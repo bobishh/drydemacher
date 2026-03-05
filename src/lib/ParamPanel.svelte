@@ -7,13 +7,17 @@
   let editing = $state(false);
   let editFields = $state([]);
   let live = $state(false);
-  let localParams = $state({ ...parameters });
+  let localParams = $state({});
   let hasPendingChanges = $derived(JSON.stringify(localParams) !== JSON.stringify(parameters));
   let saveValuesState = $state('idle'); // idle | saving | saved
 
   $effect(() => {
     // Sync local params if parameters change from outside (e.g. version load)
-    localParams = { ...parameters };
+    // We only do this if not in live mode or if the outer parameters were truly updated
+    // by a different version/thread load.
+    if (!live || JSON.stringify(localParams) !== JSON.stringify(parameters)) {
+      localParams = { ...parameters };
+    }
   });
 
   // Merge: any key in parameters not covered by uiSpec.fields gets a generated "number" field
@@ -222,56 +226,60 @@
     <div class="param-list">
       {#each mergedFields as field}
         {@const range = getRangeProps(field)}
-        <div class="param-field" class:auto-field={field._auto} class:param-freezed={field.freezed}>
-          <label class="param-label" for={field.key}>
-            {field.label}
-            {#if field.freezed}<span class="frozen-badge">❄️ FROZEN</span>{/if}
-          </label>
+        <div class="param-field" class:auto-field={field._auto} class:param-freezed={field.freezed} class:field-checkbox={field.type === 'checkbox'}>
+          <div class="field-header">
+            <label class="param-label" for={field.key}>
+              {field.label}
+            </label>
+            {#if field.freezed}<span class="frozen-badge" title="FROZEN">❄️</span>{/if}
+          </div>
           
-          {#if field.type === 'range'}
-            <div class="range-group">
+          <div class="field-control">
+            {#if field.type === 'range'}
+              <div class="range-group">
+                <input 
+                  id={field.key}
+                  type="range" 
+                  min={range.min} 
+                  max={range.max} 
+                  step={range.step}
+                  value={localParams[field.key]}
+                  oninput={(e) => update(field.key, parseFloat(e.target.value))}
+                  disabled={field.freezed}
+                />
+                <span class="range-value">{localParams[field.key]}</span>
+              </div>
+            {:else if field.type === 'number'}
               <input 
                 id={field.key}
-                type="range" 
-                min={range.min} 
-                max={range.max} 
-                step={range.step}
+                type="number" 
+                class="input-mono param-input"
                 value={localParams[field.key]}
                 oninput={(e) => update(field.key, parseFloat(e.target.value))}
                 disabled={field.freezed}
               />
-              <span class="range-value">{localParams[field.key]}</span>
-            </div>
-          {:else if field.type === 'number'}
-            <input 
-              id={field.key}
-              type="number" 
-              class="input-mono param-input"
-              value={localParams[field.key]}
-              oninput={(e) => update(field.key, parseFloat(e.target.value))}
-              disabled={field.freezed}
-            />
-          {:else if field.type === 'select'}
-            <Dropdown
-              options={(field.options || []).map(option => ({ id: option.value, name: option.label }))}
-              value={localParams[field.key]}
-              onchange={(val) => update(field.key, val)}
-              disabled={field.freezed}
-              placeholder="Select value..."
-            />
-          {:else if field.type === 'checkbox'}
-            <div class="checkbox-group">
-              <input 
-                id={field.key}
-                class="ui-checkbox"
-                type="checkbox" 
-                checked={localParams[field.key]}
-                onchange={(e) => update(field.key, e.target.checked)}
+            {:else if field.type === 'select'}
+              <Dropdown
+                options={(field.options || []).map(option => ({ id: option.value, name: option.label }))}
+                value={localParams[field.key]}
+                onchange={(val) => update(field.key, val)}
                 disabled={field.freezed}
+                placeholder="Select..."
               />
-              <span class="checkbox-status">{localParams[field.key] ? 'ENABLED' : 'DISABLED'}</span>
-            </div>
-          {/if}
+            {:else if field.type === 'checkbox'}
+              <label class="checkbox-wrapper">
+                <input 
+                  id={field.key}
+                  class="ui-checkbox"
+                  type="checkbox" 
+                  checked={localParams[field.key]}
+                  onchange={(e) => update(field.key, e.target.checked)}
+                  disabled={field.freezed}
+                />
+                <span class="checkbox-status">{localParams[field.key] ? 'ENABLED' : 'DISABLED'}</span>
+              </label>
+            {/if}
+          </div>
         </div>
       {/each}
     </div>
@@ -282,24 +290,25 @@
 
 <style>
   .param-panel {
-    padding: 12px;
+    padding: 10px;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 10px;
   }
 
   .panel-toolbar {
     display: flex;
-    gap: 12px;
+    gap: 8px;
     justify-content: space-between;
     align-items: center;
     border-bottom: 1px solid var(--bg-300);
     padding-bottom: 8px;
+    margin-bottom: 4px;
   }
 
   .live-apply-group {
     display: flex;
-    gap: 12px;
+    gap: 8px;
     align-items: center;
   }
 
@@ -307,68 +316,107 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    font-size: 0.65rem;
+    font-size: 0.6rem;
     font-weight: bold;
     color: var(--text-dim);
     cursor: pointer;
     user-select: none;
-  }
-
-  .live-toggle input {
-    margin: 0;
+    padding: 2px 6px;
+    border: 1px solid var(--bg-300);
+    background: var(--bg-200);
   }
 
   .live-toggle:has(input:checked) {
     color: var(--secondary);
+    border-color: var(--secondary);
+    background: color-mix(in srgb, var(--secondary) 10%, var(--bg-200));
+  }
+
+  .live-toggle input {
+    display: none;
   }
 
   .apply-btn {
-    min-width: 60px;
+    min-width: 50px;
   }
 
   .param-list {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 12px;
   }
 
   .param-field {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 4px;
+    padding: 6px;
+    background: color-mix(in srgb, var(--bg-200) 50%, transparent);
+    border: 1px solid transparent;
+    transition: all 0.2s;
   }
 
-  .param-label {
-    font-size: 0.7rem;
-    color: var(--text-dim);
-    text-transform: uppercase;
+  .param-field:hover {
+    border-color: var(--bg-400);
+    background: var(--bg-200);
+  }
+
+  .field-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    min-height: 14px;
+  }
+
+  .param-label {
+    font-size: 0.62rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    font-weight: bold;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    letter-spacing: 0.02em;
   }
 
   .frozen-badge {
-    font-size: 0.55rem;
-    color: var(--blue);
-    background: color-mix(in srgb, var(--blue) 15%, transparent);
-    padding: 1px 4px;
-    border-radius: 2px;
+    font-size: 0.6rem;
+    cursor: help;
   }
 
   .range-group {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
   }
 
   input[type="range"] {
     flex: 1;
     cursor: pointer;
+    height: 4px;
+    background: var(--bg-300);
+    border-radius: 2px;
+    appearance: none;
   }
 
-  input[type="range"]:disabled {
-    cursor: not-allowed;
-    opacity: 0.3;
+  input[type="range"]::-webkit-slider-thumb {
+    appearance: none;
+    width: 12px;
+    height: 12px;
+    background: var(--secondary);
+    border-radius: 50%;
+    cursor: pointer;
+    box-shadow: 0 0 5px rgba(0,0,0,0.3);
+  }
+
+  .range-number-input {
+    width: 48px;
+    padding: 2px 4px;
+    background: var(--bg-100);
+    border: 1px solid var(--bg-300);
+    color: var(--secondary);
+    font-size: 0.7rem;
+    text-align: right;
   }
 
   .range-value {
@@ -380,39 +428,39 @@
   }
 
   .param-input {
-    width: 80px;
-    padding: 4px 8px;
-    background: var(--bg-200);
+    width: 100%;
+    padding: 4px 6px;
+    background: var(--bg-100);
     border: 1px solid var(--bg-300);
     color: var(--text);
     font-family: var(--font-mono);
     font-size: 0.75rem;
   }
 
-  .param-input:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .checkbox-group {
+  .checkbox-wrapper {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
+    cursor: pointer;
   }
 
   .checkbox-status {
-    font-size: 0.65rem;
-    color: var(--secondary);
+    font-size: 0.6rem;
+    color: var(--text-dim);
     font-weight: bold;
+  }
+
+  .ui-checkbox:checked + .checkbox-status {
+    color: var(--secondary);
   }
 
   .ui-checkbox {
     -webkit-appearance: none;
     appearance: none;
-    width: 14px;
-    height: 14px;
+    width: 12px;
+    height: 12px;
     border: 1px solid var(--bg-300);
-    background: var(--bg-200);
+    background: var(--bg-100);
     display: inline-grid;
     place-content: center;
     cursor: pointer;
@@ -421,58 +469,31 @@
 
   .ui-checkbox::after {
     content: '';
-    width: 8px;
-    height: 8px;
+    width: 6px;
+    height: 6px;
     background: var(--secondary);
     transform: scale(0);
     transition: transform 0.12s ease-in-out;
-  }
-
-  .ui-checkbox:checked {
-    border-color: var(--secondary);
-    background: color-mix(in srgb, var(--secondary) 16%, var(--bg-200));
   }
 
   .ui-checkbox:checked::after {
     transform: scale(1);
   }
 
-  .ui-checkbox:focus-visible {
-    outline: 1px solid var(--primary);
-    outline-offset: 1px;
-  }
-
-  .ui-checkbox:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-
-  .ui-checkbox-sm {
-    width: 12px;
-    height: 12px;
-  }
-
-  .ui-checkbox-sm::after {
-    width: 6px;
-    height: 6px;
-  }
-
   .auto-field {
     border-left: 2px solid var(--bg-400);
-    padding-left: 8px;
   }
 
   .param-freezed {
-    opacity: 0.6;
-    background: rgba(0,0,0,0.1);
-    padding: 4px;
-    border-radius: 4px;
+    opacity: 0.5;
   }
 
   .no-params {
     font-size: 0.7rem;
     color: var(--text-dim);
     font-style: italic;
+    padding: 20px;
+    text-align: center;
   }
 
   /* Edit mode */

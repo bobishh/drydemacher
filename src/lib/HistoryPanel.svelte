@@ -58,12 +58,18 @@
     {#each paginatedHistory as thread (thread.id)}
       <div 
         class="history-card {activeThreadId === thread.id ? 'active' : ''}" 
+        role="button"
+        tabindex="0"
         onclick={() => onSelect(thread)}
+        onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') onSelect(thread); }}
       >
         <div class="card-header">
           <span class="card-title">{thread.title}</span>
           <span class="card-date">{formatDate(thread.updated_at)}</span>
         </div>
+        {#if thread.summary}
+          <div class="card-summary">{thread.summary}</div>
+        {/if}
         <div class="card-stats">
           {thread.messages.filter(m => m.role === 'assistant' && m.output).length} versions
         </div>
@@ -206,6 +212,17 @@
     font-size: 0.6rem;
     color: var(--text-dim);
     white-space: nowrap;
+  }
+
+  .card-summary {
+    font-size: 0.65rem;
+    color: var(--text);
+    margin-bottom: 8px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    line-height: 1.3;
   }
 
   .card-stats {

@@ -3,6 +3,14 @@ use crate::models::{Thread, Message, DesignOutput, ThreadReference};
 
 pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
     let conn = Connection::open(db_path)?;
+    
+    // Enable WAL mode for better concurrency and prevent "database is locked" errors
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA busy_timeout = 5000;"
+    )?;
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS threads (
             id TEXT PRIMARY KEY,
@@ -201,6 +209,13 @@ pub fn clear_history(conn: &Connection) -> SqlResult<()> {
 
 pub fn delete_thread(conn: &Connection, id: &str) -> SqlResult<()> {
     conn.execute("DELETE FROM threads WHERE id = ?", [id])?;
+    Ok(())
+}
+
+pub fn delete_message(conn: &Connection, id: &str) -> SqlResult<()> {
+    conn.execute("DELETE FROM messages WHERE id = ?", [id])?;
+    // We also delete associated thread references that originated from this message
+    conn.execute("DELETE FROM thread_references WHERE source_message_id = ?", [id])?;
     Ok(())
 }
 

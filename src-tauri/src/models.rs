@@ -26,6 +26,8 @@ pub struct Asset {
 pub struct MicrowaveConfig {
     pub hum_id: Option<String>,
     pub ding_id: Option<String>,
+    #[serde(default)]
+    pub muted: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -97,6 +99,40 @@ pub struct ThreadReference {
     pub summary: String,
     pub pinned: bool,
     pub created_at: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Attachment {
+    pub path: String,
+    pub name: String,
+    pub explanation: String,
+    pub r#type: String, // "image" or "cad"
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct GenerateOutput {
+    pub design: DesignOutput,
+    pub thread_id: String,
+    pub message_id: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct CommitOutput {
+    pub thread_id: String,
+    pub message_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct IntentDecision {
+    pub intent_mode: String, // "question" | "design"
+    pub confidence: f32,
+    pub response: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct QuestionReply {
+    pub thread_id: String,
+    pub response: String,
 }
 
 pub struct AppState {

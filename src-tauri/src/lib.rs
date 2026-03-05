@@ -2,6 +2,7 @@ pub mod models;
 pub mod db;
 pub mod llm;
 pub mod freecad;
+pub mod context;
 
 use tauri::{State, AppHandle, Manager};
 use serde_json::json;
@@ -11,106 +12,8 @@ use std::fs;
 use std::sync::Mutex;
 use base64::{Engine as _, engine::general_purpose};
 
-use crate::models::{AppState, Config, Engine, DesignOutput, Message, ThreadReference};
-
-const THREAD_SUMMARY_MAX_CHARS: usize = 1600;
-const SUMMARY_ITEM_MAX_CHARS: usize = 220;
-const RECENT_DIALOGUE_MAX_MESSAGES: usize = 6;
-const RECENT_DIALOGUE_ITEM_MAX_CHARS: usize = 260;
-const PINNED_REFERENCES_MAX_ITEMS: usize = 4;
-const PINNED_REFERENCE_CONTENT_MAX_CHARS: usize = 2200;
-const PINNED_REFERENCE_SUMMARY_MAX_CHARS: usize = 200;
-
-fn compact_text(text: &str, max_chars: usize) -> String {
-    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.chars().count() <= max_chars {
-        compact
-    } else {
-        let mut out = compact.chars().take(max_chars.saturating_sub(1)).collect::<String>();
-        out.push('…');
-        out
-    }
-}
-
-fn latest_output(messages: &[Message]) -> Option<DesignOutput> {
-    messages
-        .iter()
-        .rev()
-        .find(|m| m.role == "assistant" && m.output.is_some())
-        .and_then(|m| m.output.clone())
-}
-
-fn build_thread_summary(title: &str, messages: &[Message]) -> String {
-    let mut sections: Vec<String> = Vec::new();
-
-    if !title.trim().is_empty() {
-        sections.push(format!("Thread: {}", compact_text(title, SUMMARY_ITEM_MAX_CHARS)));
-    }
-
-    if let Some(output) = latest_output(messages).as_ref() {
-        let mut anchor = format!("Current version anchor: {} [{}]", output.title, output.version_name);
-        if !output.response.trim().is_empty() {
-            anchor.push_str(&format!(" - {}", compact_text(&output.response, SUMMARY_ITEM_MAX_CHARS)));
-        }
-        sections.push(anchor);
-    }
-
-    let recent_user_intents = messages
-        .iter()
-        .filter(|m| m.role == "user")
-        .rev()
-        .take(4)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(|m| format!("- {}", compact_text(&m.content, SUMMARY_ITEM_MAX_CHARS)))
-        .collect::<Vec<_>>();
-    if !recent_user_intents.is_empty() {
-        sections.push(format!("Recent user intents:\n{}", recent_user_intents.join("\n")));
-    }
-
-    let recent_assistant_decisions = messages
-        .iter()
-        .filter(|m| m.role == "assistant")
-        .rev()
-        .take(4)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(|m| {
-            if let Some(output) = &m.output {
-                let mut line = format!("{} [{}]", output.title, output.version_name);
-                if !output.response.trim().is_empty() {
-                    line.push_str(&format!(" - {}", compact_text(&output.response, SUMMARY_ITEM_MAX_CHARS)));
-                }
-                format!("- {}", line)
-            } else {
-                format!("- Q/A: {}", compact_text(&m.content, SUMMARY_ITEM_MAX_CHARS))
-            }
-        })
-        .collect::<Vec<_>>();
-    if !recent_assistant_decisions.is_empty() {
-        sections.push(format!("Recent assistant outcomes:\n{}", recent_assistant_decisions.join("\n")));
-    }
-
-    compact_text(&sections.join("\n\n"), THREAD_SUMMARY_MAX_CHARS)
-}
-
-fn build_recent_dialogue(messages: &[Message]) -> String {
-    messages
-        .iter()
-        .rev()
-        .take(RECENT_DIALOGUE_MAX_MESSAGES)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(|m| {
-            let speaker = if m.role == "user" { "USER" } else { "ASSISTANT" };
-            format!("{}: {}", speaker, compact_text(&m.content, RECENT_DIALOGUE_ITEM_MAX_CHARS))
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+use crate::models::{AppState, DesignOutput, Message, ThreadReference, Attachment, GenerateOutput, CommitOutput, IntentDecision, QuestionReply};
+use crate::context::*;
 
 fn extract_code_blocks(text: &str) -> Vec<String> {
     let mut blocks = Vec::new();
@@ -159,6 +62,9 @@ fn looks_like_python_macro(text: &str) -> bool {
     .count();
     signal_count >= 2 || (lowered.contains("import ") && lowered.contains("if doc is none"))
 }
+
+const PINNED_REFERENCE_SUMMARY_MAX_CHARS: usize = 200;
+const PINNED_REFERENCE_CONTENT_MAX_CHARS: usize = 2200;
 
 fn summarize_reference(kind: &str, name: &str, content: &str) -> String {
     let intro = match kind {
@@ -290,32 +196,6 @@ fn migrate_legacy_references(conn: &rusqlite::Connection) -> Result<(), String> 
     Ok(())
 }
 
-fn build_pinned_references_block(references: &[ThreadReference]) -> String {
-    references
-        .iter()
-        .filter(|r| !r.content.trim().is_empty() || !r.summary.trim().is_empty())
-        .rev()
-        .take(PINNED_REFERENCES_MAX_ITEMS)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(|r| {
-            let body = if !r.content.trim().is_empty() {
-                compact_text(&r.content, PINNED_REFERENCE_CONTENT_MAX_CHARS)
-            } else {
-                r.summary.clone()
-            };
-            format!(
-                "- {} [{}]\n{}\n",
-                r.name,
-                r.kind,
-                compact_text(&body, PINNED_REFERENCE_CONTENT_MAX_CHARS)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn persist_thread_summary(
     conn: &rusqlite::Connection,
     thread_id: &str,
@@ -328,13 +208,13 @@ fn persist_thread_summary(
 }
 
 #[tauri::command]
-async fn get_config(state: State<'_, AppState>) -> Result<Config, String> {
+async fn get_config(state: State<'_, AppState>) -> Result<crate::models::Config, String> {
     let config = state.config.lock().unwrap();
     Ok(config.clone())
 }
 
 #[tauri::command]
-async fn save_config(config: Config, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
+async fn save_config(config: crate::models::Config, state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     let config_dir = app.path().app_config_dir().unwrap();
     let config_path = config_dir.join("config.json");
     
@@ -364,31 +244,10 @@ async fn delete_thread(id: String, state: State<'_, AppState>) -> Result<(), Str
     db::delete_thread(&db, &id).map_err(|e: rusqlite::Error| e.to_string())
 }
 
-#[derive(serde::Serialize)]
-struct GenerateOutput {
-    design: DesignOutput,
-    thread_id: String,
-}
-
-#[derive(serde::Serialize)]
-struct IntentDecision {
-    intent_mode: String, // "question" | "design"
-    confidence: f32,
-    response: String,
-}
-
-#[derive(serde::Serialize)]
-struct QuestionReply {
-    thread_id: String,
-    response: String,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct Attachment {
-    pub path: String,
-    pub name: String,
-    pub explanation: String,
-    pub r#type: String, // "image" or "cad"
+#[tauri::command]
+async fn delete_version(message_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let db = state.db.lock().unwrap();
+    db::delete_message(&db, &message_id).map_err(|e: rusqlite::Error| e.to_string())
 }
 
 #[tauri::command]
@@ -396,6 +255,7 @@ async fn generate_design(
     prompt: String, 
     thread_id: Option<String>,
     parent_macro_code: Option<String>,
+    working_design: Option<DesignOutput>,
     is_retry: bool,
     image_data: Option<String>,
     attachments: Option<Vec<Attachment>>,
@@ -409,113 +269,15 @@ async fn generate_design(
     }.ok_or("No active engine selected")?;
 
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-
     let question_mode = question_mode.unwrap_or(false);
 
-    // Find the thread and its latest design context
-    let (thread_id_actual, thread_title_existing, thread_summary, recent_dialogue, pinned_references, last_output) = {
+    let ctx = {
         let db = state.db.lock().unwrap();
-        if let Some(tid) = thread_id.clone() {
-            let messages = db::get_thread_messages(&db, &tid).unwrap_or_default();
-            let last_o = latest_output(&messages);
-            let summary = db::get_thread_summary(&db, &tid)
-                .ok()
-                .flatten()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| build_thread_summary(
-                    &db::get_thread_title(&db, &tid).ok().flatten().unwrap_or_default(),
-                    &messages
-                ));
-            let dialogue = build_recent_dialogue(&messages);
-            let title = db::get_thread_title(&db, &tid).ok().flatten().unwrap_or_default();
-            let refs = db::get_thread_references(&db, &tid).unwrap_or_default();
-            (tid, title, summary, dialogue, build_pinned_references_block(&refs), last_o)
-        } else {
-            let fallback_output = parent_macro_code.map(|code| DesignOutput {
-                title: "Untitled Design".to_string(),
-                version_name: "V1".to_string(),
-                response: String::new(),
-                interaction_mode: "design".to_string(),
-                macro_code: code,
-                ui_spec: json!({ "fields": [] }),
-                initial_params: json!({}),
-            });
-            (Uuid::new_v4().to_string(), String::new(), String::new(), String::new(), String::new(), fallback_output)
-        }
+        context::assemble_context(&db, thread_id, working_design, parent_macro_code)
     };
 
-    // Construct technical context with attachments
-    let mut full_prompt = prompt.clone();
-    
-    if let Some(atts) = &attachments {
-        if !atts.is_empty() {
-            full_prompt.push_str("\n\nUser provided additional context/attachments:");
-            for att in atts {
-                full_prompt.push_str(&format!("\n- Attachment: {} (Type: {}, Purpose: {})", att.name, att.r#type, att.explanation));
-            }
-        }
-    }
-
-    full_prompt = format!(
-        "{}\n\n{}\n\nUSER_INTENT_MODE: {}",
-        full_prompt,
-        TECHNICAL_SYSTEM_PROMPT,
-        if question_mode { "QUESTION_ONLY" } else { "DESIGN_EDIT" }
-    );
-
-    let contextual_prompt = if let Some(previous) = &last_output {
-        let ui_spec_json = serde_json::to_string_pretty(&previous.ui_spec).unwrap_or_else(|_| "{}".to_string());
-        let params_json = serde_json::to_string_pretty(&previous.initial_params).unwrap_or_else(|_| "{}".to_string());
-        format!(
-            "CURRENT DESIGN CONTEXT
-Thread Title: {}
-Current Title: {}
-Version: {}
-
-THREAD SUMMARY
-{}
-
-RECENT DIALOGUE
-{}
-
-PINNED REFERENCES
-{}
-
-Current FreeCAD Macro:
-```python
-{}
-```
-
-Current UI Spec:
-```json
-{}
-```
-
-Current Initial Params:
-```json
-{}
-```
-
-USER REQUEST:
-{}",
-            thread_title_existing,
-            previous.title,
-            previous.version_name,
-            if thread_summary.trim().is_empty() { "[none]" } else { &thread_summary },
-            if recent_dialogue.trim().is_empty() { "[none]" } else { &recent_dialogue },
-            if pinned_references.trim().is_empty() { "[none]" } else { &pinned_references },
-            previous.macro_code,
-            ui_spec_json,
-            params_json,
-            full_prompt
-        )
-    } else {
-        full_prompt
-    };
-
-    // NOTE: In a more advanced version, we would also send CAD metadata 
-    // from the attachment paths to multimodal LLMs.
-    // For now, we provide the metadata/explanation and all provided images.
+    let intent_mode = if question_mode { "QUESTION_ONLY" } else { "DESIGN_EDIT" };
+    let contextual_prompt = format_contextual_prompt(&ctx, &prompt, TECHNICAL_SYSTEM_PROMPT, intent_mode);
 
     let mut images = Vec::new();
     if let Some(ref main_img) = image_data {
@@ -541,8 +303,7 @@ USER REQUEST:
         Ok(mut out) => {
             if question_mode {
                 out.interaction_mode = "question".to_string();
-                if let Some(previous) = &last_output {
-                    // Keep geometry state stable when user is asking about the existing model.
+                if let Some(previous) = &ctx.last_output {
                     out.title = previous.title.clone();
                     out.version_name = previous.version_name.clone();
                     out.macro_code = previous.macro_code.clone();
@@ -570,7 +331,10 @@ USER REQUEST:
         Err(raw_body) => ("error".to_string(), format!("LLM Response (Unparsed): {}", raw_body), None)
     };
 
-    // DB update
+    let assistant_msg_id = Uuid::new_v4().to_string();
+    let thread_id_actual = ctx.thread_id.clone();
+
+    // Persist immediately on the backend
     {
         let db = state.db.lock().unwrap();
         let thread_title = output.as_ref().map(|o| o.title.clone()).unwrap_or_else(|| "Failed Design Attempt".to_string());
@@ -591,7 +355,7 @@ USER REQUEST:
         }
 
         let assistant_msg = Message {
-            id: Uuid::new_v4().to_string(),
+            id: assistant_msg_id.clone(),
             role: "assistant".to_string(),
             content: content.clone(),
             status: status.clone(),
@@ -617,9 +381,8 @@ USER REQUEST:
         if let Ok(json) = serde_json::to_string_pretty(&session_data) {
             let _ = fs::write(cache_path, json);
         }
-        Ok(GenerateOutput { design: out, thread_id: thread_id_actual })
+        Ok(GenerateOutput { design: out, thread_id: thread_id_actual, message_id: assistant_msg_id })
     } else {
-        // Return thread_id even on error so frontend can stay in context
         Err(format!("ERR_ID:{}|{}", thread_id_actual, content))
     }
 }
@@ -659,6 +422,74 @@ fn fallback_intent(prompt: &str) -> IntentDecision {
 }
 
 #[tauri::command]
+async fn commit_generated_version(
+    thread_id: String,
+    prompt: String,
+    design: DesignOutput,
+    image_data: Option<String>,
+    attachments: Option<Vec<Attachment>>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<CommitOutput, String> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let thread_title = design.title.clone();
+    let assistant_text = if design.response.trim().is_empty() {
+        "Synthesized design output.".to_string()
+    } else {
+        design.response.clone()
+    };
+
+    let user_msg = Message {
+        id: Uuid::new_v4().to_string(),
+        role: "user".to_string(),
+        content: prompt.clone(),
+        status: "success".to_string(),
+        output: None,
+        image_data: image_data.clone(),
+        timestamp: now,
+    };
+    let assistant_msg = Message {
+        id: Uuid::new_v4().to_string(),
+        role: "assistant".to_string(),
+        content: assistant_text,
+        status: "success".to_string(),
+        output: Some(design.clone()),
+        image_data: None,
+        timestamp: now + 1,
+    };
+
+    {
+        let db = state.db.lock().unwrap();
+        db::create_or_update_thread(&db, &thread_id, &thread_title, now).map_err(|e: rusqlite::Error| e.to_string())?;
+        db::add_message(&db, &thread_id, &user_msg).map_err(|e: rusqlite::Error| e.to_string())?;
+        persist_user_prompt_references(&db, &thread_id, &user_msg.id, &prompt, attachments.as_ref(), now)?;
+        db::add_message(&db, &thread_id, &assistant_msg).map_err(|e: rusqlite::Error| e.to_string())?;
+        let _ = persist_thread_summary(&db, &thread_id, &thread_title);
+    }
+
+    {
+        let mut last = state.last_design.lock().unwrap();
+        *last = Some(design.clone());
+        let mut last_tid = state.last_thread_id.lock().unwrap();
+        *last_tid = Some(thread_id.clone());
+    }
+
+    let cache_path = app.path().app_config_dir().unwrap().join("last_design.json");
+    let session_data = json!({
+        "design": design,
+        "thread_id": Some(thread_id.clone())
+    });
+    if let Ok(json) = serde_json::to_string_pretty(&session_data) {
+        let _ = fs::write(cache_path, json);
+    }
+
+    Ok(CommitOutput {
+        thread_id,
+        message_id: assistant_msg.id,
+    })
+}
+
+#[tauri::command]
 async fn classify_intent(
     prompt: String,
     thread_id: Option<String>,
@@ -675,30 +506,24 @@ async fn classify_intent(
     }
     .ok_or("No active engine selected")?;
 
-    let backend_context = if let Some(thread_id) = thread_id.as_ref() {
-        let db = state.db.lock().unwrap();
-        let messages = db::get_thread_messages(&db, thread_id).unwrap_or_default();
-        let title = db::get_thread_title(&db, thread_id).ok().flatten().unwrap_or_default();
-        let summary = db::get_thread_summary(&db, thread_id)
-            .ok()
-            .flatten()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| build_thread_summary(&title, &messages));
-        let recent_dialogue = build_recent_dialogue(&messages);
-        let pinned_references = build_pinned_references_block(&db::get_thread_references(&db, thread_id).unwrap_or_default());
+    let backend_context = if thread_id.is_some() {
+        let ctx = {
+            let db = state.db.lock().unwrap();
+            context::assemble_context(&db, thread_id, None, None)
+        };
 
         let mut blocks = Vec::new();
-        if !summary.trim().is_empty() {
-            blocks.push(format!("THREAD SUMMARY\n{}", summary));
+        if !ctx.summary.trim().is_empty() {
+            blocks.push(format!("THREAD SUMMARY\n{}", ctx.summary));
         }
-        if !recent_dialogue.trim().is_empty() {
-            blocks.push(format!("RECENT DIALOGUE\n{}", recent_dialogue));
+        if !ctx.recent_dialogue.trim().is_empty() {
+            blocks.push(format!("RECENT DIALOGUE\n{}", ctx.recent_dialogue));
         }
-        if !pinned_references.trim().is_empty() {
-            blocks.push(format!("PINNED REFERENCES\n{}", pinned_references));
+        if !ctx.pinned_references.trim().is_empty() {
+            blocks.push(format!("PINNED REFERENCES\n{}", ctx.pinned_references));
         }
-        if let Some(ctx) = context.as_ref().filter(|c| !c.trim().is_empty()) {
-            blocks.push(format!("CURRENT LIVE SNAPSHOT\n{}", ctx));
+        if let Some(c) = context.as_ref().filter(|c| !c.trim().is_empty()) {
+            blocks.push(format!("CURRENT LIVE SNAPSHOT\n{}", c));
         }
         Some(blocks.join("\n\n"))
     } else {
@@ -721,6 +546,8 @@ async fn answer_question_light(
     response: String,
     thread_id: Option<String>,
     title_hint: Option<String>,
+    image_data: Option<String>,
+    attachments: Option<Vec<Attachment>>,
     state: State<'_, AppState>
 ) -> Result<QuestionReply, String> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
@@ -738,14 +565,14 @@ async fn answer_question_light(
         let user_msg = Message {
             id: Uuid::new_v4().to_string(),
             role: "user".to_string(),
-            content: prompt,
+            content: prompt.clone(),
             status: "success".to_string(),
             output: None,
-            image_data: None,
+            image_data: image_data.clone(),
             timestamp: now,
         };
         db::add_message(&db, &thread_id_actual, &user_msg).map_err(|e| e.to_string())?;
-        persist_user_prompt_references(&db, &thread_id_actual, &user_msg.id, &user_msg.content, None, now)?;
+        persist_user_prompt_references(&db, &thread_id_actual, &user_msg.id, &prompt, attachments.as_ref(), now)?;
 
         let assistant_msg = Message {
             id: Uuid::new_v4().to_string(),
@@ -1029,9 +856,9 @@ async fn save_recorded_audio(
 pub fn run() {
     let context = tauri::generate_context!();
     
-    let default_config = Config {
+    let default_config = crate::models::Config {
         engines: vec![
-            Engine {
+            crate::models::Engine {
                 id: "default-gemini".to_string(),
                 name: "Google Gemini".to_string(),
                 provider: "gemini".to_string(),
@@ -1039,7 +866,7 @@ pub fn run() {
                 model: "gemini-2.0-flash".to_string(),
                 light_model: "gemini-2.0-flash-lite".to_string(),
                 base_url: "".to_string(),
-                system_prompt: DEFAULT_PROMPT.to_string(),
+                system_prompt: "You are a CAD expert.".to_string(),
             }
         ],
         selected_engine_id: "default-gemini".to_string(),
@@ -1065,7 +892,7 @@ pub fn run() {
             let config_path = config_dir.join("config.json");
             if config_path.exists() {
                 if let Ok(data) = fs::read_to_string(&config_path) {
-                    if let Ok(c) = serde_json::from_str::<Config>(&data) {
+                    if let Ok(c) = serde_json::from_str::<crate::models::Config>(&data) {
                         config = c;
                     }
                 }
@@ -1110,7 +937,9 @@ pub fn run() {
             get_history,
             clear_history,
             delete_thread,
+            delete_version,
             generate_design,
+            commit_generated_version,
             render_stl,
             list_models,
             classify_intent,
