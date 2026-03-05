@@ -1,6 +1,7 @@
 # Agent Protocol
 
 ## Mandates
+- **NEVER COMMIT ANYTHING UNLESS ASKED FOR.**
 - **Always verify Rust code** by running `cd src-tauri && cargo check` before reporting a successful implementation or restart.
 - **Strictly adhere to the established UI theme** (Tactical Midnight, square borders, `--primary` / `--secondary` bronze accents).
 - **Enforce layout boundaries**: All major layout containers must have `overflow: hidden` to prevent UI jitter and content bleeding.

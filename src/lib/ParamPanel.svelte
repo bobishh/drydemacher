@@ -1,52 +1,246 @@
 <script>
-  let { uiSpec = null, parameters = {}, onchange } = $props();
+  import { invoke } from '@tauri-apps/api/core';
+
+  let { uiSpec = $bindable(null), parameters = {}, onchange, activeVersionId = null } = $props();
+
+  let editing = $state(false);
+  let editFields = $state([]);
+  let live = $state(false);
+  let localParams = $state({ ...parameters });
+  let hasPendingChanges = $derived(JSON.stringify(localParams) !== JSON.stringify(parameters));
+
+  $effect(() => {
+    // Sync local params if parameters change from outside (e.g. version load)
+    localParams = { ...parameters };
+  });
+
+  // Merge: any key in parameters not covered by uiSpec.fields gets a generated "number" field
+  const mergedFields = $derived.by(() => {
+    const specFields = uiSpec?.fields || [];
+    const declaredKeys = new Set(specFields.map(f => f.key));
+    
+    const extraFields = Object.entries(parameters)
+      .filter(([key]) => !declaredKeys.has(key))
+      .map(([key, val]) => ({
+        key,
+        label: key.replace(/[_-]/g, ' '),
+        type: typeof val === 'boolean' ? 'checkbox' : 'number',
+        _auto: true,
+      }));
+    
+    const all = [...specFields, ...extraFields];
+    // Sort: non-freezed first, then freezed
+    return all.sort((a, b) => {
+      if (a.freezed === b.freezed) return 0;
+      return a.freezed ? 1 : -1;
+    });
+  });
+
+  function startEditing() {
+    editFields = mergedFields.map(f => ({ ...f }));
+    editing = true;
+  }
+
+  function cancelEditing() {
+    editing = false;
+    editFields = [];
+  }
+
+  function addField() {
+    editFields = [...editFields, { key: '', label: '', type: 'number', min: undefined, max: undefined, step: undefined, freezed: false }];
+  }
+
+  function removeField(index) {
+    editFields = editFields.filter((_, i) => i !== index);
+  }
+
+  async function saveFields() {
+    const cleaned = editFields
+      .filter(f => f.key.trim())
+      .map(f => {
+        const field = { 
+          key: f.key.trim(), 
+          label: f.label || f.key, 
+          type: f.type,
+          freezed: !!f.freezed
+        };
+        // Preserve options for select types
+        if (f.type === 'select' && f.options) {
+          field.options = f.options;
+        }
+        if (f.type === 'range' || f.type === 'number') {
+          if (f.min !== undefined && f.min !== '') field.min = Number(f.min);
+          if (f.max !== undefined && f.max !== '') field.max = Number(f.max);
+          if (f.step !== undefined && f.step !== '') field.step = Number(f.step);
+        }
+        return field;
+      });
+
+    const newSpec = { fields: cleaned };
+    uiSpec = newSpec;
+
+    if (activeVersionId) {
+      try {
+        await invoke('update_ui_spec', { messageId: activeVersionId, uiSpec: newSpec });
+      } catch (e) {
+        console.error('Failed to save ui_spec:', e);
+      }
+    }
+
+    editing = false;
+    editFields = [];
+  }
 
   function update(key, value) {
-    if (onchange) {
+    localParams[key] = value;
+    if (live && onchange) {
       onchange({ [key]: value });
     }
+  }
+
+  function applyChanges() {
+    if (onchange) {
+      onchange(localParams);
+    }
+  }
+
+  function getRangeProps(field) {
+    const val = localParams[field.key] || 0;
+    const min = field.min !== undefined ? field.min : 0;
+    let max = field.max !== undefined ? field.max : Math.max(200, val * 4);
+    const step = field.step !== undefined ? field.step : (max > 50 ? 1 : 0.1);
+    return { min, max, step };
+  }
+
+  const FIELD_TYPES = ['range', 'number', 'select', 'checkbox'];
+
+  function getAvailableTypes(field) {
+    // If it's boolean in parameters, don't allow range/number?
+    // User said "booleans, it can't be turned to range"
+    const val = parameters[field.key];
+    if (typeof val === 'boolean' || field.type === 'checkbox') {
+      return ['checkbox'];
+    }
+    if (field.type === 'select') {
+      return ['select'];
+    }
+    return ['range', 'number'];
   }
 </script>
 
 <div class="param-panel">
-  {#if uiSpec && uiSpec.fields}
+  <div class="panel-toolbar">
+    {#if !editing}
+      <div class="live-apply-group">
+        <label class="live-toggle" title="Update geometry immediately on every change">
+          <input type="checkbox" bind:checked={live} />
+          <span>LIVE</span>
+        </label>
+        <button 
+          class="btn btn-xs btn-primary apply-btn" 
+          onclick={applyChanges} 
+          disabled={!hasPendingChanges || live}
+        >
+          APPLY
+        </button>
+      </div>
+      <button class="btn btn-xs" onclick={startEditing} title="Edit controls">✏️ EDIT</button>
+    {:else}
+      <button class="btn btn-xs" onclick={saveFields}>💾 SAVE</button>
+      <button class="btn btn-xs btn-ghost" onclick={cancelEditing}>✕ CANCEL</button>
+    {/if}
+  </div>
+
+  {#if editing}
+    <div class="edit-list">
+      {#each editFields as field, i}
+        <div class="edit-field" class:is-freezed={field.freezed}>
+          <div class="edit-row">
+            <input class="input-mono edit-input" placeholder="key" bind:value={field.key} />
+            <input class="input-mono edit-input flex-2" placeholder="Label" bind:value={field.label} />
+            <select class="input-mono edit-select" bind:value={field.type}>
+              {#each getAvailableTypes(field) as t}
+                <option value={t}>{t}</option>
+              {/each}
+            </select>
+            <label class="freeze-toggle" title="Freeze value and move to bottom">
+              <input type="checkbox" bind:checked={field.freezed} />
+              <span>❄️</span>
+            </label>
+            <button class="btn btn-xs btn-ghost" onclick={() => removeField(i)}>✕</button>
+          </div>
+          {#if field.type === 'range' || field.type === 'number'}
+            <div class="edit-row edit-bounds">
+              <input class="input-mono edit-input-sm" type="number" placeholder="min" bind:value={field.min} />
+              <input class="input-mono edit-input-sm" type="number" placeholder="max" bind:value={field.max} />
+              <input class="input-mono edit-input-sm" type="number" placeholder="step" bind:value={field.step} />
+            </div>
+          {/if}
+          {#if field.type === 'select'}
+            <div class="edit-row edit-info">
+              <span class="info-tag">ENUM: {field.options?.length || 0} options (intrinsic)</span>
+            </div>
+          {/if}
+        </div>
+      {/each}
+      <button class="btn btn-xs add-field-btn" onclick={addField}>+ ADD FIELD</button>
+    </div>
+  {:else if mergedFields.length > 0}
     <div class="param-list">
-      {#each uiSpec.fields as field}
-        <div class="param-field">
-          <label class="param-label" for={field.key}>{field.label}</label>
+      {#each mergedFields as field}
+        {@const range = getRangeProps(field)}
+        <div class="param-field" class:auto-field={field._auto} class:param-freezed={field.freezed}>
+          <label class="param-label" for={field.key}>
+            {field.label}
+            {#if field.freezed}<span class="frozen-badge">❄️ FROZEN</span>{/if}
+          </label>
           
           {#if field.type === 'range'}
             <div class="range-group">
               <input 
                 id={field.key}
                 type="range" 
-                min={field.min} 
-                max={field.max} 
-                step={field.step || 0.01}
-                value={parameters[field.key]}
+                min={range.min} 
+                max={range.max} 
+                step={range.step}
+                value={localParams[field.key]}
                 oninput={(e) => update(field.key, parseFloat(e.target.value))}
+                disabled={field.freezed}
               />
-              <span class="range-value">{parameters[field.key]}</span>
+              <span class="range-value">{localParams[field.key]}</span>
             </div>
           {:else if field.type === 'number'}
             <input 
               id={field.key}
               type="number" 
               class="input-mono param-input"
-              value={parameters[field.key]}
+              value={localParams[field.key]}
               oninput={(e) => update(field.key, parseFloat(e.target.value))}
+              disabled={field.freezed}
             />
           {:else if field.type === 'select'}
             <select 
               id={field.key}
               class="input-mono param-select"
-              value={parameters[field.key]}
+              value={localParams[field.key]}
               onchange={(e) => update(field.key, e.target.value)}
+              disabled={field.freezed}
             >
               {#each field.options || [] as option}
                 <option value={option.value}>{option.label}</option>
               {/each}
             </select>
+          {:else if field.type === 'checkbox'}
+            <div class="checkbox-group">
+              <input 
+                id={field.key}
+                type="checkbox" 
+                checked={localParams[field.key]}
+                onchange={(e) => update(field.key, e.target.checked)}
+                disabled={field.freezed}
+              />
+              <span class="checkbox-status">{localParams[field.key] ? 'ENABLED' : 'DISABLED'}</span>
+            </div>
           {/if}
         </div>
       {/each}
@@ -69,8 +263,13 @@
     cursor: pointer;
   }
 
-  .param-select:focus {
+  .param-select:focus:not(:disabled) {
     border-color: var(--primary);
+  }
+
+  .param-select:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .param-panel {
@@ -80,12 +279,42 @@
     gap: 12px;
   }
 
-  .param-header {
-    font-size: 0.6rem;
-    color: var(--secondary);
+  .panel-toolbar {
+    display: flex;
+    gap: 12px;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--bg-300);
+    padding-bottom: 8px;
+  }
+
+  .live-apply-group {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+  }
+
+  .live-toggle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.65rem;
     font-weight: bold;
-    letter-spacing: 0.1em;
-    margin-bottom: 4px;
+    color: var(--text-dim);
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .live-toggle input {
+    margin: 0;
+  }
+
+  .live-toggle:has(input:checked) {
+    color: var(--secondary);
+  }
+
+  .apply-btn {
+    min-width: 60px;
   }
 
   .param-list {
@@ -104,6 +333,17 @@
     font-size: 0.7rem;
     color: var(--text-dim);
     text-transform: uppercase;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .frozen-badge {
+    font-size: 0.55rem;
+    color: var(--blue);
+    background: color-mix(in srgb, var(--blue) 15%, transparent);
+    padding: 1px 4px;
+    border-radius: 2px;
   }
 
   .range-group {
@@ -115,6 +355,11 @@
   input[type="range"] {
     flex: 1;
     cursor: pointer;
+  }
+
+  input[type="range"]:disabled {
+    cursor: not-allowed;
+    opacity: 0.3;
   }
 
   .range-value {
@@ -135,9 +380,135 @@
     font-size: 0.75rem;
   }
 
+  .param-input:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .checkbox-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .checkbox-status {
+    font-size: 0.65rem;
+    color: var(--secondary);
+    font-weight: bold;
+  }
+
+  .auto-field {
+    border-left: 2px solid var(--bg-400);
+    padding-left: 8px;
+  }
+
+  .param-freezed {
+    opacity: 0.6;
+    background: rgba(0,0,0,0.1);
+    padding: 4px;
+    border-radius: 4px;
+  }
+
   .no-params {
     font-size: 0.7rem;
     color: var(--text-dim);
     font-style: italic;
+  }
+
+  /* Edit mode */
+  .edit-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .edit-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px;
+    background: var(--bg-200);
+    border: 1px solid var(--bg-300);
+  }
+
+  .edit-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .edit-input {
+    flex: 1;
+    padding: 4px 6px;
+    background: var(--bg);
+    border: 1px solid var(--bg-300);
+    color: var(--text);
+    font-size: 0.7rem;
+  }
+
+  .edit-input:focus, .edit-select:focus, .edit-input-sm:focus {
+    border-color: var(--primary);
+    outline: none;
+  }
+
+  .flex-2 { flex: 2; }
+
+  .edit-select {
+    width: 80px;
+    padding: 4px 4px;
+    background: var(--bg);
+    border: 1px solid var(--bg-300);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    cursor: pointer;
+  }
+
+  .edit-bounds {
+    padding-left: 4px;
+  }
+
+  .edit-input-sm {
+    width: 60px;
+    padding: 3px 5px;
+    background: var(--bg);
+    border: 1px solid var(--bg-300);
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+  }
+
+  .freeze-toggle {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    cursor: pointer;
+    font-size: 0.8rem;
+    user-select: none;
+  }
+
+  .freeze-toggle input {
+    margin: 0;
+  }
+
+  .edit-info {
+    font-size: 0.6rem;
+    color: var(--text-dim);
+    padding-left: 4px;
+  }
+
+  .info-tag {
+    background: var(--bg-300);
+    padding: 1px 4px;
+    border-radius: 2px;
+  }
+
+  .add-field-btn {
+    align-self: flex-start;
+  }
+
+  .btn-xs {
+    padding: 2px 6px;
+    font-size: 0.6rem;
   }
 </style>

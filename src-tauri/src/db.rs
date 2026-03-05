@@ -17,6 +17,7 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
             thread_id TEXT NOT NULL,
             role TEXT NOT NULL,
             content TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'success',
             output TEXT,
             timestamp INTEGER NOT NULL,
             image_data TEXT,
@@ -24,8 +25,10 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
         )",
         [],
     )?;
-    // Attempt to add column for existing databases. Ignore error if it already exists.
+    
+    // Migrations for existing databases
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN image_data TEXT", []);
+    let _ = conn.execute("ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'success'", []);
 
     Ok(conn)
 }
@@ -44,22 +47,8 @@ pub fn get_all_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
     let mut threads = Vec::new();
     for thread in thread_iter {
         let mut t = thread?;
-        let mut msg_stmt = conn.prepare("SELECT id, role, content, output, timestamp, image_data FROM messages WHERE thread_id = ? ORDER BY timestamp ASC")?;
-        let msg_iter = msg_stmt.query_map([&t.id], |row| {
-            let output_str: Option<String> = row.get(3)?;
-            let output: Option<DesignOutput> = output_str.and_then(|s| serde_json::from_str(&s).ok());
-            Ok(Message {
-                id: row.get(0)?,
-                role: row.get(1)?,
-                content: row.get(2)?,
-                output,
-                timestamp: row.get::<_, i64>(4)? as u64,
-                image_data: row.get(5)?,
-            })
-        })?;
-        for msg in msg_iter {
-            t.messages.push(msg?);
-        }
+        let messages = get_thread_messages(conn, &t.id)?;
+        t.messages = messages;
         threads.push(t);
     }
     Ok(threads)
@@ -77,24 +66,25 @@ pub fn create_or_update_thread(conn: &Connection, thread_id: &str, title: &str, 
 pub fn add_message(conn: &Connection, thread_id: &str, msg: &Message) -> SqlResult<()> {
     let output_str = msg.output.as_ref().and_then(|o| serde_json::to_string(o).ok());
     conn.execute(
-        "INSERT INTO messages (id, thread_id, role, content, output, timestamp, image_data) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![msg.id, thread_id, msg.role, msg.content, output_str, msg.timestamp as i64, msg.image_data],
+        "INSERT INTO messages (id, thread_id, role, content, status, output, timestamp, image_data) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![msg.id, thread_id, msg.role, msg.content, msg.status, output_str, msg.timestamp as i64, msg.image_data],
     )?;
     Ok(())
 }
 
 pub fn get_thread_messages(conn: &Connection, thread_id: &str) -> SqlResult<Vec<Message>> {
-    let mut stmt = conn.prepare("SELECT id, role, content, output, timestamp, image_data FROM messages WHERE thread_id = ? ORDER BY timestamp ASC")?;
+    let mut stmt = conn.prepare("SELECT id, role, content, status, output, timestamp, image_data FROM messages WHERE thread_id = ? ORDER BY timestamp ASC")?;
     let msg_iter = stmt.query_map([thread_id], |row| {
-        let output_str: Option<String> = row.get(3)?;
+        let output_str: Option<String> = row.get(4)?;
         let output: Option<DesignOutput> = output_str.and_then(|s| serde_json::from_str(&s).ok());
         Ok(Message {
             id: row.get(0)?,
             role: row.get(1)?,
             content: row.get(2)?,
+            status: row.get(3)?,
             output,
-            timestamp: row.get::<_, i64>(4)? as u64,
-            image_data: row.get(5)?,
+            timestamp: row.get::<_, i64>(5)? as u64,
+            image_data: row.get(6)?,
         })
     })?;
     
@@ -107,11 +97,44 @@ pub fn get_thread_messages(conn: &Connection, thread_id: &str) -> SqlResult<Vec<
 
 pub fn clear_history(conn: &Connection) -> SqlResult<()> {
     conn.execute("DELETE FROM threads", [])?;
-    // CASCADE will delete messages
     Ok(())
 }
 
 pub fn delete_thread(conn: &Connection, id: &str) -> SqlResult<()> {
     conn.execute("DELETE FROM threads WHERE id = ?", [id])?;
+    Ok(())
+}
+
+pub fn update_message_ui_spec(conn: &Connection, message_id: &str, ui_spec: &serde_json::Value) -> SqlResult<()> {
+    let output_str: Option<String> = conn.query_row(
+        "SELECT output FROM messages WHERE id = ?1",
+        [message_id],
+        |row| row.get(0),
+    )?;
+
+    if let Some(json_str) = output_str {
+        if let Ok(mut output) = serde_json::from_str::<serde_json::Value>(&json_str) {
+            output["ui_spec"] = ui_spec.clone();
+            let updated = serde_json::to_string(&output).unwrap();
+            conn.execute("UPDATE messages SET output = ?1 WHERE id = ?2", params![updated, message_id])?;
+        }
+    }
+    Ok(())
+}
+
+pub fn update_message_parameters(conn: &Connection, message_id: &str, parameters: &serde_json::Value) -> SqlResult<()> {
+    let output_str: Option<String> = conn.query_row(
+        "SELECT output FROM messages WHERE id = ?1",
+        [message_id],
+        |row| row.get(0),
+    )?;
+
+    if let Some(json_str) = output_str {
+        if let Ok(mut output) = serde_json::from_str::<serde_json::Value>(&json_str) {
+            output["initial_params"] = parameters.clone();
+            let updated = serde_json::to_string(&output).unwrap();
+            conn.execute("UPDATE messages SET output = ?1 WHERE id = ?2", params![updated, message_id])?;
+        }
+    }
     Ok(())
 }

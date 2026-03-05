@@ -3,7 +3,7 @@ use serde_json::json;
 
 pub async fn generate_design(engine: &Engine, prompt: &String, image_data: Option<String>) -> Result<DesignOutput, String> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(300))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
     
@@ -16,13 +16,28 @@ pub async fn generate_design(engine: &Engine, prompt: &String, image_data: Optio
 
 pub async fn list_models(provider: &str, api_key: &str, base_url: &str) -> Result<Vec<String>, String> {
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(300))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
     match provider {
         "openai" => fetch_openai_models(&client, api_key, base_url).await,
         "gemini" => fetch_gemini_models(&client, api_key).await,
         _ => Ok(vec![]),
+    }
+}
+
+pub fn clean_json_text(text: &str) -> String {
+    let text = text.trim();
+    
+    // Find the first '{' and the last '}'
+    let start = text.find('{');
+    let end = text.rfind('}');
+
+    match (start, end) {
+        (Some(s), Some(e)) if e > s => {
+            text[s..=e].to_string()
+        },
+        _ => text.to_string(), // Fallback to original if no braces found
     }
 }
 
@@ -36,11 +51,11 @@ async fn call_openai_compatible(client: &reqwest::Client, engine: &Engine, promp
     let system_content = if engine.system_prompt.contains("$USER_PROMPT") {
         engine.system_prompt.replace("$USER_PROMPT", prompt)
     } else {
-        format!("{}\n\nUser intent: {}", engine.system_prompt, prompt)
+        engine.system_prompt.clone()
     };
 
     let mut user_content = vec![
-        json!({ "type": "text", "text": "Generate the design JSON now:" })
+        json!({ "type": "text", "text": prompt })
     ];
 
     if let Some(b64) = image_data {
@@ -76,7 +91,8 @@ async fn call_openai_compatible(client: &reqwest::Client, engine: &Engine, promp
     let content = res_json["choices"][0]["message"]["content"].as_str()
         .ok_or("Model response had no text content")?;
     
-    serde_json::from_str::<DesignOutput>(content).map_err(|e| format!("Failed to parse design JSON: {}", e))
+    let clean_content = clean_json_text(content);
+    serde_json::from_str::<DesignOutput>(&clean_content).map_err(|_| content.to_string())
 }
 
 async fn call_gemini(client: &reqwest::Client, engine: &Engine, prompt: &String, image_data: Option<String>) -> Result<DesignOutput, String> {
@@ -89,11 +105,11 @@ async fn call_gemini(client: &reqwest::Client, engine: &Engine, prompt: &String,
     let system_content = if engine.system_prompt.contains("$USER_PROMPT") {
         engine.system_prompt.replace("$USER_PROMPT", prompt)
     } else {
-        format!("{}\n\nUser intent: {}", engine.system_prompt, prompt)
+        engine.system_prompt.clone()
     };
 
     let mut parts = vec![
-        json!({ "text": format!("{}\n\nGenerate the design JSON now. Return JSON only.", system_content) })
+        json!({ "text": prompt })
     ];
 
     if let Some(b64_data_url) = image_data {
@@ -115,6 +131,9 @@ async fn call_gemini(client: &reqwest::Client, engine: &Engine, prompt: &String,
     }
 
     let payload = json!({
+        "systemInstruction": {
+            "parts": [{ "text": system_content }]
+        },
         "contents": [{
             "role": "user",
             "parts": parts
@@ -122,19 +141,49 @@ async fn call_gemini(client: &reqwest::Client, engine: &Engine, prompt: &String,
         "generationConfig": { "responseMimeType": "application/json" }
     });
 
-    let response = client.post(&url).json(&payload).send().await.map_err(|e| e.to_string())?;
+    eprintln!("[GEMINI DEBUG] URL: {}", url.split('?').next().unwrap_or(&url));
+    eprintln!("[GEMINI DEBUG] Model: {}", engine.model);
+    eprintln!("[GEMINI DEBUG] System prompt length: {} chars", system_content.len());
+    eprintln!("[GEMINI DEBUG] User prompt length: {} chars", prompt.len());
+    eprintln!("[GEMINI DEBUG] Has image: {}", parts.len() > 1);
+    eprintln!("[GEMINI DEBUG] Payload size: {} bytes", serde_json::to_string(&payload).unwrap_or_default().len());
+    eprintln!("[GEMINI DEBUG] User prompt preview: {:.200}", prompt);
+
+    let response = client.post(&url).json(&payload).send().await.map_err(|e| {
+        eprintln!("[GEMINI DEBUG] Request SEND failed: {:?}", e);
+        e.to_string()
+    })?;
     let status = response.status();
+    eprintln!("[GEMINI DEBUG] Response status: {}", status);
     let body = response.text().await.unwrap_or_default();
 
     if !status.is_success() {
+        eprintln!("[GEMINI DEBUG] Error body: {}", body);
         return Err(format!("Gemini Error {}: {}", status, body));
     }
 
-    let res_json: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+    eprintln!("[GEMINI DEBUG] Response body length: {} chars", body.len());
+    eprintln!("[GEMINI DEBUG] Response preview: {:.500}", body);
+
+    let res_json: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+        eprintln!("[GEMINI DEBUG] JSON parse error: {}", e);
+        e.to_string()
+    })?;
     let text = res_json["candidates"][0]["content"]["parts"][0]["text"].as_str()
-        .ok_or("Gemini response had no text content")?;
+        .ok_or_else(|| {
+            eprintln!("[GEMINI DEBUG] No text in response. Full JSON: {}", body);
+            "Gemini response had no text content".to_string()
+        })?;
     
-    serde_json::from_str::<DesignOutput>(text).map_err(|e| format!("Failed to parse design JSON: {}", e))
+    eprintln!("[GEMINI DEBUG] Extracted text length: {} chars", text.len());
+    let clean_text = clean_json_text(text);
+    eprintln!("[GEMINI DEBUG] Clean JSON preview: {:.300}", clean_text);
+    
+    serde_json::from_str::<DesignOutput>(&clean_text).map_err(|e| {
+        eprintln!("[GEMINI DEBUG] DesignOutput parse FAILED: {}", e);
+        eprintln!("[GEMINI DEBUG] Raw text was: {}", text);
+        text.to_string()
+    })
 }
 
 async fn fetch_openai_models(client: &reqwest::Client, api_key: &str, base_url: &str) -> Result<Vec<String>, String> {

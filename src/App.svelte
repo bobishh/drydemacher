@@ -47,6 +47,162 @@
 
   let viewerComponent = $state(null);
 
+  // Microwave cooking state
+  let cookingStartTime = $state(null);
+  let cookingElapsed = $state(0);
+  let cookingPhrase = $state('');
+  let phraseKey = $state(0);
+  let cookingInterval = $state(null);
+  let phraseInterval = $state(null);
+  let audioCtx = $state(null);
+  let audioNodes = $state([]);
+  let isMuted = $state(false);
+  let masterGain = $state(null);
+
+  const COOKING_PHRASES = [
+    "Heating up the tensor cores...",
+    "Defrosting the latent space...",
+    "Rotating the probability distribution...",
+    "Microwaving your geometry at 2.45 GHz...",
+    "BRep nuclei reaching critical temperature...",
+    "Agitating water molecules in the weight matrix...",
+    "Turntable spinning at 6 RPM (Revolutions Per Manifold)...",
+    "Reticulating splines in a convection field...",
+    "CAUTION: Contents may be topologically hot...",
+    "Nuking the mesh from orbit...",
+    "Electromagnetic radiation applied to your prompt...",
+    "Standing wave pattern detected in the hidden layers...",
+    "The magnetron hums its ancient song...",
+    "Popcorn mode: ON (kernel expansion imminent)...",
+    "Do NOT open the door. The geometry is still raw inside...",
+    "Detected sparks. Someone put foil in the embeddings...",
+    "Thawing frozen parameters from last session...",
+    "Power level: MAXIMUM OVERTHINKING...",
+    "Timer set to ∞. Please wait.",
+    "Your CAD is being irradiated with good vibes...",
+    "Cooking instructions unclear. Generating anyway...",
+    "The mesh will be hot. Use oven mitts when handling normals.",
+  ];
+
+  function pickPhrase() {
+    cookingPhrase = COOKING_PHRASES[Math.floor(Math.random() * COOKING_PHRASES.length)];
+    phraseKey++;
+  }
+
+  function toggleMute() {
+    isMuted = !isMuted;
+    if (masterGain) {
+      masterGain.gain.value = isMuted ? 0 : 1;
+    }
+  }
+
+  function startCooking() {
+    cookingStartTime = Date.now();
+    cookingElapsed = 0;
+    pickPhrase();
+
+    cookingInterval = setInterval(() => {
+      cookingElapsed = Math.floor((Date.now() - cookingStartTime) / 1000);
+    }, 1000);
+
+    phraseInterval = setInterval(pickPhrase, 4000);
+
+    // Web Audio: gentle microwave fan hum (filtered noise + soft sine)
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      masterGain = audioCtx.createGain();
+      masterGain.gain.value = isMuted ? 0 : 1;
+      masterGain.connect(audioCtx.destination);
+
+      // White/Brown noise mix for fan/ventilation sound
+      const bufferSize = audioCtx.sampleRate * 2;
+      const noiseBuffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+      const data = noiseBuffer.getChannelData(0);
+      let brown = 0;
+      for (let i = 0; i < bufferSize; i++) {
+        const white = Math.random() * 2 - 1;
+        brown = (brown + (0.02 * white)) / 1.02;
+        // Mix 70% brown, 30% white for a more balanced "hissing" fan
+        data[i] = (brown * 0.7 + white * 0.3) * 3.5;
+      }
+      const noise = audioCtx.createBufferSource();
+      noise.buffer = noiseBuffer;
+      noise.loop = true;
+
+      const noiseFilter = audioCtx.createBiquadFilter();
+      noiseFilter.type = 'lowpass';
+      noiseFilter.frequency.value = 400; // a bit more open than 200
+      noiseFilter.Q.value = 0.5;
+
+      const noiseGain = audioCtx.createGain();
+      noiseGain.gain.value = 0.08;
+
+      noise.connect(noiseFilter);
+      noiseFilter.connect(noiseGain);
+      noiseGain.connect(masterGain);
+      noise.start();
+
+      // Soft 60Hz mains hum
+      const hum = audioCtx.createOscillator();
+      hum.type = 'sine';
+      hum.frequency.value = 60;
+      const humGain = audioCtx.createGain();
+      humGain.gain.value = 0.02;
+      hum.connect(humGain);
+      humGain.connect(masterGain);
+      hum.start();
+
+      audioNodes = [noise, hum];
+    } catch (e) {
+      console.warn('Audio not available:', e);
+    }
+  }
+
+  function stopCooking(success) {
+    clearInterval(cookingInterval);
+    clearInterval(phraseInterval);
+    cookingInterval = null;
+    phraseInterval = null;
+
+    // Stop hum
+    for (const node of audioNodes) {
+      try { node.stop(); } catch(e) {}
+    }
+    audioNodes = [];
+
+    // Ding! (clean microwave beep)
+    if (success && audioCtx) {
+      try {
+        const now = audioCtx.currentTime;
+        const g = audioCtx.createGain();
+        g.gain.setValueAtTime(0, now);
+        g.gain.linearRampToValueAtTime(0.2, now + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.001, now + 0.8);
+        g.connect(masterGain);
+
+        const o = audioCtx.createOscillator();
+        o.type = 'sine';
+        o.frequency.setValueAtTime(1200, now);
+        o.frequency.exponentialRampToValueAtTime(1180, now + 0.8);
+        o.connect(g);
+        o.start(now);
+        o.stop(now + 0.8);
+      } catch(e) {}
+    }
+
+    // Clean up audio context after ding fades
+    setTimeout(() => {
+      if (audioCtx) { try { audioCtx.close(); } catch(e) {} audioCtx = null; }
+      masterGain = null;
+    }, 2000);
+  }
+
+  function formatCookingTime(s) {
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+  }
+
   // Derived active thread
   const activeThread = $derived(history.find(t => t.id === activeThreadId));
 
@@ -70,9 +226,11 @@
     try {
       const last = await invoke('get_last_design');
       if (last) {
-        macroCode = last.macro_code;
-        uiSpec = last.ui_spec;
-        parameters = last.initial_params || {};
+        const [design, threadId] = last;
+        macroCode = design.macro_code;
+        uiSpec = design.ui_spec;
+        parameters = design.initial_params || {};
+        activeThreadId = threadId;
         status = 'Restored last design session.';
         // Trigger render now that path is fixed
         await handleParamChange(parameters);
@@ -213,6 +371,7 @@
   async function handleGenerate(initialPrompt) {
     isGenerating = true;
     error = null;
+    startCooking();
     let currentPrompt = initialPrompt;
     let maxAttempts = 3;
     let attempt = 1;
@@ -225,7 +384,7 @@
     while (attempt <= maxAttempts) {
       status = `Consulting LLM (Attempt ${attempt}/${maxAttempts})...`;
       try {
-        const data = await invoke('generate_design', { 
+        const result = await invoke('generate_design', { 
           prompt: currentPrompt,
           threadId: activeThreadId,
           parentMacroCode: !activeThreadId ? macroCode : null,
@@ -233,16 +392,16 @@
           imageData: currentImageData
         });
         
+        const data = result.design;
+        activeThreadId = result.thread_id;
+
         status = 'Parsing geometry specification and UI...';
         macroCode = data.macro_code;
         uiSpec = data.ui_spec;
         parameters = data.initial_params || {};
 
         await loadHistory();
-        if (!activeThreadId && history.length > 0) {
-          activeThreadId = history[0].id;
-        }
-
+        
         const updatedThread = history.find(t => t.id === activeThreadId);
         if (updatedThread) {
           const lastMsg = [...updatedThread.messages].reverse().find(m => m.role === 'assistant' && m.output);
@@ -258,6 +417,7 @@
           stlUrl = convertFileSrc(absolutePath);
           status = 'Design synthesized and rendered successfully.';
           error = null;
+          stopCooking(true);
           break; // Success! Exit loop.
         } catch (renderError) {
           console.error("Render failed on attempt", attempt, renderError);
@@ -269,6 +429,7 @@
             attempt++;
           } else {
             status = 'Failed after maximum attempts.';
+            stopCooking(false);
             // Open the code modal so user can manually edit
             selectedCode = macroCode;
             selectedTitle = data.title;
@@ -277,8 +438,17 @@
           }
         }
       } catch (e) {
-        error = `Generation Failed: ${e}`;
+        // Handle context-preserving error
+        if (typeof e === 'string' && e.startsWith("ERR_ID:")) {
+          const [idPart, errorMsg] = e.split('|');
+          activeThreadId = idPart.replace("ERR_ID:", "");
+          error = `Generation Failed: ${errorMsg}`;
+          await loadHistory();
+        } else {
+          error = `Generation Failed: ${e}`;
+        }
         status = 'LLM API Error.';
+        stopCooking(false);
         break; // LLM failed entirely, don't retry FreeCAD logic
       }
     }
@@ -291,6 +461,14 @@
     const codeToUse = forcedCode || macroCode;
     
     if (!codeToUse) return;
+
+    if (activeVersionId) {
+      try {
+        await invoke('update_parameters', { messageId: activeVersionId, parameters });
+      } catch (e) {
+        console.error('Failed to persist parameters:', e);
+      }
+    }
     
     status = 'Executing FreeCAD engine (BRep/STL)...';
     try {
@@ -485,7 +663,11 @@
       {#if isGenerating}
         <div class="mini-spinner"></div>
       {/if}
-      <span class="status-text">{error || status}</span>
+      <span 
+        class="status-text {error ? 'copyable' : ''}" 
+        onclick={() => { if (error) { navigator.clipboard.writeText(error); status = 'Error copied to clipboard.'; } }}
+        title={error || ''}
+      >{error || status}</span>
     </div>
     <div class="system-bar__right">
       <button class="icon-btn" onclick={toggleConfig} title="Toggle Configuration">
@@ -508,7 +690,7 @@
           <div class="sidebar-section flex-1">
             <div class="pane-header">TUNABLE PARAMETERS</div>
             <div class="sidebar-content scrollable">
-              <ParamPanel {uiSpec} {parameters} onchange={handleParamChange} />
+              <ParamPanel bind:uiSpec {parameters} onchange={handleParamChange} {activeVersionId} />
             </div>
           </div>
 
@@ -533,6 +715,28 @@
         <div class="main-workbench">
           <main class="viewport-area">
             <Viewer bind:this={viewerComponent} {stlUrl} />
+
+            {#if isGenerating}
+              <div class="microwave-overlay">
+                <div class="microwave-glass"></div>
+                <div class="microwave-content">
+                  <div class="microwave-turntable">
+                    <div class="turntable-plate"></div>
+                    <div class="turntable-object"></div>
+                  </div>
+                  <div class="microwave-timer">{formatCookingTime(cookingElapsed)}</div>
+                  {#key phraseKey}
+                    <div class="microwave-phrase">{cookingPhrase}</div>
+                  {/key}
+                  <div class="microwave-dots">
+                    <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+                  </div>
+                </div>
+                <button class="mute-btn" onclick={toggleMute} title={isMuted ? 'Unmute' : 'Mute'}>
+                  {isMuted ? '🔇' : '🔊'}
+                </button>
+              </div>
+            {/if}
             
             {#if macroCode || stlUrl}
               <div class="viewport-overlay">
@@ -733,6 +937,14 @@
     color: var(--red);
   }
 
+  .status-text.copyable {
+    cursor: pointer;
+  }
+
+  .status-text.copyable:hover {
+    text-decoration: underline;
+  }
+
   .system-bar__center {
     flex: 1;
     text-align: center;
@@ -798,5 +1010,144 @@
     padding: 8px;
     border: 1px solid var(--bg-300);
     z-index: 50;
+  }
+
+  /* Microwave cooking overlay */
+  .microwave-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .microwave-glass {
+    position: absolute;
+    inset: 0;
+    background: rgba(10, 14, 24, 0.7);
+    backdrop-filter: blur(10px) saturate(0.2);
+    animation: microwave-pulse 2.5s ease-in-out infinite;
+  }
+
+  @keyframes microwave-pulse {
+    0%, 100% { background: rgba(10, 14, 24, 0.70); }
+    50% { background: rgba(10, 14, 24, 0.60); }
+  }
+
+  .microwave-content {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 20px;
+    pointer-events: none;
+  }
+
+  /* Turntable */
+  .microwave-turntable {
+    position: relative;
+    width: 120px;
+    height: 120px;
+    animation: turntable-spin 4s linear infinite;
+  }
+
+  .turntable-plate {
+    position: absolute;
+    inset: 0;
+    border: 2px solid var(--bg-400);
+    border-radius: 50%;
+    opacity: 0.5;
+  }
+
+  .turntable-object {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 60px;
+    height: 22px;
+    background: var(--primary);
+    opacity: 0.6;
+    border-radius: 11px;
+    transform: translate(-50%, -50%);
+    box-shadow: 0 0 16px color-mix(in srgb, var(--primary) 30%, transparent);
+    animation: object-throb 1.5s ease-in-out infinite;
+  }
+
+  @keyframes turntable-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+
+  @keyframes object-throb {
+    0%, 100% { opacity: 0.5; transform: translate(-50%, -50%) scale(1); }
+    50% { opacity: 0.8; transform: translate(-50%, -50%) scale(1.08); }
+  }
+
+  .microwave-timer {
+    font-family: var(--font-mono);
+    font-size: 2.2rem;
+    font-weight: bold;
+    color: var(--primary);
+    letter-spacing: 0.15em;
+    text-shadow: 0 0 20px color-mix(in srgb, var(--primary) 40%, transparent);
+  }
+
+  .microwave-phrase {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    text-align: center;
+    max-width: 400px;
+    letter-spacing: 0.03em;
+    min-height: 1.5em;
+    animation: phrase-fade 4s ease-in-out forwards;
+  }
+
+  @keyframes phrase-fade {
+    0% { opacity: 0; transform: translateY(6px); }
+    12% { opacity: 1; transform: translateY(0); }
+    88% { opacity: 1; transform: translateY(0); }
+    100% { opacity: 0; transform: translateY(-6px); }
+  }
+
+  .microwave-dots {
+    display: flex;
+    gap: 6px;
+  }
+
+  .microwave-dots .dot {
+    width: 6px;
+    height: 6px;
+    background: var(--secondary);
+    border-radius: 50%;
+    animation: dot-bounce 1.4s ease-in-out infinite;
+  }
+
+  .microwave-dots .dot:nth-child(2) { animation-delay: 0.2s; }
+  .microwave-dots .dot:nth-child(3) { animation-delay: 0.4s; }
+
+  @keyframes dot-bounce {
+    0%, 80%, 100% { transform: scale(0.6); opacity: 0.3; }
+    40% { transform: scale(1); opacity: 1; }
+  }
+
+  .mute-btn {
+    position: absolute;
+    bottom: 12px;
+    right: 12px;
+    z-index: 2;
+    background: var(--bg-300);
+    border: 1px solid var(--bg-400);
+    color: var(--text);
+    font-size: 1rem;
+    padding: 4px 8px;
+    cursor: pointer;
+    pointer-events: all;
+  }
+
+  .mute-btn:hover {
+    border-color: var(--primary);
   }
 </style>

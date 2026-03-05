@@ -1,16 +1,26 @@
 <script>
   import Dropdown from './Dropdown.svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { open } from '@tauri-apps/plugin-dialog';
 
   let { config = $bindable(), availableModels = [], isLoadingModels = false, onfetch, onsave } = $props();
 
   let isSaving = $state(false);
   let message = $state('');
+  let activeSection = $state('engines'); // 'engines' or 'assets'
 
   const providers = [
     { id: 'gemini', name: 'Google Gemini' },
     { id: 'openai', name: 'OpenAI (or Compatible)' },
     { id: 'ollama', name: 'Ollama (Local)' }
+  ];
+
+  const formats = [
+    { id: 'STL', name: 'STL (3D Mesh)' },
+    { id: 'STEP', name: 'STEP (BRep)' },
+    { id: 'PNG', name: 'PNG (Reference)' },
+    { id: 'JPG', name: 'JPG (Reference)' },
+    { id: 'JSON', name: 'JSON (Data)' }
   ];
 
   const selectedEngine = $derived(config.engines.find(e => e.id === config.selected_engine_id));
@@ -42,6 +52,7 @@
     };
     config.engines = [...config.engines, newEngine];
     config.selected_engine_id = id;
+    activeSection = 'engines';
   }
 
   function removeEngine(id) {
@@ -49,6 +60,38 @@
     if (config.selected_engine_id === id) {
       config.selected_engine_id = config.engines.length > 0 ? config.engines[0].id : '';
     }
+  }
+
+  async function addAsset() {
+    try {
+      const selected = await open({
+        multiple: false,
+        filters: [
+          { name: 'All Assets', extensions: ['stl', 'step', 'stp', 'png', 'jpg', 'jpeg', 'json'] }
+        ]
+      });
+
+      if (selected) {
+        const path = selected;
+        const ext = path.split('.').pop().toUpperCase();
+        const name = path.split(/[\/\\]/).pop();
+        
+        const asset = await invoke('upload_asset', {
+          sourcePath: path,
+          name,
+          format: ext
+        });
+
+        config.assets = [...(config.assets || []), asset];
+        message = `Asset ${name} added.`;
+      }
+    } catch (e) {
+      message = `Upload failed: ${e}`;
+    }
+  }
+
+  function removeAsset(id) {
+    config.assets = config.assets.filter(a => a.id !== id);
   }
 
   function handleProviderChange() {
@@ -64,109 +107,157 @@
 </script>
 
 <div class="config-container">
-  <aside class="engine-list">
-    <div class="list-header">
-      <label>ENGINES</label>
-      <button class="btn btn-xs" onclick={addEngine}>+ ADD</button>
+  <aside class="config-sidebar">
+    <div class="sidebar-group">
+      <div class="list-header">
+        <label>ENGINES</label>
+        <button class="btn btn-xs" onclick={addEngine}>+ ADD</button>
+      </div>
+      <div class="list-content">
+        {#each config.engines as engine}
+          <button 
+            class="engine-item {activeSection === 'engines' && config.selected_engine_id === engine.id ? 'active' : ''}"
+            onclick={() => { config.selected_engine_id = engine.id; activeSection = 'engines'; }}
+          >
+            <span class="engine-name">{engine.name || '(unnamed)'}</span>
+            <span class="engine-provider">{engine.provider}</span>
+          </button>
+        {/each}
+      </div>
     </div>
-    <div class="list-content">
-      {#each config.engines as engine}
-        <button 
-          class="engine-item {config.selected_engine_id === engine.id ? 'active' : ''}"
-          onclick={() => { config.selected_engine_id = engine.id; }}
-        >
-          <span class="engine-name">{engine.name || '(unnamed)'}</span>
-          <span class="engine-provider">{engine.provider}</span>
-        </button>
-      {/each}
+
+    <div class="sidebar-group">
+      <div class="list-header">
+        <label>ASSETS / REFERENCE</label>
+        <button class="btn btn-xs" onclick={addAsset}>+ UPLOAD</button>
+      </div>
+      <div class="list-content">
+        {#each (config.assets || []) as asset}
+          <button 
+            class="engine-item {activeSection === 'assets' && config.selected_asset_id === asset.id ? 'active' : ''}"
+            onclick={() => { config.selected_asset_id = asset.id; activeSection = 'assets'; }}
+          >
+            <span class="engine-name">{asset.name}</span>
+            <span class="engine-provider">{asset.format}</span>
+          </button>
+        {/each}
+        {#if !config.assets || config.assets.length === 0}
+          <div class="empty-sidebar-msg">No assets uploaded.</div>
+        {/if}
+      </div>
     </div>
   </aside>
 
   <main class="engine-details">
-    {#if selectedEngine}
-      <div class="details-content">
-        <div class="field-row">
-          <div class="field flex-2">
-            <label for="e-name">DISPLAY NAME</label>
+    <div class="details-scrollable">
+      {#if activeSection === 'engines' && selectedEngine}
+        <div class="details-content">
+          <div class="field-row">
+            <div class="field flex-2">
+              <label for="e-name">DISPLAY NAME</label>
+              <input 
+                id="e-name" 
+                type="text" 
+                value={selectedEngine.name} 
+                class="input-mono" 
+                placeholder="e.g. My Gemini" 
+                oninput={(e) => selectedEngine.name = e.target.value}
+              />
+            </div>
+            <div class="field flex-1">
+              <label for="e-provider">PROVIDER</label>
+              <Dropdown 
+                options={providers} 
+                value={selectedEngine.provider} 
+                onchange={(val) => { selectedEngine.provider = val; handleProviderChange(); }} 
+              />
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="e-key">API KEY</label>
             <input 
-              id="e-name" 
-              type="text" 
-              value={selectedEngine.name} 
+              id="e-key" 
+              type="password" 
+              value={selectedEngine.api_key} 
               class="input-mono" 
-              placeholder="e.g. My Gemini" 
-              oninput={(e) => selectedEngine.name = e.target.value}
+              placeholder="Enter API key..." 
+              oninput={(e) => selectedEngine.api_key = e.target.value}
             />
           </div>
-          <div class="field flex-1">
-            <label for="e-provider">PROVIDER</label>
-            <Dropdown 
-              options={providers} 
-              value={selectedEngine.provider} 
-              onchange={(val) => { selectedEngine.provider = val; handleProviderChange(); }} 
-            />
+
+          <div class="field-row">
+            <div class="field flex-2">
+              <label for="e-model">MODEL</label>
+              <Dropdown 
+                options={availableModels.length > 0 ? availableModels : (selectedEngine.model ? [selectedEngine.model] : [])} 
+                value={selectedEngine.model} 
+                placeholder={isLoadingModels ? "Fetching..." : "Fetch models first..."} 
+                onchange={(val) => selectedEngine.model = val}
+              />
+            </div>
+            <div class="field flex-1">
+              <label for="e-baseurl">BASE URL (OPTIONAL)</label>
+              <input 
+                id="e-baseurl" 
+                type="text" 
+                value={selectedEngine.base_url} 
+                class="input-mono" 
+                placeholder="Default" 
+                oninput={(e) => selectedEngine.base_url = e.target.value}
+              />
+            </div>
+          </div>
+
+          <div class="field prompt-field">
+            <div class="prompt-header">
+              <label for="e-prompt">SYSTEM PROMPT (template with $USER_PROMPT)</label>
+              <button class="btn btn-xs" onclick={resetPrompt}>RESET TO DEFAULT</button>
+            </div>
+            <textarea 
+              id="e-prompt" 
+              value={selectedEngine.system_prompt} 
+              class="input-mono system-prompt-input" 
+              spellcheck="false"
+              oninput={(e) => selectedEngine.system_prompt = e.target.value}
+              placeholder="Template for LLM. Use $USER_PROMPT as placeholder for user intent."
+            ></textarea>
+          </div>
+
+          <div class="danger-zone">
+            <button class="btn btn-xs btn-ghost" onclick={() => removeEngine(selectedEngine.id)}>REMOVE ENGINE</button>
           </div>
         </div>
-
-        <div class="field">
-          <label for="e-key">API KEY</label>
-          <input 
-            id="e-key" 
-            type="password" 
-            value={selectedEngine.api_key} 
-            class="input-mono" 
-            placeholder="Enter API key..." 
-            oninput={(e) => selectedEngine.api_key = e.target.value}
-          />
-        </div>
-
-        <div class="field-row">
-          <div class="field flex-2">
-            <label for="e-model">MODEL</label>
-            <Dropdown 
-              options={availableModels.length > 0 ? availableModels : (selectedEngine.model ? [selectedEngine.model] : [])} 
-              value={selectedEngine.model} 
-              placeholder={isLoadingModels ? "Fetching..." : "Fetch models first..."} 
-              onchange={(val) => selectedEngine.model = val}
-            />
+      {:else if activeSection === 'assets'}
+        {@const selectedAsset = config.assets?.find(a => a.id === config.selected_asset_id)}
+        {#if selectedAsset}
+          <div class="details-content">
+            <div class="field">
+              <label>ASSET NAME</label>
+              <input type="text" bind:value={selectedAsset.name} class="input-mono" />
+            </div>
+            <div class="field">
+              <label>FORMAT</label>
+              <Dropdown options={formats} bind:value={selectedAsset.format} />
+            </div>
+            <div class="field">
+              <label>LOCAL PATH</label>
+              <div class="path-display">{selectedAsset.path}</div>
+            </div>
+            <div class="danger-zone">
+              <button class="btn btn-xs btn-ghost" onclick={() => removeAsset(selectedAsset.id)}>REMOVE ASSET</button>
+            </div>
           </div>
-          <div class="field flex-1">
-            <label for="e-baseurl">BASE URL (OPTIONAL)</label>
-            <input 
-              id="e-baseurl" 
-              type="text" 
-              value={selectedEngine.base_url} 
-              class="input-mono" 
-              placeholder="Default" 
-              oninput={(e) => selectedEngine.base_url = e.target.value}
-            />
-          </div>
+        {:else}
+          <div class="no-engine">Select an asset to view details.</div>
+        {/if}
+      {:else}
+        <div class="no-engine">
+          <p>No engine selected. Add one to begin.</p>
+          <button class="btn btn-primary" onclick={addEngine}>ADD FIRST ENGINE</button>
         </div>
-
-        <div class="field prompt-field">
-          <div class="prompt-header">
-            <label for="e-prompt">SYSTEM PROMPT (template with $USER_PROMPT)</label>
-            <button class="btn btn-xs" onclick={resetPrompt}>RESET TO DEFAULT</button>
-          </div>
-          <textarea 
-            id="e-prompt" 
-            value={selectedEngine.system_prompt} 
-            class="input-mono system-prompt-input" 
-            spellcheck="false"
-            oninput={(e) => selectedEngine.system_prompt = e.target.value}
-            placeholder="Template for LLM. Use $USER_PROMPT as placeholder for user intent."
-          ></textarea>
-        </div>
-
-        <div class="danger-zone">
-          <button class="btn btn-xs btn-ghost" onclick={() => removeEngine(selectedEngine.id)}>REMOVE ENGINE</button>
-        </div>
-      </div>
-    {:else}
-      <div class="no-engine">
-        <p>No engine selected. Add one to begin.</p>
-        <button class="btn btn-primary" onclick={addEngine}>ADD FIRST ENGINE</button>
-      </div>
-    {/if}
+      {/if}
+    </div>
 
     <div class="config-footer">
       <span class="status-msg">{message}</span>
@@ -183,14 +274,28 @@
     height: 100%;
     width: 100%;
     background: var(--bg-100);
+    overflow: hidden;
   }
 
-  .engine-list {
+  .config-sidebar {
     width: 240px;
     flex-shrink: 0;
     border-right: 1px solid var(--bg-300);
     display: flex;
     flex-direction: column;
+    overflow: hidden;
+  }
+
+  .sidebar-group {
+    display: flex;
+    flex-direction: column;
+    max-height: 50%;
+    border-bottom: 2px solid var(--bg-300);
+  }
+
+  .sidebar-group:last-child {
+    flex: 1;
+    border-bottom: none;
   }
 
   .list-header {
@@ -199,6 +304,7 @@
     justify-content: space-between;
     align-items: center;
     border-bottom: 1px solid var(--bg-300);
+    background: var(--bg-200);
   }
 
   .list-content {
@@ -208,7 +314,7 @@
 
   .engine-item {
     width: 100%;
-    padding: 12px;
+    padding: 10px 12px;
     text-align: left;
     background: none;
     border: none;
@@ -229,15 +335,26 @@
   }
 
   .engine-name {
-    font-size: 0.8rem;
+    font-size: 0.75rem;
     font-weight: bold;
     color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .engine-provider {
-    font-size: 0.65rem;
+    font-size: 0.6rem;
     color: var(--secondary);
     text-transform: uppercase;
+  }
+
+  .empty-sidebar-msg {
+    padding: 20px;
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    text-align: center;
+    font-style: italic;
   }
 
   .engine-details {
@@ -245,15 +362,19 @@
     display: flex;
     flex-direction: column;
     min-width: 0;
+    overflow: hidden;
+  }
+
+  .details-scrollable {
+    flex: 1;
+    overflow-y: auto;
   }
 
   .details-content {
-    flex: 1;
     padding: 24px;
     display: flex;
     flex-direction: column;
     gap: 20px;
-    overflow-y: auto;
   }
 
   .field-row {
@@ -267,13 +388,14 @@
     gap: 6px;
   }
 
-  .key-row {
-    display: flex;
-    gap: 8px;
-  }
-
-  .key-row input {
-    flex: 1;
+  .path-display {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    background: var(--bg-200);
+    padding: 8px;
+    border: 1px solid var(--bg-300);
+    word-break: break-all;
   }
 
   .flex-1 { flex: 1; }
@@ -303,7 +425,7 @@
 
   .prompt-field {
     flex: 1;
-    min-height: 250px;
+    min-height: 300px;
     display: flex;
     flex-direction: column;
   }
@@ -313,10 +435,6 @@
     justify-content: space-between;
     align-items: center;
     margin-bottom: 6px;
-  }
-
-  .prompt-header label {
-    margin-bottom: 0;
   }
 
   .system-prompt-input {
@@ -337,16 +455,18 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    background: var(--bg-100);
   }
 
   .no-engine {
-    flex: 1;
+    height: 100%;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     gap: 16px;
     color: var(--text-dim);
+    font-size: 0.8rem;
   }
 
   .btn-xs {

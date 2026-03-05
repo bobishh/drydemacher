@@ -39,6 +39,8 @@
   function formatDate(ts) {
     return new Date(ts * 1000).toLocaleString();
   }
+
+  const lastMessage = $derived(messages.length > 0 ? messages[messages.length - 1] : null);
 </script>
 
 <div class="prompt-container">
@@ -47,15 +49,28 @@
       <button class="nav-btn" disabled={!hasPrev} onclick={goPrev}>&larr; PREV</button>
       
       <div class="version-info">
-        <span class="version-counter">V{currentVersionIndex + 1} OF {versions.length}</span>
+        <div class="version-counter-group">
+          <span class="version-counter">V{currentVersionIndex + 1} OF {versions.length}</span>
+          {#if currentVersion && currentVersion.output?.version_name}
+            <span class="version-name">{currentVersion.output.version_name}</span>
+          {/if}
+        </div>
         {#if currentVersion}
-          <button class="code-btn" onclick={() => onShowCode(currentVersion)} title="Inspect Python Code">📜 CODE</button>
-          <button class="code-btn" onclick={() => onVersionChange(currentVersion)} title="Force Re-render">🔄 RENDER</button>
+          <div class="version-actions">
+            <button class="code-btn" onclick={() => onShowCode(currentVersion)} title="Inspect Python Code">📜 CODE</button>
+          </div>
         {/if}
       </div>
 
       <button class="nav-btn" disabled={!hasNext} onclick={goNext}>NEXT &rarr;</button>
     </div>
+
+    {#if lastMessage && lastMessage.status === 'error'}
+      <div class="error-msg-box">
+        <div class="error-header">LLM GENERATION ERROR</div>
+        <div class="error-content">{lastMessage.content}</div>
+      </div>
+    {/if}
 
     {#if currentUserMsg && currentVersion}
       <details class="version-details" bind:open={detailsOpen}>
@@ -134,14 +149,41 @@
   .version-info {
     display: flex;
     align-items: center;
+    gap: 16px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .version-counter-group {
+    display: flex;
+    align-items: center;
     gap: 12px;
+    flex-shrink: 0;
   }
 
   .version-counter {
-    font-size: 0.75rem;
+    font-size: 0.7rem;
     font-weight: bold;
     color: var(--secondary);
-    letter-spacing: 0.05em;
+    font-family: var(--font-mono);
+    white-space: nowrap;
+  }
+
+  .version-name {
+    font-size: 0.65rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    font-weight: 500;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .version-actions {
+    display: flex;
+    gap: 8px;
+    margin-left: auto;
   }
 
   .code-btn {
@@ -231,5 +273,30 @@
     font-weight: bold;
     text-transform: uppercase;
     letter-spacing: 0.05em;
+  }
+
+  .error-msg-box {
+    margin: 8px 12px;
+    padding: 12px;
+    background: rgba(220, 38, 38, 0.1);
+    border: 1px solid var(--red);
+    color: var(--red);
+    font-size: 0.75rem;
+    overflow: hidden;
+  }
+
+  .error-header {
+    font-weight: bold;
+    margin-bottom: 8px;
+    font-size: 0.65rem;
+    letter-spacing: 0.1em;
+  }
+
+  .error-content {
+    font-family: var(--font-mono);
+    white-space: pre-wrap;
+    max-height: 200px;
+    overflow-y: auto;
+    word-break: break-all;
   }
 </style>
