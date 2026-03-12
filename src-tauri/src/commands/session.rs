@@ -3,7 +3,48 @@ use std::path::PathBuf;
 
 use tauri::{AppHandle, Manager, State};
 
-use crate::models::{AppResult, AppState, LastDesignSnapshot};
+use crate::db;
+use crate::models::{
+    AgentDraft, AgentSession, AppResult, AppState, LastDesignSnapshot, McpServerStatus,
+};
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_active_agent_sessions(state: State<'_, AppState>) -> AppResult<Vec<AgentSession>> {
+    let conn = state.db.lock().await;
+    db::get_active_agent_sessions(&conn, 30)
+        .map_err(|e| crate::models::AppError::persistence(e.to_string()))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_mcp_server_status(state: State<'_, AppState>) -> AppResult<McpServerStatus> {
+    Ok(state.mcp_status())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_agent_draft(
+    state: State<'_, AppState>,
+    thread_id: String,
+    base_message_id: String,
+) -> AppResult<Option<AgentDraft>> {
+    let conn = state.db.lock().await;
+    db::get_agent_draft(&conn, &thread_id, &base_message_id)
+        .map_err(|e| crate::models::AppError::persistence(e.to_string()))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn delete_agent_draft(
+    state: State<'_, AppState>,
+    thread_id: String,
+    base_message_id: String,
+) -> AppResult<()> {
+    let conn = state.db.lock().await;
+    db::delete_agent_draft(&conn, &thread_id, &base_message_id)
+        .map_err(|e| crate::models::AppError::persistence(e.to_string()))
+}
 
 fn last_snapshot_path(app: &AppHandle) -> PathBuf {
     app.path()

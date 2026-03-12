@@ -24,6 +24,7 @@ function createSessionStore() {
     isManual: false as boolean,
     repairMessage: '' as string,
     cookingPhrase: '' as string,
+    agentDraft: null as any | null,
   });
 
   return {
@@ -33,6 +34,7 @@ function createSessionStore() {
     setPhase: (p: SessionPhase) => update(s => ({ ...s, phase: p })),
     setStatus: (msg: string) => update(s => ({ ...s, status: msg })),
     setError: (err: string | null) => update(s => ({ ...s, error: err })),
+    setAgentDraft: (draft: any | null) => update(s => ({ ...s, agentDraft: draft })),
     setStlUrl: (url: string | null) =>
       update(s => ({
         ...s,

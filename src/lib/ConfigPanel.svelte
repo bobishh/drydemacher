@@ -4,14 +4,16 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import {
     formatBackendError,
+    getMcpServerStatus,
     getSystemPrompt,
     saveRecordedAudio,
     uploadAsset,
   } from './tauri/client';
-  import type { AppConfig } from './types/domain';
+  import type { AppConfig, McpServerStatus } from './types/domain';
 
   type ActiveSection = 'engines' | 'assets';
   type RecordingTarget = 'hum' | 'ding';
+  type MicLoadState = 'idle' | 'loading' | 'ready' | 'error';
   type MicrophoneOption = {
     id: string;
     name: string;
@@ -44,7 +46,18 @@
   let timerInterval: ReturnType<typeof setInterval> | null = null;
   let micOptions = $state<MicrophoneOption[]>([]);
   let selectedMicId = $state('');
+  let micLoadState = $state<MicLoadState>('idle');
+  let micStatusMessage = $state('');
   let selectedAssetId = $state('');
+  let mcpStatus = $state<McpServerStatus | null>(null);
+  let mcpStatusMessage = $state('');
+
+  type McpAgentSnippet = {
+    id: string;
+    label: string;
+    location: string;
+    snippet: string;
+  };
 
   const providers = [
     { id: 'gemini', name: 'Google Gemini' },
@@ -88,6 +101,92 @@
     config.freecadCmd = '';
   }
 
+  const mcpEndpoint = $derived(mcpStatus?.endpointUrl || 'http://127.0.0.1:39249/mcp');
+
+  const mcpAgentSnippets = $derived.by<McpAgentSnippet[]>(() => {
+    const endpoint = mcpEndpoint;
+    return [
+      {
+        id: 'gemini',
+        label: 'GEMINI CLI',
+        location: '~/.gemini/settings.json',
+        snippet: JSON.stringify(
+          {
+            mcpServers: {
+              ecky_mcp: {
+                httpUrl: endpoint,
+              },
+            },
+          },
+          null,
+          2,
+        ),
+      },
+      {
+        id: 'codex',
+        label: 'CODEX',
+        location: '~/.codex/config.toml',
+        snippet: `[mcp_servers.ecky_mcp]\nenabled = true\nurl = "${endpoint}"\n`,
+      },
+      {
+        id: 'claude',
+        label: 'CLAUDE CODE',
+        location: '.mcp.json or ~/.claude.json',
+        snippet: JSON.stringify(
+          {
+            mcpServers: {
+              ecky_mcp: {
+                type: 'http',
+                url: endpoint,
+              },
+            },
+          },
+          null,
+          2,
+        ),
+      },
+    ];
+  });
+
+  const genericMcpSnippet = $derived.by(() => {
+    const endpoint = mcpStatus?.endpointUrl || 'http://127.0.0.1:39249/mcp';
+    return JSON.stringify(
+      {
+        mcpServers: {
+          ecky_mcp: {
+            httpUrl: endpoint
+          }
+        }
+      },
+      null,
+      2,
+    );
+  });
+
+  async function refreshMcpStatus() {
+    try {
+      mcpStatus = await getMcpServerStatus();
+      mcpStatusMessage = mcpStatus.running
+        ? 'Local HTTP MCP server is running.'
+        : (mcpStatus.lastStartupError || 'Local HTTP MCP server is not running.');
+    } catch (e: unknown) {
+      mcpStatusMessage = `Failed to read MCP status: ${formatBackendError(e)}`;
+    }
+  }
+
+  async function copyMcpSnippet(snippet: string, label: string) {
+    try {
+      await navigator.clipboard.writeText(snippet);
+      mcpStatusMessage = `Copied ${label} MCP snippet.`;
+    } catch (e: unknown) {
+      mcpStatusMessage = `Copy failed: ${formatBackendError(e)}`;
+    }
+  }
+
+  onMount(() => {
+    void refreshMcpStatus();
+  });
+
   async function handleSave() {
     isSaving = true;
     message = 'Saving registry...';
@@ -119,13 +218,29 @@
     activeSection = 'engines';
   }
 
-  async function refreshMicInputs() {
-    if (!navigator?.mediaDevices) return;
-    try {
-      const temp = await navigator.mediaDevices.getUserMedia({ audio: true });
-      temp.getTracks().forEach(track => track.stop());
-    } catch (_) {
-      // Permission may already be denied or unavailable; continue best-effort enumeration.
+  async function refreshMicInputs(requestPermission = true) {
+    if (!navigator?.mediaDevices) {
+      micLoadState = 'error';
+      micStatusMessage = 'Media devices are unavailable in this webview.';
+      micOptions = [];
+      selectedMicId = '';
+      return;
+    }
+
+    micLoadState = 'loading';
+    micStatusMessage = '';
+
+    if (requestPermission) {
+      try {
+        const temp = await navigator.mediaDevices.getUserMedia({ audio: true });
+        temp.getTracks().forEach(track => track.stop());
+      } catch (e: unknown) {
+        micLoadState = 'error';
+        micStatusMessage = `Microphone access failed: ${formatBackendError(e)}`;
+        micOptions = [];
+        selectedMicId = '';
+        return;
+      }
     }
 
     try {
@@ -136,12 +251,22 @@
           id: d.deviceId,
           name: d.label || `Microphone ${i + 1}`
         }));
-      if (micOptions.length > 0 && !micOptions.some(m => m.id === selectedMicId)) {
-        selectedMicId = micOptions[0].id;
-      }
+      selectedMicId = micOptions.some(m => m.id === selectedMicId) ? selectedMicId : (micOptions[0]?.id ?? '');
+      micLoadState = 'ready';
+      micStatusMessage = micOptions.length === 0
+        ? 'No named microphone inputs were returned. Recording will use the system default input if available.'
+        : '';
     } catch (e: unknown) {
+      micLoadState = 'error';
+      micStatusMessage = `Failed to enumerate microphones: ${formatBackendError(e)}`;
+      micOptions = [];
+      selectedMicId = '';
       console.warn('Failed to enumerate microphones:', e);
     }
+  }
+
+  async function loadMicInputs() {
+    await refreshMicInputs(true);
   }
 
   async function uploadMicrowaveAudio(target: RecordingTarget) {
@@ -304,14 +429,6 @@
       selectedEngine.systemPrompt = await getSystemPrompt();
     }
   }
-
-  onMount(() => {
-    void refreshMicInputs();
-    const mediaDevices = navigator?.mediaDevices;
-    const onDeviceChange = () => { void refreshMicInputs(); };
-    mediaDevices?.addEventListener?.('devicechange', onDeviceChange);
-    return () => mediaDevices?.removeEventListener?.('devicechange', onDeviceChange);
-  });
 </script>
 
 <div class="config-container">
@@ -359,9 +476,27 @@
         <span>MICROWAVE SOUNDS</span>
       </div>
       <div class="list-content microwave-assignments">
-        {#if micOptions.length > 1}
-          <div class="mic-device-block">
+        <div class="mic-device-block">
+          <div class="mic-device-header">
             <span class="role-label">MIC INPUT</span>
+            <button
+              class="btn btn-xs btn-ghost"
+              onclick={loadMicInputs}
+              disabled={isRecording || micLoadState === 'loading'}
+            >
+              {micLoadState === 'idle' ? 'LOAD INPUTS' : '↻ RESCAN'}
+            </button>
+          </div>
+
+          {#if micLoadState === 'idle'}
+            <div class="mic-status">
+              Load microphone inputs only when needed. Recording still works with the system default input.
+            </div>
+          {:else if micLoadState === 'loading'}
+            <div class="mic-status">Scanning microphones...</div>
+          {:else if micLoadState === 'error'}
+            <div class="mic-status mic-status-error">{micStatusMessage}</div>
+          {:else if micOptions.length > 1}
             <div class="mic-device-row">
               <Dropdown
                 options={micOptions}
@@ -370,10 +505,15 @@
                 placeholder="Select microphone..."
                 disabled={isRecording}
               />
-              <button class="btn btn-xs btn-ghost" onclick={refreshMicInputs} disabled={isRecording}>↻ RESCAN</button>
             </div>
-          </div>
-        {/if}
+          {:else if micOptions.length === 1}
+            <div class="mic-status">
+              Using `{micOptions[0].name}` when recording.
+            </div>
+          {:else}
+            <div class="mic-status">{micStatusMessage}</div>
+          {/if}
+        </div>
 
         <div class="sound-role">
           <span class="role-label">COOKING HUM</span>
@@ -402,6 +542,7 @@
             {:else}
               <button class="btn btn-xs" onclick={() => startRecording('ding')} disabled={isRecording}>🎤 RECORD</button>
             {/if}
+            <button class="btn btn-xs btn-ghost" onclick={() => uploadMicrowaveAudio('ding')} disabled={isRecording}>📁 UPLOAD DING</button>
             {#if microwave.dingId}
               <button class="btn btn-xs btn-ghost" onclick={() => microwave.dingId = null}>✕ CLEAR</button>
             {/if}
@@ -433,6 +574,44 @@
           <div class="field-help">
             Leave blank to auto-detect via `FREECAD_CMD`, PATH, or standard macOS FreeCAD locations.
           </div>
+        </div>
+
+        <div class="field">
+          <div class="prompt-header">
+            <div class="field-title">ADD THIS TO YOUR AGENTIC TOOL</div>
+            <div class="inline-actions">
+              <button class="btn btn-xs btn-ghost" onclick={refreshMcpStatus}>REFRESH MCP</button>
+              <button class="btn btn-xs" onclick={() => copyMcpSnippet(genericMcpSnippet, 'generic JSON')}>COPY GENERIC JSON</button>
+            </div>
+          </div>
+          <div class="mcp-status-row">
+            <span class:mcp-running={mcpStatus?.running} class:mcp-stopped={!mcpStatus?.running}>
+              {mcpStatus?.running ? 'RUNNING' : 'STOPPED'}
+            </span>
+            <span class="mcp-endpoint">{mcpStatus?.endpointUrl || 'http://127.0.0.1:39249/mcp'}</span>
+          </div>
+          <div class="field-help">
+            Canonical local MCP endpoint for agent clients. Pick your host and copy the right config format directly.
+          </div>
+          <div class="mcp-agent-grid">
+            {#each mcpAgentSnippets as agent (agent.id)}
+              <div class="mcp-agent-card">
+                <div class="mcp-agent-card__head">
+                  <span class="mcp-agent-card__label">{agent.label}</span>
+                  <button class="btn btn-xs" onclick={() => copyMcpSnippet(agent.snippet, agent.label)}>
+                    COPY
+                  </button>
+                </div>
+                <div class="mcp-agent-card__path">{agent.location}</div>
+              </div>
+            {/each}
+          </div>
+          {#if mcpStatusMessage}
+            <div class="field-note">{mcpStatusMessage}</div>
+          {/if}
+          {#if mcpStatus?.lastStartupError}
+            <div class="field-note">Last startup error: {mcpStatus.lastStartupError}</div>
+          {/if}
         </div>
 
       {#if activeSection === 'engines' && selectedEngine}
@@ -735,6 +914,13 @@
     letter-spacing: 0.05em;
   }
 
+  .field-title {
+    font-size: 0.65rem;
+    color: var(--text-dim);
+    font-weight: bold;
+    letter-spacing: 0.05em;
+  }
+
   input, textarea {
     padding: 8px 12px;
     background: var(--bg-200);
@@ -762,6 +948,89 @@
     justify-content: space-between;
     align-items: center;
     margin-bottom: 6px;
+  }
+
+  .inline-actions {
+    display: flex;
+    gap: 8px;
+  }
+
+  .mcp-status-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .mcp-running,
+  .mcp-stopped {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 74px;
+    padding: 2px 8px;
+    border: 1px solid var(--bg-300);
+    font-size: 0.62rem;
+    font-weight: bold;
+    letter-spacing: 0.06em;
+    background: var(--bg-200);
+  }
+
+  .mcp-running {
+    border-color: var(--secondary);
+    color: var(--secondary);
+  }
+
+  .mcp-stopped {
+    border-color: var(--primary);
+    color: var(--primary);
+  }
+
+  .mcp-endpoint {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    color: var(--text-dim);
+  }
+
+  .mcp-agent-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 10px;
+  }
+
+  .mcp-agent-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px;
+    border: 1px solid var(--bg-300);
+    background: var(--bg-200);
+    overflow: hidden;
+  }
+
+  .mcp-agent-card__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .mcp-agent-card__label {
+    font-size: 0.66rem;
+    font-weight: bold;
+    letter-spacing: 0.06em;
+    color: var(--text);
+  }
+
+  .mcp-agent-card__path {
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    color: var(--text-dim);
+    word-break: break-word;
   }
 
   .system-prompt-input {
@@ -827,6 +1096,13 @@
     border-bottom: 1px solid var(--bg-300);
   }
 
+  .mic-device-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
   .mic-device-row {
     display: flex;
     gap: 6px;
@@ -842,6 +1118,17 @@
     font-weight: bold;
     color: var(--text-dim);
     letter-spacing: 0.05em;
+  }
+
+  .mic-status {
+    font-size: 0.65rem;
+    line-height: 1.4;
+    color: var(--text-dim);
+  }
+
+  .mic-status-error {
+    color: var(--red);
+    white-space: pre-wrap;
   }
 
   .role-actions {

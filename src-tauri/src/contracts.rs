@@ -9,9 +9,79 @@ pub const GENIE_TRAITS_VERSION: u8 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct AgentOrigin {
+    pub host_label: String,
+    pub client_kind: String,
+    pub agent_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_model_label: Option<String>,
+    pub session_id: String,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSession {
+    pub session_id: String,
+    pub client_kind: String,
+    pub host_label: String,
+    pub agent_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_model_label: Option<String>,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    pub model_id: Option<String>,
+    pub phase: String,
+    pub status_text: String,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDraft {
+    pub session_id: String,
+    pub thread_id: String,
+    pub base_message_id: String,
+    pub model_id: Option<String>,
+    pub design_output: DesignOutput,
+    pub artifact_bundle: Option<ArtifactBundle>,
+    pub model_manifest: Option<ModelManifest>,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetLeaseInfo {
+    pub session_id: String,
+    pub thread_id: String,
+    pub message_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    pub host_label: String,
+    pub agent_label: String,
+    pub acquired_at: u64,
+    pub expires_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerStatus {
+    pub running: bool,
+    pub endpoint_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_startup_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub enum AppErrorCode {
     Validation,
     NotFound,
+    Conflict,
     Provider,
     Persistence,
     Render,
@@ -59,6 +129,10 @@ impl AppError {
 
     pub fn provider(message: impl Into<String>) -> Self {
         Self::new(AppErrorCode::Provider, message)
+    }
+
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::new(AppErrorCode::Conflict, message)
     }
 
     pub fn persistence(message: impl Into<String>) -> Self {
@@ -575,6 +649,40 @@ impl std::str::FromStr for InteractionMode {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum MacroDialect {
+    Legacy,
+    CadFrameworkV1,
+}
+
+impl MacroDialect {
+    pub fn is_framework(&self) -> bool {
+        matches!(self, Self::CadFrameworkV1)
+    }
+}
+
+fn default_macro_dialect() -> MacroDialect {
+    MacroDialect::Legacy
+}
+
+pub fn infer_macro_dialect_from_code(macro_code: &str) -> MacroDialect {
+    let trimmed = macro_code.trim();
+    if trimmed.contains("cad_sdk") || trimmed.contains("CONTROLS") {
+        MacroDialect::CadFrameworkV1
+    } else {
+        MacroDialect::Legacy
+    }
+}
+
+pub fn normalize_design_output(mut output: DesignOutput) -> DesignOutput {
+    let inferred = infer_macro_dialect_from_code(&output.macro_code);
+    if inferred.is_framework() {
+        output.macro_dialect = inferred;
+    }
+    output
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DesignOutput {
@@ -588,6 +696,8 @@ pub struct DesignOutput {
     pub interaction_mode: InteractionMode,
     #[serde(alias = "macro_code")]
     pub macro_code: String,
+    #[serde(default = "default_macro_dialect", alias = "macro_dialect")]
+    pub macro_dialect: MacroDialect,
     #[serde(default, alias = "ui_spec")]
     pub ui_spec: UiSpec,
     #[serde(default, alias = "initial_params")]
@@ -717,6 +827,8 @@ pub struct Message {
     pub artifact_bundle: Option<ArtifactBundle>,
     #[serde(default)]
     pub model_manifest: Option<ModelManifest>,
+    #[serde(default)]
+    pub agent_origin: Option<AgentOrigin>,
     #[serde(default, alias = "image_data")]
     pub image_data: Option<String>,
     #[serde(default, alias = "attachment_images")]
@@ -813,6 +925,15 @@ pub struct GenerateOutput {
     pub usage: Option<UsageSummary>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateDesignOptions {
+    #[serde(default)]
+    pub question_mode: Option<bool>,
+    #[serde(default)]
+    pub follow_up_question: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitOutput {
@@ -827,6 +948,8 @@ pub struct IntentDecision {
     pub intent_mode: String,
     pub confidence: f32,
     pub response: String,
+    #[serde(default)]
+    pub final_response: Option<String>,
     #[serde(default)]
     pub usage: Option<UsageSummary>,
 }
@@ -959,6 +1082,8 @@ pub struct DeletedMessage {
     pub artifact_bundle: Option<ArtifactBundle>,
     #[serde(default)]
     pub model_manifest: Option<ModelManifest>,
+    #[serde(default)]
+    pub agent_origin: Option<AgentOrigin>,
     pub timestamp: u64,
     #[serde(default, alias = "image_data")]
     pub image_data: Option<String>,
@@ -1044,6 +1169,10 @@ pub enum ControlViewSource {
     Inherited,
     Llm,
     Manual,
+}
+
+fn default_control_source() -> ControlViewSource {
+    ControlViewSource::Generated
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -1205,6 +1334,8 @@ pub struct ControlPrimitive {
     pub primitive_id: String,
     pub label: String,
     pub kind: ControlPrimitiveKind,
+    #[serde(default = "default_control_source")]
+    pub source: ControlViewSource,
     #[serde(default)]
     pub part_ids: Vec<String>,
     #[serde(default)]
@@ -1254,6 +1385,7 @@ pub struct ControlView {
     pub sections: Vec<ControlViewSection>,
     #[serde(default, rename = "default")]
     pub is_default: bool,
+    #[serde(default = "default_control_source")]
     pub source: ControlViewSource,
     #[serde(default)]
     pub status: EnrichmentStatus,
@@ -1819,6 +1951,7 @@ mod tests {
                     primitive_id: "primitive-shell-radius".to_string(),
                     label: "Shell Radius".to_string(),
                     kind: ControlPrimitiveKind::Number,
+                    source: ControlViewSource::Generated,
                     part_ids: vec!["part-shell".to_string()],
                     bindings: vec![PrimitiveBinding {
                         parameter_key: "radius".to_string(),
@@ -1834,6 +1967,7 @@ mod tests {
                     primitive_id: "primitive-shell-radius-target".to_string(),
                     label: "Shell Radius Target".to_string(),
                     kind: ControlPrimitiveKind::Number,
+                    source: ControlViewSource::Generated,
                     part_ids: vec!["part-shell".to_string()],
                     bindings: vec![PrimitiveBinding {
                         parameter_key: "radius".to_string(),

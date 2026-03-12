@@ -14,11 +14,11 @@
   import HistoryPanel from './lib/HistoryPanel.svelte';
   import CodeModal from './lib/CodeModal.svelte';
   import DeletedModels from './lib/DeletedModels.svelte';
-  import { startMicrowaveHum, stopMicrowaveHum, stopMicrowaveAudio, playDing, playErrorBuzz, getActiveMicrowaveCount, setAudibleThread } from './lib/audio/microwave';
+  import { activeMicrowaveCount, setMuted, stopMicrowaveAudio, setAudibleThread } from './lib/audio/microwave';
   import { session } from './lib/stores/sessionStore';
   import { handleGenerate, initOrchestrator, isQuestionIntent } from './lib/controllers/requestOrchestrator';
-  import { handleParamChange, commitManualVersion, stageParamChange } from './lib/controllers/manualController';
-  import { loadFromHistory, deleteThread, createNewThread, forkDesign, deleteVersion, loadVersion, refreshHistory } from './lib/stores/history';
+  import { handleParamChange, commitManualVersion, forkManualVersion, stageParamChange } from './lib/controllers/manualController';
+  import { applyAgentDraft, loadFromHistory, deleteThread, renameThread, createNewThread, forkDesign, deleteVersion, loadVersion, refreshHistory } from './lib/stores/history';
   import { workingCopy, isDirty } from './lib/stores/workingCopy';
   import { history, activeThreadId, activeVersionId, config, availableModels, isLoadingModels } from './lib/stores/domainState';
   import { sidebarWidth, historyHeight, dialogueHeight, showCodeModal, selectedCode, selectedTitle, currentView } from './lib/stores/viewState';
@@ -41,13 +41,18 @@
   } from './lib/modelRuntime/semanticControls';
   import {
     addImportedModelVersion,
+    deleteAgentDraft,
     exportFile,
     formatBackendError,
+    getAgentDraft,
+    getActiveAgentSessions,
     getModelManifest,
     importFcstd,
     saveModelManifest,
   } from './lib/tauri/client';
   import type {
+    AgentDraft,
+    AgentSession,
     DesignParams,
     GenieTraits,
     Message,
@@ -70,6 +75,89 @@
   };
 
   type ThreadPhase = Request['phase'] | 'idle' | 'booting';
+  type ViewerBusyPhase = 'generating' | 'repairing' | 'rendering' | 'committing' | null;
+
+  function formatAgentPhase(phase: string): string {
+    return phase.replace(/_/g, ' ').toUpperCase();
+  }
+
+  function agentDraftKey(draft: AgentDraft | null | undefined): string | null {
+    if (!draft) return null;
+    return `${draft.threadId}:${draft.baseMessageId}:${draft.updatedAt}`;
+  }
+
+  function mapAgentPhaseToViewerBusy(session: AgentSession | null): ViewerBusyPhase {
+    switch (session?.phase) {
+      case 'rendering':
+      case 'restoring_version':
+        return 'rendering';
+      case 'saving_version':
+        return 'committing';
+      case 'patching_params':
+      case 'patching_macro':
+      case 'reading':
+      case 'resolving':
+        return 'generating';
+      default:
+        return null;
+    }
+  }
+
+  function formatAgentOriginLabel(origin: Message['agentOrigin'] | null | undefined): string | null {
+    if (!origin) return null;
+    const host = origin.hostLabel?.trim() || origin.agentLabel?.trim() || 'Agent';
+    const model = origin.llmModelLabel?.trim() || origin.llmModelId?.trim() || '';
+    if (!model || model.toLowerCase() === host.toLowerCase()) {
+      return host;
+    }
+    return `${host} · ${model}`;
+  }
+
+  function isActiveRequestPhase(phase: Request['phase']): boolean {
+    return !['success', 'error', 'canceled'].includes(phase);
+  }
+
+  function isModelBusyRequestPhase(phase: Request['phase']): boolean {
+    return ['generating', 'repairing', 'queued_for_render', 'rendering', 'committing'].includes(phase);
+  }
+
+  function requestMatchesViewerTarget(
+    request: Request,
+    threadId: string | null,
+    messageId: string | null,
+    modelId: string | null,
+  ): boolean {
+    if (!threadId || request.threadId !== threadId) return false;
+    if (modelId) {
+      if (request.baseModelId) return request.baseModelId === modelId;
+      if (messageId && request.baseMessageId) return request.baseMessageId === messageId;
+      return false;
+    }
+    if (messageId) {
+      if (request.baseMessageId) return request.baseMessageId === messageId;
+      return false;
+    }
+    return true;
+  }
+
+  function sessionMatchesViewerTarget(
+    candidate: AgentSession,
+    threadId: string | null,
+    messageId: string | null,
+    modelId: string | null,
+  ): boolean {
+    if (!threadId || candidate.threadId !== threadId) return false;
+    if (modelId) {
+      if (candidate.modelId) return candidate.modelId === modelId;
+      if (messageId && candidate.messageId) return candidate.messageId === messageId;
+      return false;
+    }
+    if (messageId) {
+      if (candidate.messageId) return candidate.messageId === messageId;
+      return false;
+    }
+    return true;
+  }
 
   // Local reactive aliases for templates
   const phase = $derived($session.phase);
@@ -149,6 +237,99 @@
     const preferred = partScoped.length > 0 ? [...partScoped, ...globalControls] : visibleControls;
     return preferred.slice(0, 4);
   });
+  const suppressViewportBusyUi = $derived($showCodeModal);
+  const localViewportRequests = $derived.by<Request[]>(() => {
+    const threadId = $activeThreadId;
+    const messageId = $activeVersionId;
+    const modelId = activeArtifactBundle?.modelId ?? null;
+    return $activeThreadRequests.filter(
+      (request) =>
+        isActiveRequestPhase(request.phase) &&
+        requestMatchesViewerTarget(request, threadId, messageId, modelId),
+    );
+  });
+  const externalViewerSession = $derived.by<AgentSession | null>(() => {
+    const threadId = $activeThreadId;
+    const messageId = $activeVersionId;
+    const modelId = activeArtifactBundle?.modelId ?? null;
+    if (!threadId && !messageId && !modelId) return null;
+
+    return (
+      activeAgentSessions.find((candidate) =>
+        sessionMatchesViewerTarget(candidate, threadId, messageId, modelId),
+      ) ??
+      null
+    );
+  });
+  const externalViewerBusyPhase = $derived.by<ViewerBusyPhase>(() =>
+    mapAgentPhaseToViewerBusy(externalViewerSession),
+  );
+  const manualViewerBusyPhase = $derived.by<ViewerBusyPhase>(() => {
+    if ($session.isManual && phase === 'rendering') return 'rendering';
+    return null;
+  });
+  const showViewerBusyMask = $derived.by(() => {
+    if (suppressViewportBusyUi) return false;
+    if (localViewportRequests.some((request) => isModelBusyRequestPhase(request.phase))) return true;
+    if (manualViewerBusyPhase === 'rendering') return true;
+    return externalViewerBusyPhase === 'rendering' || externalViewerBusyPhase === 'committing';
+  });
+  const localViewerBusyPhase = $derived.by<ViewerBusyPhase>(() => {
+    if (localViewportRequests.some((request) => request.phase === 'committing')) return 'committing';
+    if (
+      localViewportRequests.some((request) =>
+        ['queued_for_render', 'rendering'].includes(request.phase),
+      )
+    ) {
+      return 'rendering';
+    }
+    if (localViewportRequests.some((request) => request.phase === 'repairing')) return 'repairing';
+    if (localViewportRequests.some((request) => request.phase === 'generating')) return 'generating';
+    if (manualViewerBusyPhase === 'rendering') return 'rendering';
+    return null;
+  });
+  const viewerBusyPhase = $derived.by<ViewerBusyPhase>(() => {
+    return localViewerBusyPhase ?? externalViewerBusyPhase;
+  });
+  const viewerBusyText = $derived.by<string | null>(() => {
+    switch (localViewerBusyPhase) {
+      case 'repairing':
+        return $session.repairMessage || 'Reweaving the geometry lattice.';
+      case 'rendering':
+        return 'Stabilizing the geometry into manufacturable solids.';
+      case 'committing':
+        return 'Finalizing the artifact and sealing it into the thread.';
+      case 'generating':
+        return $session.cookingPhrase || 'Preparing the next transformation.';
+      default:
+        if (!externalViewerSession || !externalViewerBusyPhase) return null;
+        if (externalViewerSession.statusText.trim()) return externalViewerSession.statusText;
+        switch (externalViewerBusyPhase) {
+          case 'rendering':
+            return `External agent ${externalViewerSession.agentLabel} is updating the model.`;
+          case 'committing':
+            return `External agent ${externalViewerSession.agentLabel} is saving a version.`;
+          case 'generating':
+            return `External agent ${externalViewerSession.agentLabel} is preparing an update.`;
+          default:
+            return null;
+        }
+    }
+  });
+  const externalViewerStatusText = $derived.by<string | null>(() => {
+    if (!externalViewerSession || !externalViewerBusyPhase) return null;
+    if (externalViewerSession.statusText.trim()) return externalViewerSession.statusText;
+    switch (externalViewerBusyPhase) {
+      case 'rendering':
+        return `External agent ${externalViewerSession.agentLabel} is updating the model.`;
+      case 'committing':
+        return `External agent ${externalViewerSession.agentLabel} is saving a version.`;
+      case 'generating':
+        return `External agent ${externalViewerSession.agentLabel} is preparing an update.`;
+      default:
+        return null;
+    }
+  });
 
   let viewerComponent = $state<ViewerHandle | null>(null);
   let drawingOverlay = $state<DrawingOverlayHandle | null>(null);
@@ -157,6 +338,9 @@
   let lastAdvisorBubble = $state('');
   let lastAdvisorQuestion = $state('');
   let dismissedBubbleText = $state('');
+
+  let activeAgentSessions = $state<AgentSession[]>([]);
+  let lastSeenAgentDraftKey = $state<string | null>(null);
 
   let isResizingWidth = $state(false);
   let isResizingHeight = $state(false);
@@ -177,17 +361,87 @@
   // Shut down audio context when idle for 2s
   let idleTimeout: ReturnType<typeof setTimeout> | null = null;
   $effect(() => {
-    if ($activeRequestCount === 0) {
-      idleTimeout = setTimeout(() => stopMicrowaveAudio(true), 2000);
-    } else if (idleTimeout) {
-      clearTimeout(idleTimeout);
-      idleTimeout = null;
+    const hasAudioActivity = $activeRequestCount > 0 || $activeMicrowaveCount > 0;
+    if (hasAudioActivity) {
+      if (idleTimeout) {
+        clearTimeout(idleTimeout);
+        idleTimeout = null;
+        console.info('[Microwave] idle shutdown canceled', {
+          activeRequests: $activeRequestCount,
+          activeMicrowaves: $activeMicrowaveCount,
+        });
+      }
+      return;
+    }
+
+    if (!idleTimeout) {
+      console.info('[Microwave] idle shutdown scheduled');
+      idleTimeout = setTimeout(() => {
+        const stillActive = get(activeRequestCount) > 0 || get(activeMicrowaveCount) > 0;
+        if (stillActive) {
+          console.info('[Microwave] idle shutdown skipped due to renewed activity', {
+            activeRequests: get(activeRequestCount),
+            activeMicrowaves: get(activeMicrowaveCount),
+          });
+          idleTimeout = null;
+          return;
+        }
+        console.info('[Microwave] idle shutdown closing audio context');
+        stopMicrowaveAudio(true);
+        idleTimeout = null;
+      }, 2000);
     }
   });
 
   // Wire thread changes to audio focus
   $effect(() => {
     setAudibleThread($activeThreadId);
+  });
+
+  // Poll for agent activity
+  $effect(() => {
+    let canceled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const schedule = () => {
+      if (canceled) return;
+      const delay =
+        typeof document !== 'undefined' && document.visibilityState === 'hidden' ? 5000 : 2000;
+      timer = setTimeout(() => {
+        void tick();
+      }, delay);
+    };
+
+    const tick = async () => {
+      try {
+        await refreshExternalAgentState();
+      } catch (e) {
+        console.error('Failed to fetch external agent state:', e);
+      } finally {
+        schedule();
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      void tick();
+    };
+
+    void tick();
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
+
+    return () => {
+      canceled = true;
+      if (timer) clearTimeout(timer);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      }
+    };
   });
 
   function formatCookingTime(s: number) {
@@ -201,8 +455,87 @@
   });
 
   const activeThread = $derived($history.find(t => t.id === $activeThreadId));
+  const activeVersionMessage = $derived.by<Message | null>(() => {
+    if (!activeThread) return null;
+    return (
+      activeThread.messages.find(
+        (message) =>
+          message.id === $activeVersionId &&
+          message.role === 'assistant' &&
+          Boolean(message.output || message.artifactBundle),
+      ) ?? null
+    );
+  });
+  const activeVersionAgentLabel = $derived(formatAgentOriginLabel(activeVersionMessage?.agentOrigin));
   const eckyTraits = $derived<Partial<GenieTraits>>(activeThread?.genieTraits || {});
   const eckyIntensity = $derived(1.0 + Math.max(0, ($activeRequestCount - 1) * 0.25));
+  
+  const agentDraft = $derived($session.agentDraft);
+
+  async function loadAgentDraft() {
+    if (!agentDraft) return;
+    await applyAgentDraft(agentDraft);
+  }
+
+  async function discardAgentDraft() {
+    if (!agentDraft) return;
+    try {
+      await deleteAgentDraft(agentDraft.threadId, agentDraft.baseMessageId);
+      lastSeenAgentDraftKey = null;
+      session.setAgentDraft(null);
+    } catch (e) {
+      console.error('Failed to discard agent draft:', e);
+    }
+  }
+
+  async function refreshExternalAgentState() {
+    activeAgentSessions = await getActiveAgentSessions();
+
+    const threadId = $activeThreadId;
+    const messageId = $activeVersionId;
+    if (!threadId || !messageId) {
+      lastSeenAgentDraftKey = null;
+      const currentDraft = get(session).agentDraft as AgentDraft | null;
+      if (currentDraft) {
+        session.setAgentDraft(null);
+      }
+      return;
+    }
+
+    const draft = (await getAgentDraft(threadId, messageId)) as AgentDraft | null;
+    const nextDraftKey = agentDraftKey(draft);
+
+    if (!draft) {
+      const currentDraft = get(session).agentDraft as AgentDraft | null;
+      if (currentDraft?.threadId === threadId && currentDraft?.baseMessageId === messageId) {
+        session.setAgentDraft(null);
+      }
+      lastSeenAgentDraftKey = null;
+      return;
+    }
+
+    if (nextDraftKey === lastSeenAgentDraftKey) {
+      return;
+    }
+
+    lastSeenAgentDraftKey = nextDraftKey;
+    if (!get(isDirty)) {
+      await applyAgentDraft(draft);
+      return;
+    }
+
+    session.setAgentDraft(draft);
+    session.setStatus('External agent draft updated. Load or discard it before saving.');
+  }
+
+  $effect(() => {
+    const threadId = $activeThreadId;
+    const messageId = $activeVersionId;
+    lastSeenAgentDraftKey = null;
+    if (!threadId || !messageId) return;
+    void refreshExternalAgentState();
+  });
+
   const inFlightByThread = $derived.by(() => {
     const counts: Record<string, number> = {};
     for (const req of $allRequests) {
@@ -245,18 +578,22 @@
 
   const activeThreadHighestPhase = $derived.by<ThreadPhase>(() => {
     if (phase === 'booting') return 'booting';
-    
-    // Check if there is an error specifically in this thread
-    const threadErrors = $activeThreadRequests.filter(r => r.phase === 'error' && r.error);
+
+    const activeRequests = $activeThreadRequests.filter(
+      (request) => !['success', 'error', 'canceled'].includes(request.phase),
+    );
+    const activePhases = activeRequests.map((request) => request.phase);
+    if (activePhases.some((requestPhase) => ['rendering', 'queued_for_render', 'committing'].includes(requestPhase))) {
+      return 'rendering';
+    }
+    if (activePhases.some((requestPhase) => requestPhase === 'repairing')) return 'repairing';
+    if (activePhases.some((requestPhase) => requestPhase === 'generating')) return 'generating';
+    if (activePhases.some((requestPhase) => requestPhase === 'answering')) return 'answering';
+    if (activePhases.some((requestPhase) => requestPhase === 'classifying')) return 'classifying';
+
+    const threadErrors = $activeThreadRequests.filter((request) => request.phase === 'error' && request.error);
     if (threadErrors.length > 0) return 'error';
 
-    const reqPhases = $activeThreadRequests.map(r => r.phase);
-    if (reqPhases.some(p => ['rendering', 'queued_for_render', 'committing'].includes(p))) return 'rendering';
-    if (reqPhases.some(p => p === 'repairing')) return 'repairing';
-    if (reqPhases.some(p => p === 'generating')) return 'generating';
-    if (reqPhases.some(p => p === 'answering')) return 'answering';
-    if (reqPhases.some(p => p === 'classifying')) return 'classifying';
-    
     return 'idle';
   });
 
@@ -273,7 +610,11 @@
 
   const genieBubble = $derived.by(() => {
     const atPhase = activeThreadHighestPhase;
-    const threadError = $activeThreadRequests.find(r => r.phase === 'error')?.error;
+    const threadError =
+      atPhase === 'error'
+        ? [...$activeThreadRequests].reverse().find((request) => request.phase === 'error' && request.error)
+            ?.error
+        : null;
     
     const raw = threadError || 
                (atPhase === 'repairing' ? $session.repairMessage : null) || 
@@ -283,15 +624,17 @@
   });
 
   async function toggleMicrowaveMute() {
-    const newMuted = !($config?.microwave?.muted);
-    config.update(c => ({ 
-      ...c, 
-      microwave: { 
-        ...(c.microwave || { humId: null, dingId: null }), 
-        muted: newMuted 
-      } 
-    }));
-    if (newMuted) stopMicrowaveAudio(true);
+    const currentConfig = get(config);
+    const newMuted = !(currentConfig?.microwave?.muted);
+    const nextConfig = {
+      ...currentConfig,
+      microwave: {
+        ...(currentConfig?.microwave || { humId: null, dingId: null }),
+        muted: newMuted,
+      },
+    };
+    config.set(nextConfig);
+    setMuted(newMuted, nextConfig);
     await saveConfig();
   }
 
@@ -499,10 +842,10 @@
       </button>
     {/if}
     <button class="settings-overlay-btn" onclick={() => currentView.set($currentView === 'config' ? 'workbench' : 'config')} title="Configuration">
-      {$currentView === 'config' ? '⚒️' : '⚙️'}
+      {$currentView === 'config' ? '×' : '⚙️'}
     </button>
     <button class="settings-overlay-btn" onclick={() => currentView.set($currentView === 'trash' ? 'workbench' : 'trash')} title="Trash">
-      {$currentView === 'trash' ? '⚒️' : '🗑️'}
+      {$currentView === 'trash' ? '×' : '🗑️'}
     </button>
   </div>
 
@@ -557,8 +900,10 @@
             <div class="sidebar-content scrollable">
               <HistoryPanel history={$history} activeThreadId={$activeThreadId} 
                 inFlightByThread={inFlightByThread}
+                activeAgentSessions={activeAgentSessions}
                 onSelect={loadFromHistory} 
                 onDelete={deleteThread}
+                onRename={renameThread}
                 onNew={createNewThread}
                 onImportFcstd={handleImportFcstd}
               />
@@ -575,7 +920,7 @@
           <main class="viewport-area" role="presentation">
             <Viewer
               bind:this={viewerComponent}
-              stlUrl={$activeThreadId || $workingCopy.macroCode ? stlUrl : null}
+              stlUrl={$activeThreadId ? stlUrl : null}
               viewerAssets={viewerAssets}
               selectedPartId={selectedPartId}
               overlayPartLabel={overlaySelectedPart?.label ?? null}
@@ -585,18 +930,63 @@
               previewTransforms={importedPreviewTransforms}
               onOverlayChange={handleSemanticControlChange}
               onSelectPart={handlePartSelect}
-              isGenerating={$activeThreadBusy}
+              isGenerating={viewerBusyPhase === 'generating' || viewerBusyPhase === 'repairing'}
+              hideModelWhileBusy={showViewerBusyMask}
+              busyPhase={viewerBusyPhase}
+              busyText={viewerBusyText}
             />
             <DrawingOverlay bind:this={drawingOverlay} active={drawMode} />
             <div class="genie-layer">
               <VertexGenie mode={genieMode} bubble={genieBubble} onDismiss={dismissGenie} traits={eckyTraits} intensity={eckyIntensity} />
             </div>
 
+            {#if externalViewerSession}
+              <div class="agent-activity-banner">
+                <span class="agent-activity-banner__label">
+                  {externalViewerSession.agentLabel.toUpperCase()} · {formatAgentPhase(externalViewerSession.phase)}
+                </span>
+                <span class="agent-activity-banner__body">
+                  {externalViewerStatusText || `Active in ${externalViewerSession.clientKind}.`}
+                </span>
+              </div>
+            {/if}
+
+            {#if agentDraft}
+              <div class="agent-draft-toast">
+                <span class="toast-label">EXTERNAL AGENT DRAFT AVAILABLE FOR THIS VERSION</span>
+                <div class="toast-actions">
+                  <button class="btn btn-xs btn-primary" onclick={loadAgentDraft}>LOAD DRAFT</button>
+                  <button class="btn btn-xs btn-secondary" onclick={discardAgentDraft}>DISCARD</button>
+                </div>
+              </div>
+            {/if}
+
             {#if error}
-              <div class="error-banner" role="alert">
+              <div
+                class="error-banner"
+                role="button"
+                tabindex="0"
+                aria-label="Dismiss error"
+                onclick={dismissError}
+                onkeydown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    dismissError();
+                  }
+                }}
+              >
                 <div class="error-banner__label">ERROR</div>
                 <div class="error-banner__body">{error}</div>
-                <button class="error-banner__dismiss" onclick={dismissError} title="Dismiss error">✕</button>
+                <button
+                  class="error-banner__dismiss"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    dismissError();
+                  }}
+                  title="Dismiss error"
+                >
+                  ✕
+                </button>
               </div>
             {/if}
 
@@ -653,11 +1043,16 @@
               </div>
             {/if}
             
-            {#if $workingCopy.macroCode || stlUrl}
+            {#if $activeThreadId && ($workingCopy.macroCode || stlUrl)}
               <div class="viewport-overlay">
+                {#if activeVersionAgentLabel}
+                  <div class="agent-origin-chip" title={`Current model authored by ${activeVersionAgentLabel}`}>
+                    {activeVersionAgentLabel}
+                  </div>
+                {/if}
                 <div class="export-actions">
-                  <button class="btn btn-xs btn-secondary" onclick={forkDesign} title="Fork this design into a new project">🍴 FORK</button>
-                  <button class="btn btn-xs btn-primary" onclick={exportSTL} disabled={!stlUrl}>💾 STL</button>
+                  <button class="btn btn-xs btn-secondary" onclick={forkDesign} disabled={showViewerBusyMask} title="Fork this design into a new project">🍴 FORK</button>
+                  <button class="btn btn-xs btn-primary" onclick={exportSTL} disabled={!stlUrl || showViewerBusyMask}>💾 STL</button>
                 </div>
               </div>
             {/if}
@@ -676,7 +1071,9 @@
               <PromptPanel
                 onGenerate={handleGenerate}
                 isGenerating={$activeThreadBusy}
-                messages={activeThread?.messages || []}                onShowCode={(m) => { selectedCode.set(m.output.macroCode); selectedTitle.set(m.output.title); showCodeModal.set(true); }}
+                messages={activeThread?.messages || []}
+                activeThreadId={$activeThreadId}
+                onShowCode={(m) => { selectedCode.set(m.output.macroCode); selectedTitle.set(m.output.title); showCodeModal.set(true); }}
                 onDeleteVersion={deleteVersion}
                 bind:activeVersionId={$activeVersionId}
                 onVersionChange={loadVersion}
@@ -702,7 +1099,13 @@
   {/if}
 
   {#if $showCodeModal}
-    <CodeModal bind:code={$selectedCode} title={$selectedTitle} onCommit={commitManualVersion} onclose={() => showCodeModal.set(false)} />
+    <CodeModal
+      bind:code={$selectedCode}
+      title={$selectedTitle}
+      onCommit={commitManualVersion}
+      onFork={forkManualVersion}
+      onclose={() => showCodeModal.set(false)}
+    />
   {/if}
 </div>
 
@@ -716,6 +1119,17 @@
   .viewport-area { flex: 1; min-height: 100px; background: #0b0f1a; position: relative; overflow: hidden; }
   .dialogue-area { flex-shrink: 0; background: var(--bg-100); display: flex; flex-direction: column; border-top: 1px solid var(--bg-300); overflow: hidden; }
   .dialogue-content { flex: 1; min-height: 0; }
+  .agent-origin-chip {
+    padding: 4px 8px;
+    border: 1px solid color-mix(in srgb, var(--primary) 45%, var(--bg-400));
+    background: color-mix(in srgb, var(--primary) 10%, var(--bg-200));
+    color: var(--primary);
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    pointer-events: none;
+  }
   .pane-header { padding: 4px 12px; background: var(--bg-200); border-bottom: 1px solid var(--bg-300); color: var(--secondary); font-size: 0.6rem; font-weight: bold; letter-spacing: 0.1em; text-transform: uppercase; }
   .scrollable { overflow-y: auto; }
   .resizer-w { width: 4px; background: var(--bg-300); cursor: col-resize; z-index: 10; flex-shrink: 0; }
@@ -740,6 +1154,11 @@
     background: color-mix(in srgb, var(--bg-100) 88%, black 12%);
     box-shadow: var(--shadow);
     overflow: hidden;
+    cursor: pointer;
+  }
+  .error-banner:focus-visible {
+    outline: 1px solid var(--red);
+    outline-offset: 1px;
   }
   .error-banner__label {
     color: var(--red);
@@ -763,6 +1182,68 @@
     cursor: pointer;
   }
   .error-banner__dismiss:hover { border-color: var(--red); color: var(--text); }
+
+  .agent-activity-banner {
+    position: absolute;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 135;
+    max-width: min(70vw, 560px);
+    padding: 8px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    border: 1px solid color-mix(in srgb, var(--primary) 68%, var(--bg-300));
+    background: color-mix(in srgb, var(--bg-100) 92%, black 8%);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    pointer-events: none;
+  }
+
+  .agent-activity-banner__label {
+    color: var(--primary);
+    font-size: 0.62rem;
+    font-weight: bold;
+    letter-spacing: 0.1em;
+  }
+
+  .agent-activity-banner__body {
+    color: var(--text);
+    font-size: 0.76rem;
+    line-height: 1.35;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .agent-draft-toast {
+    position: absolute;
+    top: 72px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 140;
+    background: var(--bg-100);
+    border: 1px solid var(--secondary);
+    padding: 8px 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    box-shadow: var(--shadow);
+  }
+
+  .toast-label {
+    font-size: 0.65rem;
+    font-weight: bold;
+    color: var(--secondary);
+    letter-spacing: 0.05em;
+  }
+
+  .toast-actions {
+    display: flex;
+    gap: 8px;
+  }
 
   /* STL Cafeteria — multi-microwave strip */
   .cafeteria-strip { position: absolute; bottom: 48px; left: 12px; right: 12px; z-index: 100; display: flex; gap: 8px; flex-wrap: wrap; pointer-events: auto; }
@@ -817,7 +1298,7 @@
   .mw-btn { background: var(--bg-300); border: 1px solid var(--bg-400); color: var(--text); font-size: 0.55rem; padding: 2px 6px; cursor: pointer; font-weight: bold; }
   .mw-btn:hover { border-color: var(--primary); color: var(--primary); }
   .mw-btn-cancel:hover { background: var(--red); color: white; border-color: var(--red); }
-  .viewport-overlay { position: absolute; bottom: 12px; right: 12px; background: rgba(11, 15, 26, 0.6); backdrop-filter: blur(4px); padding: 8px; border: 1px solid var(--bg-300); z-index: 50; }
+  .viewport-overlay { position: absolute; bottom: 12px; right: 12px; background: rgba(11, 15, 26, 0.6); backdrop-filter: blur(4px); padding: 8px; border: 1px solid var(--bg-300); z-index: 50; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
   .boot-overlay { position: absolute; inset: 0; z-index: 300; display: flex; align-items: center; justify-content: center; background: var(--bg); }
   .boot-overlay__glass { position: absolute; inset: 0; background: radial-gradient(circle, rgba(74, 140, 92, 0.16), transparent), rgba(8, 12, 20, 0.86); backdrop-filter: blur(18px); }
   .boot-overlay__content { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 20px; }

@@ -7,16 +7,21 @@ pub mod contracts;
 pub mod db;
 pub mod freecad;
 pub mod llm;
+pub mod mcp;
 pub mod models;
+pub mod services;
 
 use std::fs;
-use std::sync::Mutex;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::sleep;
 use tauri::Manager;
 use uuid::Uuid;
 
 use crate::context::*;
 use crate::models::{
-    AppState, Attachment, DesignOutput, GenieTraits, LastDesignSnapshot, ThreadReference,
+    AppState, Attachment, DesignOutput, GenieTraits, LastDesignSnapshot, PathResolver,
+    ThreadReference,
 };
 
 use rand::Rng;
@@ -299,6 +304,7 @@ pub(crate) fn fallback_intent(prompt: &str) -> models::IntentDecision {
             intent_mode: "question".to_string(),
             confidence: 0.95,
             response: "Answering the question without generating geometry.".to_string(),
+            final_response: Some("Answering the question without generating geometry.".to_string()),
             usage: None,
         };
     }
@@ -324,6 +330,7 @@ pub(crate) fn fallback_intent(prompt: &str) -> models::IntentDecision {
             intent_mode: "question".to_string(),
             confidence: 0.55,
             response: "Thinking not deep enough. This looks like a question.".to_string(),
+            final_response: None,
             usage: None,
         }
     } else {
@@ -331,6 +338,7 @@ pub(crate) fn fallback_intent(prompt: &str) -> models::IntentDecision {
             intent_mode: "design".to_string(),
             confidence: 0.55,
             response: "This looks like a geometry change request.".to_string(),
+            final_response: None,
             usage: None,
         }
     }
@@ -353,7 +361,7 @@ Macro Requirements:
 Return a JSON object with:
 1. "title": A short (2-5 words) descriptive title.
 2. "version_name": Short descriptive name for this iteration.
-3. "response": short end-user text for Ecky's speech bubble (1-4 concise sentences). If there are 3D printing risks, add a separate final sentence starting with `PRINTING RISKS:`.
+3. "response": short end-user text for Ecky Einacs's speech bubble (1-4 concise sentences). If there are 3D printing risks, add a separate final sentence starting with `PRINTING RISKS:`.
 4. "interaction_mode": "design" or "question".
 5. "macro_code": The Python macro code.
 6. "ui_spec": { 
@@ -380,7 +388,7 @@ UI Guidelines:
 pub(crate) const TECHNICAL_SYSTEM_PROMPT: &str = r#"Return a JSON object with:
 1. "title": 2-5 words project title.
 2. "version_name": Short descriptive name for this iteration.
-3. "response": short end-user text for the advisor speech bubble (1-3 concise sentences).
+3. "response": short end-user text for Ecky Einacs's speech bubble (1-3 concise sentences).
 4. "interaction_mode": "design" or "question".
 5. "macro_code": FreeCAD Python code.
 6. "ui_spec": { "fields": [ { "key": string, "label": string, "type": "range"|"number"|"select"|"checkbox" } ] }
@@ -394,6 +402,9 @@ CRITICAL RULES:
   - Use 'min_from' and 'max_from' keys in the 'ui_spec' fields to link parameter boundaries to other keys (e.g., inner_radius max_from outer_radius).
   - Ensure geometry stays sane and valid across all parameter permutations.
 - PARAMETERS: Access parameters directly by name (e.g. `L = connector_length`) or via `params.get("key", default)`.
+- FRAMEWORK: If an "ACTUAL CURRENT CAD FRAMEWORK" block is present, follow it strictly and use the provided CAD SDK. Do not invent custom control classes or custom registries.
+- FRAMEWORK ENFORCEMENT: When using the CAD SDK, `CONTROLS` inside `macro_code` is the source of truth. The backend derives `ui_spec` and `initial_params` from `CONTROLS` and may reject malformed framework macros.
+- FRAMEWORK PARAMS: When using the CAD SDK, raw `params` access is allowed only inside `registry.bind(params)` during config bootstrap. Use `cfg` for geometry.
 - NO BRACES: NEVER use `{var}` style interpolation inside the macro_code string.
 - CLEANUP: You MUST remove any parameters from "ui_spec" and "initial_params" that are no longer used in the current "macro_code". Do not accumulate parameters from previous designs.
 - PRINTABILITY: Prefer geometry that is straightforward to 3D print (manifold solids, reasonable wall thickness, avoid fragile or unsupported details unless requested).
@@ -489,13 +500,33 @@ pub fn run() {
 
             let db_path = config_dir.join("history.sqlite");
             let conn = db::init_db(&db_path).expect("Failed to initialize SQLite database");
+            if let Ok(interrupted) = db::mark_interrupted_pending_messages(&conn) {
+                if interrupted > 0 {
+                    eprintln!(
+                        "[BOOT] recovered {} interrupted pending request(s) as error",
+                        interrupted
+                    );
+                }
+            }
             let _ = migrate_legacy_references(&conn);
 
-            app.manage(AppState {
-                config: Mutex::new(config),
-                last_snapshot: Mutex::new(last_snapshot),
-                db: tokio::sync::Mutex::new(conn),
-                render_lock: tokio::sync::Mutex::new(()),
+            let state = AppState::new(config, last_snapshot, conn);
+            app.manage(state.clone());
+
+            let resolver: Arc<dyn PathResolver + Send + Sync> = Arc::new(app.handle().clone());
+            let server_state = state.clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    if let Err(err) =
+                        crate::mcp::server::serve_http(server_state.clone(), resolver.clone()).await
+                    {
+                        eprintln!("[MCP] HTTP server stopped: {}", err);
+                        server_state.set_mcp_status(false, Some(err.to_string()));
+                        sleep(Duration::from_secs(2)).await;
+                        continue;
+                    }
+                    break;
+                }
             });
 
             Ok(())
@@ -626,8 +657,12 @@ mod tests {
 
     #[test]
     fn explicit_question_only_markers_force_question_mode() {
-        assert!(is_explicit_question_only_request("answer only: why is this thin?"));
-        assert!(is_explicit_question_only_request("только ответь, почему тут дырка?"));
+        assert!(is_explicit_question_only_request(
+            "answer only: why is this thin?"
+        ));
+        assert!(is_explicit_question_only_request(
+            "только ответь, почему тут дырка?"
+        ));
 
         let fallback = fallback_intent("just answer, do not generate anything");
         assert_eq!(fallback.intent_mode, "question");

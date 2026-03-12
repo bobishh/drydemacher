@@ -3,7 +3,7 @@
   import { onMount } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import Modal from './Modal.svelte';
-  import type { Attachment, Message, UsageSummary } from './types/domain';
+  import type { AgentOrigin, Attachment, Message, UsageSummary } from './types/domain';
 
   type TauriBridgeWindow = Window & typeof globalThis & {
     __TAURI_INTERNALS__?: {
@@ -25,6 +25,7 @@
     isGenerating = false,
     messages = [],
     onShowCode,
+    activeThreadId = null,
     activeVersionId = $bindable(null),
     onVersionChange,
     onDeleteVersion,
@@ -33,20 +34,101 @@
     isGenerating?: boolean;
     messages?: Message[];
     onShowCode: (message: CodeVersionMessage) => void;
+    activeThreadId?: string | null;
     activeVersionId?: string | null;
     onVersionChange?: (message: VersionMessage) => void;
     onDeleteVersion?: (messageId: string) => void;
   } = $props();
 
+  const PROMPT_DRAFTS_STORAGE_KEY = 'ecky:prompt-drafts:v1';
+  const NEW_THREAD_DRAFT_KEY = '__new__';
+  const PROMPT_DRAFT_DEBOUNCE_MS = 400;
+
   let prompt = $state('');
   let attachments = $state<Attachment[]>([]);
   let isDragging = $state(false);
   let showDeleteConfirm = $state(false);
+  let draftScopeKey = $state<string | null>(null);
+  let draftPersistTimer: number | null = null;
+  let pendingDraftWrite = $state<{ scopeKey: string; prompt: string } | null>(null);
   const hasImageAttachments = $derived(attachments.some((attachment) => attachment.type === 'image'));
+
+  function currentDraftScopeKey(threadId: string | null | undefined) {
+    const normalized = `${threadId ?? ''}`.trim();
+    return normalized || NEW_THREAD_DRAFT_KEY;
+  }
+
+  function readPromptDrafts(): Record<string, string> {
+    if (typeof localStorage === 'undefined') return {};
+    try {
+      const raw = localStorage.getItem(PROMPT_DRAFTS_STORAGE_KEY);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function writePromptDrafts(nextDrafts: Record<string, string>) {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      localStorage.setItem(PROMPT_DRAFTS_STORAGE_KEY, JSON.stringify(nextDrafts));
+    } catch (error) {
+      console.warn('Failed to persist prompt drafts:', error);
+    }
+  }
+
+  function persistPromptDraftNow(scopeKey: string, nextPrompt: string) {
+    const drafts = readPromptDrafts();
+    const trimmedValue = `${nextPrompt ?? ''}`;
+    if (trimmedValue.trim()) {
+      drafts[scopeKey] = trimmedValue;
+    } else {
+      delete drafts[scopeKey];
+    }
+    writePromptDrafts(drafts);
+  }
+
+  function flushPendingPromptDraft() {
+    if (draftPersistTimer) {
+      clearTimeout(draftPersistTimer);
+      draftPersistTimer = null;
+    }
+    if (!pendingDraftWrite) return;
+    persistPromptDraftNow(pendingDraftWrite.scopeKey, pendingDraftWrite.prompt);
+    pendingDraftWrite = null;
+  }
+
+  function schedulePromptDraftPersist(scopeKey: string, nextPrompt: string) {
+    pendingDraftWrite = { scopeKey, prompt: nextPrompt };
+    if (draftPersistTimer) clearTimeout(draftPersistTimer);
+    draftPersistTimer = window.setTimeout(() => {
+      flushPendingPromptDraft();
+    }, PROMPT_DRAFT_DEBOUNCE_MS);
+  }
+
+  function loadPromptDraft(scopeKey: string) {
+    const drafts = readPromptDrafts();
+    prompt = drafts[scopeKey] ?? '';
+    draftScopeKey = scopeKey;
+  }
+
+  function handlePromptInput(e: Event) {
+    prompt = (e.currentTarget as HTMLTextAreaElement).value;
+    schedulePromptDraftPersist(currentDraftScopeKey(activeThreadId), prompt);
+  }
 
   function isVersionMessage(message: Message): message is VersionMessage {
     return message.role === 'assistant' && !!(message.output || message.artifactBundle);
   }
+
+  $effect(() => {
+    const nextScopeKey = currentDraftScopeKey(activeThreadId);
+    if (nextScopeKey === draftScopeKey) return;
+    flushPendingPromptDraft();
+    loadPromptDraft(nextScopeKey);
+  });
 
   function versionTitle(message: VersionMessage | null | undefined) {
     if (!message) return 'this version';
@@ -57,6 +139,16 @@
       message.artifactBundle?.modelId ||
       'Imported Model'
     );
+  }
+
+  function formatAgentOrigin(origin: AgentOrigin | null | undefined) {
+    if (!origin) return null;
+    const host = origin.hostLabel?.trim() || origin.agentLabel?.trim() || 'Agent';
+    const model = origin.llmModelLabel?.trim() || origin.llmModelId?.trim() || '';
+    if (!model || model.toLowerCase() === host.toLowerCase()) {
+      return host;
+    }
+    return `${host} · ${model}`;
   }
 
   function processPaths(paths: string[]) {
@@ -104,6 +196,7 @@
     }
 
     return () => {
+      flushPendingPromptDraft();
       unlisten?.();
     };
   });
@@ -145,9 +238,16 @@
       isSubmitting = true;
       const currentPrompt = prompt;
       const currentAttachments = [...attachments];
+      const scopeKey = currentDraftScopeKey(activeThreadId);
       
       prompt = '';
       attachments = [];
+      pendingDraftWrite = null;
+      if (draftPersistTimer) {
+        clearTimeout(draftPersistTimer);
+        draftPersistTimer = null;
+      }
+      persistPromptDraftNow(scopeKey, '');
       
       onGenerate(currentPrompt, currentAttachments).finally(() => {
         isSubmitting = false;
@@ -439,6 +539,14 @@
               VERSION {usageLabel(currentVersion.usage)}
             </span>
           {/if}
+          {#if currentVersion?.agentOrigin}
+            <span
+              class="version-agent-badge"
+              title={`Agent-authored version via ${formatAgentOrigin(currentVersion.agentOrigin)}`}
+            >
+              {formatAgentOrigin(currentVersion.agentOrigin)}
+            </span>
+          {/if}
         </div>
         {#if currentVersion}
           <div class="version-actions">
@@ -492,11 +600,14 @@
               {#each promptTrail as msg, i}
                 {@const visuals = trailVisuals(msg)}
                 <div class="trail-item {msg.role === 'assistant' ? 'trail-assistant' : 'trail-user'}">
-                  <div class="trail-header-row">
-                    <div class="trail-meta">
-                      <span class="trail-role">{msg.role === 'assistant' ? 'ECKY' : 'YOU'}</span>
-                      <span class="trail-time">{formatDate(msg.timestamp)}</span>
-                    </div>
+                    <div class="trail-header-row">
+                      <div class="trail-meta">
+                        <span class="trail-role">{msg.role === 'assistant' ? 'ECKY' : 'YOU'}</span>
+                        {#if msg.role === 'assistant' && msg.agentOrigin}
+                          <span class="trail-agent-origin">{formatAgentOrigin(msg.agentOrigin)}</span>
+                        {/if}
+                        <span class="trail-time">{formatDate(msg.timestamp)}</span>
+                      </div>
                     <button class="trail-copy-btn" type="button" onclick={() => copyTrailMessage(msg)}>
                       {copiedTrailMessageId === msg.id ? 'COPIED' : 'COPY'}
                     </button>
@@ -560,7 +671,8 @@
 
     <textarea
       class="input-mono prompt-input"
-      bind:value={prompt}
+      value={prompt}
+      oninput={handlePromptInput}
       onkeydown={handleKeydown}
       placeholder="Type a question or design change... (Cmd+Enter to process)"
       spellcheck="false"
@@ -772,6 +884,19 @@
     padding: 2px 6px;
     border: 1px solid color-mix(in srgb, var(--secondary) 45%, var(--bg-400));
     background: color-mix(in srgb, var(--secondary) 8%, var(--bg-200));
+    white-space: nowrap;
+  }
+
+  .version-agent-badge,
+  .trail-agent-origin {
+    padding: 2px 6px;
+    border: 1px solid color-mix(in srgb, var(--primary) 45%, var(--bg-400));
+    background: color-mix(in srgb, var(--primary) 10%, var(--bg-200));
+    color: var(--primary);
+    font-family: var(--font-mono);
+    font-size: 0.6rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
     white-space: nowrap;
   }
 

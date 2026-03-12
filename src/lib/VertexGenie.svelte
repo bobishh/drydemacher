@@ -431,7 +431,7 @@
         {copyFeedback || 'COPY'}
       </button>
       <button class="bubble-close" type="button" onclick={() => onDismiss?.()} aria-label="Dismiss advisor bubble"></button>
-      <div class="bubble-speaker"><strong>ECKY:</strong></div>
+      <div class="bubble-speaker"><strong>ECKY EINACS:</strong></div>
       {#if cleanQuestion}
         <div class="bubble-question-block">
           <div class="bubble-question-label">YOU ASKED</div>

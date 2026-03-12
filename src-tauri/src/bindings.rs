@@ -10,6 +10,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         crate::commands::history::get_thread,
         crate::commands::history::clear_history,
         crate::commands::history::delete_thread,
+        crate::commands::history::rename_thread,
         crate::commands::history::delete_version,
         crate::commands::history::restore_version,
         crate::commands::history::get_deleted_messages,
@@ -31,10 +32,15 @@ pub fn builder() -> Builder<tauri::Wry> {
         crate::commands::design::add_imported_model_version,
         crate::commands::design::update_ui_spec,
         crate::commands::design::update_parameters,
+        crate::commands::design::update_version_runtime,
         crate::commands::design::parse_macro_params,
         crate::commands::assets::upload_asset,
         crate::commands::assets::save_recorded_audio,
         crate::commands::session::get_last_design,
         crate::commands::session::save_last_design,
+        crate::commands::session::get_active_agent_sessions,
+        crate::commands::session::get_mcp_server_status,
+        crate::commands::session::get_agent_draft,
+        crate::commands::session::delete_agent_draft,
     ])
 }

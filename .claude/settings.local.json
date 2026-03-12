@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc -l /Users/bogdan/Workspace/personal/alcoholics_audacious/ecky/src/lib/*.svelte | tail -1)"
+    ]
+  }
+}
