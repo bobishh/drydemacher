@@ -9,6 +9,8 @@ pub struct IntentClassification {
     pub confidence: f32,
     #[serde(default)]
     pub response: String,
+    #[serde(default)]
+    pub final_response: Option<String>,
 }
 
 pub enum ResponseFormat {
@@ -27,6 +29,12 @@ pub async fn generate_design(
     prompt: &str,
     images: Vec<String>,
 ) -> Result<LlmOutcome<DesignOutput>, String> {
+    if !engine.enabled {
+        return Err(format!(
+            "Engine \"{}\" is disabled. Enable it in Settings → Agents before making API calls.",
+            engine.name
+        ));
+    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(600))
         .build()
@@ -79,6 +87,12 @@ pub async fn classify_intent(
     context: Option<&str>,
     images: Vec<String>,
 ) -> Result<LlmOutcome<IntentClassification>, String> {
+    if !engine.enabled {
+        return Err(format!(
+            "Engine \"{}\" is disabled. Enable it in Settings → Agents before making API calls.",
+            engine.name
+        ));
+    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
@@ -89,14 +103,21 @@ pub async fn classify_intent(
     let classifier_system = r#"Return ONLY JSON with fields:
 1) "intent": "question" or "design"
 2) "confidence": number in [0, 1]
-3) "response": text reply.
+3) "response": short routing/bubble text
+4) "final_response": either null or a final user-facing answer
 
 Choose "question" when user asks to explain, inspect, compare, clarify, or asks "why/how/what" about existing design/code.
 Choose "design" when user asks to create/change/add/remove geometry, parameters, dimensions, connectors, or regenerate output.
 If the user explicitly says to only answer and not generate anything, such as "answer only", "just answer", "do not generate", "только ответь", or "без генерации", always choose "question".
+If the user is asking whether something can be changed, why something behaves a certain way, what a parameter/feature does, or how to approach a change, prefer "question" if you can answer from the current context. Do NOT choose "design" just because the request mentions CAD verbs like move, resize, increase, decrease, or add.
+Only choose "design" when the user is clearly instructing you to actually perform the geometry change now.
+If the recent dialogue ends with an assistant clarification question and the new user message looks like a short direct answer to that question, prefer "design" so the pending change can continue.
+Do not ask the same clarification question again unless the new answer is still genuinely unusable.
 
-If intent is "question", "response" must directly answer the user's question in 1-4 concise sentences using the provided current design context and screenshots when relevant.
-If intent is "design", "response" must be one short routing sentence for the assistant bubble.
+If you can fully answer immediately from the provided context, set "intent" to "question" and put that final answer in "final_response".
+Use "response" for the short bubble/routing text. It can be brief even when "final_response" contains the full answer.
+If more work is still needed after classification, "final_response" must be null.
+If intent is "design", "response" must be one short routing sentence for the assistant bubble and "final_response" must be null.
 "#;
 
     let classifier_user = if let Some(context) = context.filter(|c| !c.trim().is_empty()) {
@@ -147,6 +168,14 @@ If intent is "design", "response" must be one short routing sentence for the ass
     if !(0.0..=1.0).contains(&parsed.confidence) {
         parsed.confidence = 0.5;
     }
+    parsed.final_response = parsed
+        .final_response
+        .take()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if parsed.final_response.is_some() {
+        parsed.intent = "question".to_string();
+    }
     if parsed.response.trim().is_empty() {
         parsed.response = if parsed.intent == "question" {
             "Thinking not deep enough. Treating this as a question.".to_string()
@@ -167,6 +196,96 @@ fn select_classifier_model(engine: &Engine, has_images: bool) -> &str {
         engine.model.as_str()
     } else {
         engine.light_model.as_str()
+    }
+}
+
+/// Fetch models for an auto-agent CLI tool.
+/// Tries to read the relevant env var (GEMINI_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY)
+/// and hit the live API. Falls back to a curated static list when no key is available.
+pub async fn list_agent_models(cmd: &str) -> Result<crate::contracts::AgentModelList, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let cmd_name = std::path::Path::new(cmd)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(cmd)
+        .to_lowercase();
+
+    if cmd_name.contains("gemini") {
+        let api_key = std::env::var("GEMINI_API_KEY")
+            .or_else(|_| std::env::var("GOOGLE_API_KEY"))
+            .or_else(|_| std::env::var("GOOGLE_GEMINI_API_KEY"))
+            .unwrap_or_default();
+        if !api_key.is_empty() {
+            if let Ok(models) = fetch_gemini_models(&client, &api_key).await {
+                if !models.is_empty() {
+                    return Ok(crate::contracts::AgentModelList {
+                        models,
+                        is_live: true,
+                    });
+                }
+            }
+        }
+        Ok(crate::contracts::AgentModelList {
+            models: vec![
+                "gemini-3.1-pro-preview".to_string(),
+                "gemini-2.5-pro-preview-05-06".to_string(),
+                "gemini-2.5-flash-preview-04-17".to_string(),
+                "gemini-2.5-flash".to_string(),
+                "gemini-2.0-flash".to_string(),
+                "gemini-2.0-flash-lite".to_string(),
+            ],
+            is_live: false,
+        })
+    } else if cmd_name.contains("claude") {
+        let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+        if !api_key.is_empty() {
+            if let Ok(models) = fetch_anthropic_models(&client, &api_key).await {
+                if !models.is_empty() {
+                    return Ok(crate::contracts::AgentModelList {
+                        models,
+                        is_live: true,
+                    });
+                }
+            }
+        }
+        Ok(crate::contracts::AgentModelList {
+            models: vec![
+                "claude-opus-4-6".to_string(),
+                "claude-sonnet-4-6".to_string(),
+                "claude-haiku-4-5-20251001".to_string(),
+            ],
+            is_live: false,
+        })
+    } else if cmd_name.contains("codex") || cmd_name.contains("openai") {
+        let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+        if !api_key.is_empty() {
+            if let Ok(models) = fetch_openai_models(&client, &api_key, "").await {
+                if !models.is_empty() {
+                    return Ok(crate::contracts::AgentModelList {
+                        models,
+                        is_live: true,
+                    });
+                }
+            }
+        }
+        Ok(crate::contracts::AgentModelList {
+            models: vec![
+                "o4-mini".to_string(),
+                "o3".to_string(),
+                "gpt-4o".to_string(),
+                "gpt-4o-mini".to_string(),
+            ],
+            is_live: false,
+        })
+    } else {
+        Ok(crate::contracts::AgentModelList {
+            models: vec![],
+            is_live: false,
+        })
     }
 }
 
@@ -776,6 +895,37 @@ async fn call_gemini(
     }
 }
 
+async fn fetch_anthropic_models(
+    client: &reqwest::Client,
+    api_key: &str,
+) -> Result<Vec<String>, String> {
+    let response = client
+        .get("https://api.anthropic.com/v1/models")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !response.status().is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("Anthropic Models Error: {}", body));
+    }
+
+    let res_json: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    let mut models = res_json["data"]
+        .as_array()
+        .ok_or("Invalid response from Anthropic")?
+        .iter()
+        .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
+        .filter(|id| id.starts_with("claude-"))
+        .collect::<Vec<_>>();
+
+    // Newest first (lexicographic desc works well for claude-X-Y versioning)
+    models.sort_by(|a, b| b.cmp(a));
+    Ok(models)
+}
+
 async fn fetch_openai_models(
     client: &reqwest::Client,
     api_key: &str,
@@ -995,6 +1145,7 @@ mod tests {
             light_model: "gpt-4.1-nano".to_string(),
             base_url: String::new(),
             system_prompt: String::new(),
+            enabled: true,
         };
 
         assert_eq!(select_classifier_model(&engine, true), "gpt-4o");
@@ -1012,6 +1163,7 @@ mod tests {
             light_model: String::new(),
             base_url: String::new(),
             system_prompt: String::new(),
+            enabled: true,
         };
 
         assert_eq!(select_classifier_model(&engine, false), "gpt-4o");

@@ -38,6 +38,14 @@ pub async fn get_system_prompt() -> AppResult<String> {
 
 #[tauri::command]
 #[specta::specta]
+pub async fn list_agent_models(cmd: String) -> AppResult<crate::contracts::AgentModelList> {
+    crate::llm::list_agent_models(&cmd)
+        .await
+        .map_err(crate::models::AppError::provider)
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn list_models(
     provider: String,
     api_key: String,
@@ -46,4 +54,13 @@ pub async fn list_models(
     crate::llm::list_models(&provider, &api_key, &base_url)
         .await
         .map_err(crate::models::AppError::provider)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_app_logs(
+    state: State<'_, AppState>,
+) -> AppResult<Vec<crate::contracts::AppLogEntry>> {
+    let logs = state.app_logs.lock().unwrap();
+    Ok(logs.iter().cloned().collect())
 }

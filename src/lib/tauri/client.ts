@@ -1,5 +1,6 @@
-import { commands, type AppError, type Result } from './contracts';
+import { commands, type AppError, type AppLogEntry, type Result, type ThreadAgentState } from './contracts';
 import {
+  normalizeAgentDraft,
   normalizeArtifactBundle,
   normalizeConfig,
   normalizeDeletedMessage,
@@ -14,6 +15,7 @@ import {
   toContractLastDesignSnapshot,
   toContractUsageSummary,
   toContractUiSpec,
+  type AgentSession,
   type ArtifactBundle,
   type AppConfig,
   type Attachment,
@@ -25,11 +27,15 @@ import {
   type IntentDecision,
   type LastDesignSnapshot,
   type ModelManifest,
+  type McpServerStatus,
   type ParsedParamsResult,
   type Thread,
   type UiSpec,
   type UsageSummary,
 } from '../types/domain';
+import type { PostProcessingSpec } from './contracts';
+
+export type { ThreadAgentState };
 
 function unwrapResult<T>(result: Result<T, AppError>): T {
   if (result.status === 'ok') {
@@ -69,6 +75,10 @@ export async function getConfig(): Promise<AppConfig> {
   return normalizeConfig(unwrapResult(await commands.getConfig()));
 }
 
+export async function checkFreecad(): Promise<boolean> {
+  return unwrapResult(await commands.checkFreecad());
+}
+
 export async function saveConfig(config: AppConfig): Promise<void> {
   unwrapResult(await commands.saveConfig(config));
 }
@@ -83,6 +93,10 @@ export async function listModels(
   baseUrl: string,
 ): Promise<string[]> {
   return unwrapResult(await commands.listModels(provider, apiKey, baseUrl));
+}
+
+export async function listAgentModels(cmd: string): Promise<{ models: string[]; isLive: boolean }> {
+  return unwrapResult(await commands.listAgentModels(cmd));
 }
 
 export async function getHistory(): Promise<Thread[]> {
@@ -101,6 +115,10 @@ export async function deleteThread(id: string): Promise<void> {
   unwrapResult(await commands.deleteThread(id));
 }
 
+export async function renameThread(id: string, title: string): Promise<void> {
+  unwrapResult(await commands.renameThread(id, title));
+}
+
 export async function deleteVersion(messageId: string): Promise<void> {
   unwrapResult(await commands.deleteVersion(messageId));
 }
@@ -117,6 +135,18 @@ export async function hideDeletedMessage(messageId: string): Promise<void> {
   unwrapResult(await commands.hideDeletedMessage(messageId));
 }
 
+export async function finalizeThread(id: string): Promise<void> {
+  unwrapResult(await commands.finalizeThread(id));
+}
+
+export async function reopenThread(id: string): Promise<void> {
+  unwrapResult(await commands.reopenThread(id));
+}
+
+export async function getInventory(): Promise<Thread[]> {
+  return unwrapResult(await commands.getInventory()).map(normalizeThread);
+}
+
 export async function generateDesign(input: {
   prompt: string;
   threadId: string | null;
@@ -126,6 +156,7 @@ export async function generateDesign(input: {
   imageData: string | null;
   attachments: Attachment[];
   questionMode: boolean | null;
+  followUpQuestion: string | null;
 }): Promise<GenerateOutput> {
   const result = unwrapResult(
     await commands.generateDesign(
@@ -136,7 +167,10 @@ export async function generateDesign(input: {
       input.isRetry,
       input.imageData,
       input.attachments.map(toContractAttachment),
-      input.questionMode,
+      {
+        questionMode: input.questionMode,
+        followUpQuestion: input.followUpQuestion,
+      },
     ),
   );
   return {
@@ -216,9 +250,12 @@ export async function renderStl(macroCode: string, parameters: DesignParams): Pr
 export async function renderModel(
   macroCode: string,
   parameters: DesignParams,
+  postProcessing?: PostProcessingSpec | null,
 ): Promise<ArtifactBundle> {
-  return normalizeArtifactBundle(unwrapResult(await commands.renderModel(macroCode, parameters)));
+  return normalizeArtifactBundle(unwrapResult(await commands.renderModel(macroCode, parameters, postProcessing ?? null)));
 }
+
+export type { PostProcessingSpec };
 
 export async function importFcstd(sourcePath: string): Promise<ArtifactBundle> {
   return normalizeArtifactBundle(unwrapResult(await commands.importFcstd(sourcePath)));
@@ -317,6 +354,14 @@ export async function updateParameters(
   unwrapResult(await commands.updateParameters(messageId, parameters));
 }
 
+export async function updateVersionRuntime(
+  messageId: string,
+  artifactBundle: ArtifactBundle,
+  modelManifest: ModelManifest,
+): Promise<void> {
+  unwrapResult(await commands.updateVersionRuntime(messageId, artifactBundle, modelManifest));
+}
+
 export async function parseMacroParams(macroCode: string): Promise<ParsedParamsResult> {
   return normalizeParsedParamsResult(await commands.parseMacroParams(macroCode));
 }
@@ -342,3 +387,47 @@ export async function saveLastDesign(snapshot: LastDesignSnapshot | null): Promi
     await commands.saveLastDesign(snapshot ? toContractLastDesignSnapshot(snapshot) : null),
   );
 }
+
+export async function getActiveAgentSessions(): Promise<AgentSession[]> {
+  return unwrapResult(await commands.getActiveAgentSessions());
+}
+
+export async function getMcpServerStatus(): Promise<McpServerStatus> {
+  return unwrapResult(await commands.getMcpServerStatus());
+}
+
+export async function getAgentDraft(
+  threadId: string,
+  baseMessageId: string,
+) {
+  return normalizeAgentDraft(unwrapResult(await commands.getAgentDraft(threadId, baseMessageId)));
+}
+
+export async function deleteAgentDraft(
+  threadId: string,
+  baseMessageId: string,
+) {
+  unwrapResult(await commands.deleteAgentDraft(threadId, baseMessageId));
+}
+
+export async function resolveAgentConfirm(requestId: string, choice: string) {
+  unwrapResult(await commands.resolveAgentConfirm(requestId, choice));
+}
+
+export async function resolveAgentPrompt(requestId: string, promptText: string) {
+  unwrapResult(await commands.resolveAgentPrompt(requestId, promptText));
+}
+
+export async function getThreadAgentState(threadId: string): Promise<ThreadAgentState> {
+  return unwrapResult(await commands.getThreadAgentState(threadId));
+}
+
+export async function getAppLogs(): Promise<AppLogEntry[]> {
+  return unwrapResult(await commands.getAppLogs());
+}
+
+export async function wakeAutoAgent(label: string): Promise<void> {
+  unwrapResult(await commands.wakeAutoAgent(label));
+}
+
+export type { AppLogEntry };
