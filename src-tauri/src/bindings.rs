@@ -42,5 +42,6 @@ pub fn builder() -> Builder<tauri::Wry> {
         crate::commands::session::get_mcp_server_status,
         crate::commands::session::get_agent_draft,
         crate::commands::session::delete_agent_draft,
+        crate::commands::session::resolve_agent_confirm,
     ])
 }

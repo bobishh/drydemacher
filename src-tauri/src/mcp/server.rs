@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use std::io;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tauri::Emitter;
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
@@ -109,6 +110,7 @@ struct ResolvedTargetRef {
 struct HttpServerState {
     state: AppState,
     app: Arc<dyn PathResolver + Send + Sync>,
+    handle: tauri::AppHandle,
 }
 
 fn now_secs() -> u64 {
@@ -216,12 +218,20 @@ fn validate_origin(headers: &HeaderMap) -> Option<Response> {
     let origin = headers.get("origin")?;
     let origin = match origin.to_str() {
         Ok(value) => value,
-        Err(_) => return Some(plain_text_response(StatusCode::FORBIDDEN, "Origin not allowed.")),
+        Err(_) => {
+            return Some(plain_text_response(
+                StatusCode::FORBIDDEN,
+                "Origin not allowed.",
+            ))
+        }
     };
     if allowed_origin(origin) {
         None
     } else {
-        Some(plain_text_response(StatusCode::FORBIDDEN, "Origin not allowed."))
+        Some(plain_text_response(
+            StatusCode::FORBIDDEN,
+            "Origin not allowed.",
+        ))
     }
 }
 
@@ -354,14 +364,15 @@ async fn resolve_target_for_session(
         .map(|draft| draft.design_output.clone())
         .or(target.design.clone())
         .ok_or_else(|| AppError::validation("Target has no design output."))?;
-    let (range_count, number_count, select_count, checkbox_count) =
-        design.ui_spec.fields.iter().fold((0, 0, 0, 0), |acc, field| {
-            match field {
-                crate::models::UiField::Range { .. } => (acc.0 + 1, acc.1, acc.2, acc.3),
-                crate::models::UiField::Number { .. } => (acc.0, acc.1 + 1, acc.2, acc.3),
-                crate::models::UiField::Select { .. } => (acc.0, acc.1, acc.2 + 1, acc.3),
-                crate::models::UiField::Checkbox { .. } => (acc.0, acc.1, acc.2, acc.3 + 1),
-            }
+    let (range_count, number_count, select_count, checkbox_count) = design
+        .ui_spec
+        .fields
+        .iter()
+        .fold((0, 0, 0, 0), |acc, field| match field {
+            crate::models::UiField::Range { .. } => (acc.0 + 1, acc.1, acc.2, acc.3),
+            crate::models::UiField::Number { .. } => (acc.0, acc.1 + 1, acc.2, acc.3),
+            crate::models::UiField::Select { .. } => (acc.0, acc.1, acc.2 + 1, acc.3),
+            crate::models::UiField::Checkbox { .. } => (acc.0, acc.1, acc.2, acc.3 + 1),
         });
     let model_id = target
         .latest_draft
@@ -480,11 +491,7 @@ async fn move_or_refresh_lease(
     .map_err(|e| AppError::persistence(e.to_string()))
 }
 
-async fn release_lease(
-    state: &AppState,
-    session_id: &str,
-    target: &McpTargetRef,
-) -> AppResult<()> {
+async fn release_lease(state: &AppState, session_id: &str, target: &McpTargetRef) -> AppResult<()> {
     let conn = state.db.lock().await;
     db::delete_target_lease(
         &conn,
@@ -504,7 +511,8 @@ fn target_ref_from_value(value: &Value) -> Option<McpTargetRef> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .or_else(|| {
-            value.get("artifactBundle")
+            value
+                .get("artifactBundle")
                 .and_then(|bundle| bundle.get("modelId"))
                 .and_then(Value::as_str)
                 .map(str::to_string)
@@ -717,9 +725,7 @@ fn resource_definitions(state: &AppState) -> Vec<Value> {
 fn read_resource_text(state: &AppState, uri: &str) -> Option<String> {
     match uri {
         "ecky://guides/system-prompt" => Some(selected_engine_prompt(state)),
-        "ecky://guides/technical-system-prompt" => {
-            Some(crate::TECHNICAL_SYSTEM_PROMPT.to_string())
-        }
+        "ecky://guides/technical-system-prompt" => Some(crate::TECHNICAL_SYSTEM_PROMPT.to_string()),
         "ecky://guides/modeling-guidelines" => Some(workflow_guide_text(state)),
         _ => None,
     }
@@ -937,12 +943,27 @@ fn tool_definitions() -> Vec<Value> {
                 &["messageId"],
             )
         }),
+        json!({
+            "name": "user_confirm_request",
+            "description": "Show a confirmation dialog with clickable buttons in the Ecky UI. Use this instead of asking in the chat terminal. Blocks until the user responds or the timeout expires.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "message": { "type": "string", "description": "The question or statement to show the user." },
+                    "buttons": { "type": "array", "items": { "type": "string" }, "description": "Button labels. Defaults to [\"Yes\", \"No\"]." },
+                    "requestId": { "type": "string", "description": "Optional stable ID for deduplication." },
+                    "timeoutSecs": { "type": "number", "description": "Seconds to wait before timing out. Default 120, max 600." }
+                },
+                "required": ["message"]
+            }
+        }),
     ]
 }
 
 pub async fn serve_http(
     state: AppState,
     app: Arc<dyn PathResolver + Send + Sync>,
+    handle: tauri::AppHandle,
 ) -> io::Result<()> {
     let listener = match TcpListener::bind(MCP_BIND_ADDR).await {
         Ok(listener) => listener,
@@ -955,8 +976,17 @@ pub async fn serve_http(
     state.set_mcp_status(true, None);
 
     let router = Router::new()
-        .route("/mcp", post(handle_http_post).delete(handle_http_delete).get(handle_http_get))
-        .with_state(HttpServerState { state: state.clone(), app });
+        .route(
+            "/mcp",
+            post(handle_http_post)
+                .delete(handle_http_delete)
+                .get(handle_http_get),
+        )
+        .with_state(HttpServerState {
+            state: state.clone(),
+            app,
+            handle,
+        });
 
     let result = axum::serve(listener, router).await;
     if let Err(err) = &result {
@@ -967,20 +997,17 @@ pub async fn serve_http(
     result.map_err(io::Error::other)
 }
 
-async fn handle_http_get(
-    State(_server): State<HttpServerState>,
-    headers: HeaderMap,
-) -> Response {
+async fn handle_http_get(State(_server): State<HttpServerState>, headers: HeaderMap) -> Response {
     if let Some(response) = validate_origin(&headers) {
         return response;
     }
-    plain_text_response(StatusCode::METHOD_NOT_ALLOWED, "GET is not supported for this MCP endpoint.")
+    plain_text_response(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "GET is not supported for this MCP endpoint.",
+    )
 }
 
-async fn handle_http_delete(
-    State(server): State<HttpServerState>,
-    headers: HeaderMap,
-) -> Response {
+async fn handle_http_delete(State(server): State<HttpServerState>, headers: HeaderMap) -> Response {
     if let Some(response) = validate_origin(&headers) {
         return response;
     }
@@ -1083,48 +1110,60 @@ async fn dispatch_request(
             req.id,
             json!({ "resources": resource_definitions(&server.state) }),
         ),
-        "resources/read" => match serde_json::from_value::<ReadResourceParams>(req.params.unwrap_or_default()) {
-            Ok(params) => match read_resource_text(&server.state, &params.uri) {
-                Some(text) => json_rpc_result(
-                    req.id,
-                    json!({
-                        "contents": [
-                            {
-                                "uri": params.uri,
-                                "mimeType": "text/plain",
-                                "text": text
-                            }
-                        ]
-                    }),
-                ),
-                None => json_rpc_error(req.id, -32602, format!("Unknown resource: {}", params.uri)),
-            },
-            Err(err) => json_rpc_error(req.id, -32602, format!("Invalid params: {}", err)),
-        },
-        "prompts/list" => json_rpc_result(req.id, json!({ "prompts": prompt_definitions() })),
-        "prompts/get" => match serde_json::from_value::<GetPromptParams>(req.params.unwrap_or_default()) {
-            Ok(params) => {
-                let _ = params.arguments;
-                match prompt_payload(&server.state, &params.name) {
-                    Some(prompt) => json_rpc_result(req.id, prompt),
-                    None => json_rpc_error(req.id, -32602, format!("Unknown prompt: {}", params.name)),
-                }
-            }
-            Err(err) => json_rpc_error(req.id, -32602, format!("Invalid params: {}", err)),
-        },
-        "tools/list" => json_rpc_result(req.id, json!({ "tools": tool_definitions() })),
-        "tools/call" => match serde_json::from_value::<CallToolParams>(req.params.unwrap_or_default()) {
-            Ok(params) => match dispatch_tool_call(server, session_id, params).await {
-                Ok((value, next_target)) => {
-                    if next_target.is_some() {
-                        set_session_target(&server.state, session_id, next_target).await;
+        "resources/read" => {
+            match serde_json::from_value::<ReadResourceParams>(req.params.unwrap_or_default()) {
+                Ok(params) => match read_resource_text(&server.state, &params.uri) {
+                    Some(text) => json_rpc_result(
+                        req.id,
+                        json!({
+                            "contents": [
+                                {
+                                    "uri": params.uri,
+                                    "mimeType": "text/plain",
+                                    "text": text
+                                }
+                            ]
+                        }),
+                    ),
+                    None => {
+                        json_rpc_error(req.id, -32602, format!("Unknown resource: {}", params.uri))
                     }
-                    mcp_tool_success(req.id, &value)
+                },
+                Err(err) => json_rpc_error(req.id, -32602, format!("Invalid params: {}", err)),
+            }
+        }
+        "prompts/list" => json_rpc_result(req.id, json!({ "prompts": prompt_definitions() })),
+        "prompts/get" => {
+            match serde_json::from_value::<GetPromptParams>(req.params.unwrap_or_default()) {
+                Ok(params) => {
+                    let _ = params.arguments;
+                    match prompt_payload(&server.state, &params.name) {
+                        Some(prompt) => json_rpc_result(req.id, prompt),
+                        None => json_rpc_error(
+                            req.id,
+                            -32602,
+                            format!("Unknown prompt: {}", params.name),
+                        ),
+                    }
                 }
-                Err(err) => mcp_tool_error(req.id, &err),
-            },
-            Err(err) => json_rpc_error(req.id, -32602, format!("Invalid params: {}", err)),
-        },
+                Err(err) => json_rpc_error(req.id, -32602, format!("Invalid params: {}", err)),
+            }
+        }
+        "tools/list" => json_rpc_result(req.id, json!({ "tools": tool_definitions() })),
+        "tools/call" => {
+            match serde_json::from_value::<CallToolParams>(req.params.unwrap_or_default()) {
+                Ok(params) => match dispatch_tool_call(server, session_id, params).await {
+                    Ok((value, next_target)) => {
+                        if next_target.is_some() {
+                            set_session_target(&server.state, session_id, next_target).await;
+                        }
+                        mcp_tool_success(req.id, &value)
+                    }
+                    Err(err) => mcp_tool_error(req.id, &err),
+                },
+                Err(err) => json_rpc_error(req.id, -32602, format!("Invalid params: {}", err)),
+            }
+        }
         _ => json_rpc_error(req.id, -32601, format!("Method not found: {}", req.method)),
     }
 }
@@ -1142,16 +1181,18 @@ async fn dispatch_tool_call(
 
     match params.name.as_str() {
         "health_check" => {
-            let response = handlers::handle_health_check(&server.state, server.app.as_ref()).await?;
+            let response =
+                handlers::handle_health_check(&server.state, server.app.as_ref()).await?;
             Ok((serde_json::to_value(response).unwrap(), None))
         }
         "workspace_overview" => {
-            let req_args = serde_json::from_value::<WorkspaceOverviewRequest>(args)
-                .unwrap_or(WorkspaceOverviewRequest {
+            let req_args = serde_json::from_value::<WorkspaceOverviewRequest>(args).unwrap_or(
+                WorkspaceOverviewRequest {
                     agent_label: None,
                     llm_model_id: None,
                     llm_model_label: None,
-                });
+                },
+            );
             let target = resolve_target_for_session(
                 &server.state,
                 server.app.as_ref(),
@@ -1239,11 +1280,12 @@ async fn dispatch_tool_call(
             Ok((serde_json::to_value(response).unwrap(), None))
         }
         "target_get" => {
-            let mut req_args = serde_json::from_value::<TargetGetRequest>(args).unwrap_or(TargetGetRequest {
-                identity: AgentIdentityOverride::default(),
-                thread_id: None,
-                message_id: None,
-            });
+            let mut req_args =
+                serde_json::from_value::<TargetGetRequest>(args).unwrap_or(TargetGetRequest {
+                    identity: AgentIdentityOverride::default(),
+                    thread_id: None,
+                    message_id: None,
+                });
             let target = resolve_target_for_session(
                 &server.state,
                 server.app.as_ref(),
@@ -1254,8 +1296,13 @@ async fn dispatch_tool_call(
             .await?;
             req_args.thread_id = Some(target.thread_id.clone());
             req_args.message_id = Some(target.message_id.clone());
-            let response =
-                handlers::handle_target_get(&server.state, server.app.as_ref(), req_args, &current_ctx).await?;
+            let response = handlers::handle_target_get(
+                &server.state,
+                server.app.as_ref(),
+                req_args,
+                &current_ctx,
+            )
+            .await?;
             let value = serde_json::to_value(&response).unwrap();
             let next_target = target_ref_from_value(&value);
             Ok((value, next_target))
@@ -1291,11 +1338,13 @@ async fn dispatch_tool_call(
                 Ok(response) => {
                     let value = serde_json::to_value(&response).unwrap();
                     let next_target = target_ref_from_value(&value).unwrap_or(lease_target.clone());
-                    move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target).await?;
+                    move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target)
+                        .await?;
                     Ok((value, Some(next_target)))
                 }
                 Err(err) => {
-                    let _ = release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
+                    let _ =
+                        release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
                     Err(err)
                 }
             }
@@ -1331,11 +1380,13 @@ async fn dispatch_tool_call(
                 Ok(response) => {
                     let value = serde_json::to_value(&response).unwrap();
                     let next_target = target_ref_from_value(&value).unwrap_or(lease_target.clone());
-                    move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target).await?;
+                    move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target)
+                        .await?;
                     Ok((value, Some(next_target)))
                 }
                 Err(err) => {
-                    let _ = release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
+                    let _ =
+                        release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
                     Err(err)
                 }
             }
@@ -1400,11 +1451,14 @@ async fn dispatch_tool_call(
                 Ok(response) => {
                     let value = serde_json::to_value(&response).unwrap();
                     let next_target = target_ref_from_value(&value).unwrap_or(lease_target.clone());
-                    move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target).await?;
+                    move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target)
+                        .await?;
+                    let _ = server.handle.emit("history-updated", ());
                     Ok((value, Some(next_target)))
                 }
                 Err(err) => {
-                    let _ = release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
+                    let _ =
+                        release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
                     Err(err)
                 }
             }
@@ -1440,11 +1494,14 @@ async fn dispatch_tool_call(
                 Ok(response) => {
                     let value = serde_json::to_value(&response).unwrap();
                     let next_target = target_ref_from_value(&value).unwrap_or(lease_target.clone());
-                    move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target).await?;
+                    move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target)
+                        .await?;
+                    let _ = server.handle.emit("history-updated", ());
                     Ok((value, Some(next_target)))
                 }
                 Err(err) => {
-                    let _ = release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
+                    let _ =
+                        release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
                     Err(err)
                 }
             }
@@ -1480,11 +1537,14 @@ async fn dispatch_tool_call(
                 Ok(response) => {
                     let value = serde_json::to_value(&response).unwrap();
                     let next_target = target_ref_from_value(&value).unwrap_or(lease_target.clone());
-                    move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target).await?;
+                    move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target)
+                        .await?;
+                    let _ = server.handle.emit("history-updated", ());
                     Ok((value, Some(next_target)))
                 }
                 Err(err) => {
-                    let _ = release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
+                    let _ =
+                        release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
                     Err(err)
                 }
             }
@@ -1520,25 +1580,27 @@ async fn dispatch_tool_call(
                 Ok(response) => {
                     let value = serde_json::to_value(&response).unwrap();
                     let next_target = target_ref_from_value(&value).unwrap_or(lease_target.clone());
-                    move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target).await?;
+                    move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target)
+                        .await?;
+                    let _ = server.handle.emit("history-updated", ());
                     Ok((value, Some(next_target)))
                 }
                 Err(err) => {
-                    let _ = release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
+                    let _ =
+                        release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
                     Err(err)
                 }
             }
         }
         "version_save" => {
-            let mut req_args = serde_json::from_value::<VersionSaveRequest>(args).unwrap_or(
-                VersionSaveRequest {
+            let mut req_args =
+                serde_json::from_value::<VersionSaveRequest>(args).unwrap_or(VersionSaveRequest {
                     identity: AgentIdentityOverride::default(),
                     thread_id: None,
                     message_id: None,
                     title: None,
                     version_name: None,
-                },
-            );
+                });
             let action_ctx = current_ctx.with_override(&req_args.identity);
             let target = resolve_target_for_session(
                 &server.state,
@@ -1567,25 +1629,27 @@ async fn dispatch_tool_call(
                 Ok(response) => {
                     let value = serde_json::to_value(&response).unwrap();
                     let next_target = target_ref_from_value(&value).unwrap_or(lease_target.clone());
-                    move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target).await?;
+                    move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target)
+                        .await?;
+                    let _ = server.handle.emit("history-updated", ());
                     Ok((value, Some(next_target)))
                 }
                 Err(err) => {
-                    let _ = release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
+                    let _ =
+                        release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
                     Err(err)
                 }
             }
         }
         "thread_fork_from_target" => {
-            let mut req_args = serde_json::from_value::<ThreadForkRequest>(args).unwrap_or(
-                ThreadForkRequest {
+            let mut req_args =
+                serde_json::from_value::<ThreadForkRequest>(args).unwrap_or(ThreadForkRequest {
                     identity: AgentIdentityOverride::default(),
                     thread_id: None,
                     message_id: None,
                     title: None,
                     version_name: None,
-                },
-            );
+                });
             let action_ctx = current_ctx.with_override(&req_args.identity);
             let target = resolve_target_for_session(
                 &server.state,
@@ -1614,11 +1678,14 @@ async fn dispatch_tool_call(
                 Ok(response) => {
                     let value = serde_json::to_value(&response).unwrap();
                     let next_target = target_ref_from_value(&value).unwrap_or(lease_target.clone());
-                    move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target).await?;
+                    move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target)
+                        .await?;
+                    let _ = server.handle.emit("history-updated", ());
                     Ok((value, Some(next_target)))
                 }
                 Err(err) => {
-                    let _ = release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
+                    let _ =
+                        release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
                     Err(err)
                 }
             }
@@ -1645,15 +1712,32 @@ async fn dispatch_tool_call(
                 Ok(response) => {
                     let value = serde_json::to_value(&response).unwrap();
                     let next_target = target_ref_from_value(&value).unwrap_or(lease_target.clone());
-                    move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target).await?;
+                    move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target)
+                        .await?;
                     Ok((value, Some(next_target)))
                 }
                 Err(err) => {
-                    let _ = release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
+                    let _ =
+                        release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
                     Err(err)
                 }
             }
         }
-        _ => Err(AppError::validation(format!("Unknown tool: {}", params.name))),
+        "user_confirm_request" => {
+            let req: UserConfirmRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let response = handlers::handle_user_confirm_request(
+                &server.state,
+                &server.handle,
+                req,
+                &current_ctx,
+            )
+            .await?;
+            Ok((serde_json::to_value(response).unwrap(), None))
+        }
+        _ => Err(AppError::validation(format!(
+            "Unknown tool: {}",
+            params.name
+        ))),
     }
 }

@@ -2,11 +2,13 @@ use crate::db;
 use crate::mcp::contracts::*;
 use crate::models::{
     AgentDraft, AgentOrigin, AgentSession, AppError, AppResult, AppState, ArtifactBundle,
-    ControlPrimitive, ControlView, ControlViewSource, DesignOutput, InteractionMode,
-    MacroDialect, ModelManifest, ModelSourceKind, PathResolver, UiSpec,
+    ControlPrimitive, ControlView, ControlViewSource, DesignOutput, InteractionMode, MacroDialect,
+    ModelManifest, ModelSourceKind, PathResolver, UiSpec,
 };
 use crate::services::{history, render};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tauri::Emitter;
+use tokio::sync::oneshot;
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -51,10 +53,14 @@ impl AgentContext {
             .filter(|value| !value.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| self.agent_label.clone());
-        let llm_model_id = override_identity.llm_model_id.as_ref().and_then(|value| {
-            let trimmed = value.trim().to_string();
-            (!trimmed.is_empty()).then_some(trimmed)
-        }).or_else(|| self.llm_model_id.clone());
+        let llm_model_id = override_identity
+            .llm_model_id
+            .as_ref()
+            .and_then(|value| {
+                let trimmed = value.trim().to_string();
+                (!trimmed.is_empty()).then_some(trimmed)
+            })
+            .or_else(|| self.llm_model_id.clone());
         let llm_model_label = override_identity
             .llm_model_label
             .as_ref()
@@ -130,6 +136,60 @@ fn try_record_agent_error(
     );
 }
 
+pub async fn handle_user_confirm_request(
+    state: &AppState,
+    handle: &tauri::AppHandle,
+    req: UserConfirmRequest,
+    ctx: &AgentContext,
+) -> AppResult<UserConfirmResponse> {
+    let request_id = req
+        .request_id
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let buttons = req
+        .buttons
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| vec!["Yes".to_string(), "No".to_string()]);
+    let timeout_secs = req.timeout_secs.unwrap_or(120).clamp(5, 600);
+
+    let (tx, rx) = oneshot::channel::<String>();
+
+    {
+        let mut channels = state.confirm_channels.lock().await;
+        channels.insert(request_id.clone(), tx);
+    }
+
+    handle
+        .emit(
+            "agent-confirm-request",
+            AgentConfirmEvent {
+                request_id: request_id.clone(),
+                message: req.message,
+                buttons,
+                agent_label: ctx.agent_label.clone(),
+            },
+        )
+        .map_err(|e| AppError::internal(format!("Failed to emit confirmation event: {}", e)))?;
+
+    let choice = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx)
+        .await
+        .map_err(|_| {
+            // Clean up stale channel on timeout
+            let state_clone = state.confirm_channels.clone();
+            let id_clone = request_id.clone();
+            tokio::spawn(async move {
+                state_clone.lock().await.remove(&id_clone);
+            });
+            AppError::internal(format!(
+                "User confirmation timed out after {} seconds.",
+                timeout_secs
+            ))
+        })?
+        .map_err(|_| AppError::internal("Confirmation channel closed unexpectedly.".to_string()))?;
+
+    Ok(UserConfirmResponse { request_id, choice })
+}
+
 pub async fn handle_health_check(
     state: &AppState,
     app: &dyn PathResolver,
@@ -140,7 +200,7 @@ pub async fn handle_health_check(
         .await
         .query_row("SELECT 1", [], |_row| Ok(()))
         .is_ok();
-    let freecad_configured = render::configured_freecad_cmd(state).is_some();
+    let freecad_configured = render::is_freecad_available(state);
     let config_dir = app.app_config_dir();
     let db_path = config_dir
         .join("history.sqlite")
@@ -647,7 +707,10 @@ pub async fn handle_version_save(
             draft.design_output.ui_spec.clone(),
             draft.artifact_bundle.clone(),
             draft.model_manifest.clone(),
-            Some(format!("{} committed a new version via MCP.", ctx.agent_label)),
+            Some(format!(
+                "{} committed a new version via MCP.",
+                ctx.agent_label
+            )),
             Some(ctx.origin()),
             state,
             app,
@@ -740,14 +803,7 @@ pub async fn handle_version_restore(
 
     if let Err(err) = &result {
         let conn = state.db.lock().await;
-        try_record_agent_error(
-            &conn,
-            ctx,
-            tracked_thread_id,
-            tracked_message_id,
-            None,
-            err,
-        );
+        try_record_agent_error(&conn, ctx, tracked_thread_id, tracked_message_id, None, err);
     }
 
     result
@@ -1013,17 +1069,15 @@ fn normalize_llm_primitive(
     }
 
     let order = if primitive.order == 0 {
-        existing
-            .map(|value| value.order)
-            .unwrap_or_else(|| {
-                manifest
-                    .control_primitives
-                    .iter()
-                    .map(|entry| entry.order)
-                    .max()
-                    .unwrap_or(0)
-                    + 1
-            })
+        existing.map(|value| value.order).unwrap_or_else(|| {
+            manifest
+                .control_primitives
+                .iter()
+                .map(|entry| entry.order)
+                .max()
+                .unwrap_or(0)
+                + 1
+        })
     } else {
         primitive.order
     };
@@ -1051,17 +1105,15 @@ fn normalize_llm_view(
     }
 
     let order = if view.order == 0 {
-        existing
-            .map(|value| value.order)
-            .unwrap_or_else(|| {
-                manifest
-                    .control_views
-                    .iter()
-                    .map(|entry| entry.order)
-                    .max()
-                    .unwrap_or(0)
-                    + 1
-            })
+        existing.map(|value| value.order).unwrap_or_else(|| {
+            manifest
+                .control_views
+                .iter()
+                .map(|entry| entry.order)
+                .max()
+                .unwrap_or(0)
+                + 1
+        })
     } else {
         view.order
     };
@@ -1104,12 +1156,8 @@ pub async fn handle_semantic_manifest_get(
             "Reading semantic manifest.",
         )?;
 
-        let target = resolve_semantic_target(
-            &conn,
-            app,
-            req.thread_id.clone(),
-            req.message_id.clone(),
-        )?;
+        let target =
+            resolve_semantic_target(&conn, app, req.thread_id.clone(), req.message_id.clone())?;
 
         tracked_thread_id = Some(target.thread_id.clone());
         tracked_message_id = Some(target.base_message_id.clone());
@@ -1164,12 +1212,8 @@ pub async fn handle_control_primitive_save(
 
     let result = async {
         let conn = state.db.lock().await;
-        let target = resolve_semantic_target(
-            &conn,
-            app,
-            req.thread_id.clone(),
-            req.message_id.clone(),
-        )?;
+        let target =
+            resolve_semantic_target(&conn, app, req.thread_id.clone(), req.message_id.clone())?;
         tracked_thread_id = Some(target.thread_id.clone());
         tracked_message_id = Some(target.base_message_id.clone());
         tracked_model_id = Some(target.artifact_bundle.model_id.clone());
@@ -1189,7 +1233,8 @@ pub async fn handle_control_primitive_save(
             .control_primitives
             .iter()
             .find(|entry| entry.primitive_id == req.primitive.primitive_id);
-        let next_primitive = normalize_llm_primitive(req.primitive, existing, &target.model_manifest)?;
+        let next_primitive =
+            normalize_llm_primitive(req.primitive, existing, &target.model_manifest)?;
         let next_primitive_id = next_primitive.primitive_id.clone();
         let mut next_manifest = target.model_manifest.clone();
         next_manifest.control_primitives = next_manifest
@@ -1198,9 +1243,11 @@ pub async fn handle_control_primitive_save(
             .filter(|entry| entry.primitive_id != next_primitive_id)
             .chain(std::iter::once(next_primitive))
             .collect();
-        next_manifest
-            .control_primitives
-            .sort_by(|left, right| left.order.cmp(&right.order).then_with(|| left.label.cmp(&right.label)));
+        next_manifest.control_primitives.sort_by(|left, right| {
+            left.order
+                .cmp(&right.order)
+                .then_with(|| left.label.cmp(&right.label))
+        });
 
         drop(conn);
 
@@ -1260,12 +1307,8 @@ pub async fn handle_control_primitive_delete(
 
     let result = async {
         let conn = state.db.lock().await;
-        let target = resolve_semantic_target(
-            &conn,
-            app,
-            req.thread_id.clone(),
-            req.message_id.clone(),
-        )?;
+        let target =
+            resolve_semantic_target(&conn, app, req.thread_id.clone(), req.message_id.clone())?;
         tracked_thread_id = Some(target.thread_id.clone());
         tracked_message_id = Some(target.base_message_id.clone());
         tracked_model_id = Some(target.artifact_bundle.model_id.clone());
@@ -1282,9 +1325,12 @@ pub async fn handle_control_primitive_delete(
 
         let mut next_manifest = target.model_manifest.clone();
         let primitive_id = req.primitive_id;
-        next_manifest.control_primitives.retain(|entry| entry.primitive_id != primitive_id);
+        next_manifest
+            .control_primitives
+            .retain(|entry| entry.primitive_id != primitive_id);
         next_manifest.control_relations.retain(|relation| {
-            relation.source_primitive_id != primitive_id && relation.target_primitive_id != primitive_id
+            relation.source_primitive_id != primitive_id
+                && relation.target_primitive_id != primitive_id
         });
         for view in &mut next_manifest.control_views {
             view.primitive_ids.retain(|entry| entry != &primitive_id);
@@ -1293,7 +1339,9 @@ pub async fn handle_control_primitive_delete(
             }
         }
         for advisory in &mut next_manifest.advisories {
-            advisory.primitive_ids.retain(|entry| entry != &primitive_id);
+            advisory
+                .primitive_ids
+                .retain(|entry| entry != &primitive_id);
         }
 
         drop(conn);
@@ -1354,12 +1402,8 @@ pub async fn handle_control_view_save(
 
     let result = async {
         let conn = state.db.lock().await;
-        let target = resolve_semantic_target(
-            &conn,
-            app,
-            req.thread_id.clone(),
-            req.message_id.clone(),
-        )?;
+        let target =
+            resolve_semantic_target(&conn, app, req.thread_id.clone(), req.message_id.clone())?;
         tracked_thread_id = Some(target.thread_id.clone());
         tracked_message_id = Some(target.base_message_id.clone());
         tracked_model_id = Some(target.artifact_bundle.model_id.clone());
@@ -1388,9 +1432,11 @@ pub async fn handle_control_view_save(
             .filter(|entry| entry.view_id != next_view_id)
             .chain(std::iter::once(next_view))
             .collect();
-        next_manifest
-            .control_views
-            .sort_by(|left, right| left.order.cmp(&right.order).then_with(|| left.label.cmp(&right.label)));
+        next_manifest.control_views.sort_by(|left, right| {
+            left.order
+                .cmp(&right.order)
+                .then_with(|| left.label.cmp(&right.label))
+        });
 
         drop(conn);
 
@@ -1450,12 +1496,8 @@ pub async fn handle_control_view_delete(
 
     let result = async {
         let conn = state.db.lock().await;
-        let target = resolve_semantic_target(
-            &conn,
-            app,
-            req.thread_id.clone(),
-            req.message_id.clone(),
-        )?;
+        let target =
+            resolve_semantic_target(&conn, app, req.thread_id.clone(), req.message_id.clone())?;
         tracked_thread_id = Some(target.thread_id.clone());
         tracked_message_id = Some(target.base_message_id.clone());
         tracked_model_id = Some(target.artifact_bundle.model_id.clone());
@@ -1472,7 +1514,9 @@ pub async fn handle_control_view_delete(
 
         let mut next_manifest = target.model_manifest.clone();
         let view_id = req.view_id;
-        next_manifest.control_views.retain(|entry| entry.view_id != view_id);
+        next_manifest
+            .control_views
+            .retain(|entry| entry.view_id != view_id);
         for advisory in &mut next_manifest.advisories {
             advisory.view_ids.retain(|entry| entry != &view_id);
         }

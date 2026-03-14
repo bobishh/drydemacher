@@ -48,8 +48,10 @@
     getActiveAgentSessions,
     getModelManifest,
     importFcstd,
+    resolveAgentConfirm,
     saveModelManifest,
   } from './lib/tauri/client';
+  import { listen } from '@tauri-apps/api/event';
   import type {
     AgentDraft,
     AgentSession,
@@ -450,8 +452,30 @@
     return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
   }
 
+  // --- Agent confirmation requests ---
+  type AgentConfirmItem = { requestId: string; message: string; buttons: string[]; agentLabel: string };
+  let pendingConfirms = $state<AgentConfirmItem[]>([]);
+
+  async function answerConfirm(requestId: string, choice: string) {
+    pendingConfirms = pendingConfirms.filter(c => c.requestId !== requestId);
+    try { await resolveAgentConfirm(requestId, choice); } catch { /* already timed out */ }
+  }
+
   onMount(() => {
     void boot();
+    const unlisten = listen<AgentConfirmItem>('agent-confirm-request', (event) => {
+      const item = event.payload;
+      if (!pendingConfirms.find(c => c.requestId === item.requestId)) {
+        pendingConfirms = [...pendingConfirms, item];
+      }
+    });
+    const unlistenHistory = listen('history-updated', () => {
+      void refreshHistory();
+    });
+    return () => {
+      void unlisten.then(fn => fn());
+      void unlistenHistory.then(fn => fn());
+    };
   });
 
   const activeThread = $derived($history.find(t => t.id === $activeThreadId));
@@ -1043,6 +1067,22 @@
               </div>
             {/if}
             
+            {#if pendingConfirms.length > 0}
+              <div class="agent-confirm-stack">
+                {#each pendingConfirms as confirm (confirm.requestId)}
+                  <div class="agent-confirm-card">
+                    <div class="agent-confirm-label">{confirm.agentLabel}</div>
+                    <div class="agent-confirm-message">{confirm.message}</div>
+                    <div class="agent-confirm-buttons">
+                      {#each confirm.buttons as btn}
+                        <button class="agent-confirm-btn" onclick={() => answerConfirm(confirm.requestId, btn)}>{btn}</button>
+                      {/each}
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+
             {#if $activeThreadId && ($workingCopy.macroCode || stlUrl)}
               <div class="viewport-overlay">
                 {#if activeVersionAgentLabel}
@@ -1306,4 +1346,13 @@
   .boot-overlay__status { color: var(--text-dim); font-size: 0.7rem; }
   .flex-1 { flex: 1; }
   .sidebar-section { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+
+  /* Agent confirmation stack */
+  .agent-confirm-stack { position: absolute; bottom: 12px; right: 12px; display: flex; flex-direction: column; gap: 8px; z-index: 200; max-width: 320px; }
+  .agent-confirm-card { background: var(--bg-200); border: 1px solid var(--primary); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; box-shadow: 0 0 16px color-mix(in srgb, var(--primary) 30%, transparent); }
+  .agent-confirm-label { font-size: 0.55rem; color: var(--primary); font-weight: bold; text-transform: uppercase; letter-spacing: 0.1em; }
+  .agent-confirm-message { font-size: 0.75rem; color: var(--text); line-height: 1.4; white-space: pre-wrap; }
+  .agent-confirm-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+  .agent-confirm-btn { background: var(--bg-300); border: 1px solid var(--bg-400); color: var(--text); font-size: 0.65rem; padding: 4px 10px; cursor: pointer; font-weight: bold; }
+  .agent-confirm-btn:hover { border-color: var(--primary); color: var(--primary); background: color-mix(in srgb, var(--primary) 10%, var(--bg-300)); }
 </style>

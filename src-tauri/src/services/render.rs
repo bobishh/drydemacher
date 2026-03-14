@@ -11,6 +11,10 @@ pub fn configured_freecad_cmd(state: &AppState) -> Option<String> {
     }
 }
 
+pub fn is_freecad_available(state: &AppState) -> bool {
+    freecad::resolve_freecad_path(configured_freecad_cmd(state).as_deref()).is_ok()
+}
+
 pub async fn render_stl(
     macro_code: &str,
     parameters: &DesignParams,

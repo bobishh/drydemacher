@@ -86,7 +86,8 @@ pub async fn add_manual_version(
     let msg = Message {
         id: msg_id.clone(),
         role: MessageRole::Assistant,
-        content: response_text.unwrap_or_else(|| "Manual edit committed as new version.".to_string()),
+        content: response_text
+            .unwrap_or_else(|| "Manual edit committed as new version.".to_string()),
         status: MessageStatus::Success,
         output: Some(output),
         usage: None,

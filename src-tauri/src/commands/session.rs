@@ -5,7 +5,7 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::db;
 use crate::models::{
-    AgentDraft, AgentSession, AppResult, AppState, LastDesignSnapshot, McpServerStatus,
+    AgentDraft, AgentSession, AppError, AppResult, AppState, LastDesignSnapshot, McpServerStatus,
 };
 
 #[tauri::command]
@@ -103,5 +103,26 @@ pub async fn save_last_design(
         *last = snapshot.clone();
     }
     write_last_snapshot(&app, snapshot.as_ref());
+    Ok(())
+}
+
+/// Called by the frontend when the user clicks a confirmation button.
+/// Resolves the pending oneshot channel so the MCP handler can return.
+#[tauri::command]
+#[specta::specta]
+pub async fn resolve_agent_confirm(
+    request_id: String,
+    choice: String,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    let mut channels = state.confirm_channels.lock().await;
+    if let Some(tx) = channels.remove(&request_id) {
+        let _ = tx.send(choice);
+    } else {
+        return Err(AppError::not_found(format!(
+            "No pending confirmation with id: {}",
+            request_id
+        )));
+    }
     Ok(())
 }

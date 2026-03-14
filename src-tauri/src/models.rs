@@ -1,7 +1,8 @@
-use std::path::PathBuf;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
+use tokio::sync::oneshot;
 
 pub use crate::contracts::*;
 
@@ -75,6 +76,8 @@ pub struct AppState {
     pub render_lock: Arc<tokio::sync::Mutex<()>>,
     pub mcp_status: Arc<Mutex<McpServerStatus>>,
     pub mcp_sessions: Arc<tokio::sync::Mutex<HashMap<String, McpSessionState>>>,
+    /// Pending user-confirmation requests keyed by requestId.
+    pub confirm_channels: Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<String>>>>,
 }
 
 impl AppState {
@@ -94,6 +97,7 @@ impl AppState {
                 last_startup_error: None,
             })),
             mcp_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            confirm_channels: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 

@@ -319,6 +319,18 @@ async deleteAgentDraft(threadId: string, baseMessageId: string) : Promise<Result
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * Called by the frontend when the user clicks a confirmation button.
+ * Resolves the pending oneshot channel so the MCP handler can return.
+ */
+async resolveAgentConfirm(requestId: string, choice: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resolve_agent_confirm", { requestId, choice }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 

@@ -178,8 +178,14 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
         "ALTER TABLE agent_sessions ADD COLUMN host_label TEXT NOT NULL DEFAULT ''",
         [],
     );
-    let _ = conn.execute("ALTER TABLE agent_sessions ADD COLUMN llm_model_id TEXT", []);
-    let _ = conn.execute("ALTER TABLE agent_sessions ADD COLUMN llm_model_label TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE agent_sessions ADD COLUMN llm_model_id TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_sessions ADD COLUMN llm_model_label TEXT",
+        [],
+    );
     migrate_thread_genie_traits(&conn)?;
 
     Ok(conn)

@@ -8,6 +8,34 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct HealthCheckRequest {}
 
+// --- user_confirm_request ---
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserConfirmRequest {
+    pub request_id: Option<String>,
+    pub message: String,
+    pub buttons: Option<Vec<String>>,
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserConfirmResponse {
+    pub request_id: String,
+    pub choice: String,
+}
+
+/// Payload emitted as a Tauri event to the frontend.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentConfirmEvent {
+    pub request_id: String,
+    pub message: String,
+    pub buttons: Vec<String>,
+    pub agent_label: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthCheckResponse {

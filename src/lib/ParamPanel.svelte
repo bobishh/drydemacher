@@ -863,6 +863,9 @@
     saveValuesState = 'saving';
     try {
       await updateParameters(activeVersionId, localParams);
+      // Sync in-memory state so that isDirty=true and paramPanelState reflects saved values.
+      // This prevents stale state from being used in subsequent renders or overwritten by agent drafts.
+      if (onspecchange) onspecchange(uiSpec ?? { fields: [] }, localParams);
       await refreshHistory();
       saveValuesState = 'saved';
       setTimeout(() => {
@@ -870,6 +873,7 @@
       }, 1500);
     } catch (e: unknown) {
       console.error('Failed to save defaults:', formatBackendError(e));
+      session.setError(`Save Values Failed: ${formatBackendError(e)}`);
       saveValuesState = 'idle';
     }
   }

@@ -14,8 +14,8 @@ pub mod services;
 use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::sleep;
 use tauri::Manager;
+use tokio::time::sleep;
 use uuid::Uuid;
 
 use crate::context::*;
@@ -515,10 +515,15 @@ pub fn run() {
 
             let resolver: Arc<dyn PathResolver + Send + Sync> = Arc::new(app.handle().clone());
             let server_state = state.clone();
+            let server_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
-                    if let Err(err) =
-                        crate::mcp::server::serve_http(server_state.clone(), resolver.clone()).await
+                    if let Err(err) = crate::mcp::server::serve_http(
+                        server_state.clone(),
+                        resolver.clone(),
+                        server_handle.clone(),
+                    )
+                    .await
                     {
                         eprintln!("[MCP] HTTP server stopped: {}", err);
                         server_state.set_mcp_status(false, Some(err.to_string()));

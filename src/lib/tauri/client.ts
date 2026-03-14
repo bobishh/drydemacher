@@ -383,3 +383,7 @@ export async function deleteAgentDraft(
 ) {
   unwrapResult(await commands.deleteAgentDraft(threadId, baseMessageId));
 }
+
+export async function resolveAgentConfirm(requestId: string, choice: string) {
+  unwrapResult(await commands.resolveAgentConfirm(requestId, choice));
+}

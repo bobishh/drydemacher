@@ -991,7 +991,7 @@ fn source_kind_dir_name(source_kind: ModelSourceKind) -> &'static str {
     }
 }
 
-fn resolve_freecad_path(configured_freecad_cmd: Option<&str>) -> AppResult<PathBuf> {
+pub(crate) fn resolve_freecad_path(configured_freecad_cmd: Option<&str>) -> AppResult<PathBuf> {
     if let Some(configured_cmd) = configured_freecad_cmd {
         return Ok(normalize_freecad_cmd(configured_cmd));
     }

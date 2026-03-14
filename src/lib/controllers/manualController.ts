@@ -306,6 +306,10 @@ export async function handleParamChange(
       console.log('[ManualController] Persisting parameters to messageId:', sourceVersionId);
       try {
         await updateVersionRuntime(sourceVersionId, bundle, manifest);
+      } catch (e) {
+        console.error('[ManualController] Failed to update version runtime:', formatBackendError(e), e);
+      }
+      try {
         await updateParameters(sourceVersionId, currentParams);
         console.log('[ManualController] update_parameters success');
         if (renderSeq === latestParamRenderSeq && get(activeThreadId) === snapshotThreadId) {
