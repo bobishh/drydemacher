@@ -10,6 +10,13 @@
     updateUiSpec,
   } from './tauri/client';
   import { buildImportedSyntheticDesign } from './modelRuntime/importedRuntime';
+  import {
+    filterFieldsBySearch,
+    resolveContextSections,
+    resolveTargetParameterKeys,
+    type MeasurementControlFocus,
+    type ContextSelectionTarget,
+  } from './modelRuntime/contextualEditing';
   import type {
     MaterializedSemanticControl,
     MaterializedSemanticView,
@@ -92,10 +99,13 @@
     modelManifest = null,
     controlViews = [],
     activeControlViewId = null,
+    selectedTarget = null,
     selectedPartId = null,
+    searchQuery = $bindable(''),
     onSelectControlView,
     onSelectPart,
     onSemanticChange,
+    onControlFocusChange,
     onchange,
     onspecchange,
     activeVersionId = null,
@@ -107,10 +117,13 @@
     modelManifest?: ModelManifest | null;
     controlViews?: MaterializedSemanticView[];
     activeControlViewId?: string | null;
+    selectedTarget?: ContextSelectionTarget | null;
     selectedPartId?: string | null;
+    searchQuery?: string;
     onSelectControlView?: (viewId: string | null) => void;
     onSelectPart?: (partId: string | null) => void;
     onSemanticChange?: (primitiveId: string, value: ParamValue) => Promise<void> | void;
+    onControlFocusChange?: (focus: MeasurementControlFocus | null) => void;
     onchange?: (params: DesignParams) => Promise<void> | void;
     onspecchange?: (uiSpec: UiSpec, params: DesignParams) => void;
     activeVersionId?: string | null;
@@ -252,12 +265,25 @@
           label,
           frozen: !!field.frozen,
         };
+      case 'image':
+        return {
+          type: 'image',
+          key,
+          label,
+          frozen: !!field.frozen,
+        };
     }
   }
 
   function asNumber(value: ParamValue | undefined, fallback = 0): number {
     const numeric = Number(value);
     return Number.isFinite(numeric) ? numeric : fallback;
+  }
+
+  function firstSelectedPath(selection: string | string[] | null): string | null {
+    if (typeof selection === 'string') return selection;
+    if (Array.isArray(selection)) return selection[0] ?? null;
+    return null;
   }
 
   function getSelectValue(key: string): string | number | null {
@@ -271,6 +297,17 @@
 
   function getInputChecked(event: Event): boolean {
     return (event.currentTarget as HTMLInputElement).checked;
+  }
+
+  function setFocusedControl(primitiveId: string | null, parameterKey: string | null) {
+    onControlFocusChange?.({ primitiveId, parameterKey });
+  }
+
+  function clearFocusedControl(event: MouseEvent | FocusEvent) {
+    const current = event.currentTarget as HTMLElement | null;
+    const related = (event as FocusEvent).relatedTarget as Node | null;
+    if (current && related && current.contains(related)) return;
+    onControlFocusChange?.(null);
   }
 
   $effect(() => {
@@ -440,24 +477,13 @@
 
   let reading = $state(false);
   let applying = $state(false);
-  let searchQuery = $state('');
 
   const filteredFields = $derived.by(() => {
-    if (!searchQuery.trim()) return mergedFields;
-    const query = searchQuery.toLowerCase();
-    return mergedFields.filter(f => 
-      f.key.toLowerCase().includes(query) || 
-      (f.label && f.label.toLowerCase().includes(query))
-    );
+    return filterFieldsBySearch(mergedFields, searchQuery);
   });
 
   const filteredEditFields = $derived.by(() => {
-    if (!searchQuery.trim()) return editFields;
-    const query = searchQuery.toLowerCase();
-    return editFields.filter(f => 
-      f.key.toLowerCase().includes(query) || 
-      (f.label && f.label.toLowerCase().includes(query))
-    );
+    return filterFieldsBySearch(editFields, searchQuery);
   });
 
   $effect(() => {
@@ -474,7 +500,7 @@
   });
 
   $effect(() => {
-    localSelectedPartId = selectedPartId;
+    localSelectedPartId = selectedTarget?.partId ?? selectedPartId;
   });
 
   const partCount = $derived(modelManifest?.parts?.length ?? 0);
@@ -515,6 +541,10 @@
   });
 
   const selectedParameterKeys = $derived.by(() => {
+    const exactKeys = resolveTargetParameterKeys(modelManifest, selectedTarget);
+    if (exactKeys.size > 0) {
+      return exactKeys;
+    }
     const keys = new Set<string>();
     for (const group of selectedGroups) {
       for (const key of group.parameterKeys || []) {
@@ -545,18 +575,7 @@
   });
 
   const filteredSemanticSections = $derived.by(() => {
-    if (!activeSemanticView) return [];
-    if (!searchQuery.trim()) return activeSemanticView.sections;
-    const query = searchQuery.toLowerCase();
-    return activeSemanticView.sections
-      .map((section) => ({
-        ...section,
-        controls: section.controls.filter((control) => {
-          const signature = `${control.label} ${control.rawField?.key ?? ''}`.toLowerCase();
-          return signature.includes(query);
-        }),
-      }))
-      .filter((section) => section.controls.length > 0);
+    return resolveContextSections(activeSemanticView, selectedTarget, searchQuery);
   });
 
   const primitiveCatalog = $derived.by(() => {
@@ -2479,8 +2498,13 @@
                 {#if field}
                   <div
                     class="param-field"
+                    role="group"
                     class:field-select={field.type === 'select'}
                     class:field-checkbox={field.type === 'checkbox'}
+                    onmouseenter={() => setFocusedControl(control.primitiveId, field.key)}
+                    onmouseleave={clearFocusedControl}
+                    onfocusin={() => setFocusedControl(control.primitiveId, field.key)}
+                    onfocusout={clearFocusedControl}
                   >
                     <div class="field-header">
                       <div class="field-title">
@@ -2546,6 +2570,23 @@
                           />
                           <span class="checkbox-status">{control.value ? 'ON' : 'OFF'}</span>
                         </label>
+                      {:else if field.type === 'image'}
+                        <div class="image-field-wrapper">
+                          <button
+                            class="btn param-btn"
+                            onclick={async () => {
+                              const file = await open({
+                                multiple: false,
+                                filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
+                              });
+                              const selected = firstSelectedPath(file);
+                              if (selected) updateSemanticControl(control, selected);
+                            }}
+                            disabled={!control.editable}
+                          >
+                            {control.value ? String(control.value).split(/[/\\]/).pop() : 'Select Image...'}
+                          </button>
+                        </div>
                       {/if}
                     </div>
                   </div>
@@ -2572,11 +2613,16 @@
               {@const cadHint = getCadHint(field)}
               <div
                 class="param-field param-field-focus"
+                role="group"
                 data-cad-tone={cadHint.tone}
                 class:auto-field={field._auto}
                 class:param-freezed={field.frozen}
                 class:field-select={field.type === 'select'}
                 class:field-checkbox={field.type === 'checkbox'}
+                onmouseenter={() => setFocusedControl(null, field.key)}
+                onmouseleave={clearFocusedControl}
+                onfocusin={() => setFocusedControl(null, field.key)}
+                onfocusout={clearFocusedControl}
               >
                 <div class="field-header">
                   <div class="field-title">
@@ -2641,11 +2687,8 @@
                             multiple: false,
                             filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
                           });
-                          if (typeof file === 'string') {
-                            update(field.key, file);
-                          } else if (file && file.path) {
-                            update(field.key, file.path);
-                          }
+                          const selected = firstSelectedPath(file);
+                          if (selected) update(field.key, selected);
                         }}
                         disabled={field.frozen}
                       >
@@ -2671,11 +2714,16 @@
           {@const cadHint = getCadHint(field)}
           <div
             class="param-field"
+            role="group"
             data-cad-tone={cadHint.tone}
             class:auto-field={field._auto}
             class:param-freezed={field.frozen}
             class:field-select={field.type === 'select'}
             class:field-checkbox={field.type === 'checkbox'}
+            onmouseenter={() => setFocusedControl(null, field.key)}
+            onmouseleave={clearFocusedControl}
+            onfocusin={() => setFocusedControl(null, field.key)}
+            onfocusout={clearFocusedControl}
           >
             <div class="field-header">
               <div class="field-title">
@@ -2740,11 +2788,8 @@
                        multiple: false,
                        filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
                      });
-                     if (typeof file === 'string') {
-                       update(field.key, file);
-                     } else if (file && file.path) {
-                       update(field.key, file.path);
-                     }
+                     const selected = firstSelectedPath(file);
+                     if (selected) update(field.key, selected);
                    }}
                    disabled={field.frozen}
                  >

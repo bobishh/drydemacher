@@ -5,16 +5,40 @@ test.describe('Concurrency Isolation', () => {
     // Mock the Tauri invoke to simulate a slow generation and basic boot
     await page.addInitScript(() => {
       window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
-      const originalInvoke = window.__TAURI_INTERNALS__.invoke;
       window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
         if (cmd === 'get_config') {
-          return { engines: [{ id: 'mock', name: 'Mock' }], selected_engine_id: 'mock' };
+          return {
+            engines: [{ id: 'mock', name: 'Mock' }],
+            selectedEngineId: 'mock',
+            hasSeenOnboarding: true,
+          };
         }
+        if (cmd === 'check_freecad') return true;
         if (cmd === 'get_history') {
-          return [{ id: 'mock-thread-2', title: 'Existing Thread', updatedAt: Date.now(), versionCount: 1 }];
+          return [{
+            id: 'mock-thread-2',
+            title: 'Existing Thread',
+            updatedAt: Date.now() / 1000,
+            versionCount: 1,
+            pendingCount: 0,
+            errorCount: 0,
+            summary: '',
+            messages: [],
+          }];
         }
+        if (cmd === 'get_last_design') return null;
+        if (cmd === 'get_default_macro') return '# mock macro';
         if (cmd === 'get_thread') {
-          return { id: 'mock-thread-2', title: 'Existing Thread', messages: [] };
+          return {
+            id: args.id,
+            title: 'Existing Thread',
+            updatedAt: Date.now() / 1000,
+            versionCount: 1,
+            pendingCount: 0,
+            errorCount: 0,
+            summary: '',
+            messages: [],
+          };
         }
         if (cmd === 'generate_design') {
           // Artificial delay
@@ -33,15 +57,38 @@ test.describe('Concurrency Isolation', () => {
         if (cmd === 'render_stl') {
           return '/mock/path/to.stl';
         }
-        if (originalInvoke) {
-          return originalInvoke(cmd, args);
+        if (cmd === 'save_config') return null;
+        if (cmd === 'init_generation_attempt') return 'mock-msg-1';
+        if (cmd === 'classify_intent') {
+          return {
+            intentMode: 'design',
+            response: 'Routing request...',
+            finalResponse: '',
+            confidence: 0.9,
+            usage: null,
+          };
         }
-        return {};
+        if (cmd === 'finalize_generation_attempt') return null;
+        if (cmd === 'save_last_design') return null;
+        if (cmd === 'get_active_agent_sessions') return [];
+        if (cmd === 'get_agent_terminal_snapshots') return [];
+        if (cmd === 'get_thread_agent_state') {
+          return {
+            threadId: args?.threadId ?? null,
+            connectionState: 'disconnected',
+            sessions: [],
+            primaryAgentLabel: null,
+            statusText: '',
+          };
+        }
+        return null;
       };
     });
 
     await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
     await page.waitForSelector('.workbench');
+    await expect(page.locator('.history-card')).toContainText('Existing Thread');
 
     // Type a prompt
     const textarea = page.locator('.prompt-input');

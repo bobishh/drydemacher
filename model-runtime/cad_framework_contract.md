@@ -16,7 +16,7 @@ Rules:
 - Keep control keys stable across iterations unless the user explicitly renames them.
 
 SDK:
-- from cad_sdk import number, select, toggle, ControlRegistry, BuildContext
+- from cad_sdk import number, select, toggle, image, ControlRegistry, BuildContext
 - ControlRegistry provides defaults(), bind(params), and to_ui_spec().
 
 Required macro structure:

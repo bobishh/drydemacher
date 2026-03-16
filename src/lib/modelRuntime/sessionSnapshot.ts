@@ -22,8 +22,10 @@ function buildWorkingDesign(): DesignOutput | null {
     response: '',
     interactionMode: 'design',
     macroCode: current.macroCode,
+    macroDialect: current.macroDialect ?? 'legacy',
     uiSpec: current.uiSpec,
     initialParams: current.params,
+    postProcessing: current.postProcessing ?? null,
   };
 }
 

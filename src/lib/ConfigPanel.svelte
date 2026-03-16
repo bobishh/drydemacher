@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import Dropdown from './Dropdown.svelte';
   import { open } from '@tauri-apps/plugin-dialog';
+  import { derivePrimaryAgentId, normalizeMcpMode } from './agents/state';
   import {
     formatBackendError,
     getAppLogs,
@@ -43,8 +44,12 @@
   let activeSection = $state<ActiveSection>('agents');
 
   // Eagerly initialize mcp config so derived below is always non-null
-  if (!config.mcp) config.mcp = { port: null, maxSessions: null, autoAgents: [] };
+  if (!config.mcp) config.mcp = { port: null, maxSessions: null, mode: 'passive', primaryAgentId: null, autoAgents: [] };
   if (!Array.isArray(config.mcp.autoAgents)) config.mcp.autoAgents = [];
+  if (!config.mcp.mode) config.mcp.mode = normalizeMcpMode(config.mcp.mode, config.mcp.autoAgents);
+  if (config.mcp.primaryAgentId === undefined) {
+    config.mcp.primaryAgentId = derivePrimaryAgentId(config.mcp.autoAgents, config.mcp.primaryAgentId);
+  }
 
   function deriveConnectionType(): ConnectionType {
     if (config.connectionType === 'mcp') return 'mcp';
@@ -55,12 +60,41 @@
     return null;
   }
 
-  let connectionType = $state<ConnectionType>(deriveConnectionType());
-  let mcpMode = $state<McpMode>((config.mcp?.autoAgents ?? []).length > 0 ? 'active' : 'passive');
+  function ensurePrimaryAutoAgent() {
+    if (!config.mcp) return;
+    const nextPrimaryAgentId = derivePrimaryAgentId(config.mcp.autoAgents ?? [], config.mcp.primaryAgentId);
+    if (nextPrimaryAgentId === config.mcp.primaryAgentId) return;
+    config = {
+      ...config,
+      mcp: {
+        ...config.mcp,
+        primaryAgentId: nextPrimaryAgentId,
+      },
+    };
+  }
+
+  const connectionType = $derived.by<ConnectionType>(() => deriveConnectionType());
+  const mcpMode = $derived.by<McpMode>(() =>
+    normalizeMcpMode(config.mcp?.mode, config.mcp?.autoAgents ?? []),
+  );
 
   function setConnectionType(type: ConnectionType) {
-    connectionType = type;
-    config.connectionType = type;
+    config = {
+      ...config,
+      connectionType: type,
+    };
+  }
+
+  function setMcpMode(mode: McpMode) {
+    const currentMcp = getMcpConfig();
+    config = {
+      ...config,
+      mcp: {
+        ...currentMcp,
+        mode,
+      },
+    };
+    ensurePrimaryAutoAgent();
   }
 
   // Recording state
@@ -86,6 +120,45 @@
     location: string;
     snippet: string;
   };
+  type AutoAgentPreset = {
+    id: string;
+    label: string;
+    cmd: string;
+    model: string | null;
+    args: string[];
+  };
+
+  const eckyMcpToolNames = [
+    'bootstrap_ecky',
+    'health_check',
+    'workspace_overview',
+    'session_log_in',
+    'session_log_out',
+    'resume_session',
+    'thread_list',
+    'thread_get',
+    'agent_identity_set',
+    'target_meta_get',
+    'target_macro_get',
+    'target_detail_get',
+    'target_get',
+    'get_model_screenshot',
+    'params_patch_and_render',
+    'macro_replace_and_render',
+    'semantic_manifest_get',
+    'control_primitive_save',
+    'control_primitive_delete',
+    'control_view_save',
+    'control_view_delete',
+    'measurement_annotation_save',
+    'measurement_annotation_delete',
+    'version_save',
+    'thread_fork_from_target',
+    'version_restore',
+    'user_confirm_request',
+    'request_user_prompt',
+    'finalize_thread',
+  ];
 
   const providers = [
     { id: 'gemini', name: 'Google Gemini' },
@@ -193,12 +266,34 @@
 
   function addAutoAgent() {
     const cur = config.mcp!;
-    config.mcp = { ...cur, autoAgents: [...cur.autoAgents, { id: `agent-${Date.now()}`, label: '', cmd: '', model: null, args: [], enabled: true, startOnDemand: false }] };
+    const nextAgent = { id: `agent-${Date.now()}`, label: '', cmd: '', model: null, args: [], enabled: true, startOnDemand: false };
+    config.mcp = { ...cur, autoAgents: [...cur.autoAgents, nextAgent] };
+    if (!config.mcp.primaryAgentId) {
+      config.mcp.primaryAgentId = nextAgent.id;
+    }
+  }
+
+  function addAutoAgentPreset(preset: AutoAgentPreset) {
+    const cur = config.mcp!;
+    const nextAgent = {
+      id: `agent-${Date.now()}`,
+      label: preset.label,
+      cmd: preset.cmd,
+      model: preset.model,
+      args: [...preset.args],
+      enabled: true,
+      startOnDemand: false,
+    };
+    config.mcp = { ...cur, autoAgents: [...cur.autoAgents, nextAgent] };
+    if (!config.mcp.primaryAgentId) {
+      config.mcp.primaryAgentId = nextAgent.id;
+    }
   }
 
   function removeAutoAgent(id: string) {
     const cur = config.mcp!;
     config.mcp = { ...cur, autoAgents: cur.autoAgents.filter(a => a.id !== id) };
+    ensurePrimaryAutoAgent();
   }
 
   function getAgentArgsString(args: string[]): string {
@@ -209,6 +304,7 @@
     agent.args = value.trim() ? value.trim().split(/\s+/) : [];
   }
   const mcpConfig = $derived(config.mcp!);
+  const primaryAgentOptions = $derived((mcpConfig.autoAgents ?? []).filter((agent) => agent.enabled));
 
   const mcpEndpoint = $derived(mcpStatus?.endpointUrl || 'http://127.0.0.1:39249/mcp');
 
@@ -221,11 +317,33 @@
         location: '~/.gemini/settings.json',
         snippet: JSON.stringify(
           {
+            tools: {
+              allowed: eckyMcpToolNames.map((tool) => `mcp_ecky_mcp_${tool}`),
+            },
             mcpServers: {
               ecky_mcp: {
                 httpUrl: endpoint,
+                trust: true,
+                includeTools: eckyMcpToolNames,
               },
             },
+          },
+          null,
+          2,
+        ),
+      },
+      {
+        id: 'amp',
+        label: 'AMP',
+        location: '~/.config/amp/settings.json',
+        snippet: JSON.stringify(
+          {
+            'amp.mcpServers': {
+              ecky_mcp: {
+                url: endpoint,
+              },
+            },
+            'amp.tools.enable': ['mcp__ecky_mcp__*'],
           },
           null,
           2,
@@ -235,7 +353,7 @@
         id: 'codex',
         label: 'CODEX',
         location: '~/.codex/config.toml',
-        snippet: `[mcp_servers.ecky_mcp]\nenabled = true\nurl = "${endpoint}"\n`,
+        snippet: `model = "gpt-5.4"\n\n[mcp_servers.ecky_mcp]\nenabled = true\nurl = "${endpoint}"\n`,
       },
       {
         id: 'claude',
@@ -254,8 +372,47 @@
           2,
         ),
       },
+      {
+        id: 'opencode',
+        label: 'OPENCODE',
+        location: '~/.config/opencode/opencode.json',
+        snippet: JSON.stringify(
+          {
+            $schema: 'https://opencode.ai/config.json',
+            mcp: {
+              ecky_mcp: {
+                type: 'remote',
+                enabled: true,
+                url: endpoint,
+              },
+            },
+          },
+          null,
+          2,
+        ),
+      },
     ];
   });
+
+  const autoAgentPresets: AutoAgentPreset[] = [
+    {
+      id: 'claude',
+      label: 'CLAUDE',
+      cmd: 'claude',
+      model: null,
+      args: ['--allowedTools', 'Read', 'LS', 'Glob', 'Grep', 'mcp__ecky_mcp__*'],
+    },
+    { id: 'gemini', label: 'GEMINI', cmd: 'gemini', model: null, args: [] },
+    { id: 'codex', label: 'CODEX', cmd: 'codex', model: 'gpt-5.4', args: [] },
+    {
+      id: 'amp',
+      label: 'AMP',
+      cmd: 'amp',
+      model: null,
+      args: ['--settings-file', '/Users/bogdan/.config/amp/settings.json'],
+    },
+    { id: 'opencode', label: 'OPENCODE', cmd: 'opencode', model: null, args: [] },
+  ];
 
   const genericMcpSnippet = $derived.by(() => {
     const endpoint = mcpStatus?.endpointUrl || 'http://127.0.0.1:39249/mcp';
@@ -747,17 +904,17 @@
             <div class="conn-type-row">
               <button
                 class="conn-type-btn {mcpMode === 'passive' ? 'active' : ''}"
-                onclick={() => mcpMode = 'passive'}
+                onclick={() => setMcpMode('passive')}
               >PASSIVE</button>
               <button
                 class="conn-type-btn {mcpMode === 'active' ? 'active' : ''}"
-                onclick={() => mcpMode = 'active'}
+                onclick={() => setMcpMode('active')}
               >ACTIVE</button>
             </div>
             <div class="field-help">
               {mcpMode === 'passive'
                 ? 'External agents (Claude Code, Gemini CLI, Codex) connect to Ecky\'s MCP server.'
-                : 'Ecky launches agents automatically on startup.'}
+                : 'Ecky wakes the primary agent when a queued message arrives, then hibernates it between turns.'}
             </div>
           </div>
 
@@ -836,7 +993,37 @@
                 <div class="field-title">AUTO-AGENTS</div>
                 <button class="btn btn-xs" onclick={addAutoAgent}>+ ADD</button>
               </div>
-              <div class="field-help">Processes Ecky launches (e.g. Codex, Gemini CLI). Requires restart to take effect.</div>
+              <div class="field-help">Processes Ecky can wake on demand (e.g. Codex, Gemini CLI). Requires restart to take effect.</div>
+              <div class="auto-agent-presets">
+                {#each autoAgentPresets as preset (preset.id)}
+                  <button class="btn btn-xs btn-ghost" onclick={() => addAutoAgentPreset(preset)}>
+                    + {preset.label}
+                  </button>
+                {/each}
+              </div>
+              <div class="field-help">Presets fill safe cmd/args for Ecky. Gemini/Amp home-config snippets below scope MCP access; keep AMP model empty because its CLI uses mode flags instead of <code>--model</code>.</div>
+              <div class="field-row">
+                <div class="field flex-1">
+                  <label for="mcp-primary-agent">PRIMARY AGENT</label>
+                  <select
+                    id="mcp-primary-agent"
+                    class="input-mono"
+                    value={mcpConfig.primaryAgentId ?? ''}
+                    onchange={(e) => {
+                      getMcpConfig().primaryAgentId = (e.currentTarget as HTMLSelectElement).value || null;
+                    }}
+                    disabled={primaryAgentOptions.length === 0}
+                  >
+                    <option value="">No enabled agents</option>
+                    {#each primaryAgentOptions as agent}
+                      <option value={agent.id}>{agent.label || agent.cmd || agent.id}</option>
+                    {/each}
+                  </select>
+                  <div class="field-help">
+                    After you save, only the selected primary agent will receive the next queued turn.
+                  </div>
+                </div>
+              </div>
               {#if mcpConfig.autoAgents && mcpConfig.autoAgents.length > 0}
                 <div class="auto-agent-list">
                   {#each mcpConfig.autoAgents as agent (agent.id)}
@@ -848,8 +1035,8 @@
                       <div class="aac-row aac-row-top">
                         <input type="text" class="input-mono aac-label" placeholder="Label" bind:value={agent.label} />
                         <input type="text" class="input-mono aac-cmd" placeholder="Command (e.g. gemini)" bind:value={agent.cmd} />
-                        <label class="aac-toggle" title="Enabled on startup">
-                          <input type="checkbox" bind:checked={agent.enabled} />
+                        <label class="aac-toggle" title="Enabled for active MCP wake">
+                          <input type="checkbox" bind:checked={agent.enabled} onchange={ensurePrimaryAutoAgent} />
                           <span class="tgl-track"></span>
                           <span class="tgl-label">ON</span>
                         </label>
@@ -894,7 +1081,7 @@
                           <span class="aac-fallback-badge" title="These are static fallback models — no API key found in env">fallback</span>
                         {/if}
                       </div>
-                      <!-- Row 3: args + demand toggle -->
+                      <!-- Row 3: args only -->
                       <div class="aac-row aac-row-args">
                         <span class="aac-field-label">ARGS</span>
                         <input
@@ -904,11 +1091,6 @@
                           value={getAgentArgsString(agent.args)}
                           oninput={(e) => setAgentArgsFromString(agent, (e.currentTarget as HTMLInputElement).value)}
                         />
-                        <label class="aac-toggle aac-demand-toggle" title="When checked, agent is NOT launched on startup — only when manually triggered">
-                          <input type="checkbox" bind:checked={agent.startOnDemand} />
-                          <span class="tgl-track"></span>
-                          <span class="tgl-label">on-demand</span>
-                        </label>
                       </div>
                     </div>
                   {/each}
@@ -1506,6 +1688,13 @@
     gap: 14px;
   }
 
+  .auto-agent-presets {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 8px 0 10px;
+  }
+
   .auto-agent-card {
     display: flex;
     flex-direction: column;
@@ -1631,14 +1820,6 @@
 
   .aac-toggle:has(input:checked) .tgl-label {
     color: var(--primary);
-  }
-
-  .aac-demand-toggle {
-    margin-left: auto;
-  }
-
-  .aac-demand-toggle .tgl-label {
-    color: var(--secondary);
   }
 
   .aac-fallback-badge {

@@ -1,11 +1,13 @@
 import { derived, writable } from 'svelte/store';
 
 import {
+  type MacroDialect,
   normalizeDesignOutput,
   normalizeDesignParams,
   normalizeUiSpec,
   type DesignOutput,
   type DesignParams,
+  type PostProcessingSpec,
   type UiSpec,
 } from '../types/domain';
 
@@ -13,8 +15,10 @@ export interface WorkingCopyState {
   title: string;
   versionName: string;
   macroCode: string;
+  macroDialect: MacroDialect;
   uiSpec: UiSpec;
   params: DesignParams;
+  postProcessing: PostProcessingSpec | null;
   dirty: boolean;
   sourceVersionId: string | null;
 }
@@ -28,8 +32,10 @@ function createInitialState(): WorkingCopyState {
     title: '',
     versionName: '',
     macroCode: '',
+    macroDialect: 'legacy',
     uiSpec: { fields: [] },
     params: {},
+    postProcessing: null,
     dirty: false,
     sourceVersionId: null,
   };
@@ -48,8 +54,10 @@ function createWorkingCopyStore() {
         title: normalized.title,
         versionName: normalized.versionName,
         macroCode: normalized.macroCode,
+        macroDialect: normalized.macroDialect ?? 'legacy',
         uiSpec: normalizeUiSpec(normalized.uiSpec),
         params: normalizeDesignParams(normalized.initialParams),
+        postProcessing: normalized.postProcessing ?? null,
         dirty: false,
         sourceVersionId: messageId,
       });

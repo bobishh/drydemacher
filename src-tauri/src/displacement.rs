@@ -12,6 +12,13 @@ struct Vec3 {
     z: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Axis {
+    X,
+    Y,
+    Z,
+}
+
 impl Vec3 {
     fn add(&self, other: &Vec3) -> Vec3 {
         Vec3 {
@@ -83,6 +90,220 @@ fn quantize(v: &Vec3) -> (i32, i32, i32) {
     )
 }
 
+fn axis_value(v: &Vec3, axis: Axis) -> f32 {
+    match axis {
+        Axis::X => v.x,
+        Axis::Y => v.y,
+        Axis::Z => v.z,
+    }
+}
+
+fn axis_unit(axis: Axis) -> Vec3 {
+    match axis {
+        Axis::X => Vec3 {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        Axis::Y => Vec3 {
+            x: 0.0,
+            y: 1.0,
+            z: 0.0,
+        },
+        Axis::Z => Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 1.0,
+        },
+    }
+}
+
+fn choose_planar_axes(
+    min_x: f32,
+    max_x: f32,
+    min_y: f32,
+    max_y: f32,
+    min_z: f32,
+    max_z: f32,
+) -> (Axis, Axis) {
+    let mut spans = [
+        (Axis::X, max_x - min_x),
+        (Axis::Y, max_y - min_y),
+        (Axis::Z, max_z - min_z),
+    ];
+    spans.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    (spans[0].0, spans[1].0)
+}
+
+fn remaining_axis(planar_axes: (Axis, Axis)) -> Axis {
+    match planar_axes {
+        (Axis::X, Axis::Y) | (Axis::Y, Axis::X) => Axis::Z,
+        (Axis::X, Axis::Z) | (Axis::Z, Axis::X) => Axis::Y,
+        (Axis::Y, Axis::Z) | (Axis::Z, Axis::Y) => Axis::X,
+        _ => Axis::Z,
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PlanarProjectionContext {
+    axes: (Axis, Axis),
+    min_x: f32,
+    max_x: f32,
+    min_y: f32,
+    max_y: f32,
+    min_z: f32,
+    max_z: f32,
+}
+
+impl PlanarProjectionContext {
+    fn new(
+        axes: (Axis, Axis),
+        min_x: f32,
+        max_x: f32,
+        min_y: f32,
+        max_y: f32,
+        min_z: f32,
+        max_z: f32,
+    ) -> Self {
+        Self {
+            axes,
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+            min_z,
+            max_z,
+        }
+    }
+
+    fn axis_bounds(&self, axis: Axis) -> (f32, f32) {
+        match axis {
+            Axis::X => (self.min_x, self.max_x),
+            Axis::Y => (self.min_y, self.max_y),
+            Axis::Z => (self.min_z, self.max_z),
+        }
+    }
+
+    fn uv(&self, v: &Vec3) -> (f32, f32) {
+        let (u_min, u_max) = self.axis_bounds(self.axes.0);
+        let (v_min, v_max) = self.axis_bounds(self.axes.1);
+        let u_span = u_max - u_min;
+        let v_span = v_max - v_min;
+        let u = if u_span > 1e-5 {
+            (axis_value(v, self.axes.0) - u_min) / u_span
+        } else {
+            0.0
+        };
+        let v_tex = if v_span > 1e-5 {
+            (axis_value(v, self.axes.1) - v_min) / v_span
+        } else {
+            0.0
+        };
+        (u, v_tex)
+    }
+
+    fn normal_axis(&self) -> Axis {
+        remaining_axis(self.axes)
+    }
+}
+
+fn edge_key(a: usize, b: usize) -> (usize, usize) {
+    if a < b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+fn midpoint(v1: &Vec3, v2: &Vec3) -> Vec3 {
+    Vec3 {
+        x: (v1.x + v2.x) * 0.5,
+        y: (v1.y + v2.y) * 0.5,
+        z: (v1.z + v2.z) * 0.5,
+    }
+}
+
+fn max_planar_edge_span(
+    tri: &[usize; 3],
+    vertices: &[Vec3],
+    projection: &PlanarProjectionContext,
+) -> f32 {
+    let uv0 = projection.uv(&vertices[tri[0]]);
+    let uv1 = projection.uv(&vertices[tri[1]]);
+    let uv2 = projection.uv(&vertices[tri[2]]);
+    [(uv0, uv1), (uv1, uv2), (uv2, uv0)]
+        .into_iter()
+        .map(|(left, right)| (left.0 - right.0).abs().max((left.1 - right.1).abs()))
+        .fold(0.0, f32::max)
+}
+
+fn refine_planar_mesh(
+    vertices: &mut Vec<Vec3>,
+    indices: &mut Vec<[usize; 3]>,
+    projection: &PlanarProjectionContext,
+    image_width: u32,
+    image_height: u32,
+) {
+    let target_segments = image_width.max(image_height).clamp(24, 64) as f32;
+    let uv_edge_limit = 1.0 / target_segments;
+
+    for _ in 0..8 {
+        let mut midpoint_cache: HashMap<(usize, usize), usize> = HashMap::new();
+        let mut next_indices = Vec::with_capacity(indices.len());
+        let mut split_count = 0usize;
+
+        for tri in indices.iter() {
+            let max_edge_span = max_planar_edge_span(tri, vertices, projection);
+
+            if max_edge_span <= uv_edge_limit {
+                next_indices.push(*tri);
+                continue;
+            }
+
+            split_count += 1;
+
+            let midpoint_index = |left: usize,
+                                  right: usize,
+                                  vertices: &mut Vec<Vec3>,
+                                  midpoint_cache: &mut HashMap<(usize, usize), usize>|
+             -> usize {
+                let key = edge_key(left, right);
+                if let Some(existing) = midpoint_cache.get(&key) {
+                    return *existing;
+                }
+                let idx = vertices.len();
+                let point = midpoint(&vertices[left], &vertices[right]);
+                vertices.push(point);
+                midpoint_cache.insert(key, idx);
+                idx
+            };
+
+            let a = tri[0];
+            let b = tri[1];
+            let c = tri[2];
+            let ab = midpoint_index(a, b, vertices, &mut midpoint_cache);
+            let bc = midpoint_index(b, c, vertices, &mut midpoint_cache);
+            let ca = midpoint_index(c, a, vertices, &mut midpoint_cache);
+
+            next_indices.push([a, ab, ca]);
+            next_indices.push([ab, b, bc]);
+            next_indices.push([ca, bc, c]);
+            next_indices.push([ab, bc, ca]);
+        }
+
+        *indices = next_indices;
+
+        if split_count == 0 {
+            break;
+        }
+    }
+}
+
 pub fn apply(
     input_stl: &Path,
     image_path: &str,
@@ -119,7 +340,7 @@ pub fn apply(
             z: 0.0,
         });
         let mut tri_indices = [0; 3];
-        for i in 0..3 {
+        for tri_index in &mut tri_indices {
             let v = read_vec3(&mut file)
                 .map_err(|e| AppError::internal(format!("Failed to read vertex: {}", e)))?;
             let q = quantize(&v);
@@ -133,7 +354,7 @@ pub fn apply(
                 });
                 new_idx
             });
-            tri_indices[i] = idx;
+            *tri_index = idx;
             // Accumulate normal for vertex
             let vn = &mut vertex_normals[idx];
             *vn = vn.add(&normal);
@@ -177,11 +398,28 @@ pub fn apply(
         }
     }
 
+    let planar_axes = choose_planar_axes(min_x, max_x, min_y, max_y, min_z, max_z);
+    let planar_projection =
+        PlanarProjectionContext::new(planar_axes, min_x, max_x, min_y, max_y, min_z, max_z);
+    if matches!(spec.projection, ProjectionType::Planar) {
+        refine_planar_mesh(
+            &mut vertices,
+            &mut indices,
+            &planar_projection,
+            img_w,
+            img_h,
+        );
+    }
+
     // Displace
     let mut new_vertices = Vec::with_capacity(vertices.len());
+    let planar_normal_axis = planar_projection.normal_axis();
+    let (_, planar_front_coord) = planar_projection.axis_bounds(planar_normal_axis);
+    let planar_normal_span =
+        planar_front_coord - planar_projection.axis_bounds(planar_normal_axis).0;
+    let planar_front_tolerance = planar_normal_span.abs().max(1.0) * 1e-4;
     for i in 0..vertices.len() {
         let v = &vertices[i];
-        let n = &vertex_normals[i];
 
         let (u, mut v_tex) = match spec.projection {
             ProjectionType::Cylindrical => {
@@ -203,21 +441,7 @@ pub fn apply(
                 let v_tex = phi / std::f32::consts::PI;
                 (u, v_tex)
             }
-            ProjectionType::Planar => {
-                let x_span = max_x - min_x;
-                let y_span = max_y - min_y;
-                let u = if x_span > 1e-5 {
-                    (v.x - min_x) / x_span
-                } else {
-                    0.0
-                };
-                let v_tex = if y_span > 1e-5 {
-                    (v.y - min_y) / y_span
-                } else {
-                    0.0
-                };
-                (u, v_tex)
-            }
+            ProjectionType::Planar => planar_projection.uv(v),
         };
 
         // Clamp
@@ -239,7 +463,21 @@ pub fn apply(
         }
 
         let displacement = factor * spec.depth_mm as f32;
-        let new_v = v.add(&n.mul(displacement));
+        let new_v = match spec.projection {
+            ProjectionType::Planar => {
+                if (axis_value(v, planar_normal_axis) - planar_front_coord).abs()
+                    <= planar_front_tolerance
+                {
+                    v.add(&axis_unit(planar_normal_axis).mul(displacement))
+                } else {
+                    *v
+                }
+            }
+            ProjectionType::Cylindrical | ProjectionType::Spherical => {
+                let n = &vertex_normals[i];
+                v.add(&n.mul(displacement))
+            }
+        };
         new_vertices.push(new_v);
     }
 
@@ -279,4 +517,21 @@ pub fn apply(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{choose_planar_axes, Axis};
+
+    #[test]
+    fn choose_planar_axes_uses_two_largest_bbox_dimensions() {
+        let axes = choose_planar_axes(-128.0, 128.0, -1.5, 1.5, -100.0, 100.0);
+        assert_eq!(axes, (Axis::X, Axis::Z));
+    }
+
+    #[test]
+    fn choose_planar_axes_prefers_x_and_y_for_flat_top_down_shapes() {
+        let axes = choose_planar_axes(-50.0, 50.0, -30.0, 30.0, -2.0, 2.0);
+        assert_eq!(axes, (Axis::X, Axis::Y));
+    }
 }

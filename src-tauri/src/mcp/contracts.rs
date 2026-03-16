@@ -1,6 +1,6 @@
 use crate::models::{
-    AgentDraft, AgentOrigin, ArtifactBundle, ControlPrimitive, ControlView, DesignOutput,
-    DesignParams, ModelManifest, TargetLeaseInfo, Thread, ThreadStatus, UiSpec,
+    AgentOrigin, ArtifactBundle, ControlPrimitive, ControlView, DesignOutput, DesignParams,
+    MeasurementAnnotation, ModelManifest, TargetLeaseInfo, Thread, ThreadStatus, UiSpec,
 };
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +23,8 @@ pub struct UserPromptRequest {
 pub struct UserPromptResponse {
     pub request_id: String,
     pub prompt_text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::contracts::Attachment>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -32,6 +34,35 @@ pub struct AgentPromptEvent {
     pub message: Option<String>,
     pub agent_label: String,
     pub session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetModelScreenshotRequest {
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    #[serde(default)]
+    pub include_overlays: Option<bool>,
+    #[serde(default)]
+    pub camera: Option<crate::contracts::ViewportCameraState>,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentViewportScreenshotEvent {
+    pub request_id: String,
+    pub thread_id: String,
+    pub message_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    pub preview_stl_path: String,
+    #[serde(default)]
+    pub viewer_assets: Vec<crate::contracts::ViewerAsset>,
+    pub include_overlays: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub camera: Option<crate::contracts::ViewportCameraState>,
 }
 
 // --- user_confirm_request ---
@@ -198,6 +229,104 @@ pub struct TargetGetRequest {
     pub message_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TargetResolvedFrom {
+    Base,
+    Draft,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetMetaRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetMetaResponse {
+    pub thread_id: String,
+    pub message_id: String,
+    pub title: String,
+    pub version_name: String,
+    pub model_id: Option<String>,
+    pub has_draft: bool,
+    pub resolved_from: TargetResolvedFrom,
+    pub ui_field_count: usize,
+    pub range_count: usize,
+    pub number_count: usize,
+    pub select_count: usize,
+    pub checkbox_count: usize,
+    pub parameter_count: usize,
+    pub has_semantic_manifest: bool,
+    pub control_primitive_count: usize,
+    pub control_relation_count: usize,
+    pub control_view_count: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetMacroRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetMacroResponse {
+    pub thread_id: String,
+    pub message_id: String,
+    pub title: String,
+    pub version_name: String,
+    pub resolved_from: TargetResolvedFrom,
+    pub macro_code: String,
+    pub macro_dialect: crate::models::MacroDialect,
+    pub post_processing: Option<crate::models::PostProcessingSpec>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TargetDetailSection {
+    UiSpec,
+    InitialParams,
+    ArtifactBundle,
+    LatestDraft,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetDetailRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    pub section: TargetDetailSection,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetDetailResponse {
+    pub thread_id: String,
+    pub message_id: String,
+    pub title: String,
+    pub version_name: String,
+    pub resolved_from: TargetResolvedFrom,
+    pub section: TargetDetailSection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_spec: Option<UiSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_params: Option<DesignParams>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_bundle: Option<Option<ArtifactBundle>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_draft: Option<Option<()>>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TargetGetResponse {
@@ -210,7 +339,7 @@ pub struct TargetGetResponse {
     pub initial_params: DesignParams,
     pub artifact_bundle: Option<ArtifactBundle>,
     pub model_manifest: Option<ModelManifest>,
-    pub latest_draft: Option<AgentDraft>,
+    pub latest_draft: Option<()>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -231,7 +360,7 @@ pub struct SemanticManifestResponse {
     pub version_name: Option<String>,
     pub artifact_bundle: ArtifactBundle,
     pub model_manifest: ModelManifest,
-    pub latest_draft: Option<AgentDraft>,
+    pub latest_draft: Option<()>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -301,6 +430,26 @@ pub struct SessionResumeResponse {
     pub message_id: Option<String>,
     pub model_id: Option<String>,
     pub last_interaction_at: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionReplySaveRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    pub body: String,
+    #[serde(default)]
+    pub fatal: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionReplySaveResponse {
+    pub thread_id: String,
+    pub message_id: String,
+    pub fatal: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -441,6 +590,30 @@ pub struct ControlViewDeleteRequest {
     pub thread_id: Option<String>,
     pub message_id: Option<String>,
     pub view_id: String,
+    pub title: Option<String>,
+    pub version_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasurementAnnotationSaveRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    pub annotation: MeasurementAnnotation,
+    pub title: Option<String>,
+    pub version_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasurementAnnotationDeleteRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    pub annotation_id: String,
     pub title: Option<String>,
     pub version_name: Option<String>,
 }

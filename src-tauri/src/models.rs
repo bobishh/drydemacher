@@ -1,8 +1,9 @@
 use std::collections::{HashMap, VecDeque};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::Manager;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use tauri::{Emitter, Manager};
 use tokio::sync::oneshot;
 
 pub use crate::contracts::*;
@@ -69,6 +70,44 @@ impl McpSessionState {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct PromptResumeState {
+    pub pgid: Option<i32>,
+    pub agent_label: String,
+    pub thread_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ViewportScreenshotCapture {
+    pub data_url: String,
+    pub width: u32,
+    pub height: u32,
+    pub camera: ViewportCameraState,
+    pub source: String,
+    pub thread_id: String,
+    pub message_id: String,
+    pub model_id: Option<String>,
+    pub include_overlays: bool,
+}
+
+pub type ViewportScreenshotSender = oneshot::Sender<Result<ViewportScreenshotCapture, String>>;
+pub type PendingViewportScreenshotChannels =
+    Arc<tokio::sync::Mutex<HashMap<String, ViewportScreenshotSender>>>;
+pub type AgentTerminalWriter = Arc<Mutex<Box<dyn Write + Send>>>;
+pub type AgentTerminalPty = Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>;
+
+pub struct AgentTerminalRuntime {
+    pub snapshot: AgentTerminalSnapshot,
+    pub writer: AgentTerminalWriter,
+    pub pty: AgentTerminalPty,
+    pub pending_utf8: Vec<u8>,
+    pub pending_escape: String,
+    pub last_emitted_at: Option<Instant>,
+}
+
+pub type PendingAgentTerminalSessions = Arc<Mutex<HashMap<String, AgentTerminalRuntime>>>;
+pub type PendingAgentSessionTraces = Arc<Mutex<HashMap<String, VecDeque<AgentSessionTraceEntry>>>>;
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Mutex<Config>>,
@@ -79,19 +118,23 @@ pub struct AppState {
     pub mcp_sessions: Arc<tokio::sync::Mutex<HashMap<String, McpSessionState>>>,
     /// Pending user-confirmation requests keyed by requestId.
     pub confirm_channels: Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<String>>>>,
-    /// Pending user-prompt requests keyed by requestId (agent waits for free-text from UI).
-    pub prompt_channels: Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<String>>>>,
-    /// Active-mode auto-agent process group IDs keyed by agent label.
-    /// Used to SIGSTOP the agent while it waits for user input.
-    pub auto_agent_pids: Arc<Mutex<HashMap<String, i32>>>,
-    /// Maps prompt request_id → pgid for agents that were SIGSTOP'd.
-    /// Cleared and SIGCONT'd when the user resolves the prompt.
-    pub prompt_pgids: Arc<Mutex<HashMap<String, i32>>>,
-    /// Per-agent wake notifiers. Fired by `wake_auto_agent` to unblock
-    /// the supervisor loop waiting to respawn a dead agent.
-    pub agent_wake: Arc<Mutex<HashMap<String, Arc<tokio::sync::Notify>>>>,
+    /// Pending user-prompt requests keyed by requestId (agent waits for text/attachments from UI).
+    pub prompt_channels:
+        Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<ResolveAgentPromptInput>>>>,
+    /// Runtime state machine for active-mode MCP agents.
+    pub auto_agent_runtime: Arc<Mutex<crate::mcp::runtime::AutoAgentRuntimeRegistry>>,
+    /// Maps prompt request_id → process control for agents SIGSTOP'd while waiting on the user.
+    pub prompt_waits: Arc<Mutex<HashMap<String, PromptResumeState>>>,
+    /// Pending viewport screenshot requests keyed by requestId.
+    pub viewport_screenshot_channels: PendingViewportScreenshotChannels,
     /// Ring buffer of in-app log entries (latest 200 entries).
     pub app_logs: Arc<Mutex<VecDeque<AppLogEntry>>>,
+    /// Structured per-session trace buffers for active MCP agents.
+    pub agent_session_traces: PendingAgentSessionTraces,
+    /// Active PTY-backed terminal bridges for interactive auto-agents.
+    pub agent_terminals: PendingAgentTerminalSessions,
+    /// App handle for emitting runtime PTY events back into the frontend.
+    pub app_handle: Arc<Mutex<Option<tauri::AppHandle>>>,
 }
 
 impl AppState {
@@ -113,11 +156,20 @@ impl AppState {
             mcp_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             confirm_channels: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             prompt_channels: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            auto_agent_pids: Arc::new(Mutex::new(HashMap::new())),
-            prompt_pgids: Arc::new(Mutex::new(HashMap::new())),
-            agent_wake: Arc::new(Mutex::new(HashMap::new())),
+            auto_agent_runtime: Arc::new(Mutex::new(
+                crate::mcp::runtime::AutoAgentRuntimeRegistry::default(),
+            )),
+            prompt_waits: Arc::new(Mutex::new(HashMap::new())),
+            viewport_screenshot_channels: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             app_logs: Arc::new(Mutex::new(VecDeque::new())),
+            agent_session_traces: Arc::new(Mutex::new(HashMap::new())),
+            agent_terminals: Arc::new(Mutex::new(HashMap::new())),
+            app_handle: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn set_app_handle(&self, handle: tauri::AppHandle) {
+        *self.app_handle.lock().unwrap() = Some(handle);
     }
 
     pub fn push_log(&self, message: String) {
@@ -141,5 +193,53 @@ impl AppState {
 
     pub fn mcp_status(&self) -> McpServerStatus {
         self.mcp_status.lock().unwrap().clone()
+    }
+
+    pub fn emit_agent_terminal_update(&self, snapshot: &AgentTerminalSnapshot) {
+        let handle = self.app_handle.lock().unwrap().clone();
+        if let Some(handle) = handle {
+            let _ = handle.emit("agent-terminal-updated", snapshot);
+        }
+    }
+
+    pub fn push_agent_session_trace(&self, entry: AgentSessionTraceEntry) {
+        {
+            let mut traces = self.agent_session_traces.lock().unwrap();
+            let buffer = traces.entry(entry.session_id.clone()).or_default();
+            if buffer.len() >= 200 {
+                buffer.pop_front();
+            }
+            buffer.push_back(entry.clone());
+        }
+
+        let handle = self.app_handle.lock().unwrap().clone();
+        if let Some(handle) = handle {
+            let _ = handle.emit("agent-session-trace-updated", entry);
+        }
+    }
+
+    pub fn agent_session_trace(&self, session_id: &str) -> Vec<AgentSessionTraceEntry> {
+        self.agent_session_traces
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .map(|entries| entries.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn latest_agent_session_trace_summary(&self, session_id: &str) -> Option<String> {
+        self.agent_session_traces
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .and_then(|entries| entries.back())
+            .map(|entry| entry.summary.clone())
+    }
+
+    pub fn emit_history_updated(&self) {
+        let handle = self.app_handle.lock().unwrap().clone();
+        if let Some(handle) = handle {
+            let _ = handle.emit("history-updated", ());
+        }
     }
 }

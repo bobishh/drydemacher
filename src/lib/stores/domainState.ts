@@ -17,6 +17,15 @@ export const config = writable<AppConfig>({
     dingId: null,
     muted: false,
   },
+  mcp: {
+    port: null,
+    maxSessions: null,
+    mode: 'passive',
+    primaryAgentId: null,
+    autoAgents: [],
+  },
+  hasSeenOnboarding: false,
+  connectionType: null,
 });
 export const availableModels = writable<string[]>([]);
 export const isLoadingModels = writable<boolean>(false);

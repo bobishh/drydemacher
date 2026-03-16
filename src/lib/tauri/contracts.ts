@@ -45,6 +45,14 @@ async listAgentModels(cmd: string) : Promise<Result<AgentModelList, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+async getAppLogs() : Promise<Result<AppLogEntry[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_app_logs") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getHistory() : Promise<Result<Thread[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_history") };
@@ -253,9 +261,9 @@ async exportFile(sourcePath: string, targetPath: string) : Promise<Result<null, 
     else return { status: "error", error: e  as any };
 }
 },
-async addManualVersion(threadId: string, title: string, versionName: string, macroCode: string, parameters: Partial<{ [key in string]: ParamValue }>, uiSpec: UiSpec, artifactBundle: ArtifactBundle | null, modelManifest: ModelManifest | null) : Promise<Result<string, AppError>> {
+async addManualVersion(input: AddManualVersionInput) : Promise<Result<string, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("add_manual_version", { threadId, title, versionName, macroCode, parameters, uiSpec, artifactBundle, modelManifest }) };
+    return { status: "ok", data: await TAURI_INVOKE("add_manual_version", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -344,17 +352,25 @@ async getMcpServerStatus() : Promise<Result<McpServerStatus, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
-async getAgentDraft(threadId: string, baseMessageId: string) : Promise<Result<AgentDraft | null, AppError>> {
+async getAgentTerminalSnapshots() : Promise<Result<AgentTerminalSnapshot[], AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("get_agent_draft", { threadId, baseMessageId }) };
+    return { status: "ok", data: await TAURI_INVOKE("get_agent_terminal_snapshots") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async deleteAgentDraft(threadId: string, baseMessageId: string) : Promise<Result<null, AppError>> {
+async sendAgentTerminalInput(input: AgentTerminalInput) : Promise<Result<null, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_agent_draft", { threadId, baseMessageId }) };
+    return { status: "ok", data: await TAURI_INVOKE("send_agent_terminal_input", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async resizeAgentTerminal(agentId: string, cols: number, rows: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resize_agent_terminal", { agentId, cols, rows }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -374,11 +390,27 @@ async resolveAgentConfirm(requestId: string, choice: string) : Promise<Result<nu
 },
 /**
  * Called by the frontend when the user submits a prompt in MCP mode.
- * Resolves the pending oneshot channel so the MCP handler can return the text.
+ * Resolves the pending oneshot channel so the MCP handler can return the text and attachments.
  */
-async resolveAgentPrompt(requestId: string, promptText: string) : Promise<Result<null, AppError>> {
+async resolveAgentPrompt(input: ResolveAgentPromptInput) : Promise<Result<null, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("resolve_agent_prompt", { requestId, promptText }) };
+    return { status: "ok", data: await TAURI_INVOKE("resolve_agent_prompt", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async resolveAgentViewportScreenshot(input: ResolveViewportScreenshotInput) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resolve_agent_viewport_screenshot", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async rejectAgentViewportScreenshot(input: RejectViewportScreenshotInput) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("reject_agent_viewport_screenshot", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -395,9 +427,46 @@ async getThreadAgentState(threadId: string) : Promise<Result<ThreadAgentState, A
     else return { status: "error", error: e  as any };
 }
 },
-async getAppLogs() : Promise<Result<AppLogEntry[], AppError>> {
+async getAgentSessionTrace(sessionId: string) : Promise<Result<AgentSessionTraceEntry[], AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("get_app_logs") };
+    return { status: "ok", data: await TAURI_INVOKE("get_agent_session_trace", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async wakePrimaryAutoAgent(threadId: string | null) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("wake_primary_auto_agent", { threadId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async stopPrimaryAutoAgent(threadId: string | null) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("stop_primary_auto_agent", { threadId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async restartPrimaryAutoAgent(threadId: string | null) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("restart_primary_auto_agent", { threadId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Called by the frontend when the user queues a message in MCP mode and no agent is running.
+ * Fires the wake notifier so the supervisor loop can respawn the named agent.
+ * Safe to call redundantly — noop if the agent is already running.
+ */
+async wakeAutoAgent(label: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("wake_auto_agent", { label }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -415,24 +484,53 @@ async getAppLogs() : Promise<Result<AppLogEntry[], AppError>> {
 
 /** user-defined types **/
 
+export type AddManualVersionInput = { threadId: string; title: string; versionName: string; macroCode: string; parameters: Partial<{ [key in string]: ParamValue }>; uiSpec: UiSpec; postProcessing: PostProcessingSpec | null; artifactBundle: ArtifactBundle | null; modelManifest: ModelManifest | null }
 export type Advisory = { advisoryId: string; label: string; severity: AdvisorySeverity; primitiveIds?: string[]; viewIds?: string[]; message: string; condition?: AdvisoryCondition; threshold?: number | null }
 export type AdvisoryCondition = "always" | "below" | "above"
 export type AdvisorySeverity = "info" | "warning"
 export type AgentModelList = { models: string[]; isLive: boolean }
-export type AppLogEntry = { tsMs: number; message: string }
-export type AgentDraft ={ sessionId: string; threadId: string; baseMessageId: string; modelId: string | null; designOutput: DesignOutput; artifactBundle: ArtifactBundle | null; modelManifest: ModelManifest | null; updatedAt: number }
 export type AgentOrigin = { hostLabel: string; clientKind: string; agentLabel: string; llmModelId?: string | null; llmModelLabel?: string | null; sessionId: string; createdAt: number }
 export type AgentSession = { sessionId: string; clientKind: string; hostLabel: string; agentLabel: string; llmModelId?: string | null; llmModelLabel?: string | null; threadId: string | null; messageId: string | null; modelId: string | null; phase: string; statusText: string; updatedAt: number }
+export type AgentSessionTraceEntry = { sessionId: string; agentLabel: string; threadId?: string | null; messageId?: string | null; modelId?: string | null; phase: string; kind: string; summary: string; details?: string | null; timestamp: number }
+export type AgentTerminalInput = { agentId: string; text?: string; key?: string | null; ctrl?: boolean; alt?: boolean; shift?: boolean; meta?: boolean; submit?: boolean }
+export type AgentTerminalSnapshot = { agentId: string; agentLabel: string; providerKind?: string | null; 
+/**
+ * Stable per-PTY-session token. Changes whenever the backend creates
+ * a fresh terminal session for the agent.
+ */
+sessionNonce: number; 
+/**
+ * Deprecated compatibility snapshot for inactive/last-session display.
+ * Live terminal rendering should use `vtStream`.
+ */
+screenText: string; 
+/**
+ * Authoritative raw VT replay stream for live terminal rendering.
+ */
+vtStream?: string; 
+/**
+ * Optional incremental VT chunk for live updates. When present, the frontend
+ * should merge it into its local replay state instead of treating `vtStream`
+ * as a full snapshot replacement.
+ */
+vtDelta?: string | null; attentionRequired: boolean; busy?: boolean; activityLabel?: string | null; activityStartedAt?: number | null; attentionKind?: string | null; summary?: string | null; active: boolean; updatedAt: number }
 export type AppError = { code: AppErrorCode; message: string; details?: string | null }
 export type AppErrorCode = "validation" | "notFound" | "conflict" | "provider" | "persistence" | "render" | "parse" | "internal"
-export type ArtifactBundle = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; contentHash: string; artifactVersion?: number; fcstdPath: string; manifestPath: string; macroPath?: string | null; previewStlPath: string; viewerAssets?: ViewerAsset[] }
+export type AppLogEntry = { tsMs: number; message: string }
+export type ArtifactBundle = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; contentHash: string; artifactVersion?: number; fcstdPath: string; manifestPath: string; macroPath?: string | null; previewStlPath: string; viewerAssets?: ViewerAsset[]; edgeTargets?: ViewerEdgeTarget[]; calloutAnchors?: CalloutAnchor[]; measurementGuides?: MeasurementGuide[] }
 export type Asset = { id: string; name: string; path: string; format: string }
 export type Attachment = { path: string; name: string; explanation: string; kind: AttachmentKind }
 export type AttachmentKind = "image" | "cad"
 /**
  * Whether Ecky runs the embedded MCP HTTP server.
  */
-export type AutoAgent = { id: string; label: string; cmd: string; model?: string | null; args: string[]; enabled: boolean; startOnDemand?: boolean }
+export type AutoAgent = { id: string; label: string; cmd: string; model?: string | null; args: string[]; enabled: boolean; 
+/**
+ * Deprecated compatibility flag from the old eager-start implementation.
+ * Active-mode wake behavior now depends on `mcp.mode` and `mcp.primaryAgentId`.
+ */
+startOnDemand?: boolean }
+export type CalloutAnchor = { anchorId: string; position: [number, number, number]; normal?: [number, number, number] | null }
 export type Config = { engines: Engine[]; selectedEngineId: string; freecadCmd?: string; assets?: Asset[]; microwave?: MicrowaveConfig | null; mcp?: McpConfig; hasSeenOnboarding?: boolean; connectionType?: string | null }
 export type ControlPrimitive = { primitiveId: string; label: string; kind: ControlPrimitiveKind; source?: ControlViewSource; partIds?: string[]; bindings?: PrimitiveBinding[]; editable: boolean; order?: number }
 export type ControlPrimitiveKind = "number" | "toggle" | "choice"
@@ -442,7 +540,7 @@ export type ControlView = { viewId: string; label: string; scope: ControlViewSco
 export type ControlViewScope = "global" | "part"
 export type ControlViewSection = { sectionId: string; label: string; primitiveIds?: string[]; collapsed?: boolean }
 export type ControlViewSource = "generated" | "inherited" | "llm" | "manual"
-export type DeletedMessage = { id: string; threadId: string; threadTitle: string; role: MessageRole; content: string; output?: DesignOutput | null; usage?: UsageSummary | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; agentOrigin?: AgentOrigin | null; timestamp: number; imageData?: string | null; attachmentImages?: string[]; deletedAt: number }
+export type DeletedMessage = { id: string; threadId: string; threadTitle: string; role: MessageRole; content: string; output?: DesignOutput | null; usage?: UsageSummary | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; agentOrigin?: AgentOrigin | null; timestamp: number; imageData?: string | null; visualKind?: MessageVisualKind | null; attachmentImages?: string[]; deletedAt: number }
 export type DesignOutput = { title?: string; versionName?: string; response?: string; interactionMode?: InteractionMode; macroCode: string; macroDialect?: MacroDialect; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; postProcessing?: PostProcessingSpec | null }
 export type DisplacementSpec = { imageParam: string; projection: ProjectionType; depthMm: number; invert?: boolean }
 export type DocumentMetadata = { documentName: string; documentLabel: string; sourcePath?: string | null; objectCount?: number; warnings?: string[] }
@@ -475,15 +573,31 @@ port?: number | null;
  */
 maxSessions?: number | null; 
 /**
- * External processes to launch on startup.
+ * How Ecky exposes MCP: passive server-only or active server + lazy auto-agent wake.
+ */
+mode?: McpMode; 
+/**
+ * Which auto-agent should be woken when the user queues a message in active mode.
+ */
+primaryAgentId?: string | null; 
+/**
+ * External processes available to Ecky in active mode.
  */
 autoAgents?: AutoAgent[] }
+export type McpMode = "passive" | "active"
 export type McpServerStatus = { running: boolean; endpointUrl: string; lastStartupError?: string | null }
-export type Message = { id: string; role: MessageRole; content: string; status: MessageStatus; output?: DesignOutput | null; usage?: UsageSummary | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; agentOrigin?: AgentOrigin | null; imageData?: string | null; attachmentImages?: string[]; timestamp: number }
+export type MeasurementAnnotation = { annotationId: string; label: string; basis: MeasurementBasis; axis: MeasurementAxis; parameterKeys?: string[]; primitiveIds?: string[]; targetIds?: string[]; guideId?: string | null; explanation?: string | null; formulaHint?: string | null; source: MeasurementAnnotationSource }
+export type MeasurementAnnotationSource = "generated" | "llm" | "manual" | "api"
+export type MeasurementAxis = "x" | "y" | "z" | "radial" | "normal" | "path" | "custom"
+export type MeasurementBasis = "outer" | "inner" | "wall" | "clearance" | "centerline" | "pitch" | "custom"
+export type MeasurementGuide = { guideId: string; kind: MeasurementGuideKind; anchorIds?: string[]; labelAnchorId?: string | null; targetIds?: string[] }
+export type MeasurementGuideKind = "linear" | "radial" | "clearance" | "pitch" | "leader"
+export type Message = { id: string; role: MessageRole; content: string; status: MessageStatus; output?: DesignOutput | null; usage?: UsageSummary | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; agentOrigin?: AgentOrigin | null; imageData?: string | null; visualKind?: MessageVisualKind | null; attachmentImages?: string[]; timestamp: number }
 export type MessageRole = "user" | "assistant"
 export type MessageStatus = "pending" | "success" | "error" | "discarded"
+export type MessageVisualKind = "conceptPreview"
 export type MicrowaveConfig = { humId?: string | null; dingId?: string | null; muted?: boolean }
-export type ModelManifest = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; document: DocumentMetadata; parts?: PartBinding[]; parameterGroups?: ParameterGroup[]; controlPrimitives?: ControlPrimitive[]; controlRelations?: ControlRelation[]; controlViews?: ControlView[]; advisories?: Advisory[]; selectionTargets?: SelectionTarget[]; warnings?: string[]; enrichmentState?: ManifestEnrichmentState }
+export type ModelManifest = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; document: DocumentMetadata; parts?: PartBinding[]; parameterGroups?: ParameterGroup[]; controlPrimitives?: ControlPrimitive[]; controlRelations?: ControlRelation[]; controlViews?: ControlView[]; advisories?: Advisory[]; selectionTargets?: SelectionTarget[]; measurementAnnotations?: MeasurementAnnotation[]; warnings?: string[]; enrichmentState?: ManifestEnrichmentState }
 export type ModelSourceKind = "generated" | "importedFcstd"
 export type ParamValue = string | number | boolean | null
 export type ParameterGroup = { groupId: string; label: string; parameterKeys?: string[]; partIds?: string[]; editable: boolean; presentation?: string | null; order?: number | null }
@@ -492,16 +606,19 @@ export type PartBinding = { partId: string; freecadObjectName: string; label: st
 export type PostProcessingSpec = { displacement?: DisplacementSpec | null }
 export type PrimitiveBinding = { parameterKey: string; scale?: number; offset?: number; min?: number | null; max?: number | null }
 export type ProjectionType = "planar" | "cylindrical" | "spherical"
+export type RejectViewportScreenshotInput = { requestId: string; error: string }
+export type ResolveAgentPromptInput = { requestId: string; promptText: string; attachments?: Attachment[] }
+export type ResolveViewportScreenshotInput = { requestId: string; dataUrl: string; width: number; height: number; camera: ViewportCameraState; source: string; threadId: string; messageId: string; modelId?: string | null; includeOverlays: boolean }
 export type SelectOption = { label: string; value: SelectValue }
 export type SelectValue = string | number
-export type SelectionTarget = { partId: string; viewerNodeId: string; label: string; kind: SelectionTargetKind; editable: boolean }
-export type SelectionTargetKind = "part" | "object" | "group"
+export type SelectionTarget = { targetId?: string | null; partId: string; viewerNodeId: string; label: string; kind: SelectionTargetKind; editable: boolean; parameterKeys?: string[]; primitiveIds?: string[]; viewIds?: string[] }
+export type SelectionTargetKind = "part" | "object" | "group" | "edge"
 export type Thread = { id: string; title: string; summary?: string; messages: Message[]; updatedAt: number; genieTraits?: GenieTraits | null; versionCount?: number; pendingCount?: number; errorCount?: number; status?: ThreadStatus; finalizedAt?: number | null; pendingConfirm?: string | null }
 export type ThreadAgentState = { 
 /**
- * "none" | "active" | "waiting" | "disconnected"
+ * "none" | "sleeping" | "waking" | "waiting" | "active" | "disconnected" | "error"
  */
-connectionState: string; agentLabel: string | null; llmModelLabel: string | null; phase: string | null; statusText: string | null; updatedAt: number | null }
+connectionState: string; agentLabel: string | null; llmModelLabel: string | null; providerKind?: string | null; sessionId?: string | null; phase: string | null; statusText: string | null; latestTraceSummary?: string | null; hasTrace?: boolean; busy?: boolean; activityLabel?: string | null; activityStartedAt?: number | null; attentionKind?: string | null; waitingOnPrompt?: boolean; awaitingPromptRearm?: boolean; updatedAt: number | null }
 export type ThreadStatus = "active" | "finalized"
 export type UiField = { type: "range"; key: string; label?: string; min?: number | null; max?: number | null; step?: number | null; minFrom?: string | null; maxFrom?: string | null; frozen?: boolean } | { type: "number"; key: string; label?: string; min?: number | null; max?: number | null; step?: number | null; minFrom?: string | null; maxFrom?: string | null; frozen?: boolean } | { type: "select"; key: string; label?: string; options?: SelectOption[]; frozen?: boolean } | { type: "checkbox"; key: string; label?: string; frozen?: boolean } | { type: "image"; key: string; label?: string; frozen?: boolean }
 export type UiSpec = { fields?: UiField[] }
@@ -509,6 +626,9 @@ export type UsageSegment = { stage: string; provider: string; model: string; inp
 export type UsageSummary = { inputTokens?: number; outputTokens?: number; totalTokens?: number; cachedInputTokens?: number; reasoningTokens?: number; estimatedCostUsd?: number | null; segments?: UsageSegment[] }
 export type ViewerAsset = { partId: string; nodeId: string; objectName: string; label: string; path: string; format: ViewerAssetFormat }
 export type ViewerAssetFormat = "stl" | "gltf" | "glb"
+export type ViewerEdgePoint = { x: number; y: number; z: number }
+export type ViewerEdgeTarget = { targetId: string; partId: string; viewerNodeId: string; label: string; editable: boolean; start: ViewerEdgePoint; end: ViewerEdgePoint }
+export type ViewportCameraState = { position: [number, number, number]; target: [number, number, number]; zoom?: number | null; fov?: number | null }
 
 /** tauri-specta globals **/
 

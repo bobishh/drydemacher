@@ -7,6 +7,8 @@ export type SelectOption = Contract.SelectOption;
 export type MessageRole = Contract.MessageRole;
 export type MessageStatus = Contract.MessageStatus;
 export type InteractionMode = Contract.InteractionMode;
+export type MessageVisualKind = Contract.MessageVisualKind;
+export type MacroDialect = Contract.MacroDialect;
 export type FinalizeStatus = Contract.FinalizeStatus;
 export type UsageSegment = Contract.UsageSegment;
 export type UsageSummary = Contract.UsageSummary;
@@ -16,8 +18,11 @@ export type GenieEyeStyle = Contract.EyeStyle;
 export type IntentDecision = Contract.IntentDecision;
 export type AgentOrigin = Contract.AgentOrigin;
 export type AgentSession = Contract.AgentSession;
-export type AgentDraft = Contract.AgentDraft;
+export type AgentSessionTraceEntry = Contract.AgentSessionTraceEntry;
+export type AgentTerminalSnapshot = Contract.AgentTerminalSnapshot;
+export type AgentTerminalInput = Contract.AgentTerminalInput;
 export type McpServerStatus = Contract.McpServerStatus;
+export type ViewportCameraState = Contract.ViewportCameraState;
 export type GenerateOutput = {
   design: DesignOutput;
   threadId: string;
@@ -86,8 +91,10 @@ export interface DesignOutput {
   response: string;
   interactionMode: InteractionMode;
   macroCode: string;
+  macroDialect?: MacroDialect;
   uiSpec: UiSpec;
   initialParams: DesignParams;
+  postProcessing?: PostProcessingSpec | null;
 }
 
 export interface Message {
@@ -101,8 +108,10 @@ export interface Message {
   modelManifest?: ModelManifest | null;
   agentOrigin?: AgentOrigin | null;
   imageData?: string | null;
+  visualKind?: MessageVisualKind | null;
   attachmentImages?: string[];
   timestamp: number;
+  deletedAt?: number | null;
 }
 
 export interface GenieTraits {
@@ -159,6 +168,7 @@ export interface DeletedMessage {
   agentOrigin?: AgentOrigin | null;
   timestamp: number;
   imageData?: string | null;
+  visualKind?: MessageVisualKind | null;
   attachmentImages?: string[];
   deletedAt: number;
 }
@@ -179,9 +189,13 @@ export interface AutoAgent {
   startOnDemand?: boolean;
 }
 
+export type McpMode = 'passive' | 'active';
+
 export interface McpConfig {
   port: number | null;
   maxSessions: number | null;
+  mode: McpMode;
+  primaryAgentId: string | null;
   autoAgents: AutoAgent[];
 }
 
@@ -207,7 +221,17 @@ export type ControlViewSource = Contract.ControlViewSource;
 export type AdvisorySeverity = Contract.AdvisorySeverity;
 export type AdvisoryCondition = Contract.AdvisoryCondition;
 export type ViewerAsset = Contract.ViewerAsset;
+export type ViewerEdgePoint = Contract.ViewerEdgePoint;
+export type ViewerEdgeTarget = Contract.ViewerEdgeTarget;
+export type CalloutAnchor = Contract.CalloutAnchor;
+export type MeasurementGuideKind = Contract.MeasurementGuideKind;
+export type MeasurementGuide = Contract.MeasurementGuide;
+export type MeasurementBasis = Contract.MeasurementBasis;
+export type MeasurementAxis = Contract.MeasurementAxis;
+export type MeasurementAnnotationSource = Contract.MeasurementAnnotationSource;
+export type MeasurementAnnotation = Contract.MeasurementAnnotation;
 export type ArtifactBundle = Contract.ArtifactBundle;
+export type PostProcessingSpec = Contract.PostProcessingSpec;
 export type ManifestBounds = Contract.ManifestBounds;
 export type DocumentMetadata = Contract.DocumentMetadata;
 export type PartBinding = Contract.PartBinding;
@@ -446,8 +470,15 @@ export function normalizeDesignOutput(
       (output?.interactionMode ??
         (legacy.interaction_mode as InteractionMode | undefined)) ?? 'design',
     macroCode: (output?.macroCode ?? (legacy.macro_code as string | undefined)) ?? '',
+    macroDialect:
+      (output?.macroDialect ??
+        (legacy.macro_dialect as MacroDialect | undefined)) ?? 'legacy',
     uiSpec: normalizeUiSpec(output?.uiSpec ?? legacy.ui_spec),
     initialParams: normalizeDesignParams(output?.initialParams ?? legacy.initial_params),
+    postProcessing:
+      (output?.postProcessing ??
+        (legacy.post_processing as PostProcessingSpec | undefined) ??
+        null),
   };
 }
 
@@ -474,6 +505,8 @@ export function normalizeMessage(message: Contract.Message | Message): Message {
         : null,
     agentOrigin: (message.agentOrigin ?? (legacy.agent_origin as AgentOrigin | undefined)) ?? null,
     imageData: message.imageData ?? null,
+    visualKind:
+      (message.visualKind ?? (legacy.visual_kind as MessageVisualKind | undefined)) ?? null,
     attachmentImages: Array.isArray(message.attachmentImages)
       ? [...message.attachmentImages]
       : Array.isArray(legacy.attachment_images)
@@ -556,6 +589,8 @@ export function normalizeDeletedMessage(
     agentOrigin: (message.agentOrigin ?? (legacy.agent_origin as AgentOrigin | undefined)) ?? null,
     timestamp: message.timestamp,
     imageData: message.imageData ?? null,
+    visualKind:
+      (message.visualKind ?? (legacy.visual_kind as MessageVisualKind | undefined)) ?? null,
     attachmentImages: Array.isArray(message.attachmentImages)
       ? [...message.attachmentImages]
       : Array.isArray(legacy.attachment_images)
@@ -584,9 +619,17 @@ export function normalizeConfig(config: Contract.Config | AppConfig): AppConfig 
       ? {
           port: config.mcp.port ?? null,
           maxSessions: (config.mcp as any).maxSessions ?? null,
+          mode:
+            ((config.mcp as any).mode as McpMode | undefined) ??
+            ((config.mcp as any).autoAgents?.length ? 'active' : 'passive'),
+          primaryAgentId:
+            (config.mcp as any).primaryAgentId ??
+            (Array.isArray((config.mcp as any).autoAgents) && (config.mcp as any).autoAgents.length > 0
+              ? (config.mcp as any).autoAgents.find((agent: AutoAgent) => agent.enabled)?.id ?? null
+              : null),
           autoAgents: Array.isArray((config.mcp as any).autoAgents) ? [...(config.mcp as any).autoAgents] : [],
         }
-      : { port: null, maxSessions: null, autoAgents: [] },
+      : { port: null, maxSessions: null, mode: 'passive', primaryAgentId: null, autoAgents: [] },
     hasSeenOnboarding: Boolean(config.hasSeenOnboarding ?? legacy.has_seen_onboarding),
     connectionType: (config as AppConfig).connectionType ?? null,
   };
@@ -657,22 +700,13 @@ export function normalizeParsedParamsResult(
   };
 }
 
-export function normalizeAgentDraft(draft: Contract.AgentDraft | AgentDraft | null | undefined): AgentDraft | null {
-  if (!draft) return null;
-  return {
-    ...draft,
-    designOutput: normalizeDesignOutput(draft.designOutput),
-    artifactBundle: draft.artifactBundle ? normalizeArtifactBundle(draft.artifactBundle) : null,
-    modelManifest: draft.modelManifest ? normalizeModelManifest(draft.modelManifest) : null,
-  };
-}
-
 export function normalizeArtifactBundle(
   bundle: Contract.ArtifactBundle | ArtifactBundle,
 ): ArtifactBundle {
   return {
     ...bundle,
     viewerAssets: Array.isArray(bundle.viewerAssets) ? [...bundle.viewerAssets] : [],
+    edgeTargets: Array.isArray(bundle.edgeTargets) ? [...bundle.edgeTargets] : [],
   };
 }
 
@@ -704,7 +738,12 @@ export function normalizeModelManifest(
       : [],
     advisories: Array.isArray(manifest.advisories) ? [...manifest.advisories] : [],
     selectionTargets: Array.isArray(manifest.selectionTargets)
-      ? [...manifest.selectionTargets]
+      ? manifest.selectionTargets.map((target) => ({
+          ...target,
+          parameterKeys: Array.isArray(target.parameterKeys) ? [...target.parameterKeys] : [],
+          primitiveIds: Array.isArray(target.primitiveIds) ? [...target.primitiveIds] : [],
+          viewIds: Array.isArray(target.viewIds) ? [...target.viewIds] : [],
+        }))
       : [],
     warnings: Array.isArray(manifest.warnings) ? [...manifest.warnings] : [],
     enrichmentState: {
@@ -789,8 +828,10 @@ export function toContractDesignOutput(output: DesignOutput): Contract.DesignOut
     response: output.response,
     interactionMode: output.interactionMode,
     macroCode: output.macroCode,
+    macroDialect: output.macroDialect ?? 'legacy',
     uiSpec: toContractUiSpec(output.uiSpec),
     initialParams: output.initialParams,
+    postProcessing: output.postProcessing ?? null,
   };
 }
 

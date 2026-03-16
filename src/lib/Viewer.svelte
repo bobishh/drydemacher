@@ -1,11 +1,26 @@
 <script lang="ts">
+  import { open } from '@tauri-apps/plugin-dialog';
   import { onDestroy, onMount } from 'svelte';
   import * as THREE from 'three';
   import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
   import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
   import ViewportTransmutation from './ViewportTransmutation.svelte';
   import { estimateBase64Bytes, profileLog } from './debug/profiler';
-  import type { ParamValue, UiField, ViewerAsset } from './types/domain';
+  import type {
+    Advisory,
+    ParamValue,
+    UiField,
+    ViewerAsset,
+    ViewerEdgeTarget,
+    ViewportCameraState,
+  } from './types/domain';
+  import {
+    resolveViewerNodeTarget,
+    shouldDisplayViewportControlList,
+    type MeasurementControlFocus,
+    type ResolvedMeasurementCallout,
+    type ContextSelectionTarget,
+  } from './modelRuntime/contextualEditing';
   import type { ImportedPreviewTransform } from './modelRuntime/importedRuntime';
   import type { MaterializedSemanticControl } from './modelRuntime/semanticControls';
 
@@ -14,39 +29,67 @@
   let {
     stlUrl = null,
     viewerAssets = [],
+    edgeTargets = [],
+    selectionTargets = [],
+    selectedTarget = null,
+    searchQuery = '',
     selectedPartId = null,
     overlayPartLabel = null,
     overlayPartEditable = false,
     overlayPreviewOnly = false,
     overlayControls = [],
+    overlayAdvisories = [],
+    activeMeasurementCallout = null,
     previewTransforms = {},
     isGenerating = false,
     hideModelWhileBusy = false,
     busyPhase = null,
     busyText = null,
-    onSelectPart,
+    persistedCameraState = null,
+    onSearchQueryChange,
+    onSelectTarget,
     onOverlayChange,
+    onControlFocusChange,
+    onCameraStateChange,
+    onModelLoaded,
   }: {
     stlUrl?: string | null;
     viewerAssets?: ViewerAsset[];
+    edgeTargets?: ViewerEdgeTarget[];
+    selectionTargets?: ContextSelectionTarget[];
+    selectedTarget?: ContextSelectionTarget | null;
+    searchQuery?: string;
     selectedPartId?: string | null;
     overlayPartLabel?: string | null;
     overlayPartEditable?: boolean;
     overlayPreviewOnly?: boolean;
     overlayControls?: MaterializedSemanticControl[];
+    overlayAdvisories?: Advisory[];
+    activeMeasurementCallout?: ResolvedMeasurementCallout | null;
     previewTransforms?: Record<string, ImportedPreviewTransform>;
     isGenerating?: boolean;
     hideModelWhileBusy?: boolean;
     busyPhase?: ViewportBusyPhase;
     busyText?: string | null;
-    onSelectPart?: (partId: string | null) => void;
+    persistedCameraState?: ViewportCameraState | null;
+    onSearchQueryChange?: (query: string) => void;
+    onSelectTarget?: (target: ContextSelectionTarget | null) => void;
     onOverlayChange?: (primitiveId: string, value: ParamValue) => Promise<void> | void;
+    onControlFocusChange?: (focus: MeasurementControlFocus | null) => void;
+    onCameraStateChange?: (camera: ViewportCameraState) => void;
+    onModelLoaded?: () => void;
   } = $props();
 
   type RuntimeMesh = {
     partId: string | null;
     baseBounds: THREE.Box3 | null;
     mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>;
+  };
+
+  type RuntimeEdge = {
+    targetId: string;
+    partId: string;
+    line: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>;
   };
 
   let viewerHost: HTMLDivElement;
@@ -56,6 +99,7 @@
   let controls: OrbitControls | null = null;
   let modelRoot: THREE.Group | null = null;
   let runtimeMeshes: RuntimeMesh[] = [];
+  let runtimeEdges: RuntimeEdge[] = [];
   let animationFrameId: number | undefined;
   let resizeObserver: ResizeObserver | undefined;
   let loadToken = 0;
@@ -64,19 +108,76 @@
   let overlayVisible = $state(false);
   let overlayFallback = $state(true);
   let hoveredPartId = $state<string | null>(null);
+  let hoveredTargetId = $state<string | null>(null);
   let dimensionFrame = $state<{ bottom: number; height: number; left: number; right: number; top: number; width: number } | null>(null);
+  let measurementOverlay = $state<{
+    badgeLeft: number;
+    badgeTop: number;
+    lineSegments: Array<{ x1: number; y1: number; x2: number; y2: number }>;
+    label: string;
+    explanation: string | null;
+  } | null>(null);
   const showEditableCallouts = $derived.by(
     () => !hideModelWhileBusy && !overlayFallback && overlayPartEditable && overlayControls.length > 0,
+  );
+  const showViewportControlList = $derived.by(
+    () => shouldDisplayViewportControlList(selectedTarget),
   );
 
   const raycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
   let pointerDownAt: { x: number; y: number } | null = null;
 
-  export function captureScreenshot(overlayCanvas: HTMLCanvasElement | null = null): string | null {
+  function currentCameraState(): ViewportCameraState | null {
+    if (!camera || !controls) return null;
+    return {
+      position: [camera.position.x, camera.position.y, camera.position.z],
+      target: [controls.target.x, controls.target.y, controls.target.z],
+      zoom: Number.isFinite(camera.zoom) ? camera.zoom : null,
+      fov: Number.isFinite(camera.fov) ? camera.fov : null,
+    };
+  }
+
+  function applyCameraState(nextState: ViewportCameraState | null | undefined) {
+    if (!camera || !controls || !nextState) return;
+    camera.position.set(...nextState.position);
+    camera.zoom = typeof nextState.zoom === 'number' ? nextState.zoom : 1;
+    camera.fov = typeof nextState.fov === 'number' ? nextState.fov : 45;
+    camera.updateProjectionMatrix();
+    controls.target.set(...nextState.target);
+    controls.update();
+    updateOverlayAnchor();
+  }
+
+  function emitCameraStateChange() {
+    const nextCamera = currentCameraState();
+    if (nextCamera) {
+      onCameraStateChange?.(nextCamera);
+    }
+  }
+
+  async function notifyModelLoaded(token: number) {
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    if (token !== loadToken) return;
+    onModelLoaded?.();
+  }
+
+  export function getCameraState(): ViewportCameraState | null {
+    return currentCameraState();
+  }
+
+  export function setCameraState(nextState: ViewportCameraState | null = null) {
+    applyCameraState(nextState);
+  }
+
+  export function captureScreenshotDetails(
+    overlayCanvas: HTMLCanvasElement | null = null,
+  ): { dataUrl: string; width: number; height: number; camera: ViewportCameraState } | null {
     if (!renderer || !scene || !camera) return null;
     renderer.render(scene, camera);
     const source = renderer.domElement;
+    const effectiveCamera = currentCameraState();
+    if (!effectiveCamera) return null;
     let dataUrl = null;
     if (overlayCanvas) {
       const offscreen = document.createElement('canvas');
@@ -106,7 +207,16 @@
       outputMb: Number((estimateBase64Bytes(dataUrl) / (1024 * 1024)).toFixed(2)),
       withOverlay: !!overlayCanvas,
     });
-    return dataUrl;
+    return {
+      dataUrl,
+      width: source.width,
+      height: source.height,
+      camera: effectiveCamera,
+    };
+  }
+
+  export function captureScreenshot(overlayCanvas: HTMLCanvasElement | null = null): string | null {
+    return captureScreenshotDetails(overlayCanvas)?.dataUrl ?? null;
   }
 
   function asNumber(value: ParamValue | undefined, fallback = 0): number {
@@ -134,6 +244,13 @@
     return typeof value === 'string' || typeof value === 'number' ? value : null;
   }
 
+  function firstSelectedPath(selected: string | string[] | null): string | null {
+    if (Array.isArray(selected)) {
+      return typeof selected[0] === 'string' ? selected[0] : null;
+    }
+    return typeof selected === 'string' ? selected : null;
+  }
+
   function getInputValue(event: Event): string {
     return (event.currentTarget as HTMLInputElement).value;
   }
@@ -142,9 +259,36 @@
     return (event.currentTarget as HTMLInputElement).checked;
   }
 
+  function setFocusedControl(primitiveId: string | null, parameterKey: string | null) {
+    onControlFocusChange?.({ primitiveId, parameterKey });
+  }
+
+  function clearFocusedControl(event: MouseEvent | FocusEvent) {
+    const current = event.currentTarget as HTMLElement | null;
+    const related = (event as FocusEvent).relatedTarget as Node | null;
+    if (current && related && current.contains(related)) return;
+    onControlFocusChange?.(null);
+  }
+
   function updateOverlayParam(primitiveId: string, value: ParamValue) {
     if (hideModelWhileBusy) return;
     onOverlayChange?.(primitiveId, value);
+  }
+
+  async function pickOverlayImage(primitiveId: string) {
+    try {
+      const selected = firstSelectedPath(
+        await open({
+          multiple: false,
+          filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
+        }),
+      );
+      if (selected) {
+        updateOverlayParam(primitiveId, selected);
+      }
+    } catch (error) {
+      console.error('Failed to pick overlay image:', error);
+    }
   }
 
   function overlayFieldTone(field: UiField | null) {
@@ -193,6 +337,7 @@
       renderer.domElement.removeEventListener('pointerleave', handlePointerLeave);
       renderer.domElement.removeEventListener('pointerup', handlePointerUp);
     }
+    controls?.removeEventListener?.('change', emitCameraStateChange);
     disposeModel();
     controls?.dispose?.();
     if (renderer) {
@@ -214,6 +359,14 @@
   $effect(() => {
     if (!scene) return;
     void loadCurrentModel();
+  });
+
+  $effect(() => {
+    if (!modelRoot) return;
+    attachEdgeTargets(modelRoot);
+    applyPreviewTransforms();
+    applySelectionStyles();
+    updateOverlayAnchor();
   });
 
   $effect(() => {
@@ -265,6 +418,7 @@
 
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
+    controls.addEventListener('change', emitCameraStateChange);
 
     const hemi = new THREE.HemisphereLight(0xc7d8ff, 0x202020, 0.9);
     scene.add(hemi);
@@ -355,11 +509,18 @@
       applyPreviewTransforms();
       scene.add(modelRoot);
       frameModel(modelRoot);
+      applyCameraState(persistedCameraState);
       applySelectionStyles();
       updateOverlayAnchor();
+      emitCameraStateChange();
+      await notifyModelLoaded(token);
     } catch (error) {
       console.error('Failed to load multipart STL assets:', error);
       disposeDetachedGroup(nextRoot);
+      if (stlUrl) {
+        await loadSingleStl(token, stlUrl);
+        return;
+      }
     }
   }
 
@@ -388,7 +549,10 @@
       applyPreviewTransforms();
       scene.add(modelRoot);
       frameModel(modelRoot);
+      applyCameraState(persistedCameraState);
       updateOverlayAnchor();
+      emitCameraStateChange();
+      await notifyModelLoaded(token);
     } catch (error) {
       console.error('Failed to load STL:', error);
       disposeDetachedGroup(nextRoot);
@@ -428,13 +592,78 @@
     });
   }
 
+  function createEdgeMaterial(isSelected: boolean, isHovered: boolean) {
+    return new THREE.LineBasicMaterial({
+      color: isSelected ? 0xe5ca88 : isHovered ? 0x78c0a8 : 0x405371,
+      transparent: true,
+      opacity: isSelected ? 1 : isHovered ? 0.95 : 0.46,
+    });
+  }
+
+  function disposeRuntimeEdges(root: THREE.Group | null) {
+    if (!root) {
+      runtimeEdges = [];
+      return;
+    }
+    for (const entry of runtimeEdges) {
+      root.remove(entry.line);
+      entry.line.geometry?.dispose?.();
+      entry.line.material?.dispose?.();
+    }
+    runtimeEdges = [];
+  }
+
+  function attachEdgeTargets(root: THREE.Group) {
+    disposeRuntimeEdges(root);
+    if (edgeTargets.length === 0) return;
+
+    runtimeEdges = edgeTargets.map((target) => {
+      const geometry = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(target.start.x, target.start.y, target.start.z),
+        new THREE.Vector3(target.end.x, target.end.y, target.end.z),
+      ]);
+      const line = new THREE.Line(
+        geometry,
+        createEdgeMaterial(false, false),
+      );
+      line.userData.partId = target.partId;
+      line.userData.viewerNodeId = target.viewerNodeId;
+      line.userData.selectionTargetId = target.targetId;
+      root.add(line);
+      return {
+        targetId: target.targetId,
+        partId: target.partId,
+        line,
+      };
+    });
+  }
+
   function applySelectionStyles() {
+    const measurementPartIds = new Set(activeMeasurementCallout?.partIds || []);
+    const measurementTargetIds = new Set(activeMeasurementCallout?.targetIds || []);
+
     for (const entry of runtimeMeshes) {
       const isSelected = !!selectedPartId && entry.partId === selectedPartId;
       const isHovered = !isSelected && !!hoveredPartId && entry.partId === hoveredPartId;
-      entry.mesh.material.color.setHex(isSelected ? 0xe5ca88 : isHovered ? 0xdbcb94 : 0xd2bf89);
-      entry.mesh.material.emissive.setHex(isSelected ? 0x5b4120 : isHovered ? 0x0f5146 : 0x000000);
-      entry.mesh.material.emissiveIntensity = isSelected ? 0.45 : isHovered ? 0.32 : 0;
+      const isMeasured =
+        !isSelected && !isHovered && !!entry.partId && measurementPartIds.has(entry.partId);
+      entry.mesh.material.color.setHex(
+        isSelected ? 0xe5ca88 : isHovered ? 0xdbcb94 : isMeasured ? 0xd8d5aa : 0xd2bf89,
+      );
+      entry.mesh.material.emissive.setHex(
+        isSelected ? 0x5b4120 : isHovered ? 0x0f5146 : isMeasured ? 0x1d5e57 : 0x000000,
+      );
+      entry.mesh.material.emissiveIntensity = isSelected ? 0.45 : isHovered ? 0.32 : isMeasured ? 0.26 : 0;
+    }
+
+    for (const entry of runtimeEdges) {
+      const isSelected = selectedTarget?.kind === 'edge' && selectedTarget.targetId === entry.targetId;
+      const isHovered = !isSelected && hoveredTargetId === entry.targetId;
+      const isMeasured = !isSelected && !isHovered && measurementTargetIds.has(entry.targetId);
+      entry.line.material.color.setHex(
+        isSelected ? 0xe5ca88 : isHovered ? 0x78c0a8 : isMeasured ? 0x9ad8c5 : 0x405371,
+      );
+      entry.line.material.opacity = isSelected ? 1 : isHovered ? 0.95 : isMeasured ? 0.88 : 0.46;
     }
   }
 
@@ -456,6 +685,23 @@
       const { scale, anchor } = preview;
       entry.mesh.scale.set(scale.x, scale.y, scale.z);
       entry.mesh.position.set(
+        (1 - scale.x) * anchor.x,
+        (1 - scale.y) * anchor.y,
+        (1 - scale.z) * anchor.z,
+      );
+    }
+
+    for (const entry of runtimeEdges) {
+      const preview = previewTransforms[entry.partId];
+      if (!preview) {
+        entry.line.scale.set(1, 1, 1);
+        entry.line.position.set(0, 0, 0);
+        continue;
+      }
+
+      const { scale, anchor } = preview;
+      entry.line.scale.set(scale.x, scale.y, scale.z);
+      entry.line.position.set(
         (1 - scale.x) * anchor.x,
         (1 - scale.y) * anchor.y,
         (1 - scale.z) * anchor.z,
@@ -535,19 +781,147 @@
     };
   }
 
+  function projectWorldPoint(point: [number, number, number]) {
+    if (!camera || !renderer || !viewerHost) return null;
+    const projected = new THREE.Vector3(point[0], point[1], point[2]).project(camera);
+    if (projected.z < -1 || projected.z > 1) return null;
+    const width = renderer.domElement.clientWidth || viewerHost.clientWidth;
+    const height = renderer.domElement.clientHeight || viewerHost.clientHeight;
+    return {
+      x: ((projected.x + 1) * 0.5) * width,
+      y: ((1 - projected.y) * 0.5) * height,
+    };
+  }
+
+  function projectEdgeMidpoint(targetId: string) {
+    const edge = runtimeEdges.find((entry) => entry.targetId === targetId)?.line;
+    if (!edge) return null;
+    const position = edge.geometry.getAttribute('position');
+    if (!position || position.count < 2) return null;
+    const start = new THREE.Vector3().fromBufferAttribute(position, 0);
+    const end = new THREE.Vector3().fromBufferAttribute(position, position.count - 1);
+    start.applyMatrix4(edge.matrixWorld);
+    end.applyMatrix4(edge.matrixWorld);
+    return projectWorldPoint([
+      (start.x + end.x) * 0.5,
+      (start.y + end.y) * 0.5,
+      (start.z + end.z) * 0.5,
+    ]);
+  }
+
+  function fallbackMeasurementPoint(): { x: number; y: number } | null {
+    for (const targetId of activeMeasurementCallout?.targetIds || []) {
+      const edgePoint = projectEdgeMidpoint(targetId);
+      if (edgePoint) return edgePoint;
+    }
+
+    for (const partId of activeMeasurementCallout?.partIds || []) {
+      const point = runtimeMeshes
+        .filter((entry) => entry.partId === partId)
+        .map((entry) => projectMeshPoint(entry.mesh, 'top'))
+        .find(Boolean);
+      if (point) return point;
+    }
+
+    if (selectedPartId) {
+      const selectedPoint = runtimeMeshes
+        .filter((entry) => entry.partId === selectedPartId)
+        .map((entry) => projectMeshPoint(entry.mesh, 'top'))
+        .find(Boolean);
+      if (selectedPoint) return selectedPoint;
+    }
+
+    return null;
+  }
+
+  function updateMeasurementOverlay() {
+    if (!activeMeasurementCallout || hideModelWhileBusy) {
+      measurementOverlay = null;
+      return;
+    }
+
+    const lineSegments: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
+    let badgePoint: { x: number; y: number } | null = null;
+
+    if (activeMeasurementCallout.guide && activeMeasurementCallout.guide.points.length > 0) {
+      const screenPoints = activeMeasurementCallout.guide.points
+        .map((point) => projectWorldPoint(point))
+        .filter((point): point is { x: number; y: number } => Boolean(point));
+      for (let index = 1; index < screenPoints.length; index += 1) {
+        const previous = screenPoints[index - 1];
+        const next = screenPoints[index];
+        lineSegments.push({
+          x1: previous.x,
+          y1: previous.y,
+          x2: next.x,
+          y2: next.y,
+        });
+      }
+      if (activeMeasurementCallout.guide.labelPoint) {
+        const labelPoint = projectWorldPoint(activeMeasurementCallout.guide.labelPoint);
+        if (labelPoint) {
+          const leaderStart = screenPoints[screenPoints.length - 1] ?? labelPoint;
+          lineSegments.push({
+            x1: leaderStart.x,
+            y1: leaderStart.y,
+            x2: labelPoint.x,
+            y2: labelPoint.y,
+          });
+          badgePoint = labelPoint;
+        }
+      }
+      if (!badgePoint && screenPoints.length > 0) {
+        const first = screenPoints[0];
+        const last = screenPoints[screenPoints.length - 1];
+        badgePoint = {
+          x: (first.x + last.x) * 0.5,
+          y: Math.min(first.y, last.y) - 18,
+        };
+      }
+    }
+
+    if (!badgePoint) {
+      badgePoint = fallbackMeasurementPoint();
+    }
+
+    if (!badgePoint) {
+      measurementOverlay = null;
+      return;
+    }
+
+    measurementOverlay = {
+      badgeLeft: badgePoint.x,
+      badgeTop: badgePoint.y,
+      lineSegments,
+      label: activeMeasurementCallout.badgeLabel,
+      explanation: activeMeasurementCallout.explanation,
+    };
+  }
+
   function updateOverlayAnchor() {
-    if (!selectedPartId || !overlayPartLabel) {
+    if (!overlayPartLabel) {
       overlayVisible = false;
       overlayFallback = true;
       dimensionFrame = null;
+      updateMeasurementOverlay();
       return;
     }
 
     overlayVisible = true;
 
+    if (!selectedPartId) {
+      overlayFallback = true;
+      dimensionFrame = null;
+      overlayLeft = 24;
+      overlayTop = 24;
+      updateMeasurementOverlay();
+      return;
+    }
+
     if (!camera || !renderer || !viewerHost) {
       overlayFallback = true;
       dimensionFrame = null;
+      updateMeasurementOverlay();
       return;
     }
 
@@ -555,6 +929,7 @@
     if (!targetMesh) {
       overlayFallback = true;
       dimensionFrame = null;
+      updateMeasurementOverlay();
       return;
     }
 
@@ -562,29 +937,38 @@
     dimensionFrame = projectMeshFrame(targetMesh);
     if (!anchor) {
       overlayFallback = true;
+      updateMeasurementOverlay();
       return;
     }
     overlayLeft = anchor.x;
     overlayTop = anchor.y;
     overlayFallback = false;
+    updateMeasurementOverlay();
   }
 
   function disposeModel() {
     if (!modelRoot) {
       runtimeMeshes = [];
+      runtimeEdges = [];
       updateOverlayAnchor();
       return;
     }
+    disposeRuntimeEdges(modelRoot);
     scene?.remove(modelRoot);
     disposeDetachedGroup(modelRoot);
     modelRoot = null;
     runtimeMeshes = [];
+    runtimeEdges = [];
     updateOverlayAnchor();
   }
 
   function disposeDetachedGroup(group: THREE.Group) {
     group.traverse((child) => {
       if (child instanceof THREE.Mesh) {
+        child.geometry?.dispose?.();
+        child.material?.dispose?.();
+      }
+      if (child instanceof THREE.Line) {
         child.geometry?.dispose?.();
         child.material?.dispose?.();
       }
@@ -600,17 +984,63 @@
     pointerDownAt = { x: event.clientX, y: event.clientY };
   }
 
-  function hoveredPartFromEvent(event: PointerEvent): string | null {
-    if (hideModelWhileBusy || !renderer || !camera || !modelRoot || viewerAssets.length === 0) return null;
+  function fallbackPartTarget(partId: string | null, viewerNodeId: string | null): ContextSelectionTarget | null {
+    if (!partId) return null;
+    return (
+      resolveViewerNodeTarget(selectionTargets, viewerNodeId, partId) ?? {
+        targetId: `part:${partId}`,
+        kind: 'part',
+        partId,
+        label: partId,
+        editable: true,
+        viewerNodeId,
+        parameterKeys: [],
+        primitiveIds: [],
+        viewIds: [],
+      }
+    );
+  }
+
+  function selectionTargetFromEvent(event: PointerEvent): ContextSelectionTarget | null {
+    if (hideModelWhileBusy || !renderer || !camera || !modelRoot || runtimeMeshes.length === 0) return null;
     const rect = renderer.domElement.getBoundingClientRect();
     pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
     raycaster.setFromCamera(pointer, camera);
 
-    const intersections = raycaster.intersectObjects(modelRoot.children, true);
+    raycaster.params.Line.threshold = 6;
+    const edgeHit = raycaster
+      .intersectObjects(runtimeEdges.map((entry) => entry.line), true)
+      .find((entry) => typeof entry.object.userData.selectionTargetId === 'string');
+    if (edgeHit?.object.userData.selectionTargetId) {
+      const targetId = edgeHit.object.userData.selectionTargetId as string;
+      const partId = (edgeHit.object.userData.partId as string | undefined) ?? null;
+      const viewerNodeId = (edgeHit.object.userData.viewerNodeId as string | undefined) ?? null;
+      return (
+        selectionTargets.find((target) => target.targetId === targetId) ?? {
+          targetId,
+          kind: 'edge',
+          partId,
+          label: partId ? `${partId} Edge` : 'Edge',
+          editable: true,
+          viewerNodeId,
+          parameterKeys: [],
+          primitiveIds: [],
+          viewIds: [],
+        }
+      );
+    }
+
+    const intersections = raycaster.intersectObjects(runtimeMeshes.map((entry) => entry.mesh), true);
     const hit = intersections.find((entry) => typeof entry.object.userData.partId === 'string');
     if (hit?.object.userData.partId) {
-      return hit.object.userData.partId as string;
+      const partId = hit.object.userData.partId as string;
+      const viewerNodeId =
+        typeof hit.object.userData.nodeId === 'string' ? (hit.object.userData.nodeId as string) : null;
+      return (
+        resolveViewerNodeTarget(selectionTargets, viewerNodeId, partId) ??
+        fallbackPartTarget(partId, viewerNodeId)
+      );
     }
 
     let bestPartId: string | null = null;
@@ -631,13 +1061,14 @@
     }
 
     const selectionRadius = Math.max(96, Math.min(rect.width, rect.height) * 0.4);
-    return bestDistance <= selectionRadius ? bestPartId : null;
+    return bestDistance <= selectionRadius ? fallbackPartTarget(bestPartId, null) : null;
   }
 
   function handlePointerMove(event: PointerEvent) {
     if (hideModelWhileBusy) {
       if (hoveredPartId !== null) {
         hoveredPartId = null;
+        hoveredTargetId = null;
         applySelectionStyles();
       }
       if (renderer) {
@@ -645,18 +1076,22 @@
       }
       return;
     }
-    const nextHovered = hoveredPartFromEvent(event);
-    if (nextHovered !== hoveredPartId) {
-      hoveredPartId = nextHovered;
+    const nextHovered = selectionTargetFromEvent(event);
+    const nextHoveredPartId = nextHovered?.partId ?? null;
+    const nextHoveredTargetId = nextHovered?.targetId ?? null;
+    if (nextHoveredPartId !== hoveredPartId || nextHoveredTargetId !== hoveredTargetId) {
+      hoveredPartId = nextHoveredPartId;
+      hoveredTargetId = nextHoveredTargetId;
       applySelectionStyles();
     }
     if (renderer) {
-      renderer.domElement.style.cursor = nextHovered ? 'pointer' : 'default';
+      renderer.domElement.style.cursor = nextHoveredTargetId ? 'pointer' : 'default';
     }
   }
 
   function handlePointerLeave() {
     hoveredPartId = null;
+    hoveredTargetId = null;
     applySelectionStyles();
     if (renderer) {
       renderer.domElement.style.cursor = hideModelWhileBusy ? 'progress' : 'default';
@@ -664,7 +1099,7 @@
   }
 
   function handlePointerUp(event: PointerEvent) {
-    if (hideModelWhileBusy || !renderer || !camera || !modelRoot || viewerAssets.length === 0) return;
+    if (hideModelWhileBusy || !renderer || !camera || !modelRoot || runtimeMeshes.length === 0) return;
     if (pointerDownAt) {
       const deltaX = Math.abs(event.clientX - pointerDownAt.x);
       const deltaY = Math.abs(event.clientY - pointerDownAt.y);
@@ -675,8 +1110,7 @@
     }
     pointerDownAt = null;
 
-    const bestPartId = hoveredPartFromEvent(event);
-    onSelectPart?.(bestPartId);
+    onSelectTarget?.(selectionTargetFromEvent(event));
   }
 </script>
 
@@ -715,15 +1149,48 @@
         </div>
       {/if}
 
+      {#if measurementOverlay}
+        <svg class="viewer-measurement-layer" aria-hidden="true">
+          {#each measurementOverlay.lineSegments as segment}
+            <line
+              class="viewer-measurement-layer__line"
+              x1={segment.x1}
+              y1={segment.y1}
+              x2={segment.x2}
+              y2={segment.y2}
+            />
+          {/each}
+        </svg>
+        <div
+          class="viewer-measurement-badge"
+          style={`left: ${measurementOverlay.badgeLeft}px; top: ${measurementOverlay.badgeTop}px;`}
+        >
+          <span class="viewer-measurement-badge__label">{measurementOverlay.label}</span>
+          {#if measurementOverlay.explanation}
+            <span class="viewer-measurement-badge__meta">{measurementOverlay.explanation}</span>
+          {/if}
+        </div>
+      {/if}
+
       {#if showEditableCallouts}
         <div
           class="viewer-part-overlay viewer-part-overlay-callouts"
           style={`left: ${overlayLeft}px; top: ${overlayTop}px;`}
         >
-          <div class="viewer-part-badge">
-            <span class="viewer-part-badge__status">{overlayPreviewOnly ? 'PREVIEW' : 'EDIT'}</span>
-            <span class="viewer-part-badge__title">{overlayPartLabel}</span>
+          <div class="viewer-context-hub">
+            <label class="viewer-context-hub__search">
+              <input
+                class="viewer-context-hub__search-input"
+                type="text"
+                value={searchQuery}
+                placeholder="Filter controls..."
+                oninput={(event) => onSearchQueryChange?.(getInputValue(event))}
+              />
+            </label>
           </div>
+          {#if overlayAdvisories.length > 0}
+            <div class="viewer-context-hub__note">{overlayAdvisories[0].label}</div>
+          {/if}
 
             <div class="viewer-callout-stack">
               {#each overlayControls as control, index}
@@ -732,6 +1199,10 @@
                 <label
                   class="viewer-callout"
                   data-tone={tone}
+                  onmouseenter={() => setFocusedControl(control.primitiveId, field?.key ?? null)}
+                  onmouseleave={clearFocusedControl}
+                  onfocusin={() => setFocusedControl(control.primitiveId, field?.key ?? null)}
+                  onfocusout={clearFocusedControl}
                 >
                   <span class="viewer-callout__label">{control.label}</span>
                 {#if field?.type === 'range'}
@@ -782,6 +1253,16 @@
                       <span>{control.value ? 'ON' : 'OFF'}</span>
                     </label>
                   </div>
+                {:else if field?.type === 'image'}
+                  <div class="viewer-callout__row">
+                    <button
+                      class="viewer-overlay-file-btn"
+                      type="button"
+                      onclick={() => pickOverlayImage(control.primitiveId)}
+                    >
+                      {control.value ? String(control.value).split(/[/\\]/).pop() : 'Select Image...'}
+                    </button>
+                  </div>
                 {/if}
               </label>
             {/each}
@@ -794,18 +1275,30 @@
           class:viewer-part-overlay-readonly={!overlayPartEditable}
           style={!overlayFallback ? `left: ${overlayLeft}px; top: ${overlayTop}px;` : undefined}
         >
-          <div class="viewer-part-overlay__header">
-            <span class="viewer-part-overlay__status">
-              {overlayPartEditable ? (overlayPreviewOnly ? 'PREVIEW' : 'EDIT') : 'INSPECT'}
-            </span>
-            <span class="viewer-part-overlay__title">{overlayPartLabel}</span>
-          </div>
+          <label class="viewer-part-overlay__search">
+            <input
+              class="viewer-part-overlay__search-input"
+              type="text"
+              value={searchQuery}
+              placeholder="Filter controls..."
+              oninput={(event) => onSearchQueryChange?.(getInputValue(event))}
+            />
+          </label>
+          {#if overlayAdvisories.length > 0}
+            <div class="viewer-part-overlay__advisory">{overlayAdvisories[0].label}</div>
+          {/if}
 
-          {#if overlayControls.length > 0}
+          {#if showViewportControlList && overlayControls.length > 0}
             <div class="viewer-part-overlay__controls">
               {#each overlayControls as control}
                 {@const field = control.rawField}
-                <label class="viewer-overlay-control">
+                <label
+                  class="viewer-overlay-control"
+                  onmouseenter={() => setFocusedControl(control.primitiveId, field?.key ?? null)}
+                  onmouseleave={clearFocusedControl}
+                  onfocusin={() => setFocusedControl(control.primitiveId, field?.key ?? null)}
+                  onfocusout={clearFocusedControl}
+                >
                   <span class="viewer-overlay-control__label">{control.label}</span>
                   {#if field?.type === 'range'}
                     {@const range = getRangeProps(field, control.value)}
@@ -855,11 +1348,21 @@
                         <span>{control.value ? 'ON' : 'OFF'}</span>
                       </label>
                     </div>
+                  {:else if field?.type === 'image'}
+                    <div class="viewer-overlay-control__row">
+                      <button
+                        class="viewer-overlay-file-btn"
+                        type="button"
+                        onclick={() => pickOverlayImage(control.primitiveId)}
+                      >
+                        {control.value ? String(control.value).split(/[/\\]/).pop() : 'Select Image...'}
+                      </button>
+                    </div>
                   {/if}
                 </label>
               {/each}
             </div>
-          {:else}
+          {:else if showViewportControlList}
             <div class="viewer-part-overlay__empty">
               {overlayPartEditable
                 ? overlayPreviewOnly
@@ -900,6 +1403,61 @@
     inset: 0;
     pointer-events: none;
     overflow: hidden;
+  }
+
+  .viewer-measurement-layer {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    overflow: hidden;
+  }
+
+  .viewer-measurement-layer__line {
+    stroke: color-mix(in srgb, var(--secondary) 58%, var(--green) 42%);
+    stroke-width: 1.5;
+    stroke-linecap: square;
+    stroke-dasharray: 8 5;
+    filter: drop-shadow(0 0 6px color-mix(in srgb, var(--green) 22%, transparent));
+  }
+
+  .viewer-measurement-badge {
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 124px;
+    max-width: min(220px, 26vw);
+    padding: 7px 9px;
+    border: 1px solid color-mix(in srgb, var(--secondary) 46%, var(--bg-300));
+    background:
+      linear-gradient(
+        180deg,
+        color-mix(in srgb, var(--bg-100) 94%, #000 6%) 0%,
+        color-mix(in srgb, var(--bg-200) 97%, #000 3%) 100%
+      );
+    box-shadow:
+      0 8px 18px rgba(0, 0, 0, 0.38),
+      inset 0 0 0 1px color-mix(in srgb, #000 34%, transparent);
+    pointer-events: none;
+    transform: translate(-50%, calc(-100% - 14px));
+    overflow: hidden;
+  }
+
+  .viewer-measurement-badge__label {
+    color: var(--secondary);
+    font-size: 0.62rem;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  .viewer-measurement-badge__meta {
+    color: var(--text-dim);
+    font-size: 0.58rem;
+    line-height: 1.35;
+    letter-spacing: 0.04em;
   }
 
   .viewer-dimension-guide {
@@ -1042,14 +1600,15 @@
     display: none;
   }
 
-  .viewer-part-badge {
+  .viewer-context-hub {
     position: absolute;
     left: 0;
     top: 0;
-    display: inline-flex;
-    align-items: center;
+    min-width: 240px;
+    display: flex;
+    flex-direction: column;
     gap: 8px;
-    padding: 6px 10px;
+    padding: 8px 10px;
     border: 1px solid color-mix(in srgb, var(--secondary) 45%, var(--bg-300));
     background:
       linear-gradient(
@@ -1065,7 +1624,7 @@
     white-space: nowrap;
   }
 
-  .viewer-part-badge::after {
+  .viewer-context-hub::after {
     content: '';
     position: absolute;
     left: 50%;
@@ -1076,26 +1635,48 @@
     transform: translateX(-50%);
   }
 
-  .viewer-part-badge__status {
-    padding: 2px 5px;
-    border: 1px solid color-mix(in srgb, var(--primary) 48%, var(--bg-300));
-    color: var(--primary);
-    background: color-mix(in srgb, var(--primary) 10%, var(--bg-100));
-    font-size: 0.56rem;
-    font-weight: 700;
-    letter-spacing: 0.1em;
+  .viewer-context-hub__search,
+  .viewer-part-overlay__search {
+    display: block;
   }
 
-  .viewer-part-badge__title {
+  .viewer-context-hub__search-input,
+  .viewer-part-overlay__search-input {
+    width: 100%;
+    min-height: 32px;
+    padding: 7px 10px;
+    border: 1px solid color-mix(in srgb, var(--primary) 40%, var(--bg-300));
+    background: color-mix(in srgb, var(--bg-100) 94%, #000 6%);
     color: var(--text);
-    font-size: 0.76rem;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.72rem;
+    outline: none;
+  }
+
+  .viewer-context-hub__search-input:focus,
+  .viewer-part-overlay__search-input:focus {
+    border-color: color-mix(in srgb, var(--primary) 68%, var(--secondary) 32%);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary) 24%, transparent);
+  }
+
+  .viewer-context-hub__note,
+  .viewer-part-overlay__advisory {
+    margin-top: 8px;
+    padding: 6px 8px;
+    border: 1px solid color-mix(in srgb, var(--green) 34%, var(--bg-300));
+    background: color-mix(in srgb, var(--green) 8%, var(--bg-100));
+    color: var(--text-dim);
+    font-size: 0.6rem;
     font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    pointer-events: auto;
   }
 
   .viewer-callout-stack {
     position: absolute;
     left: 34px;
-    top: calc(-100% - 12px);
+    top: calc(-100% + 44px);
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -1209,42 +1790,13 @@
     border-color: color-mix(in srgb, var(--text-dim) 42%, var(--bg-300));
   }
 
-  .viewer-part-overlay__header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 8px;
-  }
-
-  .viewer-part-overlay__status {
-    padding: 2px 5px;
-    border: 1px solid color-mix(in srgb, var(--primary) 48%, var(--bg-300));
-    color: var(--primary);
-    background: color-mix(in srgb, var(--primary) 10%, var(--bg-100));
-    font-size: 0.56rem;
-    font-weight: 700;
-    letter-spacing: 0.1em;
-  }
-
-  .viewer-part-overlay-readonly .viewer-part-overlay__status {
-    border-color: color-mix(in srgb, var(--text-dim) 42%, var(--bg-300));
-    color: var(--text-dim);
-    background: color-mix(in srgb, var(--text-dim) 10%, var(--bg-100));
-  }
-
-  .viewer-part-overlay__title {
-    color: var(--text);
-    font-size: 0.76rem;
-    font-weight: 700;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
   .viewer-part-overlay__controls {
     display: flex;
     flex-direction: column;
     gap: 8px;
+    max-height: min(58vh, 420px);
+    overflow: auto;
+    padding-right: 4px;
   }
 
   .viewer-overlay-control {
@@ -1339,6 +1891,29 @@
 
   .viewer-overlay-input {
     width: 100%;
+  }
+
+  .viewer-overlay-file-btn {
+    width: 100%;
+    min-height: 34px;
+    padding: 4px 6px;
+    border: 1px solid color-mix(in srgb, var(--secondary) 36%, var(--bg-300));
+    background: color-mix(in srgb, var(--bg-100) 90%, #000 10%);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    text-align: left;
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .viewer-overlay-file-btn:hover,
+  .viewer-overlay-file-btn:focus {
+    outline: none;
+    border-color: color-mix(in srgb, var(--primary) 68%, var(--secondary) 32%);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary) 24%, transparent);
   }
 
   .viewer-overlay-toggle {

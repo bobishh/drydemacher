@@ -353,7 +353,9 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
           updatedAt: Date.now() / 1000,
           versionCount: 0,
           pendingCount: 0,
-          errorCount: 0
+          errorCount: 0,
+          summary: '',
+          messages: [],
         };
         window.__MOCK_HISTORY__.unshift(thread);
         return thread;
@@ -367,9 +369,28 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
       window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
         (window as any).__MOCK_CALLS__.push({ cmd, args });
         console.log('[MOCK] Invoke:', cmd, args);
-        if (cmd === 'get_config') return { engines: [{ id: 'mock', name: 'Mock' }], selectedEngineId: 'mock' };
+        if (cmd === 'get_config') {
+          return {
+            engines: [{ id: 'mock', name: 'Mock' }],
+            selectedEngineId: 'mock',
+            hasSeenOnboarding: true,
+          };
+        }
+        if (cmd === 'save_config') return null;
+        if (cmd === 'check_freecad') return true;
         if (cmd === 'get_history') return window.__MOCK_HISTORY__;
         if (cmd === 'get_last_design') return window.__MOCK_LAST_DESIGN__;
+        if (cmd === 'get_active_agent_sessions') return [];
+        if (cmd === 'get_agent_terminal_snapshots') return [];
+        if (cmd === 'get_thread_agent_state') {
+          return {
+            threadId: args?.threadId ?? null,
+            connectionState: 'disconnected',
+            sessions: [],
+            primaryAgentLabel: null,
+            statusText: '',
+          };
+        }
         if (cmd === 'save_last_design') {
           window.__MOCK_LAST_DESIGN__ = args.snapshot ?? null;
           return null;
@@ -432,6 +453,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
             messageId: 'msg-final',
             design: {
               title: 'A Box',
+              versionName: 'V1',
               macroCode: 'create_box()',
               initialParams: { size: 10, height: 14 },
               uiSpec: {
@@ -536,9 +558,17 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
             if (args.design) {
               window.__MOCK_HISTORY__[0].versionCount = 1;
               window.__MOCK_HISTORY__[0].title = args.design.title;
+              window.__MOCK_LAST_DESIGN__ = {
+                design: args.design,
+                threadId,
+                messageId: args.messageId,
+                artifactBundle: args.artifactBundle ?? null,
+                modelManifest: args.modelManifest ?? null,
+                selectedPartId: null,
+              };
             }
           }
-          return {};
+          return null;
         }
 
         if (cmd === 'add_manual_version') {
@@ -651,17 +681,45 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
         }
 
         if (cmd === 'get_thread') {
-          return window.__MOCK_THREADS__[args.id] || { id: args.id, messages: [] };
+          const thread = window.__MOCK_THREADS__[args.id];
+          const historyThread = window.__MOCK_HISTORY__.find((entry) => entry.id === args.id) ?? null;
+          if (!thread) {
+            return {
+              id: args.id,
+              title: historyThread?.title ?? 'Mock Thread',
+              updatedAt: historyThread?.updatedAt ?? Date.now() / 1000,
+              versionCount: historyThread?.versionCount ?? 0,
+              pendingCount: historyThread?.pendingCount ?? 0,
+              errorCount: historyThread?.errorCount ?? 0,
+              summary: historyThread?.summary ?? '',
+              messages: [],
+            };
+          }
+          return {
+            id: args.id,
+            title: historyThread?.title ?? thread.title ?? 'Mock Thread',
+            updatedAt: historyThread?.updatedAt ?? Date.now() / 1000,
+            versionCount: historyThread?.versionCount ?? 0,
+            pendingCount: historyThread?.pendingCount ?? 0,
+            errorCount: historyThread?.errorCount ?? 0,
+            summary: historyThread?.summary ?? '',
+            messages: thread.messages,
+          };
         }
         return {};
       };
     });
   }
 
+  async function gotoWorkbench(page: Page) {
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.waitForSelector('.workbench');
+  }
+
   test('asking a question should show Ecky response without creating design', async ({ page }) => {
     await setupMocks(page);
-    await page.goto('/');
-    await page.waitForSelector('.workbench');
+    await gotoWorkbench(page);
 
     const textarea = page.locator('.prompt-input');
     await textarea.fill('How does this work?');
@@ -675,14 +733,14 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     const bubbleText = page.locator('.bubble-text');
     await expect(bubbleText).toBeVisible();
     await expect(bubbleText).toContainText('I am a helpful assistant');
-    await expect(page.locator('.usage-strip')).toContainText('TOK');
+    const calls = await page.evaluate(() => (window as any).__MOCK_CALLS__);
+    expect(calls.some((entry: { cmd: string }) => entry.cmd === 'render_model')).toBeFalsy();
   });
 
   test('requesting a design should trigger rendering and model update', async ({ page }) => {
     page.on('console', msg => console.log(`[PAGE] ${msg.type()}: ${msg.text()}`));
     await setupMocks(page);
-    await page.goto('/');
-    await page.waitForSelector('.workbench');
+    await gotoWorkbench(page);
 
     const textarea = page.locator('.prompt-input');
     await textarea.fill('Create a box');
@@ -697,8 +755,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
 
   test('design flow should use the model runtime commands', async ({ page }) => {
     await setupMocks(page);
-    await page.goto('/');
-    await page.waitForSelector('.workbench');
+    await gotoWorkbench(page);
 
     await page.locator('.prompt-input').fill('Create a box');
     await page.click('button:has-text("PROCESS")');
@@ -712,18 +769,18 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
 
   test('selected parts expose editable controls in the main viewer overlay', async ({ page }) => {
     await setupMocks(page);
-    await page.goto('/');
-    await page.waitForSelector('.workbench');
+    await gotoWorkbench(page);
 
     await page.locator('.prompt-input').fill('Create a box');
     await page.click('button:has-text("PROCESS")');
     await page.waitForSelector('.part-chip', { timeout: 10000 });
 
     await page.locator('.part-chip').filter({ hasText: 'Shell' }).click();
+    await expect(page.locator('.part-chip.part-chip-active')).toContainText('Shell');
 
     const overlay = page.locator('.viewer-part-overlay');
-    await expect(overlay).toContainText('Shell');
     await expect(overlay).toContainText('Size');
+    await expect(overlay).toContainText('Height');
 
     await page.locator('.live-toggle').click();
 
@@ -748,8 +805,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
 
   test('viewer overlay edits stage values when live is disabled', async ({ page }) => {
     await setupMocks(page);
-    await page.goto('/');
-    await page.waitForSelector('.workbench');
+    await gotoWorkbench(page);
 
     await page.locator('.prompt-input').fill('Create a box');
     await page.click('button:has-text("PROCESS")');
@@ -790,8 +846,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
 
   test('manual semantic knobs can be created from raw params and attached to a custom context', async ({ page }) => {
     await setupMocks(page);
-    await page.goto('/');
-    await page.waitForSelector('.workbench');
+    await gotoWorkbench(page);
 
     await page.locator('.prompt-input').fill('Create a box');
     await page.click('button:has-text("PROCESS")');
@@ -819,8 +874,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
 
   test('linked semantic knobs propagate related param updates', async ({ page }) => {
     await setupMocks(page);
-    await page.goto('/');
-    await page.waitForSelector('.workbench');
+    await gotoWorkbench(page);
 
     await page.locator('.prompt-input').fill('Create a box');
     await page.click('button:has-text("PROCESS")');
@@ -865,14 +919,13 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
 
   test('clicking the model selects a part and opens the in-view overlay', async ({ page }) => {
     await setupMocks(page);
-    await page.goto('/');
-    await page.waitForSelector('.workbench');
+    await gotoWorkbench(page);
 
     await page.locator('.prompt-input').fill('Create a box');
     await page.click('button:has-text("PROCESS")');
     await page.waitForSelector('.part-chip', { timeout: 10000 });
 
-    const viewer = page.locator('.viewer-host');
+    const viewer = page.locator('.viewer-host').first();
     const bounds = await viewer.boundingBox();
     expect(bounds).not.toBeNull();
     if (!bounds) throw new Error('viewer bounds missing');
@@ -881,18 +934,19 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     for (const ratio of [0.18, 0.24, 0.3]) {
       await page.mouse.click(bounds.x + bounds.width * ratio, bounds.y + bounds.height * 0.54);
       const overlayText = (await page.locator('.viewer-part-overlay').allTextContents())[0] ?? null;
-      if (overlayText?.includes('Shell')) break;
+      if (overlayText?.includes('Size')) break;
     }
 
-    await expect(page.locator('.viewer-part-overlay')).toContainText('Shell');
+    await expect(page.locator('.part-chip.part-chip-active')).toContainText('Shell');
+    await expect(page.locator('.viewer-part-overlay')).toContainText('Size');
   });
 
   test('importing a macro should create a manual version via the manual commit path', async ({ page }) => {
     await setupMocks(page);
-    await page.goto('/');
-    await page.waitForSelector('.workbench');
+    await gotoWorkbench(page);
 
-    await page.getByRole('button', { name: '📜' }).click();
+    await page.locator('button[title="Create New Thread"]').click();
+    await page.getByRole('button', { name: /Import Macro/i }).click();
     await page.getByPlaceholder('Paste FreeCAD macro (Python) here...').fill('print(\"manual\")');
     await page.getByRole('button', { name: /CREATE THREAD/i }).click();
 
@@ -906,10 +960,10 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
 
   test('imported FCStd proposals persist after review and version reload', async ({ page }) => {
     await setupMocks(page);
-    await page.goto('/');
-    await page.waitForSelector('.workbench');
+    await gotoWorkbench(page);
 
-    await page.getByRole('button', { name: '📦' }).click();
+    await page.locator('button[title="Create New Thread"]').click();
+    await page.getByRole('button', { name: /Import FCStd/i }).click();
 
     await expect
       .poll(async () => {
@@ -924,15 +978,18 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
       })
       .toContain('add_imported_model_version');
 
-    await expect(page.locator('.model-status-card')).toContainText('IMPORTED FCSTD');
-    await expect(page.locator('.proposal-card')).toContainText('Expose Outer Shell dimensions');
-    await expect(page.locator('.proposal-status')).toContainText('PENDING');
+    const importDialog = page.getByRole('dialog');
+    await expect(importDialog).toContainText('IMPORT ENRICHMENT');
+    await expect(importDialog.locator('.proposal-card').last()).toContainText('Expose Outer Shell dimensions');
+    await expect(importDialog.locator('.proposal-status').last()).toContainText('PENDING');
 
-    await page.locator('.proposal-card button:has-text("ACCEPT")').click();
-    await expect(page.locator('.proposal-status')).toContainText('ACCEPTED');
+    await importDialog.getByRole('button', { name: 'ACCEPT ALL' }).click();
+    await expect(importDialog.locator('.proposal-status').last()).toContainText('ACCEPTED');
+    await importDialog.getByRole('button', { name: 'APPLY' }).click();
 
     await page.locator('.history-card', { hasText: 'Imported Shell' }).click();
-    await expect(page.locator('.proposal-status')).toContainText('ACCEPTED');
+    await page.locator('.part-chip', { hasText: 'Outer Shell' }).click();
+    await expect(page.locator('.param-field', { hasText: 'Outer Shell Width' })).toBeVisible();
 
     const calls = await page.evaluate(() => (window as any).__MOCK_CALLS__);
     const saveManifestCall = calls.find((entry: { cmd: string }) => entry.cmd === 'save_model_manifest');
@@ -941,20 +998,24 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
 
   test('accepted imported bindings become editable and persist control values', async ({ page }) => {
     await setupMocks(page);
-    await page.goto('/');
-    await page.waitForSelector('.workbench');
+    await gotoWorkbench(page);
 
-    await page.getByRole('button', { name: '📦' }).click();
-    await expect(page.locator('.proposal-card')).toContainText('Expose Outer Shell dimensions');
+    await page.locator('button[title="Create New Thread"]').click();
+    await page.getByRole('button', { name: /Import FCStd/i }).click();
+    const importDialog = page.getByRole('dialog');
+    await expect(importDialog.locator('.proposal-card').last()).toContainText('Expose Outer Shell dimensions');
 
-    await page.locator('.proposal-card button:has-text("ACCEPT")').click();
-    await expect(page.locator('.proposal-status')).toContainText('ACCEPTED');
+    await importDialog.getByRole('button', { name: 'ACCEPT ALL' }).click();
+    await expect(importDialog.locator('.proposal-status').last()).toContainText('ACCEPTED');
+    await importDialog.getByRole('button', { name: 'APPLY' }).click();
 
     await page.locator('.part-chip', { hasText: 'Outer Shell' }).click();
     await expect(page.locator('.param-field', { hasText: 'Outer Shell Width' })).toBeVisible();
     await expect(page.locator('.viewer-part-overlay')).toContainText('Outer Shell');
-    await expect(page.locator('.viewer-part-overlay')).toContainText('EDIT');
     await expect(page.locator('.viewer-part-overlay')).toContainText('Outer Shell Width');
+    await expect(page.getByPlaceholder('Filter controls...')).toBeVisible();
+
+    await page.locator('.param-field', { hasText: 'Outer Shell Width' }).hover();
     await expect(page.locator('.viewer-dimension-layer')).toContainText('Outer Shell');
 
     await page.locator('.viewer-part-overlay input[type="range"]').first().evaluate((element) => {

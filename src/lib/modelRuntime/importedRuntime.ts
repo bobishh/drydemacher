@@ -108,6 +108,7 @@ export function buildImportedSyntheticDesign(
     macroCode: '',
     uiSpec,
     initialParams,
+    postProcessing: null,
   };
 }
 

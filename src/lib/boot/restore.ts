@@ -114,6 +114,38 @@ async function loadConfig() {
     needsSave = true;
   }
 
+  if (!loadedConfig.mcp) {
+    loadedConfig.mcp = {
+      port: null,
+      maxSessions: null,
+      mode: loadedConfig.connectionType === 'mcp' ? 'active' : 'passive',
+      primaryAgentId: null,
+      autoAgents: [],
+    };
+    needsSave = true;
+  } else {
+    if (!loadedConfig.mcp.mode) {
+      loadedConfig.mcp.mode = loadedConfig.mcp.autoAgents.length > 0 ? 'active' : 'passive';
+      needsSave = true;
+    }
+    const nextPrimary =
+      loadedConfig.mcp.autoAgents.find((agent) => agent.enabled)?.id ?? null;
+    if (
+      loadedConfig.mcp.mode === 'active' &&
+      (!loadedConfig.mcp.primaryAgentId ||
+        !loadedConfig.mcp.autoAgents.some(
+          (agent) => agent.enabled && agent.id === loadedConfig.mcp.primaryAgentId,
+        ))
+    ) {
+      loadedConfig.mcp.primaryAgentId = nextPrimary;
+      needsSave = true;
+    }
+    if (loadedConfig.mcp.mode === 'passive' && loadedConfig.mcp.primaryAgentId === undefined) {
+      loadedConfig.mcp.primaryAgentId = nextPrimary;
+      needsSave = true;
+    }
+  }
+
   config.set(loadedConfig);
   
   if (loadedConfig.selectedEngineId) {

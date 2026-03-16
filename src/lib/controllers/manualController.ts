@@ -9,6 +9,7 @@ import { startMicrowaveHum, stopMicrowaveHum, ensureContext } from '../audio/mic
 import { paramPanelState } from '../stores/paramPanelState';
 import { persistLastSessionSnapshot } from '../modelRuntime/sessionSnapshot';
 import { buildImportedSyntheticDesign } from '../modelRuntime/importedRuntime';
+import { getRenderableRuntimeBundle } from '../modelRuntime/runtimeBundle';
 import { ensureSemanticManifest } from '../modelRuntime/semanticControls';
 import type { DesignOutput, DesignParams, ParamValue, UiField, UiSpec } from '../types/domain';
 import {
@@ -46,6 +47,8 @@ function fallbackParamValue(field: UiField): ParamValue {
       return false;
     case 'select':
       return field.options[0]?.value ?? '';
+    case 'image':
+      return '';
     case 'range':
     case 'number':
       return typeof field.min === 'number' ? field.min : 0;
@@ -78,6 +81,15 @@ function mergeFieldWithExisting(parsedField: UiField, existingField: UiField | u
             existing.options?.length > 0 ? existing.options : parsedField.options,
         };
       }
+    case 'image':
+      {
+        const existing = existingField as Extract<UiField, { type: 'image' }>;
+        return {
+          ...parsedField,
+          label: existing.label || parsedField.label,
+          frozen: existing.frozen ?? parsedField.frozen,
+        };
+      }
     case 'range':
     case 'number':
       {
@@ -103,6 +115,9 @@ function coerceParamValue(field: UiField, currentValue: ParamValue | undefined, 
     case 'checkbox':
       if (typeof candidate === 'boolean') return candidate;
       return typeof parsedValue === 'boolean' ? parsedValue : false;
+    case 'image':
+      if (typeof candidate === 'string') return candidate;
+      return typeof parsedValue === 'string' ? parsedValue : '';
     case 'select': {
       const optionValues = new Set((field.options || []).map((option) => option.value));
       if (typeof candidate === 'string' && optionValues.has(candidate)) return candidate;
@@ -200,7 +215,10 @@ export async function handleParamChange(
       }
 
       try {
-        setManualRenderActive(true);
+        setManualRenderActive(true, {
+          threadId: snapshotThreadId,
+          messageId: targetVersionId,
+        });
         const currentConfig = get(config);
         startMicrowaveHum('__manual__', currentConfig, snapshotThreadId);
         session.setStatus('Applying imported FCStd bindings...');
@@ -270,12 +288,16 @@ export async function handleParamChange(
 
   session.setStatus('Executing FreeCAD engine...');
   try {
-    setManualRenderActive(true);
+    setManualRenderActive(true, {
+      threadId: snapshotThreadId,
+      messageId: targetVersionId,
+    });
     const currentConfig = get(config);
     startMicrowaveHum('__manual__', currentConfig, snapshotThreadId);
 
     console.log('[ManualController] Invoking render_model with', { parameters: currentParams });
-    const bundle = await renderModel(codeToUse, currentParams);
+    const bundle = await renderModel(codeToUse, currentParams, wc.postProcessing ?? null);
+    const renderableBundle = getRenderableRuntimeBundle(bundle, wc.postProcessing ?? null) ?? bundle;
     const rawManifest = await getModelManifest(bundle.modelId);
     const previousManifest = get(session).modelManifest;
     const manifest =
@@ -290,13 +312,13 @@ export async function handleParamChange(
     }
 
     if (get(activeThreadId) === snapshotThreadId) {
-      session.setStlUrl(toAssetUrl(bundle.previewStlPath));
-      session.setModelRuntime(bundle, manifest);
+      session.setStlUrl(toAssetUrl(renderableBundle.previewStlPath));
+      session.setModelRuntime(renderableBundle, manifest);
     }
 
     if (get(activeThreadId) === snapshotThreadId) {
       await persistLastSessionSnapshot({
-        artifactBundle: bundle,
+        artifactBundle: renderableBundle,
         modelManifest: manifest,
       });
     }
@@ -363,7 +385,8 @@ export async function commitManualVersion(
     const nextUiSpec = reconciled.uiSpec;
     const nextParams = reconciled.params;
 
-    const bundle = await renderModel(editedCode, nextParams);
+    const bundle = await renderModel(editedCode, nextParams, wc.postProcessing ?? null);
+    const renderableBundle = getRenderableRuntimeBundle(bundle, wc.postProcessing ?? null) ?? bundle;
     const rawManifest = await getModelManifest(bundle.modelId);
     const previousManifest = get(session).modelManifest;
     const manifest =
@@ -377,6 +400,7 @@ export async function commitManualVersion(
       macroCode: editedCode,
       parameters: nextParams,
       uiSpec: nextUiSpec,
+      postProcessing: wc.postProcessing ?? null,
       artifactBundle: bundle,
       modelManifest: manifest,
     });
@@ -390,8 +414,10 @@ export async function commitManualVersion(
       response: "Manual edit committed as new version.",
       interactionMode: "design",
       macroCode: editedCode,
+      macroDialect: wc.macroDialect ?? 'legacy',
       uiSpec: nextUiSpec,
-      initialParams: nextParams
+      initialParams: nextParams,
+      postProcessing: wc.postProcessing ?? null,
     };
 
     if (activateTargetOnSuccess) {
@@ -400,8 +426,8 @@ export async function commitManualVersion(
     }
 
     if (get(activeThreadId) === snapshotThreadId) {
-      session.setStlUrl(toAssetUrl(bundle.previewStlPath));
-      session.setModelRuntime(bundle, manifest);
+      session.setStlUrl(toAssetUrl(renderableBundle.previewStlPath));
+      session.setModelRuntime(renderableBundle, manifest);
       workingCopy.loadVersion(committedDesign, newMsgId);
       paramPanelState.hydrateFromVersion(committedDesign, newMsgId);
       activeVersionId.set(newMsgId);
@@ -420,7 +446,7 @@ export async function commitManualVersion(
         design: committedDesign,
         threadId: snapshotThreadId,
         messageId: newMsgId,
-        artifactBundle: bundle,
+        artifactBundle: renderableBundle,
         modelManifest: manifest,
         selectedPartId: null,
       });

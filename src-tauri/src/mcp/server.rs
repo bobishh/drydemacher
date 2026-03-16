@@ -3,7 +3,7 @@ use crate::mcp::contracts::*;
 use crate::mcp::handlers;
 use crate::models::{
     AppError, AppErrorCode, AppResult, AppState, McpSessionState, McpTargetRef, PathResolver,
-    TargetLeaseInfo,
+    TargetLeaseInfo, ViewportScreenshotCapture,
 };
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 use uuid::Uuid;
 
 const SESSION_HEADER: &str = "Mcp-Session-Id";
@@ -89,6 +90,8 @@ struct ResolvedTargetRef {
     thread_id: String,
     message_id: String,
     model_id: Option<String>,
+    preview_stl_path: Option<String>,
+    viewer_assets: Vec<crate::contracts::ViewerAsset>,
     title: String,
     version_name: String,
     has_draft: bool,
@@ -141,6 +144,13 @@ fn json_rpc_error(id: Option<Value>, code: i32, message: impl Into<String>) -> J
 }
 
 fn mcp_tool_success(id: Option<Value>, value: &Value) -> JsonRpcResponse {
+    if value
+        .get("content")
+        .map(|content| content.is_array())
+        .unwrap_or(false)
+    {
+        return json_rpc_result(id, value.clone());
+    }
     json_rpc_result(
         id,
         json!({
@@ -152,6 +162,98 @@ fn mcp_tool_success(id: Option<Value>, value: &Value) -> JsonRpcResponse {
             ]
         }),
     )
+}
+
+fn parse_image_data_url(data_url: &str) -> AppResult<(String, String)> {
+    let Some(rest) = data_url.strip_prefix("data:") else {
+        return Err(AppError::validation(
+            "Viewport screenshot did not return a data URL.",
+        ));
+    };
+    let Some((metadata, payload)) = rest.split_once(',') else {
+        return Err(AppError::validation(
+            "Viewport screenshot data URL is malformed.",
+        ));
+    };
+    let mut parts = metadata.split(';');
+    let mime_type = parts
+        .next()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| AppError::validation("Viewport screenshot is missing a MIME type."))?;
+    if !parts.any(|part| part.eq_ignore_ascii_case("base64")) {
+        return Err(AppError::validation(
+            "Viewport screenshot must use base64 encoding.",
+        ));
+    }
+    if payload.trim().is_empty() {
+        return Err(AppError::validation(
+            "Viewport screenshot payload is empty.",
+        ));
+    }
+    Ok((mime_type.to_string(), payload.to_string()))
+}
+
+fn build_model_screenshot_result(
+    requested_target: &ResolvedTargetRef,
+    capture: &ViewportScreenshotCapture,
+) -> AppResult<Value> {
+    let (mime_type, image_payload) = parse_image_data_url(&capture.data_url)?;
+    let source = capture.source.trim();
+    let summary = if capture.thread_id == requested_target.thread_id
+        && capture.message_id == requested_target.message_id
+    {
+        format!(
+            "Viewport screenshot from {} for {} / {}.",
+            if source.is_empty() {
+                "live-view"
+            } else {
+                source
+            },
+            capture.thread_id,
+            capture.message_id,
+        )
+    } else {
+        format!(
+            "Viewport screenshot from {} captured {} / {} while {} / {} was requested.",
+            if source.is_empty() {
+                "current-view"
+            } else {
+                source
+            },
+            capture.thread_id,
+            capture.message_id,
+            requested_target.thread_id,
+            requested_target.message_id,
+        )
+    };
+
+    Ok(json!({
+        "content": [
+            {
+                "type": "image",
+                "mimeType": mime_type,
+                "data": image_payload,
+            },
+            {
+                "type": "text",
+                "text": summary,
+            }
+        ],
+        "structuredContent": {
+            "threadId": capture.thread_id,
+            "messageId": capture.message_id,
+            "modelId": capture.model_id,
+            "requestedThreadId": requested_target.thread_id,
+            "requestedMessageId": requested_target.message_id,
+            "requestedModelId": requested_target.model_id,
+            "source": capture.source,
+            "includeOverlays": capture.include_overlays,
+            "camera": capture.camera,
+            "width": capture.width,
+            "height": capture.height,
+            "capturedAt": now_secs(),
+        }
+    }))
 }
 
 fn mcp_tool_error(id: Option<Value>, error: &AppError) -> JsonRpcResponse {
@@ -271,12 +373,19 @@ where
 async fn set_session_target(state: &AppState, session_id: &str, target: Option<McpTargetRef>) {
     let mut sessions = state.mcp_sessions.lock().await;
     if let Some(session) = sessions.get_mut(session_id) {
-        session.last_target = target;
+        session.last_target = target.clone();
     }
+    drop(sessions);
+    crate::mcp::runtime::associate_session_target(state, session_id, target.as_ref());
 }
 
 async fn remove_session(state: &AppState, session_id: &str) -> AppResult<()> {
     state.mcp_sessions.lock().await.remove(session_id);
+    crate::mcp::runtime::mark_agent_disconnected_for_session(
+        state,
+        session_id,
+        Some("Agent disconnected from Ecky's MCP server.".to_string()),
+    );
     let conn = state.db.lock().await;
     db::delete_target_leases_for_session(&conn, session_id)
         .map_err(|e| AppError::persistence(e.to_string()))?;
@@ -323,23 +432,39 @@ async fn resolve_target_for_session(
             .get(session_id)
             .and_then(|session| session.last_target.clone())
     };
+    let runtime_thread_id = crate::mcp::runtime::runtime_snapshot_by_session_id(state, session_id)
+        .and_then(|snapshot| snapshot.pending_thread_id);
 
     let conn = state.db.lock().await;
+    let stored_session = db::get_sessions_by_ids(&conn, &[session_id.to_string()])
+        .map_err(|e| AppError::persistence(e.to_string()))?
+        .into_iter()
+        .next();
 
     let target = if let Some(message_id) = explicit_message_id {
-        crate::services::target::resolve_target(&conn, app, explicit_thread_id, Some(message_id))?
+        crate::services::target::resolve_editable_target(
+            &conn,
+            app,
+            explicit_thread_id,
+            Some(message_id),
+        )?
     } else if let Some(thread_id) = explicit_thread_id {
         let message_id = db::get_latest_successful_message_id_in_thread(&conn, &thread_id)
             .map_err(|e| AppError::persistence(e.to_string()))?
             .ok_or_else(|| {
                 AppError::validation(format!("Thread {} has no successful versions.", thread_id))
             })?;
-        crate::services::target::resolve_target(&conn, app, Some(thread_id), Some(message_id))?
+        crate::services::target::resolve_editable_target(
+            &conn,
+            app,
+            Some(thread_id),
+            Some(message_id),
+        )?
     } else if let Some(cached_target) = cached_target {
         let still_exists = db::get_message_thread_id(&conn, &cached_target.message_id)
             .map_err(|e| AppError::persistence(e.to_string()))?;
         if still_exists.as_deref() == Some(cached_target.thread_id.as_str()) {
-            crate::services::target::resolve_target(
+            crate::services::target::resolve_editable_target(
                 &conn,
                 app,
                 Some(cached_target.thread_id),
@@ -349,18 +474,34 @@ async fn resolve_target_for_session(
             let recent = db::get_latest_successful_target_in_most_recent_thread(&conn)
                 .map_err(|e| AppError::persistence(e.to_string()))?
                 .ok_or_else(|| AppError::validation("No active target available."))?;
-            crate::services::target::resolve_target(
+            crate::services::target::resolve_editable_target(
                 &conn,
                 app,
                 Some(recent.thread_id),
                 Some(recent.message_id),
             )?
         }
+    } else if let Some(thread_id) = runtime_thread_id.or_else(|| {
+        stored_session
+            .as_ref()
+            .and_then(|session| session.thread_id.clone())
+    }) {
+        let message_id = db::get_latest_successful_message_id_in_thread(&conn, &thread_id)
+            .map_err(|e| AppError::persistence(e.to_string()))?
+            .ok_or_else(|| {
+                AppError::validation(format!("Thread {} has no successful versions.", thread_id))
+            })?;
+        crate::services::target::resolve_editable_target(
+            &conn,
+            app,
+            Some(thread_id),
+            Some(message_id),
+        )?
     } else {
         let recent = db::get_latest_successful_target_in_most_recent_thread(&conn)
             .map_err(|e| AppError::persistence(e.to_string()))?
             .ok_or_else(|| AppError::validation("No active target available."))?;
-        crate::services::target::resolve_target(
+        crate::services::target::resolve_editable_target(
             &conn,
             app,
             Some(recent.thread_id),
@@ -368,12 +509,7 @@ async fn resolve_target_for_session(
         )?
     };
 
-    let design = target
-        .latest_draft
-        .as_ref()
-        .map(|draft| draft.design_output.clone())
-        .or(target.design.clone())
-        .ok_or_else(|| AppError::validation("Target has no design output."))?;
+    let design = target.design_output.clone();
     let (range_count, number_count, select_count, checkbox_count) = design
         .ui_spec
         .fields
@@ -385,24 +521,22 @@ async fn resolve_target_for_session(
             crate::models::UiField::Checkbox { .. } => (acc.0, acc.1, acc.2, acc.3 + 1),
             crate::models::UiField::Image { .. } => acc,
         });
-    let model_id = target
-        .latest_draft
-        .as_ref()
-        .and_then(|draft| draft.model_id.clone())
-        .or_else(|| {
-            target
-                .artifact_bundle
-                .as_ref()
-                .map(|bundle| bundle.model_id.clone())
-        });
+    let model_id = target.model_id();
+    let runtime_bundle = target.artifact_bundle.clone();
 
     Ok(ResolvedTargetRef {
         thread_id: target.thread_id,
         message_id: target.message_id,
         model_id,
+        preview_stl_path: runtime_bundle
+            .as_ref()
+            .map(|bundle| bundle.preview_stl_path.clone()),
+        viewer_assets: runtime_bundle
+            .map(|bundle| bundle.viewer_assets)
+            .unwrap_or_default(),
         title: design.title,
         version_name: design.version_name,
-        has_draft: target.latest_draft.is_some(),
+        has_draft: false,
         ui_field_count: design.ui_spec.fields.len(),
         range_count,
         number_count,
@@ -426,6 +560,68 @@ async fn resolve_target_for_session(
             .map(|manifest| manifest.control_views.len())
             .unwrap_or(0),
     })
+}
+
+async fn request_model_screenshot(
+    server: &HttpServerState,
+    session_id: &str,
+    req: GetModelScreenshotRequest,
+) -> AppResult<Value> {
+    let target = resolve_target_for_session(
+        &server.state,
+        server.app.as_ref(),
+        session_id,
+        req.thread_id.clone(),
+        req.message_id.clone(),
+    )
+    .await?;
+    let preview_stl_path = target.preview_stl_path.clone().ok_or_else(|| {
+        AppError::validation("Target does not have a preview STL available for screenshots.")
+    })?;
+    let timeout_secs = req.timeout_secs.unwrap_or(90).clamp(5, 600);
+    let request_id = Uuid::new_v4().to_string();
+    let include_overlays = req.include_overlays.unwrap_or(true);
+    let (tx, rx) = oneshot::channel::<Result<ViewportScreenshotCapture, String>>();
+
+    {
+        let mut channels = server.state.viewport_screenshot_channels.lock().await;
+        channels.insert(request_id.clone(), tx);
+    }
+
+    server
+        .handle
+        .emit(
+            "agent-viewport-screenshot-request",
+            AgentViewportScreenshotEvent {
+                request_id: request_id.clone(),
+                thread_id: target.thread_id.clone(),
+                message_id: target.message_id.clone(),
+                model_id: target.model_id.clone(),
+                preview_stl_path,
+                viewer_assets: target.viewer_assets.clone(),
+                include_overlays,
+                camera: req.camera.clone(),
+            },
+        )
+        .map_err(|e| AppError::internal(format!("Failed to emit screenshot event: {}", e)))?;
+
+    let capture = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx)
+        .await
+        .map_err(|_| {
+            let state_clone = server.state.viewport_screenshot_channels.clone();
+            let id_clone = request_id.clone();
+            tokio::spawn(async move {
+                state_clone.lock().await.remove(&id_clone);
+            });
+            AppError::internal(format!(
+                "Viewport screenshot timed out after {} seconds.",
+                timeout_secs
+            ))
+        })?
+        .map_err(|_| AppError::internal("Viewport screenshot channel closed unexpectedly."))?
+        .map_err(AppError::validation)?;
+
+    build_model_screenshot_result(&target, &capture)
 }
 
 async fn acquire_lease(
@@ -632,8 +828,13 @@ fn workflow_guide_text(state: &AppState) -> String {
             "Recommended startup sequence:\n",
             "1. Read ecky://guides/system-prompt and ecky://guides/modeling-guidelines.\n",
             "2. Call workspace_overview.\n",
-            "3. If needed, call target_get or thread_get.\n",
-            "4. Then mutate with params_patch_and_render, macro_replace_and_render, or semantic tools.\n"
+            "3. Call target_meta_get.\n",
+            "4. For macro geometry/orientation questions, call target_macro_get.\n",
+            "5. For exact chunks, call target_detail_get(section=...).\n",
+            "6. Call semantic_manifest_get only when semantic bindings matter.\n",
+            "7. Use target_get only when you truly need the full payload.\n",
+            "8. Then mutate with params_patch_and_render, macro_replace_and_render, or semantic tools.\n",
+            "9. Use measurement_annotation tools to encode what dimensions mean instead of leaving that meaning only in prose.\n"
         ),
         selected_engine_label(state)
     )
@@ -659,8 +860,9 @@ fn workspace_overview_brief(state: &AppState) -> WorkspaceOverviewBrief {
         next_steps: vec![
             "Read ecky://guides/system-prompt if you have not loaded Ecky guidance yet."
                 .to_string(),
-            "Call target_get for full editable target details.".to_string(),
-            "Then use params_patch_and_render, macro_replace_and_render, or semantic tools."
+            "Call target_meta_get for a lightweight summary of the current editable target."
+                .to_string(),
+            "Use target_macro_get for macro reasoning, target_detail_get(section=...) for exact chunks, and target_get only as a full-payload fallback."
                 .to_string(),
         ],
     }
@@ -670,7 +872,7 @@ fn workspace_control_surface(target: &ResolvedTargetRef) -> WorkspaceControlSurf
     let mut hints = vec![];
     if target.ui_field_count > 0 {
         hints.push(format!(
-            "This target exposes {} uiSpec fields. Use target_get to inspect exact control keys, defaults, and option values.",
+            "This target exposes {} uiSpec fields. Use target_detail_get(section=\"uiSpec\") to inspect exact control keys, defaults, and option values.",
             target.ui_field_count
         ));
     } else {
@@ -687,7 +889,7 @@ fn workspace_control_surface(target: &ResolvedTargetRef) -> WorkspaceControlSurf
     }
     if target.has_semantic_manifest {
         hints.push(format!(
-            "Semantic manifest is present with {} control primitives, {} relations, and {} views. Use semantic_manifest_get to inspect bindings and control_view/control_primitive tools to edit them.",
+            "Semantic manifest is present with {} control primitives, {} relations, and {} views. Use semantic_manifest_get to inspect bindings and control_view/control_primitive/measurement_annotation tools to edit them.",
             target.control_primitive_count, target.control_relation_count, target.control_view_count
         ));
     } else {
@@ -854,12 +1056,71 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "target_get",
-            "description": "Fetch the current resolved editable target. If no target is provided, the server uses the session cache or the most recent successful thread.",
+            "name": "target_meta_get",
+            "description": "Fetch a lightweight summary of the current editable target. Preferred default read step after workspace_overview.",
             "inputSchema": with_identity(
                 &[
                     ("threadId", json!({ "type": "string" })),
                     ("messageId", json!({ "type": "string" }))
+                ],
+                &[],
+            )
+        }),
+        json!({
+            "name": "target_macro_get",
+            "description": "Fetch only the active editable macro payload for geometry, orientation, and structure reasoning. Prefer this over target_get for macro questions.",
+            "inputSchema": with_identity(
+                &[
+                    ("threadId", json!({ "type": "string" })),
+                    ("messageId", json!({ "type": "string" }))
+                ],
+                &[],
+            )
+        }),
+        json!({
+            "name": "target_detail_get",
+            "description": "Fetch one exact chunk of the active editable target by section. Use this instead of target_get when you only need uiSpec, params, or artifactBundle. latestDraft is deprecated and currently always null.",
+            "inputSchema": with_identity(
+                &[
+                    ("threadId", json!({ "type": "string" })),
+                    ("messageId", json!({ "type": "string" })),
+                    ("section", json!({
+                        "type": "string",
+                        "enum": ["uiSpec", "initialParams", "artifactBundle", "latestDraft"]
+                    }))
+                ],
+                &["section"],
+            )
+        }),
+        json!({
+            "name": "target_get",
+            "description": "Fetch the full current editable target payload. Expensive; prefer target_meta_get, target_macro_get, or target_detail_get unless you truly need everything.",
+            "inputSchema": with_identity(
+                &[
+                    ("threadId", json!({ "type": "string" })),
+                    ("messageId", json!({ "type": "string" }))
+                ],
+                &[],
+            )
+        }),
+        json!({
+            "name": "get_model_screenshot",
+            "description": "Capture the current model viewport as Ecky can see it. Defaults to the visible workbench view; if the requested target is not open, Ecky asks the user how to proceed.",
+            "inputSchema": with_identity(
+                &[
+                    ("threadId", json!({ "type": "string" })),
+                    ("messageId", json!({ "type": "string" })),
+                    ("includeOverlays", json!({ "type": "boolean", "description": "Whether to include the current drawing overlay in live captures. Defaults to true." })),
+                    ("camera", json!({
+                        "type": "object",
+                        "properties": {
+                            "position": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                            "target": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                            "zoom": { "type": "number" },
+                            "fov": { "type": "number" }
+                        }
+                    })),
+                    ("timeoutSecs", json!({ "type": "number", "description": "Seconds to wait for the UI capture flow. Default 90, max 600." }))
                 ],
                 &[],
             )
@@ -884,9 +1145,9 @@ fn tool_definitions() -> Vec<Value> {
                 "range/number: min, max, step (numbers). ",
                 "select: options array of {label, value} objects — MUST have at least one option. ",
                 "checkbox: no extra fields. ",
-                "image: use for file-picker inputs (e.g. a reference photo) — no extra fields, value is an absolute file path string. ",
+                "image: use for file-picker inputs (e.g. a reference photo) — no extra fields, value is an absolute file path string once chosen by the user. ",
                 "parameters is a flat key→value map matching uiSpec field keys. ",
-                "For image fields, omit the key from parameters (user picks the file in the UI)."
+                "For image fields, the parameter may be omitted or set to an empty string until the user picks a file in the UI."
             ),
             "inputSchema": with_identity(
                 &[
@@ -987,6 +1248,34 @@ fn tool_definitions() -> Vec<Value> {
             )
         }),
         json!({
+            "name": "measurement_annotation_save",
+            "description": "Create or update one measurement semantic annotation and save a new version.",
+            "inputSchema": with_identity(
+                &[
+                    ("threadId", json!({ "type": "string" })),
+                    ("messageId", json!({ "type": "string" })),
+                    ("annotation", json!({ "type": "object" })),
+                    ("title", json!({ "type": "string" })),
+                    ("versionName", json!({ "type": "string" }))
+                ],
+                &["annotation"],
+            )
+        }),
+        json!({
+            "name": "measurement_annotation_delete",
+            "description": "Delete one measurement semantic annotation and save a new version.",
+            "inputSchema": with_identity(
+                &[
+                    ("threadId", json!({ "type": "string" })),
+                    ("messageId", json!({ "type": "string" })),
+                    ("annotationId", json!({ "type": "string" })),
+                    ("title", json!({ "type": "string" })),
+                    ("versionName", json!({ "type": "string" }))
+                ],
+                &["annotationId"],
+            )
+        }),
+        json!({
             "name": "version_save",
             "description": "Persist the latest successful draft as a new saved version.",
             "inputSchema": with_identity(
@@ -1036,7 +1325,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "request_user_prompt",
-            "description": "Request free-text input from the human in the Ecky UI. Blocks until the user types and submits a prompt, or the timeout expires. Use this to drive the conversation loop: ask the user what they want, wait for their reply, then act on it.",
+            "description": "Request text input from the human in the Ecky UI, with optional image/CAD attachments from the same prompt panel. Blocks until the user submits or the timeout expires. Use this to drive the conversation loop: ask what they want, wait for their reply, then act on it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1045,6 +1334,19 @@ fn tool_definitions() -> Vec<Value> {
                     "timeoutSecs": { "type": "number", "description": "Seconds to wait. Default 300, max 1800." }
                 }
             }
+        }),
+        json!({
+            "name": "session_reply_save",
+            "description": "Save one final assistant reply into the current thread history. Use this for final user-facing text or fatal turn-ending errors, not for step-by-step progress.",
+            "inputSchema": with_identity(
+                &[
+                    ("threadId", json!({ "type": "string" })),
+                    ("messageId", json!({ "type": "string" })),
+                    ("body", json!({ "type": "string" })),
+                    ("fatal", json!({ "type": "boolean" }))
+                ],
+                &["body"],
+            )
         }),
         json!({
             "name": "finalize_thread",
@@ -1464,8 +1766,96 @@ async fn dispatch_tool_call(
             let updated = get_session(&server.state, session_id)
                 .await
                 .ok_or_else(|| AppError::not_found("MCP session not found."))?;
+            crate::mcp::runtime::mark_agent_active(
+                &server.state,
+                &updated.agent_label,
+                Some(session_id.to_string()),
+                None,
+                updated.llm_model_label.clone(),
+                Some("Connected to Ecky MCP.".to_string()),
+            );
             let response = current_context(session_id, &updated).as_identity_response();
             Ok((serde_json::to_value(response).unwrap(), None))
+        }
+        "target_meta_get" => {
+            let mut req_args =
+                serde_json::from_value::<TargetMetaRequest>(args).unwrap_or(TargetMetaRequest {
+                    identity: AgentIdentityOverride::default(),
+                    thread_id: None,
+                    message_id: None,
+                });
+            let target = resolve_target_for_session(
+                &server.state,
+                server.app.as_ref(),
+                session_id,
+                req_args.thread_id.clone(),
+                req_args.message_id.clone(),
+            )
+            .await?;
+            req_args.thread_id = Some(target.thread_id.clone());
+            req_args.message_id = Some(target.message_id.clone());
+            let response = handlers::handle_target_meta_get(
+                &server.state,
+                server.app.as_ref(),
+                req_args,
+                &current_ctx,
+            )
+            .await?;
+            let value = serde_json::to_value(&response).unwrap();
+            let next_target = target_ref_from_value(&value);
+            Ok((value, next_target))
+        }
+        "target_macro_get" => {
+            let mut req_args =
+                serde_json::from_value::<TargetMacroRequest>(args).unwrap_or(TargetMacroRequest {
+                    identity: AgentIdentityOverride::default(),
+                    thread_id: None,
+                    message_id: None,
+                });
+            let target = resolve_target_for_session(
+                &server.state,
+                server.app.as_ref(),
+                session_id,
+                req_args.thread_id.clone(),
+                req_args.message_id.clone(),
+            )
+            .await?;
+            req_args.thread_id = Some(target.thread_id.clone());
+            req_args.message_id = Some(target.message_id.clone());
+            let response = handlers::handle_target_macro_get(
+                &server.state,
+                server.app.as_ref(),
+                req_args,
+                &current_ctx,
+            )
+            .await?;
+            let value = serde_json::to_value(&response).unwrap();
+            let next_target = target_ref_from_value(&value);
+            Ok((value, next_target))
+        }
+        "target_detail_get" => {
+            let mut req_args: TargetDetailRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let target = resolve_target_for_session(
+                &server.state,
+                server.app.as_ref(),
+                session_id,
+                req_args.thread_id.clone(),
+                req_args.message_id.clone(),
+            )
+            .await?;
+            req_args.thread_id = Some(target.thread_id.clone());
+            req_args.message_id = Some(target.message_id.clone());
+            let response = handlers::handle_target_detail_get(
+                &server.state,
+                server.app.as_ref(),
+                req_args,
+                &current_ctx,
+            )
+            .await?;
+            let value = serde_json::to_value(&response).unwrap();
+            let next_target = target_ref_from_value(&value);
+            Ok((value, next_target))
         }
         "target_get" => {
             let mut req_args =
@@ -1494,6 +1884,12 @@ async fn dispatch_tool_call(
             let value = serde_json::to_value(&response).unwrap();
             let next_target = target_ref_from_value(&value);
             Ok((value, next_target))
+        }
+        "get_model_screenshot" => {
+            let req_args: GetModelScreenshotRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let value = request_model_screenshot(server, session_id, req_args).await?;
+            Ok((value, None))
         }
         "params_patch_and_render" => {
             let mut req_args: ParamsPatchRequest =
@@ -1780,6 +2176,92 @@ async fn dispatch_tool_call(
                 }
             }
         }
+        "measurement_annotation_save" => {
+            let mut req_args: MeasurementAnnotationSaveRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let action_ctx = current_ctx.with_override(&req_args.identity);
+            let target = resolve_target_for_session(
+                &server.state,
+                server.app.as_ref(),
+                session_id,
+                req_args.thread_id.clone(),
+                req_args.message_id.clone(),
+            )
+            .await?;
+            let lease_target = McpTargetRef {
+                thread_id: target.thread_id.clone(),
+                message_id: target.message_id.clone(),
+                model_id: target.model_id.clone(),
+            };
+            acquire_lease(&server.state, &action_ctx, &lease_target).await?;
+            req_args.thread_id = Some(target.thread_id.clone());
+            req_args.message_id = Some(target.message_id.clone());
+            match handlers::handle_measurement_annotation_save(
+                &server.state,
+                server.app.as_ref(),
+                req_args,
+                &current_ctx,
+            )
+            .await
+            {
+                Ok(response) => {
+                    let value = serde_json::to_value(&response).unwrap();
+                    let next_target = target_ref_from_value(&value).unwrap_or(lease_target.clone());
+                    move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target)
+                        .await?;
+                    let _ = server.handle.emit("history-updated", ());
+                    Ok((value, Some(next_target)))
+                }
+                Err(err) => {
+                    let _ =
+                        release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
+                    Err(err)
+                }
+            }
+        }
+        "measurement_annotation_delete" => {
+            let mut req_args: MeasurementAnnotationDeleteRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let action_ctx = current_ctx.with_override(&req_args.identity);
+            let target = resolve_target_for_session(
+                &server.state,
+                server.app.as_ref(),
+                session_id,
+                req_args.thread_id.clone(),
+                req_args.message_id.clone(),
+            )
+            .await?;
+            let lease_target = McpTargetRef {
+                thread_id: target.thread_id.clone(),
+                message_id: target.message_id.clone(),
+                model_id: target.model_id.clone(),
+            };
+            acquire_lease(&server.state, &action_ctx, &lease_target).await?;
+            req_args.thread_id = Some(target.thread_id.clone());
+            req_args.message_id = Some(target.message_id.clone());
+            match handlers::handle_measurement_annotation_delete(
+                &server.state,
+                server.app.as_ref(),
+                req_args,
+                &current_ctx,
+            )
+            .await
+            {
+                Ok(response) => {
+                    let value = serde_json::to_value(&response).unwrap();
+                    let next_target = target_ref_from_value(&value).unwrap_or(lease_target.clone());
+                    move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target)
+                        .await?;
+                    let _ = server.handle.emit("history-updated", ());
+                    Ok((value, Some(next_target)))
+                }
+                Err(err) => {
+                    let _ =
+                        release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
+                    Err(err)
+                }
+            }
+        }
         "version_save" => {
             let mut req_args =
                 serde_json::from_value::<VersionSaveRequest>(args).unwrap_or(VersionSaveRequest {
@@ -1935,6 +2417,13 @@ async fn dispatch_tool_call(
             .await?;
             Ok((serde_json::to_value(response).unwrap(), None))
         }
+        "session_reply_save" => {
+            let req: SessionReplySaveRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let response =
+                handlers::handle_session_reply_save(&server.state, req, &current_ctx).await?;
+            Ok((serde_json::to_value(response).unwrap(), None))
+        }
         "finalize_thread" => {
             let req_args: FinalizeThreadRequest =
                 serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
@@ -1946,5 +2435,171 @@ async fn dispatch_tool_call(
             "Unknown tool: {}",
             params.name
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contracts::{Config, McpConfig};
+    use rusqlite::Connection;
+
+    fn test_state() -> AppState {
+        AppState::new(
+            Config {
+                engines: Vec::new(),
+                selected_engine_id: String::new(),
+                freecad_cmd: String::new(),
+                assets: Vec::new(),
+                microwave: None,
+                mcp: McpConfig::default(),
+                has_seen_onboarding: true,
+                connection_type: None,
+            },
+            None,
+            Connection::open_in_memory().expect("memory db"),
+        )
+    }
+
+    #[test]
+    fn tool_definitions_include_get_model_screenshot() {
+        let tool_names = tool_definitions()
+            .into_iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
+            .collect::<Vec<_>>();
+
+        assert!(
+            tool_names.iter().any(|name| name == "get_model_screenshot"),
+            "expected get_model_screenshot in {:?}",
+            tool_names
+        );
+    }
+
+    #[test]
+    fn tool_definitions_include_target_read_split_tools() {
+        let tool_names = tool_definitions()
+            .into_iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
+            .collect::<Vec<_>>();
+
+        assert!(tool_names.iter().any(|name| name == "target_meta_get"));
+        assert!(tool_names.iter().any(|name| name == "target_macro_get"));
+        assert!(tool_names.iter().any(|name| name == "target_detail_get"));
+        assert!(tool_names.iter().any(|name| name == "target_get"));
+    }
+
+    #[test]
+    fn tool_definitions_include_measurement_annotation_tools() {
+        let tool_names = tool_definitions()
+            .into_iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
+            .collect::<Vec<_>>();
+
+        assert!(tool_names
+            .iter()
+            .any(|name| name == "measurement_annotation_save"));
+        assert!(tool_names
+            .iter()
+            .any(|name| name == "measurement_annotation_delete"));
+    }
+
+    #[test]
+    fn guidance_prefers_meta_macro_and_detail_over_target_get() {
+        let state = test_state();
+        let workflow = workflow_guide_text(&state);
+        let brief = workspace_overview_brief(&state);
+
+        assert!(workflow.contains("Call target_meta_get"));
+        assert!(workflow.contains("call target_macro_get"));
+        assert!(workflow.contains("call target_detail_get(section=...)"));
+        assert!(workflow.contains("Use target_get only when you truly need the full payload"));
+        assert!(workflow.contains("measurement_annotation tools"));
+        assert!(!workflow.contains("If needed, call target_get or thread_get"));
+
+        assert!(brief
+            .next_steps
+            .iter()
+            .any(|step| step.contains("target_meta_get")));
+        assert!(brief
+            .next_steps
+            .iter()
+            .any(|step| step.contains("target_macro_get")));
+        assert!(brief
+            .next_steps
+            .iter()
+            .any(|step| step.contains("target_detail_get(section=...)")));
+    }
+
+    #[test]
+    fn mcp_tool_success_preserves_rich_content_payloads() {
+        let payload = json!({
+            "content": [
+                { "type": "text", "text": "hello" }
+            ],
+            "structuredContent": {
+                "source": "visible-live"
+            }
+        });
+
+        let response = mcp_tool_success(Some(json!(1)), &payload);
+        assert_eq!(response.result, Some(payload));
+    }
+
+    #[test]
+    fn parse_image_data_url_accepts_base64_images() {
+        let (mime_type, payload) =
+            parse_image_data_url("data:image/jpeg;base64,Zm9v").expect("valid data URL");
+        assert_eq!(mime_type, "image/jpeg");
+        assert_eq!(payload, "Zm9v");
+    }
+
+    #[test]
+    fn build_model_screenshot_result_includes_image_and_metadata() {
+        let requested_target = ResolvedTargetRef {
+            thread_id: "thread-1".to_string(),
+            message_id: "message-1".to_string(),
+            model_id: Some("model-1".to_string()),
+            preview_stl_path: Some("/tmp/model.stl".to_string()),
+            viewer_assets: vec![],
+            title: "Widget".to_string(),
+            version_name: "V1".to_string(),
+            has_draft: false,
+            ui_field_count: 0,
+            range_count: 0,
+            number_count: 0,
+            select_count: 0,
+            checkbox_count: 0,
+            parameter_count: 0,
+            has_semantic_manifest: false,
+            control_primitive_count: 0,
+            control_relation_count: 0,
+            control_view_count: 0,
+        };
+        let capture = ViewportScreenshotCapture {
+            data_url: "data:image/jpeg;base64,Zm9v".to_string(),
+            width: 1280,
+            height: 720,
+            camera: crate::contracts::ViewportCameraState {
+                position: [1.0, 2.0, 3.0],
+                target: [0.0, 0.0, 0.0],
+                zoom: None,
+                fov: Some(45.0),
+            },
+            source: "visible-live".to_string(),
+            thread_id: "thread-1".to_string(),
+            message_id: "message-1".to_string(),
+            model_id: Some("model-1".to_string()),
+            include_overlays: true,
+        };
+
+        let result = build_model_screenshot_result(&requested_target, &capture)
+            .expect("screenshot payload should be valid");
+        assert_eq!(result["content"][0]["type"], "image");
+        assert_eq!(result["content"][0]["mimeType"], "image/jpeg");
+        assert_eq!(result["content"][0]["data"], "Zm9v");
+        assert_eq!(result["structuredContent"]["source"], "visible-live");
+        assert_eq!(result["structuredContent"]["threadId"], "thread-1");
+        assert_eq!(result["structuredContent"]["width"], 1280);
+        assert_eq!(result["structuredContent"]["includeOverlays"], true);
     }
 }

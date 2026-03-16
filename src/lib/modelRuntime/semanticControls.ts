@@ -681,6 +681,28 @@ export function materializeControlViews(
     .sort(sortByOrder);
 }
 
+export function pickOverlayControls(
+  view: MaterializedSemanticView | null,
+  selectedPartId: string | null,
+): MaterializedSemanticControl[] {
+  if (!view) return [];
+
+  const visibleControls = view.sections
+    .filter((section) => !section.collapsed)
+    .flatMap((section) => section.controls);
+
+  if (!selectedPartId) {
+    return visibleControls;
+  }
+
+  const partScoped = visibleControls.filter((control) =>
+    (control.partIds || []).includes(selectedPartId),
+  );
+  const globalControls = visibleControls.filter((control) => (control.partIds || []).length === 0);
+
+  return partScoped.length > 0 ? [...partScoped, ...globalControls] : visibleControls;
+}
+
 export function buildPrimitivePatch(
   manifest: ModelManifest | null,
   primitiveId: string,

@@ -4,6 +4,7 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import Modal from './Modal.svelte';
   import type { AgentOrigin, Attachment, Message, UsageSummary } from './types/domain';
+  import { isConceptPreviewMessage } from './viewportBlueprint';
 
   type TauriBridgeWindow = Window & typeof globalThis & {
     __TAURI_INTERNALS__?: {
@@ -35,6 +36,9 @@
     queuedMessages = [] as QueuedMessage[],
     messages = [],
     onShowCode,
+    onOpenConceptPreview,
+    onPinConceptPreview,
+    pinnedConceptPreviewMessageId = null,
     activeThreadId = null,
     activeVersionId = $bindable(null),
     onVersionChange,
@@ -47,6 +51,9 @@
     queuedMessages?: QueuedMessage[];
     messages?: Message[];
     onShowCode: (message: CodeVersionMessage) => void;
+    onOpenConceptPreview?: (message: Message) => void;
+    onPinConceptPreview?: (message: Message) => void;
+    pinnedConceptPreviewMessageId?: string | null;
     activeThreadId?: string | null;
     activeVersionId?: string | null;
     onVersionChange?: (message: VersionMessage) => void;
@@ -345,17 +352,16 @@
 
   const currentVersion = $derived(currentVersionIndex >= 0 ? versions[currentVersionIndex] : null);
   const promptTrail = $derived.by(() => {
-    if (!currentVersion) return [];
-    const isLatest = currentVersion.id === versions[versions.length - 1]?.id;
-    const base = isLatest ? messages : messages.filter(m => m.timestamp <= currentVersion.timestamp);
+    const base = currentVersion
+      ? (
+          currentVersion.id === versions[versions.length - 1]?.id
+            ? messages
+            : messages.filter(m => m.timestamp <= currentVersion.timestamp)
+        )
+      : messages;
     // Filter out standalone error messages (failed attempts with no output) — they pollute the trail
     return base.filter(m => !(m.role === 'assistant' && m.status === 'error' && !m.output));
   });
-  const currentUserMsg = $derived.by(() => {
-    const userMsgs = promptTrail.filter(m => m.role === 'user');
-    return userMsgs.length > 0 ? userMsgs[userMsgs.length - 1] : null;
-  });
-
   let detailsOpen = $state(false);
   let trailListEl = $state<HTMLDivElement | null>(null);
   let copiedTrailMessageId = $state<string | null>(null);
@@ -395,7 +401,12 @@
       visuals.push({
         src: msg.imageData,
         alt: msg.role === 'user' ? 'Viewport snapshot' : 'Message image',
-        label: msg.role === 'user' ? 'VIEWPORT' : 'IMAGE',
+        label:
+          msg.role === 'user'
+            ? 'VIEWPORT'
+            : msg.visualKind === 'conceptPreview'
+              ? 'CONCEPT'
+              : 'IMAGE',
       });
     }
     for (const image of msg.attachmentImages || []) {
@@ -604,7 +615,7 @@
       </div>
     {/if}
 
-    {#if currentUserMsg && currentVersion}
+    {#if promptTrail.length > 0}
       <div class="version-details">
         <button
           class="version-details-toggle"
@@ -612,7 +623,7 @@
           aria-expanded={detailsOpen}
           onclick={() => (detailsOpen = !detailsOpen)}
         >
-          <span>Dialogue History for {versionTitle(currentVersion)}</span>
+          <span>Dialogue History{currentVersion ? ` for ${versionTitle(currentVersion)}` : ''}</span>
           <span class="details-toggle-indicator">{detailsOpen ? '−' : '+'}</span>
         </button>
         {#if detailsOpen}
@@ -643,6 +654,21 @@
                             <img src={visual.src} alt={visual.alt} class="trail-image" />
                           </div>
                         {/each}
+                      </div>
+                    {/if}
+                    {#if isConceptPreviewMessage(msg)}
+                      <div class="trail-visual-actions">
+                        <button class="trail-action-btn" type="button" onclick={() => onOpenConceptPreview?.(msg)}>
+                          OPEN IN VIEWPORT
+                        </button>
+                        <button
+                          class="trail-action-btn"
+                          type="button"
+                          disabled={pinnedConceptPreviewMessageId === msg.id}
+                          onclick={() => onPinConceptPreview?.(msg)}
+                        >
+                          {pinnedConceptPreviewMessageId === msg.id ? 'PINNED' : 'PIN AS CURRENT PREVIEW'}
+                        </button>
                       </div>
                     {/if}
                     {#if msg.role === 'assistant' && msg.output}
@@ -797,6 +823,35 @@
     gap: 4px;
     width: 240px;
     flex-shrink: 0;
+  }
+
+  .trail-visual-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+
+  .trail-action-btn {
+    background: color-mix(in srgb, var(--bg-200) 88%, transparent);
+    border: 1px solid var(--bg-300);
+    color: var(--secondary);
+    cursor: pointer;
+    padding: 4px 8px;
+    font-family: var(--font-mono);
+    font-size: 0.64rem;
+    letter-spacing: 0.08em;
+  }
+
+  .trail-action-btn:hover:not(:disabled) {
+    border-color: var(--primary);
+    color: var(--primary);
+  }
+
+  .trail-action-btn:disabled {
+    cursor: default;
+    color: var(--text-dim);
+    opacity: 0.65;
   }
 
   .attachment-hint {

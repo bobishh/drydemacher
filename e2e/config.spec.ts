@@ -10,22 +10,22 @@ test.describe('Configuration Panel', () => {
 
     // Click settings button to go to config
     await page.click('button[title="Configuration"]');
-    await expect(page.locator('text=ENGINES')).toBeVisible();
+    await expect(page.locator('text=CONNECTION TYPE')).toBeVisible();
     await expect(page.locator('text=TUNABLE PARAMETERS')).not.toBeVisible();
 
     // Click back to workbench
-    await page.click('button[title="Configuration"]');
+    await page.click('button[title="Close"]');
     await expect(page.locator('text=TUNABLE PARAMETERS')).toBeVisible();
   });
 
-  test('config panel shows engine section by default', async ({ page }) => {
+  test('config panel shows connection type section by default', async ({ page }) => {
     await page.goto('/');
     await page.waitForTimeout(2000);
     await page.click('button[title="Configuration"]');
-    await expect(page.locator('text=ENGINES')).toBeVisible();
+    await expect(page.locator('text=CONNECTION TYPE')).toBeVisible();
   });
 
-  test('settings button shows gear emoji on workbench and hammer on config', async ({ page }) => {
+  test('settings button shows gear emoji on workbench and close icon on config', async ({ page }) => {
     await page.goto('/');
     await page.waitForTimeout(2000);
 
@@ -34,7 +34,7 @@ test.describe('Configuration Panel', () => {
 
     // Go to config
     await page.click('button[title="Configuration"]');
-    // On config, should show hammer
-    await expect(page.locator('button[title="Configuration"]')).toContainText('⚒️');
+    // On config, should show close affordance
+    await expect(page.locator('button[title="Close"]')).toContainText('×');
   });
 });

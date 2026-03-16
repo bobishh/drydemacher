@@ -11,7 +11,7 @@ use crate::models::{
 };
 
 fn humanize_parameter_key(key: &str) -> String {
-    key.split(|ch: char| matches!(ch, '_' | '-' | '.'))
+    key.split(['_', '-', '.'])
         .filter(|token| !token.is_empty())
         .map(|token| {
             let mut chars = token.chars();
@@ -494,12 +494,21 @@ mod tests {
                 threshold: None,
             }],
             selection_targets: vec![SelectionTarget {
+                target_id: Some("target-outer-shell".to_string()),
                 part_id: "part-outer-shell".to_string(),
                 viewer_node_id: "OuterShell001".to_string(),
                 label: "Outer Shell".to_string(),
-                kind: SelectionTargetKind::Part,
+                kind: SelectionTargetKind::Object,
                 editable: true,
+                parameter_keys: vec![
+                    "outer_shell_width".to_string(),
+                    "outer_shell_depth".to_string(),
+                    "outer_shell_height".to_string(),
+                ],
+                primitive_ids: vec!["primitive-outer-shell-size".to_string()],
+                view_ids: vec!["view-outer-shell".to_string()],
             }],
+            measurement_annotations: Vec::new(),
             warnings: vec![
                 "Imported FCStd bindings were accepted from heuristic proposals.".to_string(),
             ],

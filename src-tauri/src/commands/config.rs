@@ -13,10 +13,11 @@ pub async fn get_config(state: State<'_, AppState>) -> AppResult<Config> {
 #[tauri::command]
 #[specta::specta]
 pub async fn save_config(
-    config: Config,
+    mut config: Config,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<()> {
+    crate::mcp::runtime::ensure_primary_agent_id(&mut config);
     let config_dir = app.path().app_config_dir().unwrap();
     let config_path = config_dir.join("config.json");
 
@@ -25,8 +26,11 @@ pub async fn save_config(
     fs::write(config_path, data)
         .map_err(|err| crate::models::AppError::persistence(err.to_string()))?;
 
-    let mut state_config = state.config.lock().unwrap();
-    *state_config = config;
+    {
+        let mut state_config = state.config.lock().unwrap();
+        *state_config = config;
+    }
+    crate::mcp::runtime::sync_auto_agent_supervisors(state.inner().clone());
     Ok(())
 }
 
