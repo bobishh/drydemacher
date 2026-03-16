@@ -7,12 +7,25 @@ use uuid::Uuid;
 
 use super::session::{build_runtime_snapshot, write_last_snapshot};
 use crate::models::{
-    validate_design_output, validate_design_params, validate_model_manifest, validate_ui_spec,
-    AppError, AppResult, AppState, ArtifactBundle, DesignParams, Message, MessageRole,
-    MessageStatus, ModelManifest, ParamValue, ParsedParamsResult, SelectOption, SelectValue,
-    UiField, UiSpec,
+    validate_design_output, validate_design_params, validate_ui_spec, AppError, AppResult,
+    AppState, ArtifactBundle, DesignParams, Message, MessageRole, MessageStatus, ModelManifest,
+    ParamValue, ParsedParamsResult, SelectOption, SelectValue, UiField, UiSpec,
 };
 use crate::{db, persist_thread_summary};
+
+#[derive(Debug, Clone, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AddManualVersionInput {
+    pub thread_id: String,
+    pub title: String,
+    pub version_name: String,
+    pub macro_code: String,
+    pub parameters: DesignParams,
+    pub ui_spec: UiSpec,
+    pub post_processing: Option<crate::models::PostProcessingSpec>,
+    pub artifact_bundle: Option<ArtifactBundle>,
+    pub model_manifest: Option<ModelManifest>,
+}
 
 fn field_label(key: &str) -> String {
     key.replace(['_', '-'], " ")
@@ -199,7 +212,7 @@ fn parse_control_kind(call: &ast::ExprCall) -> Option<&str> {
 
 fn parse_framework_control(call: &ast::ExprCall) -> Result<(UiField, ParamValue), String> {
     let Some(kind) = parse_control_kind(call) else {
-        return Err("Control entry must call number/select/toggle.".to_string());
+        return Err("Control entry must call number/select/toggle/image.".to_string());
     };
     if call.args.len() < 2 {
         return Err(format!("Control '{}' must provide key and default.", kind));
@@ -269,8 +282,19 @@ fn parse_framework_control(call: &ast::ExprCall) -> Result<(UiField, ParamValue)
             };
             Ok((field, ParamValue::Boolean(default)))
         }
+        "image" => {
+            let default = parse_string_constant(&call.args[1]).ok_or_else(|| {
+                format!("Image control '{}' default must be a string literal.", key)
+            })?;
+            let field = UiField::Image {
+                key: key.clone(),
+                label,
+                frozen: false,
+            };
+            Ok((field, ParamValue::String(default)))
+        }
         _ => Err(format!(
-            "Unsupported control helper '{}'. Use number/select/toggle only.",
+            "Unsupported control helper '{}'. Use number/select/toggle/image only.",
             kind
         )),
     }
@@ -670,15 +694,16 @@ fn scan_expr_for_params_get(expr: &Expr, fields: &mut Vec<UiField>, params: &mut
         Expr::Call(call) => {
             if let Expr::Attribute(attr) = &*call.func {
                 if let Expr::Name(obj_name) = &*attr.value {
-                    if obj_name.id.as_str() == "params" && attr.attr.as_str() == "get" {
-                        if call.args.len() >= 2 {
-                            if let Expr::Constant(const_key) = &call.args[0] {
-                                if let Constant::Str(key) = &const_key.value {
-                                    if !params.contains_key(key.as_str()) {
-                                        let inferred = extract_value(&call.args[1]);
-                                        params.insert(key.to_string(), inferred.clone());
-                                        fields.push(create_field(key, &inferred));
-                                    }
+                    if obj_name.id.as_str() == "params"
+                        && attr.attr.as_str() == "get"
+                        && call.args.len() >= 2
+                    {
+                        if let Expr::Constant(const_key) = &call.args[0] {
+                            if let Constant::Str(key) = &const_key.value {
+                                if !params.contains_key(key.as_str()) {
+                                    let inferred = extract_value(&call.args[1]);
+                                    params.insert(key.to_string(), inferred.clone());
+                                    fields.push(create_field(key, &inferred));
                                 }
                             }
                         }
@@ -824,28 +849,24 @@ use crate::services::design as design_service;
 #[tauri::command]
 #[specta::specta]
 pub async fn add_manual_version(
-    thread_id: String,
-    title: String,
-    version_name: String,
-    macro_code: String,
-    parameters: DesignParams,
-    ui_spec: UiSpec,
-    artifact_bundle: Option<ArtifactBundle>,
-    model_manifest: Option<ModelManifest>,
+    input: AddManualVersionInput,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<String> {
     design_service::add_manual_version(
-        thread_id,
-        title,
-        version_name,
-        macro_code,
-        parameters,
-        ui_spec,
-        artifact_bundle,
-        model_manifest,
-        None,
-        None,
+        design_service::AddManualVersionRequest {
+            thread_id: input.thread_id,
+            title: input.title,
+            version_name: input.version_name,
+            macro_code: input.macro_code,
+            parameters: input.parameters,
+            ui_spec: input.ui_spec,
+            post_processing: input.post_processing,
+            artifact_bundle: input.artifact_bundle,
+            model_manifest: input.model_manifest,
+            response_text: None,
+            agent_origin: None,
+        },
         &state,
         &app,
     )
@@ -862,12 +883,7 @@ pub async fn add_imported_model_version(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<String> {
-    validate_model_manifest(&model_manifest)?;
-    if artifact_bundle.model_id != model_manifest.model_id {
-        return Err(AppError::validation(
-            "Imported model manifest does not match artifact bundle model id.",
-        ));
-    }
+    crate::models::validate_model_runtime_bundle(&model_manifest, &artifact_bundle)?;
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -904,6 +920,7 @@ pub async fn add_imported_model_version(
         model_manifest: Some(model_manifest.clone()),
         agent_origin: None,
         image_data: None,
+        visual_kind: None,
         attachment_images: Vec::new(),
         timestamp: now,
     };
@@ -1038,6 +1055,54 @@ pub async fn update_parameters(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn update_post_processing(
+    message_id: String,
+    post_processing: Option<crate::models::PostProcessingSpec>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<()> {
+    let (updated_output, updated_thread_id, artifact_bundle, model_manifest) = {
+        let db = state.db.lock().await;
+        let (mut current_output, current_thread_id) =
+            db::get_message_output_and_thread(&db, &message_id)
+                .map_err(|err| AppError::persistence(err.to_string()))?
+                .ok_or_else(|| {
+                    AppError::not_found("Message output not found for postProcessing update.")
+                })?;
+        current_output.post_processing = post_processing;
+        validate_design_output(&current_output)?;
+        db::update_message_output(&db, &message_id, &current_output)
+            .map_err(|err| AppError::persistence(err.to_string()))?;
+        let (artifact_bundle, model_manifest, _) =
+            db::get_message_runtime_and_thread(&db, &message_id)
+                .map_err(|err| AppError::persistence(err.to_string()))?
+                .unwrap_or((None, None, current_thread_id.clone()));
+        (
+            current_output,
+            current_thread_id,
+            artifact_bundle,
+            model_manifest,
+        )
+    };
+
+    {
+        let snapshot = build_runtime_snapshot(
+            Some(updated_output.clone()),
+            Some(updated_thread_id.clone()),
+            Some(message_id.clone()),
+            artifact_bundle,
+            model_manifest,
+            None,
+        );
+        let mut last = state.last_snapshot.lock().unwrap();
+        *last = Some(snapshot.clone());
+        write_last_snapshot(&app, Some(&snapshot));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn update_version_runtime(
     message_id: String,
     artifact_bundle: ArtifactBundle,
@@ -1045,12 +1110,7 @@ pub async fn update_version_runtime(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<()> {
-    validate_model_manifest(&model_manifest)?;
-    if artifact_bundle.model_id != model_manifest.model_id {
-        return Err(AppError::validation(
-            "Model manifest does not match artifact bundle model id.",
-        ));
-    }
+    crate::models::validate_model_runtime_bundle(&model_manifest, &artifact_bundle)?;
 
     let (current_output, current_thread_id) = {
         let db = state.db.lock().await;
@@ -1092,12 +1152,13 @@ mod tests {
     #[test]
     fn derive_framework_controls_parses_literal_controls() {
         let macro_code = r#"
-from cad_sdk import number, select, toggle, ControlRegistry
+from cad_sdk import number, select, toggle, image, ControlRegistry
 
 CONTROLS = [
     number("width", 105.0, min=60, max=180, step=1, label="Width"),
     select("style", "slit", options=["slit", "holes"], label="Style"),
     toggle("enable_tie_ears", True, label="Tie Ears"),
+    image("relief_image", "", label="Relief Image"),
 ]
 
 registry = ControlRegistry(CONTROLS)
@@ -1108,7 +1169,7 @@ cfg = registry.bind(params)
             .expect("framework parse should succeed")
             .expect("framework controls should exist");
 
-        assert_eq!(parsed.fields.len(), 3);
+        assert_eq!(parsed.fields.len(), 4);
         assert_eq!(parsed.params.get("width"), Some(&ParamValue::Number(105.0)));
         assert_eq!(
             parsed.params.get("style"),
@@ -1117,6 +1178,41 @@ cfg = registry.bind(params)
         assert_eq!(
             parsed.params.get("enable_tie_ears"),
             Some(&ParamValue::Boolean(true))
+        );
+        assert_eq!(
+            parsed.params.get("relief_image"),
+            Some(&ParamValue::String(String::new()))
+        );
+    }
+
+    #[test]
+    fn derive_framework_controls_supports_image_control() {
+        let macro_code = r#"
+from cad_sdk import image, ControlRegistry
+
+CONTROLS = [
+    image("reference_image", "", label="Reference Image"),
+]
+
+registry = ControlRegistry(CONTROLS)
+cfg = registry.bind(params)
+"#;
+
+        let parsed = derive_framework_controls(macro_code)
+            .expect("framework parse should succeed")
+            .expect("framework controls should exist");
+
+        assert_eq!(
+            parsed.fields,
+            vec![UiField::Image {
+                key: "reference_image".to_string(),
+                label: "Reference Image".to_string(),
+                frozen: false,
+            }]
+        );
+        assert_eq!(
+            parsed.params.get("reference_image"),
+            Some(&ParamValue::String(String::new()))
         );
     }
 

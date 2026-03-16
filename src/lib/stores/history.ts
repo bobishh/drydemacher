@@ -7,11 +7,11 @@ import { handleParamChange, commitManualVersion } from '../controllers/manualCon
 import { paramPanelState } from './paramPanelState';
 import { estimateBase64Bytes, profileLog } from '../debug/profiler';
 import { clearLastSessionSnapshot, persistLastSessionSnapshot } from '../modelRuntime/sessionSnapshot';
-import type { AgentDraft, Message, Thread } from '../types/domain';
+import { inspectRuntimeBundle } from '../modelRuntime/runtimeBundle';
+import type { Message, Thread } from '../types/domain';
 import {
   addImportedModelVersion,
   addManualVersion,
-  deleteAgentDraft,
   deleteThread as deleteThreadCommand,
   deleteVersion as deleteVersionCommand,
   finalizeThread as finalizeThreadCommand,
@@ -104,23 +104,10 @@ async function resolveForkRuntimePayload(message: Message): Promise<{
   return { artifactBundle: null, modelManifest: null };
 }
 
-export async function applyAgentDraft(draft: AgentDraft) {
-  const { designOutput, artifactBundle, modelManifest, baseMessageId } = draft;
-  workingCopy.loadVersion(designOutput, baseMessageId);
-  paramPanelState.hydrateFromVersion(designOutput, baseMessageId);
-  if (artifactBundle) {
-    session.setStlUrl(toAssetUrl(artifactBundle.previewStlPath));
-    session.setModelRuntime(artifactBundle, modelManifest ?? null);
-  }
-  session.setAgentDraft(null);
-  session.setStatus('Agent draft loaded. Review and SAVE VERSION to persist.');
-}
-
 export async function loadVersion(msg: Message | null | undefined) {
   if (!isVersionCandidate(msg)) return;
   activeVersionId.set(msg.id);
-  
-  session.setAgentDraft(null);
+  let rebuiltRuntime = false;
 
   if (msg.output) {
     workingCopy.loadVersion(msg.output, msg.id);
@@ -130,25 +117,38 @@ export async function loadVersion(msg: Message | null | undefined) {
     paramPanelState.reset();
   }
 
-  if (msg.artifactBundle) {
-    session.setStlUrl(toAssetUrl(msg.artifactBundle.previewStlPath));
-    session.setModelRuntime(msg.artifactBundle, msg.modelManifest ?? null);
+  const runtime = await inspectRuntimeBundle(
+    msg.artifactBundle ?? null,
+    undefined,
+    msg.output?.postProcessing ?? null,
+  );
+  if (runtime.bundle) {
+    session.setStlUrl(toAssetUrl(runtime.bundle.previewStlPath));
+    session.setModelRuntime(runtime.bundle, msg.modelManifest ?? null);
     session.setSelectedPartId(null);
   } else if (msg.output) {
     session.clearModelRuntime();
+    session.setStatus('Cached runtime expired. Rebuilding preview...');
     await handleParamChange(msg.output.initialParams || {}, msg.output.macroCode, false);
+    rebuiltRuntime = true;
   } else {
     session.setStlUrl(null);
     session.clearModelRuntime();
   }
 
-  session.setStatus(`Loaded Version: ${versionLabel(msg)}`);
+  if (runtime.degradedToPreview) {
+    session.setStatus(`Loaded Version: ${versionLabel(msg)} (preview only; part meshes were evicted).`);
+  } else if (rebuiltRuntime) {
+    session.setStatus(`Loaded Version: ${versionLabel(msg)} (runtime rebuilt from macro).`);
+  } else if (runtime.bundle || msg.output || !msg.artifactBundle) {
+    session.setStatus(`Loaded Version: ${versionLabel(msg)}`);
+  }
 
   await persistLastSessionSnapshot({
     design: msg.output ?? null,
     threadId: get(activeThreadId),
     messageId: msg.id,
-    artifactBundle: msg.artifactBundle ?? null,
+    artifactBundle: runtime.bundle ?? msg.artifactBundle ?? null,
     modelManifest: msg.modelManifest ?? null,
     selectedPartId: null,
   });

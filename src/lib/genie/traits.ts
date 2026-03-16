@@ -122,6 +122,93 @@ export const DEFAULT_GENIE_TRAITS: GenieTraits = {
   expressiveness: 0.6,
 };
 
+const U64_MASK = 0xffff_ffff_ffff_ffffn;
+const FNV_OFFSET_BASIS = 0xcbf2_9ce4_8422_2325n;
+const FNV_PRIME = 0x0000_0100_0000_01b3n;
+
+class GeneRng {
+  state: bigint;
+
+  constructor(seed: number) {
+    this.state = (BigInt(seed >>> 0) ^ 0x9e37_79b9_7f4a_7c15n) & U64_MASK;
+  }
+
+  nextU64(): bigint {
+    this.state = (this.state + 0x9e37_79b9_7f4a_7c15n) & U64_MASK;
+    let z = this.state;
+    z = ((z ^ (z >> 30n)) * 0xbf58_476d_1ce4_e5b9n) & U64_MASK;
+    z = ((z ^ (z >> 27n)) * 0x94d0_49bb_1331_11ebn) & U64_MASK;
+    return (z ^ (z >> 31n)) & U64_MASK;
+  }
+
+  unit(): number {
+    return Number(this.nextU64() >> 11n) / 2 ** 53;
+  }
+
+  rangeF64(min: number, max: number): number {
+    return min + (max - min) * this.unit();
+  }
+
+  rangeU8(min: number, maxInclusive: number): number {
+    return min + Number(this.nextU64() % BigInt(maxInclusive - min + 1));
+  }
+
+  eyeStyle(): GenieEyeStyle {
+    switch (this.rangeU8(0, 2)) {
+      case 0:
+        return 'dot';
+      case 1:
+        return 'bar';
+      default:
+        return 'slant';
+    }
+  }
+}
+
+export function deriveGenieSeed(identity: string): number {
+  let hash = FNV_OFFSET_BASIS;
+  const encoded = new TextEncoder().encode(identity);
+  for (const byte of encoded) {
+    hash ^= BigInt(byte);
+    hash = (hash * FNV_PRIME) & U64_MASK;
+  }
+  const seed = Number(((hash >> 32n) ^ hash) & 0xffff_ffffn) >>> 0;
+  return seed === 0 ? 1 : seed;
+}
+
+export function buildGenieTraitsFromSeed(seed: number): GenieTraits {
+  const normalizedSeed = seed === 0 ? 1 : seed >>> 0;
+  const rng = new GeneRng(normalizedSeed);
+  return {
+    version: 2,
+    seed: normalizedSeed,
+    colorHue: rng.rangeF64(0, 360),
+    vertexCount: rng.rangeU8(10, 24),
+    radiusBase: rng.rangeF64(25, 34),
+    stretchY: rng.rangeF64(0.9, 1.06),
+    asymmetry: rng.rangeF64(0.88, 1.14),
+    chordSkip: rng.rangeU8(2, 6),
+    jitterScale: rng.rangeF64(0.7, 1.45),
+    pulseScale: rng.rangeF64(0.7, 1.35),
+    hoverScale: rng.rangeF64(0.8, 1.6),
+    warpScale: rng.rangeF64(0.35, 1.25),
+    glowHueShift: rng.rangeF64(-32, 32),
+    eyeStyle: rng.eyeStyle(),
+    eyeSpacing: rng.rangeF64(15, 22.5),
+    eyeSize: rng.rangeF64(2, 3.6),
+    mouthCurve: rng.rangeF64(0.6, 2.6),
+    thinkingBias: rng.rangeF64(0.2, 1),
+    repairBias: rng.rangeF64(0.2, 1),
+    renderBias: rng.rangeF64(0.2, 1),
+    expressiveness: rng.rangeF64(0.35, 1),
+  };
+}
+
+export function buildAgentGenieTraits(agentIdentity: string | null | undefined): GenieTraits {
+  const identity = agentIdentity?.trim().toLowerCase() || 'ecky';
+  return buildGenieTraitsFromSeed(deriveGenieSeed(`agent:${identity}`));
+}
+
 export function normalizeGenieTraits(
   input: Partial<GenieTraits> | null | undefined,
 ): GenieTraits {

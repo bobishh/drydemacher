@@ -61,6 +61,14 @@ function createDefaultConfig(): AppConfig {
     freecadCmd: '',
     assets: [],
     microwave: null,
+    mcp: {
+      port: null,
+      maxSessions: null,
+      mode: 'passive',
+      primaryAgentId: null,
+      autoAgents: [],
+    },
+    hasSeenOnboarding: false,
   };
 }
 

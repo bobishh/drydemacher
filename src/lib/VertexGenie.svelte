@@ -485,12 +485,10 @@
   <canvas bind:this={canvas} class="genie-canvas"></canvas>
   {#if cleanBubble}
     <div class="genie-bubble">
-      {#if !actions?.length}
-        <button class="bubble-copy" type="button" onclick={copyBubbleText} aria-label="Copy advisor response">
-          {copyFeedback || 'COPY'}
-        </button>
-        <button class="bubble-close" type="button" onclick={() => onDismiss?.()} aria-label="Dismiss advisor bubble"></button>
-      {/if}
+      <button class="bubble-copy" type="button" onclick={copyBubbleText} aria-label="Copy advisor response">
+        {copyFeedback || 'COPY'}
+      </button>
+      <button class="bubble-close" type="button" onclick={() => onDismiss?.()} aria-label="Dismiss advisor bubble"></button>
       <div class="bubble-speaker"><strong>ECKY EINACS:</strong></div>
       {#if cleanQuestion}
         <div class="bubble-question-block">

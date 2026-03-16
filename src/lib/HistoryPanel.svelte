@@ -309,7 +309,8 @@
       <button 
         class="header-btn" 
         onclick={() => showNewChooser = true} 
-        title="Start a new thread"
+        title="Create New Thread"
+        aria-label="Create New Thread"
       >
         <span class="header-btn-icon" aria-hidden="true">➕</span>
         <span class="header-btn-label">NEW</span>

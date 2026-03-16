@@ -1,7 +1,7 @@
 import { commands, type AppError, type AppLogEntry, type Result, type ThreadAgentState } from './contracts';
 import {
-  normalizeAgentDraft,
   normalizeArtifactBundle,
+  normalizeAttachment,
   normalizeConfig,
   normalizeDeletedMessage,
   normalizeDesignOutput,
@@ -16,6 +16,8 @@ import {
   toContractUsageSummary,
   toContractUiSpec,
   type AgentSession,
+  type AgentTerminalInput,
+  type AgentTerminalSnapshot,
   type ArtifactBundle,
   type AppConfig,
   type Attachment,
@@ -32,8 +34,15 @@ import {
   type Thread,
   type UiSpec,
   type UsageSummary,
+  type ViewportCameraState,
 } from '../types/domain';
-import type { PostProcessingSpec } from './contracts';
+import type {
+  PostProcessingSpec,
+  QueueAgentPromptInput,
+  RejectViewportScreenshotInput,
+  ResolveAgentPromptInput,
+  ResolveViewportScreenshotInput,
+} from './contracts';
 
 export type { ThreadAgentState };
 
@@ -310,20 +319,22 @@ export async function addManualVersion(input: {
   macroCode: string;
   parameters: DesignParams;
   uiSpec: UiSpec;
+  postProcessing?: PostProcessingSpec | null;
   artifactBundle?: ArtifactBundle | null;
   modelManifest?: ModelManifest | null;
 }): Promise<string> {
   return unwrapResult(
-    await commands.addManualVersion(
-      input.threadId,
-      input.title,
-      input.versionName,
-      input.macroCode,
-      input.parameters,
-      toContractUiSpec(input.uiSpec),
-      input.artifactBundle ?? null,
-      input.modelManifest ?? null,
-    ),
+    await commands.addManualVersion({
+      threadId: input.threadId,
+      title: input.title,
+      versionName: input.versionName,
+      macroCode: input.macroCode,
+      parameters: input.parameters,
+      uiSpec: toContractUiSpec(input.uiSpec),
+      postProcessing: input.postProcessing ?? null,
+      artifactBundle: input.artifactBundle ?? null,
+      modelManifest: input.modelManifest ?? null,
+    }),
   );
 }
 
@@ -352,6 +363,13 @@ export async function updateParameters(
   parameters: DesignParams,
 ): Promise<void> {
   unwrapResult(await commands.updateParameters(messageId, parameters));
+}
+
+export async function updatePostProcessing(
+  messageId: string,
+  postProcessing: PostProcessingSpec | null,
+): Promise<void> {
+  unwrapResult(await commands.updatePostProcessing(messageId, postProcessing));
 }
 
 export async function updateVersionRuntime(
@@ -396,26 +414,104 @@ export async function getMcpServerStatus(): Promise<McpServerStatus> {
   return unwrapResult(await commands.getMcpServerStatus());
 }
 
-export async function getAgentDraft(
-  threadId: string,
-  baseMessageId: string,
-) {
-  return normalizeAgentDraft(unwrapResult(await commands.getAgentDraft(threadId, baseMessageId)));
+export async function getAgentTerminalSnapshots(): Promise<AgentTerminalSnapshot[]> {
+  return unwrapResult(await commands.getAgentTerminalSnapshots());
 }
 
-export async function deleteAgentDraft(
-  threadId: string,
-  baseMessageId: string,
-) {
-  unwrapResult(await commands.deleteAgentDraft(threadId, baseMessageId));
+export async function sendAgentTerminalInput(input: AgentTerminalInput): Promise<void> {
+  unwrapResult(
+    await commands.sendAgentTerminalInput({
+      agentId: input.agentId,
+      text: input.text ?? '',
+      key: input.key ?? null,
+      ctrl: input.ctrl ?? false,
+      alt: input.alt ?? false,
+      shift: input.shift ?? false,
+      meta: input.meta ?? false,
+      submit: input.submit ?? false,
+    }),
+  );
+}
+
+export async function resizeAgentTerminal(
+  agentId: string,
+  cols: number,
+  rows: number,
+): Promise<void> {
+  unwrapResult(await commands.resizeAgentTerminal(agentId, cols, rows));
 }
 
 export async function resolveAgentConfirm(requestId: string, choice: string) {
   unwrapResult(await commands.resolveAgentConfirm(requestId, choice));
 }
 
-export async function resolveAgentPrompt(requestId: string, promptText: string) {
-  unwrapResult(await commands.resolveAgentPrompt(requestId, promptText));
+export async function preparePromptAttachments(
+  attachments: Attachment[],
+): Promise<Attachment[]> {
+  if (attachments.length === 0) {
+    return [];
+  }
+  return unwrapResult(
+    await commands.preparePromptAttachments(
+      attachments.map(toContractAttachment),
+    ),
+  ).map(normalizeAttachment);
+}
+
+export async function resolveAgentPrompt(input: {
+  requestId: string;
+  promptText: string;
+  messageId?: string | null;
+  attachments: Attachment[];
+}) {
+  unwrapResult(
+    await commands.resolveAgentPrompt({
+      requestId: input.requestId,
+      promptText: input.promptText,
+      messageId: input.messageId ?? null,
+      attachments: input.attachments.map(toContractAttachment),
+    } as ResolveAgentPromptInput),
+  );
+}
+
+export async function queueAgentPrompt(input: {
+  threadId?: string | null;
+  promptText: string;
+  attachments: Attachment[];
+}): Promise<{ threadId: string; messageId: string }> {
+  return unwrapResult(
+    await commands.queueAgentPrompt({
+      threadId: input.threadId ?? null,
+      promptText: input.promptText,
+      attachments: input.attachments.map(toContractAttachment),
+    } as QueueAgentPromptInput),
+  );
+}
+
+export async function resolveAgentViewportScreenshot(input: {
+  requestId: string;
+  dataUrl: string;
+  width: number;
+  height: number;
+  camera: ViewportCameraState;
+  source: string;
+  threadId: string;
+  messageId: string;
+  modelId?: string | null;
+  includeOverlays: boolean;
+}) {
+  unwrapResult(
+    await commands.resolveAgentViewportScreenshot(input as ResolveViewportScreenshotInput),
+  );
+}
+
+export async function rejectAgentViewportScreenshot(requestId: string, error: string) {
+  unwrapResult(
+    await commands.rejectAgentViewportScreenshot({
+      requestId,
+      error,
+    } as RejectViewportScreenshotInput),
+  );
 }
 
 export async function getThreadAgentState(threadId: string): Promise<ThreadAgentState> {
@@ -424,6 +520,32 @@ export async function getThreadAgentState(threadId: string): Promise<ThreadAgent
 
 export async function getAppLogs(): Promise<AppLogEntry[]> {
   return unwrapResult(await commands.getAppLogs());
+}
+
+export async function wakePrimaryAutoAgent(
+  threadId?: string | null,
+  messageId?: string | null,
+  modelId?: string | null,
+): Promise<void> {
+  unwrapResult(await commands.wakePrimaryAutoAgent(threadId ?? null, messageId ?? null, modelId ?? null));
+}
+
+export async function stopPrimaryAutoAgent(
+  threadId?: string | null,
+  messageId?: string | null,
+  modelId?: string | null,
+): Promise<void> {
+  unwrapResult(await commands.stopPrimaryAutoAgent(threadId ?? null, messageId ?? null, modelId ?? null));
+}
+
+export async function restartPrimaryAutoAgent(
+  threadId?: string | null,
+  messageId?: string | null,
+  modelId?: string | null,
+): Promise<void> {
+  unwrapResult(
+    await commands.restartPrimaryAutoAgent(threadId ?? null, messageId ?? null, modelId ?? null),
+  );
 }
 
 export async function wakeAutoAgent(label: string): Promise<void> {

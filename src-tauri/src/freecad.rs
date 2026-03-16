@@ -430,6 +430,7 @@ fn ensure_runtime_sdk(app: &dyn PathResolver, bundle_dir: &Path) -> AppResult<()
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_bundle(
     model_id: &str,
     source_kind: ModelSourceKind,
@@ -456,6 +457,10 @@ fn build_bundle(
             .iter()
             .flat_map(part_to_viewer_assets)
             .collect(),
+        edge_targets: Vec::new(),
+        callout_anchors: Vec::new(),
+        measurement_guides: Vec::new(),
+        export_artifacts: Vec::new(),
     })
 }
 
@@ -538,11 +543,15 @@ fn build_manifest(
         });
 
         selection_targets.push(SelectionTarget {
+            target_id: Some(format!("target-{}", part_id)),
             part_id: part_id.clone(),
             viewer_node_id: node_id,
             label: label.clone(),
-            kind: SelectionTargetKind::Part,
+            kind: SelectionTargetKind::Object,
             editable: is_part_editable,
+            parameter_keys: object_parameter_keys.clone(),
+            primitive_ids: Vec::new(),
+            view_ids: Vec::new(),
         });
 
         if is_part_editable {
@@ -594,6 +603,7 @@ fn build_manifest(
         control_views: Vec::new(),
         advisories: Vec::new(),
         selection_targets,
+        measurement_annotations: Vec::new(),
         warnings,
         enrichment_state: ManifestEnrichmentState {
             status: if enrichment_proposals.is_empty() {
@@ -854,6 +864,7 @@ fn read_runner_report(path: &Path) -> AppResult<RunnerReport> {
     Ok(report)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_generate_runner(
     app: &dyn PathResolver,
     configured_freecad_cmd: Option<&str>,
@@ -903,6 +914,7 @@ fn run_import_runner(
     run_command(command)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_apply_import_runner(
     app: &dyn PathResolver,
     configured_freecad_cmd: Option<&str>,
@@ -1057,15 +1069,9 @@ fn resolve_freecad_bundle_path(path: &Path) -> Option<PathBuf> {
         }
     }
 
-    let dir_candidates = [path.join("freecadcmd"), path.join("FreeCADCmd")];
-
-    for candidate in dir_candidates {
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-
-    None
+    [path.join("freecadcmd"), path.join("FreeCADCmd")]
+        .into_iter()
+        .find(|candidate| candidate.exists())
 }
 
 fn find_on_path(names: &[&str]) -> Option<PathBuf> {

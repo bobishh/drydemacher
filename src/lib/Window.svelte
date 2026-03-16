@@ -10,6 +10,7 @@
     minWidth = 400,
     minHeight = 300,
     title = "",
+    hidden = false,
     onclose,
     children
   }: {
@@ -20,6 +21,7 @@
     minWidth?: number;
     minHeight?: number;
     title?: string;
+    hidden?: boolean;
     onclose: () => void;
     children: Snippet;
   } = $props();
@@ -88,8 +90,10 @@
 
 <div
   class="window"
+  class:window--hidden={hidden}
   style="left: {x}px; top: {y}px; width: {width}px; height: {height}px;"
   role="dialog"
+  aria-hidden={hidden}
 >
   <div class="window-header" role="none" onmousedown={handleDragStart}>
     <span class="window-title">{title}</span>
@@ -110,6 +114,12 @@
     display: flex;
     flex-direction: column;
     z-index: 1000;
+  }
+
+  .window--hidden {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
   }
 
   .window-header {

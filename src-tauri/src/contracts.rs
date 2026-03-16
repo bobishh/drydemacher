@@ -40,19 +40,6 @@ pub struct AgentSession {
     pub updated_at: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentDraft {
-    pub session_id: String,
-    pub thread_id: String,
-    pub base_message_id: String,
-    pub model_id: Option<String>,
-    pub design_output: DesignOutput,
-    pub artifact_bundle: Option<ArtifactBundle>,
-    pub model_manifest: Option<ModelManifest>,
-    pub updated_at: u64,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TargetLeaseInfo {
@@ -70,13 +57,157 @@ pub struct TargetLeaseInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadAgentState {
-    /// "none" | "active" | "waiting" | "disconnected"
+    /// "none" | "sleeping" | "waking" | "waiting" | "active" | "disconnected" | "error"
     pub connection_state: String,
     pub agent_label: Option<String>,
     pub llm_model_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub phase: Option<String>,
     pub status_text: Option<String>,
+    #[serde(default)]
+    pub busy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_started_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_kind: Option<String>,
+    #[serde(default)]
+    pub waiting_on_prompt: bool,
     pub updated_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentWorkingVersionEvent {
+    pub session_id: String,
+    pub thread_id: String,
+    pub message_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTerminalSnapshot {
+    pub agent_id: String,
+    pub agent_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_kind: Option<String>,
+    /// Stable per-PTY-session token. Changes whenever the backend creates
+    /// a fresh terminal session for the agent.
+    pub session_nonce: u64,
+    /// Deprecated compatibility snapshot for inactive/last-session display.
+    /// Live terminal rendering should use `vtStream`.
+    pub screen_text: String,
+    /// Authoritative raw VT replay stream for live terminal rendering.
+    #[serde(default)]
+    pub vt_stream: String,
+    /// Optional incremental VT chunk for live updates. When present, the frontend
+    /// should merge it into its local replay state instead of treating `vtStream`
+    /// as a full snapshot replacement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vt_delta: Option<String>,
+    pub attention_required: bool,
+    #[serde(default)]
+    pub busy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_started_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    pub active: bool,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTerminalInput {
+    pub agent_id: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub ctrl: bool,
+    #[serde(default)]
+    pub alt: bool,
+    #[serde(default)]
+    pub shift: bool,
+    #[serde(default)]
+    pub meta: bool,
+    #[serde(default)]
+    pub submit: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewportCameraState {
+    pub position: [f64; 3],
+    pub target: [f64; 3],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zoom: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fov: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveViewportScreenshotInput {
+    pub request_id: String,
+    pub data_url: String,
+    pub width: u32,
+    pub height: u32,
+    pub camera: ViewportCameraState,
+    pub source: String,
+    pub thread_id: String,
+    pub message_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    pub include_overlays: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveAgentPromptInput {
+    pub request_id: String,
+    pub prompt_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueAgentPromptInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    pub prompt_text: String,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct QueuedAgentPrompt {
+    pub thread_id: String,
+    pub message_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RejectViewportScreenshotInput {
+    pub request_id: String,
+    pub error: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -229,9 +360,18 @@ pub struct AutoAgent {
     pub model: Option<String>,
     pub args: Vec<String>,
     pub enabled: bool,
-    /// If true, do not launch on app start — wait for explicit trigger.
+    /// Deprecated compatibility flag from the old eager-start implementation.
+    /// Active-mode wake behavior now depends on `mcp.mode` and `mcp.primaryAgentId`.
     #[serde(default)]
     pub start_on_demand: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum McpMode {
+    #[default]
+    Passive,
+    Active,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -250,7 +390,13 @@ pub struct McpConfig {
     /// Max concurrent agent sessions. None = unlimited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_sessions: Option<u8>,
-    /// External processes to launch on startup.
+    /// How Ecky exposes MCP: passive server-only or active server + lazy auto-agent wake.
+    #[serde(default)]
+    pub mode: McpMode,
+    /// Which auto-agent should be woken when the user queues a message in active mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_agent_id: Option<String>,
+    /// External processes available to Ecky in active mode.
     #[serde(default)]
     pub auto_agents: Vec<AutoAgent>,
 }
@@ -260,6 +406,8 @@ impl Default for McpConfig {
         Self {
             port: None,
             max_sessions: None,
+            mode: McpMode::Passive,
+            primary_agent_id: None,
             auto_agents: vec![],
         }
     }
@@ -498,17 +646,11 @@ pub fn upgraded_or_default_genie_traits(thread_id: &str, raw: Option<&str>) -> G
         .unwrap_or_else(|| GenieTraits::from_seed(derive_thread_seed(thread_id)))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct UiSpec {
     #[serde(default)]
     pub fields: Vec<UiField>,
-}
-
-impl Default for UiSpec {
-    fn default() -> Self {
-        Self { fields: Vec::new() }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -767,7 +909,118 @@ pub fn normalize_design_output(mut output: DesignOutput) -> DesignOutput {
     if inferred.is_framework() {
         output.macro_dialect = inferred;
     }
+    output.post_processing = normalize_post_processing_spec(output.post_processing.take());
     output
+}
+
+fn slugify_attachment_id(value: &str) -> String {
+    let mut slug = String::with_capacity(value.len());
+    let mut prev_dash = false;
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            slug.push('-');
+            prev_dash = true;
+        }
+    }
+    let trimmed = slug.trim_matches('-');
+    if trimmed.is_empty() {
+        "lithophane".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn legacy_displacement_attachment_id(displacement: &DisplacementSpec) -> String {
+    format!(
+        "legacy-{}",
+        slugify_attachment_id(displacement.image_param.trim())
+    )
+}
+
+pub fn normalize_post_processing_spec(
+    post_processing: Option<PostProcessingSpec>,
+) -> Option<PostProcessingSpec> {
+    let mut post = post_processing?;
+    let mut attachments = post.lithophane_attachments;
+
+    if let Some(displacement) = post.displacement.as_ref() {
+        let legacy_id = legacy_displacement_attachment_id(displacement);
+        if !attachments
+            .iter()
+            .any(|attachment| attachment.id == legacy_id)
+        {
+            attachments.insert(
+                0,
+                LithophaneAttachment {
+                    id: legacy_id,
+                    enabled: true,
+                    source: LithophaneAttachmentSource::Param {
+                        image_param: displacement.image_param.clone(),
+                    },
+                    target_part_id: String::new(),
+                    placement: LithophanePlacement {
+                        projection: displacement.projection.clone(),
+                        ..default_lithophane_placement()
+                    },
+                    relief: LithophaneRelief {
+                        depth_mm: displacement.depth_mm,
+                        invert: displacement.invert,
+                    },
+                    color: default_lithophane_color(),
+                },
+            );
+        }
+    }
+
+    post.lithophane_attachments = attachments
+        .into_iter()
+        .filter_map(|mut attachment| {
+            if attachment.id.trim().is_empty() {
+                let inferred = attachment
+                    .source
+                    .image_param()
+                    .or_else(|| attachment.source.image_path())
+                    .unwrap_or("lithophane");
+                attachment.id = format!("litho-{}", slugify_attachment_id(inferred));
+            }
+            if attachment.relief.depth_mm <= 0.0 {
+                attachment.relief.depth_mm = default_lithophane_depth_mm();
+            }
+            if attachment.color.channel_thickness_mm <= 0.0 {
+                attachment.color.channel_thickness_mm = default_channel_thickness_mm();
+            }
+            if attachment.placement.bleed_margin_mm < 0.0 {
+                attachment.placement.bleed_margin_mm = 0.0;
+            }
+            if attachment.placement.width_mm < 0.0 {
+                attachment.placement.width_mm = 0.0;
+            }
+            if attachment.placement.height_mm < 0.0 {
+                attachment.placement.height_mm = 0.0;
+            }
+
+            match &attachment.source {
+                LithophaneAttachmentSource::File { image_path } if image_path.trim().is_empty() => {
+                    Some(attachment)
+                }
+                LithophaneAttachmentSource::Param { image_param }
+                    if image_param.trim().is_empty() =>
+                {
+                    None
+                }
+                _ => Some(attachment),
+            }
+        })
+        .collect();
+
+    if post.displacement.is_none() && post.lithophane_attachments.is_empty() {
+        None
+    } else {
+        Some(post)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -777,10 +1030,11 @@ pub struct AgentModelList {
     pub is_live: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ProjectionType {
     Planar,
+    Auto,
     Cylindrical,
     Spherical,
 }
@@ -795,11 +1049,139 @@ pub struct DisplacementSpec {
     pub invert: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LithophanePlacementMode {
+    PartSidePatch,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LithophaneSide {
+    Front,
+    Back,
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum OverflowMode {
+    Contain,
+    Cover,
+    Clamp,
+    Bleed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LithophaneColorMode {
+    Mono,
+    Cmyk,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum LithophaneAttachmentSource {
+    File {
+        #[serde(rename = "imagePath", alias = "image_path")]
+        image_path: String,
+    },
+    Param {
+        #[serde(rename = "imageParam", alias = "image_param")]
+        image_param: String,
+    },
+}
+
+impl LithophaneAttachmentSource {
+    pub fn image_path(&self) -> Option<&str> {
+        match self {
+            Self::File { image_path } => Some(image_path.as_str()),
+            Self::Param { .. } => None,
+        }
+    }
+
+    pub fn image_param(&self) -> Option<&str> {
+        match self {
+            Self::Param { image_param } => Some(image_param.as_str()),
+            Self::File { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LithophanePlacement {
+    #[serde(default = "default_lithophane_placement_mode")]
+    pub mode: LithophanePlacementMode,
+    #[serde(default = "default_lithophane_side")]
+    pub side: LithophaneSide,
+    #[serde(default = "default_lithophane_projection")]
+    pub projection: ProjectionType,
+    #[serde(default)]
+    pub width_mm: f64,
+    #[serde(default)]
+    pub height_mm: f64,
+    #[serde(default)]
+    pub offset_x_mm: f64,
+    #[serde(default)]
+    pub offset_y_mm: f64,
+    #[serde(default)]
+    pub rotation_deg: f64,
+    #[serde(default = "default_overflow_mode")]
+    pub overflow_mode: OverflowMode,
+    #[serde(default)]
+    pub bleed_margin_mm: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LithophaneRelief {
+    #[serde(default = "default_lithophane_depth_mm")]
+    pub depth_mm: f64,
+    #[serde(default)]
+    pub invert: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LithophaneColor {
+    #[serde(default = "default_lithophane_color_mode")]
+    pub mode: LithophaneColorMode,
+    #[serde(default = "default_channel_thickness_mm")]
+    pub channel_thickness_mm: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LithophaneAttachment {
+    pub id: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub source: LithophaneAttachmentSource,
+    #[serde(default)]
+    pub target_part_id: String,
+    #[serde(default = "default_lithophane_placement")]
+    pub placement: LithophanePlacement,
+    #[serde(default = "default_lithophane_relief")]
+    pub relief: LithophaneRelief,
+    #[serde(default = "default_lithophane_color")]
+    pub color: LithophaneColor,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PostProcessingSpec {
     #[serde(default)]
     pub displacement: Option<DisplacementSpec>,
+    #[serde(default)]
+    pub lithophane_attachments: Vec<LithophaneAttachment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -835,6 +1217,63 @@ fn default_version_name() -> String {
 
 fn default_interaction_mode() -> InteractionMode {
     InteractionMode::Design
+}
+
+fn default_lithophane_placement_mode() -> LithophanePlacementMode {
+    LithophanePlacementMode::PartSidePatch
+}
+
+fn default_lithophane_side() -> LithophaneSide {
+    LithophaneSide::Front
+}
+
+fn default_lithophane_projection() -> ProjectionType {
+    ProjectionType::Auto
+}
+
+fn default_overflow_mode() -> OverflowMode {
+    OverflowMode::Contain
+}
+
+fn default_lithophane_depth_mm() -> f64 {
+    2.0
+}
+
+fn default_channel_thickness_mm() -> f64 {
+    0.4
+}
+
+fn default_lithophane_color_mode() -> LithophaneColorMode {
+    LithophaneColorMode::Mono
+}
+
+fn default_lithophane_placement() -> LithophanePlacement {
+    LithophanePlacement {
+        mode: default_lithophane_placement_mode(),
+        side: default_lithophane_side(),
+        projection: default_lithophane_projection(),
+        width_mm: 0.0,
+        height_mm: 0.0,
+        offset_x_mm: 0.0,
+        offset_y_mm: 0.0,
+        rotation_deg: 0.0,
+        overflow_mode: default_overflow_mode(),
+        bleed_margin_mm: 0.0,
+    }
+}
+
+fn default_lithophane_relief() -> LithophaneRelief {
+    LithophaneRelief {
+        depth_mm: default_lithophane_depth_mm(),
+        invert: false,
+    }
+}
+
+fn default_lithophane_color() -> LithophaneColor {
+    LithophaneColor {
+        mode: default_lithophane_color_mode(),
+        channel_thickness_mm: default_channel_thickness_mm(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -933,6 +1372,48 @@ impl FromSql for MessageStatus {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum MessageVisualKind {
+    ConceptPreview,
+}
+
+impl MessageVisualKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ConceptPreview => "conceptPreview",
+        }
+    }
+}
+
+impl std::str::FromStr for MessageVisualKind {
+    type Err = AppError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim() {
+            "conceptPreview" => Ok(Self::ConceptPreview),
+            other => Err(AppError::validation(format!(
+                "Unknown message visual kind '{}'.",
+                other
+            ))),
+        }
+    }
+}
+
+impl ToSql for MessageVisualKind {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(self.as_str().into())
+    }
+}
+
+impl FromSql for MessageVisualKind {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        let raw = value.as_str()?;
+        raw.parse()
+            .map_err(|err: AppError| FromSqlError::Other(Box::new(err)))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
@@ -952,14 +1433,17 @@ pub struct Message {
     pub agent_origin: Option<AgentOrigin>,
     #[serde(default, alias = "image_data")]
     pub image_data: Option<String>,
+    #[serde(default, alias = "visual_kind")]
+    pub visual_kind: Option<MessageVisualKind>,
     #[serde(default, alias = "attachment_images")]
     pub attachment_images: Vec<String>,
     pub timestamp: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ThreadStatus {
+    #[default]
     Active,
     Finalized,
 }
@@ -981,12 +1465,6 @@ impl std::str::FromStr for ThreadStatus {
             "finalized" => Ok(Self::Finalized),
             _ => Ok(Self::Active),
         }
-    }
-}
-
-impl Default for ThreadStatus {
-    fn default() -> Self {
-        Self::Active
     }
 }
 
@@ -1260,6 +1738,8 @@ pub struct DeletedMessage {
     pub timestamp: u64,
     #[serde(default, alias = "image_data")]
     pub image_data: Option<String>,
+    #[serde(default, alias = "visual_kind")]
+    pub visual_kind: Option<MessageVisualKind>,
     #[serde(default, alias = "attachment_images")]
     pub attachment_images: Vec<String>,
     pub deleted_at: u64,
@@ -1295,21 +1775,17 @@ pub enum SelectionTargetKind {
     Part,
     Object,
     Group,
+    Edge,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum EnrichmentStatus {
+    #[default]
     None,
     Pending,
     Accepted,
     Rejected,
-}
-
-impl Default for EnrichmentStatus {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -1350,23 +1826,61 @@ fn default_control_source() -> ControlViewSource {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub enum MeasurementBasis {
+    Outer,
+    Inner,
+    Wall,
+    Clearance,
+    Centerline,
+    Pitch,
+    Custom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum MeasurementAxis {
+    X,
+    Y,
+    Z,
+    Radial,
+    Normal,
+    Path,
+    Custom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum MeasurementAnnotationSource {
+    Generated,
+    Llm,
+    Manual,
+    Api,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum MeasurementGuideKind {
+    Linear,
+    Radial,
+    Clearance,
+    Pitch,
+    Leader,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub enum AdvisorySeverity {
     Info,
     Warning,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum AdvisoryCondition {
+    #[default]
     Always,
     Below,
     Above,
-}
-
-impl Default for AdvisoryCondition {
-    fn default() -> Self {
-        Self::Always
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -1378,6 +1892,48 @@ pub struct ViewerAsset {
     pub label: String,
     pub path: String,
     pub format: ViewerAssetFormat,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewerEdgePoint {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewerEdgeTarget {
+    pub target_id: String,
+    pub part_id: String,
+    pub viewer_node_id: String,
+    pub label: String,
+    pub editable: bool,
+    pub start: ViewerEdgePoint,
+    pub end: ViewerEdgePoint,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CalloutAnchor {
+    pub anchor_id: String,
+    pub position: [f64; 3],
+    #[serde(default)]
+    pub normal: Option<[f64; 3]>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasurementGuide {
+    pub guide_id: String,
+    pub kind: MeasurementGuideKind,
+    #[serde(default)]
+    pub anchor_ids: Vec<String>,
+    #[serde(default)]
+    pub label_anchor_id: Option<String>,
+    #[serde(default)]
+    pub target_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -1397,6 +1953,23 @@ pub struct ArtifactBundle {
     pub preview_stl_path: String,
     #[serde(default)]
     pub viewer_assets: Vec<ViewerAsset>,
+    #[serde(default)]
+    pub edge_targets: Vec<ViewerEdgeTarget>,
+    #[serde(default)]
+    pub callout_anchors: Vec<CalloutAnchor>,
+    #[serde(default)]
+    pub measurement_guides: Vec<MeasurementGuide>,
+    #[serde(default)]
+    pub export_artifacts: Vec<ExportArtifact>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportArtifact {
+    pub label: String,
+    pub format: String,
+    pub path: String,
+    pub role: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -1466,11 +2039,41 @@ pub struct ParameterGroup {
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SelectionTarget {
+    #[serde(default)]
+    pub target_id: Option<String>,
     pub part_id: String,
     pub viewer_node_id: String,
     pub label: String,
     pub kind: SelectionTargetKind,
     pub editable: bool,
+    #[serde(default)]
+    pub parameter_keys: Vec<String>,
+    #[serde(default)]
+    pub primitive_ids: Vec<String>,
+    #[serde(default)]
+    pub view_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasurementAnnotation {
+    pub annotation_id: String,
+    pub label: String,
+    pub basis: MeasurementBasis,
+    pub axis: MeasurementAxis,
+    #[serde(default)]
+    pub parameter_keys: Vec<String>,
+    #[serde(default)]
+    pub primitive_ids: Vec<String>,
+    #[serde(default)]
+    pub target_ids: Vec<String>,
+    #[serde(default)]
+    pub guide_id: Option<String>,
+    #[serde(default)]
+    pub explanation: Option<String>,
+    #[serde(default)]
+    pub formula_hint: Option<String>,
+    pub source: MeasurementAnnotationSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -1613,6 +2216,8 @@ pub struct ModelManifest {
     pub advisories: Vec<Advisory>,
     #[serde(default)]
     pub selection_targets: Vec<SelectionTarget>,
+    #[serde(default)]
+    pub measurement_annotations: Vec<MeasurementAnnotation>,
     #[serde(default)]
     pub warnings: Vec<String>,
     #[serde(default = "default_manifest_enrichment_state")]
@@ -1784,6 +2389,9 @@ pub fn validate_design_params(params: &DesignParams, ui_spec: &UiSpec) -> AppRes
 
     for field in &ui_spec.fields {
         let Some(value) = params.get(field.key()) else {
+            if matches!(field, UiField::Image { .. }) {
+                continue;
+            }
             return Err(AppError::validation(format!(
                 "initialParams is missing '{}'.",
                 field.key()
@@ -1804,9 +2412,234 @@ pub fn validate_design_params(params: &DesignParams, ui_spec: &UiSpec) -> AppRes
     Ok(())
 }
 
+fn fallback_field_label(key: &str) -> String {
+    let label = key.replace(['_', '-'], " ").trim().to_string();
+    if label.is_empty() {
+        key.to_string()
+    } else {
+        label
+    }
+}
+
+pub fn reconcile_post_processing_controls(
+    ui_spec: &UiSpec,
+    params: &DesignParams,
+    post_processing: Option<&PostProcessingSpec>,
+) -> (UiSpec, DesignParams) {
+    let Some(normalized) = normalize_post_processing_spec(post_processing.cloned()) else {
+        return (ui_spec.clone(), params.clone());
+    };
+
+    let mut next_ui_spec = ui_spec.clone();
+    let mut next_params = params.clone();
+
+    let mut insert_missing_field = |image_key: &str| {
+        if !next_ui_spec
+            .fields
+            .iter()
+            .any(|field| field.key() == image_key)
+        {
+            next_ui_spec.fields.insert(
+                0,
+                UiField::Image {
+                    key: image_key.to_string(),
+                    label: fallback_field_label(image_key),
+                    frozen: false,
+                },
+            );
+        }
+        next_params
+            .entry(image_key.to_string())
+            .or_insert_with(|| ParamValue::String(String::new()));
+    };
+
+    if let Some(displacement) = normalized.displacement.as_ref() {
+        let image_key = displacement.image_param.trim();
+        if !image_key.is_empty() {
+            insert_missing_field(image_key);
+        }
+    }
+
+    for attachment in &normalized.lithophane_attachments {
+        if let Some(image_key) = attachment.source.image_param() {
+            let image_key = image_key.trim();
+            if !image_key.is_empty() {
+                insert_missing_field(image_key);
+            }
+        }
+    }
+
+    (next_ui_spec, next_params)
+}
+
+fn validate_post_processing_controls(
+    ui_spec: &UiSpec,
+    post_processing: Option<&PostProcessingSpec>,
+) -> AppResult<()> {
+    let Some(normalized) = normalize_post_processing_spec(post_processing.cloned()) else {
+        return Ok(());
+    };
+
+    let mut seen_ids = HashSet::new();
+    for attachment in &normalized.lithophane_attachments {
+        let attachment_id = attachment.id.trim();
+        if attachment_id.is_empty() {
+            return Err(AppError::validation(
+                "postProcessing lithophaneAttachments must include a non-empty id.",
+            ));
+        }
+        if !seen_ids.insert(attachment_id.to_string()) {
+            return Err(AppError::validation(format!(
+                "postProcessing lithophane attachment '{}' is duplicated.",
+                attachment_id
+            )));
+        }
+        if attachment.relief.depth_mm <= 0.0 {
+            return Err(AppError::validation(format!(
+                "postProcessing lithophane attachment '{}' must have depthMm > 0.",
+                attachment_id
+            )));
+        }
+        if attachment.color.channel_thickness_mm <= 0.0 {
+            return Err(AppError::validation(format!(
+                "postProcessing lithophane attachment '{}' must have channelThicknessMm > 0.",
+                attachment_id
+            )));
+        }
+        if matches!(attachment.color.mode, LithophaneColorMode::Cmyk)
+            && !matches!(attachment.placement.projection, ProjectionType::Planar)
+        {
+            return Err(AppError::validation(format!(
+                "postProcessing lithophane attachment '{}' only supports CMYK with planar projection.",
+                attachment_id
+            )));
+        }
+        if let Some(image_key) = attachment.source.image_param() {
+            validate_post_processing_image_field(ui_spec, image_key, "lithophane attachment")?;
+        }
+    }
+
+    if let Some(displacement) = normalized.displacement.as_ref() {
+        validate_post_processing_image_field(
+            ui_spec,
+            displacement.image_param.as_str(),
+            "displacement",
+        )?;
+    }
+
+    Ok(())
+}
+
+fn validate_post_processing_image_field(
+    ui_spec: &UiSpec,
+    image_key: &str,
+    label: &str,
+) -> AppResult<()> {
+    let image_key = image_key.trim();
+    if image_key.is_empty() {
+        return Err(AppError::validation(format!(
+            "postProcessing {} must reference a non-empty imageParam.",
+            label
+        )));
+    }
+    let Some(field) = ui_spec.fields.iter().find(|field| field.key() == image_key) else {
+        return Err(AppError::validation(format!(
+            "postProcessing {} imageParam '{}' must reference a uiSpec field.",
+            label, image_key
+        )));
+    };
+    if !matches!(field, UiField::Image { .. }) {
+        return Err(AppError::validation(format!(
+            "postProcessing {} imageParam '{}' must reference a uiSpec image field.",
+            label, image_key
+        )));
+    }
+    Ok(())
+}
+
 pub fn validate_design_output(output: &DesignOutput) -> AppResult<()> {
     validate_ui_spec(&output.ui_spec)?;
+    validate_post_processing_controls(&output.ui_spec, output.post_processing.as_ref())?;
     validate_design_params(&output.initial_params, &output.ui_spec)?;
+    Ok(())
+}
+
+pub fn validate_artifact_bundle(bundle: &ArtifactBundle) -> AppResult<()> {
+    let mut anchor_ids = HashSet::new();
+    for anchor in &bundle.callout_anchors {
+        if anchor.anchor_id.trim().is_empty() {
+            return Err(AppError::validation(
+                "callout anchors must include a non-empty anchorId.",
+            ));
+        }
+        if !anchor_ids.insert(anchor.anchor_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "callout anchor '{}' is duplicated.",
+                anchor.anchor_id
+            )));
+        }
+    }
+
+    let mut guide_ids = HashSet::new();
+    for guide in &bundle.measurement_guides {
+        if guide.guide_id.trim().is_empty() {
+            return Err(AppError::validation(
+                "measurement guides must include a non-empty guideId.",
+            ));
+        }
+        if !guide_ids.insert(guide.guide_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "measurement guide '{}' is duplicated.",
+                guide.guide_id
+            )));
+        }
+        if guide.anchor_ids.is_empty() {
+            return Err(AppError::validation(format!(
+                "measurement guide '{}' must include at least one anchorId.",
+                guide.guide_id
+            )));
+        }
+        for anchor_id in &guide.anchor_ids {
+            if !anchor_ids.contains(anchor_id.as_str()) {
+                return Err(AppError::validation(format!(
+                    "measurement guide '{}' references unknown anchorId '{}'.",
+                    guide.guide_id, anchor_id
+                )));
+            }
+        }
+        if let Some(label_anchor_id) = guide.label_anchor_id.as_deref() {
+            if !anchor_ids.contains(label_anchor_id) {
+                return Err(AppError::validation(format!(
+                    "measurement guide '{}' references unknown labelAnchorId '{}'.",
+                    guide.guide_id, label_anchor_id
+                )));
+            }
+        }
+    }
+
+    for export_artifact in &bundle.export_artifacts {
+        if export_artifact.label.trim().is_empty() {
+            return Err(AppError::validation(
+                "export artifacts must include a non-empty label.",
+            ));
+        }
+        if export_artifact.format.trim().is_empty() {
+            return Err(AppError::validation(
+                "export artifacts must include a non-empty format.",
+            ));
+        }
+        if export_artifact.path.trim().is_empty() {
+            return Err(AppError::validation(
+                "export artifacts must include a non-empty path.",
+            ));
+        }
+        if export_artifact.role.trim().is_empty() {
+            return Err(AppError::validation(
+                "export artifacts must include a non-empty role.",
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -1879,6 +2712,18 @@ pub fn validate_model_manifest(manifest: &ModelManifest) -> AppResult<()> {
         }
     }
 
+    let mut known_parameter_keys = HashSet::new();
+    for part in &manifest.parts {
+        for key in &part.parameter_keys {
+            known_parameter_keys.insert(key.as_str());
+        }
+    }
+    for group in &manifest.parameter_groups {
+        for key in &group.parameter_keys {
+            known_parameter_keys.insert(key.as_str());
+        }
+    }
+
     let mut primitive_ids = HashSet::new();
     let mut view_ids = HashSet::new();
     let mut relation_ids = HashSet::new();
@@ -1922,6 +2767,7 @@ pub fn validate_model_manifest(manifest: &ModelManifest) -> AppResult<()> {
                     primitive.primitive_id
                 )));
             }
+            known_parameter_keys.insert(binding.parameter_key.as_str());
         }
     }
 
@@ -2009,7 +2855,21 @@ pub fn validate_model_manifest(manifest: &ModelManifest) -> AppResult<()> {
         }
     }
 
+    let mut selection_target_ids = HashSet::new();
     for target in &manifest.selection_targets {
+        if let Some(target_id) = target.target_id.as_deref() {
+            if target_id.trim().is_empty() {
+                return Err(AppError::validation(
+                    "selection targets with targetId must use a non-empty value.",
+                ));
+            }
+            if !selection_target_ids.insert(target_id) {
+                return Err(AppError::validation(format!(
+                    "selection target '{}' is duplicated.",
+                    target_id
+                )));
+            }
+        }
         if !part_ids.contains(target.part_id.as_str()) {
             return Err(AppError::validation(format!(
                 "selection target '{}' references unknown partId '{}'.",
@@ -2021,6 +2881,96 @@ pub fn validate_model_manifest(manifest: &ModelManifest) -> AppResult<()> {
                 "selection target '{}' references an unknown viewer node id.",
                 target.viewer_node_id
             )));
+        }
+        for parameter_key in &target.parameter_keys {
+            if !known_parameter_keys.contains(parameter_key.as_str()) {
+                return Err(AppError::validation(format!(
+                    "selection target '{}' references unknown parameterKey '{}'.",
+                    target
+                        .target_id
+                        .as_deref()
+                        .unwrap_or(target.viewer_node_id.as_str()),
+                    parameter_key
+                )));
+            }
+        }
+        for primitive_id in &target.primitive_ids {
+            if !primitive_ids.contains(primitive_id.as_str()) {
+                return Err(AppError::validation(format!(
+                    "selection target '{}' references unknown primitiveId '{}'.",
+                    target
+                        .target_id
+                        .as_deref()
+                        .unwrap_or(target.viewer_node_id.as_str()),
+                    primitive_id
+                )));
+            }
+        }
+        for view_id in &target.view_ids {
+            if !view_ids.contains(view_id.as_str()) {
+                return Err(AppError::validation(format!(
+                    "selection target '{}' references unknown viewId '{}'.",
+                    target
+                        .target_id
+                        .as_deref()
+                        .unwrap_or(target.viewer_node_id.as_str()),
+                    view_id
+                )));
+            }
+        }
+    }
+
+    let mut measurement_annotation_ids = HashSet::new();
+    for annotation in &manifest.measurement_annotations {
+        if annotation.annotation_id.trim().is_empty() {
+            return Err(AppError::validation(
+                "measurement annotations must include a non-empty annotationId.",
+            ));
+        }
+        if !measurement_annotation_ids.insert(annotation.annotation_id.as_str()) {
+            return Err(AppError::validation(format!(
+                "measurement annotation '{}' is duplicated.",
+                annotation.annotation_id
+            )));
+        }
+        if annotation.label.trim().is_empty() {
+            return Err(AppError::validation(format!(
+                "measurement annotation '{}' must include a non-empty label.",
+                annotation.annotation_id
+            )));
+        }
+        if annotation.parameter_keys.is_empty()
+            && annotation.primitive_ids.is_empty()
+            && annotation.target_ids.is_empty()
+        {
+            return Err(AppError::validation(format!(
+                "measurement annotation '{}' must reference at least one parameterKey, primitiveId, or targetId.",
+                annotation.annotation_id
+            )));
+        }
+        for parameter_key in &annotation.parameter_keys {
+            if !known_parameter_keys.contains(parameter_key.as_str()) {
+                return Err(AppError::validation(format!(
+                    "measurement annotation '{}' references unknown parameterKey '{}'.",
+                    annotation.annotation_id, parameter_key
+                )));
+            }
+        }
+        for primitive_id in &annotation.primitive_ids {
+            if !primitive_ids.contains(primitive_id.as_str()) {
+                return Err(AppError::validation(format!(
+                    "measurement annotation '{}' references unknown primitiveId '{}'.",
+                    annotation.annotation_id, primitive_id
+                )));
+            }
+        }
+        for target_id in &annotation.target_ids {
+            if !selection_target_ids.contains(target_id.as_str()) {
+                return Err(AppError::validation(format!(
+                    "measurement annotation '{}' references unknown targetId '{}'.",
+                    annotation.annotation_id, target_id
+                )));
+            }
         }
     }
 
@@ -2071,6 +3021,55 @@ pub fn validate_model_manifest(manifest: &ModelManifest) -> AppResult<()> {
                 return Err(AppError::validation(format!(
                     "advisory '{}' references unknown viewId '{}'.",
                     advisory.advisory_id, view_id
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub fn validate_model_runtime_bundle(
+    manifest: &ModelManifest,
+    bundle: &ArtifactBundle,
+) -> AppResult<()> {
+    validate_model_manifest(manifest)?;
+    validate_artifact_bundle(bundle)?;
+
+    if bundle.model_id != manifest.model_id {
+        return Err(AppError::validation(
+            "Model manifest does not match artifact bundle model id.",
+        ));
+    }
+
+    let selection_target_ids = manifest
+        .selection_targets
+        .iter()
+        .filter_map(|target| target.target_id.as_deref())
+        .collect::<HashSet<_>>();
+    let guide_ids = bundle
+        .measurement_guides
+        .iter()
+        .map(|guide| guide.guide_id.as_str())
+        .collect::<HashSet<_>>();
+
+    for guide in &bundle.measurement_guides {
+        for target_id in &guide.target_ids {
+            if !selection_target_ids.contains(target_id.as_str()) {
+                return Err(AppError::validation(format!(
+                    "measurement guide '{}' references unknown targetId '{}'.",
+                    guide.guide_id, target_id
+                )));
+            }
+        }
+    }
+
+    for annotation in &manifest.measurement_annotations {
+        if let Some(guide_id) = annotation.guide_id.as_deref() {
+            if !guide_ids.contains(guide_id) {
+                return Err(AppError::validation(format!(
+                    "measurement annotation '{}' references unknown guideId '{}'.",
+                    annotation.annotation_id, guide_id
                 )));
             }
         }
@@ -2190,12 +3189,17 @@ mod tests {
                 threshold: None,
             }],
             selection_targets: vec![SelectionTarget {
+                target_id: Some("target-shell".to_string()),
                 part_id: "part-shell".to_string(),
                 viewer_node_id: "node-shell".to_string(),
                 label: "Shell".to_string(),
-                kind: SelectionTargetKind::Part,
+                kind: SelectionTargetKind::Object,
                 editable: true,
+                parameter_keys: vec!["radius".to_string()],
+                primitive_ids: vec!["primitive-shell-radius".to_string()],
+                view_ids: vec!["view-shell".to_string()],
             }],
+            measurement_annotations: Vec::new(),
             warnings: Vec::new(),
             enrichment_state: ManifestEnrichmentState {
                 status: EnrichmentStatus::None,
@@ -2241,11 +3245,15 @@ mod tests {
                 part.viewer_node_ids
                     .iter()
                     .map(|node_id| SelectionTarget {
+                        target_id: Some(format!("target-{}", node_id)),
                         part_id: part.part_id.clone(),
                         viewer_node_id: node_id.clone(),
                         label: part.label.clone(),
-                        kind: SelectionTargetKind::Part,
+                        kind: SelectionTargetKind::Object,
                         editable: part.editable,
+                        parameter_keys: part.parameter_keys.clone(),
+                        primitive_ids: Vec::new(),
+                        view_ids: Vec::new(),
                     })
                     .collect::<Vec<_>>()
             })
@@ -2286,6 +3294,7 @@ mod tests {
             control_views: Vec::new(),
             advisories: Vec::new(),
             selection_targets,
+            measurement_annotations: Vec::new(),
             warnings: Vec::new(),
             enrichment_state: ManifestEnrichmentState {
                 status: EnrichmentStatus::None,
@@ -2313,6 +3322,99 @@ mod tests {
         manifest.control_relations[0].target_primitive_id = "missing-target".to_string();
         let err = validate_model_manifest(&manifest).expect_err("manifest should be invalid");
         assert!(err.message.contains("unknown target primitive"));
+    }
+
+    #[test]
+    fn validate_model_manifest_rejects_unknown_selection_target_primitive() {
+        let mut manifest = sample_manifest();
+        manifest.selection_targets[0].primitive_ids = vec!["missing-primitive".to_string()];
+        let err = validate_model_manifest(&manifest).expect_err("manifest should be invalid");
+        assert!(err.message.contains("unknown primitiveId"));
+    }
+
+    #[test]
+    fn validate_model_manifest_accepts_measurement_annotations() {
+        let mut manifest = sample_manifest();
+        manifest.measurement_annotations = vec![MeasurementAnnotation {
+            annotation_id: "measurement-shell-outer-radius".to_string(),
+            label: "Outer Radius".to_string(),
+            basis: MeasurementBasis::Outer,
+            axis: MeasurementAxis::Radial,
+            parameter_keys: vec!["radius".to_string()],
+            primitive_ids: vec!["primitive-shell-radius".to_string()],
+            target_ids: vec!["target-shell".to_string()],
+            guide_id: Some("guide-shell-radius".to_string()),
+            explanation: Some("Measures the outer shell radius.".to_string()),
+            formula_hint: Some("outer_radius = radius".to_string()),
+            source: MeasurementAnnotationSource::Generated,
+        }];
+
+        validate_model_manifest(&manifest).expect("manifest should accept measurement semantics");
+    }
+
+    #[test]
+    fn validate_model_manifest_rejects_unknown_measurement_target_ids() {
+        let mut manifest = sample_manifest();
+        manifest.measurement_annotations = vec![MeasurementAnnotation {
+            annotation_id: "measurement-shell-outer-radius".to_string(),
+            label: "Outer Radius".to_string(),
+            basis: MeasurementBasis::Outer,
+            axis: MeasurementAxis::Radial,
+            parameter_keys: vec!["radius".to_string()],
+            primitive_ids: Vec::new(),
+            target_ids: vec!["missing-target".to_string()],
+            guide_id: None,
+            explanation: None,
+            formula_hint: None,
+            source: MeasurementAnnotationSource::Generated,
+        }];
+
+        let err =
+            validate_model_manifest(&manifest).expect_err("manifest should reject bad targetId");
+        assert!(err.message.contains("unknown targetId"));
+    }
+
+    #[test]
+    fn validate_model_runtime_bundle_rejects_unknown_measurement_guide_ids() {
+        let mut manifest = sample_manifest();
+        manifest.measurement_annotations = vec![MeasurementAnnotation {
+            annotation_id: "measurement-shell-outer-radius".to_string(),
+            label: "Outer Radius".to_string(),
+            basis: MeasurementBasis::Outer,
+            axis: MeasurementAxis::Radial,
+            parameter_keys: vec!["radius".to_string()],
+            primitive_ids: vec!["primitive-shell-radius".to_string()],
+            target_ids: vec!["target-shell".to_string()],
+            guide_id: Some("missing-guide".to_string()),
+            explanation: None,
+            formula_hint: None,
+            source: MeasurementAnnotationSource::Generated,
+        }];
+
+        let bundle = ArtifactBundle {
+            schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
+            model_id: manifest.model_id.clone(),
+            source_kind: ModelSourceKind::Generated,
+            content_hash: "hash".to_string(),
+            artifact_version: 1,
+            fcstd_path: "/tmp/model.FCStd".to_string(),
+            manifest_path: "/tmp/model.json".to_string(),
+            macro_path: Some("/tmp/model.py".to_string()),
+            preview_stl_path: "/tmp/model.stl".to_string(),
+            viewer_assets: Vec::new(),
+            edge_targets: Vec::new(),
+            callout_anchors: vec![CalloutAnchor {
+                anchor_id: "anchor-shell-center".to_string(),
+                position: [0.0, 0.0, 0.0],
+                normal: None,
+            }],
+            measurement_guides: Vec::new(),
+            export_artifacts: Vec::new(),
+        };
+
+        let err = validate_model_runtime_bundle(&manifest, &bundle)
+            .expect_err("runtime pair should reject bad guide id");
+        assert!(err.message.contains("unknown guideId"));
     }
 
     #[test]
@@ -2374,6 +3476,167 @@ mod tests {
 
         assert_eq!(traits.version, GENIE_TRAITS_VERSION);
         assert_eq!(traits.seed, derive_thread_seed(thread_id));
+    }
+
+    #[test]
+    fn reconcile_post_processing_controls_inserts_missing_image_field_and_param() {
+        let ui_spec = UiSpec {
+            fields: vec![UiField::Number {
+                key: "width".to_string(),
+                label: "width".to_string(),
+                min: None,
+                max: None,
+                step: None,
+                min_from: None,
+                max_from: None,
+                frozen: false,
+            }],
+        };
+        let params = DesignParams::from([("width".to_string(), ParamValue::Number(100.0))]);
+        let post = PostProcessingSpec {
+            displacement: Some(DisplacementSpec {
+                image_param: "image_path".to_string(),
+                projection: ProjectionType::Planar,
+                depth_mm: 2.0,
+                invert: true,
+            }),
+            lithophane_attachments: vec![],
+        };
+
+        let (next_ui_spec, next_params) =
+            reconcile_post_processing_controls(&ui_spec, &params, Some(&post));
+
+        assert!(matches!(
+            next_ui_spec.fields.first(),
+            Some(UiField::Image { key, .. }) if key == "image_path"
+        ));
+        assert_eq!(
+            next_params.get("image_path"),
+            Some(&ParamValue::String(String::new()))
+        );
+    }
+
+    #[test]
+    fn validate_design_output_rejects_displacement_without_image_field() {
+        let output = DesignOutput {
+            title: "Lithophane".to_string(),
+            version_name: "V1".to_string(),
+            response: "ok".to_string(),
+            interaction_mode: InteractionMode::Design,
+            macro_code: "pass".to_string(),
+            macro_dialect: MacroDialect::Legacy,
+            ui_spec: UiSpec {
+                fields: vec![UiField::Number {
+                    key: "width".to_string(),
+                    label: "width".to_string(),
+                    min: None,
+                    max: None,
+                    step: None,
+                    min_from: None,
+                    max_from: None,
+                    frozen: false,
+                }],
+            },
+            initial_params: DesignParams::from([("width".to_string(), ParamValue::Number(100.0))]),
+            post_processing: Some(PostProcessingSpec {
+                displacement: Some(DisplacementSpec {
+                    image_param: "image_path".to_string(),
+                    projection: ProjectionType::Planar,
+                    depth_mm: 2.0,
+                    invert: false,
+                }),
+                lithophane_attachments: vec![],
+            }),
+        };
+
+        let error = validate_design_output(&output).unwrap_err();
+        assert!(error.message.contains(
+            "postProcessing displacement imageParam 'image_path' must reference a uiSpec field."
+        ));
+    }
+
+    #[test]
+    fn normalize_post_processing_spec_promotes_legacy_displacement() {
+        let normalized = normalize_post_processing_spec(Some(PostProcessingSpec {
+            displacement: Some(DisplacementSpec {
+                image_param: "image_path".to_string(),
+                projection: ProjectionType::Planar,
+                depth_mm: 2.25,
+                invert: true,
+            }),
+            lithophane_attachments: vec![],
+        }))
+        .expect("post-processing should normalize");
+
+        assert_eq!(normalized.lithophane_attachments.len(), 1);
+        let attachment = &normalized.lithophane_attachments[0];
+        assert_eq!(attachment.id, "legacy-image-path");
+        assert!(matches!(
+            attachment.source,
+            LithophaneAttachmentSource::Param { ref image_param } if image_param == "image_path"
+        ));
+        assert_eq!(attachment.placement.projection, ProjectionType::Planar);
+        assert_eq!(attachment.relief.depth_mm, 2.25);
+        assert!(attachment.relief.invert);
+    }
+
+    #[test]
+    fn validate_design_output_rejects_cmyk_for_non_planar_lithophane_attachment() {
+        let output = DesignOutput {
+            title: "Lithophane".to_string(),
+            version_name: "V1".to_string(),
+            response: "ok".to_string(),
+            interaction_mode: InteractionMode::Design,
+            macro_code: "pass".to_string(),
+            macro_dialect: MacroDialect::Legacy,
+            ui_spec: UiSpec {
+                fields: vec![UiField::Image {
+                    key: "image_path".to_string(),
+                    label: "Image".to_string(),
+                    frozen: false,
+                }],
+            },
+            initial_params: DesignParams::from([(
+                "image_path".to_string(),
+                ParamValue::String("/tmp/litho.png".to_string()),
+            )]),
+            post_processing: Some(PostProcessingSpec {
+                displacement: None,
+                lithophane_attachments: vec![LithophaneAttachment {
+                    id: "panel".to_string(),
+                    enabled: true,
+                    source: LithophaneAttachmentSource::Param {
+                        image_param: "image_path".to_string(),
+                    },
+                    target_part_id: String::new(),
+                    placement: LithophanePlacement {
+                        mode: LithophanePlacementMode::PartSidePatch,
+                        side: LithophaneSide::Front,
+                        projection: ProjectionType::Cylindrical,
+                        width_mm: 40.0,
+                        height_mm: 20.0,
+                        offset_x_mm: 0.0,
+                        offset_y_mm: 0.0,
+                        rotation_deg: 0.0,
+                        overflow_mode: OverflowMode::Contain,
+                        bleed_margin_mm: 0.0,
+                    },
+                    relief: LithophaneRelief {
+                        depth_mm: 2.0,
+                        invert: false,
+                    },
+                    color: LithophaneColor {
+                        mode: LithophaneColorMode::Cmyk,
+                        channel_thickness_mm: 0.4,
+                    },
+                }],
+            }),
+        };
+
+        let error = validate_design_output(&output).unwrap_err();
+        assert!(error
+            .message
+            .contains("only supports CMYK with planar projection"));
     }
 
     proptest! {

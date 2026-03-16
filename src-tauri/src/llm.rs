@@ -190,9 +190,7 @@ If intent is "design", "response" must be one short routing sentence for the ass
 }
 
 fn select_classifier_model(engine: &Engine, has_images: bool) -> &str {
-    if has_images {
-        engine.model.as_str()
-    } else if engine.light_model.trim().is_empty() {
+    if has_images || engine.light_model.trim().is_empty() {
         engine.model.as_str()
     } else {
         engine.light_model.as_str()
@@ -586,6 +584,7 @@ fn estimate_cost_usd(
     Some(input_cost + cached_input_cost + output_cost)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn usage_segment(
     stage: &str,
     provider: &str,
@@ -718,6 +717,7 @@ pub fn clean_json_text(text: &str) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn call_openai_compatible(
     client: &reqwest::Client,
     engine: &Engine,
@@ -788,6 +788,7 @@ async fn call_openai_compatible(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn call_gemini(
     client: &reqwest::Client,
     engine: &Engine,

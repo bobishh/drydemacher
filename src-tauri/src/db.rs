@@ -52,6 +52,7 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
             agent_origin TEXT,
             timestamp INTEGER NOT NULL,
             image_data TEXT,
+            visual_kind TEXT,
             attachment_images TEXT,
             deleted_at INTEGER,
             trash_hidden_at INTEGER,
@@ -94,22 +95,8 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
             model_id TEXT,
             phase TEXT NOT NULL,
             status_text TEXT NOT NULL DEFAULT '',
-            updated_at INTEGER NOT NULL
-        )",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS agent_drafts (
-            session_id TEXT NOT NULL,
-            thread_id TEXT NOT NULL,
-            base_message_id TEXT NOT NULL,
-            model_id TEXT,
-            design_output TEXT NOT NULL,
-            artifact_bundle TEXT,
-            model_manifest TEXT,
             updated_at INTEGER NOT NULL,
-            PRIMARY KEY (thread_id, base_message_id)
+            managed_runtime INTEGER NOT NULL DEFAULT 0
         )",
         [],
     )?;
@@ -151,7 +138,6 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
          ON target_leases(session_id, expires_at DESC)",
         [],
     )?;
-
     // Migrations for existing databases
     let _ = conn.execute(
         "ALTER TABLE threads ADD COLUMN summary TEXT NOT NULL DEFAULT ''",
@@ -159,11 +145,13 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
     );
     let _ = conn.execute("ALTER TABLE threads ADD COLUMN genie_traits TEXT", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN image_data TEXT", []);
+    let _ = conn.execute("ALTER TABLE messages ADD COLUMN visual_kind TEXT", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN attachment_images TEXT", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN usage TEXT", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN artifact_bundle TEXT", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN model_manifest TEXT", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN agent_origin TEXT", []);
+    let _ = conn.execute("DROP TABLE IF EXISTS agent_drafts", []);
     let _ = conn.execute(
         "ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'success'",
         [],
@@ -192,6 +180,15 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
         "ALTER TABLE agent_sessions ADD COLUMN llm_model_label TEXT",
         [],
     );
+    let _ = conn.execute(
+        "ALTER TABLE agent_sessions ADD COLUMN managed_runtime INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "DROP INDEX IF EXISTS idx_agent_session_trace_session_trace_id",
+        [],
+    );
+    let _ = conn.execute("DROP TABLE IF EXISTS agent_session_trace", []);
     migrate_thread_genie_traits(&conn)?;
 
     Ok(conn)
@@ -603,7 +600,7 @@ pub fn add_message(conn: &Connection, thread_id: &str, msg: &Message) -> SqlResu
         serde_json::to_string(&msg.attachment_images).ok()
     };
     conn.execute(
-        "INSERT INTO messages (id, thread_id, role, content, status, output, usage, artifact_bundle, model_manifest, agent_origin, timestamp, image_data, attachment_images) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        "INSERT INTO messages (id, thread_id, role, content, status, output, usage, artifact_bundle, model_manifest, agent_origin, timestamp, image_data, visual_kind, attachment_images) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             msg.id,
             thread_id,
@@ -617,6 +614,7 @@ pub fn add_message(conn: &Connection, thread_id: &str, msg: &Message) -> SqlResu
             agent_origin_str,
             msg.timestamp as i64,
             msg.image_data,
+            msg.visual_kind,
             attachment_images_str,
         ],
     )?;
@@ -692,12 +690,12 @@ fn load_thread_message_rows(
     include_deleted: bool,
 ) -> SqlResult<Vec<ThreadMessageRow>> {
     let sql = if include_deleted {
-        "SELECT id, role, content, status, output, usage, artifact_bundle, model_manifest, agent_origin, timestamp, image_data, attachment_images, deleted_at
+        "SELECT id, role, content, status, output, usage, artifact_bundle, model_manifest, agent_origin, timestamp, image_data, visual_kind, attachment_images, deleted_at
          FROM messages
          WHERE thread_id = ?1 AND status != 'discarded'
          ORDER BY timestamp ASC"
     } else {
-        "SELECT id, role, content, status, output, usage, artifact_bundle, model_manifest, agent_origin, timestamp, image_data, attachment_images, deleted_at
+        "SELECT id, role, content, status, output, usage, artifact_bundle, model_manifest, agent_origin, timestamp, image_data, visual_kind, attachment_images, deleted_at
          FROM messages
          WHERE thread_id = ?1 AND status != 'discarded' AND deleted_at IS NULL
          ORDER BY timestamp ASC"
@@ -716,7 +714,8 @@ fn load_thread_message_rows(
         let model_manifest = model_manifest_str.and_then(|s| serde_json::from_str(&s).ok());
         let agent_origin_str: Option<String> = row.get(8)?;
         let agent_origin = deserialize_agent_origin(agent_origin_str.as_deref());
-        let attachment_images_str: Option<String> = row.get(11)?;
+        let visual_kind = row.get(11)?;
+        let attachment_images_str: Option<String> = row.get(12)?;
         let attachment_images = attachment_images_str
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
@@ -734,9 +733,10 @@ fn load_thread_message_rows(
                 agent_origin,
                 timestamp: row.get::<_, i64>(9)? as u64,
                 image_data: row.get(10)?,
+                visual_kind,
                 attachment_images,
             },
-            deleted_at: row.get(12)?,
+            deleted_at: row.get(13)?,
         })
     })?;
 
@@ -798,44 +798,60 @@ pub fn mark_interrupted_pending_messages(conn: &Connection) -> SqlResult<usize> 
 pub fn update_message_status_and_output(
     conn: &Connection,
     message_id: &str,
-    status: &MessageStatus,
-    output: Option<&DesignOutput>,
-    usage: Option<&crate::models::UsageSummary>,
-    artifact_bundle: Option<&crate::models::ArtifactBundle>,
-    model_manifest: Option<&crate::models::ModelManifest>,
-    content: Option<&str>,
+    update: MessageStatusUpdate<'_>,
 ) -> SqlResult<()> {
+    let MessageStatusUpdate {
+        status,
+        output,
+        usage,
+        artifact_bundle,
+        model_manifest,
+        visual_kind,
+        content,
+    } = update;
     let output_str = output.and_then(|o| serde_json::to_string(o).ok());
     let usage_str = usage.and_then(|value| serde_json::to_string(value).ok());
     let artifact_bundle_str = artifact_bundle.and_then(|value| serde_json::to_string(value).ok());
     let model_manifest_str = model_manifest.and_then(|value| serde_json::to_string(value).ok());
     if let Some(text) = content {
         conn.execute(
-            "UPDATE messages SET status = ?1, output = ?2, usage = ?3, artifact_bundle = ?4, model_manifest = ?5, content = ?6 WHERE id = ?7",
+            "UPDATE messages SET status = ?1, output = ?2, usage = ?3, artifact_bundle = ?4, model_manifest = ?5, visual_kind = COALESCE(?6, visual_kind), content = ?7 WHERE id = ?8",
             params![
                 status,
                 output_str,
                 usage_str,
                 artifact_bundle_str,
                 model_manifest_str,
+                visual_kind,
                 text,
                 message_id
             ],
         )?;
     } else {
         conn.execute(
-            "UPDATE messages SET status = ?1, output = ?2, usage = ?3, artifact_bundle = ?4, model_manifest = ?5 WHERE id = ?6",
+            "UPDATE messages SET status = ?1, output = ?2, usage = ?3, artifact_bundle = ?4, model_manifest = ?5, visual_kind = COALESCE(?6, visual_kind) WHERE id = ?7",
             params![
                 status,
                 output_str,
                 usage_str,
                 artifact_bundle_str,
                 model_manifest_str,
+                visual_kind,
                 message_id
             ],
         )?;
     }
     Ok(())
+}
+
+pub struct MessageStatusUpdate<'a> {
+    pub status: &'a MessageStatus,
+    pub output: Option<&'a DesignOutput>,
+    pub usage: Option<&'a crate::models::UsageSummary>,
+    pub artifact_bundle: Option<&'a crate::models::ArtifactBundle>,
+    pub model_manifest: Option<&'a crate::models::ModelManifest>,
+    pub visual_kind: Option<&'a crate::models::MessageVisualKind>,
+    pub content: Option<&'a str>,
 }
 
 pub fn delete_thread(conn: &Connection, id: &str) -> SqlResult<()> {
@@ -950,7 +966,7 @@ pub fn restore_version_cluster(conn: &Connection, id: &str) -> SqlResult<Option<
 
 pub fn get_deleted_messages(conn: &Connection) -> SqlResult<Vec<DeletedMessage>> {
     let mut stmt = conn.prepare("
-        SELECT m.id, m.thread_id, t.title as thread_title, m.role, m.content, m.output, m.usage, m.artifact_bundle, m.model_manifest, m.agent_origin, m.timestamp, m.image_data, m.attachment_images, m.deleted_at
+        SELECT m.id, m.thread_id, t.title as thread_title, m.role, m.content, m.output, m.usage, m.artifact_bundle, m.model_manifest, m.agent_origin, m.timestamp, m.image_data, m.visual_kind, m.attachment_images, m.deleted_at
         FROM messages m
         JOIN threads t ON m.thread_id = t.id
         WHERE m.deleted_at IS NOT NULL
@@ -978,7 +994,8 @@ pub fn get_deleted_messages(conn: &Connection) -> SqlResult<Vec<DeletedMessage>>
             model_manifest_str.and_then(|json_str| serde_json::from_str(&json_str).ok());
         let agent_origin_str: Option<String> = row.get(9)?;
         let agent_origin = deserialize_agent_origin(agent_origin_str.as_deref());
-        let attachment_images_str: Option<String> = row.get(12)?;
+        let visual_kind = row.get(12)?;
+        let attachment_images_str: Option<String> = row.get(13)?;
         let attachment_images = attachment_images_str
             .and_then(|json_str| serde_json::from_str(&json_str).ok())
             .unwrap_or_default();
@@ -996,8 +1013,9 @@ pub fn get_deleted_messages(conn: &Connection) -> SqlResult<Vec<DeletedMessage>>
             agent_origin,
             timestamp: row.get::<_, i64>(10)? as u64,
             image_data: row.get(11)?,
+            visual_kind,
             attachment_images,
-            deleted_at: row.get::<_, i64>(13)? as u64,
+            deleted_at: row.get::<_, i64>(14)? as u64,
         })
     })?;
 
@@ -1122,9 +1140,17 @@ pub fn upsert_agent_session(
     conn: &Connection,
     session: &crate::models::AgentSession,
 ) -> SqlResult<()> {
+    upsert_agent_session_with_ownership(conn, session, session.client_kind == "managed-mcp-http")
+}
+
+pub fn upsert_agent_session_with_ownership(
+    conn: &Connection,
+    session: &crate::models::AgentSession,
+    managed_runtime: bool,
+) -> SqlResult<()> {
     conn.execute(
-        "INSERT INTO agent_sessions (session_id, client_kind, host_label, agent_label, llm_model_id, llm_model_label, thread_id, message_id, model_id, phase, status_text, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+        "INSERT INTO agent_sessions (session_id, client_kind, host_label, agent_label, llm_model_id, llm_model_label, thread_id, message_id, model_id, phase, status_text, updated_at, managed_runtime)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT(session_id) DO UPDATE SET
             client_kind = excluded.client_kind,
             host_label = excluded.host_label,
@@ -1136,7 +1162,8 @@ pub fn upsert_agent_session(
             model_id = excluded.model_id,
             phase = excluded.phase,
             status_text = excluded.status_text,
-            updated_at = excluded.updated_at",
+            updated_at = excluded.updated_at,
+            managed_runtime = excluded.managed_runtime",
         params![
             session.session_id,
             session.client_kind,
@@ -1149,7 +1176,8 @@ pub fn upsert_agent_session(
             session.model_id,
             session.phase,
             session.status_text,
-            session.updated_at as i64
+            session.updated_at as i64,
+            i64::from(managed_runtime)
         ],
     )?;
     Ok(())
@@ -1308,6 +1336,48 @@ pub fn get_thread_last_agent_session_for_agent(
     .optional()
 }
 
+pub fn get_managed_agent_session_ids_not_in(
+    conn: &Connection,
+    live_session_ids: &[String],
+) -> SqlResult<Vec<String>> {
+    if live_session_ids.is_empty() {
+        let mut stmt = conn.prepare(
+            "SELECT session_id
+             FROM agent_sessions
+             WHERE managed_runtime != 0",
+        )?;
+        let iter = stmt.query_map([], |row| row.get(0))?;
+        let mut session_ids = Vec::new();
+        for item in iter {
+            session_ids.push(item?);
+        }
+        return Ok(session_ids);
+    }
+
+    let placeholders = live_session_ids
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("?{}", index + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT session_id
+         FROM agent_sessions
+         WHERE managed_runtime != 0
+           AND session_id NOT IN ({})",
+        placeholders
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let iter = stmt.query_map(rusqlite::params_from_iter(live_session_ids.iter()), |row| {
+        row.get(0)
+    })?;
+    let mut session_ids = Vec::new();
+    for item in iter {
+        session_ids.push(item?);
+    }
+    Ok(session_ids)
+}
+
 pub fn delete_expired_target_leases(conn: &Connection) -> SqlResult<usize> {
     conn.execute(
         "DELETE FROM target_leases WHERE expires_at < ?1",
@@ -1406,87 +1476,6 @@ pub fn delete_target_leases_for_session(conn: &Connection, session_id: &str) -> 
     Ok(())
 }
 
-pub fn upsert_agent_draft(conn: &Connection, draft: &crate::models::AgentDraft) -> SqlResult<()> {
-    let design_output_str = serde_json::to_string(&draft.design_output)
-        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-    let artifact_bundle_str = draft
-        .artifact_bundle
-        .as_ref()
-        .and_then(|b| serde_json::to_string(b).ok());
-    let model_manifest_str = draft
-        .model_manifest
-        .as_ref()
-        .and_then(|m| serde_json::to_string(m).ok());
-
-    conn.execute(
-        "INSERT INTO agent_drafts (session_id, thread_id, base_message_id, model_id, design_output, artifact_bundle, model_manifest, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-         ON CONFLICT(thread_id, base_message_id) DO UPDATE SET
-            session_id = excluded.session_id,
-            model_id = excluded.model_id,
-            design_output = excluded.design_output,
-            artifact_bundle = excluded.artifact_bundle,
-            model_manifest = excluded.model_manifest,
-            updated_at = excluded.updated_at",
-        params![
-            draft.session_id,
-            draft.thread_id,
-            draft.base_message_id,
-            draft.model_id,
-            design_output_str,
-            artifact_bundle_str,
-            model_manifest_str,
-            draft.updated_at as i64
-        ],
-    )?;
-    Ok(())
-}
-
-pub fn get_agent_draft(
-    conn: &Connection,
-    thread_id: &str,
-    base_message_id: &str,
-) -> SqlResult<Option<crate::models::AgentDraft>> {
-    conn.query_row(
-        "SELECT session_id, thread_id, base_message_id, model_id, design_output, artifact_bundle, model_manifest, updated_at
-         FROM agent_drafts
-         WHERE thread_id = ?1 AND base_message_id = ?2",
-        params![thread_id, base_message_id],
-        |row| {
-            let design_output_str: String = row.get(4)?;
-            let design_output: DesignOutput = serde_json::from_str(&design_output_str)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-            let artifact_bundle_str: Option<String> = row.get(5)?;
-            let artifact_bundle = artifact_bundle_str.and_then(|s| serde_json::from_str(&s).ok());
-            let model_manifest_str: Option<String> = row.get(6)?;
-            let model_manifest = model_manifest_str.and_then(|s| serde_json::from_str(&s).ok());
-
-            Ok(crate::models::AgentDraft {
-                session_id: row.get(0)?,
-                thread_id: row.get(1)?,
-                base_message_id: row.get(2)?,
-                model_id: row.get(3)?,
-                design_output,
-                artifact_bundle,
-                model_manifest,
-                updated_at: row.get::<_, i64>(7)? as u64,
-            })
-        }
-    ).optional()
-}
-
-pub fn delete_agent_draft(
-    conn: &Connection,
-    thread_id: &str,
-    base_message_id: &str,
-) -> SqlResult<()> {
-    conn.execute(
-        "DELETE FROM agent_drafts WHERE thread_id = ?1 AND base_message_id = ?2",
-        params![thread_id, base_message_id],
-    )?;
-    Ok(())
-}
-
 pub fn get_message_output_and_thread(
     conn: &Connection,
     message_id: &str,
@@ -1524,10 +1513,12 @@ pub fn get_message_thread_id(conn: &Connection, message_id: &str) -> SqlResult<O
     .optional()
 }
 
+pub type MessageRuntimeAndThread = (Option<ArtifactBundle>, Option<ModelManifest>, String);
+
 pub fn get_message_runtime_and_thread(
     conn: &Connection,
     message_id: &str,
-) -> SqlResult<Option<(Option<ArtifactBundle>, Option<ModelManifest>, String)>> {
+) -> SqlResult<Option<MessageRuntimeAndThread>> {
     let row: Option<(Option<String>, Option<String>, String)> = conn
         .query_row(
             "SELECT artifact_bundle, model_manifest, thread_id FROM messages WHERE id = ?1",
@@ -1554,6 +1545,8 @@ mod tests {
     use crate::models::{
         DesignParams, InteractionMode, MessageRole, MessageStatus, ParamValue, UiField, UiSpec,
     };
+    use std::fs;
+    use std::path::PathBuf;
 
     fn init_db_internal(conn: &Connection) -> SqlResult<()> {
         conn.execute(
@@ -1581,10 +1574,29 @@ mod tests {
                 agent_origin TEXT,
                 timestamp INTEGER NOT NULL,
                 image_data TEXT,
+                visual_kind TEXT,
                 attachment_images TEXT,
                 deleted_at INTEGER,
                 trash_hidden_at INTEGER,
                 FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS agent_sessions (
+                session_id TEXT PRIMARY KEY,
+                client_kind TEXT NOT NULL,
+                host_label TEXT NOT NULL DEFAULT '',
+                agent_label TEXT NOT NULL,
+                llm_model_id TEXT,
+                llm_model_label TEXT,
+                thread_id TEXT,
+                message_id TEXT,
+                model_id TEXT,
+                phase TEXT NOT NULL,
+                status_text TEXT NOT NULL DEFAULT '',
+                updated_at INTEGER NOT NULL,
+                managed_runtime INTEGER NOT NULL DEFAULT 0
             )",
             [],
         )?;
@@ -1651,6 +1663,7 @@ mod tests {
             agent_origin: None,
             timestamp: now,
             image_data: None,
+            visual_kind: None,
             attachment_images: Vec::new(),
         };
 
@@ -1707,6 +1720,7 @@ mod tests {
             agent_origin: None,
             timestamp: 100,
             image_data: None,
+            visual_kind: None,
             attachment_images: Vec::new(),
         };
         let assistant_msg = Message {
@@ -1721,6 +1735,7 @@ mod tests {
             agent_origin: None,
             timestamp: 101,
             image_data: None,
+            visual_kind: None,
             attachment_images: Vec::new(),
         };
 
@@ -1785,6 +1800,7 @@ mod tests {
             agent_origin: None,
             timestamp: 200,
             image_data: None,
+            visual_kind: None,
             attachment_images: Vec::new(),
         };
 
@@ -1818,6 +1834,7 @@ mod tests {
             agent_origin: None,
             timestamp: 250,
             image_data: None,
+            visual_kind: None,
             attachment_images: Vec::new(),
         };
 
@@ -1852,6 +1869,7 @@ mod tests {
             agent_origin: None,
             timestamp: 300,
             image_data: Some("data:image/png;base64,viewport".to_string()),
+            visual_kind: Some(crate::models::MessageVisualKind::ConceptPreview),
             attachment_images: vec![
                 "data:image/png;base64,ref-1".to_string(),
                 "data:image/png;base64,ref-2".to_string(),
@@ -1865,6 +1883,10 @@ mod tests {
         assert_eq!(
             messages[0].image_data.as_deref(),
             Some("data:image/png;base64,viewport")
+        );
+        assert_eq!(
+            messages[0].visual_kind,
+            Some(crate::models::MessageVisualKind::ConceptPreview)
         );
         assert_eq!(
             messages[0].attachment_images,
@@ -1898,6 +1920,7 @@ mod tests {
                 agent_origin: None,
                 timestamp: 200,
                 image_data: None,
+                visual_kind: None,
                 attachment_images: Vec::new(),
             },
         )
@@ -1918,6 +1941,7 @@ mod tests {
                 agent_origin: None,
                 timestamp: 300,
                 image_data: None,
+                visual_kind: None,
                 attachment_images: Vec::new(),
             },
         )
@@ -1953,6 +1977,7 @@ mod tests {
                 agent_origin: None,
                 timestamp: 100,
                 image_data: None,
+                visual_kind: None,
                 attachment_images: Vec::new(),
             },
         )
@@ -2045,5 +2070,116 @@ mod tests {
                 panic!("DB read failed");
             }
         }
+    }
+
+    #[test]
+    fn trimmed_mcp_fixture_keeps_thread_bound_agent_sessions() {
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/mcp_regression_fixture.sqlite");
+        assert!(
+            fixture_path.exists(),
+            "missing fixture at {}",
+            fixture_path.display()
+        );
+
+        let temp_db =
+            std::env::temp_dir().join(format!("ecky-mcp-fixture-{}.sqlite", uuid::Uuid::new_v4()));
+        fs::copy(&fixture_path, &temp_db).expect("copy fixture");
+        let conn = init_db(&temp_db).expect("open fixture copy");
+
+        let raw_thread_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))
+            .expect("thread count");
+        assert_eq!(raw_thread_count, 3);
+
+        let visible_threads = get_all_threads(&conn).expect("threads");
+        assert!(
+            visible_threads
+                .iter()
+                .any(|thread| thread.id == "29c64fc4-803b-4d75-bac0-e0f656304881"),
+            "fixture should keep the Panelka thread visible"
+        );
+
+        let last_panelka_session =
+            get_thread_last_agent_session(&conn, "29c64fc4-803b-4d75-bac0-e0f656304881")
+                .expect("last session")
+                .expect("panelka session");
+        assert_eq!(
+            last_panelka_session.thread_id.as_deref(),
+            Some("29c64fc4-803b-4d75-bac0-e0f656304881")
+        );
+        assert!(!last_panelka_session.session_id.is_empty());
+    }
+
+    #[test]
+    fn init_db_drops_legacy_agent_session_trace_table_and_index() {
+        let db_path =
+            std::env::temp_dir().join(format!("ecky-agent-trace-drop-{}", uuid::Uuid::new_v4()));
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute(
+                "CREATE TABLE agent_session_trace (
+                    trace_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    summary TEXT NOT NULL
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE INDEX idx_agent_session_trace_session_trace_id
+                 ON agent_session_trace(session_id, trace_id DESC)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let conn = init_db(&db_path).unwrap();
+        let table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'agent_session_trace'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_agent_session_trace_session_trace_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count, 0);
+        assert_eq!(index_count, 0);
+    }
+
+    #[test]
+    fn init_db_drops_legacy_agent_drafts_table() {
+        let db_path =
+            std::env::temp_dir().join(format!("ecky-agent-drafts-legacy-{}", uuid::Uuid::new_v4()));
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute(
+                "CREATE TABLE agent_drafts (
+                    session_id TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    base_message_id TEXT NOT NULL,
+                    design_output TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )",
+                [],
+            )
+            .unwrap();
+        }
+
+        let conn = init_db(&db_path).unwrap();
+        let table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'agent_drafts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count, 0);
     }
 }

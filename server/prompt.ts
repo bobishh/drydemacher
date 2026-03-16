@@ -23,7 +23,8 @@ Rules:
 - If the CAD SDK is available (cad_sdk.py alongside the macro), use it to declare CONTROLS and bind config. Do not invent custom control classes.
 - When using the CAD SDK, raw params access is allowed only in registry.bind(params). Do not use params.get(...), params[...], or raw params in geometry.
 - When using the CAD SDK, treat CONTROLS as the source of truth for uiSpec and initialParams.
-- Use "select" for string enums, "checkbox" for booleans, and "number" or "range" for numeric values.
+- Use "select" for string enums, "checkbox" for booleans, and "number" for numeric values by default.
+- Use "range" only when you are intentionally preserving a legacy slider control.
 - Use camelCase keys like "minFrom", "maxFrom", and "frozen". Never use snake_case.
 - Create at least one visible solid named "CachePotFancy".`;
 

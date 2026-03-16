@@ -94,7 +94,9 @@
 
 <style>
   .custom-select {
-    position: relative;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
     width: 100%;
     font-family: var(--font-mono);
   }
@@ -131,17 +133,15 @@
   }
 
   .select-dropdown {
-    position: absolute;
-    top: 100%;
-    left: 0;
-    right: 0;
+    position: relative;
+    width: 100%;
+    margin-top: -1px;
     background: var(--bg-200);
     border: 1px solid var(--primary);
     box-shadow: 0 8px 16px rgba(0,0,0,0.5);
-    z-index: 1000;
-    max-height: 300px;
+    z-index: 20;
+    max-height: 240px;
     overflow-y: auto;
-    margin-top: -1px;
   }
 
   .select-option {

@@ -7,6 +7,8 @@ export type SelectOption = Contract.SelectOption;
 export type MessageRole = Contract.MessageRole;
 export type MessageStatus = Contract.MessageStatus;
 export type InteractionMode = Contract.InteractionMode;
+export type MessageVisualKind = Contract.MessageVisualKind;
+export type MacroDialect = Contract.MacroDialect;
 export type FinalizeStatus = Contract.FinalizeStatus;
 export type UsageSegment = Contract.UsageSegment;
 export type UsageSummary = Contract.UsageSummary;
@@ -16,8 +18,10 @@ export type GenieEyeStyle = Contract.EyeStyle;
 export type IntentDecision = Contract.IntentDecision;
 export type AgentOrigin = Contract.AgentOrigin;
 export type AgentSession = Contract.AgentSession;
-export type AgentDraft = Contract.AgentDraft;
+export type AgentTerminalSnapshot = Contract.AgentTerminalSnapshot;
+export type AgentTerminalInput = Contract.AgentTerminalInput;
 export type McpServerStatus = Contract.McpServerStatus;
+export type ViewportCameraState = Contract.ViewportCameraState;
 export type GenerateOutput = {
   design: DesignOutput;
   threadId: string;
@@ -86,8 +90,10 @@ export interface DesignOutput {
   response: string;
   interactionMode: InteractionMode;
   macroCode: string;
+  macroDialect?: MacroDialect;
   uiSpec: UiSpec;
   initialParams: DesignParams;
+  postProcessing?: PostProcessingSpec | null;
 }
 
 export interface Message {
@@ -101,8 +107,10 @@ export interface Message {
   modelManifest?: ModelManifest | null;
   agentOrigin?: AgentOrigin | null;
   imageData?: string | null;
+  visualKind?: MessageVisualKind | null;
   attachmentImages?: string[];
   timestamp: number;
+  deletedAt?: number | null;
 }
 
 export interface GenieTraits {
@@ -159,6 +167,7 @@ export interface DeletedMessage {
   agentOrigin?: AgentOrigin | null;
   timestamp: number;
   imageData?: string | null;
+  visualKind?: MessageVisualKind | null;
   attachmentImages?: string[];
   deletedAt: number;
 }
@@ -179,9 +188,13 @@ export interface AutoAgent {
   startOnDemand?: boolean;
 }
 
+export type McpMode = 'passive' | 'active';
+
 export interface McpConfig {
   port: number | null;
   maxSessions: number | null;
+  mode: McpMode;
+  primaryAgentId: string | null;
   autoAgents: AutoAgent[];
 }
 
@@ -207,7 +220,28 @@ export type ControlViewSource = Contract.ControlViewSource;
 export type AdvisorySeverity = Contract.AdvisorySeverity;
 export type AdvisoryCondition = Contract.AdvisoryCondition;
 export type ViewerAsset = Contract.ViewerAsset;
+export type ViewerEdgePoint = Contract.ViewerEdgePoint;
+export type ViewerEdgeTarget = Contract.ViewerEdgeTarget;
+export type CalloutAnchor = Contract.CalloutAnchor;
+export type MeasurementGuideKind = Contract.MeasurementGuideKind;
+export type MeasurementGuide = Contract.MeasurementGuide;
+export type MeasurementBasis = Contract.MeasurementBasis;
+export type MeasurementAxis = Contract.MeasurementAxis;
+export type MeasurementAnnotationSource = Contract.MeasurementAnnotationSource;
+export type MeasurementAnnotation = Contract.MeasurementAnnotation;
 export type ArtifactBundle = Contract.ArtifactBundle;
+export type ExportArtifact = Contract.ExportArtifact;
+export type PostProcessingSpec = Contract.PostProcessingSpec;
+export type ProjectionType = Contract.ProjectionType;
+export type OverflowMode = Contract.OverflowMode;
+export type LithophanePlacementMode = Contract.LithophanePlacementMode;
+export type LithophaneSide = Contract.LithophaneSide;
+export type LithophaneColorMode = Contract.LithophaneColorMode;
+export type LithophaneAttachmentSource = Contract.LithophaneAttachmentSource;
+export type LithophanePlacement = Contract.LithophanePlacement;
+export type LithophaneRelief = Contract.LithophaneRelief;
+export type LithophaneColor = Contract.LithophaneColor;
+export type LithophaneAttachment = Contract.LithophaneAttachment;
 export type ManifestBounds = Contract.ManifestBounds;
 export type DocumentMetadata = Contract.DocumentMetadata;
 export type PartBinding = Contract.PartBinding;
@@ -291,6 +325,159 @@ function optionalNumber(value: number | null | undefined): number | undefined {
 
 function optionalString(value: string | null | undefined): string | undefined {
   return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function slugifyLithophaneId(value: string): string {
+  const slug = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return slug || 'lithophane';
+}
+
+function legacyLithophaneAttachmentId(imageParam: string): string {
+  return `legacy-${slugifyLithophaneId(imageParam)}`;
+}
+
+function normalizeLithophaneAttachmentSource(
+  source: LithophaneAttachmentSource | Record<string, unknown> | null | undefined,
+): LithophaneAttachmentSource | null {
+  if (!source || typeof source !== 'object') return null;
+  const kind = (source as { kind?: string }).kind;
+  if (kind === 'file') {
+    return {
+      kind: 'file',
+      imagePath:
+        (source as { imagePath?: string }).imagePath ??
+        (source as { image_path?: string }).image_path ??
+        '',
+    };
+  }
+  if (kind === 'param') {
+    return {
+      kind: 'param',
+      imageParam:
+        (source as { imageParam?: string }).imageParam ??
+        (source as { image_param?: string }).image_param ??
+        '',
+    };
+  }
+  return null;
+}
+
+function normalizeLithophaneAttachment(
+  attachment: LithophaneAttachment | Record<string, unknown> | null | undefined,
+): LithophaneAttachment | null {
+  if (!attachment || typeof attachment !== 'object') return null;
+  const source = normalizeLithophaneAttachmentSource(
+    (attachment as { source?: LithophaneAttachmentSource }).source,
+  );
+  if (!source) return null;
+  const placement = (attachment as { placement?: LithophanePlacement }).placement;
+  const relief = (attachment as { relief?: LithophaneRelief }).relief;
+  const color = (attachment as { color?: LithophaneColor }).color;
+  const inferredId =
+    source.kind === 'param'
+      ? legacyLithophaneAttachmentId(source.imageParam)
+      : `litho-${slugifyLithophaneId(source.imagePath.split(/[/\\]/).pop() ?? '')}`;
+  return {
+    id: (attachment as { id?: string }).id ?? inferredId,
+    enabled: (attachment as { enabled?: boolean }).enabled ?? true,
+    source,
+    targetPartId:
+      (attachment as { targetPartId?: string }).targetPartId ??
+      (attachment as { target_part_id?: string }).target_part_id ??
+      '',
+    placement: {
+      mode: placement?.mode ?? 'partSidePatch',
+      side: placement?.side ?? 'front',
+      projection: placement?.projection ?? 'auto',
+      widthMm: placement?.widthMm ?? 0,
+      heightMm: placement?.heightMm ?? 0,
+      offsetXMm: placement?.offsetXMm ?? 0,
+      offsetYMm: placement?.offsetYMm ?? 0,
+      rotationDeg: placement?.rotationDeg ?? 0,
+      overflowMode: placement?.overflowMode ?? 'contain',
+      bleedMarginMm: placement?.bleedMarginMm ?? 0,
+    },
+    relief: {
+      depthMm: relief?.depthMm ?? 2,
+      invert: relief?.invert ?? false,
+    },
+    color: {
+      mode: color?.mode ?? 'mono',
+      channelThicknessMm: color?.channelThicknessMm ?? 0.4,
+    },
+  };
+}
+
+function buildLegacyLithophaneAttachment(
+  displacement: Contract.DisplacementSpec | null | undefined,
+): LithophaneAttachment | null {
+  if (!displacement?.imageParam?.trim()) return null;
+  return {
+    id: legacyLithophaneAttachmentId(displacement.imageParam),
+    enabled: true,
+    source: { kind: 'param', imageParam: displacement.imageParam },
+    targetPartId: '',
+    placement: {
+      mode: 'partSidePatch',
+      side: 'front',
+      projection: displacement.projection ?? 'auto',
+      widthMm: 0,
+      heightMm: 0,
+      offsetXMm: 0,
+      offsetYMm: 0,
+      rotationDeg: 0,
+      overflowMode: 'contain',
+      bleedMarginMm: 0,
+    },
+    relief: {
+      depthMm: displacement.depthMm ?? 2,
+      invert: displacement.invert ?? false,
+    },
+    color: {
+      mode: 'mono',
+      channelThicknessMm: 0.4,
+    },
+  };
+}
+
+export function normalizePostProcessing(
+  postProcessing: PostProcessingSpec | Record<string, unknown> | null | undefined,
+): PostProcessingSpec | null {
+  if (!postProcessing) return null;
+  const legacy = postProcessing as Record<string, unknown>;
+  const displacement =
+    (postProcessing as { displacement?: Contract.DisplacementSpec | null }).displacement ??
+    (legacy.displacement as Contract.DisplacementSpec | null | undefined) ??
+    null;
+  const rawAttachments =
+    ((postProcessing as { lithophaneAttachments?: LithophaneAttachment[] | null })
+      .lithophaneAttachments ??
+      (legacy.lithophane_attachments as LithophaneAttachment[] | undefined) ??
+      []) || [];
+  const attachments = rawAttachments
+    .map((attachment) => normalizeLithophaneAttachment(attachment))
+    .filter((attachment): attachment is LithophaneAttachment => attachment !== null);
+  const legacyAttachment = buildLegacyLithophaneAttachment(displacement);
+  if (legacyAttachment && !attachments.some((attachment) => attachment.id === legacyAttachment.id)) {
+    attachments.unshift(legacyAttachment);
+  }
+  if (!displacement && attachments.length === 0) return null;
+  return {
+    displacement,
+    lithophaneAttachments: attachments,
+  };
+}
+
+export function hasActiveLithophaneAttachments(
+  postProcessing: PostProcessingSpec | null | undefined,
+): boolean {
+  return (normalizePostProcessing(postProcessing)?.lithophaneAttachments ?? []).some(
+    (attachment) => attachment.enabled !== false,
+  );
 }
 
 export function normalizeUsageSummary(
@@ -446,8 +633,16 @@ export function normalizeDesignOutput(
       (output?.interactionMode ??
         (legacy.interaction_mode as InteractionMode | undefined)) ?? 'design',
     macroCode: (output?.macroCode ?? (legacy.macro_code as string | undefined)) ?? '',
+    macroDialect:
+      (output?.macroDialect ??
+        (legacy.macro_dialect as MacroDialect | undefined)) ?? 'legacy',
     uiSpec: normalizeUiSpec(output?.uiSpec ?? legacy.ui_spec),
     initialParams: normalizeDesignParams(output?.initialParams ?? legacy.initial_params),
+    postProcessing: normalizePostProcessing(
+      output?.postProcessing ??
+        (legacy.post_processing as PostProcessingSpec | undefined) ??
+        null,
+    ),
   };
 }
 
@@ -474,6 +669,8 @@ export function normalizeMessage(message: Contract.Message | Message): Message {
         : null,
     agentOrigin: (message.agentOrigin ?? (legacy.agent_origin as AgentOrigin | undefined)) ?? null,
     imageData: message.imageData ?? null,
+    visualKind:
+      (message.visualKind ?? (legacy.visual_kind as MessageVisualKind | undefined)) ?? null,
     attachmentImages: Array.isArray(message.attachmentImages)
       ? [...message.attachmentImages]
       : Array.isArray(legacy.attachment_images)
@@ -556,6 +753,8 @@ export function normalizeDeletedMessage(
     agentOrigin: (message.agentOrigin ?? (legacy.agent_origin as AgentOrigin | undefined)) ?? null,
     timestamp: message.timestamp,
     imageData: message.imageData ?? null,
+    visualKind:
+      (message.visualKind ?? (legacy.visual_kind as MessageVisualKind | undefined)) ?? null,
     attachmentImages: Array.isArray(message.attachmentImages)
       ? [...message.attachmentImages]
       : Array.isArray(legacy.attachment_images)
@@ -584,9 +783,17 @@ export function normalizeConfig(config: Contract.Config | AppConfig): AppConfig 
       ? {
           port: config.mcp.port ?? null,
           maxSessions: (config.mcp as any).maxSessions ?? null,
+          mode:
+            ((config.mcp as any).mode as McpMode | undefined) ??
+            ((config.mcp as any).autoAgents?.length ? 'active' : 'passive'),
+          primaryAgentId:
+            (config.mcp as any).primaryAgentId ??
+            (Array.isArray((config.mcp as any).autoAgents) && (config.mcp as any).autoAgents.length > 0
+              ? (config.mcp as any).autoAgents.find((agent: AutoAgent) => agent.enabled)?.id ?? null
+              : null),
           autoAgents: Array.isArray((config.mcp as any).autoAgents) ? [...(config.mcp as any).autoAgents] : [],
         }
-      : { port: null, maxSessions: null, autoAgents: [] },
+      : { port: null, maxSessions: null, mode: 'passive', primaryAgentId: null, autoAgents: [] },
     hasSeenOnboarding: Boolean(config.hasSeenOnboarding ?? legacy.has_seen_onboarding),
     connectionType: (config as AppConfig).connectionType ?? null,
   };
@@ -657,22 +864,14 @@ export function normalizeParsedParamsResult(
   };
 }
 
-export function normalizeAgentDraft(draft: Contract.AgentDraft | AgentDraft | null | undefined): AgentDraft | null {
-  if (!draft) return null;
-  return {
-    ...draft,
-    designOutput: normalizeDesignOutput(draft.designOutput),
-    artifactBundle: draft.artifactBundle ? normalizeArtifactBundle(draft.artifactBundle) : null,
-    modelManifest: draft.modelManifest ? normalizeModelManifest(draft.modelManifest) : null,
-  };
-}
-
 export function normalizeArtifactBundle(
   bundle: Contract.ArtifactBundle | ArtifactBundle,
 ): ArtifactBundle {
   return {
     ...bundle,
     viewerAssets: Array.isArray(bundle.viewerAssets) ? [...bundle.viewerAssets] : [],
+    edgeTargets: Array.isArray(bundle.edgeTargets) ? [...bundle.edgeTargets] : [],
+    exportArtifacts: Array.isArray(bundle.exportArtifacts) ? [...bundle.exportArtifacts] : [],
   };
 }
 
@@ -704,7 +903,12 @@ export function normalizeModelManifest(
       : [],
     advisories: Array.isArray(manifest.advisories) ? [...manifest.advisories] : [],
     selectionTargets: Array.isArray(manifest.selectionTargets)
-      ? [...manifest.selectionTargets]
+      ? manifest.selectionTargets.map((target) => ({
+          ...target,
+          parameterKeys: Array.isArray(target.parameterKeys) ? [...target.parameterKeys] : [],
+          primitiveIds: Array.isArray(target.primitiveIds) ? [...target.primitiveIds] : [],
+          viewIds: Array.isArray(target.viewIds) ? [...target.viewIds] : [],
+        }))
       : [],
     warnings: Array.isArray(manifest.warnings) ? [...manifest.warnings] : [],
     enrichmentState: {
@@ -722,6 +926,15 @@ export function toContractAttachment(attachment: Attachment): Contract.Attachmen
     name: attachment.name,
     explanation: attachment.explanation,
     kind: attachment.type === 'image' ? 'image' : 'cad',
+  };
+}
+
+export function normalizeAttachment(attachment: Contract.Attachment): Attachment {
+  return {
+    path: attachment.path,
+    name: attachment.name,
+    explanation: attachment.explanation,
+    type: attachment.kind === 'image' ? 'image' : 'cad',
   };
 }
 
@@ -789,8 +1002,10 @@ export function toContractDesignOutput(output: DesignOutput): Contract.DesignOut
     response: output.response,
     interactionMode: output.interactionMode,
     macroCode: output.macroCode,
+    macroDialect: output.macroDialect ?? 'legacy',
     uiSpec: toContractUiSpec(output.uiSpec),
     initialParams: output.initialParams,
+    postProcessing: output.postProcessing ?? null,
   };
 }
 

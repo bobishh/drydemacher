@@ -52,7 +52,7 @@ export function buildImportedUiSpec(manifest: ModelManifest | null): UiSpec {
 
   return {
     fields: [...keys].sort().map((key) => ({
-      type: 'range' as const,
+      type: 'number' as const,
       key,
       label: humanizeParameterKey(key),
       min: 0,
@@ -108,6 +108,7 @@ export function buildImportedSyntheticDesign(
     macroCode: '',
     uiSpec,
     initialParams,
+    postProcessing: null,
   };
 }
 

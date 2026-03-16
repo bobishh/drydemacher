@@ -4,6 +4,7 @@ dist/
 .svelte-kit/
 .vercel
 .output
+.sloposcope
 .DS_Store
 *.log
 

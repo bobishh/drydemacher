@@ -38,7 +38,7 @@ pub fn get_thread(conn: &rusqlite::Connection, id: &str) -> AppResult<Thread> {
 
     let lifecycle = db::get_thread_lifecycle(conn, id)
         .map_err(|err| AppError::persistence(err.to_string()))?
-        .unwrap_or_else(|| db::ThreadLifecycle {
+        .unwrap_or(db::ThreadLifecycle {
             status: ThreadStatus::Active,
             finalized_at: None,
             pending_confirm: None,

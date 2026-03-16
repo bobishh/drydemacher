@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  buildAgentGenieTraits,
+  buildGenieTraitsFromSeed,
   DEFAULT_GENIE_TRAITS,
+  deriveGenieSeed,
   resolveModeTraits,
   seededUnit,
 } from './traits';
@@ -93,4 +96,26 @@ test('seeded offsets stay stable per seed and vary across seeds', () => {
   assert.notDeepEqual(idleA.seedOffsets, idleC.seedOffsets);
   assert.equal(seededUnit(101, 4), seededUnit(101, 4));
   assert.notEqual(seededUnit(101, 4), seededUnit(202, 4));
+});
+
+test('deriveGenieSeed stays stable for the same identity and changes across identities', () => {
+  assert.equal(deriveGenieSeed('agent:gemini'), deriveGenieSeed('agent:gemini'));
+  assert.notEqual(deriveGenieSeed('agent:gemini'), deriveGenieSeed('agent:claude'));
+});
+
+test('buildGenieTraitsFromSeed is deterministic and matches the requested seed', () => {
+  const first = buildGenieTraitsFromSeed(77);
+  const second = buildGenieTraitsFromSeed(77);
+
+  assert.deepEqual(first, second);
+  assert.equal(first.seed, 77);
+});
+
+test('buildAgentGenieTraits is stable per agent identity', () => {
+  const geminiA = buildAgentGenieTraits('Gemini');
+  const geminiB = buildAgentGenieTraits('gemini');
+  const claude = buildAgentGenieTraits('Claude');
+
+  assert.deepEqual(geminiA, geminiB);
+  assert.notDeepEqual(geminiA, claude);
 });

@@ -1,6 +1,6 @@
 import { writable, get } from 'svelte/store';
 import { requestQueue } from './requestQueue';
-import type { AgentDraft, ArtifactBundle, ModelManifest } from '../types/domain';
+import type { ArtifactBundle, ModelManifest } from '../types/domain';
 
 export type SessionPhase = 
   | 'booting'
@@ -22,9 +22,10 @@ function createSessionStore() {
     modelManifest: null as ModelManifest | null,
     selectedPartId: null as string | null,
     isManual: false as boolean,
+    manualThreadId: null as string | null,
+    manualMessageId: null as string | null,
     repairMessage: '' as string,
     cookingPhrase: '' as string,
-    agentDraft: null as AgentDraft | null,
   });
 
   return {
@@ -34,7 +35,6 @@ function createSessionStore() {
     setPhase: (p: SessionPhase) => update(s => ({ ...s, phase: p })),
     setStatus: (msg: string) => update(s => ({ ...s, status: msg })),
     setError: (err: string | null) => update(s => ({ ...s, error: err })),
-    setAgentDraft: (draft: AgentDraft | null) => update(s => ({ ...s, agentDraft: draft })),
     setStlUrl: (url: string | null) =>
       update(s => ({
         ...s,
@@ -81,9 +81,21 @@ export const selectedPartId = {
 export const isManual = { subscribe: (fn: (value: boolean) => void) => session.subscribe(s => fn(s.isManual)) };
 
 let manualRenderActive = false;
+let manualRenderThreadId: string | null = null;
+let manualRenderMessageId: string | null = null;
 
-export function setManualRenderActive(active: boolean) {
+export function setManualRenderActive(
+  active: boolean,
+  target: { threadId?: string | null; messageId?: string | null } | null = null,
+) {
   manualRenderActive = active;
+  if (active) {
+    manualRenderThreadId = target?.threadId ?? null;
+    manualRenderMessageId = target?.messageId ?? null;
+  } else {
+    manualRenderThreadId = null;
+    manualRenderMessageId = null;
+  }
   syncSessionPhaseFromQueue();
 }
 
@@ -123,7 +135,9 @@ export function syncSessionPhaseFromQueue() {
   session.update(s => ({ 
     ...s, 
     phase: newPhase, 
-    isManual: manualRenderActive && !hasActiveLLM 
+    isManual: manualRenderActive && !hasActiveLLM,
+    manualThreadId: manualRenderThreadId,
+    manualMessageId: manualRenderMessageId,
   }));
 }
 

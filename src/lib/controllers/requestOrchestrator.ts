@@ -9,6 +9,7 @@ import { paramPanelState } from '../stores/paramPanelState';
 import { ensureContext, startRequestHum, stopRequestHum } from '../audio/microwave';
 import { startCookingPhraseLoop, startLightReasoningPhraseLoop, stopPhraseLoop } from '../stores/phraseEngine';
 import { persistLastSessionSnapshot } from '../modelRuntime/sessionSnapshot';
+import { getRenderableRuntimeBundle } from '../modelRuntime/runtimeBundle';
 import { ensureSemanticManifest } from '../modelRuntime/semanticControls';
 import type {
   AppConfig,
@@ -261,20 +262,30 @@ function buildWorkingDesignSnapshot(): DesignOutput | null {
     response: '',
     interactionMode: 'design',
     macroCode: wc.macroCode,
+    macroDialect: wc.macroDialect ?? 'legacy',
     uiSpec: panel.uiSpec || { fields: [] },
-    initialParams: panel.params || {}
+    initialParams: panel.params || {},
+    postProcessing: wc.postProcessing ?? null,
   };
 }
 
-export async function handleGenerate(initialPrompt: string, attachments: Attachment[] = []): Promise<string> {
+type GenerateSubmissionOptions = {
+  imageDataOverride?: string | null;
+};
+
+export async function handleGenerate(
+  initialPrompt: string,
+  attachments: Attachment[] = [],
+  options: GenerateSubmissionOptions = {},
+): Promise<string> {
   session.setError(null);
 
   // Keep backend AppState config in sync with current UI config before generation.
   await saveConfig(get(config));
 
   // Capture screenshot with drawing overlay synchronously before clearing
-  let preCapture: string | null = null;
-  if (viewerRef && get(session).stlUrl) {
+  let preCapture: string | null = options.imageDataOverride ?? null;
+  if (!preCapture && viewerRef && get(session).stlUrl) {
     const overlay = getDrawingCanvas?.() ?? null;
     preCapture = viewerRef.captureScreenshot(overlay);
   }
@@ -737,7 +748,8 @@ class GenerationPipeline {
     bundle: import('../types/domain').ArtifactBundle,
     manifest: import('../types/domain').ModelManifest,
   ) {
-    const stlUrlValue = toAssetUrl(bundle.previewStlPath);
+    const renderableBundle = getRenderableRuntimeBundle(bundle, data.postProcessing ?? null) ?? bundle;
+    const stlUrlValue = toAssetUrl(renderableBundle.previewStlPath);
     requestQueue.patch(this.requestId, { phase: 'committing' });
     syncSessionPhaseFromQueue();
 
@@ -752,7 +764,7 @@ class GenerationPipeline {
         workingCopy.loadVersion(data, this.assistantMessageId);
         paramPanelState.hydrateFromVersion(data, this.assistantMessageId);
         session.setStlUrl(stlUrlValue);
-        session.setModelRuntime(bundle, manifest);
+        session.setModelRuntime(renderableBundle, manifest);
       }
       session.setStatus('Design synthesized successfully.');
     }
@@ -763,7 +775,7 @@ class GenerationPipeline {
         design: data,
         threadId: this.snapshotThreadId,
         messageId: this.assistantMessageId,
-        artifactBundle: bundle,
+        artifactBundle: renderableBundle,
         modelManifest: manifest,
         selectedPartId: null,
       });
@@ -777,7 +789,7 @@ class GenerationPipeline {
         threadId: this.snapshotThreadId,
         messageId: this.assistantMessageId!,
         stlUrl: stlUrlValue,
-        artifactBundle: bundle,
+        artifactBundle: renderableBundle,
         modelManifest: manifest,
       }
     });

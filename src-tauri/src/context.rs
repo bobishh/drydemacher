@@ -166,6 +166,7 @@ pub struct PromptContext {
     pub summary: String,
     pub recent_dialogue: String,
     pub pinned_references: String,
+    pub available_assets: String,
     pub last_output: Option<DesignOutput>,
 }
 
@@ -204,6 +205,7 @@ pub fn assemble_context(
             summary,
             recent_dialogue: dialogue,
             pinned_references: build_pinned_references_block(&refs),
+            available_assets: String::new(),
             last_output: working_design.or(last_o),
         }
     } else {
@@ -225,6 +227,7 @@ pub fn assemble_context(
             summary: String::new(),
             recent_dialogue: String::new(),
             pinned_references: String::new(),
+            available_assets: String::new(),
             last_output: working_design.or(fallback_output),
         }
     }
@@ -252,6 +255,11 @@ pub fn format_contextual_prompt(
         "USER REQUEST (ACTUAL)\n{}\n\nEXECUTION RULES (MANDATORY)\n{}\n\nUSER_INTENT_MODE: {}",
         base_prompt, system_prompt, intent_mode
     );
+    let available_assets_block = if ctx.available_assets.trim().is_empty() {
+        "[none]".to_string()
+    } else {
+        ctx.available_assets.clone()
+    };
 
     if let Some(previous) = &ctx.last_output {
         let ui_spec_json =
@@ -260,13 +268,14 @@ pub fn format_contextual_prompt(
             .unwrap_or_else(|_| "{}".to_string());
 
         format!(
-            "CURRENT DESIGN CONTEXT\nThread Title: {}\nCurrent Title: {}\nVersion: {}\n\nTHREAD SUMMARY\n{}\n\nRECENT DIALOGUE\n{}\n\nPINNED REFERENCES (historical/supplemental; do not override ACTUAL CURRENT state unless the user asks)\n{}\n\nACTUAL CURRENT FREECAD MACRO (AUTHORITATIVE, NOT A SAMPLE):\n```python\n{}\n```\n\nACTUAL CURRENT UI SPEC (AUTHORITATIVE):\n```json\n{}\n```\n\nACTUAL CURRENT INITIAL PARAMS (AUTHORITATIVE):\n```json\n{}\n```\n\n{}{}",
+            "CURRENT DESIGN CONTEXT\nThread Title: {}\nCurrent Title: {}\nVersion: {}\n\nTHREAD SUMMARY\n{}\n\nRECENT DIALOGUE\n{}\n\nPINNED REFERENCES (historical/supplemental; do not override ACTUAL CURRENT state unless the user asks)\n{}\n\nAVAILABLE LOCAL ASSETS (AUTHORITATIVE; use absolute paths directly for image controls when relevant)\n{}\n\nACTUAL CURRENT FREECAD MACRO (AUTHORITATIVE, NOT A SAMPLE):\n```python\n{}\n```\n\nACTUAL CURRENT UI SPEC (AUTHORITATIVE):\n```json\n{}\n```\n\nACTUAL CURRENT INITIAL PARAMS (AUTHORITATIVE):\n```json\n{}\n```\n\n{}{}",
             ctx.thread_title,
             previous.title,
             previous.version_name,
             if ctx.summary.trim().is_empty() { "[none]" } else { &ctx.summary },
             if ctx.recent_dialogue.trim().is_empty() { "[none]" } else { &ctx.recent_dialogue },
             if ctx.pinned_references.trim().is_empty() { "[none]" } else { &ctx.pinned_references },
+            available_assets_block,
             previous.macro_code,
             ui_spec_json,
             params_json,
@@ -274,7 +283,12 @@ pub fn format_contextual_prompt(
             full_prompt
         )
     } else {
-        format!("{}{}", framework_block, full_prompt)
+        format!(
+            "AVAILABLE LOCAL ASSETS (AUTHORITATIVE; use absolute paths directly for image controls when relevant)\n{}\n\n{}{}",
+            available_assets_block,
+            framework_block,
+            full_prompt
+        )
     }
 }
 
@@ -295,6 +309,7 @@ mod tests {
             model_manifest: None,
             agent_origin: None,
             image_data: None,
+            visual_kind: None,
             attachment_images: Vec::new(),
             timestamp: 1000,
         }
@@ -487,6 +502,7 @@ mod tests {
             summary: "summary".to_string(),
             recent_dialogue: "USER: hi".to_string(),
             pinned_references: "ref".to_string(),
+            available_assets: "- Ecky Family [PNG] path: /tmp/ecky-family.png".to_string(),
             last_output: Some(mock_design("Lens")),
         };
 
@@ -502,6 +518,7 @@ mod tests {
         assert!(result.contains("ACTUAL CURRENT UI SPEC (AUTHORITATIVE):"));
         assert!(result.contains("ACTUAL CURRENT INITIAL PARAMS (AUTHORITATIVE):"));
         assert!(result.contains("ACTUAL CURRENT CAD FRAMEWORK (AUTHORITATIVE):"));
+        assert!(result.contains("AVAILABLE LOCAL ASSETS"));
         assert!(result.contains("USER REQUEST (ACTUAL)"));
         assert!(result.contains("EXECUTION RULES (MANDATORY)"));
     }

@@ -1,4 +1,5 @@
 use base64::{engine::general_purpose, Engine as _};
+use std::collections::BTreeMap;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, State};
@@ -12,6 +13,7 @@ use crate::models::{
     GenerateOutput, IntentDecision, InteractionMode, MacroDialect, Message, MessageRole,
     MessageStatus, ModelManifest, UiSpec, UsageSummary,
 };
+use crate::services::design::{auto_heal_legacy_params, is_param_schema_mismatch};
 use crate::{
     db, fallback_intent, freecad, llm, persist_thread_summary, persist_user_prompt_references,
     TECHNICAL_SYSTEM_PROMPT,
@@ -126,6 +128,37 @@ fn build_visual_input_notes(
     }
 }
 
+fn build_available_assets_block(state: &State<'_, AppState>, app: &AppHandle) -> String {
+    let mut by_path = BTreeMap::new();
+    {
+        let config = state.config.lock().unwrap();
+        for asset in &config.assets {
+            let format = asset.format.trim().to_uppercase();
+            if !matches!(format.as_str(), "PNG" | "JPG" | "JPEG" | "WEBP") {
+                continue;
+            }
+            by_path
+                .entry(asset.path.clone())
+                .or_insert_with(|| asset.clone());
+        }
+    }
+
+    if let Ok(scanned) = crate::commands::assets::collect_image_assets(app) {
+        for asset in scanned {
+            by_path.entry(asset.path.clone()).or_insert(asset);
+        }
+    }
+
+    let mut assets = by_path.into_values().collect::<Vec<_>>();
+    assets.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+    assets
+        .into_iter()
+        .take(8)
+        .map(|asset| format!("- {} [{}] path: {}", asset.name, asset.format, asset.path))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn load_framework_contract(app: &AppHandle) -> Option<String> {
     let path = freecad::resolve_resource_path(
         app,
@@ -140,10 +173,8 @@ fn load_framework_contract(app: &AppHandle) -> Option<String> {
 }
 
 fn should_use_framework_for_generation(ctx: &PromptContext) -> bool {
-    ctx.last_output
-        .as_ref()
-        .map(|output| output.macro_dialect.is_framework())
-        .unwrap_or(true)
+    let _ = ctx;
+    true
 }
 
 fn prepend_follow_up_context(prompt: String, follow_up_question: Option<&str>) -> String {
@@ -201,10 +232,11 @@ pub async fn generate_design(
     let options = options.unwrap_or_default();
     let question_mode = options.question_mode.unwrap_or(false);
     let follow_up_question = options.follow_up_question;
-    let ctx = {
+    let mut ctx = {
         let db = state.db.lock().await;
         crate::context::assemble_context(&db, thread_id, working_design, parent_macro_code)
     };
+    ctx.available_assets = build_available_assets_block(&state, &app);
     let intent_mode = if question_mode {
         "QUESTION_ONLY"
     } else {
@@ -279,7 +311,33 @@ pub async fn generate_design(
         }
     }
 
-    validate_design_output(&output.data)?;
+    if let Err(err) = validate_design_output(&output.data) {
+        if !question_mode
+            && output.data.macro_dialect == MacroDialect::Legacy
+            && is_param_schema_mismatch(&err)
+        {
+            if let Some((ui_spec, initial_params, _heal_report)) = auto_heal_legacy_params(
+                &output.data.macro_code,
+                &output.data.ui_spec,
+                &output.data.initial_params,
+                ctx.last_output
+                    .as_ref()
+                    .map(|design| &design.initial_params),
+            )? {
+                output.data.ui_spec = ui_spec;
+                output.data.initial_params = initial_params;
+                validate_design_output(&output.data)?;
+            } else {
+                return Err(AppError::with_details(
+                    AppErrorCode::Validation,
+                    err.message,
+                    "Legacy macro parameter mismatch could not be auto-healed because no dynamic params were parsed from the macro.".to_string(),
+                ));
+            }
+        } else {
+            return Err(err);
+        }
+    }
 
     Ok(GenerateOutput {
         design: output.data,
@@ -336,6 +394,7 @@ pub async fn init_generation_attempt(
             model_manifest: None,
             agent_origin: None,
             image_data,
+            visual_kind: None,
             attachment_images,
             timestamp: now,
         };
@@ -362,6 +421,7 @@ pub async fn init_generation_attempt(
             model_manifest: None,
             agent_origin: None,
             image_data: None,
+            visual_kind: None,
             attachment_images: Vec::new(),
             timestamp: now + 1,
         };
@@ -374,6 +434,7 @@ pub async fn init_generation_attempt(
 
 #[tauri::command]
 #[specta::specta]
+#[allow(clippy::too_many_arguments)]
 pub async fn finalize_generation_attempt(
     message_id: String,
     status: FinalizeStatus,
@@ -409,16 +470,19 @@ pub async fn finalize_generation_attempt(
     db::update_message_status_and_output(
         &db,
         &message_id,
-        &match status {
-            FinalizeStatus::Success => MessageStatus::Success,
-            FinalizeStatus::Error => MessageStatus::Error,
-            FinalizeStatus::Discarded => MessageStatus::Discarded,
+        db::MessageStatusUpdate {
+            status: &match status {
+                FinalizeStatus::Success => MessageStatus::Success,
+                FinalizeStatus::Error => MessageStatus::Error,
+                FinalizeStatus::Discarded => MessageStatus::Discarded,
+            },
+            output: design.as_ref(),
+            usage: usage.as_ref(),
+            artifact_bundle: artifact_bundle.as_ref(),
+            model_manifest: model_manifest.as_ref(),
+            visual_kind: None,
+            content: content.as_deref(),
         },
-        design.as_ref(),
-        usage.as_ref(),
-        artifact_bundle.as_ref(),
-        model_manifest.as_ref(),
-        content.as_deref(),
     )
     .map_err(|err| AppError::persistence(err.to_string()))?;
 
@@ -565,7 +629,31 @@ pub async fn classify_intent(
 
 #[cfg(test)]
 mod tests {
-    use super::prepend_follow_up_context;
+    use super::{prepend_follow_up_context, should_use_framework_for_generation};
+    use crate::context::PromptContext;
+    use crate::models::{DesignOutput, InteractionMode, MacroDialect, UiSpec};
+
+    fn prompt_context_with_last_output(macro_dialect: MacroDialect) -> PromptContext {
+        PromptContext {
+            thread_id: "thread-1".to_string(),
+            thread_title: "Thread".to_string(),
+            summary: String::new(),
+            recent_dialogue: String::new(),
+            pinned_references: String::new(),
+            available_assets: String::new(),
+            last_output: Some(DesignOutput {
+                title: "Design".to_string(),
+                version_name: "v1".to_string(),
+                response: String::new(),
+                interaction_mode: InteractionMode::Design,
+                macro_code: "import FreeCAD".to_string(),
+                macro_dialect,
+                ui_spec: UiSpec { fields: Vec::new() },
+                initial_params: Default::default(),
+                post_processing: None,
+            }),
+        }
+    }
 
     #[test]
     fn prepend_follow_up_context_is_noop_when_missing() {
@@ -584,5 +672,11 @@ mod tests {
         assert!(result.contains("\"Which side?\""));
         assert!(result.contains("Do not repeat the same clarification question"));
         assert!(result.ends_with("CURRENT DESIGN CONTEXT\n..."));
+    }
+
+    #[test]
+    fn framework_contract_stays_enabled_even_for_legacy_threads() {
+        let ctx = prompt_context_with_last_output(MacroDialect::Legacy);
+        assert!(should_use_framework_for_generation(&ctx));
     }
 }

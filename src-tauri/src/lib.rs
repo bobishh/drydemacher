@@ -7,12 +7,14 @@ pub mod contracts;
 pub mod db;
 pub mod displacement;
 pub mod freecad;
+pub mod lithophane;
 pub mod llm;
 pub mod mcp;
 pub mod models;
 pub mod services;
 
 use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::Manager;
@@ -44,6 +46,57 @@ fn set_macos_process_name(name: &str) {
 
 #[cfg(not(target_os = "macos"))]
 fn set_macos_process_name(_name: &str) {}
+
+fn init_history_db_with_recovery(
+    config_dir: &Path,
+) -> Result<(rusqlite::Connection, Vec<String>), String> {
+    let db_path = config_dir.join("history.sqlite");
+    match db::init_db(&db_path) {
+        Ok(conn) => Ok((conn, Vec::new())),
+        Err(initial_err) => {
+            let mut warnings = vec![format!(
+                "[BOOT] Failed to initialize history database at {}: {}",
+                db_path.display(),
+                initial_err
+            )];
+
+            if db_path.exists() {
+                let backup_path = config_dir.join(format!(
+                    "history.unreadable.{}.sqlite",
+                    Uuid::new_v4().simple()
+                ));
+                fs::rename(&db_path, &backup_path).map_err(|rename_err| {
+                    format!(
+                        "[BOOT] History database init failed at {}: {}. Recovery rename to {} also failed: {}",
+                        db_path.display(),
+                        initial_err,
+                        backup_path.display(),
+                        rename_err
+                    )
+                })?;
+                warnings.push(format!(
+                    "[BOOT] Moved unreadable history database to {}",
+                    backup_path.display()
+                ));
+            }
+
+            let recovered = db::init_db(&db_path).map_err(|recovery_err| {
+                format!(
+                    "[BOOT] Recovery init failed for history database at {} after initial error {}: {}",
+                    db_path.display(),
+                    initial_err,
+                    recovery_err
+                )
+            })?;
+
+            warnings.push(format!(
+                "[BOOT] Recreated history database at {}",
+                db_path.display()
+            ));
+            Ok((recovered, warnings))
+        }
+    }
+}
 
 pub fn generate_genie_traits() -> GenieTraits {
     let mut rng = rand::thread_rng();
@@ -389,12 +442,16 @@ Return a JSON object with:
    }
 
 UI Guidelines:
-- Use "range" for continuous dimensions.
+- Use "number" for numeric parameters. Do not use "range" unless you are intentionally preserving a legacy control shape.
 - Use "select" (enums) for discrete choices. Ensure "options" are provided.
 - Use "checkbox" for boolean flags (e.g., "Show Holes"). Value will be true or false.
-- Use "image" for file uploads (e.g., lithophanes).
+- Use "image" for file uploads (e.g., lithophanes). The matching initial param may be omitted or set to an empty string until the user picks a file.
 
 For lithophanes or image embossing: NEVER use FreeCAD PySide or pixel manipulation in Python. Instead, output a high-tessellation base mesh from FreeCAD and provide a `post_processing.displacement` block linking to your `image` type field. The Rust backend will displace the mesh automatically.
+- For lithophanes, expose the image itself as the primary UI control. Do NOT expose projection, invert, or depth controls unless the user explicitly asks for manual tuning.
+- Choose projection automatically from the geometry intent: use `planar` for flat plaques or relief faces, `cylindrical` for wrapped round walls like pots or tubes, and `spherical` only for globe-like shells.
+- If the image parameter is empty, the displacement should no-op and the base model should still render cleanly.
+- If the prompt context includes `AVAILABLE LOCAL ASSETS` and the user asks for a lithophane or image embossing without supplying a new image, you may choose a relevant listed asset and use its absolute path directly as the image parameter.
 "#;
 
 pub(crate) const TECHNICAL_SYSTEM_PROMPT: &str = r#"Return a JSON object with:
@@ -414,14 +471,21 @@ CRITICAL RULES:
   - Use 'number' for all numeric parameters. NEVER use 'range'.
   - Use 'min_from' and 'max_from' keys in the 'ui_spec' fields to link parameter boundaries to other keys (e.g., inner_radius max_from outer_radius).
   - Ensure geometry stays sane and valid across all parameter permutations.
+  - For file-picking inputs, use `type: "image"` and leave the matching initial param empty or omit it.
+  - For lithophanes, expose only the image field by default. Keep projection, invert, and depth inside `post_processing` unless the user explicitly asks to tweak them.
+  - If `AVAILABLE LOCAL ASSETS` is present and the user wants a lithophane without providing a new image, prefer a relevant listed asset over inventing a fake file path.
 - PARAMETERS: Access parameters directly by name (e.g. `L = connector_length`) or via `params.get("key", default)`.
 - FRAMEWORK: If an "ACTUAL CURRENT CAD FRAMEWORK" block is present, follow it strictly and use the provided CAD SDK. Do not invent custom control classes or custom registries.
+- FRAMEWORK DEFAULT: Prefer the CAD SDK and `CONTROLS` for all new designs and substantial edits. Legacy raw-params macros are a fallback, not the default.
+- FRAMEWORK MIGRATION: If the current design is legacy and the requested edit needs richer controls such as `type: "image"` inputs, stable typed controls, or cleaner parameter structure, you MAY migrate the design to the CAD framework while preserving the existing geometry intent.
 - FRAMEWORK ENFORCEMENT: When using the CAD SDK, `CONTROLS` inside `macro_code` is the source of truth. The backend derives `ui_spec` and `initial_params` from `CONTROLS` and may reject malformed framework macros.
 - FRAMEWORK PARAMS: When using the CAD SDK, raw `params` access is allowed only inside `registry.bind(params)` during config bootstrap. Use `cfg` for geometry.
 - NO BRACES: NEVER use `{var}` style interpolation inside the macro_code string.
 - CLEANUP: You MUST remove any parameters from "ui_spec" and "initial_params" that are no longer used in the current "macro_code". Do not accumulate parameters from previous designs.
 - PRINTABILITY: Prefer geometry that is straightforward to 3D print (manifold solids, reasonable wall thickness, avoid fragile or unsupported details unless requested).
 - PRINTABILITY REPORTING: If printability risks remain, mention them explicitly at the end of "response" as a separate sentence prefixed with `PRINTING RISKS:`.
+- LITHOPHANE DEFAULTS: If you return `post_processing.displacement`, choose projection automatically from the model intent: `planar` for flat faces, `cylindrical` for wrapped round walls, `spherical` only for globe-like surfaces.
+- LITHOPHANE NO-OP: If the image parameter is empty, the displacement should no-op so the base geometry still previews correctly.
 - If USER_INTENT_MODE is "QUESTION_ONLY":
   - Set "interaction_mode" to "question".
   - Use "response" to explain the current design/code.
@@ -430,11 +494,6 @@ CRITICAL RULES:
   - Set "interaction_mode" to "design".
   - Use "response" as a short summary of what changed.
 "#;
-
-/// Minimal shell escaping: wraps in single quotes and escapes embedded single quotes.
-fn shell_escape(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
 
 pub fn run() {
     set_macos_process_name("Ecky CAD");
@@ -462,13 +521,13 @@ pub fn run() {
         connection_type: None,
     };
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .setup(move |app| {
-            let config_dir = app.path().app_config_dir()?;
-            let app_data_dir = app.path().app_data_dir()?;
+            let config_dir = app.handle().app_config_dir();
+            let app_data_dir = app.handle().app_data_dir();
             if !config_dir.exists() {
                 fs::create_dir_all(&config_dir)?;
             }
@@ -477,15 +536,40 @@ pub fn run() {
             }
 
             let mut config = default_config;
+            let mut has_explicit_mcp_mode = false;
+            let mut has_explicit_primary_agent = false;
             let config_path = config_dir.join("config.json");
             if config_path.exists() {
                 if let Ok(data) = fs::read_to_string(&config_path) {
+                    if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&data) {
+                        has_explicit_mcp_mode =
+                            raw.get("mcp").and_then(|mcp| mcp.get("mode")).is_some();
+                        has_explicit_primary_agent = raw
+                            .get("mcp")
+                            .and_then(|mcp| mcp.get("primaryAgentId"))
+                            .is_some();
+                    }
                     if let Ok(c) = serde_json::from_str::<crate::models::Config>(&data) {
                         config = c;
                     }
                 }
             }
             let mut should_persist_config = false;
+            if crate::commands::assets::sync_image_assets_into_config(app.handle(), &mut config)? {
+                should_persist_config = true;
+            }
+            if !has_explicit_mcp_mode {
+                let next_mode = crate::mcp::runtime::default_mcp_mode(&config);
+                if config.mcp.mode != next_mode {
+                    config.mcp.mode = next_mode;
+                    should_persist_config = true;
+                }
+            }
+            if !has_explicit_primary_agent
+                || crate::mcp::runtime::ensure_primary_agent_id(&mut config)
+            {
+                should_persist_config = true;
+            }
             for engine in config.engines.iter_mut() {
                 let prompt = engine.system_prompt.trim();
                 if prompt.is_empty() || prompt == "You are a CAD expert." {
@@ -520,8 +604,8 @@ pub fn run() {
                 }
             }
 
-            let db_path = config_dir.join("history.sqlite");
-            let conn = db::init_db(&db_path).expect("Failed to initialize SQLite database");
+            let (conn, startup_warnings) = init_history_db_with_recovery(&config_dir)
+                .map_err(|err| tauri::Error::Io(std::io::Error::other(err)))?;
             if let Ok(interrupted) = db::mark_interrupted_pending_messages(&conn) {
                 if interrupted > 0 {
                     eprintln!(
@@ -533,9 +617,13 @@ pub fn run() {
             let _ = migrate_legacy_references(&conn);
 
             let mcp_port = config.mcp.port;
-            let auto_agents = config.mcp.auto_agents.clone();
             let state = AppState::new(config, last_snapshot, conn);
+            state.set_app_handle(app.handle().clone());
             app.manage(state.clone());
+            for warning in startup_warnings {
+                eprintln!("{}", warning);
+                state.push_log(warning);
+            }
 
             {
                 let resolver: Arc<dyn PathResolver + Send + Sync> = Arc::new(app.handle().clone());
@@ -561,174 +649,15 @@ pub fn run() {
                 });
             }
 
-            for agent in auto_agents.into_iter().filter(|a| a.enabled && !a.start_on_demand) {
-                let supervisor_state = state.clone();
-                tauri::async_runtime::spawn(async move {
-                    // Wait for MCP server to be ready (up to 15s).
-                    let endpoint_url = {
-                        let mut url = String::new();
-                        for _ in 0..75 {
-                            let status = supervisor_state.mcp_status();
-                            if status.running {
-                                url = status.endpoint_url;
-                                break;
-                            }
-                            tokio::time::sleep(Duration::from_millis(200)).await;
-                        }
-                        if url.is_empty() {
-                            let msg = format!("[SUPERVISOR] MCP server not ready after 15s, aborting agent {}", agent.label);
-                            eprintln!("{}", msg);
-                            supervisor_state.push_log(msg);
-                            return;
-                        }
-                        url
-                    };
-
-                    // Write AGENTS.md to a temp working dir so the agent has full context.
-                    let work_dir = std::env::temp_dir().join(format!("ecky-agent-{}", agent.label));
-                    if let Err(e) = std::fs::create_dir_all(&work_dir) {
-                        let msg = format!("[SUPERVISOR] Failed to create work dir: {}", e);
-                        eprintln!("{}", msg);
-                        supervisor_state.push_log(msg);
-                    }
-                    let agents_md = format!(
-                        "# Ecky CAD Agent\n\n\
-                        ## MCP Server\n\
-                        Connect to: `{endpoint_url}`\n\n\
-                        ## Startup sequence (token-efficient — follow exactly)\n\
-                        1. Call `request_user_prompt` with a SHORT friendly greeting only \
-                           (e.g. \"Hello! What would you like to design?\"). \
-                           Do NOT call bootstrap_ecky or workspace_overview yet.\n\
-                        2. When the user sends their first message:\n\
-                           a. Call `bootstrap_ecky` to load system guidance.\n\
-                           b. Call `workspace_overview` to see the current design state.\n\
-                           c. Act on the request using `macro_replace_and_render` or `params_patch_and_render`.\n\
-                        3. Loop: after each action call `request_user_prompt` again — \
-                           do NOT restart or re-bootstrap between turns.\n\n\
-                        ## Rules\n\
-                        - Units are millimeters.\n\
-                        - Keep macroCode, uiSpec, and parameters aligned.\n\
-                        - Prefer printable manifold solids.\n\
-                        - Call `version_save` after successful renders the user approves.\n",
-                        endpoint_url = endpoint_url,
-                    );
-                    let agents_md_path = work_dir.join("AGENTS.md");
-                    if let Err(e) = std::fs::write(&agents_md_path, &agents_md) {
-                        let msg = format!("[SUPERVISOR] Failed to write AGENTS.md: {}", e);
-                        eprintln!("{}", msg);
-                        supervisor_state.push_log(msg);
-                    }
-
-                    // Initial prompt piped via stdin — kicks off the agent.
-                    // Bootstrap (bootstrap_ecky + workspace_overview) is deferred to after
-                    // the first user message to avoid burning tokens before any interaction.
-                    let initial_prompt = format!(
-                        "You are an Ecky CAD design assistant. \
-                        Read AGENTS.md in your current directory for full instructions. \
-                        The Ecky MCP server is at {endpoint_url}. \
-                        Start now: call request_user_prompt with a SHORT friendly greeting \
-                        (e.g. \"Hello! What would you like to design?\"). \
-                        Do NOT call bootstrap_ecky or workspace_overview yet — \
-                        bootstrap only when the user sends their first message.",
-                        endpoint_url = endpoint_url,
-                    );
-
-                    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-                    let mut parts = vec![shell_escape(&agent.cmd)];
-                    // "auto" or empty → let the agent pick its own model, don't pass --model.
-                    if let Some(model) = &agent.model {
-                        let m = model.trim();
-                        if !m.is_empty() && m != "auto" {
-                            parts.push("--model".to_string());
-                            parts.push(shell_escape(m));
-                        }
-                    }
-                    for arg in &agent.args {
-                        parts.push(shell_escape(arg));
-                    }
-                    let cmd_str = parts.join(" ");
-
-                    // Register a wake notifier so the frontend can trigger respawn on demand.
-                    let wake = {
-                        let n = Arc::new(tokio::sync::Notify::new());
-                        supervisor_state.agent_wake.lock().unwrap()
-                            .insert(agent.label.clone(), n.clone());
-                        n
-                    };
-
-                    // Supervisor loop: spawn once, wait for exit, then wait for an explicit
-                    // wake signal (fired when user queues a message and no agent is running).
-                    // This avoids token-burning restarts while still recovering on demand.
-                    loop {
-                        let msg = format!("[SUPERVISOR] Spawning agent: {}", agent.label);
-                        eprintln!("{}", msg);
-                        supervisor_state.push_log(msg);
-                        let mut cmd = tokio::process::Command::new(&shell);
-                        cmd.args(["-l", "-c", &cmd_str]);
-                        cmd.current_dir(&work_dir);
-                        cmd.stdin(std::process::Stdio::piped());
-                        // Own process group so we can SIGSTOP/SIGCONT the whole group.
-                        #[cfg(unix)]
-                        cmd.process_group(0);
-
-                        match cmd.spawn() {
-                            Err(e) => {
-                                let msg = format!("[SUPERVISOR] Failed to spawn {}: {}", agent.label, e);
-                                eprintln!("{}", msg);
-                                supervisor_state.push_log(msg);
-                            }
-                            Ok(mut child) => {
-                                // Register the process group ID (= child PID when process_group(0)).
-                                #[cfg(unix)]
-                                if let Some(pid) = child.id() {
-                                    supervisor_state.auto_agent_pids.lock().unwrap()
-                                        .insert(agent.label.clone(), pid as i32);
-                                }
-
-                                // Write initial prompt to stdin then close it.
-                                if let Some(mut stdin) = child.stdin.take() {
-                                    use tokio::io::AsyncWriteExt;
-                                    let _ = stdin.write_all(initial_prompt.as_bytes()).await;
-                                    // stdin drops here, signaling EOF to the agent.
-                                }
-                                let start = tokio::time::Instant::now();
-                                match child.wait().await {
-                                    Ok(status) => {
-                                        let msg = format!("[SUPERVISOR] Agent {} exited after {}s: {}", agent.label, start.elapsed().as_secs(), status);
-                                        eprintln!("{}", msg);
-                                        supervisor_state.push_log(msg);
-                                    },
-                                    Err(e) => {
-                                        let msg = format!("[SUPERVISOR] Agent {} wait error: {}", agent.label, e);
-                                        eprintln!("{}", msg);
-                                        supervisor_state.push_log(msg);
-                                    },
-                                }
-
-                                // Clean up PID registration on exit.
-                                #[cfg(unix)]
-                                supervisor_state.auto_agent_pids.lock().unwrap()
-                                    .remove(&agent.label);
-                            }
-                        }
-
-                        // Wait for explicit wake signal — only respawn when user demands it.
-                        let msg = format!("[SUPERVISOR] Agent {} is down — waiting for wake signal", agent.label);
-                        eprintln!("{}", msg);
-                        supervisor_state.push_log(msg);
-                        wake.notified().await;
-                        let msg = format!("[SUPERVISOR] Wake received for {}, respawning", agent.label);
-                        eprintln!("{}", msg);
-                        supervisor_state.push_log(msg);
-                    }
-                });
-            }
+            crate::mcp::runtime::initialize_auto_agent_supervisors(state.clone());
 
             Ok(())
         })
-        .invoke_handler(builder.invoke_handler())
-        .run(context)
-        .expect("error while running tauri application");
+        .invoke_handler(builder.invoke_handler());
+
+    if let Err(err) = app.run(context) {
+        eprintln!("[BOOT] Failed to run tauri application: {}", err);
+    }
 }
 
 #[cfg(test)]
@@ -861,5 +790,37 @@ mod tests {
 
         let fallback = fallback_intent("just answer, do not generate anything");
         assert_eq!(fallback.intent_mode, "question");
+    }
+
+    #[test]
+    fn init_history_db_with_recovery_moves_unreadable_path_and_recreates_database() {
+        let temp_root =
+            std::env::temp_dir().join(format!("ecky-history-recovery-{}", Uuid::new_v4().simple()));
+        fs::create_dir_all(&temp_root).expect("temp root should be created");
+
+        let db_path = temp_root.join("history.sqlite");
+        fs::create_dir_all(&db_path).expect("poisoned database path should be a directory");
+
+        let (conn, warnings) =
+            init_history_db_with_recovery(&temp_root).expect("recovery should succeed");
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| row.get(0))
+            .expect("recovered database should be queryable");
+        assert!(count > 0);
+        assert!(db_path.is_file());
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("Moved unreadable history database")));
+        assert!(fs::read_dir(&temp_root)
+            .expect("temp root should be readable")
+            .filter_map(Result::ok)
+            .any(|entry| {
+                let file_name = entry.file_name();
+                let file_name = file_name.to_string_lossy();
+                file_name.starts_with("history.unreadable.") && entry.path().is_dir()
+            }));
+
+        fs::remove_dir_all(&temp_root).expect("temp root should be cleaned up");
     }
 }

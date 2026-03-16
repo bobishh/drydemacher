@@ -69,6 +69,25 @@ def toggle(
     )
 
 
+def image(
+    key: str,
+    default: str = "",
+    label: Optional[str] = None,
+    section: Optional[str] = None,
+    part: Optional[str] = None,
+    help: Optional[str] = None,
+) -> Dict[str, Any]:
+    return _control(
+        key,
+        "image",
+        default,
+        label=label,
+        section=section,
+        part=part,
+        help=help,
+    )
+
+
 def _control(
     key: str,
     kind: str,
@@ -121,6 +140,8 @@ class ControlRegistry:
                 value = _coerce_number(value, control.get("default"))
             elif kind == "toggle":
                 value = bool(value)
+            elif kind == "image":
+                value = "" if value is None else str(value)
             bound[key] = value
         return bound
 
@@ -145,6 +166,8 @@ class ControlRegistry:
                 field["options"] = _normalize_options(control.get("options"))
             elif kind == "toggle":
                 field["type"] = "checkbox"
+            elif kind == "image":
+                field["type"] = "image"
             else:
                 raise ValueError(f"Unknown control type: {kind}")
             fields.append(field)

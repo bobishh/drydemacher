@@ -1,5 +1,6 @@
 <script lang="ts">
   import { get } from 'svelte/store';
+  import { convertFileSrc } from '@tauri-apps/api/core';
   import Dropdown from './Dropdown.svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import {
@@ -10,6 +11,14 @@
     updateUiSpec,
   } from './tauri/client';
   import { buildImportedSyntheticDesign } from './modelRuntime/importedRuntime';
+  import {
+    filterFieldsBySearch,
+    resolveContextSections,
+    resolveTargetParameterKeys,
+    type MeasurementControlFocus,
+    type ContextSelectionTarget,
+  } from './modelRuntime/contextualEditing';
+  import { normalizePostProcessing } from './types/domain';
   import type {
     MaterializedSemanticControl,
     MaterializedSemanticView,
@@ -30,9 +39,15 @@
     ControlView,
     ControlViewScope,
     ControlViewSource,
+    ArtifactBundle,
     DesignParams,
     EnrichmentProposal,
     EnrichmentStatus,
+    LithophaneAttachment,
+    LithophaneSide,
+    OverflowMode,
+    PostProcessingSpec,
+    ProjectionType,
     NumberField,
     ParamValue,
     ParameterGroup,
@@ -92,27 +107,39 @@
     modelManifest = null,
     controlViews = [],
     activeControlViewId = null,
+    selectedTarget = null,
     selectedPartId = null,
+    searchQuery = $bindable(''),
     onSelectControlView,
     onSelectPart,
     onSemanticChange,
+    onControlFocusChange,
     onchange,
     onspecchange,
+    onpostprocessingchange,
     activeVersionId = null,
     messageId = null,
     macroCode = '',
+    postProcessing = null,
+    artifactBundle = null,
   }: {
     uiSpec?: UiSpec | null;
     parameters?: DesignParams;
     modelManifest?: ModelManifest | null;
+    postProcessing?: PostProcessingSpec | null;
+    artifactBundle?: ArtifactBundle | null;
     controlViews?: MaterializedSemanticView[];
     activeControlViewId?: string | null;
+    selectedTarget?: ContextSelectionTarget | null;
     selectedPartId?: string | null;
+    searchQuery?: string;
     onSelectControlView?: (viewId: string | null) => void;
     onSelectPart?: (partId: string | null) => void;
     onSemanticChange?: (primitiveId: string, value: ParamValue) => Promise<void> | void;
+    onControlFocusChange?: (focus: MeasurementControlFocus | null) => void;
     onchange?: (params: DesignParams) => Promise<void> | void;
     onspecchange?: (uiSpec: UiSpec, params: DesignParams) => void;
+    onpostprocessingchange?: (postProcessing: PostProcessingSpec | null) => void;
     activeVersionId?: string | null;
     messageId?: string | null;
     macroCode?: string;
@@ -127,7 +154,7 @@
   let macroParseSeq = 0;
   let localSelectedPartId = $state<string | null>(null);
   let proposalMutationId = $state<string | null>(null);
-  let activeTab = $state<'views' | 'raw'>('views');
+  let activeTab = $state<'views' | 'raw' | 'litho'>('views');
   let sectionOverrides = $state<Record<string, boolean>>({});
   let hadSemanticViews = $state(false);
   let composerOpen = $state(false);
@@ -162,6 +189,61 @@
 
   let lastVersionId = $state<string | null>(null);
   let lastIncomingParamsSignature = $state('');
+  let localPostProcessing = $state<PostProcessingSpec | null>(null);
+  let lastIncomingPostProcessingSignature = $state('');
+  let selectedLithoId = $state<string | null>(null);
+
+  function clonePostProcessing(value: PostProcessingSpec | null | undefined): PostProcessingSpec | null {
+    return value ? normalizePostProcessing(JSON.parse(JSON.stringify(value))) : null;
+  }
+
+  function ensurePostProcessingDraft(): PostProcessingSpec {
+    return clonePostProcessing(localPostProcessing) ?? {
+      displacement: null,
+      lithophaneAttachments: [],
+    };
+  }
+
+  function nextLithoId() {
+    return `litho-${crypto.randomUUID().slice(0, 8)}`;
+  }
+
+  function defaultLithophaneAttachment(): LithophaneAttachment {
+    return {
+      id: nextLithoId(),
+      enabled: true,
+      source: { kind: 'file', imagePath: '' },
+      targetPartId: localSelectedPartId ?? modelManifest?.parts?.[0]?.partId ?? '',
+      placement: {
+        mode: 'partSidePatch',
+        side: 'front',
+        projection: 'auto',
+        widthMm: 0,
+        heightMm: 0,
+        offsetXMm: 0,
+        offsetYMm: 0,
+        rotationDeg: 0,
+        overflowMode: 'contain',
+        bleedMarginMm: 0,
+      },
+      relief: {
+        depthMm: 2,
+        invert: false,
+      },
+      color: {
+        mode: 'mono',
+        channelThicknessMm: 0.4,
+      },
+    };
+  }
+
+  function commitPostProcessing(next: PostProcessingSpec | null, statusText = 'Lithophane staged. Apply to rerender.') {
+    localPostProcessing = clonePostProcessing(next);
+    onpostprocessingchange?.(localPostProcessing);
+    if (!$liveApply) {
+      session.setStatus(statusText);
+    }
+  }
 
   function parseOptionalNumber(raw: EditableNumber): number | undefined {
     if (raw === null || raw === undefined || raw === '') return undefined;
@@ -252,12 +334,25 @@
           label,
           frozen: !!field.frozen,
         };
+      case 'image':
+        return {
+          type: 'image',
+          key,
+          label,
+          frozen: !!field.frozen,
+        };
     }
   }
 
   function asNumber(value: ParamValue | undefined, fallback = 0): number {
     const numeric = Number(value);
     return Number.isFinite(numeric) ? numeric : fallback;
+  }
+
+  function firstSelectedPath(selection: string | string[] | null): string | null {
+    if (typeof selection === 'string') return selection;
+    if (Array.isArray(selection)) return selection[0] ?? null;
+    return null;
   }
 
   function getSelectValue(key: string): string | number | null {
@@ -271,6 +366,17 @@
 
   function getInputChecked(event: Event): boolean {
     return (event.currentTarget as HTMLInputElement).checked;
+  }
+
+  function setFocusedControl(primitiveId: string | null, parameterKey: string | null) {
+    onControlFocusChange?.({ primitiveId, parameterKey });
+  }
+
+  function clearFocusedControl(event: MouseEvent | FocusEvent) {
+    const current = event.currentTarget as HTMLElement | null;
+    const related = (event as FocusEvent).relatedTarget as Node | null;
+    if (current && related && current.contains(related)) return;
+    onControlFocusChange?.(null);
   }
 
   $effect(() => {
@@ -312,8 +418,11 @@
 
     if (isBlankSession) {
       localParams = {};
+      localPostProcessing = null;
+      selectedLithoId = null;
       lastVersionId = null;
       lastIncomingParamsSignature = incomingParamsSignature;
+      lastIncomingPostProcessingSignature = JSON.stringify(null);
       editing = false;
       editFields = [];
       return;
@@ -345,6 +454,19 @@
       localParams = { ...parameters };
     }
     lastIncomingParamsSignature = incomingParamsSignature;
+  });
+
+  $effect(() => {
+    const normalized = clonePostProcessing(postProcessing);
+    const incomingSignature = JSON.stringify(normalized ?? null);
+    if (incomingSignature === lastIncomingPostProcessingSignature) return;
+    localPostProcessing = normalized;
+    lastIncomingPostProcessingSignature = incomingSignature;
+    const nextSelectedId =
+      normalized?.lithophaneAttachments?.find((attachment) => attachment.id === selectedLithoId)?.id ??
+      normalized?.lithophaneAttachments?.[0]?.id ??
+      null;
+    selectedLithoId = nextSelectedId;
   });
 
   // Merge: each key in localParams not covered by uiSpec.fields gets a generated "number" field
@@ -440,31 +562,20 @@
 
   let reading = $state(false);
   let applying = $state(false);
-  let searchQuery = $state('');
 
   const filteredFields = $derived.by(() => {
-    if (!searchQuery.trim()) return mergedFields;
-    const query = searchQuery.toLowerCase();
-    return mergedFields.filter(f => 
-      f.key.toLowerCase().includes(query) || 
-      (f.label && f.label.toLowerCase().includes(query))
-    );
+    return filterFieldsBySearch(mergedFields, searchQuery);
   });
 
   const filteredEditFields = $derived.by(() => {
-    if (!searchQuery.trim()) return editFields;
-    const query = searchQuery.toLowerCase();
-    return editFields.filter(f => 
-      f.key.toLowerCase().includes(query) || 
-      (f.label && f.label.toLowerCase().includes(query))
-    );
+    return filterFieldsBySearch(editFields, searchQuery);
   });
 
   $effect(() => {
     if (editing) return;
     if (controlViews.length === 0) {
       hadSemanticViews = false;
-      activeTab = 'raw';
+      if (activeTab === 'views') activeTab = 'raw';
       return;
     }
     if (!hadSemanticViews) {
@@ -474,7 +585,7 @@
   });
 
   $effect(() => {
-    localSelectedPartId = selectedPartId;
+    localSelectedPartId = selectedTarget?.partId ?? selectedPartId;
   });
 
   const partCount = $derived(modelManifest?.parts?.length ?? 0);
@@ -489,6 +600,26 @@
   const selectedPart = $derived.by<PartBinding | null>(() => {
     if (!localSelectedPartId || !modelManifest?.parts?.length) return null;
     return modelManifest.parts.find((part) => part.partId === localSelectedPartId) ?? null;
+  });
+
+  const lithophaneAttachments = $derived.by<LithophaneAttachment[]>(() =>
+    clonePostProcessing(localPostProcessing)?.lithophaneAttachments ?? [],
+  );
+
+  const selectedLithophaneAttachment = $derived.by<LithophaneAttachment | null>(() => {
+    if (!lithophaneAttachments.length) return null;
+    return (
+      lithophaneAttachments.find((attachment) => attachment.id === selectedLithoId) ??
+      lithophaneAttachments[0] ??
+      null
+    );
+  });
+
+  const selectedLithophaneExportArtifacts = $derived.by(() => {
+    const attachment = selectedLithophaneAttachment;
+    const exports = artifactBundle?.exportArtifacts ?? [];
+    if (!attachment) return exports;
+    return exports.filter((item) => item.label.includes(attachment.id));
   });
 
   const manifestWarnings = $derived.by(() => {
@@ -515,6 +646,10 @@
   });
 
   const selectedParameterKeys = $derived.by(() => {
+    const exactKeys = resolveTargetParameterKeys(modelManifest, selectedTarget);
+    if (exactKeys.size > 0) {
+      return exactKeys;
+    }
     const keys = new Set<string>();
     for (const group of selectedGroups) {
       for (const key of group.parameterKeys || []) {
@@ -545,18 +680,7 @@
   });
 
   const filteredSemanticSections = $derived.by(() => {
-    if (!activeSemanticView) return [];
-    if (!searchQuery.trim()) return activeSemanticView.sections;
-    const query = searchQuery.toLowerCase();
-    return activeSemanticView.sections
-      .map((section) => ({
-        ...section,
-        controls: section.controls.filter((control) => {
-          const signature = `${control.label} ${control.rawField?.key ?? ''}`.toLowerCase();
-          return signature.includes(query);
-        }),
-      }))
-      .filter((section) => section.controls.length > 0);
+    return resolveContextSections(activeSemanticView, null, searchQuery);
   });
 
   const primitiveCatalog = $derived.by(() => {
@@ -909,19 +1033,26 @@
   }
 
   function getAvailableTypes(field: EditableUiField | ResolvedUiField) {
-    // If it's boolean in parameters, don't allow range/number?
-    // User said "booleans, it can't be turned to range"
-    const val = parameters[field.key];
-    if (typeof val === 'boolean' || field.type === 'checkbox') {
-      return ['checkbox'];
+    const preferredTypes: EditableUiField['type'][] = [];
+    const paramValue = parameters[field.key];
+
+    preferredTypes.push(field.type);
+    if (typeof paramValue === 'boolean') {
+      preferredTypes.push('checkbox');
+    } else if (typeof paramValue === 'string') {
+      preferredTypes.push('select');
+    } else if (typeof paramValue === 'number' || paramValue === null) {
+      preferredTypes.push('number');
     }
-    if (field.type === 'select') {
-      return ['select'];
-    }
-    if (field.type === 'image') {
-      return ['image'];
-    }
-    return ['range', 'number'];
+
+    return [...new Set<EditableUiField['type']>([
+      ...preferredTypes,
+      'number',
+      'select',
+      'checkbox',
+      'image',
+      'range',
+    ])];
   }
 
   function getCadHint(field: UiField | ResolvedUiField | EditableUiField): CadHint {
@@ -986,6 +1117,108 @@
     localSelectedPartId = partId;
     session.setSelectedPartId(partId);
     onSelectPart?.(partId);
+  }
+
+  function patchLithophaneAttachment(
+    attachmentId: string,
+    mutate: (attachment: LithophaneAttachment) => LithophaneAttachment,
+    statusText = 'Lithophane staged. Apply to rerender.',
+  ) {
+    const draft = ensurePostProcessingDraft();
+    draft.displacement = null;
+    draft.lithophaneAttachments = (draft.lithophaneAttachments || []).map((attachment) =>
+      attachment.id === attachmentId ? mutate(attachment) : attachment,
+    );
+    commitPostProcessing(draft, statusText);
+  }
+
+  function addLithophane() {
+    const draft = ensurePostProcessingDraft();
+    const attachment = defaultLithophaneAttachment();
+    draft.displacement = null;
+    draft.lithophaneAttachments = [...(draft.lithophaneAttachments || []), attachment];
+    selectedLithoId = attachment.id;
+    commitPostProcessing(draft, 'Lithophane patch added. Apply to rerender.');
+    activeTab = 'litho';
+  }
+
+  function duplicateLithophane(attachment: LithophaneAttachment | null) {
+    if (!attachment) return;
+    const draft = ensurePostProcessingDraft();
+    const clone = {
+      ...JSON.parse(JSON.stringify(attachment)),
+      id: nextLithoId(),
+      targetPartId: attachment.targetPartId || localSelectedPartId || '',
+    } as LithophaneAttachment;
+    draft.displacement = null;
+    draft.lithophaneAttachments = [...(draft.lithophaneAttachments || []), clone];
+    selectedLithoId = clone.id;
+    commitPostProcessing(draft, 'Lithophane patch duplicated. Apply to rerender.');
+  }
+
+  function deleteLithophane(attachmentId: string) {
+    const draft = ensurePostProcessingDraft();
+    draft.displacement = null;
+    draft.lithophaneAttachments = (draft.lithophaneAttachments || []).filter(
+      (attachment) => attachment.id !== attachmentId,
+    );
+    selectedLithoId = draft.lithophaneAttachments[0]?.id ?? null;
+    commitPostProcessing(
+      draft.lithophaneAttachments.length ? draft : null,
+      'Lithophane patch removed.',
+    );
+  }
+
+  function setLithophaneImage(attachmentId: string, path: string) {
+    patchLithophaneAttachment(attachmentId, (attachment) => ({
+      ...attachment,
+      source: {
+        kind: 'file',
+        imagePath: path,
+      },
+    }));
+  }
+
+  function setLithophaneProjection(
+    attachmentId: string,
+    projection: ProjectionType,
+  ) {
+    patchLithophaneAttachment(attachmentId, (attachment) => ({
+      ...attachment,
+      placement: {
+        ...attachment.placement,
+        projection,
+      },
+      color:
+        projection === 'planar'
+          ? attachment.color
+          : {
+              ...attachment.color,
+              mode: 'mono',
+            },
+    }));
+  }
+
+  function setLithophaneColorMode(
+    attachmentId: string,
+    mode: 'mono' | 'cmyk',
+  ) {
+    patchLithophaneAttachment(attachmentId, (attachment) => ({
+      ...attachment,
+      color: {
+        ...attachment.color,
+        mode,
+      },
+    }));
+  }
+
+  function previewImageUrl(path: string | null | undefined) {
+    if (!path) return null;
+    try {
+      return convertFileSrc(path);
+    } catch {
+      return path;
+    }
   }
 
   function slugify(value: string): string {
@@ -1806,8 +2039,9 @@
     {/if}
   </div>
 
-  {#if editing}
-    <div class="edit-list">
+  <div class="param-panel-body">
+    {#if editing}
+      <div class="edit-list">
       {#each filteredEditFields as field}
         {@const i = editFields.indexOf(field)}
         <div class="edit-field" class:is-freezed={field.frozen}>
@@ -1868,17 +2102,17 @@
         </div>
       {/each}
       <button class="btn btn-xs add-field-btn" onclick={addField}>+ ADD FIELD</button>
-    </div>
-  {:else}
-    {#if modelManifest}
-      {#if manifestWarnings.length > 0}
-        <div class="warning-stack">
-          {#each manifestWarnings as warning}
-            <div class="warning-chip">{warning}</div>
-          {/each}
-        </div>
+      </div>
+    {:else}
+      {#if modelManifest}
+        {#if manifestWarnings.length > 0}
+          <div class="warning-stack">
+            {#each manifestWarnings as warning}
+              <div class="warning-chip">{warning}</div>
+            {/each}
+          </div>
+        {/if}
       {/if}
-    {/if}
 
     {#if modelManifest?.parts?.length && (partCount > 1 || modelManifest?.sourceKind === 'importedFcstd')}
       <div class="part-strip">
@@ -1900,6 +2134,13 @@
     {/if}
 
     <div class="panel-mode-tabs">
+      <button
+        class="panel-mode-tab"
+        class:panel-mode-tab-active={activeTab === 'litho'}
+        onclick={() => activeTab = 'litho'}
+      >
+        LITHO
+      </button>
       {#if controlViews.length > 0}
         <button
           class="panel-mode-tab"
@@ -1971,7 +2212,372 @@
       </div>
     {/if}
 
-    {#if activeTab === 'views' && controlViews.length > 0}
+    {#if activeTab === 'litho'}
+      <div class="controls-head">
+        <div class="section-label">LITHOPHANE ATTACHMENTS</div>
+        <div class="context-strip-actions">
+          <button class="btn btn-xs btn-ghost" onclick={addLithophane}>
+            + PATCH
+          </button>
+          {#if selectedLithophaneAttachment}
+            <button
+              class="btn btn-xs btn-ghost"
+              onclick={() => duplicateLithophane(selectedLithophaneAttachment)}
+            >
+              DUPLICATE
+            </button>
+            <button
+              class="btn btn-xs btn-ghost"
+              onclick={() => deleteLithophane(selectedLithophaneAttachment.id)}
+            >
+              DELETE
+            </button>
+          {/if}
+        </div>
+      </div>
+
+      {#if lithophaneAttachments.length > 0}
+        <div class="part-strip">
+          <div class="part-strip-list">
+            {#each lithophaneAttachments as attachment}
+              <button
+                class="view-chip"
+                class:view-chip-active={attachment.id === selectedLithoId}
+                onclick={() => selectedLithoId = attachment.id}
+              >
+                <span>{attachment.source.kind === 'file' && attachment.source.imagePath
+                  ? attachment.source.imagePath.split(/[/\\]/).pop()
+                  : attachment.id}</span>
+                <span class="semantic-source-badge">{attachment.enabled === false ? 'OFF' : attachment.color?.mode === 'cmyk' ? 'CMYK' : 'MONO'}</span>
+              </button>
+            {/each}
+          </div>
+        </div>
+
+        {#if selectedLithophaneAttachment}
+          {@const activeLitho = selectedLithophaneAttachment}
+          {@const planarOnlyColor = activeLitho.placement?.projection === 'planar'}
+          <div class="view-composer">
+            <div class="composer-grid">
+              <label class="primitive-picker">
+                <input
+                  class="ui-checkbox"
+                  type="checkbox"
+                  checked={activeLitho.enabled !== false}
+                  onchange={(event) =>
+                    patchLithophaneAttachment(activeLitho.id, (attachment) => ({
+                      ...attachment,
+                      enabled: getInputChecked(event),
+                    }), getInputChecked(event) ? 'Lithophane enabled.' : 'Lithophane disabled.')}
+                />
+                <div class="primitive-picker__body">
+                  <div class="primitive-picker__label">Attachment enabled</div>
+                  <div class="primitive-picker__meta">Disabled patches stay saved but skip render.</div>
+                </div>
+              </label>
+              <div class="composer-field">
+                <div class="composer-label">TARGET PART</div>
+                <Dropdown
+                  options={(modelManifest?.parts || []).map((part) => ({ id: part.partId, name: part.label }))}
+                  value={activeLitho.targetPartId || null}
+                  onchange={(value) =>
+                    patchLithophaneAttachment(activeLitho.id, (attachment) => ({
+                      ...attachment,
+                      targetPartId: typeof value === 'string' ? value : '',
+                    }))}
+                  placeholder="Choose part..."
+                />
+              </div>
+              <div class="composer-field">
+                <div class="composer-label">IMAGE</div>
+                <button
+                  class="btn param-btn"
+                  onclick={async () => {
+                    const file = await open({
+                      multiple: false,
+                      filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
+                    });
+                    const selected = firstSelectedPath(file);
+                    if (selected) setLithophaneImage(activeLitho.id, selected);
+                  }}
+                >
+                  {activeLitho.source.kind === 'file' && activeLitho.source.imagePath
+                    ? activeLitho.source.imagePath.split(/[/\\]/).pop()
+                    : 'Select Image...'}
+                </button>
+              </div>
+            </div>
+
+            {#if activeLitho.source.kind === 'file' && activeLitho.source.imagePath}
+              <div class="litho-preview">
+                <img
+                  src={previewImageUrl(activeLitho.source.imagePath) ?? ''}
+                  alt="Lithophane source"
+                  class="litho-preview__image"
+                />
+              </div>
+            {/if}
+
+            <div class="composer-grid">
+              <div class="composer-field">
+                <div class="composer-label">SIDE</div>
+                <Dropdown
+                  options={[
+                    { id: 'front', name: 'Front' },
+                    { id: 'back', name: 'Back' },
+                    { id: 'left', name: 'Left' },
+                    { id: 'right', name: 'Right' },
+                    { id: 'top', name: 'Top' },
+                    { id: 'bottom', name: 'Bottom' },
+                  ]}
+                  value={activeLitho.placement?.side}
+                  onchange={(value) =>
+                    patchLithophaneAttachment(activeLitho.id, (attachment) => ({
+                      ...attachment,
+                      placement: {
+                        ...attachment.placement,
+                        side: (typeof value === 'string' ? value : 'front') as LithophaneSide,
+                      },
+                    }))}
+                />
+              </div>
+              <div class="composer-field">
+                <div class="composer-label">PROJECTION</div>
+                <Dropdown
+                  options={[
+                    { id: 'auto', name: 'Auto' },
+                    { id: 'planar', name: 'Planar' },
+                    { id: 'cylindrical', name: 'Cylindrical' },
+                    { id: 'spherical', name: 'Spherical' },
+                  ]}
+                  value={activeLitho.placement?.projection}
+                  onchange={(value) =>
+                    setLithophaneProjection(activeLitho.id, (typeof value === 'string' ? value : 'auto') as ProjectionType)}
+                />
+              </div>
+              <div class="composer-field">
+                <div class="composer-label">OVERFLOW</div>
+                <Dropdown
+                  options={[
+                    { id: 'contain', name: 'Contain' },
+                    { id: 'cover', name: 'Cover' },
+                    { id: 'clamp', name: 'Clamp' },
+                    { id: 'bleed', name: 'Bleed' },
+                  ]}
+                  value={activeLitho.placement?.overflowMode}
+                  onchange={(value) =>
+                    patchLithophaneAttachment(activeLitho.id, (attachment) => ({
+                      ...attachment,
+                      placement: {
+                        ...attachment.placement,
+                        overflowMode: (typeof value === 'string' ? value : 'contain') as OverflowMode,
+                      },
+                    }))}
+                />
+              </div>
+              <div class="composer-field">
+                <div class="composer-label">COLOR MODE</div>
+                <Dropdown
+                  options={[
+                    { id: 'mono', name: 'Mono' },
+                    ...(planarOnlyColor ? [{ id: 'cmyk', name: 'CMYK' }] : []),
+                  ]}
+                  value={planarOnlyColor ? activeLitho.color?.mode : 'mono'}
+                  onchange={(value) => setLithophaneColorMode(activeLitho.id, (typeof value === 'string' ? value : 'mono') as 'mono' | 'cmyk')}
+                />
+              </div>
+            </div>
+
+            {#if !planarOnlyColor}
+              <div class="composer-note">
+                CMYK export is only available for planar flat patches. Switch projection to PLANAR to unlock it.
+              </div>
+            {/if}
+
+            <div class="composer-grid">
+              <div class="composer-field">
+                <label class="composer-label" for={`litho-width-${activeLitho.id}`}>WIDTH (MM)</label>
+                <input
+                  id={`litho-width-${activeLitho.id}`}
+                  class="input-mono composer-input"
+                  type="number"
+                  step="0.1"
+                  value={activeLitho.placement?.widthMm ?? 0}
+                  oninput={(event) =>
+                    patchLithophaneAttachment(activeLitho.id, (attachment) => ({
+                      ...attachment,
+                      placement: {
+                        ...attachment.placement,
+                        widthMm: Number(getInputValue(event)) || 0,
+                      },
+                    }))}
+                />
+              </div>
+              <div class="composer-field">
+                <label class="composer-label" for={`litho-height-${activeLitho.id}`}>HEIGHT (MM)</label>
+                <input
+                  id={`litho-height-${activeLitho.id}`}
+                  class="input-mono composer-input"
+                  type="number"
+                  step="0.1"
+                  value={activeLitho.placement?.heightMm ?? 0}
+                  oninput={(event) =>
+                    patchLithophaneAttachment(activeLitho.id, (attachment) => ({
+                      ...attachment,
+                      placement: {
+                        ...attachment.placement,
+                        heightMm: Number(getInputValue(event)) || 0,
+                      },
+                    }))}
+                />
+              </div>
+              <div class="composer-field">
+                <label class="composer-label" for={`litho-offset-x-${activeLitho.id}`}>OFFSET X (MM)</label>
+                <input
+                  id={`litho-offset-x-${activeLitho.id}`}
+                  class="input-mono composer-input"
+                  type="number"
+                  step="0.1"
+                  value={activeLitho.placement?.offsetXMm ?? 0}
+                  oninput={(event) =>
+                    patchLithophaneAttachment(activeLitho.id, (attachment) => ({
+                      ...attachment,
+                      placement: {
+                        ...attachment.placement,
+                        offsetXMm: Number(getInputValue(event)) || 0,
+                      },
+                    }))}
+                />
+              </div>
+              <div class="composer-field">
+                <label class="composer-label" for={`litho-offset-y-${activeLitho.id}`}>OFFSET Y (MM)</label>
+                <input
+                  id={`litho-offset-y-${activeLitho.id}`}
+                  class="input-mono composer-input"
+                  type="number"
+                  step="0.1"
+                  value={activeLitho.placement?.offsetYMm ?? 0}
+                  oninput={(event) =>
+                    patchLithophaneAttachment(activeLitho.id, (attachment) => ({
+                      ...attachment,
+                      placement: {
+                        ...attachment.placement,
+                        offsetYMm: Number(getInputValue(event)) || 0,
+                      },
+                    }))}
+                />
+              </div>
+              <div class="composer-field">
+                <label class="composer-label" for={`litho-rotation-${activeLitho.id}`}>ROTATION</label>
+                <input
+                  id={`litho-rotation-${activeLitho.id}`}
+                  class="input-mono composer-input"
+                  type="number"
+                  step="1"
+                  value={activeLitho.placement?.rotationDeg ?? 0}
+                  oninput={(event) =>
+                    patchLithophaneAttachment(activeLitho.id, (attachment) => ({
+                      ...attachment,
+                      placement: {
+                        ...attachment.placement,
+                        rotationDeg: Number(getInputValue(event)) || 0,
+                      },
+                    }))}
+                />
+              </div>
+              <div class="composer-field">
+                <label class="composer-label" for={`litho-bleed-${activeLitho.id}`}>BLEED (MM)</label>
+                <input
+                  id={`litho-bleed-${activeLitho.id}`}
+                  class="input-mono composer-input"
+                  type="number"
+                  step="0.1"
+                  value={activeLitho.placement?.bleedMarginMm ?? 0}
+                  oninput={(event) =>
+                    patchLithophaneAttachment(activeLitho.id, (attachment) => ({
+                      ...attachment,
+                      placement: {
+                        ...attachment.placement,
+                        bleedMarginMm: Math.max(0, Number(getInputValue(event)) || 0),
+                      },
+                    }))}
+                />
+              </div>
+              <div class="composer-field">
+                <label class="composer-label" for={`litho-depth-${activeLitho.id}`}>DEPTH (MM)</label>
+                <input
+                  id={`litho-depth-${activeLitho.id}`}
+                  class="input-mono composer-input"
+                  type="number"
+                  step="0.1"
+                  value={activeLitho.relief?.depthMm ?? 2}
+                  oninput={(event) =>
+                    patchLithophaneAttachment(activeLitho.id, (attachment) => ({
+                      ...attachment,
+                      relief: {
+                        ...attachment.relief,
+                        depthMm: Math.max(0.1, Number(getInputValue(event)) || 2),
+                      },
+                    }))}
+                />
+              </div>
+              <div class="composer-field">
+                <label class="composer-label" for={`litho-channel-${activeLitho.id}`}>CHANNEL THICKNESS</label>
+                <input
+                  id={`litho-channel-${activeLitho.id}`}
+                  class="input-mono composer-input"
+                  type="number"
+                  step="0.05"
+                  value={activeLitho.color?.channelThicknessMm ?? 0.4}
+                  oninput={(event) =>
+                    patchLithophaneAttachment(activeLitho.id, (attachment) => ({
+                      ...attachment,
+                      color: {
+                        ...attachment.color,
+                        channelThicknessMm: Math.max(0.05, Number(getInputValue(event)) || 0.4),
+                      },
+                    }))}
+                />
+              </div>
+            </div>
+
+            <label class="primitive-picker">
+              <input
+                class="ui-checkbox"
+                type="checkbox"
+                checked={activeLitho.relief?.invert ?? false}
+                onchange={(event) =>
+                  patchLithophaneAttachment(activeLitho.id, (attachment) => ({
+                    ...attachment,
+                    relief: {
+                      ...attachment.relief,
+                      invert: getInputChecked(event),
+                    },
+                  }), getInputChecked(event) ? 'Lithophane inversion enabled.' : 'Lithophane inversion disabled.')}
+              />
+              <div class="primitive-picker__body">
+                <div class="primitive-picker__label">Invert relief</div>
+                <div class="primitive-picker__meta">Bright pixels become shallow instead of deep.</div>
+              </div>
+            </label>
+
+            {#if selectedLithophaneExportArtifacts.length > 0}
+              <div class="warning-stack">
+                {#each selectedLithophaneExportArtifacts as exportArtifact}
+                  <div class="warning-chip">
+                    <span>{exportArtifact.role.toUpperCase()}: {exportArtifact.label}</span>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/if}
+      {:else}
+        <div class="no-params">
+          Add a lithophane patch to attach an image to the current model. It will render on Apply.
+        </div>
+      {/if}
+    {:else if activeTab === 'views' && controlViews.length > 0}
       <div class="part-strip">
         <div class="context-strip-head">
           <div class="section-label">CONTEXTS</div>
@@ -2479,8 +3085,13 @@
                 {#if field}
                   <div
                     class="param-field"
+                    role="group"
                     class:field-select={field.type === 'select'}
                     class:field-checkbox={field.type === 'checkbox'}
+                    onmouseenter={() => setFocusedControl(control.primitiveId, field.key)}
+                    onmouseleave={clearFocusedControl}
+                    onfocusin={() => setFocusedControl(control.primitiveId, field.key)}
+                    onfocusout={clearFocusedControl}
                   >
                     <div class="field-header">
                       <div class="field-title">
@@ -2515,7 +3126,16 @@
                             oninput={(e) => updateSemanticControl(control, parseFloat(getInputValue(e)))}
                             disabled={!control.editable}
                           />
-                          <span class="range-value cad-readout">{control.value}</span>
+                          <input
+                            type="number"
+                            class="input-mono param-input param-input-compact"
+                            min={range.min}
+                            max={range.max}
+                            step={range.step}
+                            value={asNumber(control.value, range.min)}
+                            oninput={(e) => updateSemanticControl(control, parseFloat(getInputValue(e)))}
+                            disabled={!control.editable}
+                          />
                         </div>
                       {:else if field.type === 'number'}
                         <input
@@ -2546,6 +3166,23 @@
                           />
                           <span class="checkbox-status">{control.value ? 'ON' : 'OFF'}</span>
                         </label>
+                      {:else if field.type === 'image'}
+                        <div class="image-field-wrapper">
+                          <button
+                            class="btn param-btn"
+                            onclick={async () => {
+                              const file = await open({
+                                multiple: false,
+                                filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
+                              });
+                              const selected = firstSelectedPath(file);
+                              if (selected) updateSemanticControl(control, selected);
+                            }}
+                            disabled={!control.editable}
+                          >
+                            {control.value ? String(control.value).split(/[/\\]/).pop() : 'Select Image...'}
+                          </button>
+                        </div>
                       {/if}
                     </div>
                   </div>
@@ -2572,11 +3209,16 @@
               {@const cadHint = getCadHint(field)}
               <div
                 class="param-field param-field-focus"
+                role="group"
                 data-cad-tone={cadHint.tone}
                 class:auto-field={field._auto}
                 class:param-freezed={field.frozen}
                 class:field-select={field.type === 'select'}
                 class:field-checkbox={field.type === 'checkbox'}
+                onmouseenter={() => setFocusedControl(null, field.key)}
+                onmouseleave={clearFocusedControl}
+                onfocusin={() => setFocusedControl(null, field.key)}
+                onfocusout={clearFocusedControl}
               >
                 <div class="field-header">
                   <div class="field-title">
@@ -2601,7 +3243,16 @@
                         oninput={(e) => update(field.key, parseFloat(getInputValue(e)))}
                         disabled={field.frozen}
                       />
-                      <span class="range-value cad-readout">{localParams[field.key]}</span>
+                      <input
+                        type="number"
+                        class="input-mono param-input param-input-compact"
+                        min={range.min}
+                        max={range.max}
+                        step={range.step}
+                        value={asNumber(localParams[field.key], range.min)}
+                        oninput={(e) => update(field.key, parseFloat(getInputValue(e)))}
+                        disabled={field.frozen}
+                      />
                     </div>
                   {:else if field.type === 'number'}
                     <input
@@ -2641,11 +3292,8 @@
                             multiple: false,
                             filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
                           });
-                          if (typeof file === 'string') {
-                            update(field.key, file);
-                          } else if (file && file.path) {
-                            update(field.key, file.path);
-                          }
+                          const selected = firstSelectedPath(file);
+                          if (selected) update(field.key, selected);
                         }}
                         disabled={field.frozen}
                       >
@@ -2671,11 +3319,16 @@
           {@const cadHint = getCadHint(field)}
           <div
             class="param-field"
+            role="group"
             data-cad-tone={cadHint.tone}
             class:auto-field={field._auto}
             class:param-freezed={field.frozen}
             class:field-select={field.type === 'select'}
             class:field-checkbox={field.type === 'checkbox'}
+            onmouseenter={() => setFocusedControl(null, field.key)}
+            onmouseleave={clearFocusedControl}
+            onfocusin={() => setFocusedControl(null, field.key)}
+            onfocusout={clearFocusedControl}
           >
             <div class="field-header">
               <div class="field-title">
@@ -2700,7 +3353,16 @@
                     oninput={(e) => update(field.key, parseFloat(getInputValue(e)))}
                     disabled={field.frozen}
                   />
-                  <span class="range-value cad-readout">{localParams[field.key]}</span>
+                  <input
+                    type="number"
+                    class="input-mono param-input param-input-compact"
+                    min={range.min}
+                    max={range.max}
+                    step={range.step}
+                    value={asNumber(localParams[field.key], range.min)}
+                    oninput={(e) => update(field.key, parseFloat(getInputValue(e)))}
+                    disabled={field.frozen}
+                  />
                 </div>
               {:else if field.type === 'number'}
                 <input
@@ -2740,11 +3402,8 @@
                        multiple: false,
                        filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
                      });
-                     if (typeof file === 'string') {
-                       update(field.key, file);
-                     } else if (file && file.path) {
-                       update(field.key, file.path);
-                     }
+                     const selected = firstSelectedPath(file);
+                     if (selected) update(field.key, selected);
                    }}
                    disabled={field.frozen}
                  >
@@ -2762,8 +3421,9 @@
             : 'No raw controls match your search.'}
         </div>
       {/if}
+      {/if}
     {/if}
-  {/if}
+  </div>
 </div>
 
 <style>
@@ -2777,7 +3437,21 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
+    min-height: 100%;
+    box-sizing: border-box;
     overflow: hidden;
+  }
+
+  .param-panel-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding-bottom: 12px;
+    scrollbar-gutter: stable;
   }
 
   .panel-toolbar {
@@ -3013,6 +3687,22 @@
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
     gap: 10px;
+  }
+
+  .litho-preview {
+    border: 1px solid var(--bg-300);
+    background: var(--bg-200);
+    padding: 8px;
+    overflow: hidden;
+  }
+
+  .litho-preview__image {
+    display: block;
+    width: 100%;
+    max-height: 180px;
+    object-fit: contain;
+    border: 1px solid var(--primary);
+    background: var(--bg-100);
   }
 
   .composer-field {
@@ -3419,6 +4109,11 @@
     font-family: var(--font-mono);
     font-size: 0.75rem;
     box-shadow: inset 0 0 0 1px color-mix(in srgb, #000 22%, transparent);
+  }
+
+  .param-input-compact {
+    width: 86px;
+    min-width: 86px;
   }
 
   .param-input:focus {
