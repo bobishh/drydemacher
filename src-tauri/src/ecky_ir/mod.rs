@@ -1,4 +1,5 @@
 pub mod backend_capabilities;
+pub mod poly_partition;
 mod build123d_lowering;
 pub(crate) mod edge_ops;
 mod eval_scalar;
@@ -298,7 +299,7 @@ fn value_uses_direct_occt_required_cad_ops(value: &lexpr::Value) -> bool {
     items.iter().any(value_uses_direct_occt_required_cad_ops)
 }
 
-fn is_ecky_rust_only_cad_head(head: &str) -> bool {
+pub(crate) fn is_ecky_rust_only_cad_head(head: &str) -> bool {
     crate::ecky_language_surface::ECKY_RUST_ONLY_CAD_OPS.contains(&head) || head == "pattern"
 }
 

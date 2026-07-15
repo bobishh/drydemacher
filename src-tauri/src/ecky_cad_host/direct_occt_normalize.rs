@@ -428,6 +428,7 @@ fn normalize_node_for_direct_occt(
                     CoreOperation::Custom(name)
                         if name == "helical-ridge"
                             || name == "hull"
+                            || name == "solidify"
                             || name == "thread"
                             || name == "rib"
                             || name == "groove"

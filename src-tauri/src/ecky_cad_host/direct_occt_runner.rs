@@ -1038,6 +1038,7 @@ fn runner_op_token(op: OcctOp) -> &'static str {
         OcctOp::Mirror => "mirror",
         OcctOp::Compound => "compound",
         OcctOp::Hull => "hull",
+        OcctOp::Solidify => "solidify",
     }
 }
 
