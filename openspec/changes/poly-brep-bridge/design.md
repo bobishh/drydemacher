@@ -2,205 +2,207 @@
 
 ## Architecture
 
-### Current: Two Disjoint Worlds
+### Two renderers, not interchangeable
+
+**Direct OCCT** (BRep): NURBS surfaces. Handles extrude, chamfer, fillet,
+difference, union exactly. Does NOT understand wall-pattern. Produces STEP +
+STL.
+
+**Mesh renderer** (csgrs): triangle mesh. Handles ALL ops including
+wall-pattern and CSG. Lower precision, no STEP export. CSG over displaced
+meshes (wall-pattern output) produces garbage — 30k+ non-manifold edges.
+
+The bridge lets a single part use both: mesh renderer for displacement, OCCT
+for the booleans that follow.
+
+### Target: Hybrid Dispatch
 
 ```
-CoreProgram
-  ├── dispatch_backend == OCCT
-  │     → plan every op as BRep
-  │     → STEP + STL + topology
-  │     → REJECTS wall-pattern
-  │
-  └── dispatch_backend == Mesh
-        → evaluate every op as triangle soup
-        → STL only (no STEP)
-        → CSG over displaced mesh = garbage
+Partition analysis classifies each part:
+
+PureOcct  → existing OCCT path (no change)
+PureMesh  → existing mesh renderer path (no change)
+
+Hybrid:
+  1. Mesh renderer evaluates the WHOLE part (extrude + wall-pattern + any
+     mesh-safe ops). Produces a displaced STL.
+  2. OCCT plan: import-stl(displaced.stl) → solidify → post-boundary booleans.
+  3. Export STL + STEP from OCCT.
 ```
 
-No part can use both. The dispatch is all-or-nothing.
-
-### Target: Hybrid Pipeline
-
-```
-CoreProgram part tree
-  │
-  ├ T1: Partition Analysis
-  │   Walk the CoreNode tree. Find the FIRST node whose operation is
-  │   mesh-only (wall-pattern, pattern, future: import-mesh).
-  │   Everything above it = pre-boundary (exact BRep capable).
-  │   Everything below it = post-boundary (must run as mesh first).
-  │
-  ├ T2: Pre-boundary sub-tree → OCCT
-  │   Standard OcctPlan path. Produces an exact BRep solid.
-  │   Tessellate result to triangle mesh at boundary point.
-  │
-  ├ T3: Mesh-only ops → Rust mesh renderer
-  │   Apply wall-pattern / displacement to the tessellated mesh.
-  │   All mesh renderer ops available (its own chamfer/fillet/CSG).
-  │
-  ├ T4: Mesh → OCCT Poly BRep (bridge)
-  │   Wrap displaced triangle mesh as OCCT polyhedral BRep solid:
-  │     - Each triangle → BRepBuilder face with Poly_Triangle
-  │     - Sew into closed shell → make solid
-  │   This is an OCCT first-class representation.
-  │
-  ├ T5: Post-boundary ops → OCCT hybrid boolean
-  │   difference / union / fuse over hybrid solids.
-  │   OCCT General Fuse Algorithm handles exact + poly.
-  │   chamfer / fillet on poly edges may degrade (expected).
-  │
-  └ Export
-      STL:  tessellate entire hybrid solid (one mesh)
-      STEP: exact faces remain exact NURBS;
-            poly faces exported as triangulated BRep faces
-```
+The key simplification vs the original design: we do NOT tessellate OCCT
+exact geometry to feed the mesh renderer (T2), and we do NOT teach wall-pattern
+to accept external meshes (T3). The mesh renderer already evaluates its own
+sub-tree including extrude; wall-pattern runs on that. OCCT only sees the
+final displaced STL.
 
 ### Partition Boundary Definition
 
-A part tree node is a **mesh boundary** if its operation is in
-`ECKY_RUST_ONLY_CAD_OPS` (currently `["wall-pattern"]`, future:
-`import-mesh`, `relief-from-image`, etc.).
+A node is a **mesh boundary** if its operation is in `ECKY_RUST_ONLY_CAD_OPS`
+(currently `["wall-pattern"]`).
 
 ```
-Example part tree:
-  difference                          ← post-boundary (T5: OCCT hybrid)
-    ├── chamfer                       ← post-boundary
-    │   └── wall-pattern              ← BOUNDARY NODE
-    │       └── extrude               ← pre-boundary (T2: OCCT exact)
-    ├── cylinder (camera hole)        ← pre-boundary (T5: OCCT boolean cutter)
-    └── cylinder (mic hole)           ← pre-boundary (T5: OCCT boolean cutter)
+Example part tree (iPhone 17e case):
+  difference                          ← BRep-required, post-boundary
+    ├── wall-pattern                  ← MESH BOUNDARY
+    │   └── extrude (case profile)    ← pre-boundary (mesh renderer handles)
+    ├── cylinder (camera hole)        ← pre-boundary (OCCT boolean cutter)
 
-Partition:
-  T2 (OCCT exact):  extrude
-  T3 (Mesh):        wall-pattern(extrude_result)
-  T5 (OCCT hybrid): difference(chamfer(mesh), cylinder, cylinder)
+Classification: Hybrid
+  Mesh renderer produces:  wall-pattern(extrude(profile)) → displaced STL
+  OCCT plan:               solidify(import-stl(displaced.stl))
+                           → difference(_, camera_cylinder)
+                           → difference(_, mic_cylinder)
 ```
 
-When multiple cutters are exact-BRep (cylinders), they fuse directly in OCCT
-without mesh conversion — only the displaced sub-tree enters as poly.
+Partition rules (implemented in `poly_partition.rs`):
 
-### OCCT Polyhedral BRep
+- **PureOcct**: no mesh-only ops anywhere in the part.
+- **PureMesh**: mesh-only ops exist, but no BRep-required op (difference,
+  union, chamfer, fillet, shell, offset) consumes their output. Only
+  mesh-safe ops (translate, rotate, scale, mirror, group) sit above.
+- **Hybrid**: at least one mesh-only op AND at least one BRep-required op
+  whose input is post-boundary (consumes displaced output, directly or
+  transitively).
 
-OCCT supports polyhedral BRep as a standard representation:
+### OCCT Planar Faceted BRep
 
-- `BRep_Builder` can create faces with `Poly_Triangulation` geometry.
-- `BRepAlgoAPI_Cut` / `Fuse` / `Common` work on mixed exact+poly solids.
-- STEP export writes poly faces as faceted BRep (AS1/AP203 compatible).
-- Quality of boolean results depends on tessellation density — finer mesh =
-  slower but more stable intersection.
+OCCT's `StlAPI_Reader::Read` internally calls `BRepBuilderAPI_MakeShapeOnMesh`,
+which converts each triangle into:
+- shared `BRepBuilderAPI_MakeVertex` (deduped by index)
+- shared linear `BRepBuilderAPI_MakeEdge`
+- planar `BRepBuilderAPI_MakeFace` per triangle
 
-This is NOT reverse-engineering mesh to NURBS. The poly faces stay poly.
-The boolean algorithm computes intersections on the triangulated shell
-directly.
+Result: a `TopoDS_Compound` of planar faces — real BRep topology with real
+geometry (plane through 3 points), real edges, real vertices. Boolean
+algorithms work on it natively.
 
-### Process Boundary
-
-The Direct OCCT runner is a separate C++ process. The mesh renderer is pure
-Rust. The bridge requires serialization:
-
-```
-Rust mesh renderer
-  → produces csgrs::Mesh (triangles + vertices)
-  → serialize to temp file (.stl or .obj or binary mesh blob)
-  → pass path to OCCT runner plan
-
-OCCT runner
-  → reads mesh file
-  → BRepBuilder creates poly shell from triangles
-  → continues with hybrid boolean plan
-```
-
-The `OcctPlan` schema gains a new command type:
-
-```json
-{
-  "op": "import_poly_mesh",
-  "meshPath": "/tmp/ecky-mesh-xxxxx.stl",
-  "resultSlot": "poly_shell_1"
-}
-```
-
-Subsequent `cut` / `fuse` commands reference `poly_shell_1` as an operand,
-same as any other shape slot.
-
-### Short-Circuit: Pure Mesh Path
-
-If partition analysis finds no post-boundary BRep ops (all ops after the
-boundary are mesh-safe), skip T4/T5 entirely:
+**Critical step: solidify.** `StlAPI_Reader` produces a compound of faces,
+NOT a solid. `BRepAlgoAPI_Cut` on an unsewn compound produces non-manifold
+garbage (73 non-manifold edges in the VertexGenie proof) because OCCT cannot
+determine inside/outside without shell topology. The `solidify` OcctOp solves
+this:
 
 ```
-wall-pattern → chamfer (mesh) → difference (mesh)
-                                          ↑ all mesh-safe
-→ mesh renderer output is final STL, no OCCT round-trip
+BRepBuilderAPI_Sewing(1.0e-6)  → merges coincident edges → closed shell
+BRepBuilderAPI_MakeSolid(shell) → closes shell into solid
+VolumeProperties check          → reverse if inverted
 ```
 
-This preserves current behavior for models where mesh-only output is
-acceptable and avoids OCCT overhead.
+This is proven: `solidify(import-stl(genie))` → `difference(cylinder)` → 0
+non-manifold edges. Without `solidify`: 73 non-manifold edges.
 
-### Short-Circuit: Pure OCCT Path
+### The `solidify` OcctOp
 
-If no mesh-only ops exist in the part, partition analysis returns no
-boundary → standard OCCT exact path. Zero overhead, zero regression.
+Added as `OcctOp::Solidify` to the enum. Takes one shape operand (a compound
+of faces). Emits C++ that sews + makes solid. The pattern mirrors the existing
+`solidify_swept_shell` C++ helper already used by the hull operation.
+
+Source: `src-tauri/src/ecky_cad_host/direct_occt_executor.rs`,
+`OcctOp::Solidify` match arm.
+
+### Hybrid Dispatch Wiring (the remaining work)
+
+In `render_model_unlocked` (services/render.rs), after the existing
+backend-resolution logic:
+
+```
+1. If source is Ecky IR:
+   a. Compile to CoreProgram.
+   b. Run poly_partition::analyze_program(program).
+   c. If ALL parts are PureOcct → existing OCCT path.
+   d. If ALL parts are PureMesh → existing mesh path.
+   e. If ANY part is Hybrid → hybrid pipeline for those parts.
+```
+
+For each Hybrid part:
+
+```
+1. Render the part through the mesh renderer (existing path, unmodified).
+   The mesh renderer handles extrude + wall-pattern + mesh-safe transforms.
+2. The mesh renderer produces an STL at a known path.
+3. Construct an OCCT plan for the post-boundary ops:
+   - import-stl(mesh_stl_path) → solidify → [post-boundary ops]
+   - Post-boundary ops are reconstructed from the CoreNode tree: everything
+     above the boundary that is BRep-required (difference, chamfer, etc.).
+   This reconstruction is the main implementation challenge — the part tree
+     above the boundary may be deeply nested.
+4. Execute the OCCT plan → STL + STEP export.
+```
+
+### Short-Circuit Paths
+
+- **PureOcct** (no mesh ops): standard OCCT exact path. Zero overhead, zero
+  regression.
+- **PureMesh** (mesh ops but no BRep-required consumer): standard mesh
+  renderer path. Zero overhead, zero regression.
+- These cover the majority of existing models. Only Hybrid parts pay the
+  bridge cost.
 
 ## Design Decisions
 
-### Decision: Tessellate at boundary, not per-op
+### Decision: mesh renderer handles the full pre-boundary chain
 
-Tessellate once when crossing the exact→mesh boundary. This gives the
-displacement op a clean, uniform mesh to work with. Retessellating per
-operation would fragment topology.
+The mesh renderer already evaluates extrude, profile, and wall-pattern. We do
+not need to tessellate OCCT exact geometry and feed it to wall-pattern. This
+avoids the T2 (OCCT tessellation) and T3 (mesh ops on external mesh) tasks
+from the original design. Trade-off: the base geometry under wall-pattern is
+the mesh renderer's tessellation, not OCCT's exact NURBS. This is acceptable
+because wall-pattern displaces the surface anyway — the exact base precision
+is lost regardless.
 
-### Decision: Poly BRep for post-boundary, not mesh CSG
+### Decision: solidify is a separate op, not bundled into import-stl
 
-Post-boundary booleans go through OCCT, not the Rust mesh CSG. This is the
-core fix: OCCT boolean over poly shells is stable because OCCT's intersection
-algorithm works on the BRep topology graph, not on raw triangle soup. The
-Rust mesh CSG (`csgrs`) fails on displaced meshes because it assumes
-coincident vertices and clean edge topology that displacement destroys.
+`import-stl` is used in existing models where a compound of faces is the
+desired output (no booleans follow). `solidify` is opt-in for the hybrid path
+where booleans need a solid. Keeping them separate preserves existing import-stl
+behavior and makes the intent explicit in the plan.
 
-### Decision: Chamfer/fillet on poly edges is best-effort
+### Decision: post-boundary boolean ops run in OCCT, not mesh CSG
 
-OCCT `BRepFilletAPI_MakeChamfer` on polyhedral edges may produce approximate
-results. This is acceptable — the user chose mesh displacement, accepting
-surface approximation. The alternative (mesh chamfer) is the current
-non-working path.
+This is the core fix. OCCT boolean over solidified poly shells is stable
+because OCCT's intersection algorithm works on the BRep topology graph, not
+on raw triangle soup. The mesh CSG (csgrs) fails on displaced meshes because
+it assumes coincident vertices and clean edge topology that displacement
+destroys.
 
-### Decision: MeshAsset interface for future generated content
+### Decision: no MeshAsset abstraction yet
 
-Define `MeshAsset` as the pipeline entry point for any triangle mesh that
-needs to enter OCCT:
-
-```
-enum MeshSource {
-    WallPattern { spec: WallPatternSpec, target: Mesh },
-    ImportedMesh { path: String },
-    // future:
-    // ImageRelief { image: ImageBuffer, depth: f64 },
-    // GeneratedMesh { prompt: String },
-}
-```
-
-`wall-pattern` becomes `MeshSource::WallPattern`. Future image/relief/AI
-content adds variants. All flow through the same poly BRep bridge.
+There is one mesh source today: `wall-pattern`. The bridge works on any STL
+path. When a second source (imported mesh, image relief, AI-generated) exists,
+it plugs into the same `import-stl` + `solidify` path. Designing the enum now
+would be premature.
 
 ## Technical Risks
+
+### Risk: post-boundary op tree reconstruction
+
+Extracting the post-boundary BRep ops from the CoreNode tree and rebuilding
+them as an OCCT plan is the main implementation challenge. The tree above the
+boundary may have transforms, conditionals, and nested operations. The
+partition analysis identifies boundary node IDs; the dispatch must slice the
+tree and rebuild the OCCT-side plan.
+
+Mitigation: start with the common case (single difference with exact
+cylinders/boxes as cutters). The iPhone 17e case fits this pattern. Generalize
+incrementally.
 
 ### Risk: OCCT poly boolean performance
 
 Boolean over dense poly shells (100k+ triangles from fine displacement) can
-be slow (seconds to minutes). Mitigation: control tessellation density at
-the boundary, allow coarse poly for boolean, fine poly for final export.
+be slow. The VertexGenie (120 triangles) boolean runs in ~5s. A real phone
+case with thousands of displaced triangles may be slower. Mitigation: control
+tessellation density at the mesh renderer stage; allow coarse poly for the
+boolean pass if profiling shows a need.
 
-### Risk: OCCT poly boolean instability
+### Risk: chamfer/fillet on poly edges
 
-General Fuse Algorithm on mixed representation is tolerance-sensitive.
-Degenerate triangles (zero-area, collinear) from displacement can cause
-intersection failures. Mitigation: mesh sanitization (already implemented)
-before poly BRep wrapping. The current `sanitize_mesh_for_export` is the
-first layer; poly BRep wrapping adds a second validation layer.
+OCCT `BRepFilletAPI_MakeChamfer` on polyhedral edges may produce approximate
+results. This is acceptable — the user chose mesh displacement, accepting
+surface approximation.
 
 ### Risk: STEP file size
 
-Poly faces inflate STEP files (triangulated BRep is verbose). Mitigation:
-only export STEP for parts with exact geometry; mark poly-only parts as
-STL-only in the manifest.
+Poly faces inflate STEP files. The VertexGenie STEP is 271KB for 120 faces.
+A real phone case could be large. Mitigation: the STEP is still valid and
+importable; size is a warning, not a blocker.

@@ -138,6 +138,7 @@ pub enum OcctOp {
     Mirror,
     Compound,
     Hull,
+    Solidify,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3286,6 +3287,7 @@ fn occt_op(op: &CoreOperation) -> AppResult<OcctOp> {
         CoreOperation::Transform(CoreTransformOp::Mirror) => Ok(OcctOp::Mirror),
         CoreOperation::Meta(CoreMetaOp::Group) => Ok(OcctOp::Compound),
         CoreOperation::Custom(name) if name == "hull" => Ok(OcctOp::Hull),
+        CoreOperation::Custom(name) if name == "solidify" => Ok(OcctOp::Solidify),
         CoreOperation::Custom(name) if name == "hole" => Err(bk_op(AuthoringReason::Unsupported, "hole",
             "Typed hole must be filled before direct OCCT planning.",
         )),

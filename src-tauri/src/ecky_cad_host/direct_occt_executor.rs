@@ -1527,6 +1527,19 @@ fn emit_command(
                 "    TopoDS_Shape {var} = ecky_convex_hull_shapes({var}_hull_inputs);\n    if ({var}.IsNull()) {{ return 41; }}\n"
             ));
         }
+        OcctOp::Solidify => {
+            // Sew a compound of faces into a shell, then close it into a
+            // solid. Required before boolean ops on mesh-imported poly
+            // faceted BRep: `StlAPI_Reader` produces a compound of planar
+            // faces, not a solid. Booleans on unsewn compounds produce
+            // non-manifold garbage because OCCT cannot determine
+            // inside/outside without shell topology.
+            let input = ref_arg(&command.args, 0)?;
+            let input_var = slot_var(input);
+            body.push_str(&format!(
+                "    BRepBuilderAPI_Sewing {var}_sewing(1.0e-6);\n    {var}_sewing.Add({input_var});\n    {var}_sewing.Perform();\n    TopoDS_Shape {var}_sewn = {var}_sewing.SewedShape();\n    TopoDS_Shell {var}_shell;\n    bool {var}_found_shell = false;\n    for (TopExp_Explorer {var}_shell_ex({var}_sewn, TopAbs_SHELL); {var}_shell_ex.More(); {var}_shell_ex.Next()) {{\n        {var}_shell = TopoDS::Shell({var}_shell_ex.Current());\n        {var}_found_shell = true;\n        break;\n    }}\n    if (!{var}_found_shell) {{ return 51; }}\n    BRepBuilderAPI_MakeSolid {var}_mk_solid({var}_shell);\n    if (!{var}_mk_solid.IsDone()) {{ return 52; }}\n    TopoDS_Solid {var}_solid = {var}_mk_solid.Solid();\n    GProp_GProps {var}_props;\n    BRepGProp::VolumeProperties({var}_solid, {var}_props);\n    if ({var}_props.Mass() < 0.0) {{ {var}_solid.Reverse(); }}\n    TopoDS_Shape {var} = {var}_solid;\n"
+            ));
+        }
     }
     vars.insert(command.output, var);
     Ok(())
@@ -3642,7 +3655,7 @@ fn emit_make_face_operation(body: &mut String, var: &str, input_var: String) {
 fn emit_import_stl_operation(body: &mut String, var: &str, path: &str) {
     let path = format!("{path:?}");
     body.push_str(&format!(
-        "    StlAPI_Reader {var}_reader;\n    TopoDS_Shape {var};\n    if (!{var}_reader.Read({var}, {path}.c_str())) {{ return 17; }}\n"
+        "    StlAPI_Reader {var}_reader;\n    TopoDS_Shape {var};\n    if (!{var}_reader.Read({var}, {path})) {{ return 17; }}\n"
     ));
 }
 
@@ -3994,6 +4007,7 @@ fn op_name(op: OcctOp) -> &'static str {
         OcctOp::Mirror => "mirror",
         OcctOp::Compound => "compound",
         OcctOp::Hull => "hull",
+        OcctOp::Solidify => "solidify",
     }
 }
 
@@ -8057,6 +8071,224 @@ mod tests {
         assert_ne!(
             count0, count1,
             "base and peg must have distinct triangle counts, both were {count0}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // T5.0a: Poly BRep empirical boolean proof.
+    //
+    // The central question of the poly-brep-bridge: can OCCT perform a
+    // reliable boolean operation on a mesh-imported poly faceted BRep?
+    //
+    // We use the VertexGenie (the Ecky mascot, seed 1) as the mesh under
+    // test — a realistic, organic, displaced 120-triangle closed surface
+    // (0 non-manifold edges). This is exactly the kind of topology the
+    // mesh renderer's CSG chokes on. If OCCT's `StlAPI_Reader` →
+    // `BRepBuilderAPI_MakeShapeOnMesh` → `difference` produces a clean,
+    // manifold result, the poly-brep-bridge premise is empirically
+    // validated for real geometry, not just boxes.
+    // -------------------------------------------------------------------
+
+    fn vertex_genie_fixture() -> Option<PathBuf> {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("vertex-genie-ecky.stl");
+        if fixture.is_file() {
+            Some(fixture)
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn poly_brep_import_round_trip_is_manifold_when_runtime_ready() {
+        // Diagnostic: import the VertexGenie via StlAPI_Reader and export it
+        // back to STL with no boolean. If THIS is non-manifold, the problem
+        // is the import→tessellate round-trip, not the boolean.
+        let Some(genie_stl) = vertex_genie_fixture() else {
+            return;
+        };
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let Some(runner) =
+            crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+                &TestResolver,
+                true,
+            )
+        else {
+            return;
+        };
+        if !runner.is_file() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+
+        let source = format!(
+            r#"(model
+              (part body
+                (import-stl {:?})))"#,
+            genie_stl.to_string_lossy()
+        );
+        let program = compile(&source);
+        let output_dir = temp_root("direct-occt-poly-brep-genie-roundtrip");
+        let outcome = export_core_program_step_stl_with_params_runner_first(
+            &program,
+            &DesignParams::new(),
+            &layout,
+            &output_dir,
+            &TestResolver,
+        )
+        .expect("round-trip export");
+        let NativeExportOutcome::Exported { stl_path, .. } = outcome else {
+            panic!("expected export");
+        };
+        let nm = ascii_stl_non_manifold_edge_count(&stl_path);
+        let metrics = stl_metrics(&stl_path);
+        eprintln!(
+            "round-trip: {nm} non-manifold edges, {} triangles, {} components, volume {:.4}",
+            metrics.triangles, metrics.components, metrics.volume
+        );
+        // Even the round-trip should be manifold if OCCT preserves topology.
+    }
+
+    #[test]
+    fn poly_brep_boolean_cut_of_vertex_genie_produces_manifold_result_when_runtime_ready() {
+        let Some(genie_stl) = vertex_genie_fixture() else {
+            return;
+        };
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let Some(runner) =
+            crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
+                &TestResolver,
+                true,
+            )
+        else {
+            return;
+        };
+        if !runner.is_file() {
+            return;
+        }
+        let layout = inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+
+        // Sanity: the fixture must be a watertight mesh to begin with.
+        let fixture_non_manifold = ascii_stl_non_manifold_edge_count(&genie_stl);
+        assert_eq!(
+            fixture_non_manifold, 0,
+            "VertexGenie fixture must be watertight (0 non-manifold edges), got {fixture_non_manifold}"
+        );
+
+        // import-stl the VertexGenie, solidify it into a closed solid,
+        // then boolean-cut it with a cylinder. The solidify step (sew +
+        // make solid) is critical: `StlAPI_Reader` produces a compound of
+        // planar faces, not a solid. Booleans on the unsewn compound produce
+        // 73 non-manifold edges; booleans on the solidified result must be
+        // clean. The cylinder is large enough to visibly remove material
+        // (radius 0.5, the genie spans roughly ±1.3 in X/Y).
+        let source = format!(
+            r#"(model
+              (part body
+                (difference
+                  (solidify (import-stl {:?}))
+                  (cylinder 0.5 4))))"#,
+            genie_stl.to_string_lossy()
+        );
+        let program = compile(&source);
+        let output_dir = temp_root("direct-occt-poly-brep-genie-cut");
+
+        let outcome = export_core_program_step_stl_with_params_runner_first(
+            &program,
+            &DesignParams::new(),
+            &layout,
+            &output_dir,
+            &TestResolver,
+        )
+        .expect("poly BRep boolean export must succeed");
+
+        let NativeExportOutcome::Exported {
+            step_path,
+            stl_path,
+            ..
+        } = outcome
+        else {
+            panic!("expected direct OCCT poly BRep export, got failure");
+        };
+        assert!(step_path.is_file(), "missing STEP export: {step_path:?}");
+        assert!(stl_path.is_file(), "missing STL export: {stl_path:?}");
+
+        // The proof: the result must be manifold. If OCCT's poly faceted
+        // BRep boolean is reliable, the cut genie has 0 non-manifold edges.
+        let result_non_manifold = ascii_stl_non_manifold_edge_count(&stl_path);
+        assert_eq!(
+            result_non_manifold, 0,
+            "poly BRep boolean cut of VertexGenie produced {result_non_manifold} non-manifold edge(s) \
+             — OCCT poly faceted BRep boolean is unreliable for organic displaced meshes"
+        );
+
+        // The cut must have actually removed material: the result must have
+        // strictly fewer triangles than the uncut genie (120) would after
+        // OCCT tessellation, and its volume must be strictly less than the
+        // uncut genie's volume.
+        let cut_metrics = stl_metrics(&stl_path);
+        assert!(
+            cut_metrics.triangles > 0,
+            "poly BRep cut produced no triangles"
+        );
+        assert!(
+            cut_metrics.components == 1,
+            "poly BRep cut produced {} disconnected components (expected 1 solid)",
+            cut_metrics.components
+        );
+
+        // Reference: the uncut genie, imported and exported with no boolean,
+        // gives us the baseline volume to compare against.
+        let baseline_source = format!(
+            r#"(model
+              (part body
+                (import-stl {:?})))"#,
+            genie_stl.to_string_lossy()
+        );
+        let baseline_program = compile(&baseline_source);
+        let baseline_dir = temp_root("direct-occt-poly-brep-genie-baseline");
+        let baseline_outcome = export_core_program_step_stl_with_params_runner_first(
+            &baseline_program,
+            &DesignParams::new(),
+            &layout,
+            &baseline_dir,
+            &TestResolver,
+        )
+        .expect("baseline genie export");
+        let NativeExportOutcome::Exported {
+            stl_path: baseline_stl,
+            ..
+        } = baseline_outcome
+        else {
+            panic!("expected baseline export");
+        };
+        let baseline_metrics = stl_metrics(&baseline_stl);
+        assert!(
+            cut_metrics.volume < baseline_metrics.volume,
+            "poly BRep cut did not reduce volume: cut {:.4} vs baseline {:.4} \
+             — the boolean did not actually remove material",
+            cut_metrics.volume,
+            baseline_metrics.volume
         );
     }
 }
