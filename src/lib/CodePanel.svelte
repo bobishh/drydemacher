@@ -12,10 +12,12 @@
     code = $bindable(''),
     sourceLanguage = null,
     onchange,
+    highlightLine = null,
   }: {
     code?: string;
     sourceLanguage?: string | null;
     onchange?: (code: string) => void;
+    highlightLine?: number | null;
   } = $props();
 
   let editorContainer: HTMLDivElement;
@@ -87,6 +89,17 @@
         changes: { from: 0, to: view.state.doc.length, insert: code },
       });
     }
+  });
+
+  // Scroll editor to a highlighted line (e.g. on compile error)
+  $effect(() => {
+    if (!view || highlightLine === null || highlightLine <= 0) return;
+    const line = view.state.doc.line(Math.min(highlightLine, view.state.doc.lines));
+    view.dispatch({
+      selection: { anchor: line.from, head: line.to },
+      scrollIntoView: true,
+    });
+    view.focus();
   });
 
   $effect(() => {

@@ -172,14 +172,54 @@ impl Align3d {
     }
 }
 
+/// Pre-triangulate a mesh for STL export, discarding degenerate polygons
+/// that would panic `earcutr`.
+///
+/// After CSG operations on displaced meshes (e.g. `wall-pattern`), some
+/// resulting n-gons may have collinear or duplicate vertices that cause
+/// `earcutr::add_contour` to panic during triangulation. This function
+/// catches those panics via `catch_unwind` and silently drops the
+/// offending polygons, producing a clean triangulated mesh where every
+/// polygon is a 3-vertex triangle. `csgrs::Mesh::to_stl_binary` has a
+/// fast path for triangles that never enters earcutr, so the subsequent
+/// export is safe.
+pub(super) fn sanitize_mesh_for_export(mesh: &IrMesh) -> IrMesh {
+    let mut triangles = Vec::new();
+    for poly in &mesh.polygons {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            poly.triangulate()
+        }));
+        match result {
+            Ok(tris) if !tris.is_empty() => {
+                for tri in tris {
+                    triangles.push(IrPolygon::new(
+                        tri.to_vec(),
+                        poly.metadata.clone(),
+                    ));
+                }
+            }
+            _ => { /* degenerate polygon — skip */ }
+        }
+    }
+    IrMesh::from_polygons(&triangles, mesh.metadata.clone())
+}
+
 fn is_empty_mesh(mesh: &IrMesh) -> bool {
-    mesh.triangulate().polygons.is_empty()
+    // Check polygon count directly — do NOT call `.triangulate()`.
+    // After CSG operations on displaced meshes (e.g. `wall-pattern`),
+    // csgrs may produce degenerate polygons (collinear or duplicate
+    // vertices) that cause `earcutr` to panic during triangulation.
+    // An emptiness check never needs triangulation.
+    mesh.polygons.is_empty()
 }
 
 fn compound_mesh(meshes: &[IrMesh]) -> IrMesh {
+    // Concatenate raw polygons without triangulating. Triangulation is
+    // unnecessary for combining meshes and can panic on degenerate
+    // polygons produced by CSG ops over displaced (wall-pattern) meshes.
     let mut polygons = Vec::new();
     for mesh in meshes {
-        polygons.extend(mesh.triangulate().polygons);
+        polygons.extend(mesh.polygons.iter().cloned());
     }
     IrMesh::from_polygons(&polygons, None)
 }

@@ -3576,6 +3576,79 @@ exit 5
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// Regression: iPhone 17e case — a 3-part Ecky source that combines
+    /// `wall-pattern` (cellular displacement) on the TPU back panel, then
+    /// runs CSG `difference` / `chamfer` / `union` over the displaced mesh.
+    ///
+    /// Previously this panicked inside `earcutr` (triangulation of a
+    /// degenerate polygon produced by the CSG library after vertex
+    /// displacement). The renderer must either produce valid geometry or
+    /// return a clean `AppError` — it must never panic the worker thread.
+    #[tokio::test]
+    async fn ecky_rust_renders_iphone_case_wall_pattern_csg_without_panic() {
+        let root = temp_root("iphone-case-wall-pattern");
+        let resolver = TestResolver { root: root.clone() };
+        let source = example_fixture_source("iphone-17e-case-multipart.ecky");
+
+        let result = render_model(
+            &source,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &test_state(&root),
+            &resolver,
+        )
+        .await;
+
+        // The critical assertion: no panic, and either success or a
+        // well-formed AppError. A thread panic is a test failure by
+        // definition (the .await never resolves).
+        match result {
+            Ok(bundle) => {
+                assert!(
+                    !bundle.preview_stl_path.is_empty(),
+                    "must produce a preview STL"
+                );
+                assert!(
+                    std::path::Path::new(&bundle.preview_stl_path).is_file(),
+                    "preview STL must exist on disk"
+                );
+                let manifest =
+                    load_manifest_for_bundle(&bundle).expect("load manifest");
+                if let Some(manifest) = manifest {
+                    assert_eq!(
+                        manifest.document.object_count, 3,
+                        "three parts expected"
+                    );
+                    let part_ids: Vec<_> = manifest
+                        .parts
+                        .iter()
+                        .map(|p| p.part_id.as_str())
+                        .collect();
+                    assert_eq!(
+                        part_ids,
+                        vec![
+                            "iphone-17e-tpu-case",
+                            "camera-frame-outer-petg",
+                            "camera-frame-inner-petg"
+                        ]
+                    );
+                }
+            }
+            Err(err) => {
+                // If it fails, it must be a clean validation/runtime error —
+                // NOT a panic. We surface the error so the test message is
+                // actionable, but we fail: the goal is a successful render.
+                panic!(
+                    "iPhone case wall-pattern render failed (expected success): {err:?}"
+                );
+            }
+        }
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// Phase 7: post-processing is backend-agnostic.
     ///
     /// Render a model via the EckyRust backend, then override the bundle's
