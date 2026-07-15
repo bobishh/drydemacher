@@ -10,6 +10,21 @@
     insertVerifyTemplate,
     looksLikeEckyModelSource,
   } from './verifyTemplate';
+  import { formatBackendError } from './tauri/client';
+
+  /** Parse a line number (1-based) from an error message or object. */
+  function parseErrorLine(error: unknown): number | null {
+    // Check direct fields on AppError-shaped objects
+    const startLine = (error as { startLine?: number | null } | null)?.startLine;
+    const ctxStart = (error as { diagnosticContext?: { startLine?: number | null } | null } | null)
+      ?.diagnosticContext?.startLine;
+    const direct = startLine ?? ctxStart;
+    if (typeof direct === 'number' && direct > 0) return direct;
+    // Fallback: scan formatted text for 'line N'
+    const text = formatBackendError(error);
+    const match = text.match(/line\s+(\d+)/i);
+    return match ? parseInt(match[1], 10) : null;
+  }
 
   type CodeModalCommitPayload = {
     code: string;
@@ -58,6 +73,7 @@
   let verifyState = $state<'idle' | 'inserted' | 'exists'>('idle');
   let commitState = $state<'idle' | 'applying' | 'committing'>('idle');
   let commitError = $state('');
+  let errorLine = $state<number | null>(null);
   let draftTitle = $state('');
   let draftVersionName = $state('');
   let initializedDraftFields = $state(false);
@@ -76,15 +92,7 @@
     }
   });
 
-  function formatCommitError(error: unknown): string {
-    if (error instanceof Error) return error.message;
-    if (typeof error === 'string') return error;
-    try {
-      return JSON.stringify(error);
-    } catch {
-      return String(error);
-    }
-  }
+
 
   async function copyCode() {
     try {
@@ -100,11 +108,13 @@
     if (!onApply || commitState !== 'idle') return;
     commitState = 'applying';
     commitError = '';
+    errorLine = null;
     try {
       await onApply(code);
     } catch (e: unknown) {
       console.error('Failed to apply code:', e);
-      commitError = formatCommitError(e);
+      commitError = formatBackendError(e);
+      errorLine = parseErrorLine(e);
     } finally {
       commitState = 'idle';
     }
@@ -122,11 +132,13 @@
     if (!onCommit || commitState !== 'idle') return;
     commitState = 'committing';
     commitError = '';
+    errorLine = null;
     try {
       await onCommit(commitPayload());
     } catch (e: unknown) {
       console.error('Failed to commit code:', e);
-      commitError = formatCommitError(e);
+      commitError = formatBackendError(e);
+      errorLine = parseErrorLine(e);
     } finally {
       commitState = 'idle';
     }
@@ -166,6 +178,7 @@
       <CodePanel
         code={code}
         {sourceLanguage}
+        highlightLine={errorLine}
         onchange={handleCodeChange}
       />
     </div>

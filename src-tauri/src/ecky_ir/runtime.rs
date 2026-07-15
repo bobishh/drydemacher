@@ -13,7 +13,7 @@ use crate::models::{
     SourceLanguage, SourceRef, ViewerAsset, ViewerAssetFormat, MODEL_RUNTIME_SCHEMA_VERSION,
 };
 
-use super::mesh_ops::eval_geometry_expr;
+use super::mesh_ops::{eval_geometry_expr, sanitize_mesh_for_export};
 use super::model::{
     build_param_env, core_program_param_defaults, materialize_selector_nodes, parse_model,
     parsed_params_from_core_program, parsed_params_from_model, IrExpr, IrModel,
@@ -1070,7 +1070,9 @@ fn render_prepared_parts(
     let mut preview_mesh: Option<IrMesh> = None;
 
     for (index, part) in parts.iter().enumerate() {
-        let mesh = eval_geometry_expr(&part.expr, env)?.into_mesh("part")?;
+        let mesh = sanitize_mesh_for_export(
+            &eval_geometry_expr(&part.expr, env)?.into_mesh("part")?,
+        );
         let part_path = parts_dir.join(format!("{}-{}.stl", index + 1, part.part_id));
         fs::write(
             &part_path,
@@ -1111,6 +1113,7 @@ fn render_prepared_parts(
 
     let preview_mesh =
         preview_mesh.ok_or_else(|| validation("`.ecky` model produced no printable parts."))?;
+    let preview_mesh = sanitize_mesh_for_export(&preview_mesh);
     let preview_path = dir.join(PREVIEW_STL_FILE_NAME);
     fs::write(
         &preview_path,
