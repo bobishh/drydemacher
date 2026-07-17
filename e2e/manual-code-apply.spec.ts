@@ -15,11 +15,28 @@ declare global {
       sourceLanguage?: 'legacyPython' | 'ecky';
       macroCode?: string;
     };
+    __emitTauriEvent?: (event: string, payload: unknown) => void;
   }
 }
 
 function manualCodeApplyMockScript() {
   window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
+  const eventHandlers = new Map<string, number>();
+  let nextCallbackId = 1;
+  window.__TAURI_INTERNALS__.transformCallback = (callback: unknown) => {
+    const callbackId = nextCallbackId++;
+    (window as unknown as Record<string, unknown>)[`_${callbackId}`] = callback;
+    return callbackId;
+  };
+  window.__emitTauriEvent = (event, payload) => {
+    const callbackId = eventHandlers.get(event);
+    const callback = callbackId
+      ? (window as unknown as Record<string, unknown>)[`_${callbackId}`]
+      : null;
+    if (typeof callback === 'function') {
+      callback({ event, id: callbackId, payload });
+    }
+  };
   window.__manualCodeApplyMock = {
     addManualVersionCalls: [],
     renderModelCalls: [],
@@ -41,6 +58,11 @@ function manualCodeApplyMockScript() {
   };
 
   window.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: Record<string, unknown>) => {
+    if (cmd === 'plugin:event|listen') {
+      eventHandlers.set(String(args?.event ?? ''), Number(args?.handler));
+      return Number(args?.handler);
+    }
+    if (cmd === 'plugin:event|unlisten') return null;
     if (cmd === 'get_config') {
       return {
         engines: [{ id: 'mock', name: 'Mock' }],
@@ -262,6 +284,88 @@ endsolid mock
 }
 
 test.describe('Manual code apply/version coverage', () => {
+  test('Given warning MCP preview params differ from the current panel When preview becomes active Then UI shows the rendered params', async ({
+    page,
+  }) => {
+    await bootManualCodeFlow(page);
+
+    await page.evaluate(() => {
+      const artifactBundle = {
+        modelId: 'agent-preview-model',
+        sourceKind: 'generated',
+        sourceLanguage: 'legacyPython',
+        geometryBackend: 'freecad',
+        engineKind: 'freecad',
+        contentHash: 'agent-preview-hash',
+        artifactVersion: 1,
+        fcstdPath: '/mock-preview.FCStd',
+        manifestPath: '/mock-preview/manifest.json',
+        macroPath: '/mock-preview.py',
+        previewStlPath: '/mock-25.stl',
+        viewerAssets: [],
+        calloutAnchors: [],
+        measurementGuides: [],
+        edgeTargets: [],
+        faceTargets: [],
+      };
+      const modelManifest = {
+        modelId: 'agent-preview-model',
+        sourceKind: 'generated',
+        sourceLanguage: 'legacyPython',
+        geometryBackend: 'freecad',
+        document: {
+          documentName: 'Bracket',
+          documentLabel: 'Bracket',
+          objectCount: 0,
+          warnings: [],
+        },
+        parts: [],
+        parameterGroups: [],
+        controlPrimitives: [],
+        controlRelations: [],
+        controlViews: [],
+        selectionTargets: [],
+        advisories: [],
+        measurementAnnotations: [],
+        warnings: [],
+        enrichmentState: { status: 'none', proposals: [] },
+      };
+      window.__emitTauriEvent?.('agent-draft-preview-updated', {
+        sessionId: 'agent-session',
+        threadId: 'mock-thread-1',
+        previewId: 'agent-preview-25',
+        baseMessageId: 'mock-msg-1',
+        modelId: 'agent-preview-model',
+        design: {
+          title: 'Bracket',
+          versionName: '',
+          interactionMode: 'tune',
+          macroCode: 'print("base bracket")',
+          sourceLanguage: 'legacyPython',
+          geometryBackend: 'freecad',
+          engineKind: 'freecad',
+          uiSpec: {
+            fields: [{ type: 'number', key: 'width', label: 'Width' }],
+          },
+          initialParams: { width: 25 },
+          postProcessing: null,
+        },
+        artifactBundle,
+        modelManifest,
+        feedback: {
+          status: 'warning',
+          summary: 'Preview requires inspection.',
+          items: [],
+          source: 'structuralVerification',
+        },
+      });
+    });
+
+    const widthInput = page.locator('[data-param-key="width"] input[type="number"]').first();
+    await expect(widthInput).toHaveValue('25');
+    await expect(page.getByTestId('genie-session-bubble')).toContainText('Preview requires inspection.');
+  });
+
   test('Given edited code draft When applying without commit Then render uses current params and add_manual_version stays untouched', async ({ page }) => {
     await bootManualCodeFlow(page);
 
