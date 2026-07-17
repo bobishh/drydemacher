@@ -23,6 +23,7 @@ use crate::models::{InteractionMode, MacroDialect, UiSpec};
 use crate::services::history;
 
 mod artifact_read;
+mod authoring_actor;
 mod compare;
 mod component;
 pub(super) mod ecky_ast;
@@ -40,6 +41,10 @@ mod verify;
 mod version_write;
 
 pub use artifact_read::{handle_artifact_feature_graph_get, handle_artifact_manifest_get};
+use authoring_actor::{
+    acquire_authoring_actor_publish_permit, forget_authoring_actors_for_session,
+    reserve_authoring_actor_revision, AuthoringActorRevision,
+};
 pub use compare::handle_compare_models;
 pub use component::{
     handle_component_extract, handle_component_get, handle_component_search,
@@ -546,6 +551,23 @@ pub(super) fn try_record_agent_error(
     model_id: Option<String>,
     err: &AppError,
 ) {
+    if is_authoring_actor_superseded(err) {
+        push_trace_event_with_conn(
+            state,
+            conn,
+            ctx,
+            TraceEvent {
+                thread_id,
+                message_id,
+                model_id,
+                phase: "idle",
+                kind: "tool_superseded",
+                summary: err.message.clone(),
+                details: err.details.clone(),
+            },
+        );
+        return;
+    }
     let _ = persist_agent_session(
         conn,
         ctx,
@@ -569,6 +591,11 @@ pub(super) fn try_record_agent_error(
             details: err.details.clone(),
         },
     );
+}
+
+fn is_authoring_actor_superseded(err: &AppError) -> bool {
+    err.code == crate::contracts::AppErrorCode::Conflict
+        && err.operation.as_deref() == Some("authoring_actor_publish")
 }
 
 pub(super) fn dialogue_identity(ctx: &AgentContext) -> agent_dialogue::AgentDialogueIdentity {
@@ -884,6 +911,9 @@ pub(super) async fn settle_live_render_phase<T>(
     };
     let (phase, status_text) = match result {
         Ok(_) => ("idle", Some("Ready.".to_string())),
+        Err(err) if is_authoring_actor_superseded(err) => {
+            ("idle", Some(err.message.clone()))
+        }
         Err(err) => ("error", Some(err.message.clone())),
     };
     mark_live_session_idle(
@@ -1316,6 +1346,7 @@ pub(super) async fn clear_session_render_preview_durable(
     session_id: &str,
 ) -> AppResult<()> {
     clear_session_render_preview(session_id);
+    forget_authoring_actors_for_session(session_id);
     let conn = state.db.lock().await;
     db::delete_agent_draft_for_session(&conn, session_id)
         .map_err(|e| AppError::persistence(e.to_string()))?;
@@ -1323,6 +1354,29 @@ pub(super) async fn clear_session_render_preview_durable(
 }
 
 pub async fn store_session_render_preview(
+    state: &AppState,
+    app: &dyn PathResolver,
+    ctx: &AgentContext,
+    req: StoreSessionRenderPreviewRequest,
+) -> AppResult<SessionRenderPreview> {
+    let revision = reserve_authoring_actor_revision(ctx, &req.thread_id).await;
+    store_session_render_preview_at_revision(state, app, ctx, revision, req).await
+}
+
+async fn store_session_render_preview_at_revision(
+    state: &AppState,
+    app: &dyn PathResolver,
+    ctx: &AgentContext,
+    revision: AuthoringActorRevision,
+    req: StoreSessionRenderPreviewRequest,
+) -> AppResult<SessionRenderPreview> {
+    let mut permit = acquire_authoring_actor_publish_permit(ctx, &req.thread_id, revision).await?;
+    let preview = store_session_render_preview_unchecked(state, app, ctx, req).await?;
+    permit.mark_published();
+    Ok(preview)
+}
+
+async fn store_session_render_preview_unchecked(
     state: &AppState,
     app: &dyn PathResolver,
     ctx: &AgentContext,

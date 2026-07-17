@@ -1,8 +1,8 @@
 use super::{
     artifact_bundle_digest, carry_forward_semantic_manifest,
     draft_feedback_from_structural_verification, persist_agent_session, settle_live_render_phase,
-    store_session_render_preview, try_record_agent_error, AgentContext,
-    StoreSessionRenderPreviewRequest,
+    reserve_authoring_actor_revision, store_session_render_preview_at_revision,
+    try_record_agent_error, AgentContext, StoreSessionRenderPreviewRequest,
 };
 use crate::mcp::contracts::{
     PrintabilityAnalyzeResponse, PrintabilityTransformRecipesGetResponse,
@@ -240,6 +240,14 @@ pub async fn handle_semantic_transform_preview(
 ) -> AppResult<SemanticTransformPreviewResponse> {
     let ctx = ctx.with_override(&req.identity);
     let ctx = &ctx;
+    let requested_actor_revision = if let Some(thread_id) = req.thread_id.as_deref() {
+        Some((
+            thread_id.to_string(),
+            reserve_authoring_actor_revision(ctx, thread_id).await,
+        ))
+    } else {
+        None
+    };
     let mut tracked_thread_id = req.thread_id.clone();
     let mut tracked_message_id = req.message_id.clone();
     let mut tracked_model_id = req.model_id.clone();
@@ -256,6 +264,10 @@ pub async fn handle_semantic_transform_preview(
 
         tracked_thread_id = Some(target.thread_id.clone());
         tracked_message_id = Some(target.message_id.clone());
+        let actor_revision = match requested_actor_revision {
+            Some((ref thread_id, revision)) if thread_id == &target.thread_id => revision,
+            _ => reserve_authoring_actor_revision(ctx, &target.thread_id).await,
+        };
         let requested_model_id = req
             .model_id
             .clone()
@@ -402,10 +414,11 @@ pub async fn handle_semantic_transform_preview(
             &artifact_bundle,
             &model_manifest,
         );
-        let preview = store_session_render_preview(
+        let preview = store_session_render_preview_at_revision(
             state,
             app,
             ctx,
+            actor_revision,
             StoreSessionRenderPreviewRequest {
                 thread_id: target.thread_id.clone(),
                 base_message_id: Some(target.message_id.clone()),

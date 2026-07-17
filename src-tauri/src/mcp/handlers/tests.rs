@@ -7067,6 +7067,91 @@ async fn given_preview_render_when_session_memory_clears_then_commit_by_preview_
 }
 
 #[tokio::test]
+async fn given_parallel_preview_revisions_when_older_finishes_last_then_newer_draft_remains_active(
+) {
+    let (state, resolver) = seed_target().await;
+    let ctx = test_ctx();
+    let older_revision = reserve_authoring_actor_revision(&ctx, "thread-1").await;
+    let newer_revision = reserve_authoring_actor_revision(&ctx, "thread-1").await;
+
+    let newer = store_session_render_preview_at_revision(
+        &state,
+        &resolver,
+        &ctx,
+        newer_revision,
+        StoreSessionRenderPreviewRequest {
+            thread_id: "thread-1".to_string(),
+            base_message_id: Some("msg-1".to_string()),
+            design_output: sample_design("Newer", "", "newer_macro()"),
+            artifact_bundle: sample_bundle("model-newer", "newer.stl"),
+            model_manifest: sample_manifest("model-newer"),
+            draft_feedback: None,
+        },
+    )
+    .await
+    .expect("newer revision publishes");
+
+    let error = store_session_render_preview_at_revision(
+        &state,
+        &resolver,
+        &ctx,
+        older_revision,
+        StoreSessionRenderPreviewRequest {
+            thread_id: "thread-1".to_string(),
+            base_message_id: Some("msg-1".to_string()),
+            design_output: sample_design("Older", "", "older_macro()"),
+            artifact_bundle: sample_bundle("model-older", "older.stl"),
+            model_manifest: sample_manifest("model-older"),
+            draft_feedback: None,
+        },
+    )
+    .await
+    .expect_err("older completion is superseded");
+
+    assert_eq!(error.code, AppErrorCode::Conflict);
+    assert_eq!(error.operation.as_deref(), Some("authoring_actor_publish"));
+    assert!(error.message.contains("superseded"));
+
+    let active = session_render_preview_for_request(
+        &ctx,
+        Some("thread-1"),
+        Some(newer.preview_id.as_str()),
+    )
+    .expect("newer preview remains active");
+    assert_eq!(active.artifact_bundle.model_id, "model-newer");
+
+    let conn = state.db.lock().await;
+    let durable = db::get_agent_draft_for_session(&conn, &ctx.session_id)
+        .expect("durable draft query")
+        .expect("durable newer draft");
+    assert_eq!(durable.preview_id, newer.preview_id);
+    assert_eq!(durable.artifact_bundle.model_id, "model-newer");
+}
+
+#[tokio::test]
+async fn superseded_actor_completion_does_not_mark_agent_session_failed() {
+    let (state, _resolver) = seed_target().await;
+    let ctx = test_ctx();
+    let error = AppError::conflict("Authoring actor render result superseded.")
+        .with_operation("authoring_actor_publish");
+    let conn = state.db.lock().await;
+
+    try_record_agent_error(
+        &state,
+        &conn,
+        &ctx,
+        Some("thread-1".to_string()),
+        Some("msg-1".to_string()),
+        Some("model-old".to_string()),
+        &error,
+    );
+
+    let sessions = db::get_sessions_by_ids(&conn, &[ctx.session_id.clone()])
+        .expect("agent session lookup");
+    assert!(sessions.is_empty(), "superseded work is not a session error");
+}
+
+#[tokio::test]
 async fn measurement_annotation_save_persists_semantic_annotation_in_new_version() {
     let (state, resolver) = seed_target().await;
     let response = handle_measurement_annotation_save(

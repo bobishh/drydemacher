@@ -2,8 +2,9 @@ use super::{
     artifact_bundle_digest, carry_forward_semantic_manifest,
     draft_feedback_from_structural_verification, mark_live_session_busy, persist_agent_session,
     push_mcp_profile, push_trace_event_with_conn, session_render_preview_for_request,
-    session_target_ref, settle_live_render_phase, store_session_render_preview,
-    try_record_agent_error, AgentContext, StoreSessionRenderPreviewRequest, TraceEvent,
+    reserve_authoring_actor_revision, session_target_ref, settle_live_render_phase,
+    store_session_render_preview_at_revision, try_record_agent_error, AgentContext,
+    StoreSessionRenderPreviewRequest, TraceEvent,
 };
 use crate::mcp::contracts::{
     MacroReplaceRequest, MacroReplaceResponse, ParamsPatchRequest, ParamsPatchResponse,
@@ -24,6 +25,14 @@ pub async fn handle_params_preview_render(
 ) -> AppResult<ParamsPatchResponse> {
     let ctx = ctx.with_override(&req.identity);
     let ctx = &ctx;
+    let requested_actor_revision = if let Some(thread_id) = req.thread_id.as_deref() {
+        Some((
+            thread_id.to_string(),
+            reserve_authoring_actor_revision(ctx, thread_id).await,
+        ))
+    } else {
+        None
+    };
     let mut tracked_thread_id = req.thread_id.clone();
     let mut tracked_message_id = req.message_id.clone();
     let mut tracked_model_id = None;
@@ -73,6 +82,10 @@ pub async fn handle_params_preview_render(
         }
         tracked_thread_id = Some(target_thread_id.clone());
         tracked_message_id = Some(target_message_id.clone());
+        let actor_revision = match requested_actor_revision {
+            Some((ref thread_id, revision)) if thread_id == &target_thread_id => revision,
+            _ => reserve_authoring_actor_revision(ctx, &target_thread_id).await,
+        };
 
         persist_agent_session(
             &conn,
@@ -257,10 +270,11 @@ pub async fn handle_params_preview_render(
             &artifact_bundle,
             &model_manifest,
         );
-        let preview = store_session_render_preview(
+        let preview = store_session_render_preview_at_revision(
             state,
             app,
             ctx,
+            actor_revision,
             StoreSessionRenderPreviewRequest {
                 thread_id: target_thread_id.clone(),
                 base_message_id: Some(target_message_id.clone()),
@@ -465,6 +479,14 @@ pub async fn handle_macro_preview_render(
     let total_started = Instant::now();
     let ctx = ctx.with_override(&req.identity);
     let ctx = &ctx;
+    let requested_actor_revision = if let Some(thread_id) = req.thread_id.as_deref() {
+        Some((
+            thread_id.to_string(),
+            reserve_authoring_actor_revision(ctx, thread_id).await,
+        ))
+    } else {
+        None
+    };
     let mut tracked_thread_id = req.thread_id.clone();
     let mut tracked_message_id = req.message_id.clone();
     let mut tracked_model_id = None;
@@ -528,6 +550,10 @@ pub async fn handle_macro_preview_render(
                 post_processing: None,
             };
             (thread_id, stub, None)
+        };
+        let actor_revision = match requested_actor_revision {
+            Some((ref thread_id, revision)) if thread_id == &working_thread_id => revision,
+            _ => reserve_authoring_actor_revision(ctx, &working_thread_id).await,
         };
 
         let conn = state.db.lock().await;
@@ -854,10 +880,11 @@ pub async fn handle_macro_preview_render(
             &model_manifest,
         );
         let store_started = Instant::now();
-        let preview = store_session_render_preview(
+        let preview = store_session_render_preview_at_revision(
             state,
             app,
             ctx,
+            actor_revision,
             StoreSessionRenderPreviewRequest {
                 thread_id: working_thread_id.clone(),
                 base_message_id: tracked_message_id.clone(),
