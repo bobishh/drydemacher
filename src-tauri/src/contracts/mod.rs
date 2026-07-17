@@ -511,6 +511,62 @@ fn default_macro_dialect() -> MacroDialect {
     MacroDialect::Legacy
 }
 
+fn contains_unquoted_lisp_form_head(source: &str, heads: &[&str]) -> bool {
+    let bytes = source.as_bytes();
+    let mut index = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_comment {
+            if byte == b'\n' {
+                in_comment = false;
+            }
+            index += 1;
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b';' => in_comment = true,
+            b'"' => in_string = true,
+            b'(' => {
+                let mut head_start = index + 1;
+                while head_start < bytes.len() && bytes[head_start].is_ascii_whitespace() {
+                    head_start += 1;
+                }
+                for head in heads {
+                    let head_bytes = head.as_bytes();
+                    let head_end = head_start.saturating_add(head_bytes.len());
+                    if head_end <= bytes.len()
+                        && &bytes[head_start..head_end] == head_bytes
+                        && (head_end == bytes.len()
+                            || bytes[head_end].is_ascii_whitespace()
+                            || matches!(bytes[head_end], b'(' | b')'))
+                    {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+
+    false
+}
+
 pub fn infer_macro_dialect_from_code(macro_code: &str) -> MacroDialect {
     // Strip ;; comment lines so a header like
     //   ;; Disable for build123d/FreeCAD fallback.
@@ -525,12 +581,11 @@ pub fn infer_macro_dialect_from_code(macro_code: &str) -> MacroDialect {
     // can appear anywhere (define-component blocks often precede the model block).
     // Check for these forms before the build123d keyword, because Ecky comments
     // or strings may contain "build123d".
-    let is_ecky = trimmed.starts_with("(model")
-        || trimmed.starts_with("(scene")
-        || trimmed.starts_with("(define-component")
-        || trimmed.contains("\n(model ")
-        || trimmed.contains("\n(scene ")
-        || trimmed.contains("\n(define-component ");
+    let is_ecky = trimmed.starts_with('(')
+        && contains_unquoted_lisp_form_head(
+            trimmed,
+            &["model", "scene", "define-component"],
+        );
     if is_ecky {
         MacroDialect::EckyIrV0
     } else if trimmed.contains("build123d") {
@@ -4615,5 +4670,34 @@ mod tests {
             MacroDialect::EckyIrV0,
             "Ecky source with ;; comment header containing 'build123d' must infer EckyIrV0"
         );
+    }
+
+    #[test]
+    fn infer_macro_dialect_ecky_with_top_level_helpers_before_model() {
+        let code = r#"(define (thread-points count)
+  (map (lambda (i) (list i 0 0)) (range 0 count)))
+
+(define thread-triangles
+  '((0 1 2) (0 2 3)))
+
+(model
+  (params (number scale 1))
+  (part main (box scale scale scale)))"#;
+
+        assert_eq!(
+            infer_macro_dialect_from_code(code),
+            MacroDialect::EckyIrV0,
+            "top-level Ecky define helpers before model must not reach the Python parser"
+        );
+    }
+
+    #[test]
+    fn infer_macro_dialect_does_not_treat_python_embedded_model_text_as_ecky() {
+        let code = r#"macro = \"\"\"
+(model
+  (part main (box 1 1 1)))
+\"\"\""#;
+
+        assert_eq!(infer_macro_dialect_from_code(code), MacroDialect::Legacy);
     }
 }
