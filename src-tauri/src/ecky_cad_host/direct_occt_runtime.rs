@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use serde::Deserialize;
@@ -31,6 +31,15 @@ const PREVIEW_STL_FILE_NAME: &str = "preview.stl";
 const STEP_FILE_NAME: &str = "model.step";
 const TOPOLOGY_FILE_NAME: &str = "topology.json";
 const DIRECT_OCCT_TEXT_FONT_ENV: &str = "ECKYCAD_FONT_PATH";
+const DIRECT_OCCT_HOT_CACHE_CAPACITY: usize = 2;
+
+#[derive(Clone)]
+struct DirectOcctHotCacheEntry {
+    bundle_dir: PathBuf,
+    content_hash: String,
+    bundle: ArtifactBundle,
+    manifest: ModelManifest,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -125,6 +134,9 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
     let content_hash =
         content_hash_with_font_path(source_identity, &params_json, cad_text_font_path);
     let model_id = model_id_from_hash(&content_hash);
+    if let Some(cached) = read_complete_cached_bundle(app, &model_id, &content_hash) {
+        return Ok(cached);
+    }
     let bundle_dir = crate::model_runtime::runtime_bundle_dir(app, &model_id)?;
 
     fs::create_dir_all(&bundle_dir).map_err(|err| AppError::persistence(err.to_string()))?;
@@ -217,7 +229,10 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
                 topology_report,
                 &manifest,
             )?;
-            crate::model_runtime::write_runtime_bundle(app, &model_id, &bundle, &manifest)
+            let stored =
+                crate::model_runtime::write_runtime_bundle(app, &model_id, &bundle, &manifest)?;
+            remember_complete_cached_bundle(&bundle_dir, &content_hash, &stored);
+            Ok(stored)
         }
         NativeExportOutcome::Blocked { blockers } => {
             let _ = fs::remove_dir_all(&bundle_dir);
@@ -231,6 +246,86 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
             )))
         }
     }
+}
+
+fn read_complete_cached_bundle(
+    app: &dyn PathResolver,
+    model_id: &str,
+    content_hash: &str,
+) -> Option<(ArtifactBundle, ModelManifest)> {
+    let bundle_dir = crate::model_runtime::runtime_bundle_dir(app, model_id).ok()?;
+    if let Some(cached) = read_hot_cached_bundle(&bundle_dir, content_hash) {
+        return Some(cached);
+    }
+    let (bundle, manifest) = crate::model_runtime::read_runtime_bundle(app, model_id).ok()?;
+    if bundle.content_hash != content_hash || manifest.model_id != model_id {
+        return None;
+    }
+    if !runtime_bundle_artifacts_ready(&bundle) {
+        return None;
+    }
+    let cached = (bundle, manifest);
+    remember_complete_cached_bundle(&bundle_dir, content_hash, &cached);
+    Some(cached)
+}
+
+fn runtime_bundle_artifacts_ready(bundle: &ArtifactBundle) -> bool {
+    let path_ready = |path: &str| {
+        !path.trim().is_empty()
+            && fs::metadata(path)
+                .map(|metadata| metadata.is_file() && metadata.len() > 0)
+                .unwrap_or(false)
+    };
+    path_ready(&bundle.preview_stl_path)
+        && bundle
+            .viewer_assets
+            .iter()
+            .all(|asset| path_ready(&asset.path))
+        && bundle
+            .export_artifacts
+            .iter()
+            .all(|artifact| path_ready(&artifact.path))
+        && bundle.macro_path.as_deref().is_none_or(path_ready)
+}
+
+fn direct_occt_hot_cache() -> &'static Mutex<VecDeque<DirectOcctHotCacheEntry>> {
+    static CACHE: OnceLock<Mutex<VecDeque<DirectOcctHotCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn read_hot_cached_bundle(
+    bundle_dir: &Path,
+    content_hash: &str,
+) -> Option<(ArtifactBundle, ModelManifest)> {
+    let mut cache = direct_occt_hot_cache().lock().ok()?;
+    let position = cache
+        .iter()
+        .position(|entry| entry.bundle_dir == bundle_dir && entry.content_hash == content_hash)?;
+    let entry = cache.remove(position)?;
+    if !runtime_bundle_artifacts_ready(&entry.bundle) {
+        return None;
+    }
+    let cached = (entry.bundle.clone(), entry.manifest.clone());
+    cache.push_front(entry);
+    Some(cached)
+}
+
+fn remember_complete_cached_bundle(
+    bundle_dir: &Path,
+    content_hash: &str,
+    cached: &(ArtifactBundle, ModelManifest),
+) {
+    let Ok(mut cache) = direct_occt_hot_cache().lock() else {
+        return;
+    };
+    cache.retain(|entry| entry.bundle_dir != bundle_dir);
+    cache.push_front(DirectOcctHotCacheEntry {
+        bundle_dir: bundle_dir.to_path_buf(),
+        content_hash: content_hash.to_string(),
+        bundle: cached.0.clone(),
+        manifest: cached.1.clone(),
+    });
+    cache.truncate(DIRECT_OCCT_HOT_CACHE_CAPACITY);
 }
 
 pub(crate) fn build_direct_occt_manifest(
@@ -440,7 +535,10 @@ fn content_hash_with_font_path(
     params_json: &str,
     cad_text_font_path: Option<&str>,
 ) -> String {
+    const DIRECT_OCCT_CACHE_SCHEMA: &str = "direct-occt-v2-nary-parallel-obb";
     let mut hasher = Sha256::new();
+    hasher.update(DIRECT_OCCT_CACHE_SCHEMA.as_bytes());
+    hasher.update(b"|");
     hasher.update(source_identity.as_bytes());
     hasher.update(b"|");
     hasher.update(params_json.as_bytes());
@@ -1645,12 +1743,115 @@ echo "fake runner plan: $plan"
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn reuses_complete_content_matched_bundle_before_starting_kernel() {
+        let root = temp_root("direct-occt-content-cache-hit");
+        let resolver = TestResolver { root: root.clone() };
+        let source = "(model (part body (box 10 20 30)))";
+        let program = compile(source);
+        let params = DesignParams::new();
+        let params_json = serde_json::to_string(&params).expect("params");
+        let hash = content_hash(source, &params_json);
+        let model_id = model_id_from_hash(&hash);
+        let bundle_dir =
+            crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
+        fs::create_dir_all(&bundle_dir).expect("bundle dir");
+        let source_path = bundle_dir.join(SOURCE_FILE_NAME);
+        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let step_path = bundle_dir.join(STEP_FILE_NAME);
+        fs::write(&source_path, source).expect("source");
+        fs::write(&preview_path, b"solid cached preview").expect("preview");
+        fs::write(&step_path, b"ISO-10303-21; cached step").expect("step");
+
+        let manifest = build_direct_occt_manifest(
+            &model_id,
+            &source_path,
+            &[("body".to_string(), "Body".to_string())],
+            &[],
+            &[],
+            None,
+            &HashMap::new(),
+        )
+        .expect("manifest");
+        let bundle = build_direct_occt_bundle(
+            &model_id,
+            &hash,
+            &source_path,
+            &preview_path,
+            &step_path,
+            None,
+            &manifest,
+        )
+        .expect("bundle");
+        crate::model_runtime::write_runtime_bundle(&resolver, &model_id, &bundle, &manifest)
+            .expect("write cached runtime bundle");
+
+        let _runner_guard =
+            crate::ecky_cad_host::direct_occt_runner::test_discovery::CwdFallbackGuard::disable();
+        let (cached, cached_manifest) = render_core_program_runtime_bundle(
+            &program,
+            source,
+            &params,
+            &blocked_layout(root.clone()),
+            &resolver,
+        )
+        .expect("complete cache hit must not start blocked kernel");
+
+        assert_eq!(cached.model_id, model_id);
+        assert_eq!(cached.content_hash, hash);
+        assert_eq!(cached_manifest.model_id, model_id);
+        assert_eq!(
+            fs::read(&preview_path).expect("cached preview"),
+            b"solid cached preview"
+        );
+
+        fs::write(bundle_dir.join("bundle.json"), b"not valid json")
+            .expect("corrupt cold cache metadata after validated read");
+        let (hot_cached, hot_manifest) = render_core_program_runtime_bundle(
+            &program,
+            source,
+            &params,
+            &blocked_layout(root.clone()),
+            &resolver,
+        )
+        .expect("hot cache hit must not parse the large disk bundle again");
+        assert_eq!(hot_cached.model_id, model_id);
+        assert_eq!(hot_manifest.model_id, model_id);
+
+        fs::remove_file(&preview_path).expect("remove cached preview");
+        assert!(
+            read_complete_cached_bundle(&resolver, &model_id, &hash).is_none(),
+            "missing artifact must invalidate cache hit"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[cfg(unix)]
     #[test]
     fn runner_first_bundle_matches_generated_source_artifacts_for_same_fixture() {
         assert_runner_first_bundle_matches_generated_source_artifacts_for_fixture(
             "direct-occt-runner-parity",
             "(model (part body (box 10 20 30)))",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_first_bundle_matches_generated_source_for_nary_boolean_fixture() {
+        assert_runner_first_bundle_matches_generated_source_artifacts_for_fixture(
+            "direct-occt-runner-parity-nary-boolean",
+            r#"
+            (model
+              (part body
+                (difference
+                  (union
+                    (box 20 20 8)
+                    (translate 8 0 4 (sphere 6))
+                    (translate -8 0 0 (cylinder 5 12)))
+                  (translate 5 0 -1 (cylinder 2 14))
+                  (translate -5 0 -1 (cylinder 2 14)))))
+            "#,
         );
     }
 

@@ -261,7 +261,9 @@ pub fn emit_plan_export_source_with_params(
 #include <Poly_Triangulation.hxx>
 #include <STEPControl_Writer.hxx>
 #include <ShapeFix_Face.hxx>
+#include <ShapeFix_Shape.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
+#include <Standard_Failure.hxx>
 #include <StlAPI_Reader.hxx>
 #include <TColgp_Array1OfPnt.hxx>
 #include <TopAbs_Orientation.hxx>
@@ -1486,14 +1488,14 @@ fn emit_command(
             }
             body.push_str(&format!("    TopoDS_Shape {var} = {var}_compound;\n"));
         }
-        OcctOp::Union => emit_boolean_fold(
+        OcctOp::Union => emit_boolean_nary(
             body,
             &var,
             "union",
             "BRepAlgoAPI_Fuse",
             ref_args(&command.args)?,
         )?,
-        OcctOp::Difference => emit_boolean_fold(
+        OcctOp::Difference => emit_boolean_nary(
             body,
             &var,
             "difference",
@@ -3942,12 +3944,51 @@ fn emit_boolean_fold(
     let mut iter = inputs.into_iter();
     let first = iter.next().expect("checked non-empty");
     body.push_str(&format!("    TopoDS_Shape {var} = {};\n", slot_var(first)));
+    for (operand_index, input) in iter.enumerate() {
+        let builder = format!("{var}_{op_name}_{}", operand_index + 1);
+        let error = cpp_string_literal(&format!(
+            "Direct OCCT boolean `{op_name}` failed at output `{var}`, operand {}.",
+            operand_index + 2
+        ));
+        body.push_str(&format!(
+            "    {{\n        try {{\n            TopTools_ListOfShape {builder}_arguments;\n            {builder}_arguments.Append({var});\n            TopTools_ListOfShape {builder}_tools;\n            {builder}_tools.Append({input_var});\n            {api_name} {builder};\n            {builder}.SetArguments({builder}_arguments);\n            {builder}.SetTools({builder}_tools);\n            {builder}.SetFuzzyValue(1.0e-5);\n            {builder}.SetRunParallel(true);\n            {builder}.SetUseOBB(true);\n            {builder}.Build();\n            if (!{builder}.IsDone()) {{ std::cerr << {error} << std::endl; return 53; }}\n            TopoDS_Shape {builder}_result = {builder}.Shape();\n            if ({builder}_result.IsNull()) {{ std::cerr << {error} << \" Result is null.\" << std::endl; return 53; }}\n            {var} = {builder}_result;\n        }} catch (const Standard_Failure& failure) {{\n            std::cerr << {error} << \" \" << failure.GetMessageString() << std::endl;\n            return 53;\n        }}\n    }}\n",
+            input_var = slot_var(input),
+        ));
+    }
+    Ok(())
+}
+
+fn emit_boolean_nary(
+    body: &mut String,
+    var: &str,
+    op_name: &str,
+    api_name: &str,
+    inputs: Vec<OcctSlot>,
+) -> AppResult<()> {
+    if inputs.len() < 2 {
+        return Err(AppError::validation(format!(
+            "Direct OCCT executor `{op_name}` requires at least two operands."
+        )));
+    }
+    let builder = format!("{var}_{op_name}");
+    let error = cpp_string_literal(&format!(
+        "Direct OCCT boolean `{op_name}` failed at output `{var}`."
+    ));
+    let mut iter = inputs.into_iter();
+    let first = iter.next().expect("checked non-empty");
+    body.push_str(&format!(
+        "    TopoDS_Shape {var};\n    {{\n        try {{\n            TopTools_ListOfShape {builder}_arguments;\n            {builder}_arguments.Append({first_var});\n            TopTools_ListOfShape {builder}_tools;\n",
+        first_var = slot_var(first),
+    ));
     for input in iter {
         body.push_str(&format!(
-            "    {var} = {api_name}({var}, {}).Shape();\n",
+            "            {builder}_tools.Append({});\n",
             slot_var(input)
         ));
     }
+    body.push_str(&format!(
+        "            {api_name} {builder};\n            {builder}.SetArguments({builder}_arguments);\n            {builder}.SetTools({builder}_tools);\n            {builder}.SetFuzzyValue(1.0e-5);\n            {builder}.SetRunParallel(true);\n            {builder}.SetUseOBB(true);\n            {builder}.Build();\n            if (!{builder}.IsDone()) {{ std::cerr << {error} << std::endl; return 53; }}\n            TopoDS_Shape {builder}_result = {builder}.Shape();\n            if ({builder}_result.IsNull()) {{ std::cerr << {error} << \" Result is null.\" << std::endl; return 53; }}\n            {var} = {builder}_result;\n        }} catch (const Standard_Failure& failure) {{\n            std::cerr << {error} << \" \" << failure.GetMessageString() << std::endl;\n            return 53;\n        }}\n    }}\n"
+    ));
     Ok(())
 }
 

@@ -108,3 +108,101 @@ silently producing unprintable geometry.
 - THEN verification fails with a diagnostic naming the affected part
 - AND the error suggests increasing tessellation density or simplifying the
   displacement pattern
+
+### Requirement: Representation-aware hybrid execution
+
+The system SHALL preserve exact BRep and indexed manifold mesh as distinct
+representations and SHALL choose a Boolean kernel from the required operation
+and export contract instead of converting every mesh to faceted BRep.
+
+#### Scenario: Mesh island exported as STL or 3MF
+
+- GIVEN a validated indexed manifold mesh participates in a hybrid Boolean
+- AND the requested output is STL or 3MF
+- WHEN the hybrid plan executes
+- THEN the local exact operands are tessellated for the mesh island
+- AND the Boolean runs as one batch mesh operation
+- AND the result remains an indexed manifold mesh
+
+#### Scenario: Analytic STEP remains exact
+
+- GIVEN a part contains only exact BRep operations
+- WHEN STEP export is requested
+- THEN the part remains on the OCCT path
+- AND no mesh Boolean or faceted conversion occurs
+
+#### Scenario: Faceted STEP exceeds budget
+
+- GIVEN an imported mesh requires a faceted STEP result
+- AND the projected faceted BRep face count exceeds the configured budget
+- WHEN the hybrid plan is validated
+- THEN execution is rejected with the projected face count and budget
+- AND no hidden kernel fallback occurs
+
+### Requirement: N-ary Boolean execution
+
+The system SHALL submit all operands of union and difference expressions to
+one kernel builder while preserving ordered head-minus-tail difference
+semantics. N-way intersection SHALL retain intersection-of-all semantics and
+MUST NOT be lowered as intersection with the union of tail operands.
+
+#### Scenario: Multi-operand union
+
+- GIVEN a union with three or more operands
+- WHEN the OCCT or mesh plan executes
+- THEN all operands are submitted to one n-ary builder
+- AND the system does not evaluate a sequential pairwise left fold
+
+#### Scenario: Multi-tool difference
+
+- GIVEN a difference with one target and multiple tools
+- WHEN the plan executes
+- THEN the target is the sole argument
+- AND all remaining operands are submitted as one ordered tool group
+
+#### Scenario: Multi-operand intersection
+
+- GIVEN an intersection with three or more operands
+- WHEN the OCCT plan executes
+- THEN the result equals the region common to every operand
+- AND the operands are not grouped as `head ∩ union(tail)`
+
+### Requirement: Deterministic hybrid reuse
+
+The system SHALL reuse successful immutable hybrid artifacts by content and
+coalesce identical concurrent work without caching failures.
+
+#### Scenario: Warm identical render
+
+- GIVEN a verified artifact exists for the same source, parameters, operation
+  plan, mesh digests, and backend/runtime versions
+- WHEN the model is rendered again
+- THEN no geometry kernel process starts
+- AND the verified artifact bundle is returned
+
+#### Scenario: Concurrent identical render
+
+- GIVEN two subscribers request the same uncached hybrid artifact
+- WHEN both requests overlap
+- THEN one kernel job executes
+- AND both subscribers receive the same result or raw failure
+
+### Requirement: Hybrid progress and cancellation
+
+The system SHALL expose typed stage progress and cancellation for long-running
+kernel jobs without emitting interactive kernel output into general app logs.
+
+#### Scenario: Long Boolean reports progress
+
+- GIVEN a hybrid Boolean is running
+- WHEN the kernel advances through its stages
+- THEN subscribers receive typed progress for import, validation, Boolean,
+  verification, and export
+
+#### Scenario: Last subscriber cancels
+
+- GIVEN a shared kernel job has one remaining subscriber
+- WHEN that subscriber cancels
+- THEN cooperative kernel cancellation is requested
+- AND an uncooperative child process is terminated
+- AND no partial artifact enters the cache

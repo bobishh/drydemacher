@@ -180,12 +180,131 @@ OcctPlan command with a `meshPath` field. We correctly decomposed it into
 ## Proof Gates
 
 - [x] PG-PROOF OCCT boolean on solidified poly BRep works (VertexGenie proof).
-- [ ] PG1 wall-pattern + difference → < 100 non-manifold edges.
-- [ ] PG2 iPhone 17e case → 3 clean parts.
-- [ ] PG3 STEP includes exact faces for non-displaced geometry.
-- [ ] PG4 STL is sliceable without manual repair.
-- [ ] PG5 Pure OCCT model → still routes to OCCT.
-- [ ] PG6 Pure mesh model → still routes to mesh renderer.
-- [ ] PG7 `cargo check` passes.
-- [ ] PG8 Existing direct-OCCT fixtures still render.
-- [ ] PG9 Existing mesh-renderer fixtures still render.
+- [x] PG1 wall-pattern + difference → < 100 non-manifold edges.
+- [x] PG2 iPhone 17e case → 3 clean parts with displaced rear panel retained.
+- [x] PG3 STEP includes exact faces for non-displaced geometry.
+- [ ] PG4 STL is sliceable without disappearing printable walls. Bambu Studio
+  completed with `Slice ok`, but layer preview on 2026-07-17 exposed a local
+  wall collapse beside the side-button opening: preview geometry showed a thin
+  wall that the configured line width removed. Re-prove after thickening or
+  reshaping that transition; inspect layers, not only the final slice status.
+- [x] PG5 Pure OCCT model → still routes to OCCT.
+- [x] PG6 Pure mesh model → still routes to mesh renderer.
+- [x] PG7 `cargo check` passes.
+- [x] PG8 Existing direct-OCCT fixtures still render.
+- [x] PG9 Existing mesh-renderer fixtures still render.
+
+---
+
+## T6 — Hybrid Performance and Job Control
+
+Research sources and decisions live in the design section
+`Performance Batch: Representation-Aware Hybrid Execution`.
+
+### T6.1 — Benchmark fixture and observability
+
+- [ ] Add the CC0 ladybug STL as a stable test fixture with provenance.
+- [x] Record a real-app baseline through MCP on the current CC0 ladybug model:
+  cold render 165.19 s, first disk-cache reuse after restart 38.94 s, hot
+  in-memory reuse 30.99 s; 29,614 output triangles, 3 components, 0
+  non-manifold edges. The cold target is still red.
+- [ ] Add a cold-run stage benchmark for import, validate, solidify, Boolean,
+  cleanup, mesh, verify, and export.
+- [ ] Record input/output vertices, triangles, OCCT faces, components,
+  manifold edges, bounding box, signed volume, and elapsed time.
+- [ ] Make the existing multi-minute path fail an acceptance threshold before
+  optimization.
+
+### T6.2 — OCCT Boolean planner
+
+- [x] Replace sequential union/difference folds with one n-ary argument/tool
+  builder while preserving head-minus-tail difference semantics.
+- [ ] Keep intersection semantics unchanged until a `BOPAlgo_CellsBuilder`
+  test proves selection of cells common to every operand; never lower it to
+  `head ∩ union(tail)`.
+- [x] Enable `SetRunParallel(true)` and `SetUseOBB(true)` in the precompiled
+  runner and generated executor.
+- [x] Add differential tests proving both execution paths produce equivalent
+  topology and volume.
+- [ ] Benchmark `SetNonDestructive(true)` memory/time before choosing its
+  default; gate inverted-solid check removal behind validation.
+- [ ] Do not enable glue globally or change fuzzy tolerance without a named
+  tolerance policy and regression fixture.
+
+### T6.3 — Faceted BRep cleanup policy
+
+- [ ] Benchmark pre-Boolean and post-Boolean same-domain unification on the
+  ladybug fixture.
+- [ ] Enable cleanup only behind a face-count/cost policy proven faster than
+  the uncleaned route.
+- [ ] Assert cleanup preserves manifoldness, components, bounding box, volume,
+  and configured deviation.
+
+### T6.4 — Artifact cache and singleflight
+
+- [x] Reuse a complete artifact bundle when its content-derived model ID,
+  backend cache schema, manifest identity, and required non-empty artifact
+  files match. Keep a bounded two-entry process-hot cache keyed by absolute
+  bundle directory plus content hash.
+- [ ] Add stored per-artifact digests. Reject same-size mutated artifacts;
+  current existence/size gate is not digest verification.
+- [ ] Add selective content-addressed caches for validated mesh, solidified
+  faceted BRep, and completed hybrid island.
+- [ ] Coalesce concurrent identical renders into one in-flight job.
+- [ ] Cache successes only; surface raw failures to every waiter.
+- [ ] Add byte-budgeted eviction and backend-version invalidation tests.
+
+### T6.5 — Progress and cancellation actor
+
+- [ ] Emit typed stage progress without dumping kernel stdout into app logs.
+- [ ] Bridge OCCT `Message_ProgressIndicator`/`UserBreak` where supported.
+- [ ] Kill an uncooperative kernel child on cancellation.
+- [ ] Keep shared work alive until the final subscriber cancels.
+- [ ] Add happy, failure, pending, and cancellation acceptance tests.
+
+### T6.6 — Representation-aware mesh Boolean route
+
+- [ ] Introduce a canonical indexed mesh handoff; do not use STL as the cache
+  representation.
+- [ ] Validate welding, orientation, manifoldness, and component count before
+  entering a mesh Boolean kernel.
+- [ ] Route STL/3MF hybrid islands through Manifold `BatchBoolean` and retain a
+  mesh result.
+- [ ] Keep exact BRep/analytic STEP in OCCT; permit faceted STEP fallback only
+  under an explicit face budget and provenance label.
+- [ ] Reject hidden fallback between kernels.
+
+### T6.7 — Optional decoration simplification
+
+- [ ] Add meshoptimizer only if benchmarks show remaining need after routing
+  and caching.
+- [ ] Use absolute error in millimetres, protected fit-zone vertices/borders,
+  and requested/achieved error provenance.
+- [ ] Reject pruning and silent simplification for physical/fit geometry.
+
+### T6 proof gates
+
+- [ ] Cold ladybug render meets the recorded performance target.
+- [x] Warm identical render performs no kernel execution (artifact timestamps
+  unchanged; content-derived model ID reused).
+- [ ] Two identical concurrent renders execute one kernel job.
+- [ ] Cancellation leaves no orphan process or partial cache entry.
+- [x] Final output has zero non-manifold edges and expected component count.
+- [ ] Bounding box, signed volume, and geometric deviation stay within the
+  fixture tolerance.
+- [x] `cd src-tauri && cargo check` passes.
+- [x] MCP inspect → validate → preview → verify proof passes on the real model.
+
+### T6.8 — Preview aggregate payload budget
+
+- [ ] Stop cloning and reserializing the full immutable artifact/manifest graph
+  at every preview layer. Store one render snapshot aggregate and pass stable
+  references/lightweight response projections through actor boundaries.
+- [ ] Do not publish every anonymous triangle-derived OCCT edge/face as a
+  semantic selector. Keep authored/tagged/analytic targets; expose dense mesh
+  picking through a lazy indexed-mesh query with explicit truncation metadata.
+- [ ] Reject truncated `target_macro_get` windows when callers submit them as a
+  full macro replacement without an explicit acknowledgement. The current API
+  allowed a 100-line window from a 320-line source to reach parse validation.
+- [ ] Add timing assertions for disk-cache and process-hot identical preview
+  responses. Current 38.94 s / 30.99 s remain red despite zero kernel work.

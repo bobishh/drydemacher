@@ -1166,6 +1166,14 @@ mod tests {
         Some((root, output))
     }
 
+    #[test]
+    fn native_runner_boolean_builder_enables_parallel_obb_and_nary_union() {
+        let source = include_str!("../../native/direct_occt_runner.cpp");
+        assert!(source.contains("builder.SetRunParallel(true);"), "{source}");
+        assert!(source.contains("builder.SetUseOBB(true);"), "{source}");
+        assert!(source.contains("fuse_shapes(shapes_to_fuse)"), "{source}");
+    }
+
     fn sample_plan() -> OcctPlan {
         OcctPlan {
             parameters: vec![OcctParameter {

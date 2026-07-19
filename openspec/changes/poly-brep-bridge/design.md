@@ -206,3 +206,125 @@ surface approximation.
 Poly faces inflate STEP files. The VertexGenie STEP is 271KB for 120 faces.
 A real phone case could be large. Mitigation: the STEP is still valid and
 importable; size is a warning, not a blocker.
+
+## Performance Batch: Representation-Aware Hybrid Execution
+
+### Research baseline
+
+The current bridge converts every participating mesh triangle into a planar
+OCCT face and evaluates multi-operand booleans as a sequential left fold. The
+precompiled runner and generated executor both omit OCCT parallel and oriented
+bounding-box options. A repeated render computes the same content-derived
+model ID but executes the kernel again before rewriting the bundle.
+
+Reference implementations avoid these patterns:
+
+- OCCT Boolean operations accept arbitrary argument/tool groups and expose
+  parallel execution, OBB interference filtering, progress/cancellation, and
+  result simplification.
+- CadQuery, build123d, and FreeCAD submit operand lists to one Boolean builder,
+  enable parallel execution, and clean results with same-domain unification.
+- Manifold provides batch Boolean operations over validated indexed manifold
+  meshes. It explicitly warns that STL round-trips lose topology.
+- meshoptimizer exposes error-bounded simplification with achieved-error
+  reporting and protected vertices/borders.
+- OpenSCAD is moving toward selective Manifold-node caching rather than an
+  undifferentiated whole-scene cache.
+
+Primary references:
+
+- <https://dev.opencascade.org/doc/overview/html/specification__boolean_operations.html>
+- <https://github.com/CadQuery/cadquery/blob/master/cadquery/occ_impl/shapes.py>
+- <https://github.com/gumyr/build123d/blob/dev/src/build123d/topology/shape_core.py>
+- <https://github.com/FreeCAD/FreeCAD/blob/main/src/Mod/Part/App/TopoShape.cpp>
+- <https://github.com/elalish/manifold>
+- <https://manifoldcad.org/docs/html/classmanifold_1_1_manifold.html>
+- <https://github.com/zeux/meshoptimizer>
+- <https://doc.cgal.org/latest/Surface_mesh_simplification/>
+
+### Decision: preserve representation until an operation requires conversion
+
+The canonical hybrid artifact is an indexed, oriented, validated mesh with a
+content digest. STL is an export format, not the internal cache or handoff
+format.
+
+- Exact BRep chains and analytic STEP requests stay in OCCT.
+- Mesh islands targeting STL/3MF use a mesh Boolean kernel after local exact
+  hosts are tessellated.
+- Faceted STEP may use the poly-BRep bridge only under an explicit face budget.
+- Pure placement/assembly of imported mesh skips Boolean conversion entirely.
+
+This prevents the common decorative-mesh case from turning thousands of
+triangles into thousands of OCCT faces before intersection.
+
+### Decision: batch Boolean planning
+
+Union and head-minus-tail difference use one n-ary Boolean builder. OCCT
+`Common` operates between two groups, so placing every tail operand in the
+tool group would compute `head ∩ union(tail)` rather than Ecky's n-way
+intersection. Intersection therefore keeps its proven fold until a dedicated
+`BOPAlgo_CellsBuilder` implementation selects cells common to every argument.
+The OCCT path enables `SetRunParallel(true)` and `SetUseOBB(true)` in both the
+precompiled runner and generated executor. Inputs remain ordered in the plan
+for deterministic semantics and cache keys.
+
+`SetNonDestructive(true)` is evaluated for cached operands, with memory usage
+benchmarked before becoming default. `SetCheckInverted(false)` is allowed only
+after solid validity and positive orientation have been proven.
+
+Global glue is forbidden: OCCT documents it for coincident shapes without real
+intersections; the ladybug/dome case has real intersections. Fuzzy tolerance
+must come from a named tolerance policy, never a hard-coded performance knob.
+
+### Decision: bounded cleanup and simplification
+
+`ShapeUpgrade_UnifySameDomain`/`SimplifyResult` may run after Boolean and on an
+imported faceted BRep only when measured face reduction exceeds cleanup cost.
+It merges adjacent coincident same-domain geometry; it does not convert curved
+facets into analytic surfaces or repair arbitrary STL.
+
+Mesh simplification is optional and explicit. Decoration-only assets may use
+meshoptimizer with absolute millimetre error, protected fit-zone vertices, and
+recorded requested/achieved error. Constraint-critical surfaces are never
+silently simplified. CGAL remains a policy-rich fallback, not the default
+dependency.
+
+### Decision: selective immutable cache and singleflight
+
+Cache keys include source mesh digest, topology repair policy, transform,
+ordered operation and operand digests, tessellation/simplification settings,
+backend version, and OCCT/Manifold runtime version. Cacheable stages are:
+
+1. validated indexed mesh;
+2. optional simplified mesh;
+3. solidified/unified faceted BRep;
+4. completed hybrid island;
+5. final verified artifact bundle.
+
+Only successful immutable artifacts enter the bounded cache. Concurrent
+identical renders share one in-flight computation. A failed computation is
+not cached; every subscriber receives the raw failure.
+
+### Decision: process actor with progress and cancellation
+
+Each kernel job runs behind a process/job actor. Stages are observable as
+`import`, `validate`, `simplify`, `solidify`, `boolean`, `cleanup`, `mesh`,
+`verify`, and `export`. OCCT `Message_ProgressIndicator` supplies cooperative
+progress and user break where available. Cancellation kills the child process
+when a kernel cannot stop cooperatively. Shared in-flight work is cancelled
+only after its last subscriber leaves.
+
+### Batch order
+
+1. Add the real CC0 ladybug fixture and stage benchmark.
+2. Replace pairwise OCCT union/difference folds with n-ary builders; enable
+   parallel + OBB in both execution paths. Preserve intersection semantics and
+   optimize it separately with Cells Builder.
+3. Benchmark same-domain cleanup before enabling any cleanup policy.
+4. Add immutable whole-artifact reuse and in-flight deduplication.
+5. Add stage progress and cancellation to the kernel actor.
+6. Add validated indexed-mesh handoff and Manifold batch routing.
+7. Add explicit decoration simplification only if the route still needs it.
+
+Each slice must preserve components, manifoldness, bounding box, signed volume,
+and configured geometric deviation before its performance result is accepted.

@@ -2349,16 +2349,68 @@ TopoDS_Shape taper_shape(const TopoDS_Shape& profile, double height, double scal
     return taper.Shape();
 }
 
+template <typename BooleanBuilder>
+TopoDS_Shape checked_boolean_shapes(
+    const std::vector<TopoDS_Shape>& argument_shapes,
+    const std::vector<TopoDS_Shape>& tool_shapes,
+    const std::string& op
+) {
+    TopTools_ListOfShape arguments;
+    for (const TopoDS_Shape& shape : argument_shapes) {
+        arguments.Append(shape);
+    }
+    TopTools_ListOfShape tools;
+    for (const TopoDS_Shape& shape : tool_shapes) {
+        tools.Append(shape);
+    }
+    BooleanBuilder builder;
+    builder.SetArguments(arguments);
+    builder.SetTools(tools);
+    builder.SetFuzzyValue(1.0e-5);
+    builder.SetRunParallel(true);
+    builder.SetUseOBB(true);
+    builder.Build();
+    if (!builder.IsDone()) {
+        throw EvalError("Direct OCCT boolean `" + op + "` failed");
+    }
+    TopoDS_Shape result = builder.Shape();
+    if (result.IsNull()) {
+        throw EvalError("Direct OCCT boolean `" + op + "` returned a null shape");
+    }
+    return result;
+}
+
 TopoDS_Shape fuse_shapes(const TopoDS_Shape& lhs, const TopoDS_Shape& rhs) {
-    return BRepAlgoAPI_Fuse(lhs, rhs).Shape();
+    return checked_boolean_shapes<BRepAlgoAPI_Fuse>({lhs}, {rhs}, "union");
+}
+
+TopoDS_Shape fuse_shapes(const std::vector<TopoDS_Shape>& shapes) {
+    if (shapes.size() < 2) {
+        throw EvalError("Direct OCCT boolean `union` requires at least two operands");
+    }
+    return checked_boolean_shapes<BRepAlgoAPI_Fuse>(
+        {shapes.front()},
+        std::vector<TopoDS_Shape>(shapes.begin() + 1, shapes.end()),
+        "union"
+    );
 }
 
 TopoDS_Shape cut_shapes(const TopoDS_Shape& lhs, const TopoDS_Shape& rhs) {
-    return BRepAlgoAPI_Cut(lhs, rhs).Shape();
+    return checked_boolean_shapes<BRepAlgoAPI_Cut>({lhs}, {rhs}, "difference");
+}
+
+TopoDS_Shape cut_shapes(
+    const TopoDS_Shape& head,
+    const std::vector<TopoDS_Shape>& tools
+) {
+    if (tools.empty()) {
+        throw EvalError("Direct OCCT boolean `difference` requires at least two operands");
+    }
+    return checked_boolean_shapes<BRepAlgoAPI_Cut>({head}, tools, "difference");
 }
 
 TopoDS_Shape common_shapes(const TopoDS_Shape& lhs, const TopoDS_Shape& rhs) {
-    return BRepAlgoAPI_Common(lhs, rhs).Shape();
+    return checked_boolean_shapes<BRepAlgoAPI_Common>({lhs}, {rhs}, "intersection");
 }
 
 // --- Convex hull -----------------------------------------------------------
@@ -3968,16 +4020,27 @@ SlotValue evaluate_command(
             }
             return compound_shapes(shapes_to_compound);
         }
+        if (op == "union") {
+            std::vector<TopoDS_Shape> shapes_to_fuse;
+            shapes_to_fuse.reserve(refs.size());
+            for (const Arg& arg : refs) {
+                shapes_to_fuse.push_back(lookup_shape(slots, arg.ref_value, op));
+            }
+            return fuse_shapes(shapes_to_fuse);
+        }
+        if (op == "difference") {
+            const TopoDS_Shape& head = lookup_shape(slots, refs.front().ref_value, op);
+            std::vector<TopoDS_Shape> tools;
+            tools.reserve(refs.size() - 1);
+            for (std::size_t index = 1; index < refs.size(); ++index) {
+                tools.push_back(lookup_shape(slots, refs[index].ref_value, op));
+            }
+            return cut_shapes(head, tools);
+        }
         TopoDS_Shape result = lookup_shape(slots, refs.front().ref_value, op);
         for (std::size_t index = 1; index < refs.size(); ++index) {
             const TopoDS_Shape& next = lookup_shape(slots, refs[index].ref_value, op);
-            if (op == "union") {
-                result = fuse_shapes(result, next);
-            } else if (op == "difference") {
-                result = cut_shapes(result, next);
-            } else {
-                result = common_shapes(result, next);
-            }
+            result = common_shapes(result, next);
         }
         return result;
     }
