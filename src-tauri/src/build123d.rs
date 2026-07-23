@@ -226,6 +226,7 @@ pub fn render_model_with_sources(
 
     let viewer_assets = build_viewer_assets(&manifest.parts);
     let bundle = ArtifactBundle {
+        geometry_provenance: None,
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id,
         source_kind: ModelSourceKind::Generated,
@@ -328,6 +329,7 @@ fn bundle_step_path(bundle_dir: &Path) -> PathBuf {
 
 fn step_export_artifacts(step_path: &Path) -> AppResult<Vec<ExportArtifact>> {
     Ok(vec![ExportArtifact {
+        geometry_provenance: None,
         label: "STEP".to_string(),
         format: "step".to_string(),
         path: path_to_string(step_path)?,
@@ -640,6 +642,7 @@ fn build_manifest_with_stable_node_keys(
     let preview_views = preview_views_from_decls(preview_view_decls);
 
     Ok(ModelManifest {
+        geometry_provenance: None,
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind: ModelSourceKind::Generated,

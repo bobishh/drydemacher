@@ -134,14 +134,18 @@ pub async fn handle_target_detail_get(
                 ) {
                     Some(Some(agent_draft_from_session_render_preview(preview)))
                 } else {
-                    let draft = db::get_agent_draft_for_session(&conn, &ctx.session_id)
-                        .map_err(|e| AppError::persistence(e.to_string()))?
-                        .filter(|draft| {
-                            draft.thread_id == target.thread_id
-                                && (draft.preview_id == target.message_id
-                                    || draft.base_message_id.as_deref()
-                                        == Some(target.message_id.as_str()))
-                        });
+                    let draft = db::get_agent_draft_for_session_thread(
+                        &conn,
+                        &ctx.session_id,
+                        &target.thread_id,
+                    )
+                    .map_err(|e| AppError::persistence(e.to_string()))?
+                    .filter(|draft| {
+                        draft.thread_id == target.thread_id
+                            && (draft.preview_id == target.message_id
+                                || draft.base_message_id.as_deref()
+                                    == Some(target.message_id.as_str()))
+                    });
                     Some(draft)
                 };
                 (None, None, None, None, None, None, latest_draft, None)

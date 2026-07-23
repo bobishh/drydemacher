@@ -1,8 +1,8 @@
-use crate::contracts::infer_macro_dialect_from_code;
 use crate::freecad;
 use crate::models::{
     AppError, AppResult, AppState, ArtifactBundle, DesignParams, DiagnosticContext,
-    DiagnosticParamValue, GeometryBackend, MacroDialect, ModelManifest, PathResolver,
+    DiagnosticParamValue, GeometryBackend, GeometryProvenance, GeometryRepresentation,
+    MacroDialect, ModelManifest, PathResolver,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -19,6 +19,291 @@ const DIRECT_OCCT_RESOURCE_SNAPSHOT_PATHS: &[&str] = &[
     "runtime/occt/bin/direct-occt-runner",
     "bin/direct-occt-runner",
 ];
+
+struct RenderFlight {
+    result: std::sync::Mutex<Option<AppResult<ArtifactBundle>>>,
+    notify: tokio::sync::Notify,
+}
+
+#[derive(Clone)]
+struct RenderConfigSnapshot {
+    default_source_language: crate::models::SourceLanguage,
+    default_geometry_backend: GeometryBackend,
+    freecad_cmd: String,
+    cad_text_font_path: String,
+}
+
+impl RenderConfigSnapshot {
+    fn from_state(state: &AppState) -> Self {
+        let config = state
+            .config
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self {
+            default_source_language: config.default_source_language,
+            default_geometry_backend: config.default_geometry_backend,
+            freecad_cmd: config.freecad_cmd.clone(),
+            cad_text_font_path: config.cad_text_font_path.clone(),
+        }
+    }
+
+    fn freecad_cmd(&self) -> Option<&str> {
+        (!self.freecad_cmd.trim().is_empty()).then_some(self.freecad_cmd.trim())
+    }
+
+    fn cad_text_font_path(&self) -> Option<&str> {
+        (!self.cad_text_font_path.trim().is_empty()).then_some(self.cad_text_font_path.trim())
+    }
+}
+
+impl RenderFlight {
+    fn pending() -> Self {
+        Self {
+            result: std::sync::Mutex::new(None),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+}
+
+struct RenderFlightOwner {
+    key: String,
+    flight: std::sync::Arc<RenderFlight>,
+    completed: bool,
+}
+
+impl RenderFlightOwner {
+    fn complete(mut self, result: AppResult<ArtifactBundle>) -> AppResult<ArtifactBundle> {
+        *self
+            .flight
+            .result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result.clone());
+        remove_render_flight(&self.key, &self.flight);
+        self.completed = true;
+        self.flight.notify.notify_waiters();
+        result
+    }
+}
+
+impl Drop for RenderFlightOwner {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let error = AppError::render("Render owner cancelled before completion.");
+        *self
+            .flight
+            .result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Err(error));
+        remove_render_flight(&self.key, &self.flight);
+        self.flight.notify.notify_waiters();
+    }
+}
+
+enum RenderFlightRole {
+    Owner(RenderFlightOwner),
+    Waiter(std::sync::Arc<RenderFlight>),
+}
+
+fn render_flights(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<RenderFlight>>> {
+    static FLIGHTS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<RenderFlight>>>,
+    > = std::sync::OnceLock::new();
+    FLIGHTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn acquire_render_flight(key: &str) -> RenderFlightRole {
+    let mut flights = render_flights()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(flight) = flights.get(key) {
+        return RenderFlightRole::Waiter(flight.clone());
+    }
+    let flight = std::sync::Arc::new(RenderFlight::pending());
+    flights.insert(key.to_string(), flight.clone());
+    RenderFlightRole::Owner(RenderFlightOwner {
+        key: key.to_string(),
+        flight,
+        completed: false,
+    })
+}
+
+fn remove_render_flight(key: &str, flight: &std::sync::Arc<RenderFlight>) {
+    let mut flights = render_flights()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if flights
+        .get(key)
+        .is_some_and(|current| std::sync::Arc::ptr_eq(current, flight))
+    {
+        flights.remove(key);
+    }
+}
+
+#[cfg(test)]
+fn render_flight_strong_count(key: &str) -> Option<usize> {
+    render_flights()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(key)
+        .map(std::sync::Arc::strong_count)
+}
+
+#[cfg(test)]
+fn render_flight_keys() -> Vec<String> {
+    render_flights()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .keys()
+        .cloned()
+        .collect()
+}
+
+async fn wait_for_render_flight(flight: std::sync::Arc<RenderFlight>) -> AppResult<ArtifactBundle> {
+    loop {
+        let notified = flight.notify.notified();
+        if let Some(result) = flight
+            .result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        {
+            return result;
+        }
+        notified.await;
+    }
+}
+
+fn render_dependency_identities(
+    macro_code: &str,
+    parameters: &DesignParams,
+    app: &dyn PathResolver,
+) -> Vec<(String, String)> {
+    use crate::ecky_cad_host::direct_occt::{OcctArg, OcctOp};
+    use sha2::{Digest, Sha256};
+
+    let mut identities = Vec::new();
+    if let Some(Ok(program)) = crate::ecky_scheme::try_compile_to_core_program(macro_code) {
+        let parameters = parameters.clone();
+        if let Ok(plan) = run_direct_occt_with_large_stack("dependency-plan", move || {
+            crate::ecky_cad_host::direct_occt::plan_core_program_with_params(&program, &parameters)
+        }) {
+            for command in plan.parts.iter().flat_map(|part| part.commands.iter()) {
+                if command.op != OcctOp::ImportStl {
+                    continue;
+                }
+                let Some(path) = command.args.first().and_then(|arg| match arg {
+                    OcctArg::Text(path) | OcctArg::Symbol(path) => Some(path.as_str()),
+                    _ => None,
+                }) else {
+                    continue;
+                };
+                let digest = fs::read(path)
+                    .map(|bytes| format!("sha256:{:x}", Sha256::digest(bytes)))
+                    .unwrap_or_else(|err| format!("unreadable:{err}"));
+                identities.push((format!("import-stl:{path}"), digest));
+            }
+        }
+    }
+
+    if let Some(runner) =
+        crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(app, true)
+    {
+        let digest = fs::read(&runner)
+            .map(|bytes| format!("sha256:{:x}", Sha256::digest(bytes)))
+            .unwrap_or_else(|err| format!("unreadable:{err}"));
+        identities.push((format!("direct-occt-runner:{}", runner.display()), digest));
+        if let Some(runtime_root) = runner.parent().and_then(Path::parent) {
+            let manifest = runtime_root.join("manifest.json");
+            if manifest.is_file() {
+                let digest = fs::read(&manifest)
+                    .map(|bytes| format!("sha256:{:x}", Sha256::digest(bytes)))
+                    .unwrap_or_else(|err| format!("unreadable:{err}"));
+                identities.push((format!("runtime-manifest:{}", manifest.display()), digest));
+            }
+        }
+    }
+    identities.sort();
+    identities.dedup();
+    identities
+}
+
+fn render_flight_key(
+    macro_code: &str,
+    parameters: &DesignParams,
+    macro_dialect: Option<&MacroDialect>,
+    geometry_backend: Option<GeometryBackend>,
+    post_processing: Option<&crate::contracts::PostProcessingSpec>,
+    previous_manifest: Option<&ModelManifest>,
+    config: &RenderConfigSnapshot,
+    app: &dyn PathResolver,
+) -> AppResult<String> {
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PreviousManifestFlightIdentity<'a> {
+        schema_version: u32,
+        model_id: &'a str,
+        source_digest: Option<&'a str>,
+        core_digest: Option<&'a str>,
+        ast_schema_version: Option<u32>,
+        tagged_anchors:
+            &'a std::collections::BTreeMap<String, crate::contracts::TaggedAnchorBinding>,
+    }
+
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RenderFlightIdentity<'a> {
+        schema_version: u32,
+        macro_code: &'a str,
+        parameters: &'a DesignParams,
+        macro_dialect: Option<&'a MacroDialect>,
+        geometry_backend: Option<GeometryBackend>,
+        post_processing: Option<&'a crate::contracts::PostProcessingSpec>,
+        previous_manifest: Option<PreviousManifestFlightIdentity<'a>>,
+        default_source_language: crate::models::SourceLanguage,
+        default_geometry_backend: GeometryBackend,
+        freecad_cmd: &'a str,
+        cad_text_font_path: &'a str,
+        dependency_identities: Vec<(String, String)>,
+        app_config_dir: PathBuf,
+        app_data_dir: PathBuf,
+    }
+
+    let previous_manifest = previous_manifest.map(|manifest| PreviousManifestFlightIdentity {
+        schema_version: manifest.schema_version,
+        model_id: &manifest.model_id,
+        source_digest: manifest.source_digest.as_deref(),
+        core_digest: manifest.core_digest.as_deref(),
+        ast_schema_version: manifest.ast_schema_version,
+        tagged_anchors: &manifest.tagged_anchors,
+    });
+    let dependency_identities = render_dependency_identities(macro_code, parameters, app);
+    let identity = RenderFlightIdentity {
+        schema_version: 1,
+        macro_code,
+        parameters,
+        macro_dialect,
+        geometry_backend,
+        post_processing,
+        previous_manifest,
+        default_source_language: config.default_source_language,
+        default_geometry_backend: config.default_geometry_backend,
+        freecad_cmd: &config.freecad_cmd,
+        cad_text_font_path: &config.cad_text_font_path,
+        dependency_identities,
+        app_config_dir: app.app_config_dir(),
+        app_data_dir: app.app_data_dir(),
+    };
+    let encoded = serde_json::to_vec(&identity).map_err(|err| {
+        AppError::internal(format!(
+            "Failed to encode render singleflight identity: {err}"
+        ))
+    })?;
+    use sha2::{Digest, Sha256};
+    Ok(format!("sha256:{:x}", Sha256::digest(encoded)))
+}
 
 fn source_line_for_offset(source: &str, offset: usize) -> Option<usize> {
     if offset > source.len() {
@@ -652,7 +937,7 @@ fn try_render_direct_occt_ecky_ir(
     parameters: &DesignParams,
     effective_dialect: &MacroDialect,
     previous_manifest: Option<&ModelManifest>,
-    state: &AppState,
+    config: &RenderConfigSnapshot,
     app: &dyn PathResolver,
 ) -> AppResult<Option<ArtifactBundle>> {
     if *effective_dialect != MacroDialect::EckyIrV0 {
@@ -662,7 +947,7 @@ fn try_render_direct_occt_ecky_ir(
     let parameters = parameters.clone();
     let previous_manifest = previous_manifest.cloned();
     let app = DirectOcctThreadResolver::from_resolver(app);
-    let cad_text_font_path = configured_cad_text_font_path(state);
+    let cad_text_font_path = config.cad_text_font_path().map(str::to_string);
     run_direct_occt_with_large_stack("render", move || {
         let program = match crate::ecky_scheme::compile_to_core_program(&macro_code) {
             Ok(program) => program,
@@ -692,6 +977,296 @@ fn try_render_direct_occt_ecky_ir(
     })
 }
 
+/// Attempt hybrid poly BRep rendering: if the source uses mesh-only ops
+/// (wall-pattern) consumed by BRep-required ops (difference/chamfer/fillet),
+/// split the part at the mesh boundary. Phase 1 renders the wall-pattern
+/// subtree through the mesh renderer. Phase 2 feeds the displaced STL into
+/// OCCT as `solidify(import-stl(...))` and runs the post-boundary booleans.
+///
+/// Returns `Ok(None)` if the source is not Hybrid (no mesh boundary or no
+/// post-boundary BRep op).
+fn try_render_hybrid_poly_brep(
+    macro_code: &str,
+    parameters: &DesignParams,
+    config: &RenderConfigSnapshot,
+    app: &dyn PathResolver,
+) -> AppResult<Option<ArtifactBundle>> {
+    let macro_code_owned = macro_code.to_string();
+    let parameters_owned = parameters.clone();
+    let app_clone = DirectOcctThreadResolver::from_resolver(app);
+    let state_font_path = config.cad_text_font_path().map(str::to_string);
+
+    // Compile + partition analysis needs the large stack (deep trees).
+    run_direct_occt_with_large_stack("hybrid-partition", move || {
+        let program = match crate::ecky_scheme::try_compile_to_core_program(&macro_code_owned) {
+            Some(Ok(program)) => program,
+            _ => return Ok(None),
+        };
+
+        let partitions = crate::ecky_ir::poly_partition::analyze_program(&program);
+        let has_hybrid = partitions.iter().any(|p| p.is_hybrid());
+        if !has_hybrid {
+            return Ok(None);
+        }
+        let surface_op_admission_issues =
+            crate::ecky_ir::poly_partition::mesh_origin_surface_op_admission_issues(&program);
+        if let Some(issue) = surface_op_admission_issues.first() {
+            return Err(AppError::validation(format!(
+                "Mesh-origin faceted BRep `{}` rejected before OCCT kernel execution: selector `{}` at Core node {} in part {}. {}.",
+                issue.operation,
+                issue.selector,
+                issue.node_id.raw(),
+                issue.part_index,
+                issue.reason
+            )));
+        }
+        let runtime_root =
+            crate::runtime_capabilities::resolve_direct_occt_runtime_root(&app_clone)?;
+        let layout =
+            crate::ecky_cad_host::direct_occt_sdk::inspect_build123d_ocp_runtime(&runtime_root);
+
+        // Phase 1: resolve each mesh island to the engine-independent
+        // MeshAsset contract. Today EckyRust is one producer; imported or
+        // generated STL producers enter through the same contract.
+        let mut mesh_assets = std::collections::HashMap::new();
+        let mut source_mesh_digests = Vec::new();
+        let mut source_mesh_boundary_or_non_manifold_edges = 0_u64;
+        let mut manifold_route_notes = Vec::new();
+        for (part_index, partition) in partitions.iter().enumerate() {
+            if !partition.is_hybrid() {
+                continue;
+            }
+            let part = &program.parts[part_index];
+            for output_node_id in &partition.mesh_output_node_ids {
+                let mut mesh_program =
+                    crate::ecky_ir::poly_partition::clone_program_for_mesh_output(
+                        &program,
+                        part_index,
+                        *output_node_id,
+                    )
+                    .ok_or_else(|| {
+                        AppError::internal(format!(
+                            "Hybrid mesh slice missing for part '{}' node {}.",
+                            part.key,
+                            output_node_id.raw()
+                        ))
+                    })?;
+                let preludes =
+                    crate::ecky_ir::poly_partition::exact_mesh_prelude_node_ids(&mesh_program);
+                for (prelude_part_index, prelude_node_id) in preludes {
+                    let prelude_program =
+                        crate::ecky_ir::poly_partition::clone_program_for_exact_mesh_prelude(
+                            &mesh_program,
+                            prelude_part_index,
+                            prelude_node_id,
+                        )
+                        .ok_or_else(|| {
+                            AppError::internal(format!(
+                                "Hybrid exact mesh prelude missing for part '{}' node {}.",
+                                part.key,
+                                prelude_node_id.raw()
+                            ))
+                        })?;
+                    let (prelude_bundle, _) = crate::ecky_cad_host::direct_occt_runtime::
+                        render_core_program_runtime_bundle_with_font_path(
+                            &prelude_program,
+                            &format!(
+                                "{macro_code_owned}\n;; hybrid-exact-prelude:{}:{}",
+                                part.key,
+                                prelude_node_id.raw()
+                            ),
+                            &parameters_owned,
+                            &layout,
+                            &app_clone,
+                            state_font_path.as_deref(),
+                        )
+                        .map_err(|err| {
+                            AppError::render(format!(
+                                "Hybrid OCCT pre-mesh phase failed for part '{}' node {}: {}",
+                                part.key,
+                                prelude_node_id.raw(),
+                                format_nested_app_error(&err)
+                            ))
+                        })?;
+                    crate::ecky_ir::poly_partition::replace_node_with_mesh_asset(
+                        &mut mesh_program,
+                        prelude_node_id,
+                        &prelude_bundle.preview_stl_path,
+                    );
+                }
+                let mesh_bundle = crate::ecky_ir::render_core_program(
+                    &mesh_program,
+                    &format!(
+                        "{macro_code_owned}\n;; hybrid-mesh-phase:{}:{}",
+                        part.key,
+                        output_node_id.raw()
+                    ),
+                    &parameters_owned,
+                    &app_clone,
+                )
+                .map_err(|err| {
+                    AppError::render(format!(
+                        "Hybrid mesh phase failed for part '{}' node {}: {}",
+                        part.key,
+                        output_node_id.raw(),
+                        format_nested_app_error(&err)
+                    ))
+                })?;
+                let mesh_part_path = match mesh_bundle.viewer_assets.as_slice() {
+                    [asset] => std::path::PathBuf::from(&asset.path),
+                    assets => {
+                        return Err(AppError::internal(format!(
+                            "Hybrid mesh slice for part '{}' node {} produced {} viewer assets; expected exactly one indexed mesh island.",
+                            part.key,
+                            output_node_id.raw(),
+                            assets.len()
+                        )));
+                    }
+                };
+                let indexed_asset = crate::ecky_ir::mesh_asset::IndexedMeshAsset::read_cache(
+                    crate::ecky_ir::mesh_asset::MeshAssetSource::EckyMeshPhase {
+                        part_id: part.key.clone(),
+                        node_id: *output_node_id,
+                    },
+                    &mesh_part_path.with_extension("indexed-mesh.json"),
+                )?;
+                if let Err(error) = indexed_asset.validate_for_boolean() {
+                    manifold_route_notes.push(format!(
+                        "Manifold route skipped for part '{}' node {} during admission: {}. Explicit OCCT solidify route retained.",
+                        part.key,
+                        output_node_id.raw(),
+                        error
+                    ));
+                }
+                let asset = crate::ecky_ir::mesh_asset::MeshAsset::ecky_mesh_phase(
+                    part.key.clone(),
+                    *output_node_id,
+                    &mesh_part_path,
+                )?;
+                let topology = indexed_asset.topology();
+                let mesh_non_manifold = topology.boundary_edge_count
+                    + topology.non_manifold_edge_count
+                    + topology.winding_mismatch_count;
+                if crate::ecky_ir::poly_partition::mesh_output_contains_open_mesh(
+                    &program,
+                    part_index,
+                    *output_node_id,
+                ) && mesh_non_manifold > 0
+                {
+                    let consumer =
+                        crate::ecky_ir::poly_partition::open_mesh_brep_consumer_operation(
+                            &program, part_index,
+                        )
+                        .unwrap_or("unknown BRep operation");
+                    return Err(AppError::render(format!(
+                        "Hybrid mesh asset for part '{}' node {} cannot enter solidification: open `mesh` has {mesh_non_manifold} boundary/non-manifold edges before consumer `{consumer}`. Use `polyhedron` with closed topology before the BRep consumer.",
+                        part.key, output_node_id.raw()
+                    )));
+                }
+                source_mesh_digests.push(indexed_asset.content_digest().to_string());
+                source_mesh_boundary_or_non_manifold_edges += mesh_non_manifold as u64;
+                mesh_assets.insert(*output_node_id, asset);
+            }
+        }
+
+        // Phase 2: OCCT — replace wall-pattern with solidify(import-stl(stl)).
+        // Use a high starting ID to avoid collisions with existing node IDs.
+        let next_node_id = crate::ecky_core_ir::NodeId::new(1_000_000);
+        let occt_program =
+            crate::ecky_ir::poly_partition::clone_program_for_occt_phase_with_mesh_assets(
+                &program,
+                &partitions,
+                &mesh_assets,
+                next_node_id,
+            )?;
+
+        let (mut bundle, mut manifest) =
+            crate::ecky_cad_host::direct_occt_runtime::render_core_program_runtime_bundle_with_font_path(
+                &occt_program,
+                &macro_code_owned,
+                &parameters_owned,
+                &layout,
+                &app_clone,
+                state_font_path.as_deref(),
+            )
+            .map_err(|err| {
+                AppError::render(format!(
+                    "Hybrid OCCT phase failed after mesh solidification: {}",
+                    format_nested_app_error(&err)
+                ))
+            })?;
+
+        for asset in &bundle.viewer_assets {
+            let non_manifold =
+                crate::services::structural_verification::preview_stl_non_manifold_edge_count(
+                    std::path::Path::new(&asset.path),
+                )?;
+            if non_manifold >= 100 {
+                return Err(AppError::render(format!(
+                    "Hybrid OCCT part '{}' has {non_manifold} non-manifold edges (limit < 100). Increase mesh tessellation density or simplify the displacement pattern.",
+                    asset.part_id
+                )));
+            }
+        }
+        let non_manifold =
+            crate::services::structural_verification::preview_stl_non_manifold_edge_count(
+                std::path::Path::new(&bundle.preview_stl_path),
+            )?;
+        if non_manifold >= 100 {
+            return Err(AppError::render(format!(
+                "Hybrid OCCT assembly has {non_manifold} non-manifold edges (limit < 100). Increase mesh tessellation density or simplify the displacement pattern."
+            )));
+        }
+
+        let used_manifold_route = !bundle
+            .export_artifacts
+            .iter()
+            .any(|artifact| artifact.format.eq_ignore_ascii_case("step"));
+        let geometry_provenance = GeometryProvenance {
+            representation: if used_manifold_route {
+                GeometryRepresentation::MeshNative
+            } else {
+                GeometryRepresentation::FacetedPolyBrep
+            },
+            source_mesh_digests,
+            closed: Some(source_mesh_boundary_or_non_manifold_edges == 0),
+            boundary_or_non_manifold_edge_count: Some(source_mesh_boundary_or_non_manifold_edges),
+        };
+        bundle.geometry_provenance = Some(geometry_provenance.clone());
+        for artifact in &mut bundle.export_artifacts {
+            if artifact.format.eq_ignore_ascii_case("step") {
+                artifact.geometry_provenance = Some(geometry_provenance.clone());
+            }
+        }
+        manifest.geometry_provenance = Some(geometry_provenance);
+
+        // Tag stored artifact truth so UI/MCP consumers know the hybrid poly
+        // BRep bridge produced faceted STEP rather than analytic source CAD.
+        let hybrid_count = partitions.iter().filter(|p| p.is_hybrid()).count();
+        let warning = if used_manifold_route {
+            format!(
+                "Hybrid mesh Boolean route: {hybrid_count} part(s) rendered from validated indexed mesh + in-memory OCCT tessellation through Manifold; STL retained as mesh-native output and no STEP fallback was fabricated."
+            )
+        } else {
+            format!(
+                "Hybrid poly BRep bridge: {hybrid_count} part(s) rendered through mesh displacement + OCCT solidify + boolean (wall-pattern → import-stl → solidify); STEP representation is faceted poly-BRep, not analytic source CAD."
+            )
+        };
+        if !manifest.warnings.iter().any(|w| w == &warning) {
+            manifest.warnings.push(warning);
+        }
+        for note in manifold_route_notes {
+            if !manifest.warnings.iter().any(|warning| warning == &note) {
+                manifest.warnings.push(note);
+            }
+        }
+        let model_id = bundle.model_id.clone();
+        let (bundle, _) =
+            crate::model_runtime::write_runtime_bundle(&app_clone, &model_id, &bundle, &manifest)?;
+
+        Ok(Some(bundle))
+    })
+}
 fn format_nested_app_error(err: &AppError) -> String {
     let mut text = err.to_string();
     if let Some(extra) = err.details.as_deref() {
@@ -714,9 +1289,7 @@ fn direct_occt_plan_diagnostic(macro_code: &str, parameters: &DesignParams) -> R
                 return Err(AppError::validation(format_nested_app_error(&err)));
             }
             None => {
-                return Err(AppError::validation(
-                    "Source did not compile to Core IR.",
-                ));
+                return Err(AppError::validation("Source did not compile to Core IR."));
             }
         };
         crate::ecky_cad_host::direct_occt::plan_core_program_with_params(&program, &parameters)
@@ -800,6 +1373,22 @@ pub async fn render_model_with_previous_manifest(
     state: &AppState,
     app: &dyn PathResolver,
 ) -> AppResult<ArtifactBundle> {
+    let config = RenderConfigSnapshot::from_state(state);
+    let flight_key = render_flight_key(
+        macro_code,
+        parameters,
+        macro_dialect.as_ref(),
+        geometry_backend,
+        post_processing,
+        previous_manifest,
+        &config,
+        app,
+    )?;
+    let owner = match acquire_render_flight(&flight_key) {
+        RenderFlightRole::Waiter(flight) => return wait_for_render_flight(flight).await,
+        RenderFlightRole::Owner(owner) => owner,
+    };
+
     let _guard = state.render_lock.lock().await;
     let first_attempt = render_model_unlocked(
         macro_code,
@@ -808,10 +1397,10 @@ pub async fn render_model_with_previous_manifest(
         geometry_backend,
         post_processing,
         previous_manifest,
-        state,
+        &config,
         app,
     );
-    match first_attempt {
+    let result = match first_attempt {
         Ok(bundle) => Ok(bundle),
         Err(err)
             if previous_manifest.is_some()
@@ -825,14 +1414,15 @@ pub async fn render_model_with_previous_manifest(
                 geometry_backend,
                 post_processing,
                 None,
-                state,
+                &config,
                 app,
             )?;
             append_tagged_selector_rebind_warning(app, &bundle);
             Ok(bundle)
         }
         Err(err) => Err(err),
-    }
+    };
+    owner.complete(result)
 }
 
 fn render_model_unlocked(
@@ -842,19 +1432,23 @@ fn render_model_unlocked(
     geometry_backend: Option<GeometryBackend>,
     post_processing: Option<&crate::contracts::PostProcessingSpec>,
     previous_manifest: Option<&ModelManifest>,
-    state: &AppState,
+    config: &RenderConfigSnapshot,
     app: &dyn PathResolver,
 ) -> AppResult<ArtifactBundle> {
-    let effective_dialect =
-        macro_dialect.unwrap_or_else(|| infer_macro_dialect_from_code(macro_code));
-    let config_default_backend = state.config.lock().unwrap().default_geometry_backend;
+    let configured_dialect = match config.default_source_language {
+        crate::models::SourceLanguage::EckyIrV0 => MacroDialect::EckyIrV0,
+        crate::models::SourceLanguage::Build123d => MacroDialect::Build123d,
+        crate::models::SourceLanguage::LegacyPython => MacroDialect::Legacy,
+    };
+    let effective_dialect = macro_dialect.unwrap_or(configured_dialect);
+    let config_default_backend = config.default_geometry_backend;
     let resolved_backend =
         resolve_geometry_backend(&effective_dialect, geometry_backend, config_default_backend);
     let dispatch_backend =
         resolve_dispatch_backend(macro_code, &effective_dialect, resolved_backend)?;
     crate::runtime_capabilities::ensure_backend_available(
         dispatch_backend,
-        configured_freecad_cmd(state).as_deref(),
+        config.freecad_cmd(),
         app,
     )?;
     // Lower Ecky IR to the target backend before dispatch.
@@ -905,6 +1499,30 @@ fn render_model_unlocked(
     } else {
         None
     };
+
+    // === Hybrid poly BRep bridge ===
+    // If the source uses mesh-only ops (wall-pattern) AND BRep-required ops
+    // (difference/chamfer/fillet), the normal dispatch fails: OCCT can't plan
+    // wall-pattern, and the mesh renderer produces garbage on CSG over
+    // displaced meshes. The hybrid bridge splits the part at the mesh
+    // boundary: mesh renderer does displacement, OCCT does the booleans on
+    // the solidified poly BRep.
+    if dispatch_backend == GeometryBackend::EckyRust && effective_dialect == MacroDialect::EckyIrV0
+    {
+        if let Some(hybrid_bundle) =
+            try_render_hybrid_poly_brep(macro_code, parameters, config, app)?
+        {
+            return finalize_render_bundle(hybrid_bundle, parameters, post_processing, app)
+                .map_err(|err| {
+                    attach_diagnostic_context(
+                        err,
+                        Some(macro_code),
+                        parameters,
+                        Some("render:hybrid"),
+                    )
+                });
+        }
+    }
     let result = match dispatch_backend {
         GeometryBackend::EckyRust => {
             // Direct OCCT handles BRep ops; the Rust mesh renderer handles
@@ -935,7 +1553,7 @@ fn render_model_unlocked(
                     parameters,
                     &effective_dialect,
                     previous_manifest,
-                    state,
+                    config,
                     app,
                 )
             } else {
@@ -947,7 +1565,7 @@ fn render_model_unlocked(
                     if uses_direct_occt_required {
                         Err(attach_diagnostic_context(
                             unsupported_required_direct_occt_error(
-                                "Direct OCCT did not produce a native bundle for native-required CAD ops like `text`, `svg`, `import-stl`, or `helical-ridge`.".to_string()
+                                "Direct OCCT did not produce a native bundle for native-required CAD ops like `chamfer`, `fillet`, `text`, `svg`, `import-stl`, or `helical-ridge`.".to_string()
                             ),
                             Some(macro_code),
                             parameters,
@@ -999,9 +1617,7 @@ fn render_model_unlocked(
                         )
                     } else {
                         let mut details = if direct_occt_ready && direct_occt_plannable {
-                            String::from(
-                                "Direct OCCT native render failed.",
-                            )
+                            String::from("Direct OCCT native render failed.")
                         } else {
                             direct_occt_plan_detail
                                 .as_deref()
@@ -1058,8 +1674,8 @@ fn render_model_unlocked(
                     None
                 },
                 parameters,
-                configured_freecad_cmd(state).as_deref(),
-                configured_cad_text_font_path(state).as_deref(),
+                config.freecad_cmd(),
+                config.cad_text_font_path(),
                 app,
                 source_language,
             )
@@ -1179,11 +1795,11 @@ fn render_model_source_unlocked(
                     err
                 ))
             })?;
+            let config = RenderConfigSnapshot::from_state(state);
             let resolved_dialect = resolve_source_macro_dialect(
-                source_path,
                 source_language,
                 macro_dialect,
-                &macro_code,
+                config.default_source_language,
             );
             return render_model_unlocked(
                 &macro_code,
@@ -1192,7 +1808,7 @@ fn render_model_source_unlocked(
                 geometry_backend,
                 post_processing,
                 None,
-                state,
+                &config,
                 app,
             );
         }
@@ -1209,40 +1825,29 @@ fn render_model_source_unlocked(
 }
 
 fn resolve_source_macro_dialect(
-    source_path: &Path,
     source_language: Option<crate::models::SourceLanguage>,
     macro_dialect: Option<MacroDialect>,
-    macro_code: &str,
+    configured_source_language: crate::models::SourceLanguage,
 ) -> MacroDialect {
     if let Some(explicit) = macro_dialect {
         return explicit;
     }
-    if let Some(language) = source_language {
-        return match language {
-            crate::models::SourceLanguage::LegacyPython => {
-                infer_macro_dialect_from_code(macro_code)
-            }
-            crate::models::SourceLanguage::EckyIrV0 => MacroDialect::EckyIrV0,
-            crate::models::SourceLanguage::Build123d => MacroDialect::Build123d,
-        };
-    }
-    match source_path
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(|value| value.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("ecky") => MacroDialect::EckyIrV0,
-        _ => infer_macro_dialect_from_code(macro_code),
+    match source_language.unwrap_or(configured_source_language) {
+        crate::models::SourceLanguage::LegacyPython => MacroDialect::Legacy,
+        crate::models::SourceLanguage::EckyIrV0 => MacroDialect::EckyIrV0,
+        crate::models::SourceLanguage::Build123d => MacroDialect::Build123d,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        annotate_lowering_error, apply_requested_post_processing,
-        is_tagged_selector_mismatch_error, load_manifest_for_bundle, render_model,
+        acquire_render_flight, annotate_lowering_error, apply_requested_post_processing,
+        is_tagged_selector_mismatch_error, load_manifest_for_bundle, render_flight_key,
+        render_flight_keys, render_flight_strong_count, render_model,
         render_model_with_previous_manifest, resolve_dispatch_backend, resolve_geometry_backend,
+        resolve_source_macro_dialect, wait_for_render_flight, RenderConfigSnapshot,
+        RenderFlightRole,
     };
     use crate::contracts::{
         Config, DisplacementSpec, LithophaneAttachment, LithophaneAttachmentSource,
@@ -1251,7 +1856,8 @@ mod tests {
         PostProcessingSpec, ProjectionType,
     };
     use crate::models::{
-        AppError, AppState, DesignParams, GeometryBackend, ParamValue, PathResolver,
+        AppError, AppState, DesignParams, GeometryBackend, GeometryRepresentation, ParamValue,
+        PathResolver, SourceLanguage,
     };
     use std::path::PathBuf;
 
@@ -1279,6 +1885,26 @@ mod tests {
             std::env::temp_dir().join(format!("ecky-render-{label}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).expect("temp root");
         root
+    }
+
+    #[test]
+    fn source_dialect_uses_saved_language_without_content_inference() {
+        assert_eq!(
+            resolve_source_macro_dialect(
+                Some(SourceLanguage::LegacyPython),
+                None,
+                SourceLanguage::EckyIrV0,
+            ),
+            MacroDialect::Legacy
+        );
+    }
+
+    #[test]
+    fn source_dialect_uses_global_config_when_saved_language_is_absent() {
+        assert_eq!(
+            resolve_source_macro_dialect(None, None, SourceLanguage::Build123d),
+            MacroDialect::Build123d
+        );
     }
 
     fn write_ascii_stl_fixture(path: &std::path::Path) {
@@ -1378,6 +2004,273 @@ endsolid sample
         AppState::new(test_config(), None, conn)
     }
 
+    #[tokio::test]
+    async fn identical_render_requests_share_failure_and_retry_starts_new_owner() {
+        let key = format!("render-flight-test-{}", uuid::Uuid::new_v4());
+        let owner = match acquire_render_flight(&key) {
+            RenderFlightRole::Owner(owner) => owner,
+            RenderFlightRole::Waiter(_) => panic!("first request must own the render"),
+        };
+        let waiter = match acquire_render_flight(&key) {
+            RenderFlightRole::Waiter(waiter) => waiter,
+            RenderFlightRole::Owner(_) => panic!("identical overlapping request must join"),
+        };
+
+        let raw_failure = AppError::render("native kernel raw failure");
+        let owner_result = owner.complete(Err(raw_failure.clone()));
+        let waiter_result = wait_for_render_flight(waiter).await;
+
+        assert_eq!(owner_result, Err(raw_failure.clone()));
+        assert_eq!(waiter_result, Err(raw_failure));
+        assert!(matches!(
+            acquire_render_flight(&key),
+            RenderFlightRole::Owner(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn owner_abort_before_kernel_lock_notifies_waiter_and_allows_retry() {
+        let key = format!("render-flight-abort-{}", uuid::Uuid::new_v4());
+        let owner = match acquire_render_flight(&key) {
+            RenderFlightRole::Owner(owner) => owner,
+            RenderFlightRole::Waiter(_) => panic!("first request must own the render"),
+        };
+        let waiter = match acquire_render_flight(&key) {
+            RenderFlightRole::Waiter(waiter) => waiter,
+            RenderFlightRole::Owner(_) => panic!("overlapping request must join"),
+        };
+
+        drop(owner);
+
+        let error = wait_for_render_flight(waiter)
+            .await
+            .expect_err("waiter must receive owner cancellation");
+        assert!(error.to_string().contains("cancelled before completion"));
+        assert_eq!(render_flight_strong_count(&key), None);
+        assert!(matches!(
+            acquire_render_flight(&key),
+            RenderFlightRole::Owner(_)
+        ));
+    }
+
+    #[test]
+    fn render_flight_identity_changes_when_imported_stl_bytes_change() {
+        let root = temp_root("singleflight-stl-digest");
+        let state = test_state(&root);
+        let resolver = TestResolver { root: root.clone() };
+        let stl_path = root.join("asset.stl");
+        write_ascii_stl_fixture(&stl_path);
+        let source = format!(
+            "(model (part imported (solidify (import-stl {:?}))))",
+            stl_path.to_string_lossy()
+        );
+        let first = render_flight_key(
+            &source,
+            &DesignParams::new(),
+            Some(&MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            None,
+            &RenderConfigSnapshot::from_state(&state),
+            &resolver,
+        )
+        .expect("first identity");
+
+        let mut changed = std::fs::read(&stl_path).expect("fixture bytes");
+        changed.extend_from_slice(b"\n");
+        std::fs::write(&stl_path, changed).expect("change fixture bytes");
+        let second = render_flight_key(
+            &source,
+            &DesignParams::new(),
+            Some(&MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            None,
+            &RenderConfigSnapshot::from_state(&state),
+            &resolver,
+        )
+        .expect("second identity");
+
+        assert_ne!(first, second);
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn overlapping_public_render_requests_join_before_kernel_lock() {
+        let root = temp_root("singleflight-public");
+        let state = std::sync::Arc::new(test_state(&root));
+        let resolver = std::sync::Arc::new(TestResolver { root: root.clone() });
+        let source = "(model (part broken (definitely-not-an-op 1)))".to_string();
+        let dialect = Some(MacroDialect::EckyIrV0);
+        let backend = Some(GeometryBackend::EckyRust);
+        let key = render_flight_key(
+            &source,
+            &DesignParams::new(),
+            dialect.as_ref(),
+            backend,
+            None,
+            None,
+            &RenderConfigSnapshot::from_state(state.as_ref()),
+            resolver.as_ref(),
+        )
+        .expect("render identity");
+
+        let kernel_gate_state = state.clone();
+        let kernel_gate = kernel_gate_state.render_lock.lock().await;
+        let spawn_request = |state: std::sync::Arc<AppState>,
+                             resolver: std::sync::Arc<TestResolver>,
+                             source: String| {
+            tokio::spawn(async move {
+                render_model_with_previous_manifest(
+                    &source,
+                    &DesignParams::new(),
+                    Some(MacroDialect::EckyIrV0),
+                    backend,
+                    None,
+                    None,
+                    state.as_ref(),
+                    resolver.as_ref(),
+                )
+                .await
+            })
+        };
+
+        let first = spawn_request(state.clone(), resolver.clone(), source.clone());
+        for _ in 0..500 {
+            if render_flight_strong_count(&key) == Some(2) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            render_flight_strong_count(&key),
+            Some(2),
+            "active keys: {:?}",
+            render_flight_keys()
+        );
+
+        let second = spawn_request(state.clone(), resolver.clone(), source.clone());
+        for _ in 0..500 {
+            if render_flight_strong_count(&key) == Some(3) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(render_flight_strong_count(&key), Some(3));
+
+        drop(kernel_gate);
+        let first_error = first.await.expect("first task").expect_err("first error");
+        let second_error = second
+            .await
+            .expect("second task")
+            .expect_err("second error");
+        assert_eq!(first_error, second_error);
+        assert_eq!(render_flight_strong_count(&key), None);
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn render_owner_uses_config_snapshot_taken_before_kernel_gate() {
+        let root = temp_root("config-snapshot");
+        let state = std::sync::Arc::new(test_state(&root));
+        let resolver = std::sync::Arc::new(TestResolver { root: root.clone() });
+        {
+            let mut config = state.config.lock().expect("config");
+            config.default_source_language = SourceLanguage::EckyIrV0;
+            config.default_geometry_backend = GeometryBackend::EckyRust;
+            config.freecad_cmd = "/before-freecad".to_string();
+            config.cad_text_font_path = "/before-font".to_string();
+        }
+        let kernel_gate = state.render_lock.lock().await;
+        let source = "(model (part broken (definitely-not-an-op 1)))".to_string();
+        let key = render_flight_key(
+            &source,
+            &DesignParams::new(),
+            None,
+            None,
+            None,
+            None,
+            &RenderConfigSnapshot::from_state(state.as_ref()),
+            resolver.as_ref(),
+        )
+        .expect("render identity");
+        let request = tokio::spawn({
+            let state = state.clone();
+            let resolver = resolver.clone();
+            let source = source.clone();
+            async move {
+                render_model_with_previous_manifest(
+                    &source,
+                    &DesignParams::new(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    state.as_ref(),
+                    resolver.as_ref(),
+                )
+                .await
+            }
+        });
+
+        for _ in 0..500 {
+            if render_flight_strong_count(&key) == Some(2) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let waiter = tokio::spawn({
+            let state = state.clone();
+            let resolver = resolver.clone();
+            let source = source.clone();
+            async move {
+                render_model_with_previous_manifest(
+                    &source,
+                    &DesignParams::new(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    state.as_ref(),
+                    resolver.as_ref(),
+                )
+                .await
+            }
+        });
+        for _ in 0..500 {
+            if render_flight_strong_count(&key) == Some(3) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        {
+            let mut config = state.config.lock().expect("config");
+            config.default_source_language = SourceLanguage::LegacyPython;
+            config.default_geometry_backend = GeometryBackend::Freecad;
+            config.freecad_cmd = "/after-freecad".to_string();
+            config.cad_text_font_path = "/after-font".to_string();
+        }
+        drop(kernel_gate);
+
+        let error = request
+            .await
+            .expect("request task")
+            .expect_err("invalid Ecky source must fail");
+        assert!(
+            error.to_string().contains("definitely-not-an-op"),
+            "render used post-gate config: {error}"
+        );
+        assert_eq!(
+            waiter
+                .await
+                .expect("waiter task")
+                .expect_err("waiter must receive owner result"),
+            error
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
     fn example_fixture_source(name: &str) -> String {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../model-runtime/examples")
@@ -1421,6 +2314,7 @@ endsolid sample
             crate::models::ParamValue::String("/definitely/missing/lithophane.png".to_string()),
         )]);
         let mut bundle = crate::models::ArtifactBundle {
+            geometry_provenance: None,
             schema_version: 1,
             model_id: "model".to_string(),
             source_kind: crate::models::ModelSourceKind::Generated,
@@ -1602,6 +2496,7 @@ endsolid sample
     fn post_processing_noop_preserves_existing_step_export_artifacts() {
         let params = DesignParams::new();
         let mut bundle = crate::models::ArtifactBundle {
+            geometry_provenance: None,
             schema_version: 1,
             model_id: "model".to_string(),
             source_kind: crate::models::ModelSourceKind::Generated,
@@ -1620,6 +2515,7 @@ endsolid sample
             callout_anchors: vec![],
             measurement_guides: vec![],
             export_artifacts: vec![crate::models::ExportArtifact {
+                geometry_provenance: None,
                 label: "STEP".to_string(),
                 format: "step".to_string(),
                 path: "/tmp/model.step".to_string(),
@@ -1660,6 +2556,7 @@ endsolid sample
 
         let params = DesignParams::new();
         let mut bundle = crate::models::ArtifactBundle {
+            geometry_provenance: None,
             schema_version: 1,
             model_id: "model".to_string(),
             source_kind: crate::models::ModelSourceKind::Generated,
@@ -1738,6 +2635,7 @@ endsolid sample
         std::fs::write(
             &manifest_path,
             serde_json::to_vec_pretty(&crate::models::ModelManifest {
+                geometry_provenance: None,
                 schema_version: 1,
                 model_id: "model".to_string(),
                 source_kind: crate::models::ModelSourceKind::Generated,
@@ -1802,6 +2700,7 @@ endsolid sample
 
         let params = DesignParams::new();
         let mut bundle = crate::models::ArtifactBundle {
+            geometry_provenance: None,
             schema_version: 1,
             model_id: "model".to_string(),
             source_kind: crate::models::ModelSourceKind::Generated,
@@ -3614,18 +4513,11 @@ exit 5
                     std::path::Path::new(&bundle.preview_stl_path).is_file(),
                     "preview STL must exist on disk"
                 );
-                let manifest =
-                    load_manifest_for_bundle(&bundle).expect("load manifest");
+                let manifest = load_manifest_for_bundle(&bundle).expect("load manifest");
                 if let Some(manifest) = manifest {
-                    assert_eq!(
-                        manifest.document.object_count, 3,
-                        "three parts expected"
-                    );
-                    let part_ids: Vec<_> = manifest
-                        .parts
-                        .iter()
-                        .map(|p| p.part_id.as_str())
-                        .collect();
+                    assert_eq!(manifest.document.object_count, 3, "three parts expected");
+                    let part_ids: Vec<_> =
+                        manifest.parts.iter().map(|p| p.part_id.as_str()).collect();
                     assert_eq!(
                         part_ids,
                         vec![
@@ -3640,9 +4532,7 @@ exit 5
                 // If it fails, it must be a clean validation/runtime error —
                 // NOT a panic. We surface the error so the test message is
                 // actionable, but we fail: the goal is a successful render.
-                panic!(
-                    "iPhone case wall-pattern render failed (expected success): {err:?}"
-                );
+                panic!("iPhone case wall-pattern render failed (expected success): {err:?}");
             }
         }
 
@@ -3750,6 +4640,629 @@ exit 5
                 .any(|a| a.format == "3mf" && a.role == "primary"),
             "post-processing must produce a 3MF for a Build123d-tagged bundle"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Hybrid poly BRep bridge: wall-pattern + difference must route through
+    /// the two-phase pipeline (mesh renderer → solidify → OCCT boolean) and
+    /// produce a manifold result, not the 30k+ non-manifold garbage the mesh
+    /// renderer produces on CSG over displaced meshes.
+    #[tokio::test]
+    async fn hybrid_poly_brep_routes_wall_pattern_difference_to_occt_boolean() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root =
+            crate::ecky_cad_host::direct_occt_sdk::bundled_build123d_runtime_root_from_repo(
+                repo_root,
+            );
+        if !runtime_root.exists() {
+            return;
+        }
+        let root = temp_root("hybrid-poly-brep-dispatch");
+        let resolver = TestResolver { root: root.clone() };
+        let source = r#"(model
+  (part body
+    (difference
+      (wall-pattern (:mode ribs :depth 0.4 :uFreq 8)
+        (extrude (circle 10) 20))
+      (cylinder 3 30))))"#;
+
+        let result = render_model(
+            source,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &test_state(&root),
+            &resolver,
+        )
+        .await;
+
+        let bundle =
+            result.expect("wall-pattern + difference must render through hybrid poly BRep bridge");
+        assert!(
+            !bundle.preview_stl_path.is_empty(),
+            "must produce a preview STL"
+        );
+        assert!(
+            std::path::Path::new(&bundle.preview_stl_path).is_file(),
+            "preview STL must exist on disk"
+        );
+
+        // The result must be manifold: far fewer than 100 non-manifold edges
+        // (the mesh renderer alone produced 30k+ on the iPhone case).
+        let non_manifold =
+            crate::ecky_cad_host::native_parity_harness::ascii_stl_non_manifold_edge_count(
+                std::path::Path::new(&bundle.preview_stl_path),
+            );
+        assert!(
+            non_manifold < 100,
+            "hybrid poly BRep result has {non_manifold} non-manifold edges (expected < 100). \
+             The bridge should route wall-pattern through mesh renderer then difference \
+             through OCCT solidify + boolean."
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Hybrid parts must export both STL and STEP. The OCCT phase produces
+    /// exact BRep topology (STEP) with poly faces from the solidified mesh.
+    #[tokio::test]
+    async fn hybrid_poly_brep_exports_both_stl_and_step() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root =
+            crate::ecky_cad_host::direct_occt_sdk::bundled_build123d_runtime_root_from_repo(
+                repo_root,
+            );
+        if !runtime_root.exists() {
+            return;
+        }
+        let root = temp_root("hybrid-poly-brep-export");
+        let resolver = TestResolver { root: root.clone() };
+        let source = r#"(model
+  (part body
+    (difference
+      (wall-pattern (:mode ribs :depth 0.4 :uFreq 8)
+        (extrude (circle 10) 20))
+      (cylinder 3 30))))"#;
+
+        let bundle = render_model(
+            source,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &test_state(&root),
+            &resolver,
+        )
+        .await
+        .expect("hybrid render");
+
+        // STL must exist.
+        assert!(
+            std::path::Path::new(&bundle.preview_stl_path).is_file(),
+            "STL must exist: {}",
+            bundle.preview_stl_path
+        );
+
+        // STEP must exist — this is the key benefit of the hybrid bridge over
+        // pure mesh rendering (which cannot produce STEP).
+        let has_step = bundle
+            .export_artifacts
+            .iter()
+            .any(|a| a.format.eq_ignore_ascii_case("step"));
+        assert!(
+            has_step,
+            "STEP export must exist for hybrid parts. export_artifacts: {:?}",
+            bundle
+                .export_artifacts
+                .iter()
+                .map(|a| &a.format)
+                .collect::<Vec<_>>()
+        );
+
+        // Manifest must carry the hybrid warning tag.
+        if let Ok(manifest) = crate::model_runtime::read_model_manifest(&resolver, &bundle.model_id)
+        {
+            assert!(
+                manifest
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("Hybrid poly BRep bridge")),
+                "manifest must tag hybrid bridge usage. warnings: {:?}",
+                manifest.warnings
+            );
+        }
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pure_mesh_literal_dispatches_to_rust_mesh_without_step() {
+        let root = temp_root("pure-mesh-literal-dispatch");
+        let resolver = TestResolver { root: root.clone() };
+        let source = r#"(model
+  (part surface
+    (mesh
+      :vertices ((0 0 0) (20 0 0) (0 20 0))
+      :triangles ((0 1 2)))))"#;
+
+        let bundle = render_model(
+            source,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::Freecad),
+            None,
+            &test_state(&root),
+            &resolver,
+        )
+        .await
+        .expect("mesh literal must redirect to Rust mesh runtime");
+
+        assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
+        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(bundle
+            .export_artifacts
+            .iter()
+            .any(|artifact| artifact.format.eq_ignore_ascii_case("stl")));
+        assert!(!bundle
+            .export_artifacts
+            .iter()
+            .any(|artifact| artifact.format.eq_ignore_ascii_case("step")));
+        let provenance = bundle
+            .geometry_provenance
+            .as_ref()
+            .expect("pure mesh provenance");
+        assert_eq!(
+            provenance.representation,
+            GeometryRepresentation::MeshNative
+        );
+        assert_eq!(provenance.closed, Some(false));
+        assert_eq!(provenance.boundary_or_non_manifold_edge_count, Some(3));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn open_mesh_rejects_before_brep_consumer_execution() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root =
+            crate::ecky_cad_host::direct_occt_sdk::bundled_build123d_runtime_root_from_repo(
+                repo_root,
+            );
+        if !runtime_root.exists() {
+            return;
+        }
+        let root = temp_root("open-mesh-brep-rejection");
+        let resolver = TestResolver { root: root.clone() };
+        let source = r#"(model
+  (part surface
+    (difference
+      (mesh
+        :vertices ((0 0 0) (20 0 0) (0 20 0))
+        :triangles ((0 1 2)))
+      (sphere 2))))"#;
+
+        let error = render_model(
+            source,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &test_state(&root),
+            &resolver,
+        )
+        .await
+        .expect_err("open mesh must not enter OCCT solidification");
+        let diagnostic = format!("{} {}", error, error.details.as_deref().unwrap_or(""));
+        assert!(diagnostic.contains("open `mesh`"), "{diagnostic}");
+        assert!(
+            diagnostic.contains("3 boundary/non-manifold edges"),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.contains("consumer `difference`"), "{diagnostic}");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn broad_mesh_origin_chamfer_rejects_before_kernel_execution() {
+        let root = temp_root("broad-mesh-origin-chamfer-rejection");
+        let resolver = TestResolver { root: root.clone() };
+        let source = r#"(model
+  (part body
+    (chamfer 0.5 :edges "all"
+      (wall-pattern (:mode ribs :depth 0.4 :uFreq 8)
+        (extrude (circle 10) 20)))))"#;
+
+        let error = render_model(
+            source,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &test_state(&root),
+            &resolver,
+        )
+        .await
+        .expect_err("broad mesh-origin chamfer must be rejected before kernel");
+        let diagnostic = format!("{} {}", error, error.details.as_deref().unwrap_or(""));
+        assert!(diagnostic.contains("Mesh-origin faceted BRep `chamfer`"), "{diagnostic}");
+        assert!(diagnostic.contains("selector `all`"), "{diagnostic}");
+        assert!(
+            diagnostic.contains("rejected before OCCT kernel execution"),
+            "{diagnostic}"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn hybrid_poly_brep_accepts_llm_generated_polyhedron_asset() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root =
+            crate::ecky_cad_host::direct_occt_sdk::bundled_build123d_runtime_root_from_repo(
+                repo_root,
+            );
+        if !runtime_root.exists() {
+            return;
+        }
+        let root = temp_root("hybrid-poly-brep-generated-mesh");
+        let resolver = TestResolver { root: root.clone() };
+        let source = r#"(model
+  (part generated-body
+    (difference
+      (polyhedron
+        :vertices
+          ((-10 -10 0) (10 -10 0) (-10 10 0) (10 10 0)
+           (-10 -10 20) (10 -10 20) (-10 10 20) (10 10 20))
+        :triangles
+          ((0 4 6) (0 6 2) (1 3 7) (1 7 5)
+           (0 1 5) (0 5 4) (2 6 7) (2 7 3)
+           (0 2 3) (0 3 1) (4 5 7) (4 7 6)))
+      (translate 0 0 -1 (cylinder 3 22)))))"#;
+
+        let bundle = render_model(
+            source,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &test_state(&root),
+            &resolver,
+        )
+        .await
+        .expect("LLM-generated polyhedron should enter the hybrid bridge");
+
+        assert!(!bundle
+            .export_artifacts
+            .iter()
+            .any(|artifact| artifact.format.eq_ignore_ascii_case("step")));
+        assert_eq!(
+            crate::services::structural_verification::preview_stl_non_manifold_edge_count(
+                std::path::Path::new(&bundle.preview_stl_path),
+            )
+            .expect("hybrid STL topology"),
+            0
+        );
+        let provenance = bundle
+            .geometry_provenance
+            .as_ref()
+            .expect("mesh-native provenance");
+        assert_eq!(provenance.representation, GeometryRepresentation::MeshNative);
+        assert_eq!(provenance.closed, Some(true));
+        assert!(!provenance.source_mesh_digests.is_empty());
+        let manifest = crate::model_runtime::read_model_manifest(&resolver, &bundle.model_id)
+            .expect("stored manifest");
+        assert_eq!(manifest.geometry_provenance.as_ref(), Some(provenance));
+        assert!(manifest
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Hybrid mesh Boolean route")));
+        let bundle_dir = crate::model_runtime::runtime_bundle_dir(&resolver, &bundle.model_id)
+            .expect("bundle dir");
+        let plan = std::fs::read_to_string(bundle_dir.join("plan.json")).expect("runner plan");
+        assert!(plan.contains("import-indexed-mesh"));
+        assert!(!bundle_dir.join("model.step").exists());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Regression guard: a pure OCCT model (no mesh ops) must NOT use the
+    /// hybrid bridge. It routes through the normal Direct OCCT path.
+    #[tokio::test]
+    async fn pure_occt_model_does_not_use_hybrid_bridge() {
+        let root = temp_root("pure-occt-no-hybrid");
+        let resolver = TestResolver { root: root.clone() };
+        let source = r#"(model (part body (difference (box 20 20 20) (cylinder 5 30))))"#;
+
+        let bundle = render_model(
+            source,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &test_state(&root),
+            &resolver,
+        )
+        .await
+        .expect("pure OCCT render");
+
+        // If the hybrid bridge was used, the manifest would carry the tag.
+        if let Ok(manifest) = crate::model_runtime::read_model_manifest(&resolver, &bundle.model_id)
+        {
+            assert!(
+                !manifest
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("Hybrid poly BRep bridge")),
+                "pure OCCT model must not use hybrid bridge"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn analytic_chamfer_routes_to_direct_occt_with_analytic_provenance() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root =
+            crate::ecky_cad_host::direct_occt_sdk::bundled_build123d_runtime_root_from_repo(
+                repo_root,
+            );
+        if !runtime_root.exists() {
+            return;
+        }
+        let root = temp_root("analytic-chamfer-direct-occt");
+        let resolver = TestResolver { root: root.clone() };
+        let source = r#"(model
+  (part body
+    (chamfer 1 :edges "top" (box 20 20 10))))"#;
+
+        let bundle = render_model(
+            source,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &test_state(&root),
+            &resolver,
+        )
+        .await
+        .expect("analytic chamfer render");
+
+        assert!(bundle
+            .export_artifacts
+            .iter()
+            .any(|artifact| artifact.format.eq_ignore_ascii_case("step")));
+        assert_eq!(
+            bundle
+                .geometry_provenance
+                .as_ref()
+                .map(|provenance| &provenance.representation),
+            Some(&GeometryRepresentation::AnalyticBrep)
+        );
+        let manifest = crate::model_runtime::read_model_manifest(&resolver, &bundle.model_id)
+            .expect("stored manifest");
+        assert_eq!(
+            manifest
+                .geometry_provenance
+                .as_ref()
+                .map(|provenance| &provenance.representation),
+            Some(&GeometryRepresentation::AnalyticBrep)
+        );
+        assert!(
+            !manifest
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("Hybrid")),
+            "analytic chamfer must not use hybrid bridge: {:?}",
+            manifest.warnings
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Regression guard: a pure mesh model (wall-pattern with no post-boundary
+    /// BRep ops) must NOT use the hybrid bridge. It routes through the mesh
+    /// renderer directly.
+    #[tokio::test]
+    async fn pure_mesh_model_does_not_use_hybrid_bridge() {
+        let root = temp_root("pure-mesh-no-hybrid");
+        let resolver = TestResolver { root: root.clone() };
+        let source = r#"(model
+  (part body
+    (wall-pattern (:mode ribs :depth 0.4 :uFreq 8)
+      (extrude (circle 10) 20))))"#;
+
+        let bundle = render_model(
+            source,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &test_state(&root),
+            &resolver,
+        )
+        .await
+        .expect("pure mesh render");
+
+        assert!(
+            std::path::Path::new(&bundle.preview_stl_path).is_file(),
+            "STL must exist"
+        );
+        // Pure mesh: no STEP (mesh renderer can't produce STEP).
+        let has_step = bundle
+            .export_artifacts
+            .iter()
+            .any(|a| a.format.eq_ignore_ascii_case("step"));
+        assert!(
+            !has_step,
+            "pure mesh model must not produce STEP (no OCCT involvement)"
+        );
+        if let Ok(manifest) = crate::model_runtime::read_model_manifest(&resolver, &bundle.model_id)
+        {
+            assert!(
+                !manifest
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("Hybrid poly BRep bridge")),
+                "pure mesh model must not use hybrid bridge"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// PG2: The iPhone 17e case fixture uses wall-pattern (cellular) followed
+    /// by chamfer (BRep-required) followed by difference/union (BRep-required).
+    /// This is the real-world Hybrid case.
+    ///
+    /// KNOWN LIMITATION: chamfer on solidified poly BRep fails — OCCT's
+    /// `BRepFilletAPI_MakeChamfer` cannot find meaningful edges on the
+    /// thousands of tiny planar facets produced by `solidify(import-stl)`.
+    /// The bridge routing is correct (classification, slicing, dispatch all
+    /// work), but chamfer/fillet on poly edges is best-effort per design.md.
+    #[tokio::test]
+    async fn hybrid_poly_brep_iphone_case_fixture_produces_manifold_parts() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root =
+            crate::ecky_cad_host::direct_occt_sdk::bundled_build123d_runtime_root_from_repo(
+                repo_root,
+            );
+        if !runtime_root.exists() {
+            return;
+        }
+        let root = temp_root("hybrid-poly-brep-iphone-case");
+        let resolver = TestResolver { root: root.clone() };
+        let source = example_fixture_source("iphone-17e-case-multipart.ecky");
+        // Exact values from the original failing `Iphone 17e case - fucked`
+        // thread. Source defaults render successfully, but this saved design
+        // previously aborted the native shim with `StdFail_NotDone`.
+        let params = DesignParams::from([
+            ("back-pattern-depth".into(), ParamValue::Number(0.45)),
+            ("back-pattern-phase".into(), ParamValue::Number(0.18)),
+            ("back-pattern-u-frequency".into(), ParamValue::Number(7.0)),
+            ("back-pattern-v-frequency".into(), ParamValue::Number(13.0)),
+            (
+                "bottom-port-gap-from-usb-edge".into(),
+                ParamValue::Number(1.2),
+            ),
+            ("bottom-port-hole-diameter".into(), ParamValue::Number(1.7)),
+            ("bottom-port-hole-pitch".into(), ParamValue::Number(4.0)),
+            (
+                "camera-frame-seat-clearance".into(),
+                ParamValue::Number(0.2),
+            ),
+            (
+                "camera-island-corner-radius".into(),
+                ParamValue::Number(7.0),
+            ),
+            ("camera-island-length".into(), ParamValue::Number(29.0)),
+            ("camera-island-width".into(), ParamValue::Number(31.0)),
+            (
+                "camera-lock-hole-clearance".into(),
+                ParamValue::Number(0.12),
+            ),
+            (
+                "camera-post-bead-extra-radius".into(),
+                ParamValue::Number(0.28),
+            ),
+            (
+                "camera-post-hole-clearance".into(),
+                ParamValue::Number(0.18),
+            ),
+            ("camera-post-length".into(), ParamValue::Number(4.2)),
+            ("camera-post-radius".into(), ParamValue::Number(1.25)),
+            ("camera-seat-depth".into(), ParamValue::Number(0.55)),
+            ("front-lip-height".into(), ParamValue::Number(1.4)),
+            ("front-rim-bottom-overlap".into(), ParamValue::Number(1.05)),
+            ("front-rim-top-overlap".into(), ParamValue::Number(0.25)),
+            ("outer-bottom-edge-chamfer".into(), ParamValue::Number(0.6)),
+            ("outer-top-edge-chamfer".into(), ParamValue::Number(0.8)),
+            ("phone-pocket-clearance".into(), ParamValue::Number(0.35)),
+            ("rear-camera-hole-diameter".into(), ParamValue::Number(15.8)),
+            ("rear-flash-hole-diameter".into(), ParamValue::Number(5.0)),
+            ("rear-mic-hole-diameter".into(), ParamValue::Number(2.0)),
+            ("rear-panel-thickness".into(), ParamValue::Number(1.6)),
+            (
+                "side-button-inner-relief-extra-length".into(),
+                ParamValue::Number(1.5),
+            ),
+            (
+                "side-button-inner-relief-width".into(),
+                ParamValue::Number(4.2),
+            ),
+            (
+                "side-button-membrane-thickness".into(),
+                ParamValue::Number(0.45),
+            ),
+            ("side-button-pad-raise".into(), ParamValue::Number(0.8)),
+            ("side-button-pad-width".into(), ParamValue::Number(4.6)),
+            ("side-wall-thickness".into(), ParamValue::Number(2.5)),
+            ("usb-c-port-opening-height".into(), ParamValue::Number(5.2)),
+            ("usb-c-port-opening-width".into(), ParamValue::Number(13.5)),
+            (
+                "use-back-cellular-pattern".into(),
+                ParamValue::Boolean(true),
+            ),
+        ]);
+        let result = render_model(
+            &source,
+            &params,
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &test_state(&root),
+            &resolver,
+        )
+        .await;
+
+        let bundle = match result {
+            Ok(bundle) => bundle,
+            Err(err) => {
+                panic!("iPhone case hybrid render failed: {err:?}");
+            }
+        };
+
+        assert!(
+            std::path::Path::new(&bundle.preview_stl_path).is_file(),
+            "preview STL must exist"
+        );
+
+        let main_part_path = bundle
+            .viewer_assets
+            .iter()
+            .find(|asset| asset.part_id == "iphone-17e-tpu-case")
+            .map(|asset| std::path::Path::new(&asset.path))
+            .expect("main TPU part STL");
+        let main_metrics = crate::ecky_cad_host::native_parity_harness::stl_metrics(main_part_path);
+        assert!(
+            main_metrics.bbox_min[2] < -0.1,
+            "hybrid main part lost the displaced rear panel: min Z is {} (expected below -0.1)",
+            main_metrics.bbox_min[2]
+        );
+
+        // The result must also remain manifold after preserving the rear panel.
+        let non_manifold =
+            crate::ecky_cad_host::native_parity_harness::ascii_stl_non_manifold_edge_count(
+                std::path::Path::new(&bundle.preview_stl_path),
+            );
+        assert!(
+            non_manifold < 100,
+            "iPhone case hybrid render has {non_manifold} non-manifold edges (expected < 100). \
+             wall-pattern + chamfer + difference must route through the hybrid poly BRep bridge."
+        );
+
         std::fs::remove_dir_all(root).unwrap();
     }
 }

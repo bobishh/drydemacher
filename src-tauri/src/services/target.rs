@@ -1,10 +1,8 @@
 use crate::db;
 use crate::models::{
-    AppError, AppResult, ArtifactBundle, DesignOutput, LastDesignSnapshot, ModelManifest,
-    PathResolver,
+    AppError, AppResult, ArtifactBundle, DesignOutput, ModelManifest, PathResolver,
 };
-use crate::services::session::last_snapshot_path;
-use std::fs;
+use crate::services::session::read_last_snapshot;
 
 pub struct ResolvedTarget {
     pub thread_id: String,
@@ -100,15 +98,15 @@ pub fn resolve_target(
         });
     }
 
-    // Try last_design.json
-    let path = last_snapshot_path(app);
-    if path.exists() {
-        if let Ok(data) = fs::read_to_string(&path) {
-            if let Ok(snapshot) = serde_json::from_str::<LastDesignSnapshot>(&data) {
-                if let (Some(tid), Some(msg_id)) = (snapshot.thread_id, snapshot.message_id) {
-                    return resolve_target(conn, app, Some(tid), Some(msg_id));
-                }
-            }
+    if let Some(snapshot) = read_last_snapshot(app, conn) {
+        if let (Some(thread_id), Some(message_id)) = (snapshot.thread_id, snapshot.message_id) {
+            return Ok(ResolvedTarget {
+                thread_id,
+                message_id,
+                design: snapshot.design,
+                artifact_bundle: snapshot.artifact_bundle,
+                model_manifest: snapshot.model_manifest,
+            });
         }
     }
 

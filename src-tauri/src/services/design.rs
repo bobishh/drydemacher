@@ -253,6 +253,8 @@ pub async fn add_manual_version(
     };
 
     db::add_message(&db, &thread_id, &msg).map_err(|err| AppError::persistence(err.to_string()))?;
+    drop(db);
+    crate::mcp::handlers::invalidate_authoring_actors_for_thread(&thread_id).await;
 
     Ok(msg_id)
 }

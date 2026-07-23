@@ -27,6 +27,9 @@ pub struct BackendCapability {
 
 const ALL_CORE_OPERATION_NAMES: &[&str] = &[
     "box",
+    "mesh",
+    "polyhedron",
+    "heightfield",
     "sphere",
     "cylinder",
     "cone",
@@ -82,6 +85,9 @@ const ALL_CORE_OPERATION_NAMES: &[&str] = &[
 
 const NATIVE_OCCT_OPS: &[BackendOperationCapability] = &[
     supported("box"),
+    supported("mesh"),
+    supported("polyhedron"),
+    supported("heightfield"),
     supported("sphere"),
     supported("cylinder"),
     supported("cone"),
@@ -148,6 +154,18 @@ const NATIVE_OCCT_OPS: &[BackendOperationCapability] = &[
 
 const BUILD123D_OPS: &[BackendOperationCapability] = &[
     supported("box"),
+    unsupported(
+        "mesh",
+        "mesh-native operation requires the EckyRust renderer",
+    ),
+    unsupported(
+        "polyhedron",
+        "mesh-native operation requires the EckyRust renderer or hybrid solidification",
+    ),
+    unsupported(
+        "heightfield",
+        "image-derived mesh operation requires the EckyRust renderer",
+    ),
     supported("sphere"),
     supported("cylinder"),
     supported("cone"),

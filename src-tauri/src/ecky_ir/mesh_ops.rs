@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use csgrs::float_types::parry3d::na::{self, Point3, Vector3};
 use csgrs::mesh::plane::Plane as IrPlane;
@@ -14,6 +15,10 @@ use crate::models::{AppResult, ParamValue};
 use super::edge_ops::{chamfer_mesh, fillet_mesh, parse_edge_selector};
 use super::eval_scalar::{
     eval_bool, eval_number, eval_points, eval_points_3d, eval_stringish, parse_count,
+};
+use super::heightfield::build_heightfield;
+use super::mesh_literal::{
+    build_mesh_literal, MAX_MESH_LITERAL_TRIANGLES, MAX_MESH_LITERAL_VERTICES,
 };
 use super::model::{
     expr_head_symbol, expr_keyword_name, expr_list_items, expr_parse_stringish, inline_let_expr,
@@ -186,16 +191,11 @@ impl Align3d {
 pub(super) fn sanitize_mesh_for_export(mesh: &IrMesh) -> IrMesh {
     let mut triangles = Vec::new();
     for poly in &mesh.polygons {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            poly.triangulate()
-        }));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| poly.triangulate()));
         match result {
             Ok(tris) if !tris.is_empty() => {
                 for tri in tris {
-                    triangles.push(IrPolygon::new(
-                        tri.to_vec(),
-                        poly.metadata.clone(),
-                    ));
+                    triangles.push(IrPolygon::new(tri.to_vec(), poly.metadata.clone()));
                 }
             }
             _ => { /* degenerate polygon — skip */ }
@@ -428,6 +428,82 @@ fn split_call_args<'a>(
     }
 
     Ok((positional, keywords))
+}
+
+fn eval_mesh_vertices(
+    operation: &str,
+    value: &IrExpr,
+    env: &BTreeMap<String, ParamValue>,
+) -> AppResult<Vec<[f64; 3]>> {
+    let points = expr_list_items(value, "mesh vertex list")?;
+    if points.len() > MAX_MESH_LITERAL_VERTICES {
+        return Err(validation(format!(
+            "`{operation}` vertices count {} exceeds allowed count {}.",
+            points.len(),
+            MAX_MESH_LITERAL_VERTICES
+        )));
+    }
+    points
+        .iter()
+        .enumerate()
+        .map(|(index, point)| {
+            let point = inline_let_expr(point)?;
+            let triple = expr_list_items(&point, "mesh vertex")?;
+            if triple.len() != 3 {
+                return Err(validation(format!(
+                    "`{operation}` vertex {index} expects `(x y z)`."
+                )));
+            }
+            Ok([
+                eval_number(&triple[0], env)?,
+                eval_number(&triple[1], env)?,
+                eval_number(&triple[2], env)?,
+            ])
+        })
+        .collect()
+}
+
+fn eval_mesh_triangles(
+    operation: &str,
+    value: &IrExpr,
+    env: &BTreeMap<String, ParamValue>,
+) -> AppResult<Vec<[usize; 3]>> {
+    let triangles = expr_list_items(value, "mesh triangle list")?;
+    if triangles.len() > MAX_MESH_LITERAL_TRIANGLES {
+        return Err(validation(format!(
+            "`{operation}` triangles count {} exceeds allowed count {}.",
+            triangles.len(),
+            MAX_MESH_LITERAL_TRIANGLES
+        )));
+    }
+    triangles
+        .iter()
+        .enumerate()
+        .map(|(triangle_index, triangle)| {
+            let triangle = inline_let_expr(triangle)?;
+            let triple = expr_list_items(&triangle, "mesh triangle")?;
+            if triple.len() != 3 {
+                return Err(validation(format!(
+                    "`{operation}` triangle {triangle_index} expects three vertex indices."
+                )));
+            }
+            let mut indices = [0usize; 3];
+            for (index_index, value) in triple.iter().enumerate() {
+                let parsed = eval_number(value, env)?;
+                if !parsed.is_finite()
+                    || parsed < 0.0
+                    || parsed.fract() != 0.0
+                    || parsed > usize::MAX as f64
+                {
+                    return Err(validation(format!(
+                        "`{operation}` triangle {triangle_index} index {index_index} must be a non-negative integer, got {parsed}."
+                    )));
+                }
+                indices[index_index] = parsed as usize;
+            }
+            Ok(indices)
+        })
+        .collect()
 }
 
 fn parse_align_axis(value: &IrExpr, node: &str) -> AppResult<AxisAlign> {
@@ -686,7 +762,8 @@ pub(super) fn build_wall_pattern_target(
             if args.len() != 2 {
                 return Err(validation("`extrude` expects a sketch and height."));
             }
-            let sketch = eval_geometry_with_bindings(&args[0], env, bindings)?.into_sketch("wall-pattern")?;
+            let sketch = eval_geometry_with_bindings(&args[0], env, bindings)?
+                .into_sketch("wall-pattern")?;
             let height = eval_number(&args[1], env)?;
             let contours = contours_from_sketch(&sketch, "wall-pattern")?;
             Ok((
@@ -724,7 +801,8 @@ pub(super) fn build_wall_pattern_target(
                     3usize,
                 )
             };
-            let sketch = eval_geometry_with_bindings(&args[sketch_index], env, bindings)?.into_sketch("wall-pattern")?;
+            let sketch = eval_geometry_with_bindings(&args[sketch_index], env, bindings)?
+                .into_sketch("wall-pattern")?;
             let base_contours = contours_from_sketch(&sketch, "wall-pattern")?;
             let top = sketch.scale(scale_x, scale_y, 1.0);
             let top_contours = contours_from_sketch(&top, "wall-pattern")?;
@@ -759,7 +837,8 @@ pub(super) fn build_wall_pattern_target(
             } else {
                 (parse_count(&args[2], env, "twist segments", 1)?, 3usize)
             };
-            let sketch = eval_geometry_with_bindings(&args[sketch_index], env, bindings)?.into_sketch("wall-pattern")?;
+            let sketch = eval_geometry_with_bindings(&args[sketch_index], env, bindings)?
+                .into_sketch("wall-pattern")?;
             let mut slices = Vec::with_capacity(segments + 1);
             for index in 0..=segments {
                 let t = index as f64 / segments as f64;
@@ -767,7 +846,11 @@ pub(super) fn build_wall_pattern_target(
                 let rotated = sketch.rotate(0.0, 0.0, angle_deg * t);
                 let contours = contours_from_sketch(&rotated, "wall-pattern")?;
                 let blocked_loops = contour_hole_loops(&contours);
-                slices.push(contour_sweep_slice_from_contours(&contours, blocked_loops, z));
+                slices.push(contour_sweep_slice_from_contours(
+                    &contours,
+                    blocked_loops,
+                    z,
+                ));
             }
             Ok((
                 twist_mesh(&sketch, height, angle_deg, segments, "wall-pattern")?,
@@ -776,9 +859,12 @@ pub(super) fn build_wall_pattern_target(
         }
         "revolve" => {
             if args.len() < 2 || args.len() > 3 {
-                return Err(validation("`revolve` expects a sketch, angle, and optional segments."));
+                return Err(validation(
+                    "`revolve` expects a sketch, angle, and optional segments.",
+                ));
             }
-            let sketch = eval_geometry_with_bindings(&args[0], env, bindings)?.into_sketch("wall-pattern")?;
+            let sketch = eval_geometry_with_bindings(&args[0], env, bindings)?
+                .into_sketch("wall-pattern")?;
             let angle_deg = eval_number(&args[1], env)?;
             let segments = args
                 .get(2)
@@ -808,7 +894,9 @@ pub(super) fn build_wall_pattern_target(
         }
         "shell" => {
             if args.len() != 2 {
-                return Err(validation("`shell` expects wall thickness and a supported solid node."));
+                return Err(validation(
+                    "`shell` expects wall thickness and a supported solid node.",
+                ));
             }
             let wall = eval_number(&args[0], env)?;
             let mesh = eval_shell_geometry(&args[1], wall, env, bindings)?;
@@ -1039,10 +1127,32 @@ pub(super) fn build_wall_pattern_target(
             };
             Ok((mesh, target))
         }
-        other => Err(unsupported(format!(
-            "Node `wall-pattern` only supports shell-surface targets (`shell`, `extrude`, `revolve`, `taper`, `twist`). It does not support `{}`.",
-            other
-        ))),
+        _ => {
+            let mesh =
+                eval_geometry_with_bindings(value, env, bindings)?.into_mesh("wall-pattern")?;
+            let bounds = mesh.bounding_box();
+            let mins = [bounds.mins.x, bounds.mins.y, bounds.mins.z];
+            let maxs = [bounds.maxs.x, bounds.maxs.y, bounds.maxs.z];
+            let spans = [
+                (maxs[0] - mins[0]).abs(),
+                (maxs[1] - mins[1]).abs(),
+                (maxs[2] - mins[2]).abs(),
+            ];
+            let normal_axis = spans
+                .iter()
+                .enumerate()
+                .min_by(|(_, left), (_, right)| left.total_cmp(right))
+                .map(|(axis, _)| axis)
+                .unwrap_or(2);
+            Ok((
+                mesh,
+                WallPatternTarget::MeshBounds {
+                    mins,
+                    maxs,
+                    normal_axis,
+                },
+            ))
+        }
     }
 }
 
@@ -1430,6 +1540,58 @@ pub(super) fn eval_geometry_with_bindings(
             cut_solids(base, cutters, "cut")
         }
         "common" => common_solids("common", args, env, bindings),
+        "heightfield" => {
+            let (positional, keywords) = split_call_args(
+                "heightfield",
+                args,
+                &["width", "depth", "relief-height", "base-thickness", "invert"],
+            )?;
+            if positional.len() != 1 {
+                return Err(validation(
+                    "`heightfield` expects one image path plus dimension keywords.",
+                ));
+            }
+            let dimension = |name: &str| -> AppResult<f64> {
+                keywords
+                    .get(name)
+                    .copied()
+                    .ok_or_else(|| validation(format!("`heightfield` requires `:{name}`.")))
+                    .and_then(|value| eval_number(value, env))
+            };
+            Ok(Geometry::Mesh(build_heightfield(
+                &eval_stringish(positional[0], env)?,
+                dimension("width")?,
+                dimension("depth")?,
+                dimension("relief-height")?,
+                dimension("base-thickness")?,
+                keywords
+                    .get("invert")
+                    .map(|value| eval_bool(value, env))
+                    .transpose()?
+                    .unwrap_or(false),
+            )?))
+        }
+        "mesh" | "polyhedron" => {
+            let (positional, keywords) =
+                split_call_args(node, args, &["vertices", "triangles"])?;
+            if !positional.is_empty() {
+                return Err(validation(format!(
+                    "`{node}` accepts only `:vertices` and `:triangles`."
+                )));
+            }
+            let vertices = keywords.get("vertices").copied().ok_or_else(|| {
+                validation(format!("`{node}` requires `:vertices`."))
+            })?;
+            let triangles = keywords.get("triangles").copied().ok_or_else(|| {
+                validation(format!("`{node}` requires `:triangles`."))
+            })?;
+            Ok(Geometry::Mesh(build_mesh_literal(
+                node,
+                eval_mesh_vertices(node, vertices, env)?,
+                eval_mesh_triangles(node, triangles, env)?,
+                node == "polyhedron",
+            )?))
+        }
         "box" => {
             let (positional, keywords) = split_call_args("box", args, &["align"])?;
             if positional.len() != 3 {
@@ -2134,31 +2296,58 @@ pub(super) fn eval_geometry_with_bindings(
             let (mesh, target) = build_wall_pattern_target(target_expr, env, bindings)?;
             Ok(Geometry::Mesh(apply_wall_pattern(&mesh, &target, &spec)?))
         }
-        "chamfer" => {
+        "chamfer" => Err(validation(
+            "`chamfer` is a CAD BRep surface operation and must run on the Direct OCCT backend. Use `mesh-chamfer` explicitly for mesh-native geometry.",
+        )),
+        "mesh-chamfer" => {
             if args.len() < 2 {
-                return Err(validation("`chamfer` expects distance and a geometry node."));
+                return Err(validation("`mesh-chamfer` expects distance and a geometry node."));
             }
             let distance = eval_number(&args[0], env)?;
             let (selector, body_index) = parse_edge_selector(args, env)?;
             if body_index >= args.len() {
-                return Err(validation("`chamfer` is missing the geometry body argument."));
+                return Err(validation(
+                    "`mesh-chamfer` is missing the geometry body argument.",
+                ));
             }
-            let mesh = eval_geometry_with_bindings(&args[body_index], env, bindings)?.into_mesh("chamfer")?;
+            let mesh = eval_geometry_with_bindings(&args[body_index], env, bindings)?
+                .into_mesh("mesh-chamfer")?;
             Ok(Geometry::Mesh(chamfer_mesh(&mesh, distance, selector)?))
         }
-        "fillet" => {
+        "fillet" => Err(validation(
+            "`fillet` is a CAD BRep surface operation and must run on the Direct OCCT backend. Use `mesh-fillet` explicitly for mesh-native geometry.",
+        )),
+        "mesh-fillet" => {
             if args.len() < 2 {
-                return Err(validation("`fillet` expects radius and a geometry node."));
+                return Err(validation("`mesh-fillet` expects radius and a geometry node."));
             }
             let radius = eval_number(&args[0], env)?;
             let (selector, body_index) = parse_edge_selector(args, env)?;
             if body_index >= args.len() {
-                return Err(validation("`fillet` is missing the geometry body argument."));
+                return Err(validation(
+                    "`mesh-fillet` is missing the geometry body argument.",
+                ));
             }
-            let mesh = eval_geometry_with_bindings(&args[body_index], env, bindings)?.into_mesh("fillet")?;
+            let mesh = eval_geometry_with_bindings(&args[body_index], env, bindings)?
+                .into_mesh("mesh-fillet")?;
             Ok(Geometry::Mesh(fillet_mesh(&mesh, radius, selector)?))
         }
-        "text" | "svg" | "import-stl" => Err(unsupported(format!(
+        "import-stl" => {
+            if args.len() != 1 {
+                return Err(validation("`import-stl` expects one STL file path."));
+            }
+            let path = eval_stringish(&args[0], env)?;
+            Ok(Geometry::Mesh(read_stl_mesh(Path::new(&path))?))
+        }
+        "mesh-bridge-overlap" => {
+            if args.len() != 1 {
+                return Err(validation("`mesh-bridge-overlap` expects one mesh."));
+            }
+            let mesh = eval_geometry_with_bindings(&args[0], env, bindings)?
+                .into_mesh("mesh-bridge-overlap")?;
+            Ok(Geometry::Mesh(add_mesh_bridge_overlap(&mesh)))
+        }
+        "text" | "svg" => Err(unsupported(format!(
             "Node `{}` is not supported by the EckyRust backend. Switch to FreeCAD or build123d.",
             node
         ))),
@@ -2170,6 +2359,151 @@ pub(super) fn eval_geometry_with_bindings(
             other
         ))),
     }
+}
+
+fn add_mesh_bridge_overlap(mesh: &IrMesh) -> IrMesh {
+    const OVERLAP_MM: f64 = 0.4;
+    const TAPER_INSET_MM: f64 = 0.2;
+    let bounds = mesh.bounding_box();
+    let mins = [bounds.mins.x, bounds.mins.y, bounds.mins.z];
+    let maxs = [bounds.maxs.x, bounds.maxs.y, bounds.maxs.z];
+    let spans = [
+        (maxs[0] - mins[0]).abs(),
+        (maxs[1] - mins[1]).abs(),
+        (maxs[2] - mins[2]).abs(),
+    ];
+    let axis = spans
+        .iter()
+        .enumerate()
+        .min_by(|(_, left), (_, right)| left.total_cmp(right))
+        .map(|(axis, _)| axis)
+        .unwrap_or(2);
+    let tolerance = spans[axis].max(1.0) * 1.0e-6;
+    let centers = [
+        (mins[0] + maxs[0]) * 0.5,
+        (mins[1] + maxs[1]) * 0.5,
+        (mins[2] + maxs[2]) * 0.5,
+    ];
+    let mut overlapped = mesh.clone();
+    for polygon in &mut overlapped.polygons {
+        for vertex in &mut polygon.vertices {
+            if vertex.pos[axis] >= maxs[axis] - tolerance {
+                vertex.pos[axis] += OVERLAP_MM;
+                for orthogonal_axis in 0..3 {
+                    if orthogonal_axis == axis || spans[orthogonal_axis] <= tolerance {
+                        continue;
+                    }
+                    let inset = TAPER_INSET_MM.min(spans[orthogonal_axis] * 0.1);
+                    let scale = (spans[orthogonal_axis] - 2.0 * inset) / spans[orthogonal_axis];
+                    vertex.pos[orthogonal_axis] = centers[orthogonal_axis]
+                        + (vertex.pos[orthogonal_axis] - centers[orthogonal_axis]) * scale;
+                }
+            }
+        }
+        polygon.plane = IrPlane::from_vertices(polygon.vertices.clone());
+        polygon.bounding_box = std::sync::OnceLock::new();
+    }
+    overlapped.bounding_box = std::sync::OnceLock::new();
+    overlapped
+}
+
+fn read_stl_mesh(path: &Path) -> AppResult<IrMesh> {
+    let bytes = std::fs::read(path)
+        .map_err(|err| validation(format!("Failed to read STL '{}': {err}", path.display())))?;
+    let triangles = if bytes.len() >= 84 {
+        let count = u32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]) as usize;
+        if 84usize.checked_add(count.saturating_mul(50)) == Some(bytes.len()) {
+            let mut triangles = Vec::with_capacity(count);
+            for index in 0..count {
+                let mut offset = 84 + index * 50 + 12;
+                let mut triangle = [[0.0; 3]; 3];
+                for vertex in &mut triangle {
+                    for coordinate in vertex {
+                        *coordinate = f32::from_le_bytes(
+                            bytes[offset..offset + 4]
+                                .try_into()
+                                .expect("checked binary STL coordinate"),
+                        ) as f64;
+                        offset += 4;
+                    }
+                }
+                triangles.push(triangle);
+            }
+            triangles
+        } else {
+            parse_ascii_stl_mesh(&bytes, path)?
+        }
+    } else {
+        parse_ascii_stl_mesh(&bytes, path)?
+    };
+    if triangles.is_empty() {
+        return Err(validation(format!(
+            "STL '{}' contains no triangles.",
+            path.display()
+        )));
+    }
+    let polygons = triangles
+        .into_iter()
+        .filter_map(|triangle| {
+            let points = triangle.map(|point| Point3::new(point[0], point[1], point[2]));
+            let cross = (points[1] - points[0]).cross(&(points[2] - points[0]));
+            if cross.norm() <= 1.0e-12 {
+                return None;
+            }
+            let normal = cross.normalize();
+            Some(IrPolygon::new(
+                points
+                    .into_iter()
+                    .map(|point| IrVertex::new(point, normal))
+                    .collect(),
+                None,
+            ))
+        })
+        .collect::<Vec<_>>();
+    if polygons.is_empty() {
+        return Err(validation(format!(
+            "STL '{}' contains only degenerate triangles.",
+            path.display()
+        )));
+    }
+    Ok(IrMesh::from_polygons(&polygons, None))
+}
+
+fn parse_ascii_stl_mesh(bytes: &[u8], path: &Path) -> AppResult<Vec<[[f64; 3]; 3]>> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|err| validation(format!("STL '{}' is invalid: {err}", path.display())))?;
+    let mut vertices = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        if !parts
+            .next()
+            .is_some_and(|token| token.eq_ignore_ascii_case("vertex"))
+        {
+            continue;
+        }
+        let point = [
+            parts.next().and_then(|value| value.parse().ok()),
+            parts.next().and_then(|value| value.parse().ok()),
+            parts.next().and_then(|value| value.parse().ok()),
+        ];
+        let [Some(x), Some(y), Some(z)] = point else {
+            return Err(validation(format!(
+                "STL '{}' contains an invalid vertex.",
+                path.display()
+            )));
+        };
+        vertices.push([x, y, z]);
+    }
+    if !vertices.len().is_multiple_of(3) {
+        return Err(validation(format!(
+            "STL '{}' contains an incomplete facet.",
+            path.display()
+        )));
+    }
+    Ok(vertices
+        .chunks_exact(3)
+        .map(|chunk| [chunk[0], chunk[1], chunk[2]])
+        .collect())
 }
 pub(super) fn fold_boolean_geometry(
     name: &str,

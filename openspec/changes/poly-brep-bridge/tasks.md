@@ -11,7 +11,7 @@
 ## Status Legend
 
 - [x] Done and tested
-- [ ] TODO
+- TODO — unchecked task
 
 ---
 
@@ -78,10 +78,7 @@ Tasks:
 
 ---
 
-## T3 — Hybrid Dispatch Wiring (TODO)
-
-**This is the remaining core work.** Wire partition analysis into the render
-pipeline so Hybrid parts automatically use the bridge.
+## T3 — Hybrid Dispatch Wiring ✅
 
 Write scope:
 
@@ -91,32 +88,35 @@ Write scope:
 
 Tasks:
 
-- [ ] 3.1 In `render_model_unlocked`, after backend resolution for Ecky IR
+- [x] 3.1 In `render_model_unlocked`, after backend resolution for Ecky IR
   sources: compile to CoreProgram, run `poly_partition::analyze_program`.
   Classify per-part strategy.
-- [ ] 3.2 If ALL parts PureOcct → existing OCCT path (no change, regression
+- [x] 3.2 If ALL parts PureOcct → existing OCCT path (no change, regression
   guard test).
-- [ ] 3.3 If ALL parts PureMesh → existing mesh path (no change, regression
+- [x] 3.3 If ALL parts PureMesh → existing mesh path (no change, regression
   guard test).
-- [ ] 3.4 If ANY part Hybrid → hybrid pipeline:
-  a. Render the whole part through mesh renderer (existing path).
-  b. Take displaced STL output path.
+- [x] 3.4 If ANY part Hybrid → hybrid pipeline:
+  a. Render each independent mesh island through the mesh renderer.
+  b. Store each displaced STL as an engine-independent `MeshAsset`.
   c. Construct OCCT plan: `import-stl(stl) → solidify → [post-boundary ops]`.
   d. Execute OCCT plan → STL + STEP.
-- [ ] 3.5 Post-boundary op reconstruction: extract BRep-required ops from
-  above the boundary node in the CoreNode tree, rebuild as OcctPlan commands.
-  Start with the common case: single `difference` with exact cutters
-  (cylinders/boxes).
-- [ ] 3.6 Integration test: wall-pattern + difference → manifold result
-  (< 100 non-manifold edges). This is proof gate PG1.
-- [ ] 3.7 Integration test: iPhone 17e case fixture → 3 clean parts. PG2.
-- [ ] 3.8 Regression test: PureOcct model still routes to OCCT (no
+- [x] 3.5 Post-boundary op reconstruction: tree-slicing in `poly_partition.rs`
+  (`clone_program_for_mesh_phase` + `clone_program_for_occt_phase`). Mesh
+  phase strips post-boundary ops; OCCT phase replaces wall-pattern with
+  `solidify(import-stl(path))`.
+- [x] 3.6 Integration test: wall-pattern + difference → manifold result
+  (< 100 non-manifold edges). **PASSING.** PG1.
+- [x] 3.7 Integration test: iPhone 17e case fixture → 3 clean parts. PG2.
+  Exact chamfer runs before the mesh boundary, cellular displacement runs on
+  its tessellated result, and final OCCT booleans preserve the rear relief.
+  The test is active and enforces the `< 100` non-manifold threshold.
+- [x] 3.8 Regression test: PureOcct model still routes to OCCT (no
   partition overhead beyond the analyze call). PG5/PG8.
-- [ ] 3.9 Regression test: PureMesh model still routes to mesh renderer. PG6/PG9.
+- [x] 3.9 Regression test: PureMesh model still routes to mesh renderer. PG6/PG9.
 
 ---
 
-## T4 — Export and Manifest (TODO)
+## T4 — Export and Manifest ✅
 
 Write scope:
 
@@ -125,15 +125,16 @@ Write scope:
 
 Tasks:
 
-- [ ] 4.1 Hybrid part export: STL from final OCCT tessellation.
-- [ ] 4.2 Hybrid part export: STEP (exact faces exact, poly faces poly).
-- [ ] 4.3 Tag hybrid parts in manifest so UI/export knows they used the
-  bridge.
-- [ ] 4.4 Tests: hybrid part → STL + STEP exist and are valid.
+- [x] 4.1 Hybrid part export: STL from final OCCT tessellation.
+- [x] 4.2 Hybrid part export: STEP (exact faces exact, poly faces poly).
+- [x] 4.3 Tag hybrid parts in manifest so UI/export knows they used the
+  bridge (manifest warning: "Hybrid poly BRep bridge: N part(s)...")
+- [x] 4.4 Tests: hybrid part → STL + STEP exist and are valid.
+  (`hybrid_poly_brep_exports_both_stl_and_step`)
 
 ---
 
-## T5 — Documentation and Integration Gates (TODO)
+## T5 — Documentation and Integration Gates
 
 Write scope:
 
@@ -142,32 +143,33 @@ Write scope:
 
 Tasks:
 
-- [ ] 5.1 `cd src-tauri && cargo check` passes. PG7.
-- [ ] 5.2 Full backend test suite passes (excluding pre-existing failures).
-- [ ] 5.3 Document hybrid pipeline in Ecky IR field guide.
-- [ ] 5.4 Update coverage matrix with hybrid classification.
+- [x] 5.1 `cd src-tauri && cargo check` passes.
+- [x] 5.2 Full backend suite passes (1625 library + 93 integration passed,
+  0 failures, 2 ignored parity cases).
+- [x] 5.3 Document hybrid pipeline in coverage matrix.
+- [x] 5.4 Update coverage matrix with hybrid classification.
 
 ---
 
-## Removed / Deferred (from original spec)
+## Completed Extensions (from original spec)
 
-### ~~T2 (original): Pre-boundary OCCT Tessellation~~
+### T2 (original): Pre-boundary OCCT Tessellation
 
-**Deferred.** The mesh renderer handles the full pre-boundary chain
-(extrude + wall-pattern). We do not need to tessellate OCCT exact geometry
-and feed it to the mesh renderer. This was an optimization for higher base
-precision; deferred until profiling shows a need.
+**Superseded by T7.** Exact BRep may be tessellated when it intentionally
+crosses into a mesh-only operation input, but `chamfer`/`fillet` are not mesh
+preludes and must not be pushed into the mesh phase.
 
-### ~~T3 (original): Mesh-Only Op Execution on Tessellated Mesh~~
+### T3 (original): Mesh-Only Op Execution on Tessellated Mesh
 
-**Deferred.** Same reason. wall-pattern already runs on mesh-renderer-extruded
-geometry. Teaching it to accept external meshes is unnecessary complexity.
+**Done.** `wall-pattern` accepts evaluated mesh inputs, including OCCT
+tessellation, imported STL, and typed `polyhedron` output.
 
-### ~~T6 (original): MeshAsset Interface~~
+### T6 (original): MeshAsset Interface
 
-**Deferred (YAGNI).** One mesh source today (wall-pattern). The bridge works
-on any STL path. When a second source exists (imported mesh, image relief,
-AI-generated), it plugs into the same `import-stl` + `solidify` path.
+**Done.** `MeshAsset` is the engine-independent handoff. Provenance supports
+internal mesh phases, imported STL, and generated providers such as Meshy.
+Typed `polyhedron` gives an LLM-native triangle mesh input without binding the
+pipeline to a generator SDK.
 
 ### ~~`import_poly_mesh` combined op~~
 
@@ -210,6 +212,10 @@ Research sources and decisions live in the design section
   non-manifold edges. The cold target is still red.
 - [ ] Add a cold-run stage benchmark for import, validate, solidify, Boolean,
   cleanup, mesh, verify, and export.
+- [x] Add the precompiled-runner stage-report contract with those eight fixed
+  ordered stages, explicit skipped status, execution counts, per-stage elapsed
+  milliseconds, and total elapsed time. Live hybrid import → solidify →
+  Boolean proof passes; the full ladybug benchmark/metrics remain pending.
 - [ ] Record input/output vertices, triangles, OCCT faces, components,
   manifold edges, bounding box, signed volume, and elapsed time.
 - [ ] Make the existing multi-minute path fail an acceptance threshold before
@@ -226,8 +232,51 @@ Research sources and decisions live in the design section
   runner and generated executor.
 - [x] Add differential tests proving both execution paths produce equivalent
   topology and volume.
+- [x] Execute `solidify(import-stl(...))` in the precompiled runner instead of
+  falling back to compile-per-render generated C++. The native parity matrix
+  covers the imported watertight VertexGenie fixture and matches generated
+  topology/volume.
 - [ ] Benchmark `SetNonDestructive(true)` memory/time before choosing its
   default; gate inverted-solid check removal behind validation.
+
+---
+
+## T7 — Surface Operation Route Authority
+
+Write scope:
+
+- `src-tauri/src/ecky_ir/poly_partition.rs`
+- `src-tauri/src/ecky_ir/mesh_ops.rs`
+- `src-tauri/src/ecky_cad_host/direct_occt_runtime.rs`
+- `src-tauri/src/mcp/handlers/mod.rs`
+- `src/lib/SketchWorkspace.svelte`
+- targeted tests
+
+Tasks:
+
+- [ ] 7.1 Add failing partition tests proving `chamfer`/`fillet` stop mesh
+  phase: `wall-pattern -> chamfer` must output the `wall-pattern` node to the
+  mesh phase and apply `chamfer` in the OCCT phase.
+- [ ] 7.2 Remove/supersede `push_bound_edge_op_before_mesh` behavior for
+  `chamfer`/`fillet`; no polygon edge-op pushdown for BRep surface ops.
+- [ ] 7.3 Add mesh evaluator guard: analytic-origin `chamfer`/`fillet` must
+  reject with an exact-route diagnostic instead of silently producing polygon
+  output. Mesh-origin usage remains explicit and marks `meshNative`.
+- [ ] 7.4 Direct OCCT pure renders set `GeometryRepresentation::AnalyticBrep`
+  on `ArtifactBundle`, `ModelManifest`, and STEP `ExportArtifact`.
+- [ ] 7.5 MCP artifact digest reports `geometryRepresentation=analyticBrep`,
+  `analyticStep=true`, `facetedStep=false` for pure Direct OCCT artifacts.
+- [ ] 7.6 UI artifact evidence displays representation truth separately from
+  `geometryBackend`.
+- [ ] 7.7 Add regression test: `(chamfer 1 (box 20 20 10))` under EckyRust
+  produces STEP + `analyticBrep` and never enters mesh chamfer.
+- [ ] 7.8 Add regression test: `wall-pattern -> chamfer` produces hybrid
+  `solidify(import-stl(...)) -> chamfer` OCCT plan and marks faceted output.
+- [ ] 7.9 Add mesh-origin surface-op admission: bounded selector/edge-count
+  gate for `chamfer`/`fillet` on solidified faceted BRep; reject dense broad
+  selectors with selected-edge count and no fallback.
+- [x] 7.10 Run `openspec validate poly-brep-bridge --strict`.
+- [ ] 7.11 Run `cd src-tauri && cargo check` plus targeted Rust tests.
 - [ ] Do not enable glue globally or change fuzzy tolerance without a named
   tolerance policy and regression fixture.
 
@@ -250,12 +299,31 @@ Research sources and decisions live in the design section
   current existence/size gate is not digest verification.
 - [ ] Add selective content-addressed caches for validated mesh, solidified
   faceted BRep, and completed hybrid island.
-- [ ] Coalesce concurrent identical renders into one in-flight job.
-- [ ] Cache successes only; surface raw failures to every waiter.
+- [x] Coalesce concurrent identical renders into one in-flight job. The
+  process-local registry keys the complete render identity before the global
+  kernel lock, so overlapping duplicates join instead of queueing a second
+  execution.
+- [x] Cache successes only; surface raw failures to every waiter. In-flight
+  results are removed on completion; waiters receive the same structured raw
+  error, and a failed request retries as a new owner.
+- [x] Include imported STL bytes and resolved runner/runtime-manifest identity
+  in the in-flight key; same-path asset/runtime replacement no longer joins
+  stale work.
+- [x] Include the expanded executable OCCT plan, runner plan schema, imported
+  STL path, and imported STL bytes in the direct artifact cache key. Same-path
+  STL mutation now misses both singleflight and completed-artifact reuse.
+- [x] Snapshot render-relevant configuration once and use the same immutable
+  snapshot for both the singleflight key and owner execution. Owner/waiter
+  tests mutate live config while the owner is blocked on the kernel gate and
+  prove the admitted snapshot remains authoritative.
 - [ ] Add byte-budgeted eviction and backend-version invalidation tests.
 
 ### T6.5 — Progress and cancellation actor
 
+- [x] Move recursive dependency-plan normalization off default Tokio workers
+  onto the named Direct OCCT large-stack worker. Add a bounded normalizer depth
+  failure and a 2 MiB MCP worker regression; the default-parallel 1715-test
+  library suite now completes without the previous `tokio-rt-worker` abort.
 - [ ] Emit typed stage progress without dumping kernel stdout into app logs.
 - [ ] Bridge OCCT `Message_ProgressIndicator`/`UserBreak` where supported.
 - [ ] Kill an uncooperative kernel child on cancellation.
@@ -264,15 +332,36 @@ Research sources and decisions live in the design section
 
 ### T6.6 — Representation-aware mesh Boolean route
 
-- [ ] Introduce a canonical indexed mesh handoff; do not use STL as the cache
-  representation.
-- [ ] Validate welding, orientation, manifoldness, and component count before
-  entering a mesh Boolean kernel.
-- [ ] Route STL/3MF hybrid islands through Manifold `BatchBoolean` and retain a
-  mesh result.
-- [ ] Keep exact BRep/analytic STEP in OCCT; permit faceted STEP fallback only
-  under an explicit face budget and provenance label.
-- [ ] Reject hidden fallback between kernels.
+- [x] Introduce a canonical indexed mesh handoff; do not use STL as the cache
+  representation. Each rendered part writes and cache-validates a versioned
+  indexed-mesh sidecar before STL export. Eligible hybrid phase-2 plans inline
+  that validated indexed asset into the native runner; C++ never probes for a
+  sibling sidecar or rereads STL.
+- [x] Add the canonical indexed-mesh asset contract and deterministic IrMesh
+  conversion: deduplicated vertices, indexed triangles, SHA-256 content
+  digest, bounds/degeneracy/topology validation, component provenance, and an
+  explicit Boolean admission gate. Runtime sidecar integration and direct
+  Manifold consumption are active.
+- [x] Validate named 1e-6 mm seam welding, orientation, manifoldness, and
+  component count before entering a mesh Boolean kernel, then require
+  Manifold `Status()` after construction and every Boolean result.
+- [x] Record AST-owned mesh Boolean boundaries per part with authored operand
+  order and mesh-dependent operand indices. Separate parts never batch
+  together; difference head/cutter order is tested; XOR remains ineligible.
+- [x] Route validated indexed hybrid islands through ordered Manifold Boolean
+  folds and retain a mesh result. Exact OCCT operands are tessellated directly
+  in memory to `MeshGL64`; authored head/cutter order stays observable and no
+  intermediate STL exists.
+- [ ] Add canonical indexed decoders for standalone imported STL/3MF assets;
+  current Manifold admission requires Ecky's validated indexed sidecar.
+- [ ] Add multi-part mesh-native bundle export. Current Manifold admission is
+  limited to a single-part plan so mixed BRep/Manifold roots never fail during
+  final bundle assembly.
+- [x] Keep exact BRep/analytic STEP in OCCT. Mesh-native Manifold output emits
+  STL without fabricating STEP; faceted STEP fallback remains disabled.
+- [x] Reject hidden fallback between kernels. Admission chooses Manifold or
+  OCCT before execution and records skipped-Manifold topology reasons; a
+  Manifold construction/Boolean failure is surfaced raw.
 
 ### T6.7 — Optional decoration simplification
 
@@ -287,7 +376,9 @@ Research sources and decisions live in the design section
 - [ ] Cold ladybug render meets the recorded performance target.
 - [x] Warm identical render performs no kernel execution (artifact timestamps
   unchanged; content-derived model ID reused).
-- [ ] Two identical concurrent renders execute one kernel job.
+- [x] Two identical concurrent renders execute one kernel job. A public render
+  concurrency test holds the kernel lock, proves the second request joins the
+  existing flight, then proves both requests receive the same result.
 - [ ] Cancellation leaves no orphan process or partial cache entry.
 - [x] Final output has zero non-manifold edges and expected component count.
 - [ ] Bounding box, signed volume, and geometric deviation stay within the

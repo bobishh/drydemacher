@@ -4,9 +4,33 @@ use std::collections::HashSet;
 
 use super::{
     default_engine_kind, default_geometry_backend, default_model_runtime_schema_version,
-    default_source_language, AppError, AppResult, EngineKind, GeometryBackend, ModelSourceKind,
-    PortFrame, SourceLanguage,
+    default_source_language, AppError, AppResult, DesignParams, EngineKind, GeometryBackend,
+    ModelManifest, ModelSourceKind, PortFrame, PostProcessingSpec, SourceLanguage, VerifierSource,
+    VerifierStatus,
 };
+
+/// Stable, explicit identity for saved and draft authoring authorities.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum AuthoringTargetRef {
+    #[specta(rename_all = "camelCase")]
+    SavedVersion {
+        thread_id: String,
+        message_id: String,
+    },
+    #[specta(rename_all = "camelCase")]
+    Draft {
+        thread_id: String,
+        preview_id: String,
+        session_id: String,
+    },
+    #[specta(rename_all = "camelCase")]
+    LatestSaved { thread_id: String },
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -110,6 +134,27 @@ pub struct MeasurementGuide {
     pub target_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum GeometryRepresentation {
+    MeshNative,
+    FacetedPolyBrep,
+    AnalyticBrep,
+    Hybrid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GeometryProvenance {
+    pub representation: GeometryRepresentation,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_mesh_digests: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary_or_non_manifold_edge_count: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtifactBundle {
@@ -143,6 +188,45 @@ pub struct ArtifactBundle {
     pub measurement_guides: Vec<MeasurementGuide>,
     #[serde(default)]
     pub export_artifacts: Vec<ExportArtifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry_provenance: Option<GeometryProvenance>,
+}
+
+/// Immutable render input/output authority. Construct only through
+/// `services::render_snapshot` so all digest and compatibility invariants hold.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderSnapshot {
+    pub snapshot_id: String,
+    pub model_id: String,
+    pub source: String,
+    pub source_digest: String,
+    pub effective_params: DesignParams,
+    pub parameter_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_processing: Option<PostProcessingSpec>,
+    pub post_processing_digest: String,
+    pub engine_kind: EngineKind,
+    pub source_language: SourceLanguage,
+    pub geometry_backend: GeometryBackend,
+    pub artifact_bundle: ArtifactBundle,
+    pub artifact_digest: String,
+    pub model_manifest: ModelManifest,
+    pub manifest_digest: String,
+}
+
+/// Immutable verification evidence. A green record is valid only for the
+/// snapshot and artifact digest it names.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VerificationRecord {
+    pub verification_id: String,
+    pub snapshot_id: String,
+    pub artifact_digest: String,
+    pub passed: bool,
+    pub verifier_status: VerifierStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier_source: Option<VerifierSource>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -152,6 +236,8 @@ pub struct ExportArtifact {
     pub format: String,
     pub path: String,
     pub role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry_provenance: Option<GeometryProvenance>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]

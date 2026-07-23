@@ -348,6 +348,11 @@ pub enum NativeExportOutcome {
         /// entry is `(part_key, absolute_path_to_parts/NNN-label.stl)`.
         part_stl_paths: Vec<(String, PathBuf)>,
     },
+    MeshExported {
+        stl_path: PathBuf,
+        /// Per-part binary STL paths keyed by part key.
+        part_stl_paths: Vec<(String, PathBuf)>,
+    },
 }
 
 pub fn inspect_build123d_ocp_runtime(runtime_root: impl AsRef<Path>) -> DirectOcctSdkLayout {
@@ -1774,7 +1779,7 @@ mod tests {
             let NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
-            ..
+                ..
             } = outcome
             else {
                 panic!("expected native box export once OCCT headers are bundled");

@@ -262,6 +262,7 @@ mod tests {
 
     fn sample_artifact_bundle(model_id: &str) -> crate::models::ArtifactBundle {
         crate::models::ArtifactBundle {
+            geometry_provenance: None,
             schema_version: 1,
             model_id: model_id.to_string(),
             source_kind: crate::models::ModelSourceKind::Generated,

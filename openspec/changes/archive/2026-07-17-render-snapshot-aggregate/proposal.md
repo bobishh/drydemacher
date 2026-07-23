@@ -54,9 +54,10 @@ identifiers.
   projections.
 - Treat memory maps, `last_design.json`, and UI projections as disposable
   caches or pointers, never authorities.
-- First applied slice: verifier diagnostics resolve effective parameters from
-  the matching preview draft before considering saved-version data or source
-  defaults.
+- Applied slices: per-thread actor sequencing and draft storage, durable-first
+  preview publication, exact preview verification parameters, explicit saved
+  target resolution, guarded frontend projection, and one session snapshot
+  service.
 
 ## Out Of Scope
 

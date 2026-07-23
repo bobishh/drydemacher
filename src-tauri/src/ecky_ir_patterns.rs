@@ -1,8 +1,10 @@
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::sync::OnceLock;
 
 use csgrs::float_types::parry3d::na::{Point3, Vector3};
 use csgrs::mesh::plane::Plane;
+use csgrs::mesh::polygon::Polygon as IrPolygon;
 use csgrs::mesh::Mesh;
 use csgrs::traits::CSG;
 
@@ -81,6 +83,11 @@ pub enum WallPatternTarget {
         outer_radius: f64,
         inner_radius: f64,
     },
+    MeshBounds {
+        mins: [f64; 3],
+        maxs: [f64; 3],
+        normal_axis: usize,
+    },
 }
 
 fn validation(message: impl Into<String>) -> AppError {
@@ -93,24 +100,44 @@ pub fn apply_wall_pattern(
     spec: &WallPatternSpec,
 ) -> AppResult<IrMesh> {
     validate_pattern_spec(spec)?;
-    let mut patterned = mesh.triangulate();
+    // Some input meshes have degenerate n-gons (from CSG) that panic earcutr
+    // during `.triangulate()`. Catch the panic and fall back to skipping
+    // degenerate polygons — same strategy as sanitize_mesh_for_export.
+    let mut patterned =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| mesh.triangulate()))
+            .unwrap_or_else(|_| {
+                // Fallback: only keep polygons that triangulate successfully.
+                let mut tris: Vec<IrPolygon<()>> = Vec::new();
+                for poly in &mesh.polygons {
+                    if let Ok(result) =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            poly.triangulate()
+                        }))
+                    {
+                        for tri in result {
+                            tris.push(IrPolygon::new(tri.to_vec(), poly.metadata.clone()));
+                        }
+                    }
+                }
+                IrMesh::from_polygons(&tris, mesh.metadata.clone())
+            });
     let levels = recommended_subdivision_levels(&patterned, spec);
     ensure_pattern_budget(patterned.polygons.len(), levels)?;
     if let Some(levels) = NonZeroU32::new(levels) {
         patterned = patterned.subdivide_triangles(levels);
     }
+    let protected_vertices = protected_mesh_seam_vertices(&patterned, target);
 
     for polygon in &mut patterned.polygons {
         for vertex in &mut polygon.vertices {
+            if protected_vertices.contains(&mesh_vertex_key(vertex.pos)) {
+                continue;
+            }
             let amount = sample_displacement(vertex.pos, vertex.normal, target, spec)?;
             if amount.abs() <= f64::EPSILON {
                 continue;
             }
-            let direction = if vertex.normal.norm() > f64::EPSILON {
-                vertex.normal.normalize()
-            } else {
-                vertex.normal
-            };
+            let direction = displacement_direction(vertex.normal, target);
             vertex.pos = Point3::new(
                 vertex.pos.x + direction.x * amount,
                 vertex.pos.y + direction.y * amount,
@@ -122,6 +149,55 @@ pub fn apply_wall_pattern(
     }
     patterned.bounding_box = OnceLock::new();
     Ok(patterned)
+}
+
+fn displacement_direction(normal: Vector3<f64>, target: &WallPatternTarget) -> Vector3<f64> {
+    if let WallPatternTarget::MeshBounds { normal_axis, .. } = target {
+        let component = [normal.x, normal.y, normal.z][*normal_axis];
+        let mut direction = Vector3::zeros();
+        direction[*normal_axis] = if component < 0.0 { -1.0 } else { 1.0 };
+        return direction;
+    }
+    if normal.norm() > f64::EPSILON {
+        normal.normalize()
+    } else {
+        normal
+    }
+}
+
+fn protected_mesh_seam_vertices(mesh: &IrMesh, target: &WallPatternTarget) -> HashSet<[u64; 3]> {
+    let WallPatternTarget::MeshBounds { normal_axis, .. } = target else {
+        return HashSet::new();
+    };
+    let mut incidence = HashMap::<[u64; 3], u8>::new();
+    for polygon in &mesh.polygons {
+        let selected = polygon
+            .vertices
+            .first()
+            .is_some_and(|vertex| generic_mesh_face_selected(vertex.normal, *normal_axis));
+        let flag = if selected { 1 } else { 2 };
+        for vertex in &polygon.vertices {
+            *incidence.entry(mesh_vertex_key(vertex.pos)).or_default() |= flag;
+        }
+    }
+    incidence
+        .into_iter()
+        .filter_map(|(point, flags)| (flags == 3).then_some(point))
+        .collect()
+}
+
+fn generic_mesh_face_selected(normal: Vector3<f64>, normal_axis: usize) -> bool {
+    [normal.x, normal.y, normal.z][normal_axis] <= -0.95
+}
+
+fn mesh_vertex_key(point: Point3<f64>) -> [u64; 3] {
+    [point.x, point.y, point.z].map(|value| {
+        if value == 0.0 {
+            0.0_f64.to_bits()
+        } else {
+            value.to_bits()
+        }
+    })
 }
 
 fn validate_pattern_spec(spec: &WallPatternSpec) -> AppResult<()> {
@@ -294,6 +370,26 @@ fn sample_displacement(
             let u = angle_progress(pos.x, pos.y, 360.0);
             let v = ((pos.z / outer_radius.max(1e-6)) + 1.0) * 0.5;
             Ok(pattern_amplitude(spec, u, v, true) * spec.depth)
+        }
+        WallPatternTarget::MeshBounds {
+            mins,
+            maxs,
+            normal_axis,
+        } => {
+            let normal_component = [normal.x, normal.y, normal.z][*normal_axis];
+            if normal_component > -0.95 {
+                return Ok(0.0);
+            }
+            let coords = [pos.x, pos.y, pos.z];
+            let uv_axes = match normal_axis {
+                0 => [1, 2],
+                1 => [0, 2],
+                _ => [0, 1],
+            };
+            let u = normalize_range(coords[uv_axes[0]], mins[uv_axes[0]], maxs[uv_axes[0]]);
+            let v = normalize_range(coords[uv_axes[1]], mins[uv_axes[1]], maxs[uv_axes[1]]);
+            let edge_fade = rim_fade(u, spec.rim_fade).min(rim_fade(v, spec.rim_fade));
+            Ok(pattern_amplitude(spec, u, v, false) * edge_fade * spec.depth)
         }
     }
 }

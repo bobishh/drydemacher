@@ -41,6 +41,7 @@ mod verify;
 mod version_write;
 
 pub use artifact_read::{handle_artifact_feature_graph_get, handle_artifact_manifest_get};
+pub(crate) use authoring_actor::invalidate_authoring_actors_for_thread;
 use authoring_actor::{
     acquire_authoring_actor_publish_permit, forget_authoring_actors_for_session,
     reserve_authoring_actor_revision, AuthoringActorRevision,
@@ -911,9 +912,7 @@ pub(super) async fn settle_live_render_phase<T>(
     };
     let (phase, status_text) = match result {
         Ok(_) => ("idle", Some("Ready.".to_string())),
-        Err(err) if is_authoring_actor_superseded(err) => {
-            ("idle", Some(err.message.clone()))
-        }
+        Err(err) if is_authoring_actor_superseded(err) => ("idle", Some(err.message.clone())),
         Err(err) => ("error", Some(err.message.clone())),
     };
     mark_live_session_idle(
@@ -1156,11 +1155,18 @@ pub struct DraftFeedbackSeed {
     pub source: crate::models::AgentDraftFeedbackSource,
 }
 
-static SESSION_RENDER_PREVIEWS: OnceLock<StdMutex<HashMap<String, SessionRenderPreview>>> =
-    OnceLock::new();
+type RenderPreviewKey = (String, String);
 
-fn session_render_previews() -> &'static StdMutex<HashMap<String, SessionRenderPreview>> {
+static SESSION_RENDER_PREVIEWS: OnceLock<
+    StdMutex<HashMap<RenderPreviewKey, SessionRenderPreview>>,
+> = OnceLock::new();
+
+fn session_render_previews() -> &'static StdMutex<HashMap<RenderPreviewKey, SessionRenderPreview>> {
     SESSION_RENDER_PREVIEWS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn render_preview_key(session_id: &str, thread_id: &str) -> RenderPreviewKey {
+    (session_id.to_string(), thread_id.to_string())
 }
 
 fn preview_matches_request(
@@ -1185,11 +1191,39 @@ pub fn session_render_preview_for_request(
     thread_id: Option<&str>,
     message_id: Option<&str>,
 ) -> Option<SessionRenderPreview> {
-    session_render_previews()
-        .lock()
-        .unwrap()
-        .get(&ctx.session_id)
-        .filter(|preview| preview_matches_request(preview, thread_id, message_id))
+    let previews = session_render_previews().lock().unwrap();
+    if let Some(thread_id) = thread_id {
+        return previews
+            .get(&render_preview_key(&ctx.session_id, thread_id))
+            .filter(|preview| preview_matches_request(preview, Some(thread_id), message_id))
+            .cloned();
+    }
+
+    // A no-thread request may only use a unique exact message match. Without
+    // a message it may use the draft only when this session owns one actor.
+    let mut matches = previews.values().filter(|preview| {
+        preview.session_id == ctx.session_id && preview_matches_request(preview, None, message_id)
+    });
+    let first = matches.next()?.clone();
+    matches.next().is_none().then_some(first)
+}
+
+fn session_render_preview_for_preview_id(
+    ctx: &AgentContext,
+    thread_id: Option<&str>,
+    preview_id: &str,
+) -> Option<SessionRenderPreview> {
+    let previews = session_render_previews().lock().unwrap();
+    if let Some(thread_id) = thread_id {
+        return previews
+            .get(&render_preview_key(&ctx.session_id, thread_id))
+            .filter(|preview| preview.preview_id == preview_id)
+            .cloned();
+    }
+
+    previews
+        .values()
+        .find(|preview| preview.session_id == ctx.session_id && preview.preview_id == preview_id)
         .cloned()
 }
 
@@ -1314,42 +1348,105 @@ pub async fn resolve_session_render_preview_for_request(
     thread_id: Option<&str>,
     message_id: Option<&str>,
 ) -> AppResult<Option<SessionRenderPreview>> {
-    if let Some(preview) = session_render_preview_for_request(ctx, thread_id, message_id) {
+    let draft = {
+        let conn = state.db.lock().await;
+        match (thread_id, message_id) {
+            (Some(thread_id), _) => {
+                db::get_agent_draft_for_session_thread(&conn, &ctx.session_id, thread_id)
+            }
+            (None, Some(message_id)) => {
+                db::get_agent_draft_for_session_message(&conn, &ctx.session_id, message_id)
+            }
+            (None, None) => db::get_unambiguous_agent_draft_for_session(&conn, &ctx.session_id),
+        }
+        .map_err(|e| AppError::persistence(e.to_string()))?
+    };
+    let Some(draft) = draft else {
+        return Ok(session_render_preview_for_request(
+            ctx, thread_id, message_id,
+        ));
+    };
+    let preview = session_render_preview_from_draft(draft);
+    if !preview_matches_request(&preview, thread_id, message_id) {
+        return Ok(None);
+    }
+    session_render_previews().lock().unwrap().insert(
+        render_preview_key(&preview.session_id, &preview.thread_id),
+        preview.clone(),
+    );
+    Ok(Some(preview))
+}
+
+/// Resolves a draft only when the caller supplied its generated preview ID.
+/// Saved message IDs must never use a draft's base-message alias.
+pub async fn resolve_session_render_preview_for_preview_id(
+    state: &AppState,
+    ctx: &AgentContext,
+    thread_id: Option<&str>,
+    preview_id: &str,
+) -> AppResult<Option<SessionRenderPreview>> {
+    if let Some(preview) = session_render_preview_for_preview_id(ctx, thread_id, preview_id) {
         return Ok(Some(preview));
     }
 
     let draft = {
         let conn = state.db.lock().await;
-        db::get_agent_draft_for_session(&conn, &ctx.session_id)
+        db::get_agent_draft_for_session_preview_id(&conn, &ctx.session_id, preview_id)
             .map_err(|e| AppError::persistence(e.to_string()))?
     };
     let Some(draft) = draft else {
         return Ok(None);
     };
     let preview = session_render_preview_from_draft(draft);
-    if !preview_matches_request(&preview, thread_id, message_id) {
+    if thread_id.is_some_and(|thread_id| preview.thread_id != thread_id) {
         return Ok(None);
     }
-    session_render_previews()
-        .lock()
-        .unwrap()
-        .insert(ctx.session_id.clone(), preview.clone());
+    session_render_previews().lock().unwrap().insert(
+        render_preview_key(&preview.session_id, &preview.thread_id),
+        preview.clone(),
+    );
     Ok(Some(preview))
 }
 
 fn clear_session_render_preview(session_id: &str) {
-    session_render_previews().lock().unwrap().remove(session_id);
+    session_render_previews()
+        .lock()
+        .unwrap()
+        .retain(|(stored_session_id, _), _| stored_session_id != session_id);
+}
+
+fn clear_session_thread_render_preview(session_id: &str, thread_id: &str) {
+    session_render_previews()
+        .lock()
+        .unwrap()
+        .remove(&render_preview_key(session_id, thread_id));
 }
 
 pub(super) async fn clear_session_render_preview_durable(
     state: &AppState,
     session_id: &str,
 ) -> AppResult<()> {
+    {
+        let conn = state.db.lock().await;
+        db::delete_agent_draft_for_session(&conn, session_id)
+            .map_err(|e| AppError::persistence(e.to_string()))?;
+    }
     clear_session_render_preview(session_id);
     forget_authoring_actors_for_session(session_id);
-    let conn = state.db.lock().await;
-    db::delete_agent_draft_for_session(&conn, session_id)
-        .map_err(|e| AppError::persistence(e.to_string()))?;
+    Ok(())
+}
+
+pub(super) async fn clear_session_thread_render_preview_durable(
+    state: &AppState,
+    session_id: &str,
+    thread_id: &str,
+) -> AppResult<()> {
+    {
+        let conn = state.db.lock().await;
+        db::delete_agent_draft_for_session_thread(&conn, session_id, thread_id)
+            .map_err(|e| AppError::persistence(e.to_string()))?;
+    }
+    clear_session_thread_render_preview(session_id, thread_id);
     Ok(())
 }
 
@@ -1442,11 +1539,6 @@ async fn store_session_render_preview_unchecked(
         ..preview
     };
 
-    session_render_previews()
-        .lock()
-        .unwrap()
-        .insert(ctx.session_id.clone(), preview.clone());
-
     {
         let db_started = Instant::now();
         let conn = state.db.lock().await;
@@ -1476,6 +1568,13 @@ async fn store_session_render_preview_unchecked(
             Some(&preview.artifact_bundle.model_id),
         );
     }
+
+    // Durable draft is the publish commit point. Do not make this preview
+    // observable through RAM, restore state, or events until the upsert lands.
+    session_render_previews().lock().unwrap().insert(
+        render_preview_key(&preview.session_id, &preview.thread_id),
+        preview.clone(),
+    );
 
     let snapshot_started = Instant::now();
     let snapshot = crate::services::session::build_runtime_snapshot(
@@ -1549,6 +1648,25 @@ pub(super) fn artifact_bundle_digest(bundle: &ArtifactBundle) -> ArtifactBundleD
         .iter()
         .find(|artifact| artifact.format.eq_ignore_ascii_case("step"))
         .map(|artifact| artifact.path.clone());
+    let geometry_representation = bundle
+        .geometry_provenance
+        .as_ref()
+        .map(|provenance| provenance.representation.clone());
+    let faceted_step = step_export_path.is_some()
+        && matches!(
+            geometry_representation.as_ref(),
+            Some(crate::models::GeometryRepresentation::FacetedPolyBrep)
+        );
+    let analytic_step = step_export_path.is_some()
+        && matches!(
+            geometry_representation.as_ref(),
+            Some(crate::models::GeometryRepresentation::AnalyticBrep)
+        );
+    let source_mesh_digests = bundle
+        .geometry_provenance
+        .as_ref()
+        .map(|provenance| provenance.source_mesh_digests.clone())
+        .unwrap_or_default();
     ArtifactBundleDigest {
         model_id: bundle.model_id.clone(),
         content_hash: bundle.content_hash.clone(),
@@ -1563,6 +1681,10 @@ pub(super) fn artifact_bundle_digest(bundle: &ArtifactBundle) -> ArtifactBundleD
         has_step_export: step_export_path.is_some(),
         step_export_path,
         multipart: bundle.viewer_assets.len() > 1,
+        geometry_representation,
+        faceted_step,
+        analytic_step,
+        source_mesh_digests,
     }
 }
 

@@ -14,6 +14,8 @@ pub(crate) const ECKY_AUTHORING_CARD: &str = concat!(
     "- NEVER use `(define ...)` inside `(model ...)`. It fails with a misleading TypeMismatch because Steel evaluates it eagerly before params have values. Use `let*` inside each `(part ...)` to compute derived values from params. Top-level `(define (fn args) ...)` helper functions OUTSIDE `(model ...)` are allowed and correct for reusable pure functions.\n",
     "- Guide routing is dynamic. For `sourceLanguage=ecky`, read `ecky://guides/ecky-source` as the primary language guide. Read backend manifests only when checking a specific op/support question. Read prose backend guides only after a lowerer/render error or artifact/export claim.\n",
     "- For repeated structures in new CAD models, prefer `repeat`, `instance`, or a named `define-component`; avoid copy-paste duplicate geometry blocks.\n",
+    "- For authored `mesh`/`polyhedron`, prefer bounded formula-generated vertex/triangle lists over copied literal blocks. Add topology verification for boundary/non-manifold edges and connected components before printability or solid claims.\n",
+    "- Reference images are inferred approximation inputs; treat geometry from them as inferred approximation source. Vision text cannot claim reconstruction or accepted CAD; normal compile, preview, structural verification, and exact artifact gates decide artifact truth.\n",
     "- Components: `(define-component name ((number key default :label ...) ...) body)` defines a closed, parameterized geometry unit; instantiate with keywords `(name :key value)`. Bodies may only reference signature keys and local bindings; pasted components carry their own `(verify ...)` clauses, tag-namespaced per instantiating part (`partkey/tag`).\n",
     "- Component library workflow: lift a proven part with `component_extract` (pass the part key and source; `save=true` stores it), discover reusable components with `component_search` (compact headers only), fetch full copy-inline source with `component_get`, then paste the `define-component` into the model and instantiate it.\n",
     "- Project folders: `project_folder_export` mirrors the active macro to `<projectsRoot>/<slug>/model.ecky` for direct file editing; check `project_folder_status` (clean/fileChanged/threadAdvanced/conflict), then `project_folder_apply` to compile, preview, and commit the edited file as a new version. Stale folders need re-export; conflicts need `force=true`. Never write version history outside this flow.\n",
@@ -24,6 +26,7 @@ pub(crate) const ECKY_AUTHORING_CARD: &str = concat!(
     "- Debug overlays are preview-only diagnostics. They are forbidden in production export geometry.\n",
     "- Fillet/chamfer are topology-sensitive. If a selector matches no edges after one smaller-radius retry and one selector retry, stop retrying fillet/chamfer; rebuild the shape with rounded source geometry (`rounded-rect`, `rounded-polygon`, `offset-rounded`, `loft`, `taper`, `cone`, or explicit profiles).\n",
     "- Do not promise STEP unless current artifact truth says `hasStepExport=true` or exportArtifacts contains `format=step`; `mesh`/`native` selects Ecky native lowering, not an automatic STEP guarantee.\n",
+    "- Before describing STEP representation, inspect artifact digest `geometryRepresentation`, `facetedStep`, and `analyticStep`. A solidified mesh STEP is faceted poly-BRep, never analytic source CAD.\n",
     "- MCP-first workflow: inspect with `target_detail_get(section=\"shapeGraph\")`, patch with `ecky_ast_*` when possible, validate with `ecky_constraints_validate`, preview via render, call `verify_generated_model`, repair red verification with another preview, then commit only green verification.\n",
     "- Prefer AST patches over full macro rewrites when an `ecky_ast_*` operation can express the edit.\n",
     "- For geometry with explicit topology/printability requirements, add top-level `(verify ...)` clauses before preview when shipped manifest/STL metrics can express the requirement; example metrics: `(stl non-manifold-edge-count)`, `(stl connected-component-count)`, `(stl overhang-face-count)`, and `(manifest has-step)`.\n",
@@ -120,6 +123,18 @@ mod tests {
         assert!(card.contains("exportArtifacts contains `format=step`"));
         assert!(card.contains("`mesh`/`native` selects Ecky native lowering"));
         assert!(card.contains("not an automatic STEP guarantee"));
+    }
+
+    #[test]
+    fn authoring_card_keeps_mesh_and_vision_claims_bounded() {
+        let card = authoring_card_text();
+
+        assert!(card.contains("formula-generated vertex/triangle lists"));
+        assert!(card.contains("topology verification"));
+        assert!(card.contains("Reference images are inferred"));
+        assert!(card.contains("facetedStep"));
+        assert!(card.contains("analyticStep"));
+        assert!(card.contains("geometryRepresentation"));
     }
 
     #[test]

@@ -890,6 +890,7 @@ fn build_bundle(
         .parent()
         .ok_or_else(|| AppError::internal("Manifest path missing parent."))?;
     Ok(ArtifactBundle {
+        geometry_provenance: None,
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind,
@@ -1400,6 +1401,7 @@ fn format_edge_coordinate(value: f64) -> String {
 
 fn step_export_artifacts(step_path: &Path) -> AppResult<Vec<ExportArtifact>> {
     Ok(vec![ExportArtifact {
+        geometry_provenance: None,
         label: "STEP".to_string(),
         format: "step".to_string(),
         path: path_to_string(step_path)?,
@@ -1649,6 +1651,7 @@ fn build_manifest_with_stable_node_keys(
     let preview_views = preview_views_from_decls(preview_view_decls);
 
     let manifest = ModelManifest {
+        geometry_provenance: None,
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind,
@@ -2928,6 +2931,17 @@ mod tests {
         }
     }
 
+    fn lower_to_freecad_large_stack(source: &str) -> AppResult<String> {
+        let source = source.to_string();
+        std::thread::Builder::new()
+            .name("freecad-integration-lowering-test".to_string())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || crate::ecky_ir::lower_to_freecad(&source))
+            .expect("spawn FreeCAD integration lowering thread")
+            .join()
+            .expect("join FreeCAD integration lowering thread")
+    }
+
     fn fixture_generated_report() -> RunnerReport {
         serde_json::from_str(include_str!(
             "../tests/fixtures/generated_runner_report.json"
@@ -2975,6 +2989,7 @@ mod tests {
     ) -> ModelManifest {
         let part = sample_part_binding("part-shell", "OuterShell", asset_path);
         ModelManifest {
+            geometry_provenance: None,
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind,
@@ -3026,6 +3041,7 @@ mod tests {
 
     fn sample_bundle(model_id: &str, source_kind: ModelSourceKind) -> ArtifactBundle {
         ArtifactBundle {
+            geometry_provenance: None,
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind,
@@ -3309,6 +3325,7 @@ mod tests {
         bundle.geometry_backend = crate::models::GeometryBackend::EckyRust;
         bundle.fcstd_path = String::new();
         bundle.export_artifacts = vec![ExportArtifact {
+            geometry_provenance: None,
             label: "STEP".to_string(),
             format: "step".to_string(),
             path: step_path.to_string_lossy().to_string(),
@@ -4833,7 +4850,7 @@ mod tests {
         let source = include_str!("../tests/fixtures/cad/surface/canonical_cup.ecky");
 
         let bundle = render_model_with_sources(
-            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            &lower_to_freecad_large_stack(source).expect("lower"),
             Some(source),
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
@@ -4870,7 +4887,7 @@ mod tests {
         let source = include_str!("../tests/fixtures/cad/surface/thomas_modular_ramp_body.ecky");
 
         let bundle = render_model_with_sources(
-            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            &lower_to_freecad_large_stack(source).expect("lower"),
             Some(source),
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
@@ -4913,7 +4930,7 @@ mod tests {
                 (polygon ((3 3) (17 3) (17 17) (3 17))))))"#;
 
         let bundle = render_model_with_sources(
-            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            &lower_to_freecad_large_stack(source).expect("lower"),
             Some(source),
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
@@ -4950,7 +4967,7 @@ mod tests {
               (extrude (circle 10) 8)))"#;
 
         let bundle = render_model_with_sources(
-            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            &lower_to_freecad_large_stack(source).expect("lower"),
             Some(source),
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
@@ -4987,7 +5004,7 @@ mod tests {
               (extrude (rounded-rect 20 10 2) 8)))"#;
 
         let bundle = render_model_with_sources(
-            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            &lower_to_freecad_large_stack(source).expect("lower"),
             Some(source),
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
@@ -5025,7 +5042,7 @@ mod tests {
                 (box 20 20 10))))"#;
 
         let bundle = render_model_with_sources(
-            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            &lower_to_freecad_large_stack(source).expect("lower"),
             Some(source),
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
@@ -5060,7 +5077,7 @@ mod tests {
               (extrude (rounded-polygon ((0 20) (20 0) (0 -20) (-20 0)) 4 8) 8)))"#;
 
         let bundle = render_model_with_sources(
-            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            &lower_to_freecad_large_stack(source).expect("lower"),
             Some(source),
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
@@ -5111,7 +5128,7 @@ mod tests {
                     (bezier-path ((0 0 0) (10 0 0) (10 10 0) (20 10 0))))))))"#;
 
         let bundle = render_model_with_sources(
-            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            &lower_to_freecad_large_stack(source).expect("lower"),
             Some(source),
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
@@ -5152,7 +5169,7 @@ mod tests {
                   (twist 20 90 8 (polygon ((0 0) (10 0) (10 10) (0 10))))))))"#;
 
         let bundle = render_model_with_sources(
-            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            &lower_to_freecad_large_stack(source).expect("lower"),
             Some(source),
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
@@ -5193,7 +5210,7 @@ mod tests {
                 (translate 90 0 0 (arc-array 3 16 0 180 (cylinder 2 4))))))"#;
 
         let bundle = render_model_with_sources(
-            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            &lower_to_freecad_large_stack(source).expect("lower"),
             Some(source),
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
@@ -5240,7 +5257,7 @@ mod tests {
                   (result (place frame peg :offset (1 2 3) :rotate (10 20 30)))))))"#;
 
         let bundle = render_model_with_sources(
-            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            &lower_to_freecad_large_stack(source).expect("lower"),
             Some(source),
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
@@ -5281,7 +5298,7 @@ mod tests {
                 (result (place frame peg :offset (1 2 3) :rotate (10 20 30))))))"#;
 
         let err = render_model_with_sources(
-            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            &lower_to_freecad_large_stack(source).expect("lower"),
             Some(source),
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
@@ -5312,7 +5329,7 @@ mod tests {
                 (result (place base peg)))))"#;
 
         let err = render_model_with_sources(
-            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            &lower_to_freecad_large_stack(source).expect("lower"),
             Some(source),
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
@@ -5349,7 +5366,7 @@ mod tests {
                     6)))))"#;
 
         let bundle = render_model_with_sources(
-            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            &lower_to_freecad_large_stack(source).expect("lower"),
             Some(source),
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
@@ -5385,7 +5402,7 @@ mod tests {
             (part body
               (box 10 10 10)))"#;
         let base_bundle = render_model_with_sources(
-            &crate::ecky_ir::lower_to_freecad(base_source).expect("lower base"),
+            &lower_to_freecad_large_stack(base_source).expect("lower base"),
             Some(base_source),
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
@@ -5411,7 +5428,7 @@ mod tests {
                 (box 10 10 10))))"#
         );
 
-        let lowered = crate::ecky_ir::lower_to_freecad(&source).expect("lower");
+        let lowered = lower_to_freecad_large_stack(&source).expect("lower");
         assert!(
             lowered.contains("{'kind': 'targetIds', 'targetIds': [\"")
                 && lowered.contains(&edge_alias_target_id),
@@ -5453,7 +5470,7 @@ mod tests {
             (part body
               (box 10 10 10)))"#;
         let base_bundle = render_model_with_sources(
-            &crate::ecky_ir::lower_to_freecad(base_source).expect("lower base"),
+            &lower_to_freecad_large_stack(base_source).expect("lower base"),
             Some(base_source),
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
@@ -5479,7 +5496,7 @@ mod tests {
                 (box 10 10 10))))"#
         );
 
-        let lowered = crate::ecky_ir::lower_to_freecad(&source).expect("lower");
+        let lowered = lower_to_freecad_large_stack(&source).expect("lower");
         assert!(
             lowered.contains("{'kind': 'targetIds', 'targetIds': [\"")
                 && lowered.contains(&face_alias_target_id),
@@ -5523,7 +5540,7 @@ mod tests {
                 :faces "top"
                 (box 10 10 10))))"#;
 
-        let lowered = crate::ecky_ir::lower_to_freecad(source).expect("lower");
+        let lowered = lower_to_freecad_large_stack(source).expect("lower");
         assert!(
             lowered.contains(
                 "{'kind': 'clauses', 'clauses': [{'kind': 'boundary', 'axis': 'z', 'bound': 'max'}]}"
@@ -5568,7 +5585,7 @@ mod tests {
                 :faces "planar+normal-z+area-max"
                 (box 10 10 10))))"#;
 
-        let lowered = crate::ecky_ir::lower_to_freecad(source).expect("lower");
+        let lowered = lower_to_freecad_large_stack(source).expect("lower");
         assert!(
             lowered.contains(
                 "{'kind': 'clauses', 'clauses': [{'kind': 'planar'}, {'kind': 'normal', 'axis': 'z'}, {'kind': 'area', 'rank': 'max'}]}"
@@ -5610,7 +5627,7 @@ mod tests {
         let source = include_str!("../tests/fixtures/cad/surface/thomas_modular_ramp.ecky");
 
         let bundle = render_model_with_sources(
-            &crate::ecky_ir::lower_to_freecad(source).expect("lower"),
+            &lower_to_freecad_large_stack(source).expect("lower"),
             Some(source),
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),

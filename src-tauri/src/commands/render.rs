@@ -6,7 +6,6 @@ use std::path::Path;
 
 use tauri::{AppHandle, State};
 
-use super::session::write_last_snapshot;
 use crate::db;
 use crate::freecad;
 use crate::models::{
@@ -15,6 +14,7 @@ use crate::models::{
     FreecadLibraryImportRequest, FreecadLibraryItem, FreecadLibrarySearchRequest, InteractionMode,
     MacroDialect, ManifestBounds, ModelManifest, ModelSourceKind, ParamValue, UiField, UiSpec,
 };
+use crate::services::session::write_last_snapshot;
 
 const ECKY_IR_BOOK_RESOURCE_PATH: &str = "docs/ecky-ir-field-guide.epub";
 const ECKY_IR_BOOK_FALLBACK_PATHS: &[&str] = &[
@@ -1256,6 +1256,7 @@ mod tests {
 
     fn sample_imported_manifest() -> ModelManifest {
         ModelManifest {
+            geometry_provenance: None,
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: "imported-fcstd-test".to_string(),
             source_kind: ModelSourceKind::ImportedFcstd,
@@ -1797,7 +1798,11 @@ mod tests {
         write_binary_stl_triangles_to_path(
             &lid_path,
             &[
-                [[-78.0, -48.0, 11.0], [55.0, -48.0, 11.0], [-78.0, 48.0, 11.0]],
+                [
+                    [-78.0, -48.0, 11.0],
+                    [55.0, -48.0, 11.0],
+                    [-78.0, 48.0, 11.0],
+                ],
                 [[55.0, -48.0, 11.0], [55.0, 48.0, 11.0], [-78.0, 48.0, 11.0]],
             ],
         );
@@ -1844,10 +1849,7 @@ mod tests {
         // body spans x=[0,50]; lid (localized) spans x=[0,133]. Distinct geometry
         // means both span widths must appear as vertex coordinates.
         assert!(model_xml.contains(r#"x="50.00000""#), "body geometry lost");
-        assert!(
-            model_xml.contains(r#"x="133.00000""#),
-            "lid geometry lost"
-        );
+        assert!(model_xml.contains(r#"x="133.00000""#), "lid geometry lost");
     }
 
     #[test]
@@ -1858,12 +1860,17 @@ mod tests {
         let root = temp_export_dir("multipart-ascii-reject");
         let body_path = root.join("body.stl");
         let lid_path = root.join("lid.stl");
-        write_binary_stl_triangles_to_path(&body_path, &[
-            [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]],
-        ]);
+        write_binary_stl_triangles_to_path(
+            &body_path,
+            &[[[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]]],
+        );
         helper_write_ascii_stl(
             &lid_path,
-            &[[[-78.0, -48.0, 11.0], [55.0, -48.0, 11.0], [-78.0, 48.0, 11.0]]],
+            &[[
+                [-78.0, -48.0, 11.0],
+                [55.0, -48.0, 11.0],
+                [-78.0, 48.0, 11.0],
+            ]],
         );
         let three_mf_path = root.join("ascii.3mf");
         let err = export_multipart_3mf_impl(

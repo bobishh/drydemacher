@@ -73,6 +73,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         crate::commands::sketch::suggest_sketch_features,
         crate::commands::sketch::generate_sketch_draft_preview,
         crate::commands::sketch::generate_sketch_preview_hull,
+        crate::commands::sketch::trace_raster_reference,
         crate::commands::sketch::save_sketch_preview_draft,
         crate::commands::sketch::load_sketch_preview_draft,
         crate::commands::sketch::clear_sketch_preview_draft,

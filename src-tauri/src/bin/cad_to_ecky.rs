@@ -55,8 +55,7 @@ fn resolve(
 ) -> Result<Resolved, String> {
     let data = fs::read_to_string(cfg_path)
         .map_err(|e| format!("read config '{}': {e}", cfg_path.display()))?;
-    let config: Config =
-        serde_json::from_str(&data).map_err(|e| format!("parse config: {e}"))?;
+    let config: Config = serde_json::from_str(&data).map_err(|e| format!("parse config: {e}"))?;
     let engine = config
         .engines
         .iter()
@@ -105,8 +104,8 @@ async fn main() -> Result<(), String> {
     }
 
     let input = input.ok_or(usage())?;
-    let source = fs::read_to_string(&input)
-        .map_err(|e| format!("read input '{}': {e}", input.display()))?;
+    let source =
+        fs::read_to_string(&input).map_err(|e| format!("read input '{}': {e}", input.display()))?;
 
     // --dump-prompt is network-free: it only needs the backend.
     if dump_prompt {
@@ -141,13 +140,16 @@ async fn main() -> Result<(), String> {
     for attempt in 1..=6 {
         match send_openai_request(&client, &url, &r.api_key, &payload).await {
             Ok((status, body)) if status.is_success() => {
-                let json: serde_json::Value = serde_json::from_str(&body)
-                    .map_err(|e| format!("parse response: {e}"))?;
+                let json: serde_json::Value =
+                    serde_json::from_str(&body).map_err(|e| format!("parse response: {e}"))?;
                 ecky = Some(strip_code_fence(&extract_openai_message_content(&json)?));
                 break;
             }
             Ok((status, body)) => {
-                last_err = format!("HTTP {status}: {}", body.chars().take(200).collect::<String>());
+                last_err = format!(
+                    "HTTP {status}: {}",
+                    body.chars().take(200).collect::<String>()
+                );
                 let cold = status.as_u16() == 500 || status.as_u16() == 503;
                 if cold && body.contains("not found") && attempt < 6 {
                     eprintln!("attempt {attempt}: cold instance, retrying…");

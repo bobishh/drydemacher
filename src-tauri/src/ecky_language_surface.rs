@@ -151,7 +151,7 @@ pub const CAD_OPS_PORTABLE: &[&str] = &[
 ];
 // Mesh/EckyRust-only surface. Do not add future CAD VM/OCCT names here until
 // the compiler/runtime actually exports and lowers them.
-pub const ECKY_RUST_ONLY_CAD_OPS: &[&str] = &["wall-pattern"];
+pub const ECKY_RUST_ONLY_CAD_OPS: &[&str] = &["mesh", "polyhedron", "heightfield", "wall-pattern"];
 // EckyRust direct-OCCT-only surface: rendered natively (no mesh path) and
 // rejected by the build123d/FreeCAD exact lowerings. Unlike `wall-pattern`
 // (mesh) these are BREP ops the exact backends cannot express.
@@ -1035,7 +1035,7 @@ fn boolean_reference(name: &str) -> SurfaceReferenceEntry {
 }
 
 fn cad_op_reference(name: &str, backend: GeometryBackend) -> SurfaceReferenceEntry {
-    let support = if name == "wall-pattern" {
+    let support = if matches!(name, "mesh" | "polyhedron" | "heightfield" | "wall-pattern") {
         "mesh/eckyRust only; rejected by build123d/freecad lowerers"
     } else if name == "hull" {
         "eckyRust direct OCCT only; rejected by build123d/freecad lowerers"
@@ -1045,6 +1045,9 @@ fn cad_op_reference(name: &str, backend: GeometryBackend) -> SurfaceReferenceEnt
         backend_support(backend)
     };
     match name {
+        "mesh" => ref_entry(name, "cadOp", "(mesh :vertices ((x y z) ...) :triangles ((a b c) ...))", "mesh", "Creates bounded indexed triangle geometry. Open orientable surfaces are allowed; invalid indices, degenerate faces, duplicates, non-manifold edges, or inconsistent winding reject.", true, support, "(mesh :vertices ((0 0 0) (10 0 0) (0 10 0)) :triangles ((0 1 2)))", &["Use zero-based integer triangle indices.", "Open mesh preview may render but remains non-printable until boundary edges are closed."]),
+        "polyhedron" => ref_entry(name, "cadOp", "(polyhedron :vertices ((x y z) ...) :triangles ((a b c) ...))", "solid", "Creates one closed orientable indexed triangle solid after deterministic topology validation.", true, support, "(polyhedron :vertices ((0 0 0) (10 0 0) (0 10 0) (0 0 10)) :triangles ((0 2 1) (0 1 3) (1 2 3) (2 0 3)))", &["Requires zero boundary edges, zero non-manifold edges, consistent winding, one component, and non-zero signed volume."]),
+        "heightfield" => ref_entry(name, "cadOp", "(heightfield image-path :width w :depth d :relief-height h :base-thickness b [:invert #t|#f])", "solid/mesh", "Samples a staged local raster into a bounded planar relief and closes its base and side walls.", true, support, "(heightfield image-path :width 100 :depth 70 :relief-height 4 :base-thickness 1.2 :invert #f)", &["Image path must reference a readable staged PNG, JPEG, or WebP asset.", "Empty image parameters remain pending; they do not produce fake geometry."]),
         "box" => ref_entry(name, "cadOp", "(box x y z :align '(x y z))", "solid", "Creates an axis-aligned rectangular solid.", true, support, "(box 40 20 10 :align '(min center min))", &[]),
         "sphere" => ref_entry(name, "cadOp", "(sphere radius)", "solid", "Creates a sphere.", true, support, "(sphere 12)", &[]),
         "cylinder" => ref_entry(name, "cadOp", "(cylinder radius height segments)", "solid", "Creates a cylinder along local Z.", true, support, "(cylinder 8 30 48)", &[]),

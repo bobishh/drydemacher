@@ -445,6 +445,7 @@ mod tests {
                 thread_id: Some("thread-snapshot".to_string()),
                 message_id: Some("msg-snapshot".to_string()),
                 artifact_bundle: Some(crate::models::ArtifactBundle {
+                    geometry_provenance: None,
                     schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
                     model_id: "model-snapshot".to_string(),
                     source_kind: crate::models::ModelSourceKind::Generated,
@@ -466,6 +467,7 @@ mod tests {
                 }),
                 model_manifest: None,
                 selected_part_id: None,
+                target_ref: None,
             }),
             conn,
         );

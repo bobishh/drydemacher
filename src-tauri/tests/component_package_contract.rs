@@ -46,6 +46,17 @@ impl PathResolver for TempPathResolver {
     }
 }
 
+fn lower_to_freecad_large_stack(source: &str) -> String {
+    let source = source.to_owned();
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || ecky_cad_lib::ecky_ir::lower_to_freecad(&source))
+        .expect("spawn FreeCAD lowering thread")
+        .join()
+        .expect("join FreeCAD lowering thread")
+        .expect("lower")
+}
+
 fn sample_port(port_id: &str, type_id: &str, compatible_with: Vec<String>) -> ComponentPort {
     ComponentPort {
         port_id: port_id.to_string(),
@@ -130,6 +141,7 @@ fn sample_sketch(sketch_id: &str) -> SketchDefinition {
             closed: true,
             radius: None,
             topology: None,
+            provenance: None,
         }],
         constraints: vec![SketchConstraint {
             constraint_id: "outer_closed".to_string(),
@@ -261,6 +273,7 @@ fn three_view_hull_document() -> SketchDocument {
                     closed: true,
                     radius: None,
                     topology: None,
+                    provenance: None,
                 }],
                 constraints: vec![],
             }
@@ -1349,7 +1362,7 @@ async fn render_installed_component_source_imports_installed_step_component() {
 
     let source = include_str!("fixtures/cad/surface/canonical_cup.ecky");
     let generated = ecky_cad_lib::freecad::render_model_with_sources(
-        &ecky_cad_lib::ecky_ir::lower_to_freecad(source).expect("lower"),
+        &lower_to_freecad_large_stack(source),
         Some(source),
         &Default::default(),
         None,
@@ -2016,6 +2029,7 @@ async fn runtime_bundle_component_package_project_preserves_explicit_ui_contract
     fs::write(
         &manifest_path,
         serde_json::to_string_pretty(&ecky_cad_lib::models::ModelManifest {
+            geometry_provenance: None,
             schema_version: ecky_cad_lib::models::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: "step-model".to_string(),
             source_kind: ModelSourceKind::ImportedStep,
@@ -2111,6 +2125,7 @@ async fn runtime_bundle_component_package_project_preserves_explicit_ui_contract
             component_display_name: "Step Body".to_string(),
             source_ref: None,
             artifact_bundle: ecky_cad_lib::models::ArtifactBundle {
+                geometry_provenance: None,
                 schema_version: ecky_cad_lib::models::MODEL_RUNTIME_SCHEMA_VERSION,
                 model_id: "step-model".to_string(),
                 source_kind: ModelSourceKind::ImportedStep,
@@ -2129,6 +2144,7 @@ async fn runtime_bundle_component_package_project_preserves_explicit_ui_contract
                 callout_anchors: Vec::new(),
                 measurement_guides: Vec::new(),
                 export_artifacts: vec![ecky_cad_lib::models::ExportArtifact {
+                    geometry_provenance: None,
                     label: "source.step".to_string(),
                     format: "step".to_string(),
                     path: step_path.to_string_lossy().to_string(),
@@ -2288,6 +2304,7 @@ async fn runtime_bundle_component_package_project_rejects_unknown_runtime_target
     fs::write(
         &manifest_path,
         serde_json::to_string_pretty(&ecky_cad_lib::models::ModelManifest {
+            geometry_provenance: None,
             schema_version: ecky_cad_lib::models::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: "fake-model".to_string(),
             source_kind: ModelSourceKind::Generated,
@@ -2340,6 +2357,7 @@ async fn runtime_bundle_component_package_project_rejects_unknown_runtime_target
             component_display_name: "Body".to_string(),
             source_ref: None,
             artifact_bundle: ecky_cad_lib::models::ArtifactBundle {
+                geometry_provenance: None,
                 schema_version: ecky_cad_lib::models::MODEL_RUNTIME_SCHEMA_VERSION,
                 model_id: "fake-model".to_string(),
                 source_kind: ModelSourceKind::Generated,
@@ -2536,7 +2554,7 @@ async fn accepted_brep_step_component_package_project_preserves_exact_target_ids
 
     let source = include_str!("fixtures/cad/surface/canonical_cup.ecky");
     let bundle = ecky_cad_lib::freecad::render_model_with_sources(
-        &ecky_cad_lib::ecky_ir::lower_to_freecad(source).expect("lower"),
+        &lower_to_freecad_large_stack(source),
         Some(source),
         &Default::default(),
         None,

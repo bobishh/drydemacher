@@ -74,10 +74,39 @@ Status terms:
 | custom | `hull` | direct | hull capsule live tests (runner + shim tiers) | native-only convex hull; build123d/FreeCAD reject |
 | custom | `helical-ridge` | normalized-direct | native helical-ridge render tests; build123d/freecad lowering tests | planner-expanded into helix sweep + boolean forms |
 | custom | `hole` | unsupported | typed-hole rejection test | must be filled before planning |
-| custom | `wall-pattern` | mesh-only | mesh path tests | Rust mesh-only operation |
-| custom | `pattern` | mesh-only | source classifier | legacy mesh alias |
-| custom | scalar eval ops | normalized-direct | normalizer scalar tests | only when fully evaluable |
+| custom | `wall-pattern` | mesh-only (hybrid-bridged) | mesh path tests + hybrid poly BRep tests | Rust mesh-only op; hybrid bridge routes to OCCT solidify + boolean when followed by BRep ops |
+| custom | `pattern` | mesh-only (hybrid-bridged) | source classifier | legacy mesh alias; hybrid bridge applies when followed by BRep ops |
+| custom | `mesh` | mesh-only | mesh literal runtime/topology/render tests | open triangle surface; never solidified when boundary evidence is nonzero |
+| custom | `polyhedron` | mesh-only (hybrid-bridged) | closed tetrahedron + live hybrid boolean tests | closed typed triangle solid; STEP after solidify is faceted poly-BRep |
+| custom | `heightfield` | mesh-only | deterministic image/closed-STL tests | bounded luminance sampling; closed relief mesh; STL only unless later hybrid-consumed |
+| custom | `solidify` | normalized-direct | hybrid poly BRep tests | sew + make solid; enables booleans on imported meshes |
 | custom | other custom ops | unsupported | normalizer rejection test | deterministic diagnostic |
+
+## Hybrid Poly BRep Bridge
+
+When a part uses mesh-only ops (`wall-pattern`, `polyhedron`, or `heightfield`)
+followed by BRep-required ops (`difference`, `chamfer`, `fillet`), render dispatch uses the
+hybrid poly BRep bridge:
+
+1. **Partition analysis** classifies the part as `Hybrid`.
+2. **Exact prelude**: OCCT tessellates chamfer/fillet inputs when a mesh-only
+   op consumes them.
+3. **Mesh phase**: each independent mesh island emits a validated,
+   engine-independent `MeshAsset` STL. Internal displacement, imported STL,
+   and typed LLM-generated `polyhedron` use the same contract.
+4. **OCCT phase**: mesh output nodes become
+   `solidify(import-stl(asset.stl))`; post-boundary booleans execute on the
+   solidified poly BRep.
+
+This avoids the 30k+ non-manifold edges the mesh renderer produces on CSG over
+displaced meshes, while preserving exact BRep boolean precision from OCCT.
+
+The `solidify` op extracts the shared shell produced by `StlAPI_Reader`, then
+uses `BRepBuilderAPI_MakeSolid`. Sewing is intentionally avoided because it
+collapsed dense faceted inputs during the iPhone regression proof.
+
+Pure OCCT models (no mesh ops) and pure mesh models (no post-boundary BRep ops)
+are unaffected — they use existing paths with zero regression.
 
 ## Open Gaps
 

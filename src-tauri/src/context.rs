@@ -560,6 +560,7 @@ mod tests {
         export_artifacts: Vec<ExportArtifact>,
     ) -> ArtifactBundle {
         ArtifactBundle {
+            geometry_provenance: None,
             schema_version: 1,
             model_id: model_id.to_string(),
             source_kind: ModelSourceKind::Generated,
@@ -583,6 +584,7 @@ mod tests {
 
     fn step_export(path: &str) -> ExportArtifact {
         ExportArtifact {
+            geometry_provenance: None,
             label: "STEP".to_string(),
             format: "step".to_string(),
             path: path.to_string(),

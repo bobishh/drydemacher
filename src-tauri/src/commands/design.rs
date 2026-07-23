@@ -5,13 +5,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, State};
 use uuid::Uuid;
 
-use super::session::{build_runtime_snapshot, write_last_snapshot};
 use crate::models::{
     validate_artifact_bundle, validate_design_output, validate_design_params, validate_ui_spec,
     AppError, AppResult, AppState, ArtifactBundle, DesignParams, GeometryBackend, Message,
     MessageRole, MessageStatus, ModelManifest, ParamValue, ParsedParamsResult, SelectOption,
     SelectValue, SourceLanguage, UiField, UiSpec,
 };
+use crate::services::session::{build_runtime_snapshot, write_last_snapshot};
 use crate::{db, persist_thread_summary};
 
 #[derive(Debug, Clone, serde::Deserialize, specta::Type)]
@@ -944,6 +944,8 @@ pub async fn add_imported_model_version(
 
     db::add_message(&db, &thread_id, &msg).map_err(|err| AppError::persistence(err.to_string()))?;
     let _ = persist_thread_summary(&db, &thread_id, &title);
+    drop(db);
+    crate::mcp::handlers::invalidate_authoring_actors_for_thread(&thread_id).await;
     let snapshot = build_runtime_snapshot(
         None,
         Some(thread_id.clone()),
@@ -1004,6 +1006,7 @@ pub async fn update_ui_spec(
             model_manifest,
         )
     };
+    crate::mcp::handlers::invalidate_authoring_actors_for_thread(&updated_thread_id).await;
 
     {
         let snapshot = build_runtime_snapshot(
@@ -1053,6 +1056,7 @@ pub async fn update_parameters(
             model_manifest,
         )
     };
+    crate::mcp::handlers::invalidate_authoring_actors_for_thread(&updated_thread_id).await;
 
     {
         let snapshot = build_runtime_snapshot(
@@ -1101,6 +1105,7 @@ pub async fn update_post_processing(
             model_manifest,
         )
     };
+    crate::mcp::handlers::invalidate_authoring_actors_for_thread(&updated_thread_id).await;
 
     {
         let snapshot = build_runtime_snapshot(
@@ -1146,6 +1151,7 @@ pub async fn update_version_runtime(
             .ok_or_else(|| AppError::not_found("Message runtime not found for update."))?;
         (current_output, current_thread_id)
     };
+    crate::mcp::handlers::invalidate_authoring_actors_for_thread(&current_thread_id).await;
 
     {
         let snapshot = build_runtime_snapshot(
@@ -1220,6 +1226,7 @@ mod tests {
 
     fn sample_artifact_bundle(model_id: &str) -> ArtifactBundle {
         ArtifactBundle {
+            geometry_provenance: None,
             schema_version: 2,
             model_id: model_id.to_string(),
             source_kind: ModelSourceKind::Generated,

@@ -1,8 +1,9 @@
 use super::{
     artifact_bundle_digest, carry_forward_semantic_manifest,
-    draft_feedback_from_structural_verification, persist_agent_session, settle_live_render_phase,
-    reserve_authoring_actor_revision, store_session_render_preview_at_revision,
-    try_record_agent_error, AgentContext, StoreSessionRenderPreviewRequest,
+    draft_feedback_from_structural_verification, persist_agent_session,
+    reserve_authoring_actor_revision, settle_live_render_phase,
+    store_session_render_preview_at_revision, try_record_agent_error, AgentContext,
+    StoreSessionRenderPreviewRequest,
 };
 use crate::mcp::contracts::{
     PrintabilityAnalyzeResponse, PrintabilityTransformRecipesGetResponse,

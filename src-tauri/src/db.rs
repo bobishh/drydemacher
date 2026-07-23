@@ -133,14 +133,34 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
         "ALTER TABLE agent_drafts ADD COLUMN draft_feedback TEXT",
         [],
     );
+    // Draft identity is an authoring actor identity, not a client-session identity.
+    // Older installs had a unique session index and silently replaced a draft from
+    // another thread in the same client session.
+    conn.execute("DROP INDEX IF EXISTS idx_agent_drafts_session", [])?;
     conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_drafts_session
-         ON agent_drafts(session_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_drafts_session_thread
+         ON agent_drafts(session_id, thread_id)",
         [],
     )?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_agent_drafts_thread_updated
          ON agent_drafts(thread_id, updated_at DESC)",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS verification_records (
+            snapshot_id TEXT PRIMARY KEY,
+            preview_id TEXT NOT NULL,
+            artifact_digest TEXT NOT NULL,
+            verification_record TEXT NOT NULL,
+            verified_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_verification_records_preview
+         ON verification_records(preview_id, verified_at DESC)",
         [],
     )?;
 
@@ -1636,7 +1656,7 @@ pub fn upsert_agent_draft(conn: &Connection, draft: &AgentDraft) -> SqlResult<()
             draft_feedback,
             updated_at
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-        ON CONFLICT(session_id) DO UPDATE SET
+        ON CONFLICT(session_id, thread_id) DO UPDATE SET
             preview_id = excluded.preview_id,
             thread_id = excluded.thread_id,
             base_message_id = excluded.base_message_id,
@@ -1658,6 +1678,61 @@ pub fn upsert_agent_draft(conn: &Connection, draft: &AgentDraft) -> SqlResult<()
         ],
     )?;
     Ok(())
+}
+
+pub fn upsert_verification_record(
+    conn: &Connection,
+    preview_id: &str,
+    record: &crate::models::VerificationRecord,
+    verified_at: u64,
+) -> SqlResult<()> {
+    let artifact_digest = serde_json::to_string(&record.artifact_digest)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let verification_record = serde_json::to_string(record)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    conn.execute(
+        "INSERT INTO verification_records (
+            snapshot_id,
+            preview_id,
+            artifact_digest,
+            verification_record,
+            verified_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5)
+        ON CONFLICT(snapshot_id) DO UPDATE SET
+            preview_id = excluded.preview_id,
+            artifact_digest = excluded.artifact_digest,
+            verification_record = excluded.verification_record,
+            verified_at = excluded.verified_at",
+        params![
+            record.snapshot_id,
+            preview_id,
+            artifact_digest,
+            verification_record,
+            verified_at as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn get_verification_record(
+    conn: &Connection,
+    snapshot_id: &str,
+) -> SqlResult<Option<crate::models::VerificationRecord>> {
+    conn.query_row(
+        "SELECT verification_record FROM verification_records WHERE snapshot_id = ?1",
+        params![snapshot_id],
+        |row| {
+            let serialized: String = row.get(0)?;
+            serde_json::from_str(&serialized).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        },
+    )
+    .optional()
 }
 
 fn agent_draft_from_row(row: &rusqlite::Row<'_>) -> SqlResult<AgentDraft> {
@@ -1688,8 +1763,98 @@ pub fn get_agent_draft_for_session(
     conn.query_row(
         "SELECT preview_id, session_id, thread_id, base_message_id, design_output, artifact_bundle, model_manifest, draft_feedback, updated_at
          FROM agent_drafts
-         WHERE session_id = ?1",
+         WHERE session_id = ?1
+         ORDER BY updated_at DESC, preview_id DESC
+         LIMIT 1",
         params![session_id],
+        agent_draft_from_row,
+    )
+    .optional()
+}
+
+pub fn get_agent_draft_for_session_thread(
+    conn: &Connection,
+    session_id: &str,
+    thread_id: &str,
+) -> SqlResult<Option<AgentDraft>> {
+    conn.query_row(
+        "SELECT preview_id, session_id, thread_id, base_message_id, design_output, artifact_bundle, model_manifest, draft_feedback, updated_at
+         FROM agent_drafts
+         WHERE session_id = ?1 AND thread_id = ?2",
+        params![session_id, thread_id],
+        agent_draft_from_row,
+    )
+    .optional()
+}
+
+pub fn get_agent_draft_for_session_preview_id(
+    conn: &Connection,
+    session_id: &str,
+    preview_id: &str,
+) -> SqlResult<Option<AgentDraft>> {
+    conn.query_row(
+        "SELECT preview_id, session_id, thread_id, base_message_id, design_output, artifact_bundle, model_manifest, draft_feedback, updated_at
+         FROM agent_drafts
+         WHERE session_id = ?1 AND preview_id = ?2",
+        params![session_id, preview_id],
+        agent_draft_from_row,
+    )
+    .optional()
+}
+
+pub fn get_unambiguous_agent_draft_for_session(
+    conn: &Connection,
+    session_id: &str,
+) -> SqlResult<Option<AgentDraft>> {
+    let mut statement = conn.prepare(
+        "SELECT preview_id, session_id, thread_id, base_message_id, design_output, artifact_bundle, model_manifest, draft_feedback, updated_at
+         FROM agent_drafts
+         WHERE session_id = ?1
+         LIMIT 2",
+    )?;
+    let mut rows = statement.query(params![session_id])?;
+    let Some(first) = rows.next()? else {
+        return Ok(None);
+    };
+    let first = agent_draft_from_row(first)?;
+    if rows.next()?.is_some() {
+        return Ok(None);
+    }
+    Ok(Some(first))
+}
+
+pub fn get_agent_draft_for_session_message(
+    conn: &Connection,
+    session_id: &str,
+    message_id: &str,
+) -> SqlResult<Option<AgentDraft>> {
+    let mut statement = conn.prepare(
+        "SELECT preview_id, session_id, thread_id, base_message_id, design_output, artifact_bundle, model_manifest, draft_feedback, updated_at
+         FROM agent_drafts
+         WHERE session_id = ?1
+           AND (preview_id = ?2 OR base_message_id = ?2)
+         LIMIT 2",
+    )?;
+    let mut rows = statement.query(params![session_id, message_id])?;
+    let Some(first) = rows.next()? else {
+        return Ok(None);
+    };
+    let first = agent_draft_from_row(first)?;
+    if rows.next()?.is_some() {
+        return Ok(None);
+    }
+    Ok(Some(first))
+}
+
+pub fn get_agent_draft_by_preview_id(
+    conn: &Connection,
+    preview_id: &str,
+) -> SqlResult<Option<AgentDraft>> {
+    conn.query_row(
+        "SELECT preview_id, session_id, thread_id, base_message_id, design_output, artifact_bundle, model_manifest, draft_feedback, updated_at
+         FROM agent_drafts
+         WHERE preview_id = ?1",
+        params![preview_id],
         agent_draft_from_row,
     )
     .optional()
@@ -1699,6 +1864,18 @@ pub fn delete_agent_draft_for_session(conn: &Connection, session_id: &str) -> Sq
     conn.execute(
         "DELETE FROM agent_drafts WHERE session_id = ?1",
         params![session_id],
+    )?;
+    Ok(())
+}
+
+pub fn delete_agent_draft_for_session_thread(
+    conn: &Connection,
+    session_id: &str,
+    thread_id: &str,
+) -> SqlResult<()> {
+    conn.execute(
+        "DELETE FROM agent_drafts WHERE session_id = ?1 AND thread_id = ?2",
+        params![session_id, thread_id],
     )?;
     Ok(())
 }
@@ -2238,14 +2415,30 @@ mod tests {
             )",
             [],
         )?;
+        conn.execute("DROP INDEX IF EXISTS idx_agent_drafts_session", [])?;
         conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_drafts_session
-             ON agent_drafts(session_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_drafts_session_thread
+             ON agent_drafts(session_id, thread_id)",
             [],
         )?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_agent_drafts_thread_updated
              ON agent_drafts(thread_id, updated_at DESC)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS verification_records (
+                snapshot_id TEXT PRIMARY KEY,
+                preview_id TEXT NOT NULL,
+                artifact_digest TEXT NOT NULL,
+                verification_record TEXT NOT NULL,
+                verified_at INTEGER NOT NULL
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_verification_records_preview
+             ON verification_records(preview_id, verified_at DESC)",
             [],
         )?;
         conn.execute(
@@ -2302,6 +2495,7 @@ mod tests {
 
     fn sample_artifact_bundle(model_id: &str) -> ArtifactBundle {
         ArtifactBundle {
+            geometry_provenance: None,
             schema_version: 1,
             model_id: model_id.to_string(),
             source_kind: crate::models::ModelSourceKind::Generated,
@@ -3184,13 +3378,14 @@ mod tests {
             println!("No DB found at path");
             return;
         }
-        let conn = init_db(db_path).unwrap();
+        let conn = rusqlite::Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
         match get_all_threads(&conn) {
             Ok(threads) => {
                 println!("Found {} threads", threads.len());
-                for t in threads.iter().take(1) {
-                    println!("Thread JSON: {}", serde_json::to_string_pretty(&t).unwrap());
-                }
             }
             Err(e) => {
                 println!("Failed to get threads: {:?}", e);
@@ -3312,6 +3507,49 @@ mod tests {
     }
 
     #[test]
+    fn init_db_creates_snapshot_verification_records_table() {
+        let db_path = std::env::temp_dir().join(format!(
+            "ecky-verification-records-{}",
+            uuid::Uuid::new_v4()
+        ));
+
+        let conn = init_db(&db_path).unwrap();
+        let table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'verification_records'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(table_count, 1);
+        assert!(table_has_column(&conn, "verification_records", "snapshot_id").unwrap());
+        assert!(table_has_column(&conn, "verification_records", "artifact_digest").unwrap());
+        assert!(table_has_column(&conn, "verification_records", "verification_record").unwrap());
+    }
+
+    #[test]
+    fn verification_record_roundtrip_is_keyed_by_snapshot_and_preserves_artifact_digest() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db_internal(&conn).unwrap();
+        let record = crate::models::VerificationRecord {
+            verification_id: "verification-1".to_string(),
+            snapshot_id: "snapshot-1".to_string(),
+            artifact_digest: "sha256:artifact-1".to_string(),
+            passed: true,
+            verifier_status: crate::models::VerifierStatus::Ok,
+            verifier_source: Some(crate::models::VerifierSource::RustStructural),
+        };
+
+        upsert_verification_record(&conn, "preview-1", &record, 123).unwrap();
+
+        assert_eq!(
+            get_verification_record(&conn, "snapshot-1").unwrap(),
+            Some(record)
+        );
+    }
+
+    #[test]
     fn agent_draft_roundtrip_preserves_draft_feedback() {
         let conn = Connection::open_in_memory().unwrap();
         init_db_internal(&conn).unwrap();
@@ -3339,6 +3577,7 @@ mod tests {
                 post_processing: None,
             },
             artifact_bundle: ArtifactBundle {
+                geometry_provenance: None,
                 schema_version: crate::models::MODEL_RUNTIME_SCHEMA_VERSION,
                 model_id: "model-1".to_string(),
                 source_kind: crate::models::ModelSourceKind::Generated,
@@ -3359,6 +3598,7 @@ mod tests {
                 export_artifacts: Vec::new(),
             },
             model_manifest: crate::models::ModelManifest {
+                geometry_provenance: None,
                 schema_version: crate::models::MODEL_RUNTIME_SCHEMA_VERSION,
                 model_id: "model-1".to_string(),
                 source_kind: crate::models::ModelSourceKind::Generated,
@@ -3428,6 +3668,41 @@ mod tests {
             .expect("draft");
 
         assert_eq!(loaded.draft_feedback, draft.draft_feedback);
+
+        let other_thread = AgentDraft {
+            preview_id: "preview-2".to_string(),
+            thread_id: "thread-2".to_string(),
+            ..draft.clone()
+        };
+        upsert_agent_draft(&conn, &other_thread).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM agent_drafts WHERE session_id = ?1",
+                ["session-1"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(
+            get_agent_draft_for_session_thread(&conn, "session-1", "thread-1")
+                .unwrap()
+                .expect("first thread draft")
+                .preview_id,
+            "preview-1"
+        );
+        assert_eq!(
+            get_agent_draft_for_session_thread(&conn, "session-1", "thread-2")
+                .unwrap()
+                .expect("second thread draft")
+                .preview_id,
+            "preview-2"
+        );
+        assert!(
+            get_unambiguous_agent_draft_for_session(&conn, "session-1")
+                .unwrap()
+                .is_none(),
+            "two thread-scoped drafts make no-thread resolution ambiguous"
+        );
     }
 
     #[test]

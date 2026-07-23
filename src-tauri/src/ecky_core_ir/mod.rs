@@ -129,6 +129,7 @@ pub enum CoreValueKind {
     Sketch,
     Path,
     Frame,
+    Mesh,
     Compound,
     Solid,
 }
@@ -738,7 +739,10 @@ mod tests {
         assert!((d - 0.6134).abs() < 1e-9);
         assert!((r - (3.0 - 0.6134)).abs() < 1e-9);
         assert!(iso_metric_thread_core("m6").is_some(), "case-insensitive");
-        assert!(iso_metric_thread_core("M7").is_none(), "unknown designation");
+        assert!(
+            iso_metric_thread_core("M7").is_none(),
+            "unknown designation"
+        );
     }
 
     #[test]

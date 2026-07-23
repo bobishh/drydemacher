@@ -4,7 +4,7 @@ use crate::mcp::contracts::*;
 use crate::mcp::handlers;
 use crate::mcp::handlers::AgentContext;
 use crate::models::{
-    AppError, AppErrorCode, AppResult, AppState, ArtifactBundle, Config,
+    AppError, AppErrorCode, AppResult, AppState, ArtifactBundle, AuthoringTargetRef, Config,
     FreecadLibraryImportRequest, FreecadLibrarySearchRequest, McpSessionState, McpTargetRef,
     Message, MessageRole, MessageStatus, ModelManifest, PathResolver, TargetLeaseInfo,
     ViewportScreenshotCapture,
@@ -579,6 +579,131 @@ fn current_context(session_id: &str, session: &McpSessionState) -> handlers::Age
     }
 }
 
+fn target_resolution_error(
+    kind: AuthoringTargetResolutionFailureKind,
+    requested_target: AuthoringTargetRef,
+    resolved_target: Option<AuthoringTargetRef>,
+) -> AppError {
+    let evidence = AuthoringTargetResolutionEvidence {
+        kind,
+        requested_target,
+        resolved_target,
+    };
+    let (code, message) = match kind {
+        AuthoringTargetResolutionFailureKind::NotFound => (
+            AppErrorCode::NotFound,
+            "Requested authoring target was not found.",
+        ),
+        AuthoringTargetResolutionFailureKind::Stale => (
+            AppErrorCode::Conflict,
+            "Requested authoring target is stale.",
+        ),
+    };
+    AppError::with_details(
+        code,
+        message,
+        serde_json::to_string(&evidence).unwrap_or_else(|_| "{}".to_string()),
+    )
+}
+
+fn draft_target_ref(preview: &handlers::SessionRenderPreview) -> AuthoringTargetRef {
+    AuthoringTargetRef::Draft {
+        thread_id: preview.thread_id.clone(),
+        preview_id: preview.preview_id.clone(),
+        session_id: preview.session_id.clone(),
+    }
+}
+
+async fn legacy_authoring_target_ref(
+    state: &AppState,
+    session_id: &str,
+    explicit_thread_id: Option<&str>,
+    explicit_message_id: Option<&str>,
+) -> AppResult<Option<AuthoringTargetRef>> {
+    match (explicit_thread_id, explicit_message_id) {
+        (Some(thread_id), Some(message_id)) => {
+            let saved_exists = {
+                let conn = state.db.lock().await;
+                db::get_visible_message_thread_id(&conn, message_id)
+                    .map_err(|e| AppError::persistence(e.to_string()))?
+                    .is_some()
+            };
+            if saved_exists {
+                return Ok(Some(AuthoringTargetRef::SavedVersion {
+                    thread_id: thread_id.to_string(),
+                    message_id: message_id.to_string(),
+                }));
+            }
+
+            if let Some(session) = get_session(state, session_id).await {
+                let ctx = current_context(session_id, &session);
+                if let Some(preview) = handlers::resolve_session_render_preview_for_preview_id(
+                    state,
+                    &ctx,
+                    Some(thread_id),
+                    message_id,
+                )
+                .await?
+                {
+                    return Ok(Some(draft_target_ref(&preview)));
+                }
+            }
+
+            Ok(Some(AuthoringTargetRef::SavedVersion {
+                thread_id: thread_id.to_string(),
+                message_id: message_id.to_string(),
+            }))
+        }
+        (None, Some(message_id)) => {
+            let saved_thread_id = {
+                let conn = state.db.lock().await;
+                db::get_visible_message_thread_id(&conn, message_id)
+                    .map_err(|e| AppError::persistence(e.to_string()))?
+            };
+            if let Some(thread_id) = saved_thread_id {
+                return Ok(Some(AuthoringTargetRef::SavedVersion {
+                    thread_id,
+                    message_id: message_id.to_string(),
+                }));
+            }
+            if let Some(session) = get_session(state, session_id).await {
+                let ctx = current_context(session_id, &session);
+                if let Some(preview) = handlers::resolve_session_render_preview_for_preview_id(
+                    state, &ctx, None, message_id,
+                )
+                .await?
+                {
+                    return Ok(Some(draft_target_ref(&preview)));
+                }
+                if let Some(thread_id) = session.bound_thread_id {
+                    return Ok(Some(AuthoringTargetRef::SavedVersion {
+                        thread_id,
+                        message_id: message_id.to_string(),
+                    }));
+                }
+            }
+            Err(AppError::validation(
+                "Legacy messageId needs threadId when no saved version or draft matches it.",
+            ))
+        }
+        (Some(thread_id), None) => Ok(Some(AuthoringTargetRef::LatestSaved {
+            thread_id: thread_id.to_string(),
+        })),
+        (None, None) => {
+            let Some(session) = get_session(state, session_id).await else {
+                return Ok(None);
+            };
+            let ctx = current_context(session_id, &session);
+            let target =
+                handlers::resolve_session_render_preview_for_request(state, &ctx, None, None)
+                    .await?
+                    .as_ref()
+                    .map(draft_target_ref);
+            Ok(target)
+        }
+    }
+}
+
 async fn resolve_target_for_session(
     state: &AppState,
     app: &dyn PathResolver,
@@ -586,16 +711,48 @@ async fn resolve_target_for_session(
     explicit_thread_id: Option<String>,
     explicit_message_id: Option<String>,
 ) -> AppResult<ResolvedTargetRef> {
-    if let Some(session) = state.mcp_sessions.lock().await.get(session_id).cloned() {
-        let ctx = current_context(session_id, &session);
-        if let Some(preview) = handlers::resolve_session_render_preview_for_request(
-            state,
-            &ctx,
-            explicit_thread_id.as_deref(),
-            explicit_message_id.as_deref(),
-        )
-        .await?
-        {
+    let target_ref = legacy_authoring_target_ref(
+        state,
+        session_id,
+        explicit_thread_id.as_deref(),
+        explicit_message_id.as_deref(),
+    )
+    .await?;
+    resolve_authoring_target_for_session(state, app, session_id, target_ref).await
+}
+
+async fn resolve_authoring_target_for_session(
+    state: &AppState,
+    app: &dyn PathResolver,
+    session_id: &str,
+    target_ref: Option<AuthoringTargetRef>,
+) -> AppResult<ResolvedTargetRef> {
+    if let Some(AuthoringTargetRef::Draft {
+        thread_id,
+        preview_id,
+        session_id: draft_session_id,
+    }) = target_ref.as_ref()
+    {
+        if draft_session_id != session_id {
+            return Err(target_resolution_error(
+                AuthoringTargetResolutionFailureKind::Stale,
+                target_ref.clone().expect("draft target ref"),
+                None,
+            ));
+        }
+        let preview = if let Some(session) = get_session(state, session_id).await {
+            let ctx = current_context(session_id, &session);
+            handlers::resolve_session_render_preview_for_preview_id(
+                state,
+                &ctx,
+                Some(thread_id),
+                preview_id,
+            )
+            .await?
+        } else {
+            None
+        };
+        if let Some(preview) = preview {
             let design = preview.design_output.clone();
             let (range_count, number_count, select_count, checkbox_count) = design
                 .ui_spec
@@ -631,6 +788,25 @@ async fn resolve_target_for_session(
                 control_view_count: preview.model_manifest.control_views.len(),
             });
         }
+        let resolved_target = {
+            let conn = state.db.lock().await;
+            db::get_agent_draft_by_preview_id(&conn, preview_id)
+                .map_err(|e| AppError::persistence(e.to_string()))?
+                .map(|draft| AuthoringTargetRef::Draft {
+                    thread_id: draft.thread_id,
+                    preview_id: draft.preview_id,
+                    session_id: draft.session_id,
+                })
+        };
+        return Err(target_resolution_error(
+            if resolved_target.is_some() {
+                AuthoringTargetResolutionFailureKind::Stale
+            } else {
+                AuthoringTargetResolutionFailureKind::NotFound
+            },
+            target_ref.clone().expect("draft target ref"),
+            resolved_target,
+        ));
     }
 
     let cached_target = {
@@ -650,53 +826,97 @@ async fn resolve_target_for_session(
         .into_iter()
         .next();
 
-    let target = if let Some(message_id) = explicit_message_id {
-        crate::services::target::resolve_editable_target(
+    let target = match target_ref.as_ref() {
+        Some(AuthoringTargetRef::SavedVersion {
+            thread_id,
+            message_id,
+        }) => match crate::services::target::resolve_editable_target(
             &conn,
             app,
-            explicit_thread_id,
-            Some(message_id),
-        )?
-    } else if let Some(thread_id) = explicit_thread_id {
-        crate::services::target::resolve_editable_target(&conn, app, Some(thread_id), None)?
-    } else if let Some(cached_target) = cached_target {
-        let still_exists = db::get_visible_message_thread_id(&conn, &cached_target.message_id)
-            .map_err(|e| AppError::persistence(e.to_string()))?;
-        if still_exists.as_deref() == Some(cached_target.thread_id.as_str()) {
-            let cached_thread_id = cached_target.thread_id.clone();
-            let cached_message_id = cached_target.message_id.clone();
+            Some(thread_id.clone()),
+            Some(message_id.clone()),
+        ) {
+            Ok(target) => target,
+            Err(err) if err.code == AppErrorCode::NotFound => {
+                let resolved_target = db::get_visible_message_thread_id(&conn, message_id)
+                    .map_err(|e| AppError::persistence(e.to_string()))?
+                    .map(|thread_id| AuthoringTargetRef::SavedVersion {
+                        thread_id,
+                        message_id: message_id.clone(),
+                    });
+                return Err(target_resolution_error(
+                    if resolved_target.is_some() {
+                        AuthoringTargetResolutionFailureKind::Stale
+                    } else {
+                        AuthoringTargetResolutionFailureKind::NotFound
+                    },
+                    target_ref.clone().expect("saved target ref"),
+                    resolved_target,
+                ));
+            }
+            Err(err) => return Err(err),
+        },
+        Some(AuthoringTargetRef::LatestSaved { thread_id }) => {
             match crate::services::target::resolve_editable_target(
                 &conn,
                 app,
-                Some(cached_thread_id.clone()),
-                Some(cached_message_id),
+                Some(thread_id.clone()),
+                None,
             ) {
                 Ok(target) => target,
                 Err(err) if err.code == AppErrorCode::NotFound => {
-                    crate::services::target::resolve_editable_target(
-                        &conn,
-                        app,
-                        Some(cached_thread_id),
+                    return Err(target_resolution_error(
+                        AuthoringTargetResolutionFailureKind::NotFound,
+                        target_ref.clone().expect("latest saved target ref"),
                         None,
-                    )?
+                    ));
                 }
                 Err(err) => return Err(err),
             }
-        } else {
-            return Err(AppError::validation(
-                "Cached MCP session target is no longer valid. Re-bind the session to an explicit thread/version.",
-            ));
         }
-    } else if let Some(thread_id) = runtime_thread_id.or_else(|| {
-        stored_session
-            .as_ref()
-            .and_then(|session| session.thread_id.clone())
-    }) {
-        crate::services::target::resolve_editable_target(&conn, app, Some(thread_id), None)?
-    } else {
-        return Err(AppError::validation(
-            "No bound MCP session target is available. Provide threadId/messageId or re-bind the session first.",
-        ));
+        Some(AuthoringTargetRef::Draft { .. }) => unreachable!("drafts return above"),
+        None => {
+            if let Some(cached_target) = cached_target {
+                let still_exists =
+                    db::get_visible_message_thread_id(&conn, &cached_target.message_id)
+                        .map_err(|e| AppError::persistence(e.to_string()))?;
+                if still_exists.as_deref() == Some(cached_target.thread_id.as_str()) {
+                    let cached_thread_id = cached_target.thread_id.clone();
+                    let cached_message_id = cached_target.message_id.clone();
+                    match crate::services::target::resolve_editable_target(
+                        &conn,
+                        app,
+                        Some(cached_thread_id.clone()),
+                        Some(cached_message_id),
+                    ) {
+                        Ok(target) => target,
+                        Err(err) if err.code == AppErrorCode::NotFound => {
+                            crate::services::target::resolve_editable_target(
+                                &conn,
+                                app,
+                                Some(cached_thread_id),
+                                None,
+                            )?
+                        }
+                        Err(err) => return Err(err),
+                    }
+                } else {
+                    return Err(AppError::validation(
+                        "Cached MCP session target is no longer valid. Re-bind the session to an explicit thread/version.",
+                    ));
+                }
+            } else if let Some(thread_id) = runtime_thread_id.or_else(|| {
+                stored_session
+                    .as_ref()
+                    .and_then(|session| session.thread_id.clone())
+            }) {
+                crate::services::target::resolve_editable_target(&conn, app, Some(thread_id), None)?
+            } else {
+                return Err(AppError::validation(
+                    "No bound MCP session target is available. Provide threadId/messageId or re-bind the session first.",
+                ));
+            }
+        }
     };
 
     let design = target.design_output.clone();
@@ -1223,7 +1443,7 @@ fn workflow_guide_text(state: &AppState) -> String {
             "- Backend metadata decides how `.ecky` renders: `build123d`, `freecad`, or Ecky native `mesh` (aliases: `native`, legacy `eckyRust`).\n",
             "- Ecky native backend runs the controlled CAD runtime pipeline: parse -> expand -> typecheck -> lower -> validate. Direct OCCT may accelerate supported native renders, but the public backend setting is still `mesh`/`native`, not `directOcct`.\n",
             "- Never promise STEP unless artifact truth proves it: call `artifact_manifest_get` or `target_detail_get(section=\"artifactBundle\")` first and require `hasStepExport=true`, or confirm `exportArtifacts` contains `format=step`.\n",
-            "- Use `artifact_manifest_get` for full machine-readable artifactBundle/modelManifest JSON. Use `target_detail_get(section=\"exportArtifacts\")` for the STEP path/detail; artifactBundle digest exposes `geometryBackend`, `edgeTargetCount`, `faceTargetCount`, `exportFormats`, `hasStepExport`, and `stepExportPath` for fast routing.\n",
+            "- Use `artifact_manifest_get` for full machine-readable artifactBundle/modelManifest JSON. Use `target_detail_get(section=\"exportArtifacts\")` for the STEP path/detail; artifactBundle digest exposes `geometryBackend`, `geometryRepresentation`, `facetedStep`, `analyticStep`, `sourceMeshDigests`, `edgeTargetCount`, `faceTargetCount`, `exportFormats`, `hasStepExport`, and `stepExportPath` for fast routing.\n",
             "- Use the current selected engine prompt as the design-policy baseline.\n\n",
             "Current engine:\n",
             "- {}\n\n",
@@ -1593,13 +1813,23 @@ fn surface_reference_uri_for_backend(backend: crate::models::GeometryBackend) ->
 }
 
 fn read_resource_text(state: &AppState, uri: &str) -> Option<String> {
+    let configured_backend = || {
+        state
+            .config
+            .lock()
+            .ok()
+            .map(|config| config.default_geometry_backend)
+            .unwrap_or(crate::models::GeometryBackend::EckyRust)
+    };
     match uri {
         "ecky://guides/authoring-card" => Some(authoring_card_text().to_string()),
-        "ecky://guides/technical-system-prompt" => Some(crate::TECHNICAL_SYSTEM_PROMPT.to_string()),
+        "ecky://guides/technical-system-prompt" => Some(
+            crate::agent_prompt::agent_language_reference(configured_backend()),
+        ),
         "ecky://guides/modeling-guidelines" => Some(workflow_guide_text(state)),
-        "ecky://guides/ecky-source" | "ecky://guides/ecky-ir-v0" => {
-            Some(crate::commands::generation::ecky_source_guide_text())
-        }
+        "ecky://guides/ecky-source" | "ecky://guides/ecky-ir-v0" => Some(
+            crate::agent_prompt::agent_language_reference(configured_backend()),
+        ),
         "ecky://guides/freecad" | "ecky://guides/cad-sdk" => {
             Some(crate::commands::generation::freecad_guide_text())
         }
@@ -1754,25 +1984,11 @@ fn first_version_macro_request_authoring_context(
     crate::models::SourceLanguage,
     crate::models::GeometryBackend,
 ) {
-    let dialect = req
-        .macro_dialect
-        .clone()
-        .unwrap_or_else(|| crate::models::infer_macro_dialect_from_code(&req.macro_code));
-    match dialect {
-        crate::models::MacroDialect::Legacy | crate::models::MacroDialect::CadFrameworkV1 => (
-            crate::models::SourceLanguage::LegacyPython,
-            crate::models::GeometryBackend::Freecad,
-        ),
-        crate::models::MacroDialect::Build123d => (
-            crate::models::SourceLanguage::Build123d,
-            crate::models::GeometryBackend::Build123d,
-        ),
-        crate::models::MacroDialect::EckyIrV0 => (
-            crate::models::SourceLanguage::EckyIrV0,
-            req.geometry_backend
-                .unwrap_or(config.default_geometry_backend),
-        ),
-    }
+    (
+        config.default_source_language,
+        req.geometry_backend
+            .unwrap_or(config.default_geometry_backend),
+    )
 }
 
 fn prompt_definitions() -> Vec<Value> {
@@ -3349,15 +3565,27 @@ async fn dispatch_request(
         }
         "tools/call" => {
             match serde_json::from_value::<CallToolParams>(req.params.unwrap_or_default()) {
-                Ok(params) => match dispatch_tool_call(server, session_id, params).await {
-                    Ok((value, next_target)) => {
-                        if next_target.is_some() {
-                            set_session_target(&server.state, session_id, next_target).await;
+                Ok(params) => {
+                    let dispatch_server = server.clone();
+                    let dispatch_session_id = session_id.to_string();
+                    let dispatch_result = tauri::async_runtime::spawn(async move {
+                        dispatch_tool_call(&dispatch_server, &dispatch_session_id, params).await
+                    })
+                    .await
+                    .map_err(|error| {
+                        AppError::internal(format!("MCP tool dispatcher task failed: {error}"))
+                    })
+                    .and_then(|result| result);
+                    match dispatch_result {
+                        Ok((value, next_target)) => {
+                            if next_target.is_some() {
+                                set_session_target(&server.state, session_id, next_target).await;
+                            }
+                            mcp_tool_success(req.id, &value)
                         }
-                        mcp_tool_success(req.id, &value)
+                        Err(err) => mcp_tool_error(req.id, &err),
                     }
-                    Err(err) => mcp_tool_error(req.id, &err),
-                },
+                }
                 Err(err) => json_rpc_error(req.id, -32602, format!("Invalid params: {}", err)),
             }
         }
@@ -3469,6 +3697,144 @@ async fn execute_ecky_ast_replace_preview_call(
     }
 }
 
+async fn dispatch_workspace_overview(
+    server: &HttpServerState,
+    session_id: &str,
+    args: Value,
+) -> AppResult<(Value, Option<McpTargetRef>)> {
+    let req_args = serde_json::from_value::<WorkspaceOverviewRequest>(args).unwrap_or(
+        WorkspaceOverviewRequest {
+            agent_label: None,
+            llm_model_id: None,
+            llm_model_label: None,
+        },
+    );
+    let live_bound_thread_id = server
+        .state
+        .mcp_sessions
+        .lock()
+        .await
+        .get(session_id)
+        .and_then(|session| session.bound_thread_id.clone())
+        .or_else(|| {
+            crate::mcp::runtime::runtime_snapshot_by_session_id(&server.state, session_id)
+                .and_then(|snapshot| snapshot.pending_thread_id)
+        });
+    let target_state = server.state.clone();
+    let target_app = server.app.clone();
+    let target_session_id = session_id.to_string();
+    let target_result = tauri::async_runtime::spawn(async move {
+        resolve_target_for_session(
+            &target_state,
+            target_app.as_ref(),
+            &target_session_id,
+            None,
+            None,
+        )
+        .await
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("Target resolver task failed: {error}")))?;
+    let claim_owners = handlers::claim_owners_by_thread(&server.state).await;
+    let conn = server.state.db.lock().await;
+    let recent_threads = db::get_recent_threads_limited(&conn, 5)
+        .map_err(|e| AppError::persistence(e.to_string()))?
+        .into_iter()
+        .map(|thread| thread_list_entry(&conn, thread))
+        .collect::<AppResult<Vec<_>>>()?;
+
+    let _ = req_args;
+    let (response, next_target) = match target_result {
+        Ok(target) => {
+            let lease_info = db::get_active_target_lease(
+                &conn,
+                &target.thread_id,
+                &target.message_id,
+                target.model_id.as_deref(),
+            )
+            .map_err(|e| AppError::persistence(e.to_string()))?
+            .filter(|lease| lease.session_id != session_id);
+            let next_target = Some(McpTargetRef {
+                thread_id: target.thread_id.clone(),
+                message_id: target.message_id.clone(),
+                model_id: target.model_id.clone(),
+            });
+            (
+                WorkspaceOverviewResponse {
+                    agent_brief: workspace_overview_brief(
+                        &server.state,
+                        Some(target.source_language),
+                        Some(target.geometry_backend),
+                    ),
+                    control_surface: workspace_control_surface(&target),
+                    default_target: WorkspaceOverviewTarget {
+                        thread_id: target.thread_id.clone(),
+                        message_id: Some(target.message_id.clone()),
+                        title: target.title.clone(),
+                        version_name: Some(target.version_name.clone()),
+                        model_id: target.model_id.clone(),
+                        has_draft: target.has_draft,
+                        has_version: true,
+                        claim_owner: claim_owners.get(&target.thread_id).cloned(),
+                    },
+                    recent_threads,
+                    lease_info,
+                },
+                next_target,
+            )
+        }
+        Err(err) if err.message.contains("has no successful versions") => {
+            let stored_thread_id = db::get_sessions_by_ids(&conn, &[session_id.to_string()])
+                .map_err(|e| AppError::persistence(e.to_string()))?
+                .into_iter()
+                .next()
+                .and_then(|session| session.thread_id);
+            let thread_id = live_bound_thread_id.or(stored_thread_id).ok_or(err)?;
+            let thread = crate::services::history::get_thread(&conn, &thread_id)?;
+            (
+                WorkspaceOverviewResponse {
+                    agent_brief: workspace_overview_brief(&server.state, None, None),
+                    control_surface: workspace_control_surface_for_empty_thread(&thread),
+                    default_target: WorkspaceOverviewTarget {
+                        thread_id: thread.id.clone(),
+                        message_id: None,
+                        title: thread.title.clone(),
+                        version_name: None,
+                        model_id: None,
+                        has_draft: false,
+                        has_version: false,
+                        claim_owner: claim_owners.get(&thread.id).cloned(),
+                    },
+                    recent_threads,
+                    lease_info: None,
+                },
+                None,
+            )
+        }
+        Err(err) => return Err(err),
+    };
+    drop(conn);
+    Ok((serde_json::to_value(response).unwrap(), next_target))
+}
+
+async fn dispatch_project_folder_apply(
+    server: &HttpServerState,
+    args: Value,
+    current_ctx: &AgentContext,
+) -> AppResult<(Value, Option<McpTargetRef>)> {
+    let req_args: handlers::ProjectFolderApplyRequest =
+        serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+    let response = handlers::handle_project_folder_apply(
+        &server.state,
+        server.app.as_ref(),
+        req_args,
+        current_ctx,
+    )
+    .await?;
+    emit_history_updated(server);
+    Ok((serde_json::to_value(response).unwrap(), None))
+}
+
 async fn dispatch_tool_call(
     server: &HttpServerState,
     session_id: &str,
@@ -3518,113 +3884,7 @@ async fn dispatch_tool_call(
             Ok((serde_json::to_value(response).unwrap(), None))
         }
         "workspace_overview" => {
-            let req_args = serde_json::from_value::<WorkspaceOverviewRequest>(args).unwrap_or(
-                WorkspaceOverviewRequest {
-                    agent_label: None,
-                    llm_model_id: None,
-                    llm_model_label: None,
-                },
-            );
-            let live_bound_thread_id = server
-                .state
-                .mcp_sessions
-                .lock()
-                .await
-                .get(session_id)
-                .and_then(|session| session.bound_thread_id.clone())
-                .or_else(|| {
-                    crate::mcp::runtime::runtime_snapshot_by_session_id(&server.state, session_id)
-                        .and_then(|snapshot| snapshot.pending_thread_id)
-                });
-            let target_result = resolve_target_for_session(
-                &server.state,
-                server.app.as_ref(),
-                session_id,
-                None,
-                None,
-            )
-            .await;
-            let claim_owners = handlers::claim_owners_by_thread(&server.state).await;
-            let conn = server.state.db.lock().await;
-            let recent_threads = db::get_recent_threads_limited(&conn, 5)
-                .map_err(|e| AppError::persistence(e.to_string()))?
-                .into_iter()
-                .map(|thread| thread_list_entry(&conn, thread))
-                .collect::<AppResult<Vec<_>>>()?;
-
-            let _ = req_args;
-            let (response, next_target) = match target_result {
-                Ok(target) => {
-                    let lease_info = db::get_active_target_lease(
-                        &conn,
-                        &target.thread_id,
-                        &target.message_id,
-                        target.model_id.as_deref(),
-                    )
-                    .map_err(|e| AppError::persistence(e.to_string()))?
-                    .filter(|lease| lease.session_id != session_id);
-                    let next_target = Some(McpTargetRef {
-                        thread_id: target.thread_id.clone(),
-                        message_id: target.message_id.clone(),
-                        model_id: target.model_id.clone(),
-                    });
-                    (
-                        WorkspaceOverviewResponse {
-                            agent_brief: workspace_overview_brief(
-                                &server.state,
-                                Some(target.source_language),
-                                Some(target.geometry_backend),
-                            ),
-                            control_surface: workspace_control_surface(&target),
-                            default_target: WorkspaceOverviewTarget {
-                                thread_id: target.thread_id.clone(),
-                                message_id: Some(target.message_id.clone()),
-                                title: target.title.clone(),
-                                version_name: Some(target.version_name.clone()),
-                                model_id: target.model_id.clone(),
-                                has_draft: target.has_draft,
-                                has_version: true,
-                                claim_owner: claim_owners.get(&target.thread_id).cloned(),
-                            },
-                            recent_threads,
-                            lease_info,
-                        },
-                        next_target,
-                    )
-                }
-                Err(err) if err.message.contains("has no successful versions") => {
-                    let stored_thread_id =
-                        db::get_sessions_by_ids(&conn, &[session_id.to_string()])
-                            .map_err(|e| AppError::persistence(e.to_string()))?
-                            .into_iter()
-                            .next()
-                            .and_then(|session| session.thread_id);
-                    let thread_id = live_bound_thread_id.or(stored_thread_id).ok_or(err)?;
-                    let thread = crate::services::history::get_thread(&conn, &thread_id)?;
-                    (
-                        WorkspaceOverviewResponse {
-                            agent_brief: workspace_overview_brief(&server.state, None, None),
-                            control_surface: workspace_control_surface_for_empty_thread(&thread),
-                            default_target: WorkspaceOverviewTarget {
-                                thread_id: thread.id.clone(),
-                                message_id: None,
-                                title: thread.title.clone(),
-                                version_name: None,
-                                model_id: None,
-                                has_draft: false,
-                                has_version: false,
-                                claim_owner: claim_owners.get(&thread.id).cloned(),
-                            },
-                            recent_threads,
-                            lease_info: None,
-                        },
-                        None,
-                    )
-                }
-                Err(err) => return Err(err),
-            };
-            drop(conn);
-            Ok((serde_json::to_value(response).unwrap(), next_target))
+            Box::pin(dispatch_workspace_overview(server, session_id, args)).await
         }
         "project_folder_export" => {
             let req_args: handlers::ProjectFolderExportRequest =
@@ -3650,17 +3910,7 @@ async fn dispatch_tool_call(
             Ok((serde_json::to_value(response).unwrap(), None))
         }
         "project_folder_apply" => {
-            let req_args: handlers::ProjectFolderApplyRequest =
-                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
-            let response = handlers::handle_project_folder_apply(
-                &server.state,
-                server.app.as_ref(),
-                req_args,
-                &current_ctx,
-            )
-            .await?;
-            emit_history_updated(server);
-            Ok((serde_json::to_value(response).unwrap(), None))
+            Box::pin(dispatch_project_folder_apply(server, args, &current_ctx)).await
         }
         "component_extract" => {
             let req_args: handlers::ComponentExtractToolRequest =
@@ -5420,7 +5670,8 @@ async fn dispatch_tool_call(
                 &target.message_id,
                 &model_id,
                 &original_prompt,
-            )?;
+            )
+            .await?;
             Ok((serde_json::to_value(response).unwrap(), None))
         }
         "get_structural_verification_summary" => {
@@ -5444,7 +5695,8 @@ async fn dispatch_tool_call(
                 &target.thread_id,
                 &target.message_id,
                 &model_id,
-            )?;
+            )
+            .await?;
             Ok((serde_json::to_value(response).unwrap(), None))
         }
         "printability_analyze" => {
@@ -5757,6 +6009,32 @@ mod tests {
         )
     }
 
+    #[test]
+    fn first_version_macro_context_uses_config_without_content_fallback() {
+        let mut config = test_config();
+        config.default_source_language = crate::models::SourceLanguage::EckyIrV0;
+        config.default_geometry_backend = crate::models::GeometryBackend::Build123d;
+        let request = MacroReplaceRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some("thread-1".to_string()),
+            message_id: None,
+            macro_code: "python_looking_text_that_must_not_select_legacy".to_string(),
+            macro_dialect: None,
+            ui_spec: None,
+            parameters: None,
+            post_processing: None,
+            geometry_backend: None,
+        };
+
+        assert_eq!(
+            first_version_macro_request_authoring_context(&config, &request),
+            (
+                crate::models::SourceLanguage::EckyIrV0,
+                crate::models::GeometryBackend::Build123d,
+            )
+        );
+    }
+
     fn test_db_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("ecky-mcp-server-{name}-{}", Uuid::new_v4()))
     }
@@ -5848,6 +6126,7 @@ mod tests {
 
     fn ecky_test_bundle(model_id: &str) -> ArtifactBundle {
         ArtifactBundle {
+            geometry_provenance: None,
             schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind: crate::models::ModelSourceKind::Generated,
@@ -5871,6 +6150,7 @@ mod tests {
 
     fn ecky_test_manifest(model_id: &str) -> ModelManifest {
         ModelManifest {
+            geometry_provenance: None,
             schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind: crate::models::ModelSourceKind::Generated,
@@ -6071,14 +6351,14 @@ mod tests {
             .collect()
     }
 
-    fn run_async_test_with_large_stack<F, Fut>(run: F)
+    fn run_async_test_with_stack<F, Fut>(stack_size: usize, run: F)
     where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         std::thread::Builder::new()
-            .name("mcp-server-large-stack-test".to_string())
-            .stack_size(64 * 1024 * 1024)
+            .name("mcp-server-stack-test".to_string())
+            .stack_size(stack_size)
             .spawn(move || {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -6089,6 +6369,113 @@ mod tests {
             .expect("spawn test thread")
             .join()
             .expect("join test thread");
+    }
+
+    fn run_async_test_with_large_stack<F, Fut>(run: F)
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        run_async_test_with_stack(64 * 1024 * 1024, run);
+    }
+
+    #[test]
+    fn targetless_workspace_overview_fits_bounded_worker_stack() {
+        run_async_test_with_large_stack(|| async {
+            let session_id = "session-workspace-overview-stack";
+            let server = test_dispatch_server("(model)", session_id).await;
+            {
+                let mut sessions = server.state.mcp_sessions.lock().await;
+                let session = sessions.get_mut(session_id).expect("session");
+                session.bound_thread_id = None;
+                session.last_target = None;
+            }
+
+            std::thread::Builder::new()
+                .name("mcp-workspace-overview-worker-stack".to_string())
+                .stack_size(8 * 1024 * 1024)
+                .spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("test runtime");
+                    runtime.block_on(async move {
+                        let response = dispatch_tool_call_jsonrpc(
+                            &server,
+                            session_id,
+                            "workspace_overview",
+                            json!({}),
+                        )
+                        .await;
+                        let result = response.result.expect("JSON-RPC result");
+                        assert_eq!(result["isError"], true);
+                        assert!(result["content"][0]["text"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .contains("No bound MCP session target"));
+                    });
+                })
+                .expect("spawn worker-stack test")
+                .join()
+                .expect("join worker-stack test");
+        });
+    }
+
+    #[test]
+    fn project_folder_apply_fits_bounded_worker_stack() {
+        run_async_test_with_large_stack(|| async {
+            let session_id = "session-project-folder-worker-stack";
+            let server = test_dispatch_server("(model (part body (box 8 8 4)))", session_id).await;
+            let ctx = current_context(
+                session_id,
+                &get_session(&server.state, session_id)
+                    .await
+                    .expect("MCP session"),
+            );
+            let export = handlers::handle_project_folder_export(
+                &server.state,
+                server.app.as_ref(),
+                handlers::ProjectFolderExportRequest {
+                    identity: AgentIdentityOverride::default(),
+                    thread_id: Some("thread-1".to_string()),
+                    message_id: Some("msg-1".to_string()),
+                    slug: Some("worker-stack".to_string()),
+                },
+                &ctx,
+            )
+            .await
+            .expect("export project folder");
+            std::fs::write(
+                std::path::Path::new(&export.folder)
+                    .join(crate::project_mirror::PROJECT_SOURCE_FILE_NAME),
+                "(model (part body (box 9 8 4)))",
+            )
+            .expect("edit project source");
+
+            std::thread::Builder::new()
+                .name("mcp-project-folder-worker-stack".to_string())
+                .stack_size(2 * 1024 * 1024)
+                .spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("test runtime");
+                    runtime.block_on(async move {
+                        let response = dispatch_tool_call_jsonrpc(
+                            &server,
+                            session_id,
+                            "project_folder_apply",
+                            json!({ "slug": "worker-stack" }),
+                        )
+                        .await;
+                        let result = response.result.expect("JSON-RPC result");
+                        assert_ne!(result["isError"], true, "{result}");
+                    });
+                })
+                .expect("spawn worker-stack test")
+                .join()
+                .expect("join worker-stack test");
+        });
     }
 
     #[test]
@@ -6773,6 +7160,191 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_saved_message_id_does_not_resolve_draft_base_alias() {
+        let session_id = "session-explicit-saved-target";
+        let server = test_dispatch_server("(model (part body (box 1 2 3)))", session_id).await;
+        let session = server
+            .state
+            .mcp_sessions
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .expect("MCP session");
+        let ctx = current_context(session_id, &session);
+        let preview = handlers::store_session_render_preview(
+            &server.state,
+            server.app.as_ref(),
+            &ctx,
+            handlers::StoreSessionRenderPreviewRequest {
+                thread_id: "thread-1".to_string(),
+                base_message_id: Some("msg-1".to_string()),
+                design_output: ecky_test_design(
+                    "Draft version",
+                    "V-draft",
+                    "(model (part draft (box 4 5 6)))",
+                ),
+                artifact_bundle: ecky_test_bundle("model-draft"),
+                model_manifest: ecky_test_manifest("model-draft"),
+                draft_feedback: None,
+            },
+        )
+        .await
+        .expect("store draft preview");
+
+        let saved = resolve_target_for_session(
+            &server.state,
+            server.app.as_ref(),
+            session_id,
+            Some("thread-1".to_string()),
+            Some("msg-1".to_string()),
+        )
+        .await
+        .expect("saved target");
+        assert_eq!(saved.message_id, "msg-1");
+        assert_eq!(saved.model_id.as_deref(), Some("model-base"));
+        assert!(!saved.has_draft);
+
+        let draft = resolve_target_for_session(
+            &server.state,
+            server.app.as_ref(),
+            session_id,
+            Some("thread-1".to_string()),
+            Some(preview.preview_id.clone()),
+        )
+        .await
+        .expect("draft target");
+        assert_eq!(draft.message_id, preview.preview_id);
+        assert_eq!(draft.model_id.as_deref(), Some("model-draft"));
+        assert!(draft.has_draft);
+    }
+
+    #[tokio::test]
+    async fn tagged_draft_ref_requires_exact_preview_session_and_thread() {
+        let session_id = "session-tagged-draft-target";
+        let server = test_dispatch_server("(model (part body (box 1 2 3)))", session_id).await;
+        let session = server
+            .state
+            .mcp_sessions
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .expect("MCP session");
+        let ctx = current_context(session_id, &session);
+        let preview = handlers::store_session_render_preview(
+            &server.state,
+            server.app.as_ref(),
+            &ctx,
+            handlers::StoreSessionRenderPreviewRequest {
+                thread_id: "thread-1".to_string(),
+                base_message_id: Some("msg-1".to_string()),
+                design_output: ecky_test_design(
+                    "Draft version",
+                    "V-draft",
+                    "(model (part draft (box 4 5 6)))",
+                ),
+                artifact_bundle: ecky_test_bundle("model-draft"),
+                model_manifest: ecky_test_manifest("model-draft"),
+                draft_feedback: None,
+            },
+        )
+        .await
+        .expect("store draft preview");
+        let preview_id = preview.preview_id.clone();
+
+        let resolved = resolve_authoring_target_for_session(
+            &server.state,
+            server.app.as_ref(),
+            session_id,
+            Some(AuthoringTargetRef::Draft {
+                thread_id: "thread-1".to_string(),
+                preview_id: preview_id.clone(),
+                session_id: session_id.to_string(),
+            }),
+        )
+        .await
+        .expect("exact draft target");
+        assert!(resolved.has_draft);
+
+        let requested = AuthoringTargetRef::Draft {
+            thread_id: "thread-other".to_string(),
+            preview_id: preview_id.clone(),
+            session_id: session_id.to_string(),
+        };
+        let err = resolve_authoring_target_for_session(
+            &server.state,
+            server.app.as_ref(),
+            session_id,
+            Some(requested.clone()),
+        )
+        .await
+        .expect_err("wrong thread must not resolve draft");
+        assert_eq!(err.code, AppErrorCode::Conflict);
+        let evidence: Value = serde_json::from_str(err.details.as_deref().expect("evidence"))
+            .expect("target-resolution JSON");
+        assert_eq!(evidence["kind"], "stale");
+        assert_eq!(
+            evidence["requestedTarget"],
+            serde_json::to_value(requested).unwrap()
+        );
+        assert_eq!(evidence["resolvedTarget"]["kind"], "draft");
+        assert_eq!(evidence["resolvedTarget"]["threadId"], "thread-1");
+
+        let wrong_session = AuthoringTargetRef::Draft {
+            thread_id: "thread-1".to_string(),
+            preview_id,
+            session_id: "session-other".to_string(),
+        };
+        let err = resolve_authoring_target_for_session(
+            &server.state,
+            server.app.as_ref(),
+            session_id,
+            Some(wrong_session.clone()),
+        )
+        .await
+        .expect_err("wrong session must not resolve draft");
+        assert_eq!(err.code, AppErrorCode::Conflict);
+        let evidence: Value = serde_json::from_str(err.details.as_deref().expect("evidence"))
+            .expect("target-resolution JSON");
+        assert_eq!(evidence["kind"], "stale");
+        assert_eq!(
+            evidence["requestedTarget"],
+            serde_json::to_value(wrong_session).unwrap()
+        );
+        assert!(evidence["resolvedTarget"].is_null());
+    }
+
+    #[tokio::test]
+    async fn missing_tagged_draft_returns_typed_requested_and_resolved_evidence() {
+        let session_id = "session-missing-tagged-draft";
+        let server = test_dispatch_server("(model (part body (box 1 2 3)))", session_id).await;
+        let requested = AuthoringTargetRef::Draft {
+            thread_id: "thread-1".to_string(),
+            preview_id: "preview-missing".to_string(),
+            session_id: session_id.to_string(),
+        };
+
+        let err = resolve_authoring_target_for_session(
+            &server.state,
+            server.app.as_ref(),
+            session_id,
+            Some(requested.clone()),
+        )
+        .await
+        .expect_err("missing preview must not fall back to saved version");
+        assert_eq!(err.code, AppErrorCode::NotFound);
+        let evidence: Value = serde_json::from_str(err.details.as_deref().expect("evidence"))
+            .expect("target-resolution JSON");
+        assert_eq!(evidence["kind"], "notFound");
+        assert_eq!(
+            evidence["requestedTarget"],
+            serde_json::to_value(requested).unwrap()
+        );
+        assert!(evidence["resolvedTarget"].is_null());
+    }
+
+    #[tokio::test]
     async fn freecad_library_import_persists_imported_version_into_thread() {
         let conn = crate::db::init_db(&test_db_path("library-import-thread")).expect("db");
         let state = AppState::new(test_config(), None, conn);
@@ -7206,7 +7778,9 @@ mod tests {
         assert!(
             workflow.contains("`target_detail_get(section=\"exportArtifacts\")` for the STEP path")
         );
-        assert!(workflow.contains("artifactBundle digest exposes `geometryBackend`, `edgeTargetCount`, `faceTargetCount`, `exportFormats`, `hasStepExport`, and `stepExportPath`"));
+        assert!(workflow.contains("artifactBundle digest exposes `geometryBackend`, `geometryRepresentation`, `facetedStep`, `analyticStep`, `sourceMeshDigests`, `edgeTargetCount`, `faceTargetCount`, `exportFormats`, `hasStepExport`, and `stepExportPath`"));
+        assert!(workflow.contains("formula-generated vertex/triangle lists"));
+        assert!(workflow.contains("Reference images are inferred approximation inputs"));
         assert!(workflow.contains("`verify_generated_model` first"));
         assert!(workflow.contains("call `verify_generated_model` before commit"));
         assert!(workflow.contains("Commit only green verification"));
@@ -7431,38 +8005,17 @@ mod tests {
         let ir_guide =
             read_resource_text(&state, "ecky://guides/ecky-source").expect("ir guide resource");
 
-        assert!(ir_guide.contains("(model ...)"));
-        assert!(ir_guide.contains("`.ecky`"));
-        assert!(ir_guide.contains("fileExtension: `.ecky`."));
-        assert!(ir_guide.contains("Current sourceLanguage: `ecky`."));
-        assert!(ir_guide.contains("never from thread metadata"));
-        assert!(ir_guide.contains("renders through EckyRust CAD VM"));
-        assert!(ir_guide
-            .contains("Do not promise STEP unless `ArtifactBundle.exportArtifacts` proves one exists"));
-        assert!(ir_guide.contains("structural verification first"));
-        assert!(ir_guide.contains("Typed holes are supported only as CAD-VM planning placeholders"));
-        assert!(ir_guide.contains("unfilled holes intentionally reject during render/lowering"));
-        assert!(ir_guide.contains("range"));
-        assert!(ir_guide
-            .contains("Use `map`, `range`, `repeat-union`, and `repeat-compound` inside geometry"));
-        assert!(ir_guide.contains("Static tuple destructuring is supported only for `zip`"));
-        assert!(ir_guide.contains("Zip destructuring"));
-        assert!(ir_guide.contains("`organic-loop`"));
-        assert!(ir_guide.contains("`voronoi-cells`"));
-        assert!(ir_guide.contains("`lorenz-points`"));
-        assert!(ir_guide.contains("`rossler-points`"));
-        assert!(ir_guide.contains("`logistic-bifurcation-points`"));
-        assert!(ir_guide.contains("`henon-points`"));
-        assert!(ir_guide.contains("Bounded literal counts/steps"));
-        assert!(ir_guide.contains("Seeded helpers are deterministic"));
-        assert!(ir_guide.contains("`wall-pattern`"));
-        assert!(ir_guide.contains("`cellular`"));
-        assert!(ir_guide.contains("`schwarz-p`"));
-        assert!(ir_guide.contains("`schwarz-d`"));
-        assert!(ir_guide.contains("`diamond-field`"));
-        assert!(ir_guide.contains("`neovius`"));
-        assert!(ir_guide.contains("`attractor-field`"));
-        assert!(ir_guide.contains("mesh"));
+        for expected in [
+            "(model ...)",
+            "Current fileExtension: `.ecky`.",
+            "Current sourceLanguage: `ecky`.",
+            "`mesh` and `polyhedron`",
+            "`heightfield`",
+            "single perspective image",
+            "faceted poly-BRep",
+        ] {
+            assert!(ir_guide.contains(expected), "guide missing `{expected}`");
+        }
         assert!(resource_definitions()
             .into_iter()
             .any(|resource| resource.get("uri").and_then(Value::as_str)
@@ -7479,6 +8032,22 @@ mod tests {
             .into_iter()
             .any(|resource| resource.get("uri").and_then(Value::as_str)
                 == Some("ecky://guides/ecky-ir-v0")));
+    }
+
+    #[test]
+    fn mcp_language_resources_share_the_api_language_reference() {
+        let state = test_state();
+        let backend = state.config.lock().unwrap().default_geometry_backend;
+        let expected = crate::agent_prompt::agent_language_reference(backend);
+
+        assert_eq!(
+            read_resource_text(&state, "ecky://guides/ecky-source").as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(
+            read_resource_text(&state, "ecky://guides/technical-system-prompt").as_deref(),
+            Some(expected.as_str())
+        );
     }
 
     fn read_surface_manifest_resource(state: &AppState, uri: &str) -> Value {
@@ -7659,17 +8228,10 @@ mod tests {
         assert!(guide.contains("Current fileExtension: `.ecky`."));
         assert!(guide.contains("Current sourceLanguage: `ecky`."));
         assert!(guide.contains("Target geometryBackend: `build123d`."));
-        assert!(guide.contains("Return canonical Ecky source in `macro_code`."));
-        assert!(guide
-            .contains("Use `map`, `range`, `repeat-union`, and `repeat-compound` inside geometry"));
-        assert!(guide.contains("Static tuple destructuring is supported only for `zip`"));
-        assert!(guide.contains("Zip destructuring"));
-        assert!(guide.contains("Wall-pattern is mesh/eckyRust only"));
-        assert!(guide.contains("typed/static errors and structural verification first"));
-        assert!(guide.contains("Typed holes are supported only as CAD-VM planning placeholders"));
-        // The guide may *mention* Python only to forbid it; it must not carry
-        // Python source or API examples.
-        assert!(guide.contains("never emit Python source"));
+        assert!(guide.contains("Return one complete `(model ...)` program."));
+        assert!(guide.contains("Backend support is authoritative."));
+        assert!(guide.contains("Write top-level `verify` clauses"));
+        // Canonical Ecky guide must not carry Python source or API examples.
         assert!(!guide.contains("BuildPart"));
         assert!(!guide.contains("import build123d"));
         assert!(!guide.contains("`wall-pattern`"));
@@ -7689,15 +8251,9 @@ mod tests {
         assert!(guide.contains("Current fileExtension: `.ecky`."));
         assert!(guide.contains("Current sourceLanguage: `ecky`."));
         assert!(guide.contains("Target geometryBackend: `freecad`."));
-        assert!(guide.contains("Return canonical Ecky source in `macro_code`."));
-        assert!(guide.contains("Supported CAD ops for this backend"));
-        assert!(guide
-            .contains("Use `map`, `range`, `repeat-union`, and `repeat-compound` inside geometry"));
-        assert!(guide.contains("Static tuple destructuring is supported only for `zip`"));
-        assert!(guide.contains("Zip destructuring"));
-        assert!(guide.contains("Wall-pattern is mesh/eckyRust only"));
-        assert!(guide.contains("typed/static errors and structural verification first"));
-        assert!(guide.contains("Typed holes are supported only as CAD-VM planning placeholders"));
+        assert!(guide.contains("Return one complete `(model ...)` program."));
+        assert!(guide.contains("Backend support is authoritative."));
+        assert!(guide.contains("Write top-level `verify` clauses"));
         assert!(!guide.contains("`wall-pattern`"));
         assert!(!guide.contains("`schwarz-p`"));
         assert!(!guide.contains("`schwarz-d`"));
@@ -7744,6 +8300,7 @@ mod tests {
 
     fn compact_test_bundle(model_id: &str) -> crate::models::ArtifactBundle {
         crate::models::ArtifactBundle {
+            geometry_provenance: None,
             schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind: crate::models::ModelSourceKind::Generated,
@@ -7762,6 +8319,7 @@ mod tests {
             callout_anchors: Vec::new(),
             measurement_guides: Vec::new(),
             export_artifacts: vec![crate::models::ExportArtifact {
+                geometry_provenance: None,
                 label: "STEP".to_string(),
                 format: "step".to_string(),
                 path: format!("/tmp/{model_id}.step"),
@@ -7772,6 +8330,7 @@ mod tests {
 
     fn compact_test_manifest(model_id: &str) -> crate::models::ModelManifest {
         crate::models::ModelManifest {
+            geometry_provenance: None,
             schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind: crate::models::ModelSourceKind::Generated,
@@ -7825,6 +8384,10 @@ mod tests {
             has_step_export: true,
             step_export_path: Some("/tmp/model-render.step".to_string()),
             multipart: false,
+            geometry_representation: None,
+            faceted_step: false,
+            analytic_step: false,
+            source_mesh_digests: Vec::new(),
         };
         let manifest = compact_test_manifest("model-render");
         let design = compact_test_design("render_macro()");
@@ -7896,6 +8459,10 @@ mod tests {
             has_step_export: false,
             step_export_path: None,
             multipart: false,
+            geometry_representation: None,
+            faceted_step: false,
+            analytic_step: false,
+            source_mesh_digests: Vec::new(),
         };
         let manifest = compact_test_manifest("model-render");
         let mut design = compact_test_design("(model\n  (box 10 20 30))");

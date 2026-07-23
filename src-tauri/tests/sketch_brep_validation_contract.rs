@@ -17,6 +17,7 @@ fn rectangle_sketch(sketch_id: &str, view: SketchView, points: Vec<[f64; 2]>) ->
             closed: true,
             radius: None,
             topology: None,
+            provenance: None,
         }],
         constraints: vec![],
     }
@@ -30,6 +31,7 @@ fn polyline(primitive_id: &str, points: Vec<[f64; 2]>) -> SketchPrimitive {
         closed: true,
         radius: None,
         topology: None,
+        provenance: None,
     }
 }
 

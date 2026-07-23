@@ -156,6 +156,7 @@ pub fn import_mesh_from_request(
         "Imported mesh models are reference-only; CAD booleans and topology selectors are unavailable."
             .to_string();
     let manifest = ModelManifest {
+        geometry_provenance: None,
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.clone(),
         source_kind: ModelSourceKind::ImportedMesh,
@@ -212,6 +213,7 @@ pub fn import_mesh_from_request(
         format: viewer_asset_format(&ext)?,
     };
     let bundle = ArtifactBundle {
+        geometry_provenance: None,
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id,
         source_kind: ModelSourceKind::ImportedMesh,
@@ -234,6 +236,7 @@ pub fn import_mesh_from_request(
         callout_anchors: Vec::new(),
         measurement_guides: Vec::new(),
         export_artifacts: vec![ExportArtifact {
+            geometry_provenance: None,
             label: "Source mesh".to_string(),
             format: ext,
             path: mesh_path_string,

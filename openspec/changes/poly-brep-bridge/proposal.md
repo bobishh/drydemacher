@@ -59,18 +59,10 @@ side through the engine that handles it, and recombine the results.
 
 ## Out of Scope
 
-- **OCCT tessellation of exact pre-boundary geometry (former T2).** The mesh
-  renderer already evaluates its own sub-tree including extrude. We do not
-  need to tessellate OCCT output and feed it to wall-pattern — wall-pattern
-  runs on the mesh renderer's own geometry. T2 was an optimization for
-  higher base precision; it is deferred until profiling shows a need.
-- **Mesh ops on an externally-provided mesh (former T3).** Same reason: the
-  mesh renderer handles the full pre-displacement + displacement chain today.
-- **MeshAsset interface (former T6).** There is exactly one mesh source
-  (`wall-pattern`) today. Designing a `MeshSource` enum before a second
-  source exists is premature. The bridge works on any STL path; future
-  sources (imported mesh, image relief, AI-generated) plug in when they
-  exist.
+- Generator/provider SDK integration. Generated geometry enters through the
+  provider-neutral `MeshAsset` STL contract or typed `polyhedron` data.
+- OBJ-to-STL conversion. The bridge consumes STL; provider adapters normalize
+  other triangle formats before creating a `MeshAsset`.
 - Replacing the existing pure-mesh renderer for PureMesh parts.
 - AI mesh generation itself.
 - Removing build123d/FreeCAD lowering backends.
@@ -88,18 +80,28 @@ Core IR part tree
   ├ PureMesh:  existing mesh renderer path (no change)
   │
   └ Hybrid:
-      1. Render whole part through mesh renderer (it handles extrude +
-         wall-pattern + any mesh-safe ops).
-      2. Take the displaced STL output.
-      3. Feed to OCCT plan: import-stl(displaced.stl) → solidify →
-         post-boundary boolean ops (difference/union/chamfer/fillet).
-      4. Export STL + STEP from OCCT.
+      1. Render each independent mesh island up to the first BRep-required
+         surface/boolean op and store its STL as `MeshAsset`.
+      2. Feed each asset to OCCT: import-stl(asset.stl) → solidify.
+      3. Run post-boundary BRep-required ops (difference/union/chamfer/fillet)
+         in OCCT, never by polygon edge rewriting.
+      4. Export STL + STEP from OCCT, tagged with representation provenance.
 ```
 
-This is simpler than the original 5-phase design because we do not need to
-tessellate OCCT exact geometry into the mesh renderer or teach wall-pattern
-to accept external meshes. The mesh renderer already does displacement; OCCT
-already does booleans on solidified meshes. The bridge is just the handoff.
+The handoff is engine-independent. Internal displacement, imported STL, and
+LLM/provider-generated polyhedra all become the same validated mesh asset
+before OCCT solidification.
+
+`chamfer` and `fillet` are CAD surface operations. When their input is an
+analytic Core IR shape, they remain on Direct OCCT. The mesh evaluator may only
+handle them when the input is already mesh-origin and no exact BRep route is
+available. Silent analytic-to-mesh fallback for these operations is forbidden.
+
+Preview STL is not the source of CAD truth. Direct OCCT artifacts must mark
+their bundle, manifest, and STEP export as `analyticBrep`; hybrid faceted STEP
+must mark `facetedPolyBrep`; mesh-only output must mark `meshNative`.
+Consumers must read that representation instead of inferring exactness from
+`geometryBackend`.
 
 ## What is proven
 
@@ -121,13 +123,16 @@ already does booleans on solidified meshes. The bridge is just the handoff.
 
 - [x] PG-PROOF OCCT can boolean a solidified poly BRep from a realistic
   displaced mesh (VertexGenie proof, commit `d69974d`).
-- [ ] PG1 A model using `wall-pattern` followed by `difference` renders as a
+- [x] PG1 A model using `wall-pattern` followed by `difference` renders as a
   single manifold solid with < 100 non-manifold edges.
-- [ ] PG2 The iPhone 17e case fixture renders as 3 clean parts.
-- [ ] PG3 STEP export includes exact faces for non-displaced geometry.
-- [ ] PG4 STL export is sliceable without manual repair.
-- [ ] PG5 Models with no mesh-only ops still route through pure OCCT.
-- [ ] PG6 Models with only mesh ops still route through pure mesh renderer.
-- [ ] PG7 `cd src-tauri && cargo check` passes.
-- [ ] PG8 Existing direct-OCCT fixtures still render (no regression).
-- [ ] PG9 Existing mesh-renderer fixtures still render (no regression).
+- [x] PG2 The iPhone 17e case fixture renders as 3 clean parts and retains the
+  displaced rear panel.
+- [x] PG3 STEP export includes exact faces for non-displaced geometry.
+- [x] PG4 STL export is sliceable without manual repair. Verified 2026-07-17
+  in Bambu Studio: after automatic plate arrangement, the exported multipart
+  STL completed slicing with `Slice ok` and no geometry repair.
+- [x] PG5 Models with no mesh-only ops still route through pure OCCT.
+- [x] PG6 Models with only mesh ops still route through pure mesh renderer.
+- [x] PG7 `cd src-tauri && cargo check` passes.
+- [x] PG8 Existing direct-OCCT fixtures still render (no regression).
+- [x] PG9 Existing mesh-renderer fixtures still render (no regression).

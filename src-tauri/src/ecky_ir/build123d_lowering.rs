@@ -125,13 +125,12 @@ pub fn lower_to_build123d(source: &str) -> AppResult<String> {
     match parse_model(source) {
         Ok(model) => lower_model_to_build123d(&model),
         Err(_) => {
-            let program = crate::ecky_scheme::compile_to_core_program(source)
-                .map_err(|err| {
-                    crate::models::AppError::from(crate::contracts::AuthoringError::surface(
-                        crate::contracts::AuthoringReason::ParseSyntax,
-                        err.to_string(),
-                    ))
-                })?;
+            let program = crate::ecky_scheme::compile_to_core_program(source).map_err(|err| {
+                crate::models::AppError::from(crate::contracts::AuthoringError::surface(
+                    crate::contracts::AuthoringReason::ParseSyntax,
+                    err.to_string(),
+                ))
+            })?;
             lower_core_program_to_build123d(&program)
         }
     }
@@ -778,7 +777,9 @@ fn gen_const_count(value: &Value) -> AppResult<usize> {
         unsupported("Point generators require a constant `count` for the build123d backend.")
     })?;
     if !n.is_finite() || n < 1.0 {
-        return Err(validation("Point generator `count` must be a positive integer."));
+        return Err(validation(
+            "Point generator `count` must be a positive integer.",
+        ));
     }
     Ok(n.round() as usize)
 }
@@ -867,7 +868,11 @@ fn generator_organic(args: &[Value]) -> AppResult<LoweredList> {
         let angle = gen_call("*", vec![Value::symbol("tau"), Value::number(t)]);
         let hashed = gen_call(
             "hash-signed",
-            vec![Value::number(i as f64), Value::number(count as f64), seed.dup()],
+            vec![
+                Value::number(i as f64),
+                Value::number(count as f64),
+                seed.dup(),
+            ],
         );
         let r = gen_call(
             "+",
@@ -943,11 +948,7 @@ fn try_unroll_point_map(
             Value::symbol(param.clone()),
             Value::number(i as f64),
         ])]);
-        items.push(Value::list(vec![
-            Value::symbol("let"),
-            binding,
-            body.dup(),
-        ]));
+        items.push(Value::list(vec![Value::symbol("let"), binding, body.dup()]));
     }
 
     // Probe the first element to decide 2D vs 3D; if it is not a point at all,
@@ -999,6 +1000,7 @@ fn core_value_kind_tag_local(kind: CoreValueKind) -> &'static str {
         CoreValueKind::Sketch => "sketch",
         CoreValueKind::Path => "path",
         CoreValueKind::Frame => "frame",
+        CoreValueKind::Mesh => "mesh",
         CoreValueKind::Compound => "compound",
         CoreValueKind::Solid => "solid",
     }
@@ -3772,6 +3774,7 @@ impl<'a> ExprLowerer<'a> {
             }
             Some(
                 CoreValueKind::Solid
+                | CoreValueKind::Mesh
                 | CoreValueKind::Sketch
                 | CoreValueKind::Compound
                 | CoreValueKind::Path,
@@ -4253,9 +4256,7 @@ impl<'a> ExprLowerer<'a> {
             "torus" => {
                 let parsed = ParsedCallArgs::parse("torus", args, &["align"])?;
                 if parsed.positional.len() != 2 {
-                    return Err(validation(
-                        "`torus` expects major radius and minor radius.",
-                    ));
+                    return Err(validation("`torus` expects major radius and minor radius."));
                 }
                 let major = lower_num_expr(&parsed.positional[0], scope)?;
                 let minor = lower_num_expr(&parsed.positional[1], scope)?;
@@ -4875,7 +4876,10 @@ impl<'a> ExprLowerer<'a> {
                     ));
                 }
                 let angle = lower_num_expr(&pos_args[0], scope)?;
-                let neutral_z = match properties.get("neutral-z").or_else(|| properties.get("neutral_z")) {
+                let neutral_z = match properties
+                    .get("neutral-z")
+                    .or_else(|| properties.get("neutral_z"))
+                {
                     Some(value) => lower_num_expr(value, scope)?,
                     None => "0.0".to_string(),
                 };

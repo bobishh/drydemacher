@@ -2583,6 +2583,7 @@ mod tests {
 
     fn sample_artifact_bundle(manifest_path: &str) -> ArtifactBundle {
         ArtifactBundle {
+            geometry_provenance: None,
             schema_version: crate::models::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: "generated-abc123".to_string(),
             source_kind: crate::models::ModelSourceKind::Generated,

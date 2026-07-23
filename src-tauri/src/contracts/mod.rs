@@ -582,10 +582,7 @@ pub fn infer_macro_dialect_from_code(macro_code: &str) -> MacroDialect {
     // Check for these forms before the build123d keyword, because Ecky comments
     // or strings may contain "build123d".
     let is_ecky = trimmed.starts_with('(')
-        && contains_unquoted_lisp_form_head(
-            trimmed,
-            &["model", "scene", "define-component"],
-        );
+        && contains_unquoted_lisp_form_head(trimmed, &["model", "scene", "define-component"]);
     if is_ecky {
         MacroDialect::EckyIrV0
     } else if trimmed.contains("build123d") {
@@ -1470,6 +1467,8 @@ pub struct LastDesignSnapshot {
     pub model_manifest: Option<ModelManifest>,
     #[serde(default, alias = "selected_part_id")]
     pub selected_part_id: Option<String>,
+    #[serde(default, alias = "target_ref")]
+    pub target_ref: Option<AuthoringTargetRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -3145,6 +3144,7 @@ mod tests {
 
     fn sample_manifest() -> ModelManifest {
         ModelManifest {
+            geometry_provenance: None,
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: "generated-abc123".to_string(),
             source_kind: ModelSourceKind::Generated,
@@ -3300,6 +3300,7 @@ mod tests {
 
     fn sample_artifact_bundle() -> ArtifactBundle {
         ArtifactBundle {
+            geometry_provenance: None,
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: "generated-abc123".to_string(),
             source_kind: ModelSourceKind::Generated,
@@ -3390,6 +3391,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         ModelManifest {
+            geometry_provenance: None,
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: format!(
                 "generated-shape-{}-{}-{}",
@@ -4014,6 +4016,7 @@ mod tests {
         }];
 
         let bundle = ArtifactBundle {
+            geometry_provenance: None,
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: manifest.model_id.clone(),
             source_kind: ModelSourceKind::Generated,
@@ -4053,6 +4056,7 @@ mod tests {
         ];
 
         let bundle = ArtifactBundle {
+            geometry_provenance: None,
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: manifest.model_id.clone(),
             source_kind: ModelSourceKind::Generated,
@@ -4130,6 +4134,7 @@ mod tests {
         manifest.selection_targets[0].alias_ids = vec!["legacy-target-shell".to_string()];
 
         let bundle = ArtifactBundle {
+            geometry_provenance: None,
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: manifest.model_id.clone(),
             source_kind: ModelSourceKind::Generated,
@@ -4203,6 +4208,7 @@ mod tests {
     fn validate_model_runtime_bundle_rejects_edge_target_without_manifest_target() {
         let manifest = sample_manifest();
         let bundle = ArtifactBundle {
+            geometry_provenance: None,
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: manifest.model_id.clone(),
             source_kind: ModelSourceKind::Generated,
@@ -4252,6 +4258,7 @@ mod tests {
     fn validate_model_runtime_bundle_rejects_face_target_without_manifest_target() {
         let manifest = sample_manifest();
         let bundle = ArtifactBundle {
+            geometry_provenance: None,
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: manifest.model_id.clone(),
             source_kind: ModelSourceKind::Generated,

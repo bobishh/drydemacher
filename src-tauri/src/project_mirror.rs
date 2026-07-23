@@ -443,12 +443,14 @@ mod tests {
     #[test]
     fn folder_status_reports_missing_then_clean() {
         let resolver = temp_resolver("status");
-        let status = folder_status(&resolver, None, "ghost-abc12345", Some("msg-1")).expect("status");
+        let status =
+            folder_status(&resolver, None, "ghost-abc12345", Some("msg-1")).expect("status");
         assert_eq!(status.state, ProjectSyncState::Missing);
 
         let source = "(model (part body (box 1 2 3)))";
         export_project(&resolver, &sample_request("live-abc12345", source)).expect("export");
-        let status = folder_status(&resolver, None, "live-abc12345", Some("msg-1")).expect("status");
+        let status =
+            folder_status(&resolver, None, "live-abc12345", Some("msg-1")).expect("status");
         assert_eq!(status.state, ProjectSyncState::Clean);
         assert_eq!(
             status.file_digest.as_deref(),
@@ -462,7 +464,8 @@ mod tests {
             "(model (part body (box 9 9 9)))",
         )
         .expect("external edit");
-        let status = folder_status(&resolver, None, "live-abc12345", Some("msg-1")).expect("status");
+        let status =
+            folder_status(&resolver, None, "live-abc12345", Some("msg-1")).expect("status");
         assert_eq!(status.state, ProjectSyncState::FileChanged);
     }
 

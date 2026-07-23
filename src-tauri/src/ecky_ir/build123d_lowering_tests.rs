@@ -3189,7 +3189,11 @@ fn lower_to_build123d_rib_and_groove_emit_sweep_booleans() {
         "(model (part p (rib (box 20 20 20) (circle 3) (path (0 0 0) (0 0 30)))))",
     )
     .expect("rib");
-    assert!(rib.contains("sweep(") && rib.contains(" + "), "rib sweep+fuse: {}", rib);
+    assert!(
+        rib.contains("sweep(") && rib.contains(" + "),
+        "rib sweep+fuse: {}",
+        rib
+    );
     let groove = lower_to_build123d(
         "(model (part p (groove (box 20 20 20) (circle 3) (path (0 0 0) (0 0 30)))))",
     )
@@ -3213,7 +3217,8 @@ fn lower_to_build123d_tapered_fillet_is_rejected_with_clear_error() {
     let err = lower_to_build123d("(model (part p (fillet 3 :to-radius 1 (box 20 20 20))))")
         .expect_err("tapered fillet unsupported on build123d");
     assert!(
-        err.to_string().contains("not supported on the build123d backend"),
+        err.to_string()
+            .contains("not supported on the build123d backend"),
         "expected build123d taper caveat, got {err}"
     );
     // uniform fillet still lowers fine
@@ -3222,20 +3227,25 @@ fn lower_to_build123d_tapered_fillet_is_rejected_with_clear_error() {
 
 #[test]
 fn lower_to_build123d_thread_emits_thread_helper() {
-    let code = lower_to_build123d("(model (part screw (thread :radius 8 :pitch 2 :length 16 :depth 1)))")
-        .expect("lower");
+    let code =
+        lower_to_build123d("(model (part screw (thread :radius 8 :pitch 2 :length 16 :depth 1)))")
+            .expect("lower");
     assert!(
         code.contains("_ecky_thread(8.0, 2.0, 16.0, 1.0,"),
         "thread call: {}",
         code
     );
-    assert!(code.contains("def _ecky_thread("), "thread helper: {}", code);
+    assert!(
+        code.contains("def _ecky_thread("),
+        "thread helper: {}",
+        code
+    );
 }
 
 #[test]
 fn lower_to_build123d_thread_iso_decodes_designation() {
-    let code = lower_to_build123d("(model (part bolt (thread :iso \"M6\" :length 18)))")
-        .expect("lower");
+    let code =
+        lower_to_build123d("(model (part bolt (thread :iso \"M6\" :length 18)))").expect("lower");
     // M6 → radius 2.3866, pitch 1, depth 0.6134 (D/2 - 0.6134*P).
     assert!(
         code.contains("_ecky_thread(2.3866, 1, 18.0, 0.6134,"),
@@ -3252,8 +3262,8 @@ fn lower_to_build123d_thread_iso_decodes_designation() {
 
 #[test]
 fn lower_to_build123d_slot_arc_emits_slot_arc_with_center_arc() {
-    let code = lower_to_build123d("(model (part body (extrude (slot-arc 20 0 90 10) 5)))")
-        .expect("lower");
+    let code =
+        lower_to_build123d("(model (part body (extrude (slot-arc 20 0 90 10) 5)))").expect("lower");
     assert!(
         code.contains("SlotArc(CenterArc((0, 0), 20.0, 0.0, (90.0) - (0.0)), 10.0)"),
         "slot-arc call: {}",
@@ -3263,8 +3273,9 @@ fn lower_to_build123d_slot_arc_emits_slot_arc_with_center_arc() {
 
 #[test]
 fn lower_to_build123d_slot_center_point_emits_slot_center_point() {
-    let code = lower_to_build123d("(model (part body (extrude (slot-center-point 0 0 15 0 10) 5)))")
-        .expect("lower");
+    let code =
+        lower_to_build123d("(model (part body (extrude (slot-center-point 0 0 15 0 10) 5)))")
+            .expect("lower");
     assert!(
         code.contains("SlotCenterPoint((0.0, 0.0), (15.0, 0.0), 10.0)"),
         "slot-center-point call: {}",
@@ -3276,11 +3287,7 @@ fn lower_to_build123d_slot_center_point_emits_slot_center_point() {
 fn lower_to_build123d_torus_emits_torus_with_major_minor() {
     let src = "(model (part body (torus 10 3)))";
     let code = lower_to_build123d(src).expect("lower");
-    assert!(
-        code.contains("Torus(10.0, 3.0,"),
-        "torus call: {}",
-        code
-    );
+    assert!(code.contains("Torus(10.0, 3.0,"), "torus call: {}", code);
 }
 
 #[test]

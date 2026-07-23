@@ -2,6 +2,273 @@
 mod tests {
     use super::*;
 
+    #[test]
+    fn renders_typed_polyhedron_tetrahedron_as_manifold_stl() {
+        let root = std::env::temp_dir().join(format!(
+            "ecky-polyhedron-tetrahedron-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("temp root");
+        let resolver = TestResolver { root: root.clone() };
+        let source = r#"(model
+          (part tetra
+            (polyhedron
+              :vertices ((0 0 0) (10 0 0) (0 10 0) (0 0 10))
+              :triangles ((0 2 1) (0 1 3) (1 2 3) (2 0 3)))))"#;
+
+        let bundle = render_model(source, &DesignParams::new(), &resolver)
+            .expect("typed polyhedron should render");
+        let preview = Path::new(&bundle.preview_stl_path);
+        assert!(preview.is_file(), "preview STL must exist");
+        assert_eq!(
+            crate::services::structural_verification::preview_stl_non_manifold_edge_count(preview)
+                .expect("topology summary"),
+            0,
+            "tetrahedron must be manifold"
+        );
+        assert!(
+            bundle
+                .export_artifacts
+                .iter()
+                .any(|artifact| artifact.format == "stl" && Path::new(&artifact.path).is_file()),
+            "mesh-native STL export must be explicit"
+        );
+        assert!(
+            bundle
+                .export_artifacts
+                .iter()
+                .all(|artifact| artifact.format != "step"),
+            "pure mesh must not claim STEP"
+        );
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn renders_formula_generated_polyhedron_vertices_with_same_topology() {
+        let root = render_root();
+        std::fs::create_dir_all(&root).expect("temp root");
+        let resolver = TestResolver { root: root.clone() };
+        let source = r#"(model
+          (params (number size 10))
+          (part tetra
+            (polyhedron
+              :vertices
+                (map
+                  (lambda (i)
+                    (list
+                      (* size (if (= i 1) 1 0))
+                      (* size (if (= i 2) 1 0))
+                      (* size (if (= i 3) 1 0))))
+                  (range 0 4))
+              :triangles ((0 2 1) (0 1 3) (1 2 3) (2 0 3)))))"#;
+
+        let bundle = render_model(source, &DesignParams::new(), &resolver)
+            .expect("bounded map/range vertices should render");
+        assert_eq!(
+            crate::services::structural_verification::preview_stl_non_manifold_edge_count(
+                Path::new(&bundle.preview_stl_path),
+            )
+            .expect("topology summary"),
+            0
+        );
+        let literal = render_model(
+            r#"(model (part tetra
+              (polyhedron
+                :vertices ((0 0 0) (10 0 0) (0 10 0) (0 0 10))
+                :triangles ((0 2 1) (0 1 3) (1 2 3) (2 0 3)))))"#,
+            &DesignParams::new(),
+            &resolver,
+        )
+        .expect("equivalent literal polyhedron");
+        assert_eq!(
+            std::fs::read(&bundle.preview_stl_path).expect("formula STL"),
+            std::fs::read(&literal.preview_stl_path).expect("literal STL"),
+            "formula and literal mesh digests must match"
+        );
+        let manifest = crate::model_runtime::read_model_manifest(&resolver, &bundle.model_id)
+            .expect("formula manifest");
+        assert!(
+            manifest
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("Mesh evidence:") && warning.contains("topology=closed")),
+            "manifest must expose mesh digest and topology evidence"
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn rejects_procedural_mesh_over_budget_before_render_allocation() {
+        let root = render_root();
+        std::fs::create_dir_all(&root).expect("temp root");
+        let resolver = TestResolver { root: root.clone() };
+        let source = r#"(model
+          (part too-large
+            (mesh
+              :vertices
+                (map (lambda (i) (list i 0 0)) (range 0 100001))
+              :triangles ((0 1 2)))))"#;
+
+        let error = render_model(source, &DesignParams::new(), &resolver)
+            .expect_err("oversized procedural mesh must reject");
+        assert!(error.to_string().contains("vertices count 100001"), "{error}");
+        assert!(error.to_string().contains("allowed count 100000"), "{error}");
+        assert!(
+            !root.join("model-runtime").exists(),
+            "budget rejection must happen before render directories"
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn rejects_open_polyhedron_with_boundary_edge_evidence_before_artifact_write() {
+        let root = render_root();
+        std::fs::create_dir_all(&root).expect("temp root");
+        let resolver = TestResolver { root: root.clone() };
+        let last_good = render_model(
+            r#"(model (part tetra
+              (polyhedron
+                :vertices ((0 0 0) (10 0 0) (0 10 0) (0 0 10))
+                :triangles ((0 2 1) (0 1 3) (1 2 3) (2 0 3)))))"#,
+            &DesignParams::new(),
+            &resolver,
+        )
+        .expect("seed last-good artifact");
+        let last_good_bytes = std::fs::read(&last_good.preview_stl_path).expect("last-good STL");
+        let source = r#"(model
+          (part open-tetra
+            (polyhedron
+              :vertices ((0 0 0) (10 0 0) (0 10 0) (0 0 10))
+              :triangles ((0 2 1) (0 1 3) (1 2 3)))))"#;
+
+        let error = render_model(source, &DesignParams::new(), &resolver)
+            .expect_err("open polyhedron must reject");
+        assert_eq!(error.operation.as_deref(), Some("polyhedron"));
+        assert!(error.to_string().contains("boundary edges: 3"), "{error}");
+        assert!(
+            Path::new(&last_good.preview_stl_path).is_file(),
+            "invalid polyhedron must preserve last-good artifact"
+        );
+        assert_eq!(
+            std::fs::read(&last_good.preview_stl_path).expect("preserved last-good STL"),
+            last_good_bytes
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn renders_same_open_surface_as_mesh_with_boundary_evidence() {
+        let root = render_root();
+        std::fs::create_dir_all(&root).expect("temp root");
+        let resolver = TestResolver { root: root.clone() };
+        let source = r#"(model
+          (part open-tetra
+            (mesh
+              :vertices ((0 0 0) (10 0 0) (0 10 0) (0 0 10))
+              :triangles ((0 2 1) (0 1 3) (1 2 3)))))"#;
+
+        let bundle = render_model(source, &DesignParams::new(), &resolver)
+            .expect("open mesh should render without topology repair");
+        assert_eq!(
+            crate::services::structural_verification::preview_stl_non_manifold_edge_count(
+                Path::new(&bundle.preview_stl_path),
+            )
+            .expect("boundary evidence"),
+            3
+        );
+        let manifest = crate::model_runtime::read_model_manifest(&resolver, &bundle.model_id)
+            .expect("open mesh manifest");
+        assert_eq!(manifest.parts[0].kind, "mesh");
+        assert!(
+            manifest
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("topology=open-or-non-manifold"))
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn renders_grayscale_heightfield_as_closed_deterministic_stl() {
+        let root = render_root();
+        std::fs::create_dir_all(&root).expect("temp root");
+        let image_path = root.join("heightmap.png");
+        let mut image = image::GrayImage::new(3, 3);
+        for y in 0..3 {
+            for x in 0..3 {
+                image.put_pixel(x, y, image::Luma([((x + y) * 48) as u8]));
+            }
+        }
+        image.save(&image_path).expect("heightmap fixture");
+        let resolver = TestResolver { root: root.clone() };
+        let source = format!(
+            r#"(model
+              (part relief
+                (heightfield "{}"
+                  :width 30
+                  :depth 20
+                  :relief-height 4
+                  :base-thickness 1.2
+                  :invert #f)))"#,
+            image_path.display()
+        );
+
+        let first = render_model(&source, &DesignParams::new(), &resolver)
+            .expect("heightfield should render");
+        let first_bytes = std::fs::read(&first.preview_stl_path).expect("first preview");
+        assert_eq!(
+            crate::services::structural_verification::preview_stl_non_manifold_edge_count(
+                Path::new(&first.preview_stl_path),
+            )
+            .expect("heightfield topology"),
+            0
+        );
+        let second = render_model(&source, &DesignParams::new(), &resolver)
+            .expect("same heightfield should rerender");
+        assert_eq!(
+            first_bytes,
+            std::fs::read(&second.preview_stl_path).expect("second preview")
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn heightfield_surfaces_raw_decoder_context_for_corrupt_image() {
+        let root = render_root();
+        std::fs::create_dir_all(&root).expect("temp root");
+        let image_path = root.join("corrupt.png");
+        image::GrayImage::from_pixel(2, 2, image::Luma([128]))
+            .save(&image_path)
+            .expect("valid seed fixture");
+        let resolver = TestResolver { root: root.clone() };
+        let source = format!(
+            r#"(model (part relief
+              (heightfield "{}" :width 30 :depth 20 :relief-height 4 :base-thickness 1)))"#,
+            image_path.display()
+        );
+
+        let last_good = render_model(&source, &DesignParams::new(), &resolver)
+            .expect("valid heightmap seeds last-good preview");
+        let last_good_bytes = std::fs::read(&last_good.preview_stl_path).expect("last-good STL");
+        std::fs::write(&image_path, b"not a png").expect("corrupt fixture");
+
+        let error = render_model(&source, &DesignParams::new(), &resolver)
+            .expect_err("corrupt heightmap must reject");
+        assert_eq!(error.operation.as_deref(), Some("heightfield"));
+        assert!(error.to_string().contains("corrupt.png"), "{error}");
+        assert!(
+            error.to_string().contains("failed to inspect")
+                || error.to_string().contains("failed to decode"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(&last_good.preview_stl_path).expect("preserved last-good STL"),
+            last_good_bytes
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
     fn render_root() -> std::path::PathBuf {
         std::env::temp_dir().join(format!("ecky-ir-test-{}", uuid::Uuid::new_v4()))
     }
@@ -147,6 +414,16 @@ mod tests {
                     :base-width 2
                     :crest-width 1
                     :depth 1.5)))"#
+        ));
+        assert!(source_uses_direct_occt_required_cad_ops(
+            r#"(model
+                (part body
+                  (chamfer 1 (box 20 20 10))))"#
+        ));
+        assert!(source_uses_direct_occt_required_cad_ops(
+            r#"(model
+                (part body
+                  (fillet 1 (box 20 20 10))))"#
         ));
     }
 
@@ -444,11 +721,11 @@ mod tests {
     }
 
     #[test]
-    fn wall_pattern_rejects_non_shell_surface_targets() {
+    fn wall_pattern_accepts_solid_mesh_targets() {
         let root = render_root();
         std::fs::create_dir_all(&root).unwrap();
         let resolver = TestResolver { root };
-        let err = render_model(
+        let bundle = render_model(
             r#"(model
                 (part body
                   (wall-pattern
@@ -457,12 +734,14 @@ mod tests {
             &DesignParams::new(),
             &resolver,
         )
-        .expect_err("unsupported");
+        .expect("wall-pattern accepts evaluated solid meshes");
 
-        assert!(
-            err.to_string().contains("wall-pattern"),
-            "unexpected error: {}",
-            err
+        assert_eq!(
+            crate::services::structural_verification::preview_stl_non_manifold_edge_count(
+                Path::new(&bundle.preview_stl_path),
+            )
+            .expect("STL topology"),
+            0
         );
     }
 
@@ -566,41 +845,34 @@ mod tests {
     }
 
     #[test]
-    fn fillet_box_all_edges() {
+    fn cad_fillet_rejects_mesh_renderer() {
         let root = render_root();
         std::fs::create_dir_all(&root).unwrap();
         let resolver = TestResolver { root };
-        let bundle = render_model(
+        let err = render_model(
             r#"(model (part body (fillet 2 (box 20 20 10))))"#,
             &DesignParams::new(),
             &resolver,
         )
-        .expect("fillet box should render");
+        .expect_err("CAD fillet should not run through the mesh renderer");
         assert!(
-            !bundle.viewer_assets.is_empty(),
-            "should produce viewer assets"
+            err.message.contains("Direct OCCT"),
+            "unexpected error: {}",
+            err.message
         );
     }
 
     #[test]
-    fn fillet_box_top_edges() {
+    fn mesh_fillet_box_all_edges() {
         let root = render_root();
+        std::fs::create_dir_all(&root).unwrap();
         let resolver = TestResolver { root };
-        render_model(
-            r#"(model (part body (fillet 1.5 :edges "top" (box 20 20 10))))"#,
+        let bundle = render_model(
+            r#"(model (part body (mesh-fillet 2 (box 20 20 10))))"#,
             &DesignParams::new(),
             &resolver,
         )
-        .expect("fillet box top edges should render");
-    }
-
-    #[test]
-    fn chamfer_box_all_edges() {
-        let root = render_root();
-        let resolver = TestResolver { root };
-        let src = r#"(model (part body (chamfer 2 (box 20 20 10))))"#;
-        let bundle =
-            render_model(src, &DesignParams::new(), &resolver).expect("chamfer box should render");
+        .expect("mesh-fillet box should render");
         assert!(
             !bundle.viewer_assets.is_empty(),
             "should produce viewer assets"
@@ -608,29 +880,101 @@ mod tests {
     }
 
     #[test]
-    fn chamfer_box_top_edges() {
+    fn mesh_fillet_box_top_edges() {
         let root = render_root();
         let resolver = TestResolver { root };
-        let src = r#"(model (part body (chamfer 2 :edges "top" (box 20 20 10))))"#;
-        render_model(src, &DesignParams::new(), &resolver)
-            .expect("chamfer box top edges should render");
+        render_model(
+            r#"(model (part body (mesh-fillet 1.5 :edges "top" (box 20 20 10))))"#,
+            &DesignParams::new(),
+            &resolver,
+        )
+        .expect("mesh-fillet box top edges should render");
     }
 
     #[test]
-    fn fillet_box_compound_edges() {
+    fn cad_chamfer_rejects_mesh_renderer() {
         let root = render_root();
         let resolver = TestResolver { root };
-        let src = r#"(model (part body (fillet 1 :edges "x-min+z-max" (box 20 20 10))))"#;
-        render_model(src, &DesignParams::new(), &resolver)
-            .expect("fillet box compound edges should render");
+        let src = r#"(model (part body (chamfer 2 (box 20 20 10))))"#;
+        let err = render_model(src, &DesignParams::new(), &resolver)
+            .expect_err("CAD chamfer should not run through the mesh renderer");
+        assert!(
+            err.message.contains("Direct OCCT"),
+            "unexpected error: {}",
+            err.message
+        );
     }
 
     #[test]
-    fn chamfer_cylinder() {
+    fn mesh_chamfer_box_all_edges() {
         let root = render_root();
         let resolver = TestResolver { root };
-        let src = r#"(model (part body (chamfer 1 (cylinder 10 20))))"#;
-        render_model(src, &DesignParams::new(), &resolver).expect("chamfer cylinder should render");
+        let src = r#"(model (part body (mesh-chamfer 2 (box 20 20 10))))"#;
+        let bundle =
+            render_model(src, &DesignParams::new(), &resolver).expect("mesh-chamfer box should render");
+        assert!(
+            !bundle.viewer_assets.is_empty(),
+            "should produce viewer assets"
+        );
+    }
+
+    #[test]
+    fn mesh_chamfer_box_top_edges() {
+        let root = render_root();
+        let resolver = TestResolver { root };
+        let src = r#"(model (part body (mesh-chamfer 2 :edges "top" (box 20 20 10))))"#;
+        render_model(src, &DesignParams::new(), &resolver)
+            .expect("mesh-chamfer box top edges should render");
+    }
+
+    #[test]
+    fn mesh_fillet_box_compound_edges() {
+        let root = render_root();
+        let resolver = TestResolver { root };
+        let src = r#"(model (part body (mesh-fillet 1 :edges "x-min+z-max" (box 20 20 10))))"#;
+        render_model(src, &DesignParams::new(), &resolver)
+            .expect("mesh-fillet box compound edges should render");
+    }
+
+    #[test]
+    fn mesh_chamfer_cylinder() {
+        let root = render_root();
+        let resolver = TestResolver { root };
+        let src = r#"(model (part body (mesh-chamfer 1 (cylinder 10 20))))"#;
+        render_model(src, &DesignParams::new(), &resolver)
+            .expect("mesh-chamfer cylinder should render");
+    }
+
+    #[test]
+    fn wall_pattern_accepts_llm_generated_polyhedron_target() {
+        let root = render_root();
+        std::fs::create_dir_all(&root).unwrap();
+        let resolver = TestResolver { root };
+        let bundle = render_model(
+            r#"(model
+                (part body
+                  (wall-pattern (:mode cellular :depth 0.4 :uFreq 5 :vFreq 5)
+                    (polyhedron
+                      :vertices
+                        ((0 0 0) (2 0 0) (0 20 0) (2 20 0)
+                         (0 0 30) (2 0 30) (0 20 30) (2 20 30))
+                      :triangles
+                        ((0 4 6) (0 6 2) (1 3 7) (1 7 5)
+                         (0 1 5) (0 5 4) (2 6 7) (2 7 3)
+                         (0 2 3) (0 3 1) (4 5 7) (4 7 6))))))"#,
+            &DesignParams::new(),
+            &resolver,
+        )
+        .expect("render wall-pattern over LLM-generated polyhedron");
+
+        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert_eq!(
+            crate::services::structural_verification::preview_stl_non_manifold_edge_count(
+                Path::new(&bundle.preview_stl_path),
+            )
+            .expect("STL topology"),
+            0
+        );
     }
 
     #[test]

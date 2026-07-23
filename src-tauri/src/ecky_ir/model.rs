@@ -390,8 +390,13 @@ fn inline_let_expr_with_scope(
                 }
                 _ => {
                     let mut rewritten = Vec::with_capacity(items.len());
-                    rewritten.push(head.clone());
-                    for item in items.iter().skip(1) {
+                    let start = if head.as_symbol().is_some() {
+                        rewritten.push(head.clone());
+                        1
+                    } else {
+                        0
+                    };
+                    for item in items.iter().skip(start) {
                         rewritten.push(inline_let_expr_with_scope(item, scope)?);
                     }
                     Ok(IrExpr::list(rewritten))
@@ -1252,6 +1257,7 @@ fn core_value_kind_tag(kind: CoreValueKind) -> &'static str {
         CoreValueKind::Sketch => "sketch",
         CoreValueKind::Path => "path",
         CoreValueKind::Frame => "frame",
+        CoreValueKind::Mesh => "mesh",
         CoreValueKind::Compound => "compound",
         CoreValueKind::Solid => "solid",
     }
@@ -1269,6 +1275,7 @@ pub(super) fn parse_value_kind_tag(tag: &str) -> Option<CoreValueKind> {
         "sketch" => Some(CoreValueKind::Sketch),
         "path" => Some(CoreValueKind::Path),
         "frame" => Some(CoreValueKind::Frame),
+        "mesh" => Some(CoreValueKind::Mesh),
         "compound" => Some(CoreValueKind::Compound),
         "solid" => Some(CoreValueKind::Solid),
         _ => None,

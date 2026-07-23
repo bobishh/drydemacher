@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 
+use crate::contracts::{AuthoringError, AuthoringReason, ErrorFix};
 use crate::ecky_cad_host::svg_profile::{
     extract_svg_wire_soup_profile, parse_svg_profile, SvgFillRule, SvgFitMode,
 };
@@ -11,7 +12,6 @@ use crate::ecky_core_ir::{
     CoreProgram, CoreReference, CoreSelectorPayload, CoreShapeBinding, CoreSurfaceOp, CoreSymbol,
     CoreTransformOp, CoreValueKind, NodeId,
 };
-use crate::contracts::{AuthoringError, AuthoringReason, ErrorFix};
 use crate::models::{AppError, AppResult, DesignParams, ParamValue};
 
 // --- Authoring-error constructors (backend layer) -------------------------
@@ -28,9 +28,12 @@ fn bk_op(reason: AuthoringReason, op: &str, msg: impl Into<String>) -> AppError 
 }
 
 fn bk_arity(op: &str, expected: &str) -> AppError {
-    AuthoringError::backend(AuthoringReason::Arity, format!("`{op}` expects {expected}."))
-        .with_op(op)
-        .into()
+    AuthoringError::backend(
+        AuthoringReason::Arity,
+        format!("`{op}` expects {expected}."),
+    )
+    .with_op(op)
+    .into()
 }
 
 fn bk_constrained(op: &str, msg: impl Into<String>, valid: &[&str]) -> AppError {
@@ -242,10 +245,13 @@ fn plan_expanded_core_program(
     parameters: &DesignParams,
 ) -> AppResult<OcctPlan> {
     crate::ecky_core_ir::verify_core_program(program).map_err(|err| {
-        bk(AuthoringReason::Type, format!(
-            "Direct OCCT adapter rejected invalid Core IR before planning: {}",
-            err
-        ))
+        bk(
+            AuthoringReason::Type,
+            format!(
+                "Direct OCCT adapter rejected invalid Core IR before planning: {}",
+                err
+            ),
+        )
     })?;
 
     let param_names = program
@@ -350,10 +356,13 @@ fn expand_node_for_direct_occt(
                     &nested_node_env,
                 )
                 .map_err(|err| {
-                    bk(AuthoringReason::Type, format!(
-                        "Direct OCCT expander could not evaluate build binding `{}`: {err}",
-                        binding.name
-                    ))
+                    bk(
+                        AuthoringReason::Type,
+                        format!(
+                            "Direct OCCT expander could not evaluate build binding `{}`: {err}",
+                            binding.name
+                        ),
+                    )
                 })? {
                     nested_env.insert(binding.name.clone(), param_value.clone());
                     nested_node_env.insert(binding.value.id.raw(), param_value.clone());
@@ -403,10 +412,13 @@ fn expand_node_for_direct_occt(
                     &nested_node_env,
                 )
                 .map_err(|err| {
-                    bk(AuthoringReason::Type, format!(
-                        "Direct OCCT expander could not evaluate let binding `{}`: {err}",
-                        binding.name
-                    ))
+                    bk(
+                        AuthoringReason::Type,
+                        format!(
+                            "Direct OCCT expander could not evaluate let binding `{}`: {err}",
+                            binding.name
+                        ),
+                    )
                 })? {
                     nested_env.insert(binding.name.clone(), param_value.clone());
                     nested_node_env.insert(binding.value.id.raw(), param_value.clone());
@@ -510,7 +522,9 @@ fn expand_node_for_direct_occt(
             op: CoreOperation::Primitive(CorePrimitive::Svg),
             args,
             keywords,
-        } if !keywords.is_empty() => Err(bk_op(AuthoringReason::Unsupported, "svg",
+        } if !keywords.is_empty() => Err(bk_op(
+            AuthoringReason::Unsupported,
+            "svg",
             "`svg` does not support keyword arguments yet in Direct OCCT adapter.",
         )),
         CoreNodeKind::Call {
@@ -530,9 +544,18 @@ fn expand_node_for_direct_occt(
             )
         }
         CoreNodeKind::Call { op, args, keywords } if matches!(op, CoreOperation::Custom(name) if name == "thread") => {
-            expand_thread_node(node, args, keywords, param_names, env, node_env, next_node_id)
+            expand_thread_node(
+                node,
+                args,
+                keywords,
+                param_names,
+                env,
+                node_env,
+                next_node_id,
+            )
         }
-        CoreNodeKind::Call { op, args, .. } if matches!(op, CoreOperation::Custom(name) if name == "rib" || name == "groove") => {
+        CoreNodeKind::Call { op, args, .. } if matches!(op, CoreOperation::Custom(name) if name == "rib" || name == "groove") =>
+        {
             let is_rib = matches!(op, CoreOperation::Custom(name) if name == "rib");
             expand_rib_groove_node(node, is_rib, args, param_names, env, node_env, next_node_id)
         }
@@ -540,10 +563,26 @@ fn expand_node_for_direct_occt(
             expand_sampled_radial_loft_node(node, args, keywords, param_names, env, next_node_id)
         }
         CoreNodeKind::Call { op, args, keywords } if matches!(op, CoreOperation::Custom(name) if name == "regular-polygon") => {
-            expand_regular_polygon_node(node, args, keywords, param_names, env, node_env, next_node_id)
+            expand_regular_polygon_node(
+                node,
+                args,
+                keywords,
+                param_names,
+                env,
+                node_env,
+                next_node_id,
+            )
         }
         CoreNodeKind::Call { op, args, keywords } if matches!(op, CoreOperation::Custom(name) if name == "trapezoid") => {
-            expand_trapezoid_node(node, args, keywords, param_names, env, node_env, next_node_id)
+            expand_trapezoid_node(
+                node,
+                args,
+                keywords,
+                param_names,
+                env,
+                node_env,
+                next_node_id,
+            )
         }
         CoreNodeKind::Call { op, args, keywords } if matches!(op, CoreOperation::Custom(name) if name == "slot-center-to-center" || name == "slot_center_to_center") => {
             expand_slot_center_to_center_node(node, args, keywords, param_names, env, next_node_id)
@@ -723,7 +762,10 @@ fn expand_svg_node(
     next_node_id: &mut u64,
 ) -> AppResult<CoreNode> {
     if args.is_empty() || args.len() > 4 {
-        return Err(bk_arity("svg", "a file path, optional target width/height, and optional fit mode"));
+        return Err(bk_arity(
+            "svg",
+            "a file path, optional target width/height, and optional fit mode",
+        ));
     }
 
     let source = crate::ecky_ir::eval_core_stringish_with_locals(&args[0], param_names, env)?;
@@ -740,16 +782,19 @@ fn expand_svg_node(
         return Err(AuthoringError::surface(
             AuthoringReason::Type,
             format!("Direct OCCT adapter could not read SVG source at `{source}`."),
-        ).into());
+        )
+        .into());
     };
 
     let target_width = args
         .get(1)
         .map(|arg| {
             crate::ecky_ir::eval_core_number_with_locals(arg, param_names, env).map_err(|err| {
-                bk_op(AuthoringReason::Type, "svg", format!(
-                    "Direct OCCT adapter could not evaluate `svg` width: {err}",
-                ))
+                bk_op(
+                    AuthoringReason::Type,
+                    "svg",
+                    format!("Direct OCCT adapter could not evaluate `svg` width: {err}",),
+                )
             })
         })
         .transpose()?;
@@ -758,9 +803,11 @@ fn expand_svg_node(
         .get(2)
         .map(|arg| {
             crate::ecky_ir::eval_core_number_with_locals(arg, param_names, env).map_err(|err| {
-                bk_op(AuthoringReason::Type, "svg", format!(
-                    "Direct OCCT adapter could not evaluate `svg` height: {err}",
-                ))
+                bk_op(
+                    AuthoringReason::Type,
+                    "svg",
+                    format!("Direct OCCT adapter could not evaluate `svg` height: {err}",),
+                )
             })
         })
         .transpose()?;
@@ -812,8 +859,7 @@ fn expand_svg_node(
             ))
         }
         Err(_) => {
-            let soup =
-                extract_svg_wire_soup_profile(&svg_text, target_width, target_height, fit)?;
+            let soup = extract_svg_wire_soup_profile(&svg_text, target_width, target_height, fit)?;
             let wire_nodes = soup
                 .wires
                 .iter()
@@ -913,7 +959,9 @@ fn expand_helical_ridge_node(
     next_node_id: &mut u64,
 ) -> AppResult<CoreNode> {
     if !args.is_empty() {
-        return Err(bk_op(AuthoringReason::Unsupported, "helical-ridge",
+        return Err(bk_op(
+            AuthoringReason::Unsupported,
+            "helical-ridge",
             "`helical-ridge` expects keyword options only.",
         ));
     }
@@ -1090,7 +1138,9 @@ fn expand_thread_node(
     next_node_id: &mut u64,
 ) -> AppResult<CoreNode> {
     if !args.is_empty() {
-        return Err(bk_op(AuthoringReason::Unsupported, "thread",
+        return Err(bk_op(
+            AuthoringReason::Unsupported,
+            "thread",
             "`thread` expects keyword options only.",
         ));
     }
@@ -1127,16 +1177,52 @@ fn expand_thread_node(
             positive_keyword_number(keywords, "depth", "thread", param_names, env, node_env)?,
         )
     };
-    let base_width =
-        optional_keyword_number(keywords, "base-width", pitch * 0.75, "thread", param_names, env, node_env)?;
-    let crest_width =
-        optional_keyword_number(keywords, "crest-width", pitch * 0.25, "thread", param_names, env, node_env)?;
-    let female =
-        optional_keyword_bool(keywords, "female", false, "thread", param_names, env, node_env)?;
-    let lefthand =
-        optional_keyword_bool(keywords, "lefthand", false, "thread", param_names, env, node_env)?;
-    let clearance =
-        optional_keyword_number(keywords, "clearance", 0.0, "thread", param_names, env, node_env)?.max(0.0);
+    let base_width = optional_keyword_number(
+        keywords,
+        "base-width",
+        pitch * 0.75,
+        "thread",
+        param_names,
+        env,
+        node_env,
+    )?;
+    let crest_width = optional_keyword_number(
+        keywords,
+        "crest-width",
+        pitch * 0.25,
+        "thread",
+        param_names,
+        env,
+        node_env,
+    )?;
+    let female = optional_keyword_bool(
+        keywords,
+        "female",
+        false,
+        "thread",
+        param_names,
+        env,
+        node_env,
+    )?;
+    let lefthand = optional_keyword_bool(
+        keywords,
+        "lefthand",
+        false,
+        "thread",
+        param_names,
+        env,
+        node_env,
+    )?;
+    let clearance = optional_keyword_number(
+        keywords,
+        "clearance",
+        0.0,
+        "thread",
+        param_names,
+        env,
+        node_env,
+    )?
+    .max(0.0);
 
     // Bury the ridge root inside the core by `overlap` so the `union(core, ridge)`
     // below never shares a coincident cylinder face. Without this the boolean
@@ -1160,11 +1246,20 @@ fn expand_thread_node(
         )
     };
     let mut ridge_keywords = vec![
-        CoreKeywordArg::expr("radius".to_string(), number_node(next_node_id, ridge_radius)),
+        CoreKeywordArg::expr(
+            "radius".to_string(),
+            number_node(next_node_id, ridge_radius),
+        ),
         CoreKeywordArg::expr("pitch".to_string(), number_node(next_node_id, pitch)),
         CoreKeywordArg::expr("height".to_string(), number_node(next_node_id, length)),
-        CoreKeywordArg::expr("base-width".to_string(), number_node(next_node_id, base_width)),
-        CoreKeywordArg::expr("crest-width".to_string(), number_node(next_node_id, crest_width)),
+        CoreKeywordArg::expr(
+            "base-width".to_string(),
+            number_node(next_node_id, base_width),
+        ),
+        CoreKeywordArg::expr(
+            "crest-width".to_string(),
+            number_node(next_node_id, crest_width),
+        ),
         CoreKeywordArg::expr("depth".to_string(), number_node(next_node_id, ridge_depth)),
         CoreKeywordArg::expr("lefthand".to_string(), bool_node(next_node_id, lefthand)),
     ];
@@ -1272,7 +1367,10 @@ fn expand_regular_polygon_node(
     next_node_id: &mut u64,
 ) -> AppResult<CoreNode> {
     if args.len() != 2 {
-        return Err(bk_arity("regular-polygon", "sides and radius (plus optional `:rotation`)"));
+        return Err(bk_arity(
+            "regular-polygon",
+            "sides and radius (plus optional `:rotation`)",
+        ));
     }
     reject_unknown_keywords(keywords, &["rotation"], "regular-polygon")?;
 
@@ -1290,13 +1388,16 @@ fn expand_regular_polygon_node(
 
     let sides = sides.round();
     if sides < 3.0 {
-        return Err(bk_constrained("regular-polygon",
+        return Err(bk_constrained(
+            "regular-polygon",
             "`regular-polygon` needs at least 3 sides.",
             &["3", "4", "5", "6", "8"],
         ));
     }
     if !(radius > 0.0) {
-        return Err(bk_op(AuthoringReason::Type, "regular-polygon",
+        return Err(bk_op(
+            AuthoringReason::Type,
+            "regular-polygon",
             "`regular-polygon` radius must be positive.",
         ));
     }
@@ -1338,7 +1439,10 @@ fn expand_trapezoid_node(
     next_node_id: &mut u64,
 ) -> AppResult<CoreNode> {
     if args.len() != 3 {
-        return Err(bk_arity("trapezoid", "bottom, top, and height (plus optional `:skew`)"));
+        return Err(bk_arity(
+            "trapezoid",
+            "bottom, top, and height (plus optional `:skew`)",
+        ));
     }
     reject_unknown_keywords(keywords, &["skew"], "trapezoid")?;
 
@@ -1356,12 +1460,16 @@ fn expand_trapezoid_node(
     )?;
 
     if !(bottom > 0.0) || !(top > 0.0) {
-        return Err(bk_op(AuthoringReason::Type, "trapezoid",
+        return Err(bk_op(
+            AuthoringReason::Type,
+            "trapezoid",
             "`trapezoid` bottom and top must be positive.",
         ));
     }
     if !(height > 0.0) {
-        return Err(bk_op(AuthoringReason::Type, "trapezoid",
+        return Err(bk_op(
+            AuthoringReason::Type,
+            "trapezoid",
             "`trapezoid` height must be positive.",
         ));
     }
@@ -1402,19 +1510,26 @@ fn expand_slot_center_to_center_node(
     next_node_id: &mut u64,
 ) -> AppResult<CoreNode> {
     if args.len() != 2 {
-        return Err(bk_arity("slot-center-to-center", "center separation and width"));
+        return Err(bk_arity(
+            "slot-center-to-center",
+            "center separation and width",
+        ));
     }
     reject_unknown_keywords(keywords, &[], "slot-center-to-center")?;
 
     let separation = crate::ecky_ir::eval_core_number_with_locals(&args[0], param_names, env)?;
     let width = crate::ecky_ir::eval_core_number_with_locals(&args[1], param_names, env)?;
     if !(width > 0.0) {
-        return Err(bk_op(AuthoringReason::Type, "slot-center-to-center",
+        return Err(bk_op(
+            AuthoringReason::Type,
+            "slot-center-to-center",
             "`slot-center-to-center` width must be positive.",
         ));
     }
     if !(separation >= 0.0) {
-        return Err(bk_op(AuthoringReason::Type, "slot-center-to-center",
+        return Err(bk_op(
+            AuthoringReason::Type,
+            "slot-center-to-center",
             "`slot-center-to-center` separation must be non-negative.",
         ));
     }
@@ -1460,7 +1575,9 @@ fn expand_slot_center_point_node(
     let py = crate::ecky_ir::eval_core_number_with_locals(&args[3], param_names, env)?;
     let width = crate::ecky_ir::eval_core_number_with_locals(&args[4], param_names, env)?;
     if !(width > 0.0) {
-        return Err(bk_op(AuthoringReason::Type, "slot-center-point",
+        return Err(bk_op(
+            AuthoringReason::Type,
+            "slot-center-point",
             "`slot-center-point` width must be positive.",
         ));
     }
@@ -1570,8 +1687,8 @@ pub(crate) fn profile_contour_node(
     // micro closing segment instead creates a degenerate edge that corrupts
     // meshing and booleans (non-manifold shells, swallowed fuses). Only a
     // genuinely open contour gets a real closing line.
-    let gap = ((cursor[0] - geometry.start[0]).powi(2) + (cursor[1] - geometry.start[1]).powi(2))
-        .sqrt();
+    let gap =
+        ((cursor[0] - geometry.start[0]).powi(2) + (cursor[1] - geometry.start[1]).powi(2)).sqrt();
     if gap <= 1.0e-6 {
         let last = controls.last_mut().expect("closing endpoint");
         *last = [geometry.start[0], geometry.start[1], 0.0];
@@ -1705,7 +1822,10 @@ fn expand_sampled_radial_loft_node(
     next_node_id: &mut u64,
 ) -> AppResult<CoreNode> {
     if args.len() != 1 {
-        return Err(bk_arity("sampled-radial-loft", "binder names plus keyword/value options"));
+        return Err(bk_arity(
+            "sampled-radial-loft",
+            "binder names plus keyword/value options",
+        ));
     }
     let binders = sampled_radial_loft_binders(&args[0])?;
     let height_node = sampled_keyword_node(keywords, "height")?;
@@ -1746,7 +1866,9 @@ fn expand_sampled_radial_loft_node(
                 &section_env,
             )?;
             if !radius.is_finite() || radius <= 0.0 {
-                return Err(bk_op(AuthoringReason::Type, "sampled-radial-loft",
+                return Err(bk_op(
+                    AuthoringReason::Type,
+                    "sampled-radial-loft",
                     "sampled-radial-loft radius must stay positive",
                 ));
             }
@@ -1815,10 +1937,15 @@ fn expand_shell_sampled_radial_loft_node(
     next_node_id: &mut u64,
 ) -> AppResult<CoreNode> {
     if !keywords.is_empty() || args.len() != 2 {
-        return Err(bk_arity("shell", "thickness and shape only (sampled-radial-loft)"));
+        return Err(bk_arity(
+            "shell",
+            "thickness and shape only (sampled-radial-loft)",
+        ));
     }
     let target = sampled_radial_loft_target(args).ok_or_else(|| {
-        bk_op(AuthoringReason::Type, "shell",
+        bk_op(
+            AuthoringReason::Type,
+            "shell",
             "`shell` sampled-radial-loft requires a sampled-radial-loft target.",
         )
     })?;
@@ -1953,17 +2080,22 @@ fn sampled_binder_name(node: &CoreNode) -> AppResult<String> {
         CoreNodeKind::Reference(CoreReference::Local(name)) => Ok(name.clone()),
         CoreNodeKind::Literal(CoreLiteral::Text(text)) => Ok(text.clone()),
         CoreNodeKind::Literal(CoreLiteral::Symbol(symbol)) => Ok(symbol_name(symbol).to_string()),
-        _ => Err(bk_op(AuthoringReason::Type, "sampled-radial-loft",
+        _ => Err(bk_op(
+            AuthoringReason::Type,
+            "sampled-radial-loft",
             "`sampled-radial-loft` binders must be symbols.",
         )),
     }
 }
 
 fn sampled_keyword_node<'a>(keywords: &'a [CoreKeywordArg], name: &str) -> AppResult<&'a CoreNode> {
-    sampled_optional_keyword_node(keywords, name)
-        .ok_or_else(|| bk_op(AuthoringReason::Arity, "sampled-radial-loft",
+    sampled_optional_keyword_node(keywords, name).ok_or_else(|| {
+        bk_op(
+            AuthoringReason::Arity,
+            "sampled-radial-loft",
             format!("`sampled-radial-loft` requires `:{name}`."),
-        ))
+        )
+    })
 }
 
 fn sampled_optional_keyword_node<'a>(
@@ -1978,7 +2110,9 @@ fn sampled_optional_keyword_node<'a>(
 
 fn sampled_count(value: f64, minimum: usize, label: &str) -> AppResult<usize> {
     if !value.is_finite() {
-        return Err(bk_op(AuthoringReason::Type, "sampled-radial-loft",
+        return Err(bk_op(
+            AuthoringReason::Type,
+            "sampled-radial-loft",
             format!("`sampled-radial-loft` {label} must be finite."),
         ));
     }
@@ -2117,10 +2251,10 @@ fn eval_number_for_direct_occt(
 ) -> AppResult<f64> {
     let node = rewrite_eval_node_for_direct_occt(node, env, node_env);
     crate::ecky_ir::eval_core_number_with_locals(&node, param_names, env).map_err(|err| {
-        bk(AuthoringReason::Type, format!(
-            "could not evaluate numeric Core node {:?}: {err}",
-            node.id
-        ))
+        bk(
+            AuthoringReason::Type,
+            format!("could not evaluate numeric Core node {:?}: {err}", node.id),
+        )
     })
 }
 
@@ -2337,7 +2471,13 @@ fn required_keyword_node<'a>(
         .iter()
         .find(|keyword| keyword.name == name)
         .map(|keyword| keyword.source_node())
-        .ok_or_else(|| bk_op(AuthoringReason::Arity, op, format!("`{op}` requires `:{name}`.")))
+        .ok_or_else(|| {
+            bk_op(
+                AuthoringReason::Arity,
+                op,
+                format!("`{op}` requires `:{name}`."),
+            )
+        })
 }
 
 fn positive_keyword_number(
@@ -2355,9 +2495,11 @@ fn positive_keyword_number(
         node_env,
     )?;
     if !value.is_finite() || value <= 0.0 {
-        return Err(bk_op(AuthoringReason::Type, op, format!(
-            "`{op}` {name} must be positive and finite."
-        )));
+        return Err(bk_op(
+            AuthoringReason::Type,
+            op,
+            format!("`{op}` {name} must be positive and finite."),
+        ));
     }
     Ok(value)
 }
@@ -2378,8 +2520,13 @@ fn optional_keyword_number(
     else {
         return Ok(default);
     };
-    eval_number_for_direct_occt(node, param_names, env, node_env)
-        .map_err(|err| bk_op(AuthoringReason::Type, op, format!("`{op}` could not evaluate `:{name}`: {err}")))
+    eval_number_for_direct_occt(node, param_names, env, node_env).map_err(|err| {
+        bk_op(
+            AuthoringReason::Type,
+            op,
+            format!("`{op}` could not evaluate `:{name}`: {err}"),
+        )
+    })
 }
 
 fn optional_keyword_bool(
@@ -2398,8 +2545,13 @@ fn optional_keyword_bool(
     else {
         return Ok(default);
     };
-    eval_bool_for_direct_occt(node, param_names, env, node_env)
-        .map_err(|err| bk_op(AuthoringReason::Type, op, format!("`{op}` could not evaluate `:{name}`: {err}")))
+    eval_bool_for_direct_occt(node, param_names, env, node_env).map_err(|err| {
+        bk_op(
+            AuthoringReason::Type,
+            op,
+            format!("`{op}` could not evaluate `:{name}`: {err}"),
+        )
+    })
 }
 
 fn reject_unknown_keywords(
@@ -2414,10 +2566,11 @@ fn reject_unknown_keywords(
         {
             continue;
         }
-        return Err(bk_op(AuthoringReason::Arity, op, format!(
-            "`{op}` does not recognize `:{}`.",
-            keyword.name
-        )));
+        return Err(bk_op(
+            AuthoringReason::Arity,
+            op,
+            format!("`{op}` does not recognize `:{}`.", keyword.name),
+        ));
     }
     Ok(())
 }
@@ -2695,17 +2848,23 @@ impl<'a> PartPlanner<'a> {
             CoreNodeKind::Reference(_) => match self.plan_arg(node)? {
                 OcctArg::Ref(slot) => slot,
                 other => {
-                    return Err(bk(AuthoringReason::Type, format!(
-                        "Direct OCCT adapter expected geometry reference, got {:?}.",
-                        other
-                    )));
+                    return Err(bk(
+                        AuthoringReason::Type,
+                        format!(
+                            "Direct OCCT adapter expected geometry reference, got {:?}.",
+                            other
+                        ),
+                    ));
                 }
             },
             _ => {
-                return Err(bk(AuthoringReason::Type, format!(
-                    "Direct OCCT adapter expected geometry node, got {:?}.",
-                    node.kind
-                )));
+                return Err(bk(
+                    AuthoringReason::Type,
+                    format!(
+                        "Direct OCCT adapter expected geometry node, got {:?}.",
+                        node.kind
+                    ),
+                ));
             }
         };
 
@@ -2766,10 +2925,13 @@ impl<'a> PartPlanner<'a> {
             .collect::<AppResult<Vec<_>>>()?;
         let list_arg = self.plan_arg(list)?;
         let OcctArg::List(items) = list_arg else {
-            return Err(bk(AuthoringReason::Type, format!(
-                "Direct OCCT adapter `apply` expected list argument, got {:?}.",
-                list_arg
-            )));
+            return Err(bk(
+                AuthoringReason::Type,
+                format!(
+                    "Direct OCCT adapter `apply` expected list argument, got {:?}.",
+                    list_arg
+                ),
+            ));
         };
         planned_args.extend(items);
         self.commands.push(OcctCommand {
@@ -2793,10 +2955,10 @@ impl<'a> PartPlanner<'a> {
             CoreNodeKind::Literal(CoreLiteral::Point3(point)) => Ok(OcctArg::Point3(*point)),
             CoreNodeKind::Reference(CoreReference::Parameter(id)) => {
                 let name = self.param_names.get(&id.raw()).cloned().ok_or_else(|| {
-                    bk(AuthoringReason::Type, format!(
-                        "Direct OCCT adapter could not resolve parameter {:?}.",
-                        id
-                    ))
+                    bk(
+                        AuthoringReason::Type,
+                        format!("Direct OCCT adapter could not resolve parameter {:?}.", id),
+                    )
                 })?;
                 Ok(OcctArg::Param(name))
             }
@@ -2805,19 +2967,22 @@ impl<'a> PartPlanner<'a> {
                     return Ok(value);
                 }
                 let slot = self.node_refs.get(&id.raw()).copied().ok_or_else(|| {
-                    bk(AuthoringReason::Type, format!(
-                        "Direct OCCT adapter could not resolve Core node reference {:?}.",
-                        id
-                    ))
+                    bk(
+                        AuthoringReason::Type,
+                        format!(
+                            "Direct OCCT adapter could not resolve Core node reference {:?}.",
+                            id
+                        ),
+                    )
                 })?;
                 Ok(OcctArg::Ref(slot))
             }
             CoreNodeKind::Reference(CoreReference::Local(name)) => {
                 self.locals.get(name).cloned().ok_or_else(|| {
-                    bk(AuthoringReason::Type, format!(
-                        "Direct OCCT adapter could not resolve local `{}`.",
-                        name
-                    ))
+                    bk(
+                        AuthoringReason::Type,
+                        format!("Direct OCCT adapter could not resolve local `{}`.", name),
+                    )
                 })
             }
             CoreNodeKind::List(items) | CoreNodeKind::Group(items) => Ok(OcctArg::List(
@@ -2844,10 +3009,13 @@ impl<'a> PartPlanner<'a> {
                     match self.plan_arg(arg)? {
                         OcctArg::List(items) => combined.extend(items),
                         other => {
-                            return Err(bk(AuthoringReason::Type, format!(
+                            return Err(bk(
+                                AuthoringReason::Type,
+                                format!(
                                 "Direct OCCT adapter `append` expected list argument, got {:?}.",
                                 other
-                            )))
+                            ),
+                            ))
                         }
                     }
                 }
@@ -2859,20 +3027,26 @@ impl<'a> PartPlanner<'a> {
                 ..
             } if name == "reverse" => {
                 let [arg] = args.as_slice() else {
-                    return Err(bk(AuthoringReason::Arity, format!(
-                        "Direct OCCT adapter `reverse` expected one list, got {} arguments.",
-                        args.len()
-                    )));
+                    return Err(bk(
+                        AuthoringReason::Arity,
+                        format!(
+                            "Direct OCCT adapter `reverse` expected one list, got {} arguments.",
+                            args.len()
+                        ),
+                    ));
                 };
                 match self.plan_arg(arg)? {
                     OcctArg::List(mut items) => {
                         items.reverse();
                         Ok(OcctArg::List(items))
                     }
-                    other => Err(bk(AuthoringReason::Type, format!(
-                        "Direct OCCT adapter `reverse` expected list argument, got {:?}.",
-                        other
-                    ))),
+                    other => Err(bk(
+                        AuthoringReason::Type,
+                        format!(
+                            "Direct OCCT adapter `reverse` expected list argument, got {:?}.",
+                            other
+                        ),
+                    )),
                 }
             }
             CoreNodeKind::Call {
@@ -2886,32 +3060,37 @@ impl<'a> PartPlanner<'a> {
                     _ => 2,
                 };
                 let [arg] = args.as_slice() else {
-                    return Err(bk(AuthoringReason::Arity, format!(
-                        "Direct OCCT adapter `{name}` expected one list, got {} arguments.",
-                        args.len()
-                    )));
+                    return Err(bk(
+                        AuthoringReason::Arity,
+                        format!(
+                            "Direct OCCT adapter `{name}` expected one list, got {} arguments.",
+                            args.len()
+                        ),
+                    ));
                 };
                 let items = match self.plan_arg(arg)? {
                     OcctArg::List(items) => items,
-                    OcctArg::Point2(point) => {
-                        point.iter().copied().map(OcctArg::Number).collect()
-                    }
-                    OcctArg::Point3(point) => {
-                        point.iter().copied().map(OcctArg::Number).collect()
-                    }
+                    OcctArg::Point2(point) => point.iter().copied().map(OcctArg::Number).collect(),
+                    OcctArg::Point3(point) => point.iter().copied().map(OcctArg::Number).collect(),
                     other => {
-                        return Err(bk(AuthoringReason::Type, format!(
-                            "Direct OCCT adapter `{name}` expected list argument, got {:?}.",
-                            other
-                        )))
+                        return Err(bk(
+                            AuthoringReason::Type,
+                            format!(
+                                "Direct OCCT adapter `{name}` expected list argument, got {:?}.",
+                                other
+                            ),
+                        ))
                     }
                 };
                 items.get(index).cloned().ok_or_else(|| {
-                    bk(AuthoringReason::Arity, format!(
-                        "Direct OCCT adapter `{name}` expected at least {} item(s), got {}.",
-                        index + 1,
-                        items.len()
-                    ))
+                    bk(
+                        AuthoringReason::Arity,
+                        format!(
+                            "Direct OCCT adapter `{name}` expected at least {} item(s), got {}.",
+                            index + 1,
+                            items.len()
+                        ),
+                    )
                 })
             }
             CoreNodeKind::Call { .. } | CoreNodeKind::Apply { .. } => {
@@ -2931,14 +3110,20 @@ impl<'a> PartPlanner<'a> {
                 let slot = self.plan_node(node)?;
                 Ok(OcctArg::Ref(slot))
             }
-            CoreNodeKind::If { .. } => Err(bk(AuthoringReason::Unsupported, format!(
+            CoreNodeKind::If { .. } => Err(bk(
+                AuthoringReason::Unsupported,
+                format!(
                 "Direct OCCT adapter cannot plan dynamic expression node {:?} before evaluation.",
                 node.kind
-            ))),
-            CoreNodeKind::Reference(CoreReference::Part(id)) => Err(bk(AuthoringReason::Unsupported, format!(
-                "Direct OCCT adapter cannot plan part reference {:?} in first surface.",
-                id
-            ))),
+            ),
+            )),
+            CoreNodeKind::Reference(CoreReference::Part(id)) => Err(bk(
+                AuthoringReason::Unsupported,
+                format!(
+                    "Direct OCCT adapter cannot plan part reference {:?} in first surface.",
+                    id
+                ),
+            )),
         }
     }
 
@@ -3000,7 +3185,8 @@ impl<'a> PartPlanner<'a> {
                 symbols
             }
             _ => {
-                return Err(bk_constrained("align",
+                return Err(bk_constrained(
+                    "align",
                     "Direct OCCT adapter `:align` expects `(min|center|max)^3`.",
                     &["min", "center", "max"],
                 ));
@@ -3087,20 +3273,26 @@ impl<'a> PartPlanner<'a> {
         body: &CoreNode,
     ) -> AppResult<OcctArg> {
         if params.len() != sources.len() {
-            return Err(bk(AuthoringReason::Arity, format!(
-                "Direct OCCT adapter map expected {} source list(s), got {}.",
-                params.len(),
-                sources.len()
-            )));
+            return Err(bk(
+                AuthoringReason::Arity,
+                format!(
+                    "Direct OCCT adapter map expected {} source list(s), got {}.",
+                    params.len(),
+                    sources.len()
+                ),
+            ));
         }
         let source_values = sources
             .iter()
             .map(|source| match self.plan_arg(source)? {
                 OcctArg::List(items) => Ok(items),
-                other => Err(bk(AuthoringReason::Type, format!(
-                    "Direct OCCT adapter map expected list source, got {:?}.",
-                    other
-                ))),
+                other => Err(bk(
+                    AuthoringReason::Type,
+                    format!(
+                        "Direct OCCT adapter map expected list source, got {:?}.",
+                        other
+                    ),
+                )),
             })
             .collect::<AppResult<Vec<_>>>()?;
         let Some(first_source) = source_values.first() else {
@@ -3108,7 +3300,8 @@ impl<'a> PartPlanner<'a> {
         };
         let count = first_source.len();
         if source_values.iter().any(|source| source.len() != count) {
-            return Err(bk(AuthoringReason::Type,
+            return Err(bk(
+                AuthoringReason::Type,
                 "Direct OCCT adapter map source lists must have matching lengths.",
             ));
         }
@@ -3122,7 +3315,16 @@ impl<'a> PartPlanner<'a> {
                     self.locals.insert(param.clone(), source[index].clone());
                 }
                 let iteration_body = clone_node_with_fresh_ids(body, &mut self.next_node_id);
-                items.push(self.plan_arg(&iteration_body)?);
+                let scalar_env = self.scalar_env_snapshot();
+                let scalar_node_values = self.scalar_param_node_values();
+                let expanded_body = expand_node_for_direct_occt(
+                    &iteration_body,
+                    self.param_names,
+                    &scalar_env,
+                    &scalar_node_values,
+                    &mut self.next_node_id,
+                )?;
+                items.push(self.plan_arg(&expanded_body)?);
             }
             Ok(OcctArg::List(items))
         })();
@@ -3215,7 +3417,8 @@ fn align_axis_arg(node: &CoreNode) -> AppResult<&'static str> {
             args,
             keywords,
         } if args.is_empty() && keywords.is_empty() => align_axis_name(name),
-        _ => Err(bk_constrained("align",
+        _ => Err(bk_constrained(
+            "align",
             "Direct OCCT adapter `:align` axes must be `min`, `center`, or `max`.",
             &["min", "center", "max"],
         )),
@@ -3227,7 +3430,8 @@ fn align_axis_name(name: &str) -> AppResult<&'static str> {
         "min" => Ok("min"),
         "center" => Ok("center"),
         "max" => Ok("max"),
-        _ => Err(bk_constrained("align",
+        _ => Err(bk_constrained(
+            "align",
             format!("Direct OCCT adapter `:align` axis `{name}` is not supported."),
             &["min", "center", "max"],
         )),
@@ -3288,7 +3492,9 @@ fn occt_op(op: &CoreOperation) -> AppResult<OcctOp> {
         CoreOperation::Meta(CoreMetaOp::Group) => Ok(OcctOp::Compound),
         CoreOperation::Custom(name) if name == "hull" => Ok(OcctOp::Hull),
         CoreOperation::Custom(name) if name == "solidify" => Ok(OcctOp::Solidify),
-        CoreOperation::Custom(name) if name == "hole" => Err(bk_op(AuthoringReason::Unsupported, "hole",
+        CoreOperation::Custom(name) if name == "hole" => Err(bk_op(
+            AuthoringReason::Unsupported,
+            "hole",
             "Typed hole must be filled before direct OCCT planning.",
         )),
         _ => Err(unsupported(&operation_name(op), "not in first surface")),
@@ -3298,10 +3504,14 @@ fn occt_op(op: &CoreOperation) -> AppResult<OcctOp> {
 fn typed_hole_error(keywords: &[CoreKeywordArg]) -> AppError {
     let requested_type = keyword_text(keywords, "type").unwrap_or_else(|| "unknown".to_string());
     let goal = keyword_text(keywords, "goal").unwrap_or_else(|| "unspecified".to_string());
-    bk_op(AuthoringReason::Unsupported, "hole", format!(
+    bk_op(
+        AuthoringReason::Unsupported,
+        "hole",
+        format!(
         "Typed hole requested type `{}` with goal `{}` must be filled before direct OCCT planning.",
         requested_type, goal
-    ))
+    ),
+    )
 }
 
 fn keyword_text(keywords: &[CoreKeywordArg], name: &str) -> Option<String> {
@@ -3933,8 +4143,7 @@ mod tests {
 
     #[test]
     fn plans_slot_arc_primitive_for_direct_occt() {
-        let program =
-            compile("(model (part body (extrude (slot-arc 20 0 90 10) 5)))");
+        let program = compile("(model (part body (extrude (slot-arc 20 0 90 10) 5)))");
 
         let plan = plan_core_program(&program).expect("plan");
 
@@ -3960,8 +4169,7 @@ mod tests {
     #[test]
     fn plans_slot_center_point_as_transformed_slot_for_direct_occt() {
         // Custom op expands to Slot wrapped in rotate + translate.
-        let program =
-            compile("(model (part body (extrude (slot-center-point 0 0 15 0 10) 5)))");
+        let program = compile("(model (part body (extrude (slot-center-point 0 0 15 0 10) 5)))");
 
         let plan = plan_core_program(&program).expect("plan");
 
@@ -3976,6 +4184,40 @@ mod tests {
                 && ops.contains(&OcctOp::Translate),
             "expected slot+rotate+translate, got {ops:?}"
         );
+    }
+
+    #[test]
+    fn plans_parametric_slot_center_point_inside_map_for_direct_occt() {
+        let program = compile(
+            r#"
+            (model
+              (params
+                (number rows 3 :min 2 :max 6 :step 1)
+                (number seed 0.18 :min 0 :max 1 :step 0.01))
+              (part lattice
+                (apply union
+                  (map
+                    (lambda (row)
+                      (extrude
+                        (slot-center-point
+                          0
+                          (+ row (hash-signed row 0 seed))
+                          15
+                          (+ row (hash-signed row 1 seed))
+                          2)
+                        1.5))
+                    (range 0 rows)))))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("parametric mapped slots planned");
+        let slot_count = plan.parts[0]
+            .commands
+            .iter()
+            .filter(|command| command.op == OcctOp::Slot)
+            .count();
+
+        assert_eq!(slot_count, 3);
     }
 
     #[test]
@@ -4387,10 +4629,7 @@ mod tests {
         let hull = plan.parts[0].commands.last().expect("hull");
         assert_eq!(hull.op, OcctOp::Hull);
         assert_eq!(hull.args.len(), 2);
-        assert!(hull
-            .args
-            .iter()
-            .all(|arg| matches!(arg, OcctArg::Ref(_))));
+        assert!(hull.args.iter().all(|arg| matches!(arg, OcctArg::Ref(_))));
     }
 
     #[test]
@@ -4514,7 +4753,10 @@ mod tests {
         );
         let plan = plan_core_program(&program).expect("folded-if plan");
         assert!(
-            plan.parts[0].commands.iter().any(|c| c.op == OcctOp::Translate),
+            plan.parts[0]
+                .commands
+                .iter()
+                .any(|c| c.op == OcctOp::Translate),
             "else branch survives fold"
         );
 
@@ -4553,11 +4795,19 @@ mod tests {
 
         let plan = plan_core_program(&program).expect("plan");
         let commands = &plan.parts[0].commands;
-        let ops = commands.iter().map(|command| command.op).collect::<Vec<_>>();
+        let ops = commands
+            .iter()
+            .map(|command| command.op)
+            .collect::<Vec<_>>();
 
         assert_eq!(
             ops,
-            vec![OcctOp::Polygon, OcctOp::Polygon, OcctOp::Profile, OcctOp::Extrude],
+            vec![
+                OcctOp::Polygon,
+                OcctOp::Polygon,
+                OcctOp::Profile,
+                OcctOp::Extrude
+            ],
             "two wires + soup profile + extrude"
         );
 
@@ -4575,7 +4825,10 @@ mod tests {
             &OcctArg::Text("evenodd".to_string())
         );
         assert!(
-            profile.keywords.iter().any(|keyword| keyword.name == "outer"),
+            profile
+                .keywords
+                .iter()
+                .any(|keyword| keyword.name == "outer"),
             "wires ride via :outer"
         );
 
@@ -5083,7 +5336,12 @@ mod tests {
         // polyline. A faceted polyline spine rendered the wrong pitch and gaps.
         assert_eq!(
             ops,
-            vec![OcctOp::Path, OcctOp::MakeFace, OcctOp::HelixPath, OcctOp::Sweep]
+            vec![
+                OcctOp::Path,
+                OcctOp::MakeFace,
+                OcctOp::HelixPath,
+                OcctOp::Sweep
+            ]
         );
     }
 
@@ -5180,7 +5438,11 @@ mod tests {
         // via `From`; layer/fix now live directly on the boundary `AppError`.
         assert_eq!(err.operation.as_deref(), Some("fillet"));
         assert_eq!(err.code, crate::contracts::AppErrorCode::Render);
-        assert!(err.to_string().contains("direct OCCT"), "backend named: {}", err);
+        assert!(
+            err.to_string().contains("direct OCCT"),
+            "backend named: {}",
+            err
+        );
         assert_eq!(err.layer, Some(ErrorLayer::Backend));
         assert!(err.fix.expect("fix present").hint.is_some());
     }
@@ -5204,5 +5466,3 @@ mod tests {
         );
     }
 }
-
-

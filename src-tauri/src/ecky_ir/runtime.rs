@@ -7,12 +7,14 @@ use csgrs::traits::CSG;
 use sha2::{Digest, Sha256};
 
 use crate::models::{
-    AppError, AppResult, ArtifactBundle, DesignParams, DocumentMetadata, EngineKind, FeatureGraph,
-    FeatureNode, FeatureOutputRef, GeometryBackend, ManifestBounds, ModelManifest, ModelSourceKind,
+    AppError, AppResult, ArtifactBundle, DesignParams, DocumentMetadata, EngineKind,
+    ExportArtifact, FeatureGraph, FeatureNode, FeatureOutputRef, GeometryBackend,
+    GeometryProvenance, GeometryRepresentation, ManifestBounds, ModelManifest, ModelSourceKind,
     ParamValue, ParameterGroup, ParsedParamsResult, PartBinding, PathResolver, SelectionTarget,
     SourceLanguage, SourceRef, ViewerAsset, ViewerAssetFormat, MODEL_RUNTIME_SCHEMA_VERSION,
 };
 
+use super::eval_scalar::eval_stringish;
 use super::mesh_ops::{eval_geometry_expr, sanitize_mesh_for_export};
 use super::model::{
     build_param_env, core_program_param_defaults, materialize_selector_nodes, parse_model,
@@ -162,6 +164,28 @@ pub(super) fn load_cached_bundle(bundle_dir: &Path) -> AppResult<Option<Artifact
         return Ok(None);
     }
     Ok(Some(bundle))
+}
+
+fn cached_indexed_mesh_assets_are_valid(bundle: &ArtifactBundle) -> bool {
+    bundle.viewer_assets.iter().all(|asset| {
+        crate::ecky_ir::mesh_asset::IndexedMeshAsset::read_cache(
+            crate::ecky_ir::mesh_asset::MeshAssetSource::Generated {
+                provider: "ecky-rust".to_string(),
+                model: None,
+            },
+            &Path::new(&asset.path).with_extension("indexed-mesh.json"),
+        )
+        .is_ok()
+    })
+}
+
+fn indexed_mesh_topology_evidence(
+    topology: &crate::ecky_ir::mesh_asset::IndexedMeshTopology,
+) -> (u64, bool) {
+    (
+        (topology.boundary_edge_count + topology.non_manifold_edge_count) as u64,
+        topology.closed,
+    )
 }
 
 pub fn render_model(
@@ -849,6 +873,7 @@ fn runtime_core_value_kind_tag(kind: CoreValueKind) -> &'static str {
         CoreValueKind::Sketch => "sketch",
         CoreValueKind::Path => "path",
         CoreValueKind::Frame => "frame",
+        CoreValueKind::Mesh => "mesh",
         CoreValueKind::Compound => "compound",
         CoreValueKind::Solid => "solid",
     }
@@ -1032,24 +1057,42 @@ fn render_prepared_parts(
     app: &dyn PathResolver,
     ast_identity: Option<CoreAstIdentity>,
 ) -> AppResult<ArtifactBundle> {
+    let exposes_mesh_literal = parts
+        .iter()
+        .any(|part| ir_expr_contains_mesh_literal(&part.expr));
     let part_ids = parts
         .iter()
         .map(|part| part.part_id.clone())
         .collect::<Vec<_>>();
     let params_json = serde_json::to_string(parameters).unwrap_or_default();
+    let heightfield_digest = heightfield_asset_digest(parts, env)?;
     let mut hasher = Sha256::new();
     hasher.update(source_identity.as_bytes());
     hasher.update(b"|");
     hasher.update(params_json.as_bytes());
+    if let Some(digest) = heightfield_digest.as_deref() {
+        hasher.update(b"|heightfield-assets|");
+        hasher.update(digest.as_bytes());
+    }
     let hash = format!("{:x}", hasher.finalize());
     let mut source_hasher = Sha256::new();
     source_hasher.update(source_identity.as_bytes());
+    if let Some(digest) = heightfield_digest.as_deref() {
+        source_hasher.update(b"|heightfield-assets|");
+        source_hasher.update(digest.as_bytes());
+    }
     let source_digest = format!("sha256:{:x}", source_hasher.finalize());
     let model_id = format!("generated-ir-{}", &hash[..12]);
     let dir = bundle_dir(app, &model_id)?;
 
     if let Some(cached) = load_cached_bundle(&dir)? {
         if cached_bundle_satisfies_manifest_identity(&cached, &source_digest, ast_identity.as_ref())
+            && cached_indexed_mesh_assets_are_valid(&cached)
+            && (!exposes_mesh_literal
+                || cached
+                    .export_artifacts
+                    .iter()
+                    .any(|artifact| artifact.format == "stl"))
         {
             return Ok(cached);
         }
@@ -1067,19 +1110,51 @@ fn render_prepared_parts(
 
     let mut part_bindings = Vec::new();
     let mut viewer_assets = Vec::new();
+    let mut mesh_warnings = Vec::new();
+    let mut source_mesh_digests = Vec::new();
+    let mut boundary_or_non_manifold_edge_count = 0_u64;
+    let mut mesh_literal_topology_closed = true;
     let mut preview_mesh: Option<IrMesh> = None;
 
     for (index, part) in parts.iter().enumerate() {
-        let mesh = sanitize_mesh_for_export(
-            &eval_geometry_expr(&part.expr, env)?.into_mesh("part")?,
-        );
+        let mesh =
+            sanitize_mesh_for_export(&eval_geometry_expr(&part.expr, env)?.into_mesh("part")?);
         let part_path = parts_dir.join(format!("{}-{}.stl", index + 1, part.part_id));
-        fs::write(
-            &part_path,
-            mesh.to_stl_binary(&part.part_id)
-                .map_err(|err| AppError::persistence(format!("Failed to encode STL: {}", err)))?,
-        )
-        .map_err(|err| AppError::persistence(err.to_string()))?;
+        let indexed_asset = crate::ecky_ir::mesh_asset::IndexedMeshAsset::from_ir_mesh(
+            crate::ecky_ir::mesh_asset::MeshAssetSource::Generated {
+                provider: "ecky-rust".to_string(),
+                model: None,
+            },
+            &mesh,
+        )?;
+        indexed_asset.write_cache(&part_path.with_extension("indexed-mesh.json"))?;
+        let stl_bytes = mesh
+            .to_stl_binary(&part.part_id)
+            .map_err(|err| AppError::persistence(format!("Failed to encode STL: {}", err)))?;
+        fs::write(&part_path, &stl_bytes).map_err(|err| AppError::persistence(err.to_string()))?;
+
+        if ir_expr_contains_mesh_literal(&part.expr) {
+            let digest = indexed_asset.content_digest().to_string();
+            let topology = indexed_asset.topology();
+            let (boundary_or_non_manifold, topology_closed) =
+                indexed_mesh_topology_evidence(topology);
+            source_mesh_digests.push(digest.clone());
+            boundary_or_non_manifold_edge_count += boundary_or_non_manifold;
+            mesh_literal_topology_closed &= topology_closed;
+            mesh_warnings.push(format!(
+                "Mesh evidence: part={} digest={} triangles={} boundaryOrNonManifoldEdges={} windingMismatches={} topology={}",
+                part.part_id,
+                digest,
+                mesh.polygons.len(),
+                boundary_or_non_manifold,
+                topology.winding_mismatch_count,
+                if topology_closed {
+                    "closed"
+                } else {
+                    "open-or-non-manifold"
+                }
+            ));
+        }
 
         preview_mesh = Some(match preview_mesh.take() {
             Some(existing) => existing.union(&mesh),
@@ -1099,7 +1174,11 @@ fn render_prepared_parts(
             part_id: part.part_id.clone(),
             freecad_object_name: part.part_id.clone(),
             label: part.label.clone(),
-            kind: "solid".to_string(),
+            kind: if ir_expr_contains_open_mesh_literal(&part.expr) {
+                "mesh".to_string()
+            } else {
+                "solid".to_string()
+            },
             semantic_role: Some("generated".to_string()),
             viewer_asset_path: Some(asset_path),
             viewer_node_ids: vec![part.part_id.clone()],
@@ -1129,7 +1208,14 @@ fn render_prepared_parts(
 
     let selection_targets = Vec::new();
     let feature_graph = runtime_part_feature_graph(parts, &selection_targets);
+    let geometry_provenance = exposes_mesh_literal.then(|| GeometryProvenance {
+        representation: GeometryRepresentation::MeshNative,
+        source_mesh_digests,
+        closed: Some(mesh_literal_topology_closed),
+        boundary_or_non_manifold_edge_count: Some(boundary_or_non_manifold_edge_count),
+    });
     let manifest = ModelManifest {
+        geometry_provenance: geometry_provenance.clone(),
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.clone(),
         source_kind: ModelSourceKind::Generated,
@@ -1144,7 +1230,7 @@ fn render_prepared_parts(
             document_label: "Ecky".to_string(),
             source_path: Some(macro_path.to_string_lossy().to_string()),
             object_count: part_bindings.len(),
-            warnings: Vec::new(),
+            warnings: mesh_warnings.clone(),
         },
         parts: part_bindings,
         parameter_groups: vec![ParameterGroup {
@@ -1166,7 +1252,7 @@ fn render_prepared_parts(
         tagged_anchors: std::collections::BTreeMap::new(),
         feature_graph: Some(feature_graph),
         correspondence_graph: None,
-        warnings: Vec::new(),
+        warnings: mesh_warnings,
         enrichment_state: crate::models::ManifestEnrichmentState {
             status: crate::models::EnrichmentStatus::None,
             proposals: Vec::new(),
@@ -1176,7 +1262,19 @@ fn render_prepared_parts(
     let manifest_path = dir.join(MANIFEST_FILE_NAME);
     write_manifest(&manifest_path, &manifest)?;
 
+    let export_artifacts = if exposes_mesh_literal {
+        vec![ExportArtifact {
+            geometry_provenance: geometry_provenance.clone(),
+            label: "STL".to_string(),
+            format: "stl".to_string(),
+            path: preview_path.to_string_lossy().to_string(),
+            role: "primary".to_string(),
+        }]
+    } else {
+        Vec::new()
+    };
     let bundle = ArtifactBundle {
+        geometry_provenance,
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id,
         source_kind: ModelSourceKind::Generated,
@@ -1194,10 +1292,99 @@ fn render_prepared_parts(
         face_targets: Vec::new(),
         callout_anchors: Vec::new(),
         measurement_guides: Vec::new(),
-        export_artifacts: Vec::new(),
+        export_artifacts,
     };
     write_bundle(&dir.join(BUNDLE_FILE_NAME), &bundle)?;
     Ok(bundle)
+}
+
+fn ir_expr_contains_mesh_literal(expr: &IrExpr) -> bool {
+    match expr {
+        IrExpr::List(items) => {
+            items
+                .first()
+                .and_then(IrExpr::as_symbol)
+                .is_some_and(|name| matches!(name, "mesh" | "polyhedron" | "heightfield"))
+                || items.iter().any(ir_expr_contains_mesh_literal)
+        }
+        IrExpr::Number(_)
+        | IrExpr::Boolean(_)
+        | IrExpr::String(_)
+        | IrExpr::Symbol(_)
+        | IrExpr::Keyword(_)
+        | IrExpr::Selector(_) => false,
+    }
+}
+
+fn ir_expr_contains_open_mesh_literal(expr: &IrExpr) -> bool {
+    match expr {
+        IrExpr::List(items) => {
+            items.first().and_then(IrExpr::as_symbol) == Some("mesh")
+                || items.iter().any(ir_expr_contains_open_mesh_literal)
+        }
+        IrExpr::Number(_)
+        | IrExpr::Boolean(_)
+        | IrExpr::String(_)
+        | IrExpr::Symbol(_)
+        | IrExpr::Keyword(_)
+        | IrExpr::Selector(_) => false,
+    }
+}
+
+fn heightfield_asset_digest(
+    parts: &[RuntimePart],
+    env: &BTreeMap<String, ParamValue>,
+) -> AppResult<Option<String>> {
+    let mut paths = Vec::new();
+    for part in parts {
+        collect_heightfield_asset_paths(&part.expr, env, &mut paths)?;
+    }
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    let mut hasher = Sha256::new();
+    for path in paths {
+        if path.trim().is_empty() {
+            return Err(AppError::with_details(
+                crate::models::AppErrorCode::Validation,
+                "Invalid `heightfield` geometry.",
+                "image path is empty; image selection remains pending",
+            )
+            .with_operation("heightfield"));
+        }
+        let bytes = fs::read(&path).map_err(|error| {
+            AppError::with_details(
+                crate::models::AppErrorCode::Validation,
+                "Invalid `heightfield` geometry.",
+                format!("failed to read '{path}': {error}"),
+            )
+            .with_operation("heightfield")
+        })?;
+        hasher.update(path.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(&bytes);
+    }
+    Ok(Some(format!("sha256:{:x}", hasher.finalize())))
+}
+
+fn collect_heightfield_asset_paths(
+    expr: &IrExpr,
+    env: &BTreeMap<String, ParamValue>,
+    paths: &mut Vec<String>,
+) -> AppResult<()> {
+    let IrExpr::List(items) = expr else {
+        return Ok(());
+    };
+    if items.first().and_then(IrExpr::as_symbol) == Some("heightfield") {
+        let image = items
+            .get(1)
+            .ok_or_else(|| validation("`heightfield` expects an image path."))?;
+        paths.push(eval_stringish(image, env)?);
+    }
+    for item in items {
+        collect_heightfield_asset_paths(item, env, paths)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn render_model_from_model(
@@ -1648,6 +1835,57 @@ mod tests {
         assert!(manifest.source_digest.is_some());
         assert!(manifest.core_digest.is_some());
         assert_eq!(manifest.ast_schema_version, Some(1));
+        let indexed_path =
+            Path::new(&bundle.viewer_assets[0].path).with_extension("indexed-mesh.json");
+        let indexed = crate::ecky_ir::mesh_asset::IndexedMeshAsset::read_cache(
+            crate::ecky_ir::mesh_asset::MeshAssetSource::Generated {
+                provider: "ecky-rust".to_string(),
+                model: None,
+            },
+            &indexed_path,
+        )
+        .expect("indexed mesh handoff cache");
+        assert!(indexed.topology().closed);
+    }
+
+    #[test]
+    fn render_model_rebuilds_tampered_indexed_mesh_cache() {
+        let root = render_root();
+        std::fs::create_dir_all(&root).expect("root");
+        let resolver = TestResolver { root: root.clone() };
+        let source = "(model (part body (box 2 2 2)))";
+        let first = render_model(source, &DesignParams::new(), &resolver).expect("first render");
+        let indexed_path =
+            Path::new(&first.viewer_assets[0].path).with_extension("indexed-mesh.json");
+        std::fs::write(&indexed_path, b"not indexed mesh json").expect("tamper sidecar");
+
+        let second = render_model(source, &DesignParams::new(), &resolver)
+            .expect("invalid indexed sidecar must rebuild, not be returned from cache");
+        let restored_path =
+            Path::new(&second.viewer_assets[0].path).with_extension("indexed-mesh.json");
+        crate::ecky_ir::mesh_asset::IndexedMeshAsset::read_cache(
+            crate::ecky_ir::mesh_asset::MeshAssetSource::Generated {
+                provider: "ecky-rust".to_string(),
+                model: None,
+            },
+            &restored_path,
+        )
+        .expect("rebuilt indexed sidecar validates");
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn indexed_mesh_provenance_keeps_winding_mismatches_open() {
+        let topology = crate::ecky_ir::mesh_asset::IndexedMeshTopology {
+            boundary_edge_count: 0,
+            non_manifold_edge_count: 0,
+            winding_mismatch_count: 1,
+            component_count: 1,
+            closed: false,
+        };
+
+        assert_eq!(indexed_mesh_topology_evidence(&topology), (0, false));
     }
 
     #[test]

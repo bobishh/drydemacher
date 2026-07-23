@@ -16,6 +16,7 @@
     clippy::type_complexity
 )]
 
+pub mod agent_prompt;
 pub mod bindings;
 pub mod build123d;
 pub mod cad_transpile;
@@ -28,7 +29,6 @@ pub mod db;
 pub mod displacement;
 pub mod ecky_cad_host;
 pub mod ecky_core_ir;
-pub mod agent_prompt;
 pub mod ecky_deterministic;
 pub mod ecky_ir;
 pub mod ecky_ir_patterns;
@@ -36,6 +36,7 @@ pub mod ecky_language_surface;
 pub mod ecky_scheme;
 pub mod freecad;
 pub mod freecad_library;
+mod image_sampling;
 pub mod legacy_python_to_ecky_ir;
 pub mod lithophane;
 pub mod llm;
@@ -44,6 +45,7 @@ pub mod mcp;
 pub mod model_runtime;
 pub mod models;
 pub mod project_mirror;
+pub mod raster_trace;
 pub mod runtime_capabilities;
 pub mod services;
 pub mod sketch_brep_validation;
@@ -67,10 +69,7 @@ use tokio::time::sleep;
 use uuid::Uuid;
 
 use crate::context::*;
-use crate::models::{
-    AppState, Attachment, DesignOutput, GenieTraits, LastDesignSnapshot, PathResolver,
-    ThreadReference,
-};
+use crate::models::{AppState, Attachment, GenieTraits, PathResolver, ThreadReference};
 
 use rand::Rng;
 
@@ -606,25 +605,6 @@ pub fn run() {
                 }
             }
 
-            let mut last_snapshot = None;
-            let last_path = config_dir.join("last_design.json");
-            if last_path.exists() {
-                if let Ok(data) = fs::read_to_string(&last_path) {
-                    if let Ok(session) = serde_json::from_str::<LastDesignSnapshot>(&data) {
-                        last_snapshot = Some(session);
-                    } else if let Ok(design) = serde_json::from_str::<DesignOutput>(&data) {
-                        last_snapshot = Some(LastDesignSnapshot {
-                            design: Some(design),
-                            thread_id: None,
-                            message_id: None,
-                            artifact_bundle: None,
-                            model_manifest: None,
-                            selected_part_id: None,
-                        });
-                    }
-                }
-            }
-
             let db_path = config_dir.join("history.sqlite");
             let (conn, startup_warnings) = init_history_db_with_recovery(&config_dir)
                 .map_err(|err| tauri::Error::Io(std::io::Error::other(err)))?;
@@ -644,6 +624,7 @@ pub fn run() {
                 }
             }
             let _ = migrate_legacy_references(&conn);
+            let last_snapshot = crate::services::session::read_last_snapshot(app.handle(), &conn);
 
             let mcp_port = config.mcp.port;
             let state =

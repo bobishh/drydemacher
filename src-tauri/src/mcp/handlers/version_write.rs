@@ -1,14 +1,14 @@
 use super::{
-    artifact_bundle_digest, clear_session_render_preview_durable, now_secs, persist_agent_session,
-    push_mcp_profile, resolve_session_render_preview_for_request, resolve_turn_working_target,
-    try_record_agent_error, AgentContext,
+    artifact_bundle_digest, clear_session_thread_render_preview_durable, now_secs,
+    persist_agent_session, push_mcp_profile, resolve_session_render_preview_for_request,
+    resolve_turn_working_target, try_record_agent_error, AgentContext,
 };
 use crate::db;
 use crate::mcp::contracts::{
     ThreadForkRequest, ThreadForkResponse, VersionRestoreRequest, VersionRestoreResponse,
     VersionSaveRequest, VersionSaveResponse,
 };
-use crate::models::{AppError, AppResult, AppState, PathResolver};
+use crate::models::{AppError, AppErrorCode, AppResult, AppState, PathResolver, RenderSnapshot};
 use crate::services::agent_versions::{
     save_or_update_agent_version_for_session, SaveOrUpdateAgentVersionRequest,
 };
@@ -57,6 +57,8 @@ pub async fn handle_commit_preview_version(
         tracked_thread_id = Some(preview.thread_id.clone());
         tracked_message_id = Some(preview.preview_id.clone());
         tracked_model_id = Some(preview.artifact_bundle.model_id.clone());
+
+        require_green_verification_for_preview(state, &preview).await?;
 
         {
             let conn = state.db.lock().await;
@@ -118,7 +120,12 @@ pub async fn handle_commit_preview_version(
         );
 
         let clear_started = Instant::now();
-        clear_session_render_preview_durable(state, &ctx.session_id).await?;
+        clear_session_thread_render_preview_durable(
+            state,
+            &ctx.session_id,
+            &preview.thread_id,
+        )
+        .await?;
         push_mcp_profile(
             state,
             ctx,
@@ -169,6 +176,59 @@ pub async fn handle_commit_preview_version(
     }
 
     result
+}
+
+async fn require_green_verification_for_preview(
+    state: &AppState,
+    preview: &super::SessionRenderPreview,
+) -> AppResult<()> {
+    let snapshot = preview_render_snapshot(preview)?;
+    let record = {
+        let conn = state.db.lock().await;
+        db::get_verification_record(&conn, &snapshot.snapshot_id)
+            .map_err(|error| AppError::persistence(error.to_string()))?
+    };
+    let is_current_green_record = record.as_ref().is_some_and(|record| {
+        record.passed
+            && record.snapshot_id == snapshot.snapshot_id
+            && record.artifact_digest == snapshot.artifact_digest
+    });
+    if is_current_green_record {
+        return Ok(());
+    }
+
+    let verification_evidence = record.as_ref().map_or_else(
+        || "verificationRecord=missing".to_string(),
+        |record| {
+            format!(
+                "verificationSnapshotId={} verificationArtifactDigest={} verificationPassed={}",
+                record.snapshot_id, record.artifact_digest, record.passed
+            )
+        },
+    );
+    Err(AppError::with_details(
+        AppErrorCode::Conflict,
+        "Preview requires an explicit green verification before commit.",
+        format!(
+            "previewId={} snapshotId={} artifactDigest={} {}",
+            preview.preview_id,
+            snapshot.snapshot_id,
+            snapshot.artifact_digest,
+            verification_evidence
+        ),
+    )
+    .with_operation("commit_preview_version"))
+}
+
+fn preview_render_snapshot(preview: &super::SessionRenderPreview) -> AppResult<RenderSnapshot> {
+    crate::services::render_snapshot::build_render_snapshot(
+        crate::services::render_snapshot::RenderSnapshotInput {
+            design: &preview.design_output,
+            effective_params: &preview.design_output.initial_params,
+            artifact_bundle: &preview.artifact_bundle,
+            model_manifest: &preview.model_manifest,
+        },
+    )
 }
 
 pub async fn handle_saved_target_version(
