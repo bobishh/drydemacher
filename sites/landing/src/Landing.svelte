@@ -1,171 +1,145 @@
 <script lang="ts">
   import EckyMascot from './EckyMascot.svelte';
+  import CaseWorkbench from './showcase/CaseWorkbench.svelte';
 
   const repoUrl = 'https://github.com/bobishh/ecky';
-  const releasesUrl = 'https://github.com/bobishh/ecky/releases';
   const docsUrl = '/docs/';
 
-  const layers = [
+  const facts = [
     {
-      tag: 'SURFACE',
-      title: 'You write Scheme',
-      body: 'An .ecky file is parenthesized Scheme: (model (part ...)). Friendly to read and write — and it is not the thing that gets built. It is a skin over the layer below.',
+      title: '54 Core IR operations',
+      body: '50 run directly on native OCCT. Text and SVG preprocess, import-STL uses interop, and XOR is rejected by native normalization.',
     },
     {
-      tag: 'CORE IR',
-      title: 'It lowers to a finite IR',
-      body: 'A small, fixed set of core operations: primitives, booleans, selectors, placements, repeats. The kernel never sees arbitrary Scheme, only this closed vocabulary.',
+      title: '3 geometry backends',
+      body: 'Native OCCT is primary. build123d and FreeCAD remain interop backends for export, import, and parity checks.',
     },
     {
-      tag: 'BACKEND',
-      title: 'It renders on a kernel',
-      body: 'Native OCCT by default — exact B-rep, selectable faces and edges. build123d and FreeCAD are follower backends for cross-check and import.',
+      title: '2 authoring paths',
+      body: 'API mode calls a configured LLM provider. MCP mode gives an external agent typed modeling tools.',
+    },
+    {
+      title: '3 provider adapters',
+      body: 'Gemini, OpenAI-compatible HTTP APIs, and local Ollama. Model behavior still varies by endpoint and model.',
+    },
+    {
+      title: '4 MCP gates',
+      body: 'Inspect, validate, preview, commit. A saved agent-authored version must come from a green verified preview.',
+    },
+    {
+      title: 'Local, inspectable state',
+      body: 'SQLite stores saved versions. Project mirrors expose .ecky source as ordinary files without making the folder a second database.',
     },
   ];
 
-  const features = [
+  const history = [
     {
-      title: 'Version history',
-      body: 'Every iteration is persisted in SQLite. Scroll back through the model, fork a design into a new thread.',
+      date: 'March 2026',
+      title: 'FreeCAD Python macros',
+      body: 'First repository snapshot: an LLM generated Python, then headless FreeCAD executed it.',
     },
     {
-      title: 'Eyes on the result',
-      body: 'Viewport screenshots are fed back to the LLM between iterations, so it can correct itself from what it sees.',
+      date: 'March 2026',
+      title: 'Ecky IR',
+      body: 'Arbitrary generated scripts gave way to .ecky source and a finite modeling vocabulary.',
     },
     {
-      title: 'Edit the IR by hand',
-      body: 'The generated IR is readable text. Tweak a dimension, add a fillet, commit it. No opaque script to reverse-engineer.',
+      date: 'April 2026',
+      title: 'Requirements became code',
+      body: 'Verify clauses added machine-checkable expectations alongside geometry.',
     },
     {
-      title: 'Bring your own model',
-      body: 'Gemini, any OpenAI-compatible endpoint, or local Ollama. Pick the provider and model in settings.',
+      date: 'May 2026',
+      title: 'Native rendering expanded',
+      body: 'OCCT moved from implementation detail toward the primary kernel; the field guide documented the language.',
     },
     {
-      title: 'Agent-ready (MCP)',
-      body: 'A built-in MCP server lets an external coding agent author models with its own tools: inspect, validate, preview, commit.',
+      date: 'June 2026',
+      title: 'Agent loop gained boundaries',
+      body: 'Typed MCP tools, structured authoring errors, backend parity work, and a verify-before-commit rule narrowed failure modes.',
     },
     {
-      title: 'Verify by invariant',
-      body: 'State a requirement in a verify clause and Ecky checks it red-to-green, independent of whatever geometry renders.',
+      date: 'July 2026',
+      title: 'Public v0.0.1 surface',
+      body: 'Static landing, served field guide, native capability table, and real exported models. Still pre-release.',
     },
   ];
 </script>
 
 <nav class="nav">
-  <a class="brand" href="/">
-    <span class="brand-mark">E</span>
-    <span class="brand-name">Ecky&nbsp;CAD</span>
-  </a>
-  <div class="nav-links">
-    <a href={docsUrl}>Docs</a>
-    <a href={repoUrl} target="_blank" rel="noreferrer">GitHub ↗</a>
-    <a class="nav-cta" href={releasesUrl} target="_blank" rel="noreferrer">Download</a>
+  <div class="nav-inner">
+    <a class="brand" href="/">
+      <span class="brand-mark">E</span>
+      <span class="brand-name">Ecky&nbsp;CAD</span>
+    </a>
+    <div class="nav-links">
+      <a href={docsUrl}>Docs</a>
+      <a href={repoUrl} target="_blank" rel="noreferrer">GitHub ↗</a>
+    </div>
   </div>
 </nav>
 
-<header class="hero">
-  <div class="hero-mascot">
-    <EckyMascot size={220} />
+<header class="hero" id="case-study">
+  <div class="hero-intro">
+    <div class="hero-copy">
+      <span class="kicker">PROMPT-DRIVEN CAD · V0.0.1 PRE-RELEASE</span>
+      <h1 class="hero-title">Write Lisp you don't understand.</h1>
+      <p class="hero-lede">Gaslight an LLM until it produces something useful. Burn an irresponsible number of tokens making your dog a funny plastic hat. AI companies love this workflow.</p>
+      <p class="hero-summary">
+        v0.0.1 pre-release. Describe a part. Argue through the iterations. Keep inspectable <code>.ecky</code> source, native OCCT geometry, and every saved version.
+      </p>
+      <div class="hero-cta">
+        <a class="btn btn-primary" href={repoUrl} target="_blank" rel="noreferrer">Source ↗</a>
+        <a class="btn" href={docsUrl}>Docs</a>
+      </div>
+    </div>
+    <div class="hero-mascot" aria-hidden="true">
+      <EckyMascot size={190} />
+    </div>
   </div>
-  <p class="stamp">v0.0.1 · pre-release</p>
-  <h1 class="hero-title">Prompt-driven CAD</h1>
-  <p class="hero-lede">
-    Describe a part in words. An LLM writes it in a small modeling language.
-    It renders as an exact B-rep solid you can read, edit, and version.
-  </p>
-  <div class="hero-cta">
-    <a class="btn btn-primary" href={releasesUrl} target="_blank" rel="noreferrer">Download ↗</a>
-    <a class="btn" href={repoUrl} target="_blank" rel="noreferrer">Source ↗</a>
-    <a class="btn" href={docsUrl}>Docs</a>
-  </div>
+  <CaseWorkbench />
 </header>
 
 <section class="section">
   <div class="section-head">
-    <span class="kicker">HOW IT WORKS</span>
-    <h2>Three layers, on purpose</h2>
-    <p class="section-sub">The LLM never emits a mesh or a script. It writes <code>.ecky</code>, which compiles through three layers.</p>
+    <span class="kicker">CURRENT SOURCE TREE</span>
+    <h2>Measured scope</h2>
+    <p class="section-sub">Counts come from the v0.0.1 capability table and configured adapters. They describe implemented paths, not model quality.</p>
   </div>
-  <div class="layer-grid">
-    {#each layers as layer}
-      <article class="layer-card">
-        <span class="layer-tag">{layer.tag}</span>
-        <h3>{layer.title}</h3>
-        <p>{layer.body}</p>
+  <div class="feature-grid">
+    {#each facts as fact}
+      <article class="feature-card">
+        <h3>{fact.title}</h3>
+        <p>{fact.body}</p>
       </article>
     {/each}
   </div>
-</section>
-
-<section class="section section-code">
-  <div class="section-head">
-    <span class="kicker">WHAT IT LOOKS LIKE</span>
-    <h2>A parametric enclosure</h2>
-    <p class="section-sub">Named dimensions, a hollow body with a vent bored through it, a filleted top edge, and a <code>verify</code> clause that pins the lid clearance.</p>
-  </div>
-  <pre class="code"><code>{`(model
-  (params
-    (number body_w 80 :label "Body width")
-    (number body_d 50 :label "Body depth")
-    (number body_h 20 :label "Body height")
-    (number wall    2 :label "Wall"))
-
-  (verify
-    (tag lid_clearance body.lid_gap)
-    (metric gap (clearance min-distance body lid))
-    (expect gap (>= 0.3)))
-
-  (part body
-    (build
-      (shape hollow (shell wall :faces "top" (box body_w body_d body_h)))
-      (shape vent   (translate 0 0 -0.5 (cylinder 3 (+ body_h 1))))
-      (result
-        (fillet 1.5 :edges "top"
-          (difference hollow vent)))))`}</code></pre>
 </section>
 
 <section class="section">
   <div class="section-head">
-    <span class="kicker">FEATURES</span>
-    <h2>What ships today</h2>
+    <span class="kicker">REPOSITORY HISTORY</span>
+    <h2>From Python macros to a constrained CAD language</h2>
+    <p class="section-sub">The architecture emerged through working prototypes. Dates and transitions below follow repository history; no clean origin myth.</p>
   </div>
   <div class="feature-grid">
-    {#each features as feature}
+    {#each history as item}
       <article class="feature-card">
-        <h3>{feature.title}</h3>
-        <p>{feature.body}</p>
+        <span class="status">{item.date}</span>
+        <h3>{item.title}</h3>
+        <p>{item.body}</p>
       </article>
     {/each}
-  </div>
-</section>
-
-<section class="section section-gallery">
-  <div class="section-head">
-    <span class="kicker">REAL MODELS</span>
-    <h2>Built with Ecky</h2>
-    <p class="section-sub">Coming soon: a kid's rubber stamp — a flexible TPU press face on a rigid PLA handle, designed end-to-end in .ecky.</p>
-  </div>
-  <div class="gallery">
-    <div class="gallery-slot gallery-placeholder">
-      <span>stamp · TPU + PLA</span>
-    </div>
-    <div class="gallery-slot gallery-placeholder">
-      <span>slot reserved</span>
-    </div>
-    <div class="gallery-slot gallery-placeholder">
-      <span>slot reserved</span>
-    </div>
   </div>
 </section>
 
 <section class="cta-section">
   <div class="cta-card">
-    <h2>Start building</h2>
-    <p>Ecky is early and pre-release. Expect rough edges and breaking changes.</p>
+    <h2>Source first. Release later.</h2>
+    <p>v0.0.1 can render and version real parts, but no packaged app release exists yet. Inspect the source and verify dimensions before manufacturing.</p>
     <div class="cta-row">
-      <a class="btn btn-primary" href={releasesUrl} target="_blank" rel="noreferrer">Releases ↗</a>
-      <a class="btn" href={repoUrl} target="_blank" rel="noreferrer">GitHub ↗</a>
-      <a class="btn" href={docsUrl}>Field guide</a>
+      <a class="btn btn-primary" href={repoUrl} target="_blank" rel="noreferrer">GitHub ↗</a>
+      <a class="btn" href={docsUrl}>Docs</a>
     </div>
   </div>
 </section>
@@ -173,7 +147,7 @@
 <footer class="footer">
   <div class="footer-inner">
     <span>Ecky CAD</span>
-    <span class="footer-dim">Prompt-driven CAD · exact B-rep solids</span>
+    <span class="footer-dim">v0.0.1 · 54 operations · 3 backends</span>
     <a href={repoUrl} target="_blank" rel="noreferrer">github.com/bobishh/ecky</a>
   </div>
 </footer>

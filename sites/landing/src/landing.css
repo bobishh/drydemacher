@@ -12,8 +12,8 @@
   --bg-300: #2a2a4a;
   --bg-400: #34345e;
   --text: #e0e0e0;
-  --text-dim: #888;
-  --primary: #4a8c5c;
+  --text-dim: #a3a3ad;
+  --primary: #72b982;
   --primary-dim: #2c5f3c;
   --secondary: #c8a620;
   --secondary-dim: #8a7215;
@@ -34,12 +34,21 @@ html {
   scroll-behavior: smooth;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
 body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-mono);
   font-size: 16px;
-  line-height: 1.6;
+  line-height: 1.7;
   background-image:
     linear-gradient(rgba(74, 140, 92, 0.04) 1px, transparent 1px),
     linear-gradient(90deg, rgba(74, 140, 92, 0.04) 1px, transparent 1px);
@@ -64,13 +73,20 @@ code {
   position: sticky;
   top: 0;
   z-index: 50;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 1rem 5%;
   background: rgba(26, 26, 46, 0.85);
   backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--border);
+}
+
+.nav-inner {
+  width: 100%;
+  max-width: 1240px;
+  margin: 0 auto;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem clamp(1.1rem, 5vw, 4rem);
 }
 
 .brand {
@@ -102,6 +118,7 @@ code {
   align-items: center;
   gap: 1.4rem;
   font-size: 0.85rem;
+  white-space: nowrap;
 }
 
 .nav-links a {
@@ -124,21 +141,27 @@ code {
 }
 
 /* ---------- Layout ---------- */
+/* Page shell container matches the docs site (1240px). TEXT blocks below
+   are capped at a readable measure (~720px) so paragraphs don't stretch,
+   but cards/grids/viewer fill the container responsively. Mobile: fluid. */
 .section,
 .hero,
 .cta-section {
-  width: 90%;
-  max-width: 1080px;
+  width: 100%;
+  max-width: 1240px;
   margin: 0 auto;
+  padding-left: clamp(1.1rem, 5vw, 4rem);
+  padding-right: clamp(1.1rem, 5vw, 4rem);
 }
 
 .section {
-  padding: 5rem 0;
+  padding-top: 4rem;
+  padding-bottom: 4rem;
   border-top: 1px solid var(--border);
 }
 
 .section-head {
-  margin-bottom: 3rem;
+  margin-bottom: 2.4rem;
 }
 
 .kicker {
@@ -160,19 +183,36 @@ code {
 
 .section-sub {
   color: var(--text-dim);
-  max-width: 640px;
+  max-width: 680px;
+  line-height: 1.7;
 }
 
 /* ---------- Hero ---------- */
 .hero {
-  padding: 4rem 0 5rem;
-  text-align: center;
+  padding-top: clamp(2.4rem, 6vw, 4.6rem);
+  padding-bottom: 4.5rem;
+  overflow: hidden;
+}
+
+.hero-intro {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 230px;
+  align-items: center;
+  gap: clamp(2rem, 7vw, 6rem);
+  margin-bottom: clamp(2.6rem, 6vw, 4.8rem);
+  position: relative;
+  overflow: hidden;
+}
+
+.hero-copy {
+  position: relative;
+  z-index: 1;
+  max-width: 760px;
 }
 
 .hero-mascot {
   display: flex;
   justify-content: center;
-  margin-bottom: 1.5rem;
   filter: drop-shadow(0 0 40px rgba(74, 140, 92, 0.25));
 }
 
@@ -188,11 +228,11 @@ code {
 
 .hero-title {
   font-family: var(--font-display);
-  font-size: clamp(2.6rem, 8vw, 4.6rem);
+  font-size: clamp(2.7rem, 6.5vw, 5rem);
   font-weight: 700;
   letter-spacing: -0.04em;
-  line-height: 0.95;
-  margin-bottom: 1.2rem;
+  line-height: 0.98;
+  margin-bottom: 1.35rem;
   background: linear-gradient(180deg, var(--text) 0%, #9a9a9a 100%);
   -webkit-background-clip: text;
   background-clip: text;
@@ -200,17 +240,25 @@ code {
 }
 
 .hero-lede {
-  max-width: 620px;
-  margin: 0 auto 2.4rem;
-  font-size: 1.1rem;
+  max-width: 720px;
+  margin-bottom: 1rem;
+  font-size: clamp(1.04rem, 2vw, 1.2rem);
+  color: var(--text);
+  line-height: 1.65;
+}
+
+.hero-summary {
+  max-width: 680px;
+  margin-bottom: 1.8rem;
   color: var(--text-dim);
-  line-height: 1.7;
+  font-size: 0.96rem;
+  line-height: 1.65;
 }
 
 .hero-cta {
   display: flex;
   gap: 0.8rem;
-  justify-content: center;
+  justify-content: flex-start;
   flex-wrap: wrap;
 }
 
@@ -246,8 +294,12 @@ code {
 /* ---------- Layer cards ---------- */
 .layer-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 1.2rem;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+}
+
+@media (max-width: 860px) {
+  .layer-grid { grid-template-columns: 1fr; }
 }
 
 .layer-card {
@@ -279,11 +331,13 @@ code {
 
 .layer-card p {
   color: var(--text-dim);
-  font-size: 0.92rem;
+  font-size: 0.9rem;
+  line-height: 1.6;
 }
 
 /* ---------- Code block ---------- */
 .section-code .code {
+  max-width: 760px;
   background: var(--bg-200);
   border: 1px solid var(--border);
   padding: 1.4rem 1.6rem;
@@ -297,8 +351,12 @@ code {
 /* ---------- Feature grid ---------- */
 .feature-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 1.2rem;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1rem;
+}
+
+@media (max-width: 560px) {
+  .feature-grid { grid-template-columns: 1fr; }
 }
 
 .feature-card {
@@ -316,52 +374,41 @@ code {
 
 .feature-card p {
   color: var(--text-dim);
-  font-size: 0.9rem;
+  font-size: 0.88rem;
+  line-height: 1.6;
 }
 
-/* ---------- Gallery (screenshot slots) ---------- */
-.gallery {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 1.2rem;
-}
-
-.gallery-slot {
-  aspect-ratio: 4 / 3;
-  border: 1px solid var(--border);
-  background: var(--bg-100);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-}
-
-.gallery-slot img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-
-.gallery-placeholder {
-  position: relative;
+.status {
+  display: inline-block;
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0.1rem 0.45rem;
+  border: 1px solid var(--border-bright);
   color: var(--text-dim);
-  font-size: 0.8rem;
-  letter-spacing: 0.08em;
-  background-image:
-    linear-gradient(rgba(74, 140, 92, 0.05) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(74, 140, 92, 0.05) 1px, transparent 1px);
-  background-size: 16px 16px;
+  margin-bottom: 0.7rem;
 }
 
-.gallery-placeholder span {
-  border: 1px dashed var(--border-bright);
-  padding: 0.4rem 0.8rem;
+.status-now {
+  border-color: var(--primary-dim);
+  color: var(--primary);
+}
+
+.status-next {
+  border-color: var(--secondary-dim);
+  color: var(--secondary);
+}
+
+/* ---------- Showcase (live STL viewer) ---------- */
+.showcase {
+  display: flex;
+  justify-content: center;
 }
 
 /* ---------- CTA ---------- */
 .cta-section {
-  padding: 5rem 0;
+  padding-top: 4rem;
+  padding-bottom: 4rem;
 }
 
 .cta-card {
@@ -384,6 +431,38 @@ code {
   margin-bottom: 1.8rem;
 }
 
+.manifesto {
+  text-align: center;
+  padding: 5rem 2rem 4rem;
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.manifesto-claim {
+  font-family: var(--font-display);
+  font-size: clamp(1.3rem, 3.5vw, 1.9rem);
+  line-height: 1.4;
+  color: var(--accent-bright, #4a8c5c);
+  font-style: italic;
+  margin-bottom: 1.8rem;
+  text-wrap: balance;
+}
+
+.manifesto-body {
+  font-size: clamp(1rem, 2.2vw, 1.18rem);
+  line-height: 1.65;
+  color: var(--text-dim);
+  margin-bottom: 1.8rem;
+  text-wrap: pretty;
+}
+
+.manifesto-punch {
+  font-family: var(--font-display);
+  font-size: clamp(1.1rem, 2.5vw, 1.4rem);
+  color: var(--text-bright, #dce8db);
+  letter-spacing: 0.01em;
+}
+
 .cta-row {
   display: flex;
   gap: 0.8rem;
@@ -394,18 +473,18 @@ code {
 /* ---------- Footer ---------- */
 .footer {
   border-top: 1px solid var(--border);
-  padding: 2rem 5%;
 }
 
 .footer-inner {
-  width: 90%;
-  max-width: 1080px;
+  width: 100%;
+  max-width: 1240px;
   margin: 0 auto;
   display: flex;
   justify-content: space-between;
   align-items: center;
   flex-wrap: wrap;
   gap: 0.6rem;
+  padding: 2rem clamp(1.1rem, 5vw, 4rem);
   font-size: 0.78rem;
   color: var(--text-dim);
 }
@@ -420,8 +499,36 @@ code {
 
 /* ---------- Responsive ---------- */
 @media (max-width: 640px) {
+  .nav-inner {
+    gap: 0.7rem;
+    padding-top: 0.72rem;
+    padding-bottom: 0.72rem;
+  }
   .nav-links {
-    gap: 0.9rem;
+    gap: 0.72rem;
+    font-size: 0.78rem;
+  }
+  .hero {
+    padding-top: 2.7rem;
+  }
+  .hero-intro {
+    display: block;
+    margin-bottom: 2.4rem;
+  }
+  .hero-mascot {
+    position: absolute;
+    top: -24px;
+    right: -54px;
+    opacity: 0.14;
+    pointer-events: none;
+  }
+  .hero-title {
+    max-width: 330px;
+    font-size: clamp(2.35rem, 12vw, 3.25rem);
+  }
+  .hero-lede,
+  .hero-summary {
+    max-width: 330px;
   }
   .hero-cta,
   .cta-row {

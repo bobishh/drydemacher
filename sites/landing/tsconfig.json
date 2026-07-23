@@ -10,7 +10,13 @@
     "skipLibCheck": true,
     "strict": true,
     "lib": ["ESNext", "DOM", "DOM.Iterable"],
-    "types": ["svelte"]
+    "types": ["svelte"],
+    "baseUrl": ".",
+    "paths": {
+      "@genome/*": [
+        "../../src/lib/genie/*"
+      ]
+    }
   },
   "include": ["src", "vite.config.ts"]
 }

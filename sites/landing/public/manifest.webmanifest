@@ -1,0 +1,12 @@
+{
+  "name": "Ecky CAD",
+  "short_name": "Ecky",
+  "description": "Prompt-driven CAD with inspectable source and native OCCT geometry.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1a1a2e",
+  "theme_color": "#1a1a2e",
+  "icons": [
+    { "src": "/apple-touch-icon.png", "sizes": "180x180", "type": "image/png" }
+  ]
+}
