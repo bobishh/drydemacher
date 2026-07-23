@@ -29,20 +29,19 @@ emits **three artifacts** from it:
 
 The API agent has no tools and no incremental guides. So its system prompt must
 be **complete** (every grammar rule, op, and common pitfall it needs to author
-correctly is in the prompt) **and compact** (it has a context budget). That is a
-distillation, not a copy of the book: strip images, drop narrative warmth, keep
-code + rules + a compact op table, and teach self-correction from compiler
-diagnostics.
+correctly is in the prompt) **and compact** (it has a context budget). Canonical
+Markdown therefore contains an explicit agent-reference projection beside the
+human lessons. Human renderers omit it; API and MCP consume it verbatim, then
+append the generated operation catalogue.
 
 ## Scope
 
 - Designate `public/docs/ecky-ir.md` + the auto `surface-reference` as the single
   source for language content.
-- Add a generator (extend `build:book`) that emits, from that source:
+- Add one `generate:docs` pipeline that emits, from that source:
   - the book (unchanged), and
-  - an **API system prompt** artifact (compressed: images stripped, prose
-    distilled, op catalogue injected from `surface-reference`, plus the
-    API-mode operating contract).
+  - **API system prompt** artifacts from the marked agent projection, with the
+    generated `surface-reference` catalogue and API-mode operating contract.
 - Route the MCP `technical-system-prompt` / language guides and the API-mode
   prompt through **one builder** so the agent-facing content never forks.
 - Add a **drift check**: the op set named in the generated prompt equals the

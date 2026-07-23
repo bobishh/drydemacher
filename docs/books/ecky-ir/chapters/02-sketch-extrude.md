@@ -1,6 +1,6 @@
 ## Sketch to Solid: Plate from a Profile
 
-Primitives get you a ball or a box, but real parts rarely start as a primitive — they start as a shape someone drew. Most useful CAD begins as a 2D outline that you then give thickness. In Ecky that move is `extrude`: hand it a closed profile, hand it a height, get a solid.
+Many parts begin as a closed 2D region. `extrude` turns that region into a solid with a specified height.
 
 ```scheme
 (model
@@ -30,7 +30,7 @@ Use `profile` when the shape has holes.
 
 The outer profile defines material. The hole profile removes material during the extrusion.
 
-This is the core move: draw a closed 2D region, then give it height.
+The modeling sequence stays explicit: define a region, then choose how it becomes three-dimensional.
 
 Use `offset` to grow or shrink a 2D outline by a fixed distance before extruding. A positive distance pushes the outline outward.
 
@@ -46,7 +46,7 @@ Use `offset` to grow or shrink a 2D outline by a fixed distance before extruding
 
 ![Rendered output for Sketch to Solid: Plate from a Profile, example 3](assets/02-sketch-extrude-03.png)
 
-`offset 3` grows the rounded-rect into the outer boundary; the original becomes the hole. The wall is a uniform 3 mm everywhere — the classic gasket move.
+`offset 3` creates the outer boundary; the original outline becomes the hole. The resulting gasket has a uniform 3 mm wall.
 
 `scale` stretches a profile by separate x, y, z factors. Scale a circle in one axis and it becomes an ellipse, so you reach for `scale` instead of a separate ellipse primitive.
 

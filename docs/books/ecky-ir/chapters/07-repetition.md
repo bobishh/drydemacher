@@ -1,6 +1,6 @@
 ## Repetition: Ribs, Slots, and Patterns
 
-Repeated geometry should be authored as repetition, not copied blocks.
+Represent repeated geometry with one body and an index. This keeps count, spacing, and fit math editable in one place.
 
 ```scheme
 (model
@@ -49,7 +49,7 @@ When repeated features share the same fit math, hoist derived values once instea
             (box slot_w 30 20)))))))
 ```
 
-This de-duplicates the model in three directions at once: `pitch`, `slot_w`, and `wall` exist once, `divider-depth` owns the wall-offset math once, and `divider` owns the repeated rib body once. If the same derived value or repeated body shows up across parts, stop and lift it.
+Here `pitch`, `slot_w`, and `wall` each have one definition. `divider-depth` owns the offset calculation, while `divider` owns the repeated body. Lift shared math or geometry as soon as a second call site appears.
 
 Use `repeat-compound` when repeated items should stay grouped instead of merged.
 

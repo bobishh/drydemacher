@@ -1,6 +1,6 @@
 ## Convenience Shapes: Stop Hand-Building Common Outlines
 
-`box`, `sphere`, and `extrude` cover a lot, but some outlines come up so often that drawing them by hand wastes time and invites mistakes. Ecky ships them as named shapes. Each one is a true analytic primitive (or expands to one), so it renders identically on every backend — no faceted approximations.
+Use named convenience shapes when they express the design directly. They avoid repeated outline math and preserve analytic geometry where the backend supports it.
 
 A **torus** is a ring: major radius to the tube centre, minor radius of the tube.
 

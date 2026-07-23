@@ -1,12 +1,12 @@
 ## Final Model: Integrated Film Adapter Open Helicoid v9
 
-The last model is `Ecky integrated film adapter open helicoid v9`. It is not a single decorative adapter. It is an assembly built from sliding parts: a recessed base with male rails, a lower insert, an upper clamp, a tunnel module with female-bottom and male-top joints, an open top cover with the female helicoid socket, and a separate moving lens carrier with matching male helicoid threads.
+The final example is a multi-part film adapter with sliding rail joints and a two-start helicoid. Its base, insert stack, tunnel, cover, and lens carrier share fit dimensions but remain separate printable parts.
 
 <!-- render-source: ../examples/ecky-integrated-film-adapter-open-helicoid-v9.ecky -->
 
 ![Rendered output for Final Model: Integrated Film Adapter Open Helicoid v9, example 1](assets/11-complex-film-adapter-01.png)
 
-The source is stored as `docs/books/ecky-ir/examples/ecky-integrated-film-adapter-open-helicoid-v9.ecky`. The chapter reads it in layers instead of dumping all 493 lines at once.
+Full source: `docs/books/ecky-ir/examples/ecky-integrated-film-adapter-open-helicoid-v9.ecky`. The sections below isolate the six mechanical subsystems.
 
 ### 1. Public controls define physical fit
 
@@ -175,6 +175,6 @@ The carrier is separate and previewed to the side with `carrier_preview_x`. It u
 
 That last `translate` is preview layout, not fit math. The carrier is offset so the reader can see both halves of the helicoid in one render.
 
-### What the whole book was building toward
+### Combined mechanism
 
-The early ball and plate examples taught primitives and extrusion. The plate-with-hole examples taught profiles and cuts. The parameter chapter made fit dimensions editable. The repetition and placement chapters introduced authored structure instead of copied solids. The final model uses all of that for a real mechanism: rails slide into channels, film inserts locate inside a recessed pocket, the tunnel stacks onto the base, the open cover stacks onto the tunnel, and the lens carrier threads into the cover through a two-start helicoid.
+The mechanism combines earlier patterns directly: profiles become rails and channels; named clearances control sliding fits; repeated structures stay parametric; frames place mating geometry; verification records fit requirements. The carrier threads into the cover while the remaining modules stack through rail interfaces.

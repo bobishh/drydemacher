@@ -1,12 +1,25 @@
 # Ecky IR Field Guide
 
-Learn Ecky IR by building models in order. Each chapter introduces one small idea, shows the code that creates the rendered result, then reuses the idea in a larger model. This single Markdown document is the source for the desktop docs window and the EPUB build.
+Learn Ecky IR through working models. Each chapter introduces one operation or modeling pattern, shows its rendered result, and explains the failure mode worth remembering. This Markdown file is canonical: web docs, EPUB/HTML, split rendering chapters, and the Ecky agent language reference are projections of it.
 
 Read the main lessons in order. The app sidebar exposes the same book one chapter at a time. Use **OPEN IN CODE** on any chapter to load its first runnable `.ecky` snippet into the code window. (You write parenthesized forms; they compile to a fixed set of operations, and the default render is an exact B-rep solid.)
 
+## How Ecky Thinks
+
+Ecky has three layers. Knowing their boundaries makes compiler and renderer errors easier to diagnose.
+
+**Surface language.** You write parenthesized `.ecky` forms such as `(model (part ...))`. This syntax describes authoring intent; the renderer does not execute it directly.
+
+**Core IR.** The compiler lowers surface forms into a fixed vocabulary of primitives, booleans, selectors, placements, repeats, and typed mesh operations. The kernel receives this finite data model, not arbitrary Scheme. That boundary makes models reproducible and statically checkable.
+
+**Geometry runtime.** Exact solids render on the native **OCCT** B-rep kernel. Typed polygon data renders in the bounded Rust mesh runtime; a closed mesh crosses into OCCT only through the explicit faceted poly-BRep bridge. **build123d** and **FreeCAD** are supported interop backends with smaller operation sets.
+
+Classify a failure before changing geometry: surface syntax, Core IR validation, or backend support. Diagnostics name that boundary whenever possible.
+
+
 ## First Solid: Ball on a Base
 
-Every model is a tree, and the fastest way to feel that is to grow the smallest one that renders. One `model`, one `part`, one primitive — three nested forms and you have a solid on screen. Everything later in this book is this same tree with more branches.
+A renderable file needs a `model`, a named `part`, and geometry. Start with one primitive so each added transform or boolean has an obvious effect.
 
 ```scheme
 (model
@@ -35,11 +48,11 @@ Add another primitive with `union` when two solids should become one part.
 
 Use this pattern for first tests: primitive first, then one transform, then one boolean.
 
-> **Watch for:** every primitive is born centered on the origin, so two solids written at the same spot interpenetrate instead of stacking. The `translate` above is not decoration — delete it and the ball swallows the base. When a union looks fused-but-wrong, the first question is always "did I move the second solid before combining it?"
+> **Watch for:** primitives start at the origin. Two untransformed solids overlap instead of stacking. If a union has the right members but the wrong silhouette, inspect placement before changing the boolean.
 
 ## Sketch to Solid: Plate from a Profile
 
-Primitives get you a ball or a box, but real parts rarely start as a primitive — they start as a shape someone drew. Most useful CAD begins as a 2D outline that you then give thickness. In Ecky that move is `extrude`: hand it a closed profile, hand it a height, get a solid.
+Many parts begin as a closed 2D region. `extrude` turns that region into a solid with a specified height.
 
 ```scheme
 (model
@@ -69,7 +82,7 @@ Use `profile` when the shape has holes.
 
 The outer profile defines material. The hole profile removes material during the extrusion.
 
-This is the core move: draw a closed 2D region, then give it height.
+The modeling sequence stays explicit: define a region, then choose how it becomes three-dimensional.
 
 Use `offset` to grow or shrink a 2D outline by a fixed distance before extruding. A positive distance pushes the outline outward.
 
@@ -85,7 +98,7 @@ Use `offset` to grow or shrink a 2D outline by a fixed distance before extruding
 
 ![Rendered output for Sketch to Solid: Plate from a Profile, example 3](assets/02-sketch-extrude-03.png)
 
-`offset 3` grows the rounded-rect into the outer boundary; the original becomes the hole. The wall is a uniform 3 mm everywhere — the classic gasket move.
+`offset 3` creates the outer boundary; the original outline becomes the hole. The resulting gasket has a uniform 3 mm wall.
 
 `scale` stretches a profile by separate x, y, z factors. Scale a circle in one axis and it becomes an ellipse, so you reach for `scale` instead of a separate ellipse primitive.
 
@@ -101,7 +114,7 @@ Use `offset` to grow or shrink a 2D outline by a fixed distance before extruding
 
 ## Convenience Shapes: Stop Hand-Building Common Outlines
 
-`box`, `sphere`, and `extrude` cover a lot, but some outlines come up so often that drawing them by hand wastes time and invites mistakes. Ecky ships them as named shapes. Each one is a true analytic primitive (or expands to one), so it renders identically on every backend — no faceted approximations.
+Use named convenience shapes when they express the design directly. They avoid repeated outline math and preserve analytic geometry where the backend supports it.
 
 A **torus** is a ring: major radius to the tube centre, minor radius of the tube.
 
@@ -237,7 +250,7 @@ For standard hardware, `:iso "M…"` decodes an ISO metric coarse-pitch designat
 
 ## Parameters: Make the Plate Editable
 
-The plate in the last chapter had its size baked in — change the design and you go hunting for four scattered numbers. The moment a model is worth keeping, its dimensions want names. `params` hoists the design choices to the top of the model, where the UI can expose them as labelled sliders and the geometry reads them back by name.
+Parameters separate design inputs from derived geometry. Declare editable dimensions once under `params`; the UI reads their metadata and the model reads their keys.
 
 ```scheme
 (model
@@ -266,7 +279,7 @@ That line is better than repeating `(/ bore_d 2)` through cuts and selectors.
 
 ### Units: bare numbers already have one
 
-Every number you have written so far carried a hidden unit. Ecky has two base units, and a bare number is already expressed in them: **lengths are millimeters, angles are degrees.** `(box 70 42 4)` is 70 mm by 42 mm by 4 mm; `(rotate 90 0 0 ...)` turns 90 degrees. You never have to write a suffix.
+Ecky uses **millimeters for length** and **degrees for angles**. Bare numbers already use those base units: `(box 70 42 4)` is 70 × 42 × 4 mm, while `(rotate 90 0 0 ...)` rotates 90 degrees.
 
 When you do write one, the suffix is a **conversion into that base unit** — nothing more:
 
@@ -282,11 +295,11 @@ So `(box 12mm 1cm 1in)` is exactly `(box 12 10 25.4)`, and `(rotate 1.5708rad 0 
 
 **Some numbers stay unitless on purpose.** Counts (`(repeat 5 ...)`), ratios, segment counts on a cylinder (`(cylinder 6 12 96)` — that `96` is facets, not millimeters), and indices are pure numbers. A suffix on them is meaningless; leave them bare.
 
-**One honest caveat: Ecky does not police dimensions.** The suffix only scales a number into its base unit; it does not tag the value as "a length" or "an angle." Put `45deg` where a width is expected and you get a 45 mm width, no warning — the `deg` is just stripped to its base, which for the box slot is read as millimeters. Units are a convenience for _writing_ correct numbers, not a type system that catches mixing them up. That discipline is yours: author lengths in `mm`/`cm`/`in`, angles in `deg`/`rad`, and keep counts and ratios bare.
+**Unit suffixes convert values; they do not type-check dimensions.** `45deg` in a width slot becomes the number `45`, then the box reads it as 45 mm. Use length suffixes for lengths, angle suffixes for angles, and bare values for counts and ratios.
 
 ## Cut and Join: Mounting Plate
 
-A solid is rarely the end state — you drill it, pocket it, add a boss. Once a part is more than one boolean deep, nesting it all inline becomes unreadable and impossible to point at. `build` is the fix: name each intermediate solid, then combine the names in a final `result`. The geometry is the same; the difference is that every step now has a handle you can reference, cut against, or select later.
+Use `build` when a part needs several boolean stages. Each `shape` names an intermediate result; `result` identifies the final geometry. Names keep cutters and later selectors readable.
 
 ```scheme
 (model
@@ -325,11 +338,11 @@ Add material with `union` or `fuse`.
 
 The result is still one part, but the intent stays readable.
 
-> **Watch for:** two gotchas bite here. First, a cutter that is exactly as tall as the stock leaves a paper-thin film of material at the cut floor (a "coplanar face") — make cutters _overshoot_, which is why the holes above are `(+ thickness 1)` tall and start at `-0.5`. Second, booleans rebuild topology: every face and edge is renumbered afterward, so a selector that pointed at "the top face" before a `difference` may point somewhere else after it. That is exactly the problem the next chapter's `tag-face` and selector strings exist to solve.
+> **Watch for:** make cutters cross the stock completely; coincident cutter and stock faces can leave unstable slivers. Booleans also rebuild topology, so raw face and edge indices are not durable selectors. Use geometric selectors or tags after the boolean.
 
 ## Round, Chamfer, Shell: Select Edges and Faces
 
-This is the book's first **intermediate** chapter, and it earns the label: it stacks five related ideas — `fillet`, `chamfer`, `shell`, `tag-face`, and the native-only `:created-by` — because they all answer the same question, "now that the solid exists, how do I point at the right edge or face and act on it?" Read it in passes. The finishing operations (`fillet`/`chamfer`/`shell`) come first; the selector machinery (`tag-face`, `:created-by`) is what keeps them aimed at the right topology after booleans renumber everything.
+Finishing operations need two things: a radius or thickness, and a stable way to identify target topology. This chapter pairs `fillet`, `chamfer`, and `shell` with geometric selectors, tags, and native provenance selectors.
 
 Edge operations happen after the main solid exists.
 
@@ -437,6 +450,8 @@ A normal `fillet` uses one radius. Add `:to-radius` and the radius varies along 
 
 ## Paths and Surfaces: Revolve and Sweep
 
+Choose a surface operation from the motion of a profile: rotate it around an axis, carry it along a path, or interpolate between several sections.
+
 Use `revolve` when a 2D profile turns around an axis.
 
 ```scheme
@@ -505,7 +520,7 @@ Swap `rib` for `groove` to subtract the same swept run instead of adding it. The
 
 ## Repetition: Ribs, Slots, and Patterns
 
-Repeated geometry should be authored as repetition, not copied blocks.
+Represent repeated geometry with one body and an index. This keeps count, spacing, and fit math editable in one place.
 
 ```scheme
 (model
@@ -554,7 +569,7 @@ When repeated features share the same fit math, hoist derived values once instea
             (box slot_w 30 20)))))))
 ```
 
-This de-duplicates the model in three directions at once: `pitch`, `slot_w`, and `wall` exist once, `divider-depth` owns the wall-offset math once, and `divider` owns the repeated rib body once. If the same derived value or repeated body shows up across parts, stop and lift it.
+Here `pitch`, `slot_w`, and `wall` each have one definition. `divider-depth` owns the offset calculation, while `divider` owns the repeated body. Lift shared math or geometry as soon as a second call site appears.
 
 Use `repeat-compound` when repeated items should stay grouped instead of merged.
 
@@ -605,9 +620,9 @@ spans multiple parts).
 
 ## Components and Reuse: Lift a Proven Part
 
-`repeat` solves "the same shape, many times, in one part." It does not solve "the same _proven_ shape, in two different parts, with its checks coming along." The moment you copy a block of geometry from one part into another, you have made a second thing to maintain — and the day you change the wall thickness in one and forget the other is the day a print fails. A **component** is the fix: name the geometry once, reuse it by reference, and let its proof travel with it.
+Use a component when geometry must be reused across parts or models. A component packages a closed parameter signature, its geometry, and verification clauses; each instance reuses that definition without copying source.
 
-Say you have dialed in a mounting standoff — a bored post whose wall must stay thick enough to survive a screw. Lift it into a `define-component`:
+This component defines a bored mounting standoff and carries its minimum-wall check:
 
 ```scheme
 (define-component standoff
@@ -623,13 +638,13 @@ Say you have dialed in a mounting standoff — a bored post whose wall must stay
   (part rear_right (translate 40 0 0 (standoff))))
 ```
 
-Three ideas earn their keep here.
+Three rules define component behavior.
 
 **Reuse by reference, override by keyword.** `(standoff :height 16)` instantiates the component and overrides one signature key; `(standoff)` takes every default. Omitted keys fall back to the signature, and a missing _required_ key (one with no default) is a compile error that names the component and lists its signature. There is no copy-paste, so there is no drift: change the body once and both parts move together.
 
-**Closedness is the whole contract.** A component body sees only its signature keys plus bindings it makes itself (`let`, `let*`, `repeat` indices, `build` shapes). It cannot reach a model param or an outer `let*` — try it and you get a compile error naming the variable. That restriction is not a nuisance; it is what makes a component _copy-inlineable_. Paste the `define-component` into any other model and it just works, because it never depended on its surroundings.
+**Closedness makes reuse reliable.** A component body sees only signature keys and local bindings (`let`, `let*`, repeat indices, and build shapes). Referencing a model parameter or outer binding is a compile error. Therefore the component can be copied into another model without hidden dependencies.
 
-**Proof travels with the part.** The `verify` clause lives inside the component, so it expands once per instantiation, its tag namespaced by the part key — `front_left/bore_open`, `rear_right/bore_open`. Reuse therefore includes the wall-thickness check at every call site for free. You proved the part once; every future use re-proves itself.
+**Verification expands per instance.** The component's `verify` clause is namespaced by part key, producing tags such as `front_left/bore_open` and `rear_right/bore_open`. Every instance runs the same wall-thickness requirement.
 
 For the exact signature grammar, nesting limits, and verify-travel rules, see **`define-component`** in the language reference appendix.
 
@@ -645,7 +660,7 @@ The loop is copy-inline by design: what you get back is closed source, not a hid
 
 ## Placement and Frames: Put Geometry Where It Belongs
 
-Simple transforms are enough for many models.
+Use direct transforms for fixed world-axis placement. Use a named frame when several shapes share a local coordinate system or must follow a path.
 
 ```scheme
 (translate 20 0 0 (box 10 10 10))
@@ -678,7 +693,7 @@ For path-driven models, `path-frame` can sample a location and tangent along a p
 
 ## Verification: State What Must Stay True
 
-`verify` turns design assumptions into checks. Author verify clauses from requirements, not from whichever geometry already renders. In MCP flow, treat each clause as an outer TDD test for the model: expect the first run to go red, run `verify_generated_model`, then fix the model and re-render until the same requirement goes green.
+`verify` stores measurable requirements with the model. Write the requirement before tuning geometry, run verification, and keep the clause unchanged while repairing a failed result.
 
 Start with the invariant, not the fix. This model says the lid must keep at least `0.3` mm clearance above the body:
 
@@ -700,7 +715,7 @@ Start with the invariant, not the fix. This model says the lid must keep at leas
 
 ### Red to green: lid clearance
 
-Red state: the expected clearance is `0.3`, but the lid sits only `0.2` mm above the body. Run `verify_generated_model` on this version. Expect the first run to go red because the requirement is right and the geometry is wrong.
+Red state: the required clearance is `0.3` mm, but the lid sits only `0.2` mm above the body. Verification reports the measured delta.
 
 ```text
 (model
@@ -714,7 +729,7 @@ Red state: the expected clearance is `0.3`, but the lid sits only `0.2` mm above
       (box 78 48 3))))
 ```
 
-Green state: keep the same `verify` block and move the lid to `20.4`. Then fix the model and re-render. Run `verify_generated_model` again. The requirement stays fixed while the model changes to satisfy it.
+Green state: keep the same `verify` block and move the lid to `20.4`. Re-render and run verification again. Geometry changes; the requirement does not.
 
 ```text
 (part lid
@@ -741,7 +756,7 @@ Do not delete a failing verification clause to make a render pass. Fix the model
 
 ## Real Model Patterns: Procedural Cuts and Arrayed Frames
 
-Before the final film adapter, three smaller real fixtures show language features that are not obvious from hand-sized teaching examples: generated cutter lists, deterministic pseudo-random layout, path frames, array helpers, and parameter-driven repeated cavities.
+These fixtures combine generated cutter lists, deterministic fields, path frames, arrays, and parameter-driven cavities. Focus on how each model separates generation math from final boolean intent.
 
 ### Procedural perforated panel
 
@@ -816,7 +831,7 @@ Use these when the pattern is regular. Use `map` and `range` when each instance 
 
 ### Woodlouse hotel
 
-This small habitat uses one cutter list for the entrances, then repeated shelves and vertical dividers. The point is not insect biology; the point is using named dimensions to keep repeated voids aligned with repeated structure.
+This habitat uses one generated entrance list plus repeated shelves and dividers. Shared dimensions keep openings aligned when chamber count or overall width changes.
 
 <!-- render-source: ../examples/woodlouse-hotel.ecky -->
 
@@ -843,7 +858,7 @@ The entrances are generated from one parametric chamber count:
 
 ## Projects as Folders: Edit Anywhere, Stay Canonical
 
-So far every model has lived inside a thread. That is the system of record, but it is not always where you want to type. Sometimes you want to open the source in your own editor, or hand it to an LLM file skill that only knows how to read and write files. A **project folder** is that door: Ecky mirrors one thread's active version onto disk, you edit the plain file, and Ecky picks the change back up — without ever giving up the thread as the canonical history.
+A project folder mirrors one thread's active source onto disk. Edit `model.ecky` with any file-based tool; Ecky validates the changed file and records accepted updates as new thread versions. The thread remains canonical history.
 
 `project_folder_export` writes two files:
 
@@ -853,7 +868,7 @@ So far every model has lived inside a thread. That is the system of record, but 
   ecky-project.json   binding manifest, owned by Ecky — never edit by hand
 ```
 
-Edit `model.ecky` in any editor. A polling watcher in the app notices the file no longer matches the manifest digest and applies it for you: it compiles the source, renders a preview, and commits a new version (named `folder-sync`) on the bound thread. Two safety details make this trustworthy rather than scary:
+Edit `model.ecky` in any editor. A polling watcher detects a digest change, compiles the source, renders a preview, and commits a `folder-sync` version on the bound thread. Two safeguards prevent partial or repeated failures:
 
 - **Two-tick settle.** A changed file must read identical on two consecutive polls before the compiler sees it. A half-written save — the editor flushing in chunks — never reaches Ecky mid-write.
 - **A broken save fails once, loudly, then waits.** If the edited source does not compile, the watcher reports the failure once for that exact content and then goes quiet until you change the file again. It does not re-render the same mistake every tick.
@@ -866,17 +881,17 @@ When you need to reason about the folder explicitly, `project_folder_status` cla
 - `conflict` — both sides moved. The watcher will **not** auto-resolve this; applying requires an explicit force, and the previous head stays available as a version so nothing is lost.
 - `missing` — no folder or no manifest yet.
 
-The one rule that holds all of this together: **the folder is a mirror, not a second database.** Threads and versions remain the record. A stale folder never silently clobbers the thread, and `ecky-project.json` is Ecky's to write, not yours. Treat the folder as a convenient editing surface and the thread as the truth, and the two stay in sync on their own.
+**The folder is a mirror, not a second database.** Threads and versions remain authoritative. Do not edit `ecky-project.json`; refresh a stale mirror or resolve a conflict explicitly.
 
 ## Final Model: Integrated Film Adapter Open Helicoid v9
 
-The last model is `Ecky integrated film adapter open helicoid v9`. It is not a single decorative adapter. It is an assembly built from sliding parts: a recessed base with male rails, a lower insert, an upper clamp, a tunnel module with female-bottom and male-top joints, an open top cover with the female helicoid socket, and a separate moving lens carrier with matching male helicoid threads.
+The final example is a multi-part film adapter with sliding rail joints and a two-start helicoid. Its base, insert stack, tunnel, cover, and lens carrier share fit dimensions but remain separate printable parts.
 
 <!-- render-source: ../examples/ecky-integrated-film-adapter-open-helicoid-v9.ecky -->
 
 ![Rendered output for Final Model: Integrated Film Adapter Open Helicoid v9, example 1](assets/11-complex-film-adapter-01.png)
 
-The source is stored as `docs/books/ecky-ir/examples/ecky-integrated-film-adapter-open-helicoid-v9.ecky`. The chapter reads it in layers instead of dumping all 493 lines at once.
+Full source: `docs/books/ecky-ir/examples/ecky-integrated-film-adapter-open-helicoid-v9.ecky`. The sections below isolate the six mechanical subsystems.
 
 ### 1. Public controls define physical fit
 
@@ -1045,13 +1060,262 @@ The carrier is separate and previewed to the side with `carrier_preview_x`. It u
 
 That last `translate` is preview layout, not fit math. The carrier is offset so the reader can see both halves of the helicoid in one render.
 
-### What the whole book was building toward
+### Combined mechanism
 
-The early ball and plate examples taught primitives and extrusion. The plate-with-hole examples taught profiles and cuts. The parameter chapter made fit dimensions editable. The repetition and placement chapters introduced authored structure instead of copied solids. The final model uses all of that for a real mechanism: rails slide into channels, film inserts locate inside a recessed pocket, the tunnel stacks onto the base, the open cover stacks onto the tunnel, and the lens carrier threads into the cover through a two-start helicoid.
+The mechanism combines earlier patterns directly: profiles become rails and channels; named clearances control sliding fits; repeated structures stay parametric; frames place mating geometry; verification records fit requirements. The carrier threads into the cover while the remaining modules stack through rail interfaces.
+
+## Mesh and Image Geometry: Polygons in 3D
+
+Ecky supports typed triangle geometry alongside analytic B-rep operations. Mesh execution is bounded and deterministic; it does not run Blender Python or arbitrary scripts.
+
+### Open surfaces and closed solids
+
+Use `mesh` for a triangle surface. Use `polyhedron` when the triangles form a printable solid.
+
+```scheme
+(define vertices
+  '((0 0 0) (20 0 0) (0 20 0) (0 0 20)))
+
+(define triangles
+  '((0 2 1) (0 1 3) (1 2 3) (2 0 3)))
+
+(model
+  (verify
+    (tag mesh_clean)
+    (metric bad_edges (stl non-manifold-edge-count))
+    (expect bad_edges (= 0)))
+  (part tetrahedron
+    (polyhedron
+      :vertices vertices
+      :triangles triangles)))
+```
+
+`mesh` permits boundaries and previews them honestly as an open surface. `polyhedron` requires one closed orientable component with nonzero volume. Both reject invalid indices, repeated vertices, zero-area faces, duplicates, inconsistent winding, and resource-budget overflow before render.
+
+Prefer formula-generated vertex/triangle lists for repeated or mathematical geometry. Keep one binding for each list instead of expanding thousands of copied triangles into source.
+
+### Heightmaps become dimensioned relief
+
+`heightfield` samples image luminance into a closed planar mesh. Physical dimensions remain explicit.
+
+```scheme
+(model
+  (verify
+    (tag relief_closed)
+    (metric bad_edges (stl non-manifold-edge-count))
+    (expect bad_edges (= 0)))
+  (part relief
+    (heightfield image-path
+      :width 100
+      :depth 70
+      :relief-height 4
+      :base-thickness 1.2
+      :invert #f)))
+```
+
+The image path points to a staged local asset. Empty selection is pending, not fake geometry. Decode errors retain raw path/error evidence. Width, depth, relief height, and base thickness must be positive.
+
+### Orthographic images become reviewed sketches
+
+Front, Top, and Side line art follows a different route:
+
+1. select each raster and enter physical calibration;
+2. tune threshold/inversion;
+3. extract closed contour candidates;
+4. review a candidate into an editable sketch primitive;
+5. run existing preview-hull and exact candidate validation.
+
+Raster provenance records asset digest, view, calibration, threshold, inversion, contour id, and extractor version. Failed extraction preserves the last reviewed sketch. Preview hull remains diagnostic until STEP and hidden-line validation pass.
+
+### Export truth follows representation
+
+Pure mesh output offers STL. Multipart viewer assets also enable 3MF or multipart STL export. Pure mesh does not offer STEP.
+
+A closed mesh may enter the hybrid `import-stl -> solidify` bridge before a supported BRep boolean. Successful STEP from that route is labeled **Faceted poly-BRep** and carries source mesh digests/topology evidence. It is triangle-derived, not analytic source CAD.
+
+Reference photos are another route: a vision model can propose inferred `.ecky` source, then normal compilation and verification run. One perspective photo remains an inferred approximation; response text alone cannot mark it reconstructed or accepted CAD.
+
 
 ## Appendix: Language Reference
 
 Use this section after the lessons when you need exact forms, signatures, helper names, selector strings, and verification grammar. The reference is intentionally dense; the earlier chapters show when each piece matters.
+
+### Generated Operation Index
+
+Generated from the runtime surface registry. Do not edit this table by hand.
+
+<!-- ECKY_GENERATED_OP_INDEX_START -->
+| Form | Available backends |
+| --- | --- |
+| `*` | build123d, ecky-rust, freecad |
+| `+` | build123d, ecky-rust, freecad |
+| `-` | build123d, ecky-rust, freecad |
+| `/` | build123d, ecky-rust, freecad |
+| `<` | build123d, ecky-rust, freecad |
+| `<=` | build123d, ecky-rust, freecad |
+| `=` | build123d, ecky-rust, freecad |
+| `>` | build123d, ecky-rust, freecad |
+| `>=` | build123d, ecky-rust, freecad |
+| `abs` | build123d, ecky-rust, freecad |
+| `and` | build123d, ecky-rust, freecad |
+| `append` | build123d, ecky-rust, freecad |
+| `apply` | build123d, ecky-rust, freecad |
+| `arc-array` | build123d, ecky-rust, freecad |
+| `atan` | build123d, ecky-rust, freecad |
+| `atan2` | build123d, ecky-rust, freecad |
+| `attractor-field` | ecky-rust |
+| `begin` | build123d, ecky-rust, freecad |
+| `bezier-path` | build123d, ecky-rust, freecad |
+| `box` | build123d, ecky-rust, freecad |
+| `bspline` | build123d, ecky-rust, freecad |
+| `build` | build123d, ecky-rust, freecad |
+| `cell-distance2` | build123d, ecky-rust, freecad |
+| `cellular` | ecky-rust |
+| `chamfer` | build123d, ecky-rust, freecad |
+| `circle` | build123d, ecky-rust, freecad |
+| `clamp` | build123d, ecky-rust, freecad |
+| `clip-box` | build123d, ecky-rust, freecad |
+| `common` | build123d, ecky-rust, freecad |
+| `compound` | build123d, ecky-rust, freecad |
+| `concat-map` | build123d, ecky-rust, freecad |
+| `cone` | build123d, ecky-rust, freecad |
+| `cos` | build123d, ecky-rust, freecad |
+| `cut` | build123d, ecky-rust, freecad |
+| `cylinder` | build123d, ecky-rust, freecad |
+| `define` | build123d, ecky-rust, freecad |
+| `deg` | build123d, ecky-rust, freecad |
+| `deg->rad` | build123d, ecky-rust, freecad |
+| `diamond` | ecky-rust |
+| `diamond-field` | ecky-rust |
+| `difference` | build123d, ecky-rust, freecad |
+| `ellipse` | build123d, ecky-rust, freecad |
+| `empty?` | build123d, ecky-rust, freecad |
+| `enumerate` | build123d, ecky-rust, freecad |
+| `even?` | build123d, ecky-rust, freecad |
+| `extrude` | build123d, ecky-rust, freecad |
+| `fbm` | ecky-rust |
+| `fbm2` | build123d, ecky-rust, freecad |
+| `fillet` | build123d, ecky-rust, freecad |
+| `filter` | build123d, ecky-rust, freecad |
+| `flat-map` | build123d, ecky-rust, freecad |
+| `floor` | build123d, ecky-rust, freecad |
+| `fold` | build123d, ecky-rust, freecad |
+| `for-compound` | build123d, ecky-rust, freecad |
+| `for-union` | build123d, ecky-rust, freecad |
+| `fourier` | ecky-rust |
+| `fuse` | build123d, ecky-rust, freecad |
+| `grid-array` | build123d, ecky-rust, freecad |
+| `groove` | build123d, ecky-rust, freecad |
+| `gyroid` | ecky-rust |
+| `hammered` | ecky-rust |
+| `hash-signed` | build123d, ecky-rust, freecad |
+| `hash01` | build123d, ecky-rust, freecad |
+| `heightfield` | ecky-rust |
+| `helical-ridge` | build123d, ecky-rust, freecad |
+| `henon-points` | build123d, ecky-rust, freecad |
+| `hull` | ecky-rust |
+| `if` | build123d, ecky-rust, freecad |
+| `import-stl` | build123d, ecky-rust, freecad |
+| `intersection` | build123d, ecky-rust, freecad |
+| `jitter2` | build123d, ecky-rust, freecad |
+| `jittered-grid` | build123d, ecky-rust, freecad |
+| `lambda` | build123d, ecky-rust, freecad |
+| `lerp` | build123d, ecky-rust, freecad |
+| `let` | build123d, ecky-rust, freecad |
+| `let*` | build123d, ecky-rust, freecad |
+| `linear-array` | build123d, ecky-rust, freecad |
+| `linspace` | build123d, ecky-rust, freecad |
+| `list` | build123d, ecky-rust, freecad |
+| `list?` | build123d, ecky-rust, freecad |
+| `location` | build123d, ecky-rust, freecad |
+| `loft` | build123d, ecky-rust, freecad |
+| `logistic-bifurcation-points` | build123d, ecky-rust, freecad |
+| `lorenz-points` | build123d, ecky-rust, freecad |
+| `make-face` | build123d, ecky-rust, freecad |
+| `map` | build123d, ecky-rust, freecad |
+| `max` | build123d, ecky-rust, freecad |
+| `mesh` | ecky-rust |
+| `meta` | build123d, ecky-rust, freecad |
+| `min` | build123d, ecky-rust, freecad |
+| `mirror` | build123d, ecky-rust, freecad |
+| `neovius` | ecky-rust |
+| `noise2` | build123d, ecky-rust, freecad |
+| `not` | build123d, ecky-rust, freecad |
+| `null?` | build123d, ecky-rust, freecad |
+| `odd?` | build123d, ecky-rust, freecad |
+| `offset` | build123d, ecky-rust, freecad |
+| `offset-rounded` | build123d, ecky-rust, freecad |
+| `or` | build123d, ecky-rust, freecad |
+| `organic-loop` | build123d, ecky-rust, freecad |
+| `params` | build123d, ecky-rust, freecad |
+| `part` | build123d, ecky-rust, freecad |
+| `path` | build123d, ecky-rust, freecad |
+| `path-frame` | build123d, ecky-rust, freecad |
+| `place` | build123d, ecky-rust, freecad |
+| `plane` | build123d, ecky-rust, freecad |
+| `polar-points` | build123d, ecky-rust, freecad |
+| `polygon` | build123d, ecky-rust, freecad |
+| `polyhedron` | ecky-rust |
+| `polyline` | build123d, ecky-rust, freecad |
+| `profile` | build123d, ecky-rust, freecad |
+| `quote` | build123d, ecky-rust, freecad |
+| `rad` | build123d, ecky-rust, freecad |
+| `rad->deg` | build123d, ecky-rust, freecad |
+| `radial-array` | build123d, ecky-rust, freecad |
+| `range` | build123d, ecky-rust, freecad |
+| `rectangle` | build123d, ecky-rust, freecad |
+| `reduce` | build123d, ecky-rust, freecad |
+| `regular-polygon` | build123d, ecky-rust, freecad |
+| `repeat` | build123d, ecky-rust, freecad |
+| `repeat-compound` | build123d, ecky-rust, freecad |
+| `repeat-pick` | build123d, ecky-rust, freecad |
+| `repeat-union` | build123d, ecky-rust, freecad |
+| `result` | build123d, ecky-rust, freecad |
+| `reverse` | build123d, ecky-rust, freecad |
+| `revolve` | build123d, ecky-rust, freecad |
+| `rib` | build123d, ecky-rust, freecad |
+| `ribs` | ecky-rust |
+| `ring` | build123d, ecky-rust, freecad |
+| `rings` | ecky-rust |
+| `rossler-points` | build123d, ecky-rust, freecad |
+| `rotate` | build123d, ecky-rust, freecad |
+| `rounded-polygon` | build123d, ecky-rust, freecad |
+| `rounded-rect` | build123d, ecky-rust, freecad |
+| `sampled-radial-loft` | build123d, ecky-rust, freecad |
+| `scale` | build123d, ecky-rust, freecad |
+| `schwarz-d` | ecky-rust |
+| `schwarz-p` | ecky-rust |
+| `shape` | build123d, ecky-rust, freecad |
+| `shell` | build123d, ecky-rust, freecad |
+| `sin` | build123d, ecky-rust, freecad |
+| `slot-arc` | build123d, ecky-rust, freecad |
+| `slot-center-point` | build123d, ecky-rust, freecad |
+| `slot-center-to-center` | build123d, ecky-rust, freecad |
+| `slot-overall` | build123d, ecky-rust, freecad |
+| `smoothstep` | build123d, ecky-rust, freecad |
+| `sphere` | build123d, ecky-rust, freecad |
+| `spiral` | ecky-rust |
+| `superellipse-point` | build123d, ecky-rust, freecad |
+| `svg` | build123d, ecky-rust, freecad |
+| `sweep` | build123d, ecky-rust, freecad |
+| `tan` | build123d, ecky-rust, freecad |
+| `taper` | build123d, ecky-rust, freecad |
+| `text` | build123d, ecky-rust, freecad |
+| `thread` | build123d, ecky-rust, freecad |
+| `torus` | build123d, ecky-rust, freecad |
+| `translate` | build123d, ecky-rust, freecad |
+| `trapezoid` | build123d, ecky-rust, freecad |
+| `twist` | build123d, ecky-rust, freecad |
+| `union` | build123d, ecky-rust, freecad |
+| `voronoi-cells` | build123d, ecky-rust, freecad |
+| `voronoi2` | build123d, ecky-rust, freecad |
+| `wall-pattern` | ecky-rust |
+| `wave-loop` | build123d, ecky-rust, freecad |
+| `wedge` | build123d, ecky-rust, freecad |
+| `xor` | build123d, ecky-rust, freecad |
+| `zero?` | build123d, ecky-rust, freecad |
+| `zip` | build123d, ecky-rust, freecad |
+<!-- ECKY_GENERATED_OP_INDEX_END -->
 
 ## Language Overview
 
@@ -2559,3 +2823,74 @@ Use this section as fit/tolerance checklist when a model crosses from “looks r
 - lower/upper bounds
 - failure examples
 - why anonymous offsets are garbage for physical fit
+
+<!-- ECKY_AGENT_REFERENCE_START -->
+# Ecky language reference
+
+Current fileExtension: `.ecky`.
+Current sourceLanguage: `ecky`.
+
+Return one complete `(model ...)` program. Use millimetres for length and degrees for angles. Suffixed literals convert into those base units; they do not provide dimensional type checking.
+
+## Program structure
+
+- Put reusable pure `(define ...)` helpers and `define-component` declarations before `(model ...)`.
+- Put `params`, `verify`, `part`, and `meta` clauses directly inside `model`.
+- Never put `define` inside `model`. Use `let*` inside a part when later values depend on earlier values or parameters.
+- Give every part a stable key. Use `build`, named `shape` stages, and one `result` when a part needs intermediate geometry.
+- Keep `ui_spec`, `initial_params`, and source parameter keys aligned. Use `number`, `select`, `toggle`, or `image`; never invent parameter forms.
+
+```scheme
+(model
+  (params
+    (number width 60 :label "Width" :min 20 :max 120 :step 1)
+    (number thickness 4 :label "Thickness" :min 1 :max 12 :step 0.5))
+  (part plate
+    (let* ((hole-r 3))
+      (build
+        (shape blank (extrude (rounded-rect width 36 4) thickness))
+        (shape bore (translate 0 0 -0.5 (cylinder hole-r (+ thickness 1))))
+        (result (difference blank bore))))))
+```
+
+## Geometry rules
+
+- Start with primitives or closed 2D profiles. Use `extrude`, `revolve`, `sweep`, or `loft` to create solids.
+- Boolean cutters must cross the target completely. Overshoot instead of leaving coincident faces.
+- Author repeated shelves, ribs, holes, doors, or clips with `repeat`, array forms, or component instances. Do not copy shape blocks.
+- Name every fit-critical dimension or relation: wall thickness, clearance, bore radius, pitch, seat height, and mating axis. Do not hide physical fit in anonymous offsets.
+- Prefer selectors based on physical meaning or stable tags. Boolean operations rebuild topology, so raw face or edge indices are not stable design intent.
+- Backend support is authoritative. If a diagnostic rejects an operation on the active backend, change the operation or backend; do not retry unchanged source.
+
+## Verification
+
+Write top-level `verify` clauses from measurable requirements. Keep them during repair.
+
+```scheme
+(model
+  (verify
+    (tag mesh-clean)
+    (metric bad-edges (stl non-manifold-edge-count))
+    (expect bad-edges (= 0)))
+  (verify
+    (tag preview-exists)
+    (metric preview (manifest has-preview-stl))
+    (expect preview (= true)))
+  (part body (box 30 20 10)))
+```
+
+Use `manifest` metrics for artifact and part claims, `stl` metrics for mesh structure, `clearance` for physical gaps, `selector` for measured placement, and `relation` for comparisons between named targets. A failing clause means repair geometry or parameters; never weaken the requirement to manufacture green output.
+
+## Mesh and image geometry
+
+- Use `mesh` and `polyhedron` with bounded vertex and triangle lists. Prefer formula-generated lists over copied face blocks.
+- `mesh` may be open. `polyhedron` must be one closed, orientable, nonzero-volume component. Check boundary edges, non-manifold edges, connected components, and volume before solid or printability claims.
+- Use `heightfield` for calibrated luminance relief with explicit width, depth, relief height, base thickness, and inversion. Missing image selection is pending input, not substitute geometry.
+- Front, Top, and Side raster references require physical calibration, contour review, editable sketch primitives, and normal exact-candidate validation. Raster extraction alone is not accepted CAD.
+- A single perspective image provides inferred geometry only. Never call it an exact reconstruction, measured model, or accepted CAD without independent dimensions and validation.
+- Pure mesh output supports mesh exports such as STL. STEP produced after solidifying a closed mesh is faceted poly-BRep, not analytic source CAD. Read artifact provenance before making export or exactness claims.
+
+## Operating contract
+
+Output source and required response fields only. Do not claim compilation, rendering, verification, STEP availability, or printability before runtime evidence exists. When the compiler returns a diagnostic, fix the named cause and emit a complete corrected program.
+<!-- ECKY_AGENT_REFERENCE_END -->

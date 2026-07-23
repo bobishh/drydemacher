@@ -1,6 +1,6 @@
 ## Verification: State What Must Stay True
 
-`verify` turns design assumptions into checks. Author verify clauses from requirements, not from whichever geometry already renders. In MCP flow, treat each clause as an outer TDD test for the model: expect the first run to go red, run `verify_generated_model`, then fix the model and re-render until the same requirement goes green.
+`verify` stores measurable requirements with the model. Write the requirement before tuning geometry, run verification, and keep the clause unchanged while repairing a failed result.
 
 Start with the invariant, not the fix. This model says the lid must keep at least `0.3` mm clearance above the body:
 
@@ -22,7 +22,7 @@ Start with the invariant, not the fix. This model says the lid must keep at leas
 
 ### Red to green: lid clearance
 
-Red state: the expected clearance is `0.3`, but the lid sits only `0.2` mm above the body. Run `verify_generated_model` on this version. Expect the first run to go red because the requirement is right and the geometry is wrong.
+Red state: the required clearance is `0.3` mm, but the lid sits only `0.2` mm above the body. Verification reports the measured delta.
 
 ```text
 (model
@@ -36,7 +36,7 @@ Red state: the expected clearance is `0.3`, but the lid sits only `0.2` mm above
       (box 78 48 3))))
 ```
 
-Green state: keep the same `verify` block and move the lid to `20.4`. Then fix the model and re-render. Run `verify_generated_model` again. The requirement stays fixed while the model changes to satisfy it.
+Green state: keep the same `verify` block and move the lid to `20.4`. Re-render and run verification again. Geometry changes; the requirement does not.
 
 ```text
 (part lid
@@ -60,26 +60,3 @@ Use verification for:
 - required STEP or preview artifacts
 
 Do not delete a failing verification clause to make a render pass. Fix the model or the stated requirement.
-
-### Reading the result (MCP and UI)
-
-`verify_generated_model` returns one check per clause, each with a
-machine-readable delta — you do not parse the message string:
-
-```text
-authoredVerifyChecks:
-  - tag: lid_clearance
-    status: failed
-    stableNodeId: verify:lid_clearance
-    metricSource: clearance
-    metricKey: min-distance
-    comparator: ">="
-    expected: { kind: number, value: 0.3 }
-    actual:   { kind: number, value: 0.2 }
-```
-
-An agent reads `expected` vs `actual` and the `comparator` to know exactly how
-far off the model is, then fixes geometry or parameters and re-renders. In the
-app, each clause shows as a red or green chip on the version; the chip's
-`stableNodeId` (`verify:<tag>`) focuses the matching verify node in the New
-Params map, so a red check jumps you straight to the clause that failed.

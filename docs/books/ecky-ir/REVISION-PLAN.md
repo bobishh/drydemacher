@@ -8,18 +8,17 @@ Source of the review (2026-06): the book has a solid example-driven skeleton
 but (a) misses flagship features that already ship, (b) documents one feature
 that does not compile, (c) has a numbering footgun, and (d) reads dry.
 
-## Dual-source warning (read before editing any chapter)
+## Single-source rule
 
-The book content lives in **two hand-synced copies**:
-- `public/docs/ecky-ir.md` — the **canonical served file**. The app docs window
-  and the EPUB/HTML build (`scripts/build_ecky_ir_book.ts`, `eckyIrBook.ts`)
-  read only this. Edits here are what users see.
-- `docs/books/ecky-ir/chapters/*.md` + `index.md` — the split mirror. Feeds
-  `scripts/render_book_examples.py` (image regen) and example-parity only.
+`public/docs/ecky-ir.md` is canonical for language prose and examples. The app
+reader, web docs, EPUB/HTML, and agent-reference projection consume it. The
+files under `docs/books/ecky-ir/chapters/` are generated split views used by
+the example renderer and parity tooling; never edit them directly.
 
-Every prose/code change must be applied to **both** until the duplication is
-removed. `scripts/check_book_example_parity.py` renders examples from each
-independently. (A1 was applied to both.)
+`npm run build:book` synchronizes the split views. `npm run check:book-source`
+fails when any generated chapter drifts. The operation catalogue remains
+generated from `ecky_language_surface`, then joins the canonical agent body in
+the API/MCP prompt builder.
 
 ## Ground truth verified by compilation (do not re-decide)
 

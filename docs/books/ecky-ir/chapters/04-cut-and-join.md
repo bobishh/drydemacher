@@ -1,6 +1,6 @@
 ## Cut and Join: Mounting Plate
 
-A solid is rarely the end state — you drill it, pocket it, add a boss. Once a part is more than one boolean deep, nesting it all inline becomes unreadable and impossible to point at. `build` is the fix: name each intermediate solid, then combine the names in a final `result`. The geometry is the same; the difference is that every step now has a handle you can reference, cut against, or select later.
+Use `build` when a part needs several boolean stages. Each `shape` names an intermediate result; `result` identifies the final geometry. Names keep cutters and later selectors readable.
 
 ```scheme
 (model
@@ -39,4 +39,4 @@ Add material with `union` or `fuse`.
 
 The result is still one part, but the intent stays readable.
 
-> **Watch for:** two gotchas bite here. First, a cutter that is exactly as tall as the stock leaves a paper-thin film of material at the cut floor (a "coplanar face") — make cutters _overshoot_, which is why the holes above are `(+ thickness 1)` tall and start at `-0.5`. Second, booleans rebuild topology: every face and edge is renumbered afterward, so a selector that pointed at "the top face" before a `difference` may point somewhere else after it. That is exactly the problem the next chapter's `tag-face` and selector strings exist to solve.
+> **Watch for:** make cutters cross the stock completely; coincident cutter and stock faces can leave unstable slivers. Booleans also rebuild topology, so raw face and edge indices are not durable selectors. Use geometric selectors or tags after the boolean.

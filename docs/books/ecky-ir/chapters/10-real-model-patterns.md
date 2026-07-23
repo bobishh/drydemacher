@@ -1,6 +1,6 @@
 ## Real Model Patterns: Procedural Cuts and Arrayed Frames
 
-Before the final film adapter, three smaller real fixtures show language features that are not obvious from hand-sized teaching examples: generated cutter lists, deterministic pseudo-random layout, path frames, array helpers, and parameter-driven repeated cavities.
+These fixtures combine generated cutter lists, deterministic fields, path frames, arrays, and parameter-driven cavities. Focus on how each model separates generation math from final boolean intent.
 
 ### Procedural perforated panel
 
@@ -75,7 +75,7 @@ Use these when the pattern is regular. Use `map` and `range` when each instance 
 
 ### Woodlouse hotel
 
-This small habitat uses one cutter list for the entrances, then repeated shelves and vertical dividers. The point is not insect biology; the point is using named dimensions to keep repeated voids aligned with repeated structure.
+This habitat uses one generated entrance list plus repeated shelves and dividers. Shared dimensions keep openings aligned when chamber count or overall width changes.
 
 <!-- render-source: ../examples/woodlouse-hotel.ecky -->
 
