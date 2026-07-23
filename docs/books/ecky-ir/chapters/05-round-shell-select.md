@@ -1,6 +1,6 @@
 ## Round, Chamfer, Shell: Select Edges and Faces
 
-This is the book's first **intermediate** chapter, and it earns the label: it stacks five related ideas — `fillet`, `chamfer`, `shell`, `tag-face`, and the native-only `:created-by` — because they all answer the same question, "now that the solid exists, how do I point at the right edge or face and act on it?" Read it in passes. The finishing operations (`fillet`/`chamfer`/`shell`) come first; the selector machinery (`tag-face`, `:created-by`) is what keeps them aimed at the right topology after booleans renumber everything.
+Finishing operations need two things: a radius or thickness, and a stable way to identify target topology. This chapter pairs `fillet`, `chamfer`, and `shell` with geometric selectors, tags, and native provenance selectors.
 
 Edge operations happen after the main solid exists.
 

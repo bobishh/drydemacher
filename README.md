@@ -1,96 +1,109 @@
 # Ecky CAD
 
-Prompt-driven CAD: describe a part in words, an LLM writes it in a small modeling language, and it renders as an exact B-rep solid you can read, edit, and version.
+Desktop CAD pre-release where LLMs author inspectable `.ecky` source instead of arbitrary modeling scripts. Ecky validates that source, renders it through a geometry backend, checks declared requirements, and records saved versions locally.
 
-> Early and pre-release (v0.0.1). Expect rough edges and breaking changes.
+> Current version: **v0.0.1**. Syntax, APIs, and geometry paths may break. Verify dimensions and exported geometry before manufacturing.
+
+## Current system
+
+Numbers below describe the v0.0.1 source tree. The linked capability table remains authoritative when counts change.
+
+| Area | Implemented scope | Boundary |
+| --- | --- | --- |
+| Modeling language | [54 declared Core IR operations](src-tauri/src/ecky_ir/backend_capabilities.rs) behind a parenthesized Scheme surface | Finite operation set; not arbitrary Scheme or Python at kernel boundary |
+| Native kernel | 50 operations run directly on OCCT | Text and SVG preprocess; STL import uses interop; native XOR is rejected |
+| Geometry backends | 3: native OCCT, build123d, FreeCAD | OCCT is primary; build123d and FreeCAD are interop/parity paths |
+| Authoring paths | 2: direct API mode and external-agent MCP mode | Model quality depends on provider, prompt, and verification coverage |
+| LLM adapters | 3 families: Gemini, OpenAI-compatible HTTP APIs, local Ollama | “Compatible” describes protocol shape, not equal model behavior |
+| Agent persistence gate | 4 stages: inspect → validate → preview → commit | Agent-authored commits require a green verified preview |
+| State | Saved versions in SQLite; optional project-folder mirrors for `.ecky` files | Database remains canonical; folders are mirrors, not a second database |
+
+## Measured example
+
+The [iPhone 17e case source](model-runtime/examples/iphone-17e-case-tpu.ecky) contains:
+
+- 30 named parameters covering phone dimensions, clearances, wall thicknesses, ports, and buttons.
+- 2 verification clauses: preview existence and zero non-manifold STL edges.
+- One 337,584-byte binary [STL export](sites/landing/src/models/iphone-17e-tpu-case.stl), containing 6,750 triangles.
+
+The landing page renders that STL in a live viewer. These numbers prove source and artifact scope. They do not prove physical fit; no fit-test result is recorded here.
 
 ## How it works
 
-The LLM doesn't emit a mesh or a script. It writes `.ecky`, which compiles through three layers:
+`.ecky` crosses three explicit layers:
 
-- **Surface** — parenthesized Scheme: `(model (part ...))`.
-- **Core IR** — the fixed set of operations the surface lowers to: primitives, booleans, selectors, placements, repeats. The kernel only sees this set.
-- **Backend** — native OCCT by default (B-rep, selectable faces and edges). build123d and FreeCAD are follower backends for cross-check and import.
+1. **Surface language** — readable parenthesized source such as `(model (part body ...))`.
+2. **Core IR** — compiler-lowered operations with known signatures and backend support.
+3. **Geometry backend** — native OCCT by default; build123d and FreeCAD for interop and parity work.
 
-## What it looks like
-
-A parametric enclosure: named dimensions, a hollow body with a vent bored through it, a filleted top edge, and a `verify` clause that pins the lid clearance to a requirement.
+A minimal model:
 
 ```scheme
 (model
   (params
-    (number body_w 80 :label "Body width"  :min 40 :max 120 :step 1)
-    (number body_d 50 :label "Body depth"  :min 30 :max 90  :step 1)
-    (number body_h 20 :label "Body height" :min 10 :max 40  :step 1)
-    (number wall    2 :label "Wall"         :min 1 :max 5    :step 0.5)
-    (number vent_r  3 :label "Vent radius"  :min 1 :max 6    :step 0.5))
+    (number radius 10 :label "Radius" :min 1 :max 40 :step 1))
 
-  ; the lid must keep at least 0.3 mm clearance above the body
   (verify
-    (tag lid_clearance body.lid_gap)
-    (metric gap (clearance min-distance body lid))
-    (expect gap (>= 0.3)))
+    (tag preview_exists)
+    (metric check (manifest has-preview-stl))
+    (expect check (= true)))
 
   (part body
-    (build
-      (shape hollow (shell wall :faces "top" (box body_w body_d body_h)))
-      (shape vent   (translate 0 0 -0.5 (cylinder vent_r (+ body_h 1))))
-      (result
-        (fillet 1.5 :edges "top"
-          (difference hollow vent)))))
-
-  (part lid
-    (translate 0 0 (+ body_h 0.4)
-      (box (- body_w (* wall 2)) (- body_d (* wall 2)) 3))))
+    (sphere radius)))
 ```
 
-`params` hoists dimensions to labelled sliders. `build` names each intermediate solid; `difference` bores the vent through the shelled body; `fillet` rounds the top edges. `verify` states an invariant — minimum lid clearance — that `verify_generated_model` checks red-to-green, independent of whatever geometry currently renders.
+`params` exposes a labeled control. `verify` checks the generated artifact. `part` gives geometry a stable model-level identity. The [Ecky IR Field Guide](docs/books/ecky-ir/index.md) covers the full language.
 
-Smaller is fine too — `(model (part p (sphere 10)))` renders on its own. The [Ecky IR Field Guide](docs/books/ecky-ir/index.md) builds up from there, chapter by chapter.
+## How it got here
 
-## Features
+Repository history shows an iterative boundary change, not a straight-line plan:
 
-- Version history, persisted in SQLite.
-- Viewport screenshots fed back to the LLM between iterations.
-- Fork a design into a new thread.
-- Edit the generated IR by hand and commit it.
-- LLMs: Gemini, OpenAI-compatible, Ollama.
-- MCP server for external agents (inspect / validate / preview / commit).
+| Date | Repository evidence | Change in direction |
+| --- | --- | --- |
+| 2026-03-26 | First repository snapshot | LLM generated FreeCAD Python macros; headless FreeCAD executed them |
+| 2026-03-30 | `Ecky IR` commit | Introduced a project-owned modeling language between model output and kernel |
+| 2026-04-14 | `Verification & LLM diet` | Added explicit checks while narrowing what the LLM needed to emit |
+| 2026-05-22 | `Book, some more native ecky` | Expanded native rendering and began treating the language reference as a product surface |
+| June 2026 | MCP, compiler-error, and native-OCCT changes | Added typed agent tools, self-teaching errors, backend parity checks, and verify-before-commit rules |
+| 2026-07-15 | Landing and served-docs changes | Published the v0.0.1 project surface and a real exported model |
+
+Resulting direction: keep generated intent as readable source; constrain kernel input to known operations; test artifacts instead of trusting prose; keep persisted changes behind commands. Several WIP checkpoints preceded this shape. Current architecture should be read as tested evolution, not inevitability.
 
 ## Getting started
 
 ### Prerequisites
 
-- **Node.js** and **Rust** — for the Tauri/Svelte app.
-- **Python 3.10+** — used by the interop backends and runtime tooling.
-- **FreeCAD** (optional) — only needed for the FreeCAD interop backend; `freecadcmd` must be on your `PATH`.
+- **Node.js** and **Rust** for the Tauri/Svelte application.
+- **Python 3.10+** for interop backends and runtime tooling.
+- **FreeCAD** only for the optional FreeCAD backend; `freecadcmd` must be on `PATH`.
 
-The native OCCT kernel and build123d/speech runtimes are built locally by the prepare scripts below — you don't need a system FreeCAD for the default backend.
-
-### Install and run
+Native OCCT, build123d, and speech runtimes build locally through the prepare scripts. Default OCCT rendering does not require system FreeCAD.
 
 ```bash
-# 1. Clone, then install JS dependencies
 npm install
-
-# 2. Build the native CAD runtimes (OCCT kernel, build123d, speech)
 npm run runtimes:prepare
-
-# 3. Launch the desktop app in dev mode
 npm run tauri dev
 ```
 
-Then open the in-app settings (⚙️) to pick an LLM provider and add your API key. Start typing what you want to build.
+Open settings, configure one LLM adapter, then create or open a thread. `npm run dev` starts only the Vite frontend and Node server.
 
-> Want just the web frontend without the desktop shell? `npm run dev` runs the Vite frontend and the Node server side by side.
+## Authoring modes
 
-## Two ways to drive it
+### API mode
 
-**API mode.** Ecky calls an LLM provider directly with your key and generates `.ecky` from your prompt. Pick the provider and model in settings (⚙️). Gemini, any OpenAI-compatible endpoint, and local Ollama are supported.
+Ecky calls the configured Gemini, OpenAI-compatible, or Ollama endpoint. The response becomes `.ecky` source, then follows the same parse/render/version path as manual source.
 
-**Agent mode (MCP).** Point an external coding agent at Ecky's built-in MCP server and it authors models with its own tools, going `inspect → validate → preview → commit` (`workspace_overview` to look around, `macro_preview_render` to preview an `.ecky` source, `commit_preview_version` to persist). Ecky can export a ready-made MCP skill bundle for the agent to load.
+### Agent mode through MCP
 
-Smoke-test the MCP preview→commit path:
+External agents use Ecky-owned tools and state transitions. Normal sequence:
+
+1. Inspect with `workspace_overview` and related read tools.
+2. Validate constraints or an AST patch when applicable.
+3. Render a draft with `macro_preview_render`.
+4. Check it with `verify_generated_model`; use a screenshot for visual claims.
+5. Persist only a green draft with `commit_preview_version`.
+
+Never write `history.sqlite` directly. Smoke-test preview-to-commit behavior with:
 
 ```bash
 npm run mcp:smoke -- <thread-id> <path-to-model.ecky> [mcp-url]
@@ -98,15 +111,13 @@ npm run mcp:smoke -- <thread-id> <path-to-model.ecky> [mcp-url]
 
 ## Development
 
-Full conventions are in [AGENTS.md](AGENTS.md). The short version:
-
-- **Test-first (BDD dual-loop).** A change starts from a failing integration test, driven inward through unit red-green-refactor. Run the relevant suite after each step.
-- **Conventional Commits.** `type(scope): description`; release-please reads them to compute versions and the changelog.
-- **Tauri boundary.** Frontend payloads are `camelCase`, Rust structs `snake_case`; the contract layer translates. Regenerate the TS bindings with `npm run generate:contracts`.
+[AGENTS.md](AGENTS.md) contains full conventions. Main checks:
 
 ```bash
-npm run test:unit      # Svelte/TS unit tests
-npm run test:e2e       # Playwright end-to-end tests
-npm run typecheck      # svelte-check + tsc
-cd src-tauri && cargo test   # Rust backend tests
+npm run test:unit
+npm run test:e2e
+npm run typecheck
+cd src-tauri && cargo check && cargo test
 ```
+
+Development uses outer BDD plus inner unit red-green-refactor cycles. Frontend Tauri payloads use `camelCase`; Rust uses `snake_case`; Rust boundary structs translate through `#[serde(rename_all = "camelCase")]`.

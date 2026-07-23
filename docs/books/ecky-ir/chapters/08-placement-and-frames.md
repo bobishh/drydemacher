@@ -1,6 +1,6 @@
 ## Placement and Frames: Put Geometry Where It Belongs
 
-Simple transforms are enough for many models.
+Use direct transforms for fixed world-axis placement. Use a named frame when several shapes share a local coordinate system or must follow a path.
 
 ```scheme
 (translate 20 0 0 (box 10 10 10))

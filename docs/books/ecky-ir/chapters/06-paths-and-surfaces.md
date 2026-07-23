@@ -1,5 +1,7 @@
 ## Paths and Surfaces: Revolve and Sweep
 
+Choose a surface operation from the motion of a profile: rotate it around an axis, carry it along a path, or interpolate between several sections.
+
 Use `revolve` when a 2D profile turns around an axis.
 
 ```scheme

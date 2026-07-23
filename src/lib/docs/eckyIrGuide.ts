@@ -20,6 +20,7 @@ export type DocsRenderOptions = {
 };
 
 const STATUS_SUFFIX = /\s+\[(pending|ready)\]\s*$/i;
+const AGENT_REFERENCE = /<!-- ECKY_AGENT_REFERENCE_START -->[\s\S]*?<!-- ECKY_AGENT_REFERENCE_END -->/g;
 
 export function isDocsRoute(pathname: string): boolean {
   return pathname === '/docs/ecky-ir'
@@ -35,7 +36,7 @@ export function docsSourcePath(): string {
 }
 
 export function parseDocsDocument(markdown: string, options: DocsRenderOptions = {}): DocsDocument {
-  const normalized = markdown.replace(/\r\n/g, '\n').trim();
+  const normalized = stripAgentReferenceProjection(markdown).replace(/\r\n/g, '\n').trim();
   const sections = splitSections(normalized, options);
   const titleMatch = normalized.match(/^#\s+(.+)$/m);
   const title = titleMatch?.[1]?.trim() || 'Ecky IR Field Guide';
@@ -46,6 +47,10 @@ export function parseDocsDocument(markdown: string, options: DocsRenderOptions =
     summaryHtml: renderMarkdownFragment(summaryMarkdown, options),
     sections,
   };
+}
+
+export function stripAgentReferenceProjection(markdown: string): string {
+  return markdown.replace(AGENT_REFERENCE, '').trimEnd();
 }
 
 export function resolveSection(

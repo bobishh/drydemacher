@@ -1,6 +1,6 @@
 ## First Solid: Ball on a Base
 
-Every model is a tree, and the fastest way to feel that is to grow the smallest one that renders. One `model`, one `part`, one primitive — three nested forms and you have a solid on screen. Everything later in this book is this same tree with more branches.
+A renderable file needs a `model`, a named `part`, and geometry. Start with one primitive so each added transform or boolean has an obvious effect.
 
 ```scheme
 (model
@@ -29,4 +29,4 @@ Add another primitive with `union` when two solids should become one part.
 
 Use this pattern for first tests: primitive first, then one transform, then one boolean.
 
-> **Watch for:** every primitive is born centered on the origin, so two solids written at the same spot interpenetrate instead of stacking. The `translate` above is not decoration — delete it and the ball swallows the base. When a union looks fused-but-wrong, the first question is always "did I move the second solid before combining it?"
+> **Watch for:** primitives start at the origin. Two untransformed solids overlap instead of stacking. If a union has the right members but the wrong silhouette, inspect placement before changing the boolean.

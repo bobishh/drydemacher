@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { buildEckyIrBook } from '../src/lib/docs/eckyIrBook';
+import { syncSplitBook } from './ecky_ir_source';
 
 const root = process.cwd();
 const bookTargetDir = path.join(root, 'target', 'book');
@@ -17,6 +18,7 @@ const docsSourcePath = path.join(root, 'public', 'docs', 'ecky-ir.md');
 // download current — no manual second copy.
 const publicDocsDir = path.join(root, 'public', 'docs');
 
+syncSplitBook(root);
 const docsMarkdown = fs.readFileSync(docsSourcePath, 'utf8');
 
 const book = buildEckyIrBook({

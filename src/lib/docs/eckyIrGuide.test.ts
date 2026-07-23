@@ -27,9 +27,11 @@ test('parseDocsDocument reads markdown corpus into title and sections', () => {
   const parsed = parseDocsDocument(docsFixture());
 
   assert.equal(parsed.title, 'Ecky IR Field Guide');
-  assert.ok(parsed.summaryHtml.includes('building models in order'));
-  assert.equal(parsed.sections[0]?.title, 'First Solid: Ball on a Base');
-  assert.equal(parsed.sections[1]?.title, 'Sketch to Solid: Plate from a Profile');
+  assert.ok(parsed.summaryHtml.includes('working models'));
+  assert.equal(parsed.sections[0]?.title, 'How Ecky Thinks');
+  assert.equal(parsed.sections[1]?.title, 'First Solid: Ball on a Base');
+  assert.equal(parsed.sections[2]?.title, 'Sketch to Solid: Plate from a Profile');
+  assert.ok(parsed.sections.some((section) => section.title === 'Mesh and Image Geometry: Polygons in 3D'));
   assert.ok(parsed.sections.some((section) => section.title === 'Final Model: Integrated Film Adapter Open Helicoid v9'));
   assert.ok(parsed.sections.some((section) => section.title === 'Appendix: Language Reference'));
   assert.ok(parsed.sections.some((section) => section.title === 'Language Overview'));
@@ -68,14 +70,14 @@ test('parseDocsDocument reads section status and extracts snippets', () => {
   assert.match(repetition?.bodyHtml ?? '', /model-level <code>let\*<\/code>/i);
   assert.match(repetition?.bodyHtml ?? '', /helper <code>define<\/code>/i);
   assert.match(repetition?.bodyHtml ?? '', /<code>define-component<\/code>/i);
-  assert.match(repetition?.bodyHtml ?? '', /<code>divider-depth<\/code> owns the wall-offset math once/i);
+  assert.match(repetition?.bodyHtml ?? '', /<code>divider-depth<\/code> owns the offset calculation/i);
   assert.match(verify?.snippet ?? '', /\(verify/);
   assert.match(verify?.snippet ?? '', /clearance min-distance/i);
   assert.match(verify?.bodyHtml ?? '', /clearance min-distance/i);
-  assert.match(verificationChapter?.bodyHtml ?? '', /author verify clauses from requirements/i);
-  assert.match(verificationChapter?.bodyHtml ?? '', /expect the first run to go red/i);
+  assert.match(verificationChapter?.bodyHtml ?? '', /stores measurable requirements/i);
+  assert.match(verificationChapter?.bodyHtml ?? '', /reports the measured delta/i);
   assert.match(verificationChapter?.bodyHtml ?? '', /verify_generated_model/i);
-  assert.match(verificationChapter?.bodyHtml ?? '', /fix the model and re-render/i);
+  assert.match(verificationChapter?.bodyHtml ?? '', /Re-render and run verification again/i);
   assert.match(selectors?.bodyHtml ?? '', /Tag any fit-critical selector\./);
   assert.match(selectors?.bodyHtml ?? '', /:created-by pocket/);
   assert.match(

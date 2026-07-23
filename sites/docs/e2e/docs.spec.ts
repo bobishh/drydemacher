@@ -10,7 +10,7 @@ test.describe('Ecky IR Field Guide — web docs reader', () => {
     await expect(page).toHaveTitle(/Ecky IR Field Guide/);
     await expect(page.getByRole('heading', { name: 'Ecky IR Field Guide', level: 1 })).toBeVisible();
     // Summary copy from the corpus survives into the hero.
-    await expect(page.getByText('building models in order')).toBeVisible();
+    await expect(page.getByText('working models')).toBeVisible();
 
     // Midnight Tactical dark theme is applied to the body.
     const bg = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
@@ -22,7 +22,7 @@ test.describe('Ecky IR Field Guide — web docs reader', () => {
 
     const toc = page.locator('nav[aria-label="Field guide contents"]');
     const links = toc.locator('.docs-toc__link');
-    await expect(links).toHaveCount(34);
+    await expect(links).toHaveCount(36);
 
     await expect(toc.getByText('First Solid: Ball on a Base')).toBeVisible();
     await expect(toc.getByText('Verify Clauses')).toBeVisible();

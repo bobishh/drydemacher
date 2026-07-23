@@ -1,8 +1,8 @@
 ## Components and Reuse: Lift a Proven Part
 
-`repeat` solves "the same shape, many times, in one part." It does not solve "the same _proven_ shape, in two different parts, with its checks coming along." The moment you copy a block of geometry from one part into another, you have made a second thing to maintain — and the day you change the wall thickness in one and forget the other is the day a print fails. A **component** is the fix: name the geometry once, reuse it by reference, and let its proof travel with it.
+Use a component when geometry must be reused across parts or models. A component packages a closed parameter signature, its geometry, and verification clauses; each instance reuses that definition without copying source.
 
-Say you have dialed in a mounting standoff — a bored post whose wall must stay thick enough to survive a screw. Lift it into a `define-component`:
+This component defines a bored mounting standoff and carries its minimum-wall check:
 
 ```scheme
 (define-component standoff
@@ -18,13 +18,13 @@ Say you have dialed in a mounting standoff — a bored post whose wall must stay
   (part rear_right (translate 40 0 0 (standoff))))
 ```
 
-Three ideas earn their keep here.
+Three rules define component behavior.
 
 **Reuse by reference, override by keyword.** `(standoff :height 16)` instantiates the component and overrides one signature key; `(standoff)` takes every default. Omitted keys fall back to the signature, and a missing _required_ key (one with no default) is a compile error that names the component and lists its signature. There is no copy-paste, so there is no drift: change the body once and both parts move together.
 
-**Closedness is the whole contract.** A component body sees only its signature keys plus bindings it makes itself (`let`, `let*`, `repeat` indices, `build` shapes). It cannot reach a model param or an outer `let*` — try it and you get a compile error naming the variable. That restriction is not a nuisance; it is what makes a component _copy-inlineable_. Paste the `define-component` into any other model and it just works, because it never depended on its surroundings.
+**Closedness makes reuse reliable.** A component body sees only signature keys and local bindings (`let`, `let*`, repeat indices, and build shapes). Referencing a model parameter or outer binding is a compile error. Therefore the component can be copied into another model without hidden dependencies.
 
-**Proof travels with the part.** The `verify` clause lives inside the component, so it expands once per instantiation, its tag namespaced by the part key — `front_left/bore_open`, `rear_right/bore_open`. Reuse therefore includes the wall-thickness check at every call site for free. You proved the part once; every future use re-proves itself.
+**Verification expands per instance.** The component's `verify` clause is namespaced by part key, producing tags such as `front_left/bore_open` and `rear_right/bore_open`. Every instance runs the same wall-thickness requirement.
 
 For the exact signature grammar, nesting limits, and verify-travel rules, see **`define-component`** in the language reference appendix.
 

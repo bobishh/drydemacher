@@ -1,6 +1,6 @@
 ## Parameters: Make the Plate Editable
 
-The plate in the last chapter had its size baked in — change the design and you go hunting for four scattered numbers. The moment a model is worth keeping, its dimensions want names. `params` hoists the design choices to the top of the model, where the UI can expose them as labelled sliders and the geometry reads them back by name.
+Parameters separate design inputs from derived geometry. Declare editable dimensions once under `params`; the UI reads their metadata and the model reads their keys.
 
 ```scheme
 (model
@@ -29,7 +29,7 @@ That line is better than repeating `(/ bore_d 2)` through cuts and selectors.
 
 ### Units: bare numbers already have one
 
-Every number you have written so far carried a hidden unit. Ecky has two base units, and a bare number is already expressed in them: **lengths are millimeters, angles are degrees.** `(box 70 42 4)` is 70 mm by 42 mm by 4 mm; `(rotate 90 0 0 ...)` turns 90 degrees. You never have to write a suffix.
+Ecky uses **millimeters for length** and **degrees for angles**. Bare numbers already use those base units: `(box 70 42 4)` is 70 × 42 × 4 mm, while `(rotate 90 0 0 ...)` rotates 90 degrees.
 
 When you do write one, the suffix is a **conversion into that base unit** — nothing more:
 
@@ -45,4 +45,4 @@ So `(box 12mm 1cm 1in)` is exactly `(box 12 10 25.4)`, and `(rotate 1.5708rad 0 
 
 **Some numbers stay unitless on purpose.** Counts (`(repeat 5 ...)`), ratios, segment counts on a cylinder (`(cylinder 6 12 96)` — that `96` is facets, not millimeters), and indices are pure numbers. A suffix on them is meaningless; leave them bare.
 
-**One honest caveat: Ecky does not police dimensions.** The suffix only scales a number into its base unit; it does not tag the value as "a length" or "an angle." Put `45deg` where a width is expected and you get a 45 mm width, no warning — the `deg` is just stripped to its base, which for the box slot is read as millimeters. Units are a convenience for _writing_ correct numbers, not a type system that catches mixing them up. That discipline is yours: author lengths in `mm`/`cm`/`in`, angles in `deg`/`rad`, and keep counts and ratios bare.
+**Unit suffixes convert values; they do not type-check dimensions.** `45deg` in a width slot becomes the number `45`, then the box reads it as 45 mm. Use length suffixes for lengths, angle suffixes for angles, and bare values for counts and ratios.
