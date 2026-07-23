@@ -17,9 +17,11 @@ WORKDIR /repo
 COPY sites/landing/package.json sites/landing/package-lock.json* ./sites/landing/
 RUN cd sites/landing && npm ci
 
-# Landing imports the genome from src/lib/genie — copy both trees.
+# Landing imports shared mascot geometry and the pure Ecky lexer from the
+# repository root.
 COPY sites/landing/ ./sites/landing/
 COPY src/lib/genie/ ./src/lib/genie/
+COPY src/lib/eckyLexer.ts ./src/lib/eckyLexer.ts
 
 RUN cd sites/landing && npm run build
 
@@ -34,11 +36,13 @@ RUN apk add --no-cache zip
 RUN npm init -y && npm install tsx
 
 # Copy the book builders + their pure-TS dependencies.
-COPY scripts/build_ecky_ir_book.ts scripts/build_ecky_ir_docs_site.ts ./scripts/
+COPY scripts/build_ecky_ir_book.ts scripts/build_ecky_ir_docs_site.ts scripts/ecky_ir_source.ts ./scripts/
 COPY src/lib/docs/ ./src/lib/docs/
 
 # Copy the canonical doc source + committed rendered images.
 COPY public/docs/ecky-ir.md ./public/docs/ecky-ir.md
+COPY docs/books/ecky-ir/index.md ./docs/books/ecky-ir/index.md
+COPY docs/books/ecky-ir/chapters/ ./docs/books/ecky-ir/chapters/
 COPY docs/books/ecky-ir/assets/ ./target/book/public/docs/assets/
 
 # Build both: the EPUB (offline download) and the themed web docs site.
