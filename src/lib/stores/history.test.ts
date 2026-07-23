@@ -49,6 +49,7 @@ function sampleManifest(modelId: string): ModelManifest {
       objectCount: 1,
       warnings: [],
     },
+    taggedAnchors: {},
     parts: [],
     parameterGroups: [],
     selectionTargets: [],
@@ -285,11 +286,13 @@ test('resolveVersionRuntimePayload uses target artifact instead of previous curr
 test('persistVersionRuntimePayload skips inconsistent runtime payloads', async () => {
   const calls: Array<{ messageId: string; modelId: string }> = [];
   const persisted = await persistVersionRuntimePayloadLike(
-    'msg-1',
-    sampleBundle('model-1', '/tmp/rebuilt-preview.stl'),
-    sampleManifest('model-2'),
-    async (messageId, artifactBundle) => {
-      calls.push({ messageId, modelId: artifactBundle.modelId });
+      'msg-1',
+      sampleBundle('model-1', '/tmp/rebuilt-preview.stl'),
+      sampleManifest('model-2'),
+      async (messageId, artifactBundle) => {
+      if (artifactBundle) {
+        calls.push({ messageId, modelId: artifactBundle.modelId });
+      }
     },
   );
 
@@ -300,11 +303,13 @@ test('persistVersionRuntimePayload skips inconsistent runtime payloads', async (
 test('persistVersionRuntimePayload stores rebuilt runtime for same message', async () => {
   const calls: Array<{ messageId: string; modelId: string }> = [];
   const persisted = await persistVersionRuntimePayloadLike(
-    'msg-1',
-    sampleBundle('model-1', '/tmp/rebuilt-preview.stl'),
-    sampleManifest('model-1'),
-    async (messageId, artifactBundle) => {
-      calls.push({ messageId, modelId: artifactBundle.modelId });
+      'msg-1',
+      sampleBundle('model-1', '/tmp/rebuilt-preview.stl'),
+      sampleManifest('model-1'),
+      async (messageId, artifactBundle) => {
+      if (artifactBundle) {
+        calls.push({ messageId, modelId: artifactBundle.modelId });
+      }
     },
   );
 

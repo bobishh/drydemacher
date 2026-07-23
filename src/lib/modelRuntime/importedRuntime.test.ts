@@ -11,7 +11,10 @@ test('buildImportedUiSpec defaults imported numeric controls to number inputs', 
     document: {
       documentName: 'Imported Shell',
       documentLabel: 'Imported Shell',
+      objectCount: 1,
+      warnings: [],
     },
+    taggedAnchors: {},
     parameterGroups: [
       {
         groupId: 'group-shell',

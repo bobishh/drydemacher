@@ -49,6 +49,7 @@ function manifest(overrides: Partial<ModelManifest> = {}): ModelManifest {
       objectCount: 1,
       warnings: [],
     },
+    taggedAnchors: {},
     parts: [
       {
         partId: 'body',

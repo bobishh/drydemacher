@@ -10,6 +10,7 @@ function densePartProjection(paramCount: number) {
       modelId: 'scene-density',
       sourceKind: 'generated',
       document: { documentName: 'Scene Density', documentLabel: 'Scene Density', objectCount: 1, warnings: [] },
+      taggedAnchors: {},
       parts: [
         {
           partId: 'part-dense',
@@ -22,7 +23,7 @@ function densePartProjection(paramCount: number) {
       ],
     },
     uiSpec: {
-      fields: keys.map((key) => ({ type: 'number' as const, key, label: key })),
+      fields: keys.map((key) => ({ type: 'number' as const, key, label: key, frozen: false })),
     },
     parameters: Object.fromEntries(keys.map((key, i) => [key, i])),
   });
@@ -34,6 +35,7 @@ test('buildMacroAstSceneLayout places nodes and connectors for a source-backed s
       modelId: 'scene-layout',
       sourceKind: 'generated',
       document: { documentName: 'Scene Layout', documentLabel: 'Scene Layout', objectCount: 1, warnings: [] },
+      taggedAnchors: {},
       parts: [
         {
           partId: 'part-a',
@@ -55,8 +57,8 @@ test('buildMacroAstSceneLayout places nodes and connectors for a source-backed s
     },
     uiSpec: {
       fields: [
-        { type: 'number', key: 'width_mm', label: 'Width' },
-        { type: 'checkbox', key: 'enabled', label: 'Enabled' },
+        { type: 'number', key: 'width_mm', label: 'Width', frozen: false },
+        { type: 'checkbox', key: 'enabled', label: 'Enabled', frozen: false },
         { type: 'select', key: 'mode', label: 'Mode', options: [], frozen: false },
       ],
     },
@@ -96,6 +98,7 @@ test('buildMacroAstSceneLayout keeps a single part compact and uses multiple por
       modelId: 'scene-compact',
       sourceKind: 'generated',
       document: { documentName: 'Scene Compact', documentLabel: 'Scene Compact', objectCount: 1, warnings: [] },
+      taggedAnchors: {},
       parts: [
         {
           partId: 'part-a',
@@ -109,12 +112,12 @@ test('buildMacroAstSceneLayout keeps a single part compact and uses multiple por
     },
     uiSpec: {
       fields: [
-        { type: 'number', key: 'width_mm', label: 'Width' },
-        { type: 'checkbox', key: 'enabled', label: 'Enabled' },
+        { type: 'number', key: 'width_mm', label: 'Width', frozen: false },
+        { type: 'checkbox', key: 'enabled', label: 'Enabled', frozen: false },
         { type: 'select', key: 'mode', label: 'Mode', options: [], frozen: false },
-        { type: 'image', key: 'image', label: 'Image' },
-        { type: 'number', key: 'height_mm', label: 'Height' },
-        { type: 'number', key: 'depth_mm', label: 'Depth' },
+        { type: 'image', key: 'image', label: 'Image', frozen: false },
+        { type: 'number', key: 'height_mm', label: 'Height', frozen: false },
+        { type: 'number', key: 'depth_mm', label: 'Depth', frozen: false },
       ],
     },
     parameters: {

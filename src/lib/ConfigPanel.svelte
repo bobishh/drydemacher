@@ -1617,7 +1617,6 @@
               aria-label="SYSTEM PROMPT"
               aria-readonly="true"
               data-testid="engine-system-prompt-code"
-              tabindex="0"
             ><code>{designSystemPrompt}</code></pre>
             {#if designSystemPromptError}
               <div class="field-note">{designSystemPromptError}</div>
@@ -2303,8 +2302,7 @@
   }
 
   .aac-toggle,
-  .mcp-ast-authoring-toggle,
-  .engine-enabled-toggle {
+  .mcp-ast-authoring-toggle {
     position: relative;
     display: flex;
     align-items: center;
@@ -2315,8 +2313,7 @@
   }
 
   .aac-toggle input[type="checkbox"],
-  .mcp-ast-authoring-toggle input[type="checkbox"],
-  .engine-enabled-toggle input[type="checkbox"] {
+  .mcp-ast-authoring-toggle input[type="checkbox"] {
     position: absolute;
     opacity: 0;
     width: 0;
@@ -2348,15 +2345,13 @@
   }
 
   .aac-toggle:has(input:checked) .tgl-track,
-  .mcp-ast-authoring-toggle:has(input:checked) .tgl-track,
-  .engine-enabled-toggle:has(input:checked) .tgl-track {
+  .mcp-ast-authoring-toggle:has(input:checked) .tgl-track {
     background: var(--primary);
     border-color: var(--primary);
   }
 
   .aac-toggle:has(input:checked) .tgl-track::after,
-  .mcp-ast-authoring-toggle:has(input:checked) .tgl-track::after,
-  .engine-enabled-toggle:has(input:checked) .tgl-track::after {
+  .mcp-ast-authoring-toggle:has(input:checked) .tgl-track::after {
     transform: translateX(14px);
     background: #fff;
   }

@@ -4,9 +4,24 @@ import { activeThreadIdStore as activeThreadId, activeVersionId } from '../store
 import { paramPanelState } from '../stores/paramPanelState';
 import { session } from '../stores/sessionStore';
 import { workingCopy } from '../stores/workingCopy';
+import { activeRenderSnapshot } from '../stores/activeRenderSnapshot';
 import { buildImportedSyntheticDesign } from './importedRuntime';
 import { saveLastDesign } from '../tauri/client';
 import type { DesignOutput, LastDesignSnapshot } from '../types/domain';
+
+type TauriWindow = Window & {
+  __TAURI_INTERNALS__?: {
+    invoke?: unknown;
+  };
+};
+
+function hasTauriRuntime(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    (window as TauriWindow).__TAURI_INTERNALS__ !== undefined &&
+    typeof (window as TauriWindow).__TAURI_INTERNALS__ === 'object'
+  );
+}
 
 function buildWorkingDesign(): DesignOutput | null {
   const current = get(workingCopy);
@@ -34,7 +49,12 @@ function buildWorkingDesign(): DesignOutput | null {
 export async function persistLastSessionSnapshot(
   overrides: Partial<LastDesignSnapshot> = {},
 ): Promise<void> {
+  if (!hasTauriRuntime()) {
+    return;
+  }
+
   const currentSession = get(session);
+  const currentSnapshot = get(activeRenderSnapshot);
   const baseManifest = overrides.modelManifest ?? currentSession.modelManifest;
   const candidateSelectedPartId = overrides.selectedPartId ?? currentSession.selectedPartId;
   const selectedPartId =
@@ -53,6 +73,10 @@ export async function persistLastSessionSnapshot(
         : currentSession.artifactBundle,
     modelManifest: baseManifest ?? null,
     selectedPartId,
+    targetRef:
+      overrides.targetRef !== undefined
+        ? overrides.targetRef
+        : currentSnapshot?.targetRef ?? null,
   };
 
   if (!snapshot.design && !snapshot.artifactBundle && !snapshot.modelManifest) {
@@ -68,6 +92,10 @@ export async function persistLastSessionSnapshot(
 }
 
 export async function clearLastSessionSnapshot(): Promise<void> {
+  if (!hasTauriRuntime()) {
+    return;
+  }
+
   try {
     await saveLastDesign(null);
   } catch (error) {

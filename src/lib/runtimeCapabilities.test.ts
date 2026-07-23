@@ -131,6 +131,7 @@ test('resolveActiveAuthoringContext falls back to session runtime before config 
       sourceKind: 'generated',
       sourceLanguage: 'build123d',
       geometryBackend: 'build123d',
+      taggedAnchors: {},
       document: {
         documentName: 'Session',
         documentLabel: 'Session',

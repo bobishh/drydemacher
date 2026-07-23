@@ -17,7 +17,6 @@
   import ImportEnrichmentModal from './lib/ImportEnrichmentModal.svelte';
   import ManualImportModal from './lib/ManualImportModal.svelte';
   import AgentTerminalSurface from './lib/AgentTerminalSurface.svelte';
-  import SketchWorkspace from './lib/SketchWorkspace.svelte';
   import DocsSite from './lib/DocsSite.svelte';
   import Modal from './lib/Modal.svelte';
   import Window from './lib/Window.svelte';
@@ -87,6 +86,11 @@
   import { getRenderableRuntimeBundle, inspectRuntimeBundle } from './lib/modelRuntime/runtimeBundle';
   import { sameArtifactVersion, shouldPersistVersionPreview } from './lib/versionPreviewPersistence';
   import { resolveDraftPreviewDesign } from './lib/agents/draftPreviewParams';
+  import { shouldApplyDraftPreviewToWorkspace } from './lib/agents/draftPreviewProjection';
+  import {
+    hydrateActiveRenderSnapshot,
+    RenderSnapshotMismatch,
+  } from './lib/stores/activeRenderSnapshot';
   import {
     deriveThreadAttentionIds,
     deriveMascotStateForThreadAgent,
@@ -131,7 +135,6 @@
   } from './lib/agents/workspaceCapture';
   import { codeInspectorTitle } from './lib/modelEngineLabel';
   import { buildFailedDraftSeed } from './lib/manualDraftSeed';
-  import { loadSketchPreviewDraft } from './lib/tauri/client';
   import type { TopologyMode } from './lib/viewerDisplayMode';
   import {
     agentTerminalAttentionStore,
@@ -244,7 +247,7 @@
     type ThreadAgentState,
   } from './lib/tauri/client';
   import { listen } from '@tauri-apps/api/event';
-  import type { FreecadLibraryItem, SketchDraftSource } from './lib/tauri/contracts';
+  import type { FreecadLibraryItem, SketchDocument, SketchDraftSource } from './lib/tauri/contracts';
   import type {
     AgentSession,
     AgentTerminalInput,
@@ -382,6 +385,7 @@
   type SketchPreviewState = {
     draft: SketchDraftSource;
     artifactBundle: ArtifactBundle;
+    sketchDocument?: SketchDocument | null;
   };
   type SketchPreviewDraftState = {
     scopeId: string | null;
@@ -478,6 +482,7 @@
   async function openVersionCodeModal(seed?: {
     code?: string;
     title?: string;
+    messageId?: string | null;
     sourceLanguage?: SourceLanguage | null;
     geometryBackend?: GeometryBackend | null;
   }) {
@@ -520,6 +525,13 @@
 
     codeModalMode = 'version';
     codeModalSourceLanguage = nextSourceLanguage;
+    codeModalDraftSerial += 1;
+    codeModalDraftScopeKey = [
+      'version',
+      $activeThreadId ?? 'no-thread',
+      seed?.messageId ?? $activeVersionId ?? current.sourceVersionId ?? 'draft',
+      codeModalDraftSerial,
+    ].join(':');
     selectedCode.set(nextCode);
     selectedTitle.set(codeInspectorTitle(nextTitle, nextSourceLanguage, nextGeometryBackend));
     showWindow('code');
@@ -574,8 +586,11 @@
   let showNewProjectImport = $state(false);
   let sketchPreview = $state<SketchPreviewState | null>(null);
   let sketchPreviewDraft = $state<SketchPreviewDraftState | null>(null);
+  const sketchWorkspaceAvailable = false;
   let codeModalMode = $state<'version' | 'sketch-preview' | 'docs-snippet'>('version');
   let codeModalSourceLanguage = $state<SourceLanguage | null>(null);
+  let codeModalDraftSerial = $state(0);
+  let codeModalDraftScopeKey = $state('');
   const enableViewportContextOverlay = false;
   let activeDraftFeedback = $state<AgentDraftFeedback | null>(null);
   const LIVE_APPLY_DEBOUNCE_MS = 250;
@@ -757,7 +772,7 @@
     }),
   );
   const viewerAssets = $derived.by<ViewerAsset[]>(() => viewportState.viewerAssets);
-  const hasSketchPreview = $derived(Boolean(sketchPreview?.artifactBundle));
+  const hasSketchPreview = $derived(sketchWorkspaceAvailable && Boolean(sketchPreview?.artifactBundle));
   const sketchPreviewStlUrl = $derived.by<string | null>(() =>
     sketchPreview?.artifactBundle ? toAssetUrl(sketchPreview.artifactBundle.previewStlPath) : null,
   );
@@ -767,7 +782,7 @@
       : [],
   );
   const sketchPreviewStatus = $derived.by<SketchViewportStatus | null>(() => {
-    if (!sketchPreview?.artifactBundle) return null;
+    if (!hasSketchPreview || !sketchPreview?.artifactBundle) return null;
 
     const warnings = sketchPreview.draft.warnings ?? [];
     const warningText = warnings.join(' ').toLowerCase();
@@ -784,14 +799,14 @@
     };
   });
   const sketchPreviewDraftLabel = $derived.by<string | null>(() => {
-    if (!sketchPreviewDraft) return null;
+    if (!hasSketchPreview || !sketchPreviewDraft) return null;
     return sketchPreviewDraft.savedAt ? 'DRAFT SAVED' : 'DRAFT ACTIVE';
   });
   const effectiveViewerStlUrl = $derived.by<string | null>(() =>
-    sketchPreview?.artifactBundle ? sketchPreviewStlUrl : ($activeThreadId ? stlUrl : null),
+    hasSketchPreview ? sketchPreviewStlUrl : ($activeThreadId ? stlUrl : null),
   );
   const effectiveViewerAssets = $derived.by<ViewerAsset[]>(() =>
-    sketchPreview?.artifactBundle ? sketchPreviewViewerAssets : viewerAssets,
+    hasSketchPreview ? sketchPreviewViewerAssets : viewerAssets,
   );
   const hasRenderableModel = $derived.by(() => viewportState.hasRenderableModel);
   const currentViewportTargetKey = $derived.by<string | null>(
@@ -801,7 +816,7 @@
     () => viewportState.currentViewerModelKey,
   );
   const effectiveViewerModelKey = $derived.by<string | null>(() =>
-    sketchPreview?.artifactBundle
+    hasSketchPreview && sketchPreview?.artifactBundle
       ? [
           'sketch-preview',
           sketchPreview.artifactBundle.modelId,
@@ -933,7 +948,6 @@
   let threadAgentPollInterval: ReturnType<typeof setInterval> | null = null;
   const terminalWindowState = $derived($windowStore.terminal);
   const codeWindowState = $derived($windowStore.code);
-  const sketchWindowState = $derived($windowStore.sketch);
   const projectsWindowState = $derived($windowStore.projects);
   const paramsWindowState = $derived($windowStore.params);
   const dialogueWindowState = $derived($windowStore.dialogue);
@@ -1159,6 +1173,12 @@
       paramPanelState.hydrateFromVersion(seededDraft, null);
       codeModalMode = 'version';
       codeModalSourceLanguage = seededDraft.sourceLanguage;
+      codeModalDraftSerial += 1;
+      codeModalDraftScopeKey = [
+        'manual-retry',
+        $activeThreadId ?? 'no-thread',
+        codeModalDraftSerial,
+      ].join(':');
       selectedCode.set(seededDraft.macroCode);
       selectedTitle.set(
         codeInspectorTitle(
@@ -1537,6 +1557,7 @@
         draftScopeId: scopeId,
         draftSource: preview.draft,
         artifactBundle: preview.artifactBundle,
+        sketchDocument: preview.sketchDocument ?? null,
       });
     } catch (error) {
       console.warn('[Sketch] Failed to persist preview draft:', error);
@@ -2218,20 +2239,7 @@
   }
 
   onMount(() => {
-    void (async () => {
-      await boot();
-      const snapshot = await loadSketchPreviewDraft({});
-      if (snapshot) {
-        sketchPreviewDraft = {
-          scopeId: normalizeSketchPreviewDraftScopeId(snapshot.scopeId ?? null),
-          savedAt: snapshot.updatedAt,
-        };
-        sketchPreview = {
-          draft: snapshot.draftSource,
-          artifactBundle: snapshot.artifactBundle,
-        };
-      }
-    })();
+    void boot();
     // Initial fetch of agent sessions (push events only fire on changes, not on load)
     void getActiveAgentSessions().then(sessions => { activeAgentSessions = sessions; }).catch(() => {});
     void getAgentTerminalSnapshots()
@@ -2292,33 +2300,78 @@
       'agent-draft-preview-updated',
       (event) => {
         const preview = event.payload;
-        const previousThreadId = get(activeThreadId);
-        const previewDesign = resolveDraftPreviewDesign({
-          design: preview.design,
+        const isActivePreview = shouldApplyDraftPreviewToWorkspace({
+          activeThreadId: get(activeThreadId),
           previewThreadId: preview.threadId,
-          activeThreadId: previousThreadId,
-          currentParams: get(paramPanelState).params,
         });
-        activeThreadId.set(preview.threadId);
-        activeVersionId.set(preview.previewId);
-        activeDraftFeedback = preview.feedback
-          ? {
+
+        if (isActivePreview) {
+          const previewDesign = resolveDraftPreviewDesign({
+            design: preview.design,
+            previewThreadId: preview.threadId,
+            activeThreadId: preview.threadId,
+            currentParams: get(paramPanelState).params,
+          });
+          try {
+            const snapshot = hydrateActiveRenderSnapshot({
+              threadId: preview.threadId,
+              messageId: preview.previewId,
+              eventModelId: preview.modelId ?? null,
+              design: previewDesign,
+              artifactBundle: preview.artifactBundle,
+              modelManifest: preview.modelManifest,
+              selectedPartId: null,
+              stlUrl: toAssetUrl(preview.artifactBundle.previewStlPath),
+              status: preview.feedback?.summary || 'Preview rendered.',
+              targetRef: {
+                kind: 'draft',
+                threadId: preview.threadId,
+                previewId: preview.previewId,
+                sessionId: preview.sessionId,
+              },
+            });
+            activeDraftFeedback = preview.feedback
+              ? {
               ...preview.feedback,
               items: preview.feedback.items.map((item, index) =>
                 typeof item === 'string'
-                  ? { code: `feedback-${index + 1}`, message: item }
-                  : item,
-              ),
-              authoringLints: preview.feedback.authoringLints ?? [],
-              threadId: preview.threadId,
+                    ? { code: `feedback-${index + 1}`, message: item }
+                    : item,
+                ),
+                authoringLints: preview.feedback.authoringLints ?? [],
+                threadId: preview.threadId,
               previewId: preview.previewId,
               sessionId: preview.sessionId,
-            }
-          : null;
-        workingCopy.loadVersion(previewDesign, preview.previewId);
-        paramPanelState.hydrateFromVersion(previewDesign, preview.previewId);
-        session.setStlUrl(toAssetUrl(preview.artifactBundle.previewStlPath));
-        session.setModelRuntime(preview.artifactBundle, preview.modelManifest);
+                }
+              : null;
+            void persistLastSessionSnapshot({
+              design: snapshot.design,
+              threadId: snapshot.threadId,
+              messageId: snapshot.messageId,
+              artifactBundle: snapshot.artifactBundle,
+              modelManifest: snapshot.modelManifest,
+              selectedPartId: snapshot.selectedPartId,
+              targetRef: snapshot.targetRef,
+            });
+          } catch (error) {
+            const message = error instanceof RenderSnapshotMismatch
+              ? error.message
+              : `Render snapshot rejected: ${String(error)}`;
+            session.setError(message);
+            recordSessionActivityEvent({
+              threadId: preview.threadId,
+              versionId: preview.previewId,
+              sessionId: preview.sessionId ?? 'local-session',
+              actor: { kind: 'agent', id: preview.sessionId ?? 'agent', label: 'Agent' },
+              kind: 'validation_reported',
+              title: 'Render snapshot rejected',
+              summary: message,
+              severity: 'error',
+              raw: { previewModelId: preview.modelId, manifestModelId: preview.modelManifest.modelId },
+            });
+            return;
+          }
+        }
         recordSessionActivityEvent({
           threadId: preview.threadId,
           versionId: preview.previewId,
@@ -2344,15 +2397,6 @@
             },
           ],
           raw: preview.feedback ?? null,
-        });
-        session.setStatus(preview.feedback?.summary || 'Preview rendered.');
-        void persistLastSessionSnapshot({
-          design: previewDesign,
-          threadId: preview.threadId,
-          messageId: preview.previewId,
-          artifactBundle: preview.artifactBundle,
-          modelManifest: preview.modelManifest,
-          selectedPartId: null,
         });
       },
     ) : noopUnlisten;
@@ -2520,11 +2564,19 @@
     return $nowSeconds - latestAssistantMessage.timestamp <= 300;
   });
   const hasPreviewArtifact = $derived.by(() =>
-    Boolean(sketchPreview?.artifactBundle?.previewStlPath || activeArtifactBundle?.previewStlPath),
+    Boolean(
+      hasSketchPreview
+        ? sketchPreview?.artifactBundle?.previewStlPath
+        : activeArtifactBundle?.previewStlPath,
+    ),
   );
   const previewArtifactName = $derived.by<string | null>(() =>
     sketchPreviewStatus?.artifactName ||
-    fileBasename(sketchPreview?.artifactBundle?.previewStlPath ?? activeArtifactBundle?.previewStlPath) ||
+    fileBasename(
+      hasSketchPreview
+        ? sketchPreview?.artifactBundle?.previewStlPath
+        : activeArtifactBundle?.previewStlPath,
+    ) ||
     null,
   );
 
@@ -3427,22 +3479,6 @@
           </button>
         {/if}
         <button
-          class="dock-btn"
-          class:dock-btn--active={sketchWindowState.visible}
-          data-dock-label="SKETCH"
-          onclick={() => toggleWindow('sketch')}
-          aria-label="SKETCH"
-          title="Sketch Workspace"
-        >
-          <svg class="dock-svg dock-svg--sketch" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="M5 17 10 8l5 5 4-7" />
-            <path d="M4 17h2v2H4Z" />
-            <path d="M9 7h2v2H9Z" />
-            <path d="M14 12h2v2h-2Z" />
-            <path d="M18 5h2v2h-2Z" />
-          </svg>
-        </button>
-        <button
           class="dock-btn dock-btn--utility dock-btn--settings"
           data-dock-label="SETTINGS"
           onclick={() => toggleWindow('settings')}
@@ -3495,8 +3531,8 @@
                 stlUrl={effectiveViewerStlUrl}
                 viewerAssets={effectiveViewerAssets}
                 manifestParts={hasSketchPreview ? [] : activeModelManifest?.parts ?? []}
-                edgeTargets={sketchPreview?.artifactBundle?.edgeTargets ?? activeArtifactBundle?.edgeTargets ?? []}
-                faceTargets={sketchPreview?.artifactBundle?.faceTargets ?? activeArtifactBundle?.faceTargets ?? []}
+                edgeTargets={hasSketchPreview ? sketchPreview?.artifactBundle?.edgeTargets ?? [] : activeArtifactBundle?.edgeTargets ?? []}
+                faceTargets={hasSketchPreview ? sketchPreview?.artifactBundle?.faceTargets ?? [] : activeArtifactBundle?.faceTargets ?? []}
                 selectionTargets={hasSketchPreview ? [] : contextSelectionTargets}
                 selectedTarget={hasSketchPreview ? null : selectedTarget}
                 searchQuery={hasSketchPreview ? '' : sharedContextSearchQuery}
@@ -3829,6 +3865,7 @@
             void openVersionCodeModal({
               code: $workingCopy.macroCode,
               title: $workingCopy.title,
+              messageId: $activeVersionId ?? $workingCopy.sourceVersionId,
               sourceLanguage: $workingCopy.sourceLanguage,
               geometryBackend: $workingCopy.geometryBackend,
             });
@@ -3895,34 +3932,6 @@
     </Window>
   {/if}
 
-  {#if mountedWindows.sketch}
-    <Window
-      windowId="sketch"
-      x={sketchWindowState.x}
-      y={sketchWindowState.y}
-      width={sketchWindowState.width}
-      height={sketchWindowState.height}
-      z={sketchWindowState.z}
-      minWidth={520}
-      minHeight={360}
-      title="Sketch Workspace"
-      focused={sketchWindowState.active}
-      hidden={!sketchWindowState.visible}
-      highlighted={false}
-      onclose={() => closeWindowStore('sketch')}
-    >
-      <div class="sketch-window-shell">
-        <SketchWorkspace
-          restoredPreview={sketchPreview}
-          onPreviewResult={handleSketchPreviewChange}
-          onManualPreviewResult={handleSketchManualPreviewResult}
-          onSaveDraft={handleSketchSaveDraft}
-          onDiscardDraft={discardSketchPreviewDraft}
-        />
-      </div>
-    </Window>
-  {/if}
-
   {#if mountedWindows.dialogue}
     <Window
       windowId="dialogue"
@@ -3972,6 +3981,7 @@
               void openVersionCodeModal({
                 code: m.output.macroCode,
                 title: m.output.title,
+                messageId: m.id,
                 sourceLanguage:
                   m.artifactBundle?.sourceLanguage ?? m.modelManifest?.sourceLanguage ?? m.output.sourceLanguage ?? null,
                 geometryBackend:
@@ -4143,6 +4153,7 @@
       sourceLanguage={codeModalSourceLanguage}
       macroDiffView={sessionCodeDiffView}
       title={$selectedTitle}
+      draftScopeKey={codeModalDraftScopeKey}
       defaultTitle={$workingCopy.title}
       defaultVersionName={$workingCopy.versionName || 'V-manual'}
       onApply={codeModalMode === 'version' ? applyManualCodeDraft : undefined}
@@ -4171,11 +4182,6 @@
 <style>
   .app-page { position: relative; height: 100vh; display: flex; flex-direction: column; background: var(--bg); color: var(--text); }
   .app-container { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-  .sketch-window-shell {
-    height: 100%;
-    min-height: 0;
-    overflow: hidden;
-  }
   .workbench { display: flex; height: 100%; width: 100%; overflow: hidden; }
   .main-workbench { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
   .viewport-area { flex: 1; min-height: 100px; background: #0b0f1a; position: relative; overflow: hidden; }

@@ -6,7 +6,6 @@
   import { ThreeMFLoader } from 'three/examples/jsm/loaders/3MFLoader.js';
   import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
   import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
-  import { toCreasedNormals } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
   import ViewportTransmutation from './ViewportTransmutation.svelte';
   import { estimateBase64Bytes, profileLog } from './debug/profiler';
   import type {
@@ -37,6 +36,7 @@
   import { resolveViewerTone, type ViewerTone } from './viewerLook';
   import { resolveViewerAssetUrl } from './viewerAssetUrl';
   import { shouldHandleSelectionClick, shouldHandleViewerClick } from './viewerInteraction';
+  import { prepareStlDisplayGeometry } from './viewerStlNormals';
 
   type ViewportBusyPhase = 'generating' | 'repairing' | 'rendering' | 'committing' | null;
 
@@ -214,7 +214,6 @@
 
   const raycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
-  const stlNormalCreaseAngle = Math.PI / 3;
   let pointerDownAt: { x: number; y: number } | null = null;
   let isOrbitDragging = false;
 
@@ -845,7 +844,7 @@
       return geometry;
     }
 
-    return toCreasedNormals(geometry, stlNormalCreaseAngle);
+    return prepareStlDisplayGeometry(geometry);
   }
 
   function frameModel(object: THREE.Object3D) {

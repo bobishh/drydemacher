@@ -64,6 +64,9 @@ async function installSketchMocks(
     mockWindow.__SKETCH_BREP_ACCEPT_CALLS__ = [];
     mockWindow.__SKETCH_BREP_PACKAGE_CALLS__ = [];
     mockWindow.__BREP_HIDDEN_LINE_CALLS__ = [];
+    mockWindow.__RASTER_TRACE_CALLS__ = [];
+    mockWindow.__RASTER_TRACE_MODE__ = 'ok';
+    mockWindow.__SKETCH_ALL_COMMANDS__ = [];
 
     const draftStorageKey = '__SKETCH_PREVIEW_DRAFTS__';
     const readDraftStore = () => {
@@ -105,8 +108,17 @@ async function installSketchMocks(
       return `; preview-hull-source\n(profile :outer ${polygonSource(outer)} :holes (${holes.map(polygonSource).join(' ')}))`;
     };
 
+    const sourceWithSketchEnvelope = (source: string, document: any) => {
+      const hasRaster = document?.sketches?.some((sketch: any) =>
+        sketch?.primitives?.some((primitive: any) => primitive?.provenance?.kind === 'rasterTrace'),
+      );
+      if (!hasRaster) return source;
+      return `${source}\n; ecky-sketch-document-base64:${btoa(JSON.stringify(document))}`;
+    };
+
     window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
     window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+      mockWindow.__SKETCH_ALL_COMMANDS__.push({ cmd, args });
       if (cmd === 'get_config') {
         return {
           engines: [],
@@ -147,6 +159,50 @@ async function installSketchMocks(
       if (cmd === 'get_history') return [];
       if (cmd === 'get_last_design') return null;
       if (cmd === 'get_default_macro') return '';
+      if (cmd === 'plugin:dialog|open') return '/mock/raster/front-reference.png';
+      if (cmd === 'trace_raster_reference') {
+        const request = args?.request ?? {};
+        mockWindow.__RASTER_TRACE_CALLS__.push(request);
+        if (mockWindow.__RASTER_TRACE_MODE__ === 'error') {
+          throw {
+            code: 'validation',
+            message: 'Raster trace failed.',
+            details: `path='${request.imagePath}' threshold=${request.threshold}: no closed contour found; connectedComponents=0`,
+          };
+        }
+        const asset = {
+          imagePath: request.imagePath,
+          digest: 'sha256:raster-front-fixture',
+          widthPixels: 800,
+          heightPixels: 600,
+        };
+        const provenance = {
+          kind: 'rasterTrace',
+          asset,
+          view: request.view,
+          calibration: request.calibration,
+          threshold: request.threshold,
+          invert: request.invert ?? false,
+          contourId: `raster-${request.view}-0`,
+          extractorVersion: 'raster-trace-v1',
+        };
+        return {
+          asset,
+          contours: [
+            {
+              contourId: provenance.contourId,
+              points: [[10, 10], [80, 10], [80, 70], [10, 70]],
+              closed: true,
+              foregroundPixelCount: 240,
+              signedArea: 4200,
+              provenance,
+            },
+          ],
+          connectedComponentCount: 1,
+          extractorVersion: 'raster-trace-v1',
+          evidence: ['decoded raster 800x600', 'connectedComponents=1 closedContours=1'],
+        };
+      }
       if (cmd === 'save_sketch_preview_draft') {
         const request = args?.request ?? {};
         const scopeId = draftScopeKey(request.scopeId);
@@ -154,6 +210,7 @@ async function installSketchMocks(
           scopeId: request.scopeId ?? null,
           draftSource: request.draftSource,
           artifactBundle: request.artifactBundle,
+          sketchDocument: request.sketchDocument ?? null,
           updatedAt: Math.floor(Date.now() / 1000),
         };
         const store = readDraftStore();
@@ -196,7 +253,8 @@ async function installSketchMocks(
         };
       }
       if (cmd === 'generate_sketch_draft_preview') {
-        mockWindow.__SKETCH_DRAFT_CALLS__.push(args?.request ?? null);
+        const request = args?.request ?? null;
+        mockWindow.__SKETCH_DRAFT_CALLS__.push(request);
         if (mockMode === 'delay') {
           await new Promise((resolve) => setTimeout(resolve, 800));
         }
@@ -219,7 +277,12 @@ async function installSketchMocks(
             sourceLanguage: 'ecky',
             geometryBackend: 'mesh',
             macroDialect: 'ecky',
-            source: mockSource,
+            source: sourceWithSketchEnvelope(mockSource, {
+              documentId: 'sketch-preview-document',
+              sketches: [request?.sketch],
+              activeSketchId: request?.sketch?.sketchId,
+              units: 'mm',
+            }),
             warnings: ['draft from seed geometry'],
           },
           {
@@ -266,7 +329,7 @@ async function installSketchMocks(
             sourceLanguage: 'ecky',
             geometryBackend: mockHiddenLineMode === 'unavailable' || mockHiddenLineMode === 'step-ok' ? 'mesh' : 'freecad',
             macroDialect: 'ecky',
-            source: previewHullSourceForRequest(request),
+            source: sourceWithSketchEnvelope(previewHullSourceForRequest(request), request?.document),
             warnings: [`preview hull from ${viewLabel} candidate cell search; not accepted BRep`],
           },
           {
@@ -2166,6 +2229,218 @@ function isPointOnGrid(point: SketchPointTuple, gridSize: number) {
 }
 
 test.describe('Sketch workspace', () => {
+  test('Given Front raster reference When contour is extracted and reviewed Then editable provenance-bearing sketch previews', async ({
+    page,
+  }) => {
+    await installSketchMocks(page, 'ok');
+    await openSketchWorkspace(page);
+
+    const rasterPanel = page.getByLabel('Raster reference extraction');
+    const frontReference = rasterPanel.getByLabel('front raster reference');
+    await frontReference.getByLabel('front raster image path').fill('/mock/raster/front-reference.png');
+    await expect(frontReference).toContainText('front-reference.png');
+    await frontReference.getByLabel('front raster width mm').fill('120');
+    await frontReference.getByLabel('front raster height mm').fill('80');
+    await frontReference.getByLabel('front raster threshold').fill('143');
+    await frontReference.getByLabel('front raster invert').check();
+    await frontReference.getByRole('button', { name: 'EXTRACT', exact: true }).click();
+
+    await expect(frontReference).toContainText('connectedComponents=1 closedContours=1');
+    await expect(page.locator('.sketch-pane__raster-candidate')).toHaveCount(1);
+    await frontReference.getByRole('button', { name: /REVIEW raster-front-0/i }).click();
+
+    await expect(page.getByText('raster-front / front / closed')).toBeVisible();
+    await page.waitForFunction(() => (window as any).__SKETCH_DRAFT_CALLS__.length >= 1);
+    const primitive = await page.evaluate(
+      () => (window as any).__SKETCH_DRAFT_CALLS__.at(-1)?.sketch?.primitives?.[0],
+    );
+    expect(primitive).toMatchObject({
+      primitiveId: 'raster-front',
+      closed: true,
+      provenance: {
+        kind: 'rasterTrace',
+        asset: { imagePath: '/mock/raster/front-reference.png', digest: 'sha256:raster-front-fixture' },
+        calibration: { physicalWidth: 120, physicalHeight: 80 },
+        threshold: 143,
+        invert: true,
+        contourId: 'raster-front-0',
+        extractorVersion: 'raster-trace-v1',
+      },
+    });
+  });
+
+  test('Given reviewed raster sketch When re-extraction finds no contour Then raw evidence shows and last reviewed preview remains', async ({
+    page,
+  }) => {
+    await installSketchMocks(page, 'ok');
+    await openSketchWorkspace(page);
+
+    const frontReference = page
+      .getByLabel('Raster reference extraction')
+      .getByLabel('front raster reference');
+    await frontReference.getByLabel('front raster image path').fill('/mock/raster/front-reference.png');
+    await frontReference.getByRole('button', { name: 'EXTRACT', exact: true }).click();
+    await frontReference.getByRole('button', { name: /REVIEW raster-front-0/i }).click();
+    await page.waitForFunction(() => (window as any).__SKETCH_DRAFT_CALLS__.length >= 1);
+    const previewCalls = await page.evaluate(() => (window as any).__SKETCH_DRAFT_CALLS__.length);
+
+    await page.evaluate(() => ((window as any).__RASTER_TRACE_MODE__ = 'error'));
+    await frontReference.getByLabel('front raster threshold').fill('12');
+    await frontReference.getByRole('button', { name: 'EXTRACT', exact: true }).click();
+
+    await expect(frontReference.getByRole('alert')).toContainText(
+      "path='/mock/raster/front-reference.png' threshold=12: no closed contour found; connectedComponents=0",
+    );
+    await expect(page.getByText('raster-front / front / closed')).toBeVisible();
+    await expect(page.evaluate(() => (window as any).__SKETCH_DRAFT_CALLS__.length)).resolves.toBe(
+      previewCalls,
+    );
+    await expect(mainModelViewport(page)).toBeVisible();
+  });
+
+  test('Given reviewed raster draft When app reloads and re-extracts Then same primitive and provenance restore without new version', async ({
+    page,
+  }) => {
+    await installSketchMocks(page, 'ok');
+    await openSketchWorkspace(page);
+
+    let frontReference = page
+      .getByLabel('Raster reference extraction')
+      .getByLabel('front raster reference');
+    await frontReference.getByLabel('front raster image path').fill('/mock/raster/front-reference.png');
+    await frontReference.getByLabel('front raster width mm').fill('120');
+    await frontReference.getByLabel('front raster height mm').fill('80');
+    await frontReference.getByLabel('front raster threshold').fill('143');
+    await frontReference.getByLabel('front raster invert').check();
+    await frontReference.getByRole('button', { name: 'EXTRACT', exact: true }).click();
+    await frontReference.getByRole('button', { name: /REVIEW raster-front-0/i }).click();
+    await page.waitForFunction(() => {
+      const drafts = JSON.parse(localStorage.getItem('__SKETCH_PREVIEW_DRAFTS__') ?? '{}');
+      return Boolean(
+        drafts.global?.sketchDocument?.sketches?.[0]?.primitives?.[0]?.provenance?.kind ===
+          'rasterTrace',
+      );
+    });
+
+    await page.reload();
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.getByRole('button', { name: 'SKETCH', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'SKETCH WORKSPACE' })).toBeVisible();
+    frontReference = page
+      .getByLabel('Raster reference extraction')
+      .getByLabel('front raster reference');
+
+    await expect(page.getByText('raster-front / front / closed')).toBeVisible();
+    await expect(frontReference.getByLabel('front raster image path')).toHaveValue(
+      '/mock/raster/front-reference.png',
+    );
+    await expect(frontReference.getByLabel('front raster width mm')).toHaveValue('120');
+    await expect(frontReference.getByLabel('front raster height mm')).toHaveValue('80');
+    await expect(frontReference.getByLabel('front raster threshold')).toHaveValue('143');
+    await expect(frontReference.getByLabel('front raster invert')).toBeChecked();
+
+    await frontReference.getByLabel('front raster threshold').fill('150');
+    await frontReference.getByRole('button', { name: 'EXTRACT', exact: true }).click();
+    await frontReference.getByRole('button', { name: /REVIEW raster-front-0/i }).click();
+    await page.waitForFunction(() => (window as any).__SKETCH_DRAFT_CALLS__.length >= 1);
+
+    const primitives = await page.evaluate(
+      () => (window as any).__SKETCH_DRAFT_CALLS__.at(-1)?.sketch?.primitives ?? [],
+    );
+    expect(primitives.filter((primitive: any) => primitive.primitiveId === 'raster-front')).toHaveLength(1);
+    expect(primitives[0]?.provenance?.threshold).toBe(150);
+    expect(
+      await page.evaluate(() =>
+        (window as any).__SKETCH_ALL_COMMANDS__.filter(
+          (entry: any) => entry.cmd === 'init_generation_attempt' || entry.cmd === 'add_manual_version',
+        ),
+      ),
+    ).toEqual([]);
+  });
+
+  test('Given calibrated Front Top Side rasters When all contours are reviewed Then existing preview hull runs and CAD remains pending', async ({
+    page,
+  }) => {
+    await installSketchMocks(page, 'ok');
+    await openSketchWorkspace(page);
+
+    const rasterPanel = page.getByLabel('Raster reference extraction');
+    for (const view of ['front', 'top', 'side'] as const) {
+      const reference = rasterPanel.getByLabel(`${view} raster reference`);
+      await reference.getByLabel(`${view} raster image path`).fill(`/mock/raster/${view}.png`);
+      await reference.getByLabel(`${view} raster width mm`).fill(view === 'side' ? '80' : '120');
+      await reference.getByLabel(`${view} raster height mm`).fill(view === 'top' ? '60' : '80');
+      await reference.getByRole('button', { name: 'EXTRACT', exact: true }).click();
+      await reference.getByRole('button', { name: new RegExp(`REVIEW raster-${view}-0`, 'i') }).click();
+    }
+
+    await page.waitForFunction(() => (window as any).__SKETCH_PREVIEW_HULL_CALLS__.length >= 1);
+    const request = await page.evaluate(
+      () => (window as any).__SKETCH_PREVIEW_HULL_CALLS__.at(-1),
+    );
+    expect(request.document.sketches.map((sketch: any) => sketch.view).sort()).toEqual([
+      'front',
+      'side',
+      'top',
+    ]);
+    expect(
+      request.document.sketches.every((sketch: any) =>
+        sketch.primitives.every(
+          (primitive: any) =>
+            primitive.provenance?.kind === 'rasterTrace' &&
+            primitive.provenance?.asset?.digest === 'sha256:raster-front-fixture',
+        ),
+      ),
+    ).toBe(true);
+    await expect(page.getByLabel('Sketch preview status')).toContainText(/NOT ACCEPTED CAD/i);
+    await expect(page.getByLabel('Sketch preview status')).toContainText(/EXPORT LOCKED/i);
+    expect(
+      await page.evaluate(() =>
+        (window as any).__SKETCH_ALL_COMMANDS__.filter(
+          (entry: any) => entry.cmd === 'accept_sketch_brep_candidate_solution',
+        ),
+      ),
+    ).toEqual([]);
+  });
+
+  test('Given reviewed raster views and matching exact candidate When accepted Then STEP and hidden-line evidence pass with raster provenance', async ({
+    page,
+  }) => {
+    await installSketchMocks(page, 'ok');
+    await openSketchWorkspace(page);
+
+    const rasterPanel = page.getByLabel('Raster reference extraction');
+    for (const view of ['front', 'top', 'side'] as const) {
+      const reference = rasterPanel.getByLabel(`${view} raster reference`);
+      await reference.getByLabel(`${view} raster image path`).fill(`/mock/raster/${view}.png`);
+      await reference.getByLabel(`${view} raster width mm`).fill(view === 'side' ? '80' : '120');
+      await reference.getByLabel(`${view} raster height mm`).fill(view === 'top' ? '60' : '80');
+      await reference.getByRole('button', { name: 'EXTRACT', exact: true }).click();
+      await reference.getByRole('button', { name: new RegExp(`REVIEW raster-${view}-0`, 'i') }).click();
+    }
+
+    const candidatePanel = brepCandidatePanel(page);
+    await expect(candidatePanel).toContainText(/CANDIDATE SEARCH READY/i);
+    await candidatePanel.getByRole('button', { name: /ACCEPT CANDIDATE/i }).click();
+    await expect(candidatePanel).toContainText(/STEP export artifact: .*accepted\.step/i);
+
+    const request = await lastSketchBrepAcceptRequest(page);
+    expect(
+      request.document.sketches.every((sketch: any) =>
+        sketch.primitives.every(
+          (primitive: any) =>
+            primitive.provenance?.kind === 'rasterTrace' &&
+            primitive.provenance?.extractorVersion === 'raster-trace-v1',
+        ),
+      ),
+    ).toBe(true);
+
+    const acceptedCadRow = validationLedgerRow(validationLedgerPanel(page), 'ACCEPTED CAD');
+    await expect(acceptedCadRow).toContainText(/\b(PASS|PASSED|OK)\b|✓/i);
+    await expect(acceptedCadRow).toContainText(/accepted BRep/i);
+    await expect(acceptedCadRow).toContainText(/3 views/i);
+  });
+
   test('Given empty workbench When app opens Then no sketch prompt panel is injected into the viewport and SKETCH opens the workspace', async ({
     page,
   }) => {

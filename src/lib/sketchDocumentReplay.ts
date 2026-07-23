@@ -133,6 +133,7 @@ function primitiveToStroke(
         closed: true,
         radius: primitive.radius,
         ...(primitive.topology ? { topology: copyTopology(primitive.topology) } : {}),
+        ...(primitive.provenance ? { provenance: copyRasterProvenance(primitive.provenance) } : {}),
       },
     };
   }
@@ -177,6 +178,7 @@ function primitiveToStroke(
       points: strokePoints,
       closed: true,
       ...(primitive.topology ? { topology: copyTopology(primitive.topology) } : {}),
+      ...(primitive.provenance ? { provenance: copyRasterProvenance(primitive.provenance) } : {}),
       ...dimensionLocksForPrimitive(primitive.primitiveId, constraints),
     },
   };
@@ -213,6 +215,14 @@ function copyTopology(topology: SketchPrimitiveTopology | null | undefined): Ske
   return {
     ...topology,
     edgeIds: topology.edgeIds ? [...topology.edgeIds] : undefined,
+  };
+}
+
+function copyRasterProvenance(provenance: NonNullable<SketchPrimitive['provenance']>): NonNullable<SketchPrimitive['provenance']> {
+  return {
+    ...provenance,
+    asset: { ...provenance.asset },
+    calibration: { ...provenance.calibration },
   };
 }
 

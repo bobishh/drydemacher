@@ -1,7 +1,9 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Locator } from '@playwright/test';
 
-async function numericZIndex(locator) {
-  return locator.evaluate((element) => Number.parseInt(window.getComputedStyle(element).zIndex || '0', 10));
+async function numericZIndex(locator: Locator) {
+  return locator.evaluate((element: Element) =>
+    Number.parseInt(window.getComputedStyle(element).zIndex || '0', 10),
+  );
 }
 
 test('Given app opens When workbench loads Then bottom icon dock controls are available', async ({ page }) => {

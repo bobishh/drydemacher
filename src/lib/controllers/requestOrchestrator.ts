@@ -51,6 +51,8 @@ import {
   verifyRender,
   verifyGeneratedModel,
 } from '../tauri/client';
+import { pendingHeightfieldImages, pendingHeightfieldStatus } from '../heightfieldPending';
+import { hydrateActiveRenderSnapshot } from '../stores/activeRenderSnapshot';
 
 // ---------------------------------------------------------------------------
 // Constants & Helpers
@@ -83,6 +85,9 @@ const REPAIR_PHRASES = [
 ];
 
 let modelCapabilitiesModulePromise: Promise<typeof import('../modelRuntime/modelCapabilities') | null> | null = null;
+// Snapshot writes target one session-global restore file. Serialize them so a
+// slower older invoke cannot complete after a newer request's snapshot.
+let projectionSnapshotWrite: Promise<void> = Promise.resolve();
 
 function pickRetryMessage(nextAttempt: number, maxAttempts: number): string {
   const phrase = REPAIR_PHRASES[Math.floor(Math.random() * REPAIR_PHRASES.length)];
@@ -149,6 +154,28 @@ function toAssetUrl(path: string | null | undefined): string {
   } catch {
     return path;
   }
+}
+
+export type GenerationProjectionGuard = {
+  requestId: string;
+  requestThreadId: string;
+  latestThreadRequestId: string | null;
+  activeThreadId: string | null;
+};
+
+/**
+ * A completed request may update the workspace only while it remains the
+ * request selected to own that thread's visible projection. This prevents an
+ * older same-thread completion from replacing a newer model or its restore
+ * snapshot.
+ */
+export function canPublishGenerationProjection({
+  requestId,
+  requestThreadId,
+  latestThreadRequestId,
+  activeThreadId,
+}: GenerationProjectionGuard): boolean {
+  return latestThreadRequestId === requestId && activeThreadId === requestThreadId;
 }
 
 function formatStructuralSummary(metrics: StructuralMetrics): string {
@@ -747,6 +774,15 @@ class GenerationPipeline {
         }
 
         // --- Render Step ---
+        const pendingHeightfields = pendingHeightfieldImages(
+          data.macroCode,
+          data.uiSpec,
+          data.initialParams || {},
+        );
+        if (pendingHeightfields.length > 0) {
+          await this.commitPendingHeightfield(data, pendingHeightfieldStatus(pendingHeightfields));
+          return;
+        }
         requestQueue.patch(this.requestId, { phase: 'rendering' });
         syncSessionPhaseFromQueue();
         const backendLabel = renderBackendLabel(data);
@@ -1110,34 +1146,41 @@ class GenerationPipeline {
       this.checkCanceled();
     }
 
-    if (this.isActiveThread()) {
+    if (this.canPublishGenerationProjection()) {
       activeThreadId.set(this.snapshotThreadId);
-      activeVersionId.set(this.assistantMessageId);
-      const currentQ = get(requestQueue);
-      if (currentQ.activeId === this.requestId) {
-        workingCopy.loadVersion(data, this.assistantMessageId);
-        paramPanelState.hydrateFromVersion(data, this.assistantMessageId);
-        session.setStlUrl(stlUrlValue);
-        session.setModelRuntime(renderableBundle, manifest);
-      }
-      session.setStatus(
-        runtime.skippedOversizedPreview
-          ? 'Design synthesized successfully. Lithophane preview was skipped in the viewer; base part meshes are shown instead.'
-          : 'Design synthesized successfully.',
-      );
-    }
-    requestQueue.patch(this.requestId, { threadId: this.snapshotThreadId });
-
-    if (this.isActiveThread()) {
-      await persistLastSessionSnapshot({
-        design: data,
+      hydrateActiveRenderSnapshot({
         threadId: this.snapshotThreadId,
         messageId: this.assistantMessageId,
+        design: data,
         artifactBundle: renderableBundle,
         modelManifest: manifest,
         selectedPartId: null,
+        stlUrl: stlUrlValue,
+        status: runtime.skippedOversizedPreview
+          ? 'Design synthesized successfully. Lithophane preview was skipped in the viewer; base part meshes are shown instead.'
+          : 'Design synthesized successfully.',
+        targetRef: this.assistantMessageId ? {
+          kind: 'savedVersion',
+          threadId: this.snapshotThreadId,
+          messageId: this.assistantMessageId,
+        } : null,
       });
     }
+    requestQueue.patch(this.requestId, { threadId: this.snapshotThreadId });
+
+    await this.persistProjectionSnapshot({
+      design: data,
+      threadId: this.snapshotThreadId,
+      messageId: this.assistantMessageId,
+      artifactBundle: renderableBundle,
+      modelManifest: manifest,
+      selectedPartId: null,
+      targetRef: this.assistantMessageId ? {
+        kind: 'savedVersion',
+        threadId: this.snapshotThreadId,
+        messageId: this.assistantMessageId,
+      } : null,
+    });
 
     await refreshHistory();
     requestQueue.patch(this.requestId, {
@@ -1157,16 +1200,43 @@ class GenerationPipeline {
     syncSessionPhaseFromQueue();
   }
 
+  private async commitPendingHeightfield(data: DesignOutput, statusText: string) {
+    await this.finalizeAttempt('success', data, undefined, statusText);
+    this.checkCanceled();
+    const currentSession = get(session);
+    if (this.canPublishGenerationProjection()) {
+      activeThreadId.set(this.snapshotThreadId);
+      activeVersionId.set(this.assistantMessageId);
+      workingCopy.loadVersion(data, this.assistantMessageId);
+      paramPanelState.hydrateFromVersion(data, this.assistantMessageId);
+      session.setStatus(statusText);
+    }
+    await refreshHistory();
+    requestQueue.patch(this.requestId, {
+      phase: 'success',
+      lightResponse: statusText,
+      result: {
+        design: data,
+        threadId: this.snapshotThreadId,
+        messageId: this.assistantMessageId || '',
+        stlUrl: currentSession.stlUrl || '',
+        artifactBundle: currentSession.artifactBundle,
+        modelManifest: currentSession.modelManifest,
+      },
+    });
+    this.stopMicrowave(true);
+    syncSessionPhaseFromQueue();
+  }
+
   private async handleFallbackQuestion(data: DesignOutput, currentPrompt: string) {
     void currentPrompt;
     const responseText = data.response || 'Question answered.';
     await this.finalizeAttempt('success', undefined, undefined, responseText);
 
-    if (this.isActiveThread()) {
+    if (this.canPublishGenerationProjection()) {
       session.setStatus(responseText);
     }
-    if (this.isActiveThread()) {
-      await persistLastSessionSnapshot({
+    await this.persistProjectionSnapshot({
         design: data,
         threadId: this.snapshotThreadId,
         messageId: this.assistantMessageId,
@@ -1174,7 +1244,6 @@ class GenerationPipeline {
         modelManifest: null,
         selectedPartId: null,
       });
-    }
     await refreshHistory();
     requestQueue.patch(this.requestId, {
       phase: 'success',
@@ -1203,6 +1272,28 @@ class GenerationPipeline {
 
   private isActiveThread() {
     return get(activeThreadId) === this.snapshotThreadId;
+  }
+
+  private canPublishGenerationProjection() {
+    const queue = get(requestQueue);
+    const latestThreadRequestId = [...queue.order]
+      .reverse()
+      .find((id) => queue.byId[id]?.threadId === this.snapshotThreadId) ?? null;
+    return canPublishGenerationProjection({
+      requestId: this.requestId,
+      requestThreadId: this.snapshotThreadId,
+      latestThreadRequestId,
+      activeThreadId: get(activeThreadId),
+    });
+  }
+
+  private async persistProjectionSnapshot(snapshot: Parameters<typeof persistLastSessionSnapshot>[0]) {
+    const write = projectionSnapshotWrite.then(async () => {
+      if (!this.canPublishGenerationProjection()) return;
+      await persistLastSessionSnapshot(snapshot);
+    });
+    projectionSnapshotWrite = write.catch(() => undefined);
+    await write;
   }
 
   private updateStatus(msg: string) {

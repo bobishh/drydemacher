@@ -1,5 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
+  import { convertFileSrc } from '@tauri-apps/api/core';
+  import { open } from '@tauri-apps/plugin-dialog';
   import SketchInspectorSection from './SketchInspectorSection.svelte';
   import {
     acceptSketchBrepCandidateSolution,
@@ -10,6 +12,7 @@
     generateSketchDraftPreview,
     generateSketchPreviewHull,
     suggestSketchFeatures,
+    traceRasterReference,
   } from './tauri/client';
   import type {
     ComponentPackage,
@@ -26,15 +29,17 @@
     SketchSuggestionRequest,
     SketchSuggestionResponse,
     SketchView,
+    RasterTraceContour,
+    RasterTraceResponse,
   } from './tauri/contracts';
   import {
     basename,
+    artifactEvidenceSummary,
     buildSketchDraftRequest,
     clientPointToSvgPoint,
     closeStroke,
     finishStroke,
     pointsToSvg,
-    sourceLineCount,
     strokeKind,
     summarizeSketchDraftMode,
     type SketchPoint,
@@ -48,7 +53,7 @@
     sketchDocumentSummary as buildSketchDocumentSourceSummary,
   } from './sketchDocumentSource';
   import { parseSketchDocumentEnvelope } from './sketchDocumentEnvelope';
-  import { buildSketchSuggestionRequest } from './sketchSuggestionDocument';
+  import { buildSketchSuggestionDocument, buildSketchSuggestionRequest } from './sketchSuggestionDocument';
   import { buildDraftRequestFromSuggestion } from './sketchSuggestionAccept';
   import { nextPrimitiveSequenceFromStrokes, parseSketchDocumentImportSource, sketchDocumentToStrokes } from './sketchDocumentReplay';
   import {
@@ -108,7 +113,11 @@
   } from './sketchWorkspaceScene';
   import type { ArtifactBundle } from './types/domain';
 
-  type PreviewResult = { draft: SketchDraftSource; artifactBundle: ArtifactBundle } | null;
+  type PreviewResult = {
+    draft: SketchDraftSource;
+    artifactBundle: ArtifactBundle;
+    sketchDocument?: SketchDocument | null;
+  } | null;
   type ProjectionRect = { x: number; y: number; width: number; height: number };
   type PreviewMode = 'manual' | 'auto';
   type GenerateDraftOptions = { preserveBrepAutoRepairAttempts?: boolean };
@@ -148,6 +157,17 @@
     origin: SketchPoint;
     startCamera: PaneCamera;
   };
+  type RasterReferenceState = {
+    imagePath: string;
+    physicalWidth: string;
+    physicalHeight: string;
+    threshold: number;
+    invert: boolean;
+    status: 'idle' | 'pending' | 'extracting' | 'ready' | 'error';
+    response: RasterTraceResponse | null;
+    selectedContourId: string | null;
+    errorText: string;
+  };
 
   const EXTRUDE_AMOUNT = 12;
   const AUTO_PREVIEW_DEBOUNCE_MS = 650;
@@ -159,6 +179,7 @@
   const ACCEPTED_BREP_PACKAGE_ID = 'sketch-preview-hull.accepted-brep';
   const ACCEPTED_BREP_PORT_ID = 'front_mount';
   const ACCEPTED_BREP_PORT_TYPE_ID = 'mechanical.plane.mount.v1';
+  const ORTHOGRAPHIC_VIEWS: SketchView[] = ['front', 'top', 'side'];
 
   let {
     restoredPreview = null,
@@ -220,6 +241,12 @@
     side: { zoom: DEFAULT_PANE_ZOOM, panX: 0, panY: 0 },
     custom: { zoom: DEFAULT_PANE_ZOOM, panX: 0, panY: 0 },
   });
+  let rasterReferences = $state<Record<SketchView, RasterReferenceState>>({
+    front: createRasterReferenceState(),
+    top: createRasterReferenceState(),
+    side: createRasterReferenceState(),
+    custom: createRasterReferenceState(),
+  });
   let selectedPointX = $state('');
   let selectedPointY = $state('');
   let profileX = $state('');
@@ -255,9 +282,149 @@
     if (draft || !restoredPreview) return;
     draft = restoredPreview.draft;
     artifactBundle = restoredPreview.artifactBundle;
+    const restoredDocument = restoredPreview.sketchDocument ?? (() => {
+      const envelope = parseSketchDocumentEnvelope(restoredPreview.draft.source);
+      return 'error' in envelope ? null : envelope.document;
+    })();
+    if (!restoredDocument) return;
+    const replay = sketchDocumentToStrokes(restoredDocument);
+    if ('error' in replay) return;
+    strokes = replay.strokes;
+    primitiveSequence = nextPrimitiveSequenceFromStrokes(replay.strokes);
+    sketchDocumentSnapshot = restoredDocument;
+    sketchDocumentImportText = formatSketchDocumentSource(restoredDocument);
+    restoreRasterReferencesFromStrokes(replay.strokes);
   });
   let autoPreviewTimer: ReturnType<typeof setTimeout> | null = null;
   let autoPreviewRunId = 0;
+
+  function createRasterReferenceState(): RasterReferenceState {
+    return {
+      imagePath: '',
+      physicalWidth: '100',
+      physicalHeight: '100',
+      threshold: 127,
+      invert: false,
+      status: 'idle',
+      response: null,
+      selectedContourId: null,
+      errorText: '',
+    };
+  }
+
+  function patchRasterReference(view: SketchView, patch: Partial<RasterReferenceState>) {
+    rasterReferences[view] = { ...rasterReferences[view], ...patch };
+  }
+
+  async function pickRasterReference(view: SketchView) {
+    try {
+      const selected = await open({
+        multiple: false,
+        filters: [{ name: 'Raster Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
+      });
+      const selectedPath = Array.isArray(selected) ? selected[0] : selected;
+      if (typeof selectedPath !== 'string' || !selectedPath.trim()) return;
+      patchRasterReference(view, {
+        imagePath: selectedPath,
+        status: 'pending',
+        selectedContourId: null,
+        errorText: '',
+      });
+    } catch (error) {
+      patchRasterReference(view, {
+        status: 'error',
+        errorText: formatBackendError(error),
+      });
+    }
+  }
+
+  async function extractRasterReference(view: SketchView) {
+    const reference = rasterReferences[view];
+    const physicalWidth = Number(reference.physicalWidth);
+    const physicalHeight = Number(reference.physicalHeight);
+    patchRasterReference(view, { status: 'extracting', errorText: '' });
+    try {
+      const response = await traceRasterReference({
+        imagePath: reference.imagePath,
+        view,
+        calibration: { physicalWidth, physicalHeight },
+        threshold: reference.threshold,
+        invert: reference.invert,
+        maxContours: 32,
+      });
+      patchRasterReference(view, {
+        response,
+        status: 'ready',
+        selectedContourId: response.contours[0]?.contourId ?? null,
+        errorText: '',
+      });
+    } catch (error) {
+      patchRasterReference(view, {
+        status: 'error',
+        errorText: formatBackendError(error),
+      });
+    }
+  }
+
+  function reviewRasterContour(view: SketchView, contour: RasterTraceContour) {
+    if (!contour.closed || contour.points.length < 3) return;
+    prepareSketchMutation();
+    const primitiveId = `raster-${view}`;
+    const points = contour.points.map((point) => [point[0], point[1]] as SketchPoint);
+    const stroke: SketchStroke = {
+      primitiveId,
+      sketchId: resolvedWorkspaceSketchId(view),
+      view,
+      kind: 'polyline',
+      points: [...points, points[0]],
+      closed: true,
+      provenance: contour.provenance,
+    };
+    strokes = [...strokes.filter((candidate) => candidate.primitiveId !== primitiveId), stroke];
+    activeStroke = null;
+    clearSelectedPoint();
+    errorText = '';
+    cleanupEvidenceText = `Raster contour reviewed: ${contour.contourId} / ${contour.provenance.asset.digest}`;
+    patchRasterReference(view, {
+      selectedContourId: contour.contourId,
+      status: 'ready',
+      errorText: '',
+    });
+    clearPreviewResult();
+    requestFeatureSuggestions(strokes);
+    queueAutoPreview(stroke);
+  }
+
+  function rasterCandidateContours(view: SketchView): RasterTraceContour[] {
+    return rasterReferences[view].response?.contours ?? [];
+  }
+
+  function rasterReferenceUrl(view: SketchView): string | null {
+    const path = rasterReferences[view].imagePath;
+    if (!path) return null;
+    try {
+      return convertFileSrc(path);
+    } catch {
+      return path;
+    }
+  }
+
+  function restoreRasterReferencesFromStrokes(restoredStrokes: SketchStroke[]) {
+    for (const stroke of restoredStrokes) {
+      const provenance = stroke.provenance;
+      if (!provenance || provenance.kind !== 'rasterTrace') continue;
+      patchRasterReference(stroke.view, {
+        imagePath: provenance.asset.imagePath,
+        physicalWidth: String(provenance.calibration.physicalWidth),
+        physicalHeight: String(provenance.calibration.physicalHeight),
+        threshold: provenance.threshold,
+        invert: provenance.invert,
+        status: 'pending',
+        selectedContourId: provenance.contourId,
+        errorText: '',
+      });
+    }
+  }
   let suggestionRunId = 0;
   let primitiveSequence = 0;
   const latestClosedProfile = $derived.by(() => latestClosedStroke(strokes));
@@ -2023,8 +2190,15 @@
   }
 
   function publishPreviewResult(result: PreviewResult) {
-    onPreviewResult?.(result);
-    dispatch('previewResult', result);
+    const published = result
+      ? {
+          ...result,
+          sketchDocument:
+            result.sketchDocument ?? buildSketchSuggestionDocument([...strokes, ...(activeStroke ? [activeStroke] : [])]),
+        }
+      : null;
+    onPreviewResult?.(published);
+    dispatch('previewResult', published);
   }
 
   function clearPreviewResult() {
@@ -2385,6 +2559,17 @@
           resetPaneCamera('front');
         }}>RESET PAN</button></div>
         <svg bind:this={frontSvg} class="sketch-pane__drawing" viewBox={paneViewBox('front')} preserveAspectRatio="none" aria-hidden="true">
+          {#if rasterReferenceUrl('front')}
+            <image class="sketch-pane__raster-reference" href={rasterReferenceUrl('front') ?? ''} x="0" y="0" width="100" height="100" preserveAspectRatio="none" />
+          {/if}
+          {#each rasterCandidateContours('front') as contour (contour.contourId)}
+            <polyline
+              class="sketch-pane__raster-candidate"
+              class:sketch-pane__raster-candidate--selected={rasterReferences.front.selectedContourId === contour.contourId}
+              points={pointsToSvg([...contour.points, contour.points[0]])}
+              fill="none"
+            />
+          {/each}
           {#each visibleStrokes('front') as stroke (stroke.primitiveId)}
             <polyline class:sketch-pane__stroke--closed={stroke.closed} points={pointsToSvg(displayStrokePoints(stroke))} fill="none" />
             {#each editablePointIndices(stroke) as pointIndex (`${stroke.primitiveId}-${pointIndex}`)}
@@ -2469,6 +2654,17 @@
           resetPaneCamera('top');
         }}>RESET PAN</button></div>
         <svg bind:this={topSvg} class="sketch-pane__drawing" viewBox={paneViewBox('top')} preserveAspectRatio="none" aria-hidden="true">
+          {#if rasterReferenceUrl('top')}
+            <image class="sketch-pane__raster-reference" href={rasterReferenceUrl('top') ?? ''} x="0" y="0" width="100" height="100" preserveAspectRatio="none" />
+          {/if}
+          {#each rasterCandidateContours('top') as contour (contour.contourId)}
+            <polyline
+              class="sketch-pane__raster-candidate"
+              class:sketch-pane__raster-candidate--selected={rasterReferences.top.selectedContourId === contour.contourId}
+              points={pointsToSvg([...contour.points, contour.points[0]])}
+              fill="none"
+            />
+          {/each}
           {#each visibleStrokes('top') as stroke (stroke.primitiveId)}
             <polyline class:sketch-pane__stroke--closed={stroke.closed} points={pointsToSvg(displayStrokePoints(stroke))} fill="none" />
             {#each editablePointIndices(stroke) as pointIndex (`${stroke.primitiveId}-${pointIndex}`)}
@@ -2553,6 +2749,17 @@
           resetPaneCamera('side');
         }}>RESET PAN</button></div>
         <svg bind:this={sideSvg} class="sketch-pane__drawing" viewBox={paneViewBox('side')} preserveAspectRatio="none" aria-hidden="true">
+          {#if rasterReferenceUrl('side')}
+            <image class="sketch-pane__raster-reference" href={rasterReferenceUrl('side') ?? ''} x="0" y="0" width="100" height="100" preserveAspectRatio="none" />
+          {/if}
+          {#each rasterCandidateContours('side') as contour (contour.contourId)}
+            <polyline
+              class="sketch-pane__raster-candidate"
+              class:sketch-pane__raster-candidate--selected={rasterReferences.side.selectedContourId === contour.contourId}
+              points={pointsToSvg([...contour.points, contour.points[0]])}
+              fill="none"
+            />
+          {/each}
           {#each visibleStrokes('side') as stroke (stroke.primitiveId)}
             <polyline class:sketch-pane__stroke--closed={stroke.closed} points={pointsToSvg(displayStrokePoints(stroke))} fill="none" />
             {#each editablePointIndices(stroke) as pointIndex (`${stroke.primitiveId}-${pointIndex}`)}
@@ -2621,6 +2828,109 @@
     </div>
 
     <div class="sketch-workspace__inspect">
+      <SketchInspectorSection title="RASTER REFERENCES" ariaLabel="Raster reference extraction">
+        {#snippet summaryExtra()}
+          <span>{ORTHOGRAPHIC_VIEWS.filter((view) => rasterReferences[view].imagePath).length}/3 LOADED</span>
+        {/snippet}
+        <div class="raster-reference-list">
+          {#each ORTHOGRAPHIC_VIEWS as view (view)}
+            <section class="raster-reference-card" aria-label={`${view} raster reference`}>
+              <div class="raster-reference-card__head">
+                <strong>{view.toUpperCase()}</strong>
+                <span>{rasterReferences[view].imagePath ? basename(rasterReferences[view].imagePath) : 'NO IMAGE'}</span>
+              </div>
+              <div class="raster-reference-card__actions">
+                <button class="btn btn-xs" type="button" onclick={() => pickRasterReference(view)}>
+                  SELECT IMAGE
+                </button>
+                <button
+                  class="btn btn-xs btn-primary"
+                  type="button"
+                  onclick={() => extractRasterReference(view)}
+                  disabled={!rasterReferences[view].imagePath || rasterReferences[view].status === 'extracting'}
+                >
+                  {rasterReferences[view].status === 'extracting' ? 'EXTRACTING...' : 'EXTRACT'}
+                </button>
+              </div>
+              <div class="raster-reference-card__settings">
+                <label class="raster-reference-card__path">
+                  <span>IMAGE PATH</span>
+                  <input
+                    aria-label={`${view} raster image path`}
+                    type="text"
+                    value={rasterReferences[view].imagePath}
+                    oninput={(event) => patchRasterReference(view, { imagePath: event.currentTarget.value, status: 'pending', errorText: '' })}
+                  />
+                </label>
+                <label>
+                  <span>WIDTH MM</span>
+                  <input
+                    aria-label={`${view} raster width mm`}
+                    type="number"
+                    min="0.001"
+                    step="0.1"
+                    value={rasterReferences[view].physicalWidth}
+                    oninput={(event) => patchRasterReference(view, { physicalWidth: event.currentTarget.value, status: 'pending' })}
+                  />
+                </label>
+                <label>
+                  <span>HEIGHT MM</span>
+                  <input
+                    aria-label={`${view} raster height mm`}
+                    type="number"
+                    min="0.001"
+                    step="0.1"
+                    value={rasterReferences[view].physicalHeight}
+                    oninput={(event) => patchRasterReference(view, { physicalHeight: event.currentTarget.value, status: 'pending' })}
+                  />
+                </label>
+                <label>
+                  <span>THRESHOLD</span>
+                  <input
+                    aria-label={`${view} raster threshold`}
+                    type="number"
+                    min="0"
+                    max="255"
+                    step="1"
+                    value={rasterReferences[view].threshold}
+                    oninput={(event) => patchRasterReference(view, { threshold: Number(event.currentTarget.value), status: 'pending' })}
+                  />
+                </label>
+                <label class="raster-reference-card__invert">
+                  <span>INVERT</span>
+                  <input
+                    aria-label={`${view} raster invert`}
+                    type="checkbox"
+                    checked={rasterReferences[view].invert}
+                    onchange={(event) => patchRasterReference(view, { invert: event.currentTarget.checked, status: 'pending' })}
+                  />
+                </label>
+              </div>
+              {#if rasterReferences[view].errorText}
+                <div class="raster-reference-card__error" role="alert">{rasterReferences[view].errorText}</div>
+              {/if}
+              {#if rasterReferences[view].response}
+                <div class="raster-reference-card__evidence">
+                  {rasterReferences[view].response?.evidence?.join(' / ')}
+                </div>
+                <div class="raster-reference-card__contours">
+                  {#each rasterReferences[view].response?.contours ?? [] as contour (contour.contourId)}
+                    <button
+                      class="raster-contour-choice"
+                      class:raster-contour-choice--selected={rasterReferences[view].selectedContourId === contour.contourId}
+                      type="button"
+                      onclick={() => reviewRasterContour(view, contour)}
+                    >
+                      REVIEW {contour.contourId} / {contour.points.length} PTS
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            </section>
+          {/each}
+        </div>
+      </SketchInspectorSection>
+
       <SketchInspectorSection title="PRIMITIVES" ariaLabel="Sketch primitives">
         {#snippet summaryExtra()}
           <span>{strokes.length ? `${strokes.length} profile${strokes.length === 1 ? '' : 's'}` : 'EMPTY'}</span>
@@ -3356,7 +3666,12 @@
 
         <SketchInspectorSection title="ARTIFACT EVIDENCE / SOURCE STATUS" ariaLabel="Sketch artifact evidence" className="sketch-workspace__section" open={false}>
           <div class="sketch-token">
-            {draft.sourceLanguage} / {draft.geometryBackend} / {sourceLineCount(draft.source)} lines
+            {artifactEvidenceSummary({
+              sourceLanguage: draft.sourceLanguage,
+              geometryBackend: draft.geometryBackend,
+              source: draft.source,
+              artifactBundle,
+            })}
           </div>
           <details class="sketch-source-details">
             <summary>VIEW SOURCE</summary>
@@ -3572,6 +3887,25 @@
     stroke-linejoin: miter;
     stroke-linecap: square;
     vector-effect: non-scaling-stroke;
+  }
+
+  .sketch-pane__raster-reference {
+    opacity: 0.2;
+    pointer-events: none;
+  }
+
+  .sketch-pane__drawing .sketch-pane__raster-candidate {
+    stroke: var(--secondary);
+    stroke-width: 0.45;
+    stroke-dasharray: 2 1.5;
+    opacity: 0.76;
+    pointer-events: none;
+  }
+
+  .sketch-pane__drawing .sketch-pane__raster-candidate--selected {
+    stroke: var(--primary);
+    stroke-width: 0.8;
+    opacity: 1;
   }
 
   .sketch-pane__drawing .sketch-pane__stroke--closed {
@@ -4713,6 +5047,122 @@
     background: var(--bg);
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .raster-reference-list,
+  .raster-reference-card,
+  .raster-reference-card__contours {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    overflow: hidden;
+  }
+
+  .raster-reference-card {
+    border: 1px solid var(--bg-300);
+    background: var(--bg-200);
+    padding: 7px;
+  }
+
+  .raster-reference-card__head,
+  .raster-reference-card__actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .raster-reference-card__head strong {
+    color: var(--secondary);
+    font-size: 0.62rem;
+    letter-spacing: 0.1em;
+  }
+
+  .raster-reference-card__head span {
+    min-width: 0;
+    color: var(--text-dim);
+    font-size: 0.58rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .raster-reference-card__settings {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 5px;
+    overflow: hidden;
+  }
+
+  .raster-reference-card__settings label {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+    color: var(--text-dim);
+    font-size: 0.54rem;
+  }
+
+  .raster-reference-card__settings input {
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    border: 1px solid var(--bg-300);
+    border-radius: 0;
+    background: var(--bg);
+    color: var(--text);
+    padding: 4px;
+  }
+
+  .raster-reference-card__invert {
+    justify-content: end;
+  }
+
+  .raster-reference-card__path {
+    grid-column: 1 / -1;
+  }
+
+  .raster-reference-card__invert input {
+    width: auto;
+    align-self: flex-start;
+  }
+
+  .raster-reference-card__error,
+  .raster-reference-card__evidence {
+    border: 1px solid var(--primary);
+    padding: 5px;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    font-size: 0.56rem;
+    line-height: 1.35;
+  }
+
+  .raster-reference-card__error {
+    color: var(--danger, #e06b5f);
+  }
+
+  .raster-reference-card__evidence {
+    color: var(--text-dim);
+  }
+
+  .raster-contour-choice {
+    border: 1px solid var(--bg-300);
+    border-radius: 0;
+    background: var(--bg);
+    color: var(--text-dim);
+    padding: 5px;
+    text-align: left;
+    font: inherit;
+    font-size: 0.56rem;
+    cursor: pointer;
+    overflow: hidden;
+  }
+
+  .raster-contour-choice--selected {
+    border-color: var(--primary);
+    color: var(--text);
   }
 
   @keyframes depth-grow {

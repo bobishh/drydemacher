@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { DEFAULT_GENIE_TRAITS, resolveModeTraits } from './traits';
-import { buildStoneGeometry, type StonePoint3 } from './stoneGeometry';
+import {
+  buildStoneGeometry,
+  posteriorSurfaceOffset,
+  type StonePoint3,
+} from './stoneGeometry';
 
 function bounds(points: StonePoint3[]) {
   const xs = points.map((point) => point.x);
@@ -42,6 +46,38 @@ test('buildStoneGeometry is deterministic for same profile', () => {
   const profile = resolveModeTraits({ ...DEFAULT_GENIE_TRAITS, seed: 123 }, 'thinking');
 
   assert.deepEqual(buildStoneGeometry(profile), buildStoneGeometry(profile));
+});
+
+test('Given a rerolled mascot When posterior genes build Then broad cheeks and a recessed cleft stay bounded', () => {
+  const samples = [1, 7, 123, 456, 9999, 271828].map((seed) =>
+    buildStoneGeometry(resolveModeTraits({ ...DEFAULT_GENIE_TRAITS, seed }, 'idle')).posterior,
+  );
+
+  for (const posterior of samples) {
+    assert.ok(posterior.mass >= 0.24 && posterior.mass <= 0.4);
+    assert.ok(posterior.separation >= 0.22 && posterior.separation <= 0.38);
+    assert.ok(posterior.drop >= 0.04 && posterior.drop <= 0.16);
+    assert.ok(posterior.cleftDepth >= 0.08 && posterior.cleftDepth <= 0.16);
+    assert.ok(posterior.cleftLength >= 0.28 && posterior.cleftLength <= 0.46);
+  }
+
+  assert.ok(new Set(samples.map((posterior) => posterior.mass.toFixed(3))).size >= 4);
+  assert.ok(new Set(samples.map((posterior) => posterior.separation.toFixed(3))).size >= 4);
+});
+
+test('Given posterior genes When rear surface deforms Then cheeks stay broad and cleft remains recessed', () => {
+  const posterior = buildStoneGeometry(resolveModeTraits(DEFAULT_GENIE_TRAITS, 'idle')).posterior;
+  const centerY = -posterior.drop;
+  const leftCheek = posteriorSurfaceOffset(posterior, -posterior.separation, centerY);
+  const rightCheek = posteriorSurfaceOffset(posterior, posterior.separation, centerY);
+  const cleft = posteriorSurfaceOffset(posterior, 0, centerY);
+  const boundary = posteriorSurfaceOffset(posterior, 2, 2);
+
+  assert.ok(leftCheek < -posterior.mass * 0.72);
+  assert.ok(rightCheek < -posterior.mass * 0.72);
+  assert.ok(cleft > leftCheek + posterior.cleftDepth * 0.45);
+  assert.ok(cleft > rightCheek + posterior.cleftDepth * 0.45);
+  assert.ok(Math.abs(boundary) < 0.002);
 });
 
 test('buildStoneGeometry keeps a constrained outer frame around a larger face', () => {

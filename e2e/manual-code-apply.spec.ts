@@ -7,6 +7,7 @@ declare global {
       renderModelCalls: Array<{ macroCode: string; parameters: Record<string, unknown> }>;
       updateParametersCalls: Array<{ messageId: string; parameters: Record<string, unknown> }>;
       historyCallCount: number;
+      latestThreadId: string | null;
     };
     __manualCodeApplyMockConfig?: {
       stallHistoryAfterCommit?: boolean;
@@ -42,6 +43,7 @@ function manualCodeApplyMockScript() {
     renderModelCalls: [],
     updateParametersCalls: [],
     historyCallCount: 0,
+    latestThreadId: null,
   };
 
   const historyThread = {
@@ -95,7 +97,10 @@ function manualCodeApplyMockScript() {
     }
     if (cmd === 'get_last_design') return null;
     if (cmd === 'get_default_macro') return '# mock macro';
-    if (cmd === 'init_generation_attempt') return 'mock-msg-1';
+    if (cmd === 'init_generation_attempt') {
+      window.__manualCodeApplyMock!.latestThreadId = String(args?.threadId ?? '') || null;
+      return 'mock-msg-1';
+    }
     if (cmd === 'classify_intent') {
       return {
         intentMode: 'design',
@@ -290,6 +295,8 @@ test.describe('Manual code apply/version coverage', () => {
     await bootManualCodeFlow(page);
 
     await page.evaluate(() => {
+      const activeThreadId = window.__manualCodeApplyMock?.latestThreadId;
+      if (!activeThreadId) throw new Error('Expected active generation thread');
       const artifactBundle = {
         modelId: 'agent-preview-model',
         sourceKind: 'generated',
@@ -332,7 +339,7 @@ test.describe('Manual code apply/version coverage', () => {
       };
       window.__emitTauriEvent?.('agent-draft-preview-updated', {
         sessionId: 'agent-session',
-        threadId: 'mock-thread-1',
+        threadId: activeThreadId,
         previewId: 'agent-preview-25',
         baseMessageId: 'mock-msg-1',
         modelId: 'agent-preview-model',
@@ -364,6 +371,164 @@ test.describe('Manual code apply/version coverage', () => {
     const widthInput = page.locator('[data-param-key="width"] input[type="number"]').first();
     await expect(widthInput).toHaveValue('25');
     await expect(page.getByTestId('genie-session-bubble')).toContainText('Preview requires inspection.');
+  });
+
+  test('Given another thread publishes a preview When current thread stays active Then its workspace remains unchanged', async ({
+    page,
+  }) => {
+    await bootManualCodeFlow(page);
+
+    await page.evaluate(() => {
+      window.__emitTauriEvent?.('agent-draft-preview-updated', {
+        sessionId: 'background-agent-session',
+        threadId: 'background-thread',
+        previewId: 'background-preview-99',
+        baseMessageId: null,
+        modelId: 'background-preview-model',
+        design: {
+          title: 'Background model',
+          versionName: '',
+          interactionMode: 'tune',
+          macroCode: 'print("background")',
+          sourceLanguage: 'legacyPython',
+          geometryBackend: 'freecad',
+          engineKind: 'freecad',
+          uiSpec: {
+            fields: [{ type: 'number', key: 'width', label: 'Width' }],
+          },
+          initialParams: { width: 99 },
+          postProcessing: null,
+        },
+        artifactBundle: {
+          modelId: 'background-preview-model',
+          sourceKind: 'generated',
+          sourceLanguage: 'legacyPython',
+          geometryBackend: 'freecad',
+          engineKind: 'freecad',
+          contentHash: 'background-preview-hash',
+          artifactVersion: 1,
+          fcstdPath: '/background-preview.FCStd',
+          manifestPath: '/background-preview/manifest.json',
+          macroPath: '/background-preview.py',
+          previewStlPath: '/mock-99.stl',
+          viewerAssets: [],
+          calloutAnchors: [],
+          measurementGuides: [],
+          edgeTargets: [],
+          faceTargets: [],
+        },
+        modelManifest: {
+          modelId: 'background-preview-model',
+          sourceKind: 'generated',
+          sourceLanguage: 'legacyPython',
+          geometryBackend: 'freecad',
+          document: {
+            documentName: 'Background model',
+            documentLabel: 'Background model',
+            objectCount: 0,
+            warnings: [],
+          },
+          parts: [],
+          parameterGroups: [],
+          controlPrimitives: [],
+          controlRelations: [],
+          controlViews: [],
+          selectionTargets: [],
+          advisories: [],
+          measurementAnnotations: [],
+          warnings: [],
+          enrichmentState: { status: 'none', proposals: [] },
+        },
+        feedback: {
+          status: 'warning',
+          summary: 'Background preview finished.',
+          items: [],
+          source: 'structuralVerification',
+        },
+      });
+    });
+
+    const widthInput = page.locator('[data-param-key="width"] input[type="number"]').first();
+    await expect(widthInput).toHaveValue('10');
+    await expect(page.getByTestId('genie-session-bubble')).not.toContainText(
+      'Background preview finished.',
+    );
+  });
+
+  test('Given an active preview mixes artifact and manifest identities When it arrives Then the last good workspace remains visible', async ({
+    page,
+  }) => {
+    await bootManualCodeFlow(page);
+
+    await page.evaluate(() => {
+      const activeThreadId = window.__manualCodeApplyMock?.latestThreadId;
+      if (!activeThreadId) throw new Error('Expected active generation thread');
+      window.__emitTauriEvent?.('agent-draft-preview-updated', {
+        sessionId: 'agent-session',
+        threadId: activeThreadId,
+        previewId: 'mismatched-preview',
+        baseMessageId: 'mock-msg-1',
+        modelId: 'artifact-model-a',
+        design: {
+          title: 'Mismatched preview',
+          versionName: '',
+          interactionMode: 'tune',
+          macroCode: 'print("mismatch")',
+          sourceLanguage: 'legacyPython',
+          geometryBackend: 'freecad',
+          engineKind: 'freecad',
+          uiSpec: { fields: [{ type: 'number', key: 'width', label: 'Width' }] },
+          initialParams: { width: 77 },
+          postProcessing: null,
+        },
+        artifactBundle: {
+          modelId: 'artifact-model-a',
+          sourceKind: 'generated',
+          sourceLanguage: 'legacyPython',
+          geometryBackend: 'freecad',
+          engineKind: 'freecad',
+          contentHash: 'mismatched-preview-hash',
+          artifactVersion: 1,
+          fcstdPath: '/mismatch.FCStd',
+          manifestPath: '/mismatch/manifest.json',
+          macroPath: '/mismatch.py',
+          previewStlPath: '/mock-77.stl',
+          viewerAssets: [],
+          calloutAnchors: [],
+          measurementGuides: [],
+          edgeTargets: [],
+          faceTargets: [],
+        },
+        modelManifest: {
+          modelId: 'manifest-model-b',
+          sourceKind: 'generated',
+          sourceLanguage: 'legacyPython',
+          geometryBackend: 'freecad',
+          document: {
+            documentName: 'Mismatched preview',
+            documentLabel: 'Mismatched preview',
+            objectCount: 0,
+            warnings: [],
+          },
+          parts: [],
+          parameterGroups: [],
+          controlPrimitives: [],
+          controlRelations: [],
+          controlViews: [],
+          selectionTargets: [],
+          advisories: [],
+          measurementAnnotations: [],
+          warnings: [],
+          enrichmentState: { status: 'none', proposals: [] },
+        },
+        feedback: null,
+      });
+    });
+
+    const widthInput = page.locator('[data-param-key="width"] input[type="number"]').first();
+    await expect(widthInput).toHaveValue('10');
+    await expect(page.getByTestId('genie-session-bubble')).toContainText('artifact-model-a');
+    await expect(page.getByTestId('genie-session-bubble')).toContainText('manifest-model-b');
   });
 
   test('Given edited code draft When applying without commit Then render uses current params and add_manual_version stays untouched', async ({ page }) => {

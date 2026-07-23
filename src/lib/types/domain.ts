@@ -337,6 +337,11 @@ export type Advisory = Contract.Advisory;
 export type ManifestEnrichmentState = Contract.ManifestEnrichmentState;
 export type ModelManifest = Contract.ModelManifest;
 
+export type AuthoringTargetRef =
+  | { kind: 'savedVersion'; threadId: string; messageId: string }
+  | { kind: 'draft'; threadId: string; previewId: string; sessionId: string }
+  | { kind: 'latestSaved'; threadId: string };
+
 export interface LastDesignSnapshot {
   design: DesignOutput | null;
   threadId: string | null;
@@ -344,6 +349,7 @@ export interface LastDesignSnapshot {
   artifactBundle: ArtifactBundle | null;
   modelManifest: ModelManifest | null;
   selectedPartId: string | null;
+  targetRef: AuthoringTargetRef | null;
 }
 
 export interface ParsedParamsResult {
@@ -1405,6 +1411,7 @@ export function normalizeLastDesignSnapshot(
       artifactBundle: null,
       modelManifest: null,
       selectedPartId: null,
+      targetRef: null,
     };
   }
   const legacy = snapshot as Partial<Contract.LastDesignSnapshot> &
@@ -1445,6 +1452,10 @@ export function normalizeLastDesignSnapshot(
     selectedPartId:
       (legacy.selectedPartId as string | null | undefined) ??
       (legacy.selected_part_id as string | null | undefined) ??
+      null,
+    targetRef:
+      (legacy.targetRef as AuthoringTargetRef | null | undefined) ??
+      (legacy.target_ref as AuthoringTargetRef | null | undefined) ??
       null,
   };
 }
@@ -1743,5 +1754,6 @@ export function toContractLastDesignSnapshot(
     artifactBundle: snapshot.artifactBundle,
     modelManifest: snapshot.modelManifest,
     selectedPartId: snapshot.selectedPartId,
+    targetRef: snapshot.targetRef,
   };
 }

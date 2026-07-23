@@ -32,6 +32,14 @@ export type StoneSpikeGeometry = {
   rotation: number;
 };
 
+export type StonePosteriorGeometry = {
+  mass: number;
+  separation: number;
+  drop: number;
+  cleftDepth: number;
+  cleftLength: number;
+};
+
 export type StoneGeometry = {
   hue: number;
   front: StonePoint3[];
@@ -39,8 +47,30 @@ export type StoneGeometry = {
   back: StonePoint3[];
   center: StonePoint3;
   spikes: StoneSpikeGeometry[];
+  posterior: StonePosteriorGeometry;
   face: StoneFaceGeometry;
 };
+
+export function posteriorSurfaceOffset(
+  posterior: StonePosteriorGeometry,
+  x: number,
+  y: number,
+  centerY = -posterior.drop,
+): number {
+  const cheekRadiusX = posterior.separation * 1.8;
+  const cheekRadiusY = posterior.cleftLength * 1.45;
+  const lobeAt = (centerX: number) => {
+    const dx = (x - centerX) / cheekRadiusX;
+    const dy = (y - centerY) / cheekRadiusY;
+    return Math.exp(-(dx * dx + dy * dy) * 1.4);
+  };
+  const lobe = Math.max(lobeAt(-posterior.separation), lobeAt(posterior.separation));
+  const cleftDx = x / Math.max(0.04, posterior.separation * 0.32);
+  const cleftDy = (y - centerY) / Math.max(0.08, posterior.cleftLength * 0.78);
+  const cleft = Math.exp(-(cleftDx * cleftDx * 1.7 + cleftDy * cleftDy));
+
+  return -posterior.mass * lobe + posterior.cleftDepth * cleft;
+}
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -176,7 +206,13 @@ export function buildStoneGeometry(profile: ResolvedGenieProfile): StoneGeometry
   const eyeShape = eyeRoll < 0.28 ? 'dot' : eyeRoll < 0.55 ? 'oval' : eyeRoll < 0.78 ? 'bar' : 'triangle';
   const mouthShape = mouthRoll < 0.34 ? 'triangle' : 'line';
   const spikeCount = frontCount;
-
+  const posterior: StonePosteriorGeometry = {
+    mass: 0.24 + seededUnit(profile.seed, 1800) * 0.16,
+    separation: 0.22 + seededUnit(profile.seed, 1801) * 0.16,
+    drop: 0.04 + seededUnit(profile.seed, 1802) * 0.12,
+    cleftDepth: 0.08 + seededUnit(profile.seed, 1803) * 0.08,
+    cleftLength: 0.28 + seededUnit(profile.seed, 1804) * 0.18,
+  };
   const front: StonePoint3[] = [];
   const rim: StonePoint3[] = [];
   const back: StonePoint3[] = [];
@@ -249,6 +285,7 @@ export function buildStoneGeometry(profile: ResolvedGenieProfile): StoneGeometry
         rotation: Math.atan2(point.y, point.x),
       };
     }),
+	    posterior,
 	    face: {
 	      eyeShape,
 	      mouthShape,

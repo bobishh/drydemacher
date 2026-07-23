@@ -14,6 +14,7 @@ test('buildMacroAstMapProjection projects a stable source-backed tree', () => {
         objectCount: 4,
         warnings: [],
       },
+      taggedAnchors: {},
       parts: [
         {
           partId: 'part-model',
@@ -35,9 +36,9 @@ test('buildMacroAstMapProjection projects a stable source-backed tree', () => {
     },
     uiSpec: {
       fields: [
-        { type: 'number', key: 'model_size_mm', label: 'Model Size' },
-        { type: 'number', key: 'part_region_mm', label: 'Part Region' },
-        { type: 'number', key: 'inline_anchor_width_mm', label: 'Inline Anchor Width' },
+        { type: 'number', key: 'model_size_mm', label: 'Model Size', frozen: false },
+        { type: 'number', key: 'part_region_mm', label: 'Part Region', frozen: false },
+        { type: 'number', key: 'inline_anchor_width_mm', label: 'Inline Anchor Width', frozen: false },
       ],
     },
     parameters: {
@@ -96,9 +97,9 @@ test('fields claimed by several parts collapse into the shared group', () => {
       ],
     } as any,
     uiSpec: {
-      fields: [
-        { type: 'number', key: 'hose_od', label: 'Hose OD' },
-        { type: 'number', key: 'length', label: 'Length' },
+        fields: [
+        { type: 'number', key: 'hose_od', label: 'Hose OD', frozen: false },
+        { type: 'number', key: 'length', label: 'Length', frozen: false },
       ],
     } as any,
     parameters: { hose_od: 16.5, length: 40 },
@@ -138,7 +139,10 @@ test('attaches backend source ranges to model and part nodes', () => {
 test('leaves sourceRange undefined without backend entries', () => {
   const projection = buildMacroAstMapProjection({
     macroCode: '(model (part body (box 1 2 3)))',
-    modelManifest: { parts: [{ partId: 'body', label: 'Body', parameterKeys: [] }] } as any,
+      modelManifest: {
+        parts: [{ partId: 'body', label: 'Body', parameterKeys: [] }],
+        taggedAnchors: {},
+      } as any,
     uiSpec: { fields: [] } as any,
     parameters: {},
   });
@@ -148,7 +152,10 @@ test('leaves sourceRange undefined without backend entries', () => {
 test('Given verify source nodes When projecting New Params map Then verify clauses stay addressable by stable node id', () => {
   const projection = buildMacroAstMapProjection({
     macroCode: '(model (verify (tag step_export) (expect true)) (part body (box 1 2 3)))',
-    modelManifest: { parts: [{ partId: 'body', label: 'Body', parameterKeys: [] }] } as any,
+      modelManifest: {
+        parts: [{ partId: 'body', label: 'Body', parameterKeys: [] }],
+        taggedAnchors: {},
+      } as any,
     uiSpec: { fields: [] } as any,
     parameters: {},
     sourceNodes: [
@@ -225,6 +232,7 @@ test('findOwningPartId locates the part node that owns a param fieldKey', () => 
       modelId: 'owning-part',
       sourceKind: 'generated',
       document: { documentName: 'Owning Part', documentLabel: 'Owning Part', objectCount: 1, warnings: [] },
+      taggedAnchors: {},
       parts: [
         {
           partId: 'part-a',
@@ -246,8 +254,8 @@ test('findOwningPartId locates the part node that owns a param fieldKey', () => 
     },
     uiSpec: {
       fields: [
-        { type: 'number', key: 'width_mm', label: 'Width' },
-        { type: 'number', key: 'depth_mm', label: 'Depth' },
+        { type: 'number', key: 'width_mm', label: 'Width', frozen: false },
+        { type: 'number', key: 'depth_mm', label: 'Depth', frozen: false },
       ],
     },
     parameters: { width_mm: 1, depth_mm: 2 },

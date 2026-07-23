@@ -41,6 +41,7 @@ function versionMessage(id: string): Message {
         objectCount: 1,
         warnings: [],
       },
+      taggedAnchors: {},
       parts: [],
       parameterGroups: [],
       selectionTargets: [],

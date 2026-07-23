@@ -64,6 +64,8 @@ import type {
   PostProcessingSpec,
   PromptTranscription,
   QueueAgentPromptInput,
+  RasterTraceRequest,
+  RasterTraceResponse,
   RejectViewportScreenshotInput,
   ResolveAgentPromptInput,
   ResolveViewportScreenshotInput,
@@ -74,6 +76,7 @@ import type {
   SketchBrepCandidateResponse,
   SketchDraftRequest,
   SketchDraftSource,
+  SketchDocument,
   SaveSketchPreviewDraftRequest,
   SketchPreviewDraft,
   SketchPreviewHullRequest,
@@ -573,11 +576,18 @@ export async function generateSketchPreviewHull(
   return { draft, artifactBundle: normalizeArtifactBundle(bundle) };
 }
 
+export async function traceRasterReference(
+  request: RasterTraceRequest,
+): Promise<RasterTraceResponse> {
+  return invokeCommand(commands.traceRasterReference(request));
+}
+
 export async function saveSketchPreviewDraft(input: {
   scopeId?: string | null;
   draftScopeId?: string | null;
   draftSource: SketchDraftSource;
   artifactBundle: ArtifactBundle;
+  sketchDocument?: SketchDocument | null;
 }): Promise<SketchPreviewDraft> {
   const scopeId = resolveSketchPreviewDraftScopeId(input);
   return invokeCommand(
@@ -585,6 +595,7 @@ export async function saveSketchPreviewDraft(input: {
       scopeId,
       draftSource: input.draftSource,
       artifactBundle: input.artifactBundle,
+      sketchDocument: input.sketchDocument ?? null,
     } satisfies SaveSketchPreviewDraftRequest),
   );
 }

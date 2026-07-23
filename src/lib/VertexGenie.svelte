@@ -9,7 +9,7 @@
     type GenieMode,
     type ResolvedGenieProfile,
   } from './genie/traits';
-  import { buildStoneGeometry, type StonePoint3 } from './genie/stoneGeometry';
+  import { buildStoneGeometry, posteriorSurfaceOffset, type StonePoint3 } from './genie/stoneGeometry';
   import type { GenieTraits } from './types/domain';
 
   type StoneRenderState = {
@@ -224,7 +224,7 @@
     const dy = event.clientY - dragStartY;
     if (Math.hypot(dx, dy) < 4 && !dragged) return;
     dragged = true;
-    stoneRuntime.userYaw = clamp(stoneRuntime.userYaw + dx * 0.016, -2.45, 2.45);
+    stoneRuntime.userYaw = clamp(stoneRuntime.userYaw + dx * 0.016, -Math.PI, Math.PI);
     stoneRuntime.userPitch = clamp(stoneRuntime.userPitch + dy * 0.009, -0.62, 0.62);
     dragStartX = event.clientX;
     dragStartY = event.clientY;
@@ -347,14 +347,23 @@
 	    const sideShell = deformRing(sideMid, 1516, 0.16, 0.22, 0.1);
 	    const rimShell = deformRing(rim, 1540, 0.28, 0.34, 0.14);
 	    const rearShell = deformRing(rearMid, 1564, 0.3, 0.36, -0.14);
-	    const backShell = deformRing(back, 1588, 0.32, 0.42, -0.18);
+	    const baseBackShell = deformRing(back, 1588, 0.32, 0.42, -0.18);
 	    const backCrown = back.map((point, index) =>
 	      point
 	        .clone()
 	        .lerp(backCenter, 0.42 + seededUnit(currentProfile.seed, 1552 + index) * 0.14)
 	        .setZ(-0.72 - seededUnit(currentProfile.seed, 1560 + index) * 0.18),
 	    );
-	    const crownShell = deformRing(backCrown, 1630, 0.26, 0.36, -0.22);
+	    const baseCrownShell = deformRing(backCrown, 1630, 0.26, 0.36, -0.22);
+    const posteriorCenterY = backCenter.y - stone.posterior.drop;
+    const deformPosteriorRing = (ring: THREE.Vector3[], influence: number) => ring.map((point) =>
+      point.clone().setZ(
+        point.z + posteriorSurfaceOffset(stone.posterior, point.x - backCenter.x, point.y, posteriorCenterY) * influence,
+      ),
+    );
+    const backShell = deformPosteriorRing(baseBackShell, 0.45);
+    const crownShell = deformPosteriorRing(baseCrownShell, 1.3);
+    const posteriorBackCenter = backCenter.clone();
     const center = toVector(stone.center);
     const pushTri = (a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3, shade: number) => {
       const color = base.clone().multiplyScalar(shade);
@@ -376,7 +385,7 @@
       pushQuad(rimShell[index], rearShell[index], rearShell[next], rimShell[next], 0.7 + seededUnit(currentProfile.seed, 1440 + index) * 0.12);
       pushQuad(rearShell[index], backShell[index], backShell[next], rearShell[next], 0.56 + seededUnit(currentProfile.seed, 1460 + index) * 0.12);
       pushQuad(backShell[index], crownShell[index], crownShell[next], backShell[next], 0.48 + seededUnit(currentProfile.seed, 1480 + index) * 0.1);
-      pushTri(backCenter, crownShell[next], crownShell[index], 0.42 + seededUnit(currentProfile.seed, 1500 + index) * 0.1);
+      pushTri(posteriorBackCenter, crownShell[next], crownShell[index], 0.42 + seededUnit(currentProfile.seed, 1500 + index) * 0.1);
     }
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));

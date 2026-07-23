@@ -38,6 +38,7 @@
   import ParamPanelLithophaneTab from './components/ParamPanelLithophaneTab.svelte';
   import ParamPanelRawTab from './components/ParamPanelRawTab.svelte';
   import ParamPanelViewsTab from './components/ParamPanelViewsTab.svelte';
+  import { pendingHeightfieldImages, pendingHeightfieldStatus } from './heightfieldPending';
   import { session } from './stores/sessionStore';
   import type {
     CheckboxField,
@@ -181,6 +182,12 @@
   let paramUndoStack = $state<DesignParams[]>([]);
   let paramUndoDepth = $derived(paramUndoStack.length);
   const effectiveLocalParams = $derived.by(() => ({ ...localParams, ...pendingParamDrafts }));
+  const pendingHeightfields = $derived(
+    pendingHeightfieldImages(macroCode, uiSpec, effectiveLocalParams),
+  );
+  const heightfieldPendingText = $derived(
+    pendingHeightfields.length > 0 ? pendingHeightfieldStatus(pendingHeightfields) : '',
+  );
   let hasPendingChanges = $derived(JSON.stringify(effectiveLocalParams) !== JSON.stringify(parameters));
   let saveValuesState = $state<'idle' | 'saving' | 'saved'>('idle');
   let macroParamKeys = $state<Set<string> | null>(null);
@@ -1296,7 +1303,11 @@
     }
   }
 
-  function getRangeProps(field: RangeLikeField) {
+  function getRangeProps(field: ResolvedUiField) {
+    if (field.type !== 'range' && field.type !== 'number') {
+      return { min: 0, max: 1, step: 1 };
+    }
+
     const rawVal = Number(effectiveLocalParams[field.key]);
     const val = Number.isFinite(rawVal) ? rawVal : 0;
     let min = parseOptionalNumber(field.min) ?? 0;
@@ -2336,6 +2347,9 @@
         onAddField={addField}
       />
     {:else}
+      {#if heightfieldPendingText}
+        <div class="heightfield-pending" role="status">{heightfieldPendingText}</div>
+      {/if}
       {#if modelManifest}
         {#if manifestWarnings.length > 0}
           <div class="warning-stack">
@@ -2547,7 +2561,7 @@
         parameters={effectiveLocalParams}
         {highlightedParamKey}
         liveApply={$liveApply}
-        getRangeProps={(field) => getRangeProps(field as RangeLikeField)}
+        getRangeProps={getRangeProps}
         getCadTone={(field) => getCadHint(field).tone}
         onDraftValue={stageParamDraft}
         onUpdate={update}
@@ -2592,6 +2606,16 @@
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
+  }
+
+  .heightfield-pending {
+    border: 1px solid var(--primary);
+    background: color-mix(in srgb, var(--primary) 12%, var(--bg-200));
+    color: var(--text);
+    padding: 8px;
+    overflow: hidden;
+    font-size: 0.68rem;
+    line-height: 1.4;
   }
 
   .warning-chip {

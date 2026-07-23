@@ -113,6 +113,32 @@ test('buildExportChooserOptions enables STEP when a STEP artifact exists', () =>
   assert.equal(step?.disabledReason, undefined);
 });
 
+test('buildExportChooserOptions labels solidified mesh STEP as faceted poly-BRep', () => {
+  const bundle = sampleBundle(1);
+  const geometryProvenance = {
+    representation: 'facetedPolyBrep' as const,
+    sourceMeshDigests: ['sha256:mesh-source'],
+    closed: true,
+    boundaryOrNonManifoldEdgeCount: 0,
+  };
+  bundle.geometryProvenance = geometryProvenance;
+  bundle.exportArtifacts = [
+    {
+      label: 'STEP',
+      format: 'step',
+      path: '/tmp/model.step',
+      role: 'cad-exchange',
+      geometryProvenance,
+    },
+  ];
+
+  const step = buildExportChooserOptions(bundle).find((option) => option.id === 'step');
+
+  assert.equal(step?.disabled, false);
+  assert.match(step?.subtitle ?? '', /Faceted poly-BRep/i);
+  assert.doesNotMatch(step?.subtitle ?? '', /analytic source CAD/i);
+});
+
 test('buildMultipartExportParts preserves viewer asset order and labels', () => {
   const parts = buildMultipartExportParts(sampleBundle(2));
 

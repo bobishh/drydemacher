@@ -1,6 +1,6 @@
 import type { AutoAgent } from '../types/domain';
 import { buildAgentGenieTraits } from '../genie/traits';
-import type { GenieBubbleSource } from './draftFeedback';
+import type { GenieBubbleSource } from './activity';
 import { promptBelongsToPrimaryAgent, usesMcpConnection } from './state';
 
 export type RelayPresence = {
