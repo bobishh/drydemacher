@@ -37,7 +37,7 @@ function fieldKindLabel(field: UiField): string {
   }
 }
 
-function buildUiSpecDigest(uiSpec: UiSpec | null | undefined): string | null {
+export function buildUiSpecDigest(uiSpec: UiSpec | null | undefined): string | null {
   const fields = uiSpec?.fields ?? [];
   if (!fields.length) return null;
   const lines = [
@@ -53,7 +53,7 @@ function buildUiSpecDigest(uiSpec: UiSpec | null | undefined): string | null {
   return lines.join('\n');
 }
 
-function buildParamsDigest(params: DesignParams | null | undefined): string | null {
+export function buildParamsDigest(params: DesignParams | null | undefined): string | null {
   const entries = Object.entries(params ?? {});
   if (!entries.length) return null;
   const lines = [
@@ -79,7 +79,7 @@ function formatPartSize(parts: NonNullable<ModelManifest['parts']>, index: numbe
   return `${formatNumber(width)}×${formatNumber(depth)}×${formatNumber(height)} mm`;
 }
 
-function buildManifestDigest(manifest: ModelManifest | null | undefined): string | null {
+export function buildManifestDigest(manifest: ModelManifest | null | undefined): string | null {
   if (!manifest) return null;
   const parts = manifest.parts ?? [];
   const lines = [

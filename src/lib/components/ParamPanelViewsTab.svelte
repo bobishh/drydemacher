@@ -33,8 +33,8 @@
     sourceLabel: string;
     targetLabel: string;
     mode: ControlRelationMode;
-    scale: number;
-    offset: number;
+    scale?: number;
+    offset?: number;
   };
   type SemanticSection = {
     sectionId: string;
@@ -157,8 +157,8 @@
     advisoryPrimitiveIds: string[];
     advisoryCanSave: boolean;
     relationComposerOpen: boolean;
-    relationSourcePrimitiveId: string;
-    relationTargetPrimitiveId: string;
+    relationSourcePrimitiveId: string | null;
+    relationTargetPrimitiveId: string | null;
     relationMode: ControlRelationMode;
     relationScale: string;
     relationOffset: string;
@@ -210,8 +210,8 @@
     onToggleAdvisoryPrimitive?: (primitiveId: string, checked: boolean) => void;
     onCancelAdvisory?: () => void;
     onSaveAdvisory?: () => void;
-    onRelationSourceChange?: (value: string) => void;
-    onRelationTargetChange?: (value: string) => void;
+    onRelationSourceChange?: (value: string | null) => void;
+    onRelationTargetChange?: (value: string | null) => void;
     onRelationModeChange?: (value: ControlRelationMode) => void;
     onRelationScaleChange?: (value: string) => void;
     onRelationOffsetChange?: (value: string) => void;
@@ -241,8 +241,8 @@
     onUpdateSemanticControl?: (control: MaterializedSemanticControl, nextValue: ParamValue) => void;
     onEditPrimitiveComposer?: (control: MaterializedSemanticControl) => void;
     onPickSemanticControlImage?: (control: MaterializedSemanticControl) => Promise<void> | void;
-    onSetFocusedControl?: (primitiveId: string, parameterKey: string) => void;
-    onClearFocusedControl?: () => void;
+    onSetFocusedControl?: (primitiveId: string | null, parameterKey: string | null) => void;
+    onClearFocusedControl?: (event: MouseEvent | FocusEvent) => void;
   } = $props();
 </script>
 

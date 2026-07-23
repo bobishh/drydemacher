@@ -10,6 +10,7 @@ import {
   normalizePanePoint,
   summarizeSketchDraftMode,
   sourceLineCount,
+  artifactEvidenceSummary,
 } from './sketchWorkspaceState';
 
 test('finishStroke closes profile when endpoint returns near start', () => {
@@ -458,4 +459,19 @@ test('clientPointToSvgPoint clamps SVG coordinates to sketch viewbox', () => {
 test('sourceLineCount and basename summarize generated preview without full path wall', () => {
   assert.equal(sourceLineCount('one\ntwo\nthree'), 3);
   assert.equal(basename('/tmp/ecky/sketch-preview.stl'), 'sketch-preview.stl');
+});
+
+test('artifactEvidenceSummary separates backend bucket from geometry representation truth', () => {
+  assert.equal(
+    artifactEvidenceSummary({
+      sourceLanguage: 'ecky',
+      geometryBackend: 'mesh',
+      source: 'one\ntwo',
+      artifactBundle: {
+        geometryProvenance: { representation: 'analyticBrep' },
+        exportArtifacts: [],
+      },
+    }),
+    'ecky / backend:mesh / representation:analyticBrep / 2 lines',
+  );
 });

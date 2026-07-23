@@ -578,6 +578,14 @@ async generateSketchPreviewHull(request: SketchPreviewHullRequest) : Promise<Res
     else return { status: "error", error: e  as any };
 }
 },
+async traceRasterReference(request: RasterTraceRequest) : Promise<Result<RasterTraceResponse, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("trace_raster_reference", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async saveSketchPreviewDraft(request: SaveSketchPreviewDraftRequest) : Promise<Result<SketchPreviewDraft, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("save_sketch_preview_draft", { request }) };
@@ -926,10 +934,10 @@ vtStream?: string;
  * as a full snapshot replacement.
  */
 vtDelta?: string | null; attentionRequired: boolean; busy?: boolean; activityLabel?: string | null; activityStartedAt?: number | null; attentionKind?: string | null; summary?: string | null; active: boolean; updatedAt: number }
-export type AppError = { code: AppErrorCode; message: string; details?: string | null; stableNodeKey?: string | null; startLine?: number | null; endLine?: number | null; operation?: string | null; diagnosticContext?: DiagnosticContext | null }
+export type AppError = { code: AppErrorCode; message: string; details?: string | null; stableNodeKey?: string | null; startLine?: number | null; endLine?: number | null; operation?: string | null; diagnosticContext?: DiagnosticContext | null; layer?: ErrorLayer | null; fix?: ErrorFix | null }
 export type AppErrorCode = "validation" | "notFound" | "conflict" | "provider" | "persistence" | "render" | "parse" | "internal"
 export type AppLogEntry = { tsMs: number; message: string }
-export type ArtifactBundle = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; contentHash: string; artifactVersion?: number; fcstdPath: string; manifestPath: string; macroPath?: string | null; previewStlPath: string; viewerAssets?: ViewerAsset[]; edgeTargets?: ViewerEdgeTarget[]; faceTargets?: ViewerFaceTarget[]; calloutAnchors?: CalloutAnchor[]; measurementGuides?: MeasurementGuide[]; exportArtifacts?: ExportArtifact[] }
+export type ArtifactBundle = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; contentHash: string; artifactVersion?: number; fcstdPath: string; manifestPath: string; macroPath?: string | null; previewStlPath: string; viewerAssets?: ViewerAsset[]; edgeTargets?: ViewerEdgeTarget[]; faceTargets?: ViewerFaceTarget[]; calloutAnchors?: CalloutAnchor[]; measurementGuides?: MeasurementGuide[]; exportArtifacts?: ExportArtifact[]; geometryProvenance?: GeometryProvenance | null }
 export type ArtifactBundleComponentPackageRequest = { packageId: string; version: string; displayName: string; tags?: string[]; componentId: string; componentVersion: string; componentDisplayName: string; sourceRef?: string | null; artifactBundle: ArtifactBundle; portTypes?: PortTypeDefinition[]; params?: ComponentParam[]; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; ports?: ComponentPort[] }
 export type AssemblyComponentRef = { instanceId: string; componentId: string }
 export type AssemblyDefinition = { assemblyId: string; displayName: string; components?: AssemblyComponentRef[]; mates?: AssemblyMate[]; operations?: AssemblyOperation[]; output: AssemblyOutput }
@@ -955,11 +963,9 @@ export type AuthoredVerifyCheckStatus = "passed" | "failed" | "error"
  */
 export type AuthoredVerifyValue = { kind: "number"; value: number } | { kind: "boolean"; value: boolean } | { kind: "text"; value: string }
 /**
- * What kind of authoring failure occurred, within a layer. Now boundary-typed
- * because it rides on `StructuralIssue`; the `AuthoringDiagnostic` builder
- * itself stays internal.
+ * Stable, explicit identity for saved and draft authoring authorities.
  */
-export type AuthoringReason = "parseSyntax" | "unknownOp" | "arity" | "type" | "unsupported" | "constrainedValue"
+export type AuthoringTargetRef = { kind: "savedVersion"; threadId: string; messageId: string } | { kind: "draft"; threadId: string; previewId: string; sessionId: string } | { kind: "latestSaved"; threadId: string }
 /**
  * Whether Ecky runs the embedded MCP HTTP server.
  */
@@ -1042,7 +1048,7 @@ export type ErrorLayer =
  * The active geometry backend cannot execute a lowered op.
  */
 "backend"
-export type ExportArtifact = { label: string; format: string; path: string; role: string }
+export type ExportArtifact = { label: string; format: string; path: string; role: string; geometryProvenance?: GeometryProvenance | null }
 export type ExportPartInput = { label: string; path: string; objectName?: string | null; partId?: string | null; displayColor?: string | null; placementFrame?: PortFrame | null }
 export type EyeStyle = "dot" | "bar" | "slant"
 export type FeatureGraph = { nodes: FeatureNode[] }
@@ -1057,6 +1063,8 @@ export type GenerateDesignOptions = { questionMode?: boolean | null; followUpQue
 export type GenerateOutput = { design: DesignOutput; threadId: string; messageId: string; usage?: UsageSummary | null }
 export type GenieTraits = { version?: number; seed: number; colorHue: number; vertexCount: number; radiusBase: number; stretchY: number; asymmetry: number; chordSkip: number; jitterScale: number; pulseScale: number; hoverScale: number; warpScale: number; glowHueShift: number; eyeStyle: EyeStyle; eyeSpacing: number; eyeSize: number; mouthCurve: number; thinkingBias: number; repairBias: number; renderBias: number; expressiveness: number }
 export type GeometryBackend = "freecad" | "build123d" | "mesh"
+export type GeometryProvenance = { representation: GeometryRepresentation; sourceMeshDigests: string[]; closed?: boolean | null; boundaryOrNonManifoldEdgeCount?: number | null }
+export type GeometryRepresentation = "meshNative" | "facetedPolyBrep" | "analyticBrep" | "hybrid"
 export type InstalledAssemblyComponentControls = { instanceId: string; componentId: string; parameters: Partial<{ [key in string]: ParamValue }>; placementFrame?: PortFrame | null; installedSource: InstalledComponentSource }
 export type InstalledAssemblyComponentRuntime = { instanceId: string; componentId: string; parameters: Partial<{ [key in string]: ParamValue }>; placementFrame?: PortFrame | null; runtime: InstalledComponentRuntime }
 export type InstalledAssemblyComponentSource = { instanceId: string; componentId: string; placementFrame?: PortFrame | null; installedSource: InstalledComponentSource }
@@ -1073,7 +1081,7 @@ export type InstalledComponentSource = { packageId: string; version: string; pac
 export type IntentDecision = { intentMode: string; confidence: number; response: string; finalResponse?: string | null; usage?: UsageSummary | null }
 export type InteractionMode = "design" | "question" | "tune"
 export type KeepoutVolumeKind = "box" | "cylinder" | "sphere" | "custom"
-export type LastDesignSnapshot = { design?: DesignOutput | null; threadId?: string | null; messageId?: string | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; selectedPartId?: string | null }
+export type LastDesignSnapshot = { design?: DesignOutput | null; threadId?: string | null; messageId?: string | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; selectedPartId?: string | null; targetRef?: AuthoringTargetRef | null }
 export type LithophaneAttachment = { id: string; enabled?: boolean; source: LithophaneAttachmentSource; targetPartId?: string; placement?: LithophanePlacement; relief?: LithophaneRelief; color?: LithophaneColor }
 export type LithophaneAttachmentSource = { kind: "file"; imagePath: string } | { kind: "param"; imageParam: string }
 export type LithophaneColor = { mode?: LithophaneColorMode; channelThicknessMm?: number }
@@ -1135,7 +1143,7 @@ export type MessageRole = "user" | "assistant"
 export type MessageStatus = "pending" | "working" | "success" | "error" | "discarded"
 export type MessageVisualKind = "conceptPreview"
 export type MicrowaveConfig = { humId?: string | null; dingId?: string | null; muted?: boolean }
-export type ModelManifest = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; sourceDigest?: string | null; coreDigest?: string | null; astSchemaVersion?: number | null; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; document: DocumentMetadata; parts?: PartBinding[]; parameterGroups?: ParameterGroup[]; controlPrimitives?: ControlPrimitive[]; controlRelations?: ControlRelation[]; controlViews?: ControlView[]; previewViews?: PreviewView[]; advisories?: Advisory[]; selectionTargets?: SelectionTarget[]; measurementAnnotations?: MeasurementAnnotation[]; taggedAnchors: Partial<{ [key in string]: TaggedAnchorBinding }>; featureGraph?: FeatureGraph | null; correspondenceGraph?: CorrespondenceGraph | null; warnings?: string[]; enrichmentState?: ManifestEnrichmentState }
+export type ModelManifest = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; sourceDigest?: string | null; coreDigest?: string | null; astSchemaVersion?: number | null; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; document: DocumentMetadata; parts?: PartBinding[]; parameterGroups?: ParameterGroup[]; controlPrimitives?: ControlPrimitive[]; controlRelations?: ControlRelation[]; controlViews?: ControlView[]; previewViews?: PreviewView[]; advisories?: Advisory[]; selectionTargets?: SelectionTarget[]; measurementAnnotations?: MeasurementAnnotation[]; taggedAnchors: Partial<{ [key in string]: TaggedAnchorBinding }>; featureGraph?: FeatureGraph | null; correspondenceGraph?: CorrespondenceGraph | null; warnings?: string[]; enrichmentState?: ManifestEnrichmentState; geometryProvenance?: GeometryProvenance | null }
 export type ModelSourceKind = "generated" | "importedFcstd" | "importedStep" | "importedMesh"
 export type OperationKind = "place" | "mate" | "join" | "cut" | "fuse" | "mold" | "blend"
 export type OverflowMode = "contain" | "cover" | "clamp" | "bleed"
@@ -1157,13 +1165,19 @@ export type ProjectionType = "planar" | "auto" | "cylindrical" | "spherical"
 export type PromptTranscription = { text: string; provider: string; model: string }
 export type QueueAgentPromptInput = { threadId?: string | null; promptText: string; attachments?: Attachment[] }
 export type QueuedAgentPrompt = { threadId: string; messageId: string }
+export type RasterTraceAssetIdentity = { imagePath: string; digest: string; widthPixels: number; heightPixels: number }
+export type RasterTraceCalibration = { physicalWidth: number; physicalHeight: number }
+export type RasterTraceContour = { contourId: string; points: ([number, number])[]; closed: boolean; foregroundPixelCount: number; signedArea: number; provenance: RasterTraceProvenance }
+export type RasterTraceProvenance = { kind: string; asset: RasterTraceAssetIdentity; view: SketchView; calibration: RasterTraceCalibration; threshold: number; invert: boolean; contourId: string; extractorVersion: string }
+export type RasterTraceRequest = { imagePath: string; view: SketchView; calibration: RasterTraceCalibration; threshold: number; invert?: boolean; maxContours?: number | null }
+export type RasterTraceResponse = { asset: RasterTraceAssetIdentity; contours: RasterTraceContour[]; connectedComponentCount: number; extractorVersion: string; evidence?: string[] }
 export type RejectViewportScreenshotInput = { requestId: string; error: string }
 export type ResolveAgentPromptInput = { requestId: string; promptText: string; messageIds: string[]; messageId?: string | null; attachments?: Attachment[] }
 export type ResolveViewportScreenshotInput = { requestId: string; dataUrl: string; width: number; height: number; camera: ViewportCameraState; source: string; threadId: string; messageId: string; modelId?: string | null; includeOverlays: boolean }
 export type RuntimeAuthoringContext = { engineKind: EngineKind; sourceLanguage: SourceLanguage; geometryBackend: GeometryBackend }
 export type RuntimeBackendCapability = { available: boolean; detail: string; path?: string | null }
 export type RuntimeCapabilities = { freecad: RuntimeBackendCapability; build123D: RuntimeBackendCapability; directOcct: RuntimeBackendCapability; mesh: RuntimeBackendCapability; recommendedAuthoringContext: RuntimeAuthoringContext }
-export type SaveSketchPreviewDraftRequest = { scopeId?: string | null; draftSource: SketchDraftSource; artifactBundle: ArtifactBundle }
+export type SaveSketchPreviewDraftRequest = { scopeId?: string | null; draftSource: SketchDraftSource; artifactBundle: ArtifactBundle; sketchDocument?: SketchDocument | null }
 export type SelectOption = { label: string; value: SelectValue }
 export type SelectValue = string | number
 export type SelectionTarget = { targetId?: string | null; durableTargetId?: string | null; canonicalTargetId?: string | null; aliasIds?: string[]; partId: string; viewerNodeId: string; label: string; kind: SelectionTargetKind; editable: boolean; parameterKeys?: string[]; primitiveIds?: string[]; viewIds?: string[] }
@@ -1189,9 +1203,9 @@ export type SketchDraftOperationKind = "extrude" | "revolve"
 export type SketchDraftRequest = { partId: string; sketch: SketchDefinition; operation: SketchDraftOperationKind; amount: number; symmetric?: boolean }
 export type SketchDraftSource = { sourceLanguage: SourceLanguage; geometryBackend: GeometryBackend; macroDialect: MacroDialect; source: string; warnings?: string[] }
 export type SketchFeatureSuggestion = { suggestionId: string; sketchId: string; primitiveId?: string | null; partId: string; operation: SketchDraftOperationKind; amount: number; symmetric?: boolean; confidence: number; reason: string; warnings?: string[] }
-export type SketchPreviewDraft = { scopeId?: string | null; draftSource: SketchDraftSource; artifactBundle: ArtifactBundle; updatedAt: number }
+export type SketchPreviewDraft = { scopeId?: string | null; draftSource: SketchDraftSource; artifactBundle: ArtifactBundle; sketchDocument?: SketchDocument | null; updatedAt: number }
 export type SketchPreviewHullRequest = { partId: string; document: SketchDocument; fallbackDepth: number }
-export type SketchPrimitive = { primitiveId: string; kind: SketchPrimitiveKind; points?: ([number, number])[]; closed?: boolean; radius?: number | null; topology?: SketchPrimitiveTopology | null }
+export type SketchPrimitive = { primitiveId: string; kind: SketchPrimitiveKind; points?: ([number, number])[]; closed?: boolean; radius?: number | null; topology?: SketchPrimitiveTopology | null; provenance?: RasterTraceProvenance | null }
 export type SketchPrimitiveKind = "point" | "line" | "polyline" | "spline" | "arc" | "circle"
 export type SketchPrimitiveTopology = { loopId?: string | null; edgeIds?: string[]; loopRole?: BrepProjectedLoopRole | null; sourceClass?: string | null }
 export type SketchSuggestionRequest = { document: SketchDocument; limit?: number | null }
@@ -1206,22 +1220,7 @@ export type StructuralIssue = { code: string; message: string;
 /**
  * ID of the affected part, when the issue is part-specific.
  */
-partId?: string | null; numericPayload?: number | null; diagnosticContext?: DiagnosticContext | null; 
-/**
- * Which authoring layer owns this issue (surface / coreIr / backend).
- * `None` for structural (post-render geometry) issues; the existing
- * population. Authoring diagnostics populate this via
- * `AuthoringDiagnostic::into_issue`.
- */
-layer?: ErrorLayer | null; 
-/**
- * Authoring-specific reason code. `None` for structural issues.
- */
-reason?: AuthoringReason | null; 
-/**
- * Structured next-action (hint + suggestions). `None` when not applicable.
- */
-fix?: ErrorFix | null }
+partId?: string | null; numericPayload?: number | null; diagnosticContext?: DiagnosticContext | null }
 export type StructuralMetrics = { partCount: number; previewStlSizeBytes?: number | null; previewStlTriangleCount?: number | null; previewStlComponentCount?: number | null; previewStlNonManifoldEdgeCount?: number | null; previewStlOverhangTriangleCount?: number | null; previewStlOverhangRatio?: number | null; totalVolume?: number | null; totalArea?: number | null; bbox?: ManifestBounds | null }
 export type StructuralVerificationResult = { passed: boolean; summary: string; issues: StructuralIssue[]; authoredVerifyChecks?: AuthoredVerifyCheck[]; metrics: StructuralMetrics; verifierStatus: VerifierStatus; verifierSource?: VerifierSource | null }
 export type TaggedAnchorBinding = { kind: TaggedAnchorKind; authoredSelector: string; target: string; targetIds: string[]; durableTargetIds: string[]; canonicalTargetIds: string[]; aliasIds: string[] }

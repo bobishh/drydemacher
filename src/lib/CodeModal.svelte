@@ -2,6 +2,10 @@
   import Window from './Window.svelte';
   import CodePanel from './CodePanel.svelte';
   import MacroDiffPanel from './MacroDiffPanel.svelte';
+  import {
+    seedCodeModalDraftField,
+    shouldReseedCodeModalDraftFields,
+  } from './codeModalDraftFields';
   import { composeMacroDiffPanelModel } from './macroDiffPanel';
   import type { SessionCodeDiffView } from './sessionActivity';
   import {
@@ -40,6 +44,7 @@
     sourceLanguage = null,
     macroDiffView = null,
     title,
+    draftScopeKey = '',
     defaultTitle = '',
     defaultVersionName = '',
     z = 0,
@@ -54,6 +59,7 @@
     sourceLanguage?: string | null;
     macroDiffView?: SessionCodeDiffView | null;
     title: string;
+    draftScopeKey?: string;
     defaultTitle?: string;
     defaultVersionName?: string;
     z?: number;
@@ -76,20 +82,23 @@
   let errorLine = $state<number | null>(null);
   let draftTitle = $state('');
   let draftVersionName = $state('');
-  let initializedDraftFields = $state(false);
+  let seededDraftScopeKey = $state('');
   const canMutateVersion = $derived(mode === 'version');
+  const effectiveDraftScopeKey = $derived(
+    draftScopeKey || `${mode}:${title}:${defaultTitle}:${defaultVersionName}:${sourceLanguage ?? ''}`,
+  );
   const macroDiffModel = $derived.by(() =>
     canMutateVersion && macroDiffView ? composeMacroDiffPanelModel(macroDiffView) : null,
   );
 
   $effect(() => {
-    if (commitState !== 'idle') return;
-    if (!initializedDraftFields) {
-      draftTitle = defaultTitle || title;
-      draftVersionName = defaultVersionName || 'V-manual';
-      initializedDraftFields = true;
-      return;
-    }
+    if (!shouldReseedCodeModalDraftFields(seededDraftScopeKey, effectiveDraftScopeKey, commitState)) return;
+    draftTitle = seedCodeModalDraftField(defaultTitle, title);
+    draftVersionName = seedCodeModalDraftField(defaultVersionName, 'V-manual');
+    seededDraftScopeKey = effectiveDraftScopeKey;
+    commitError = '';
+    errorLine = null;
+    verifyState = 'idle';
   });
 
 
@@ -174,6 +183,58 @@
   bind:height
 >
   <div class="code-modal-content">
+    {#if canMutateVersion}
+      <div class="code-modal-topbar">
+        <div class="commit-fields">
+          <label class="commit-field commit-field-title">
+            <span class="commit-field__label">Title</span>
+            <input
+              class="commit-input"
+              bind:value={draftTitle}
+              placeholder="Title"
+              aria-label="Version title"
+              disabled={commitState !== 'idle'}
+            />
+          </label>
+          <label class="commit-field commit-field-version">
+            <span class="commit-field__label">Version</span>
+            <input
+              class="commit-input commit-input-version"
+              bind:value={draftVersionName}
+              placeholder="Version"
+              aria-label="Version name"
+              disabled={commitState !== 'idle'}
+            />
+          </label>
+        </div>
+        <div class="commit-actions">
+          <button
+            class="btn btn-secondary"
+            onclick={handleApply}
+            disabled={!onApply || commitState !== 'idle'}
+            title="Render code changes without creating a history version"
+          >
+            {#if commitState === 'applying'}
+              APPLYING...
+            {:else}
+              APPLY
+            {/if}
+          </button>
+          <button
+            class="btn btn-primary"
+            onclick={handleCommit}
+            disabled={!onCommit || commitState !== 'idle'}
+            title="Save changes as a new version in history"
+          >
+            {#if commitState === 'committing'}
+              COMMITTING...
+            {:else}
+              COMMIT VERSION
+            {/if}
+          </button>
+        </div>
+      </div>
+    {/if}
     <div class="code-editor-area">
       <CodePanel
         code={code}
@@ -208,58 +269,6 @@
           <div class="commit-error" title={commitError}>{commitError}</div>
         {/if}
       </div>
-      <div class="footer-actions">
-        {#if canMutateVersion}
-          <div class="commit-fields">
-            <label class="commit-field">
-              <span class="commit-field__label">Title</span>
-              <input
-                class="commit-input"
-                bind:value={draftTitle}
-                placeholder="Title"
-                aria-label="Version title"
-                disabled={commitState !== 'idle'}
-              />
-            </label>
-            <label class="commit-field">
-              <span class="commit-field__label">Version</span>
-              <input
-                class="commit-input commit-input-version"
-                bind:value={draftVersionName}
-                placeholder="Version"
-                aria-label="Version name"
-                disabled={commitState !== 'idle'}
-              />
-            </label>
-          </div>
-        {/if}
-        {#if canMutateVersion}
-          <button
-            class="btn btn-secondary"
-            onclick={handleApply}
-            disabled={!onApply || commitState !== 'idle'}
-            title="Render code changes without creating a history version"
-          >
-            {#if commitState === 'applying'}
-              APPLYING...
-            {:else}
-              APPLY
-            {/if}
-          </button>
-          <button
-            class="btn btn-primary"
-            onclick={handleCommit}
-            disabled={!onCommit || commitState !== 'idle'}
-            title="Save changes as a new version in history"
-          >
-            {#if commitState === 'committing'}
-              COMMITTING...
-            {:else}
-              COMMIT VERSION
-            {/if}
-          </button>
-        {/if}
-      </div>
     </div>
   </div>
 </Window>
@@ -271,6 +280,18 @@
     background: var(--bg);
     display: flex;
     flex-direction: column;
+  }
+
+  .code-modal-topbar {
+    flex: 0 0 auto;
+    padding: 10px 12px;
+    background: color-mix(in srgb, var(--bg-100) 92%, var(--primary) 8%);
+    border-bottom: 1px solid var(--bg-300);
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 12px;
+    overflow: hidden;
   }
 
   .code-editor-area {
@@ -308,22 +329,21 @@
     text-overflow: ellipsis;
   }
 
-  .footer-actions {
+  .commit-actions {
     display: flex;
     gap: 8px;
     align-items: center;
     justify-content: flex-end;
     min-width: 0;
-    flex-wrap: wrap;
+    flex: 0 0 auto;
   }
 
   .commit-fields {
-    display: flex;
+    flex: 1 1 auto;
+    display: grid;
+    grid-template-columns: minmax(240px, 1fr) 140px;
     gap: 10px;
-    min-width: 260px;
-    padding-right: 12px;
-    margin-right: 4px;
-    border-right: 1px solid var(--bg-300);
+    min-width: 0;
   }
 
   .commit-field {
@@ -343,7 +363,7 @@
 
   .commit-input {
     min-width: 0;
-    width: 170px;
+    width: 100%;
     height: 34px;
     border: 1px solid var(--bg-300);
     background: var(--bg);
@@ -354,6 +374,6 @@
   }
 
   .commit-input-version {
-    width: 110px;
+    width: 100%;
   }
 </style>

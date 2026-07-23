@@ -4,6 +4,7 @@ import type {
   SketchPrimitive,
   SketchPrimitiveKind,
   SketchPrimitiveTopology,
+  RasterTraceProvenance,
   SketchView,
 } from './tauri/contracts';
 
@@ -23,6 +24,7 @@ export type SketchStroke = {
   closed: boolean;
   radius?: number;
   topology?: SketchPrimitiveTopology | null;
+  provenance?: RasterTraceProvenance | null;
   dimensionLocks?: SketchDimensionLocks;
 };
 
@@ -104,6 +106,31 @@ export function sourceLineCount(source: string): number {
   return source.split(/\r\n|\r|\n/).length;
 }
 
+type GeometryProvenanceLike = {
+  representation?: string | null;
+} | null;
+
+type ArtifactEvidenceBundleLike = {
+  geometryProvenance?: GeometryProvenanceLike;
+  exportArtifacts?: Array<{ format: string; geometryProvenance?: GeometryProvenanceLike }>;
+} | null;
+
+export function artifactEvidenceSummary(input: {
+  sourceLanguage?: string | null;
+  geometryBackend?: string | null;
+  source: string;
+  artifactBundle?: ArtifactEvidenceBundleLike;
+}): string {
+  const stepArtifact = input.artifactBundle?.exportArtifacts?.find(
+    (artifact) => artifact.format.toLowerCase() === 'step',
+  );
+  const representation =
+    input.artifactBundle?.geometryProvenance?.representation ??
+    stepArtifact?.geometryProvenance?.representation ??
+    'unknown';
+  return `${input.sourceLanguage ?? 'unknown'} / backend:${input.geometryBackend ?? 'unknown'} / representation:${representation} / ${sourceLineCount(input.source)} lines`;
+}
+
 export function basename(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
 }
@@ -160,6 +187,7 @@ export function buildSketchDraftRequest(strokes: SketchStroke[]): SketchDraftReq
     closed: true,
     radius: strokeKind(draftProfile) === 'circle' ? draftProfile.radius ?? null : null,
     ...(draftProfile.topology ? { topology: copyTopology(draftProfile.topology) } : {}),
+    ...(draftProfile.provenance ? { provenance: copyRasterProvenance(draftProfile.provenance) } : {}),
   }));
 
   return {
@@ -274,6 +302,14 @@ function copyTopology(topology: SketchPrimitiveTopology | null | undefined): Ske
   return {
     ...topology,
     edgeIds: topology.edgeIds ? [...topology.edgeIds] : undefined,
+  };
+}
+
+function copyRasterProvenance(provenance: RasterTraceProvenance): RasterTraceProvenance {
+  return {
+    ...provenance,
+    asset: { ...provenance.asset },
+    calibration: { ...provenance.calibration },
   };
 }
 

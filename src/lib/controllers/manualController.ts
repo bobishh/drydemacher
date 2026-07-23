@@ -37,8 +37,10 @@ import {
 } from '../tauri/client';
 import { closeWindow as closeWindowStore } from '../stores/windowStore';
 import type { WorkingCopyState } from '../stores/workingCopy';
+import { pendingHeightfieldImages, pendingHeightfieldStatus } from '../heightfieldPending';
+import { LatestTaskGate } from './latestTaskGate';
 
-let latestParamRenderSeq = 0;
+const latestParamRenderGate = new LatestTaskGate();
 let latestAppliedParamDraft: AppliedParamDraft | null = null;
 
 type ManualCommitOptions = {
@@ -437,7 +439,7 @@ export async function handleParamChange(
   }
 
   const currentParams = forcedCode ? { ...newParams } : { ...panel.params, ...newParams };
-  const renderSeq = ++latestParamRenderSeq;
+  const renderToken = latestParamRenderGate.reserve(snapshotThreadId ?? '__detached__');
   recordParamsChanged({
     threadId: snapshotThreadId,
     versionId: targetVersionId,
@@ -451,6 +453,13 @@ export async function handleParamChange(
   workingCopy.patch({ params: currentParams });
 
   const codeToUse = applySource.ok ? applySource.code : '';
+  const pendingHeightfields = pendingHeightfieldImages(codeToUse, panel.uiSpec, currentParams);
+  if (pendingHeightfields.length > 0) {
+    if (get(activeThreadId) === snapshotThreadId) {
+      session.setStatus(pendingHeightfieldStatus(pendingHeightfields));
+    }
+    return true;
+  }
   if (!codeToUse) {
     const currentSession = get(session);
     const importedDesign = buildImportedSyntheticDesign(
@@ -519,7 +528,7 @@ export async function handleParamChange(
           await saveModelManifest(nextBundle.modelId, nextManifest, null);
         }
 
-        if (renderSeq !== latestParamRenderSeq) {
+        if (!latestParamRenderGate.isCurrent(renderToken)) {
           return false;
         }
 
@@ -626,7 +635,7 @@ export async function handleParamChange(
         }
         return false;
       } finally {
-        if (renderSeq === latestParamRenderSeq) {
+        if (latestParamRenderGate.isCurrent(renderToken)) {
           stopMicrowaveHum('__manual__');
           setManualRenderActive(false);
         }
@@ -730,7 +739,7 @@ export async function handleParamChange(
       await saveModelManifest(bundle.modelId, manifest, null);
     }
 
-    if (renderSeq !== latestParamRenderSeq) {
+    if (!latestParamRenderGate.isCurrent(renderToken)) {
       return false;
     }
 
@@ -831,7 +840,7 @@ export async function handleParamChange(
         timestamp: Date.now() / 1000,
       });
 
-      if (renderSeq === latestParamRenderSeq && get(activeThreadId) === snapshotThreadId) {
+      if (latestParamRenderGate.isCurrent(renderToken) && get(activeThreadId) === snapshotThreadId) {
         activeVersionId.set(newMsgId);
         workingCopy.loadVersion(committedDesign, newMsgId);
         restoreWorkingCopyMacroDraftIfNeeded(wc, committedDesign.macroCode);
@@ -859,7 +868,7 @@ export async function handleParamChange(
             : 'Parameter version committed.',
         );
       }
-    } else if (renderSeq === latestParamRenderSeq && get(activeThreadId) === snapshotThreadId) {
+    } else if (latestParamRenderGate.isCurrent(renderToken) && get(activeThreadId) === snapshotThreadId) {
       session.setStatus(
         runtime.skippedOversizedPreview
           ? 'Parameters applied. Commit version to save history. Lithophane preview was skipped in the viewer; base part meshes are shown instead.'
@@ -868,7 +877,7 @@ export async function handleParamChange(
     }
   } catch (e) {
     console.error('[ManualController] render_model error:', formatBackendError(e), e);
-    if (renderSeq === latestParamRenderSeq && get(activeThreadId) === snapshotThreadId) {
+    if (latestParamRenderGate.isCurrent(renderToken) && get(activeThreadId) === snapshotThreadId) {
       recordRenderEvent({
         threadId: snapshotThreadId,
         versionId: targetVersionId,
@@ -882,7 +891,7 @@ export async function handleParamChange(
     }
     return false;
   } finally {
-    if (renderSeq === latestParamRenderSeq) {
+    if (latestParamRenderGate.isCurrent(renderToken)) {
       stopMicrowaveHum('__manual__');
       setManualRenderActive(false);
     }

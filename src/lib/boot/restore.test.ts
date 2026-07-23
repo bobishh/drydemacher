@@ -33,6 +33,7 @@ function sampleManifest(modelId: string): ModelManifest {
       objectCount: 1,
       warnings: [],
     },
+    taggedAnchors: {},
     parts: [],
     parameterGroups: [],
     controlPrimitives: [],

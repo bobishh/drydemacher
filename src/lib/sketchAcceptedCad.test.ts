@@ -133,6 +133,27 @@ test('buildSketchAcceptedCadRow keeps mesh preview pending instead of accepting 
   });
 });
 
+test('buildSketchAcceptedCadRow ignores one-photo vision text claiming accepted CAD', () => {
+  const visionInput = {
+    artifactBundle: {
+      ...artifactBundle,
+      geometryBackend: 'mesh' as const,
+      fcstdPath: '',
+      exportArtifacts: [],
+    },
+    hiddenLineResponse: null,
+    hiddenLineErrorText: '',
+    hiddenLineLoading: false,
+    responseText: 'Accepted CAD reconstructed exactly from one reference photo.',
+  };
+
+  const row = buildSketchAcceptedCadRow(visionInput);
+
+  assert.equal(row?.status, 'pending');
+  assert.match(row?.detail ?? '', /requires exact BRep\/STEP validation/i);
+  assert.doesNotMatch(row?.detail ?? '', /reconstructed exactly/i);
+});
+
 test('buildSketchAcceptedCadRow stays pass when structured hidden-line validation already passes', () => {
   const row = buildSketchAcceptedCadRow({
     artifactBundle,

@@ -111,6 +111,12 @@ const ALL_WINDOW_IDS: WindowId[] = [
   'activity',
 ];
 
+const HIDDEN_WINDOW_IDS = new Set<WindowId>(['sketch']);
+
+function isWindowAvailable(id: WindowId): boolean {
+  return !HIDDEN_WINDOW_IDS.has(id);
+}
+
 function buildDefaults(): WindowStoreState {
   const state = {} as WindowStoreState;
   for (const id of ALL_WINDOW_IDS) {
@@ -141,6 +147,7 @@ function mergeDbLayout(dbLayout: ThreadWindowLayout | null): WindowStoreState {
   if (!dbLayout) return defaults;
 
   for (const id of ALL_WINDOW_IDS) {
+    if (!isWindowAvailable(id)) continue;
     const saved = dbLayout.windows[id];
     if (!saved) continue;
     const reg = windowRegistry[id];
@@ -364,6 +371,7 @@ export function bringToFront(id: WindowId) {
 }
 
 export function showWindow(id: WindowId) {
+  if (!isWindowAvailable(id)) return;
   const next = cloneState(currentState());
   const reg = windowRegistry[id];
   const clamped = clampRect(next[id], reg.minSize);
@@ -376,6 +384,7 @@ export function ensureWindowVisible(id: WindowId) {
 }
 
 export function toggleWindow(id: WindowId) {
+  if (!isWindowAvailable(id)) return;
   const next = cloneState(currentState());
   if (next[id].visible) {
     next[id] = { ...next[id], visible: false };

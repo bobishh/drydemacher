@@ -5,6 +5,7 @@ import { get } from 'svelte/store';
 
 import {
   ALL_WINDOW_IDS,
+  _mergeDbLayout,
   _resetWindowStoreForTest,
   bringToFront,
   showWindow,
@@ -81,6 +82,26 @@ test('docs window is registered and can be opened', () => {
   assert.equal(state.docs.visible, true);
   assert.equal(state.docs.minimized, false);
   assert.ok(state.docs.width >= windowRegistry.docs.minSize.width);
+
+  _resetWindowStoreForTest();
+});
+
+test('Sketch Workspace stays hidden from direct opens and stale persisted layouts', () => {
+  _resetWindowStoreForTest();
+
+  showWindow('sketch');
+  assert.equal(get(windowStore).sketch.visible, false);
+
+  const restored = _mergeDbLayout({
+    schemaVersion: 1,
+    rememberLayout: true,
+    windows: {
+      params: { visible: true, minimized: false, x: 520, y: 80, width: 360, height: 480, z: 4 },
+      sketch: { visible: true, minimized: false, x: 180, y: 120, width: 760, height: 520, z: 9 },
+    },
+  });
+  assert.equal(restored.params.visible, true);
+  assert.equal(restored.sketch.visible, false);
 
   _resetWindowStoreForTest();
 });

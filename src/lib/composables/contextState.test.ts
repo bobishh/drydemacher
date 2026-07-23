@@ -16,6 +16,7 @@ function manifest(): ModelManifest {
       objectCount: 1,
       warnings: [],
     },
+    taggedAnchors: {},
     parts: [
       {
         partId: 'body',

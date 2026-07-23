@@ -26,6 +26,20 @@ export function getStepExportPath(bundle: ArtifactBundle | null | undefined): st
   return bundle?.exportArtifacts?.find((a) => a.format === 'step')?.path;
 }
 
+function stepExportSubtitle(bundle: ArtifactBundle | null | undefined): string {
+  const stepArtifact = bundle?.exportArtifacts?.find((artifact) => artifact.format === 'step');
+  const representation =
+    stepArtifact?.geometryProvenance?.representation ??
+    bundle?.geometryProvenance?.representation;
+  if (representation === 'facetedPolyBrep') {
+    return 'Faceted poly-BRep exchange from a solidified triangle mesh; planar triangle-derived topology.';
+  }
+  if (representation === 'analyticBrep') {
+    return 'Analytic BRep neutral CAD exchange file.';
+  }
+  return 'Neutral CAD exchange file.';
+}
+
 function stepExportDisabledReason(
   bundle: ArtifactBundle | null | undefined,
   runtimeCapabilities?: RuntimeCapabilities | null,
@@ -125,7 +139,7 @@ export function buildExportChooserOptions(
   options.push({
     id: 'step',
     title: 'STEP',
-    subtitle: 'Neutral CAD exchange file.',
+    subtitle: stepExportSubtitle(bundle),
     disabled: !Boolean(stepPath),
     disabledReason: stepDisabledReason,
   });
