@@ -13,8 +13,14 @@ const QUAD_SAMPLES: usize = 8;
 /// checks (self-intersection, containment, fit bounds).
 #[derive(Debug, Clone, PartialEq)]
 pub enum SvgPathSegment {
-    Line { to: [f64; 2] },
-    Cubic { c1: [f64; 2], c2: [f64; 2], to: [f64; 2] },
+    Line {
+        to: [f64; 2],
+    },
+    Cubic {
+        c1: [f64; 2],
+        c2: [f64; 2],
+        to: [f64; 2],
+    },
 }
 
 /// Exact geometry of one closed contour: a start anchor plus consecutive
@@ -1278,9 +1284,8 @@ mod tests {
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
             <path d="M1 5 C1 1 9 1 9 5 C9 9 1 9 1 5 Z"/>
         </svg>"##;
-        let profile =
-            parse_svg_profile(svg, Some(20.0), Some(20.0), SvgFitMode::Contain, true)
-                .expect("parse");
+        let profile = parse_svg_profile(svg, Some(20.0), Some(20.0), SvgFitMode::Contain, true)
+            .expect("parse");
 
         assert!(profile.outer_geometry.has_curves());
         assert_eq!(profile.outer_geometry.segments.len(), 2);

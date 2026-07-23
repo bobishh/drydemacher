@@ -55,6 +55,7 @@ enum ExpectedKind {
     Any,
     Boolean,
     Number,
+    Text,
     List,
     Point2List,
     Point3List,
@@ -62,6 +63,7 @@ enum ExpectedKind {
     Sketch,
     Path,
     Frame,
+    Mesh,
     Shape,
     Solid,
 }
@@ -465,10 +467,252 @@ fn verify_call(
         CoreOperation::Custom(custom) if custom == "hole" => {
             verify_typed_hole(&name, args, keywords, node)
         }
+        CoreOperation::Custom(custom) if matches!(custom.as_str(), "mesh" | "polyhedron") => {
+            verify_mesh_literal(&name, args, keywords, node, env)
+        }
+        CoreOperation::Custom(custom) if custom == "heightfield" => {
+            verify_heightfield(&name, args, keywords, node, env)
+        }
         CoreOperation::Custom(_) => Ok(()),
     }?;
     verify_keywords(&name, keywords, env)?;
     verify_call_dimensions(op, &name, args, env, warnings)
+}
+
+fn verify_heightfield(
+    name: &str,
+    args: &[CoreNode],
+    keywords: &[CoreKeywordArg],
+    node: &CoreNode,
+    env: &KindEnv,
+) -> CoreResult<()> {
+    verify_exact(
+        name,
+        args,
+        &[ArgSpec {
+            name: "image",
+            expected: ExpectedKind::Text,
+        }],
+        env,
+    )?;
+    for required in ["width", "depth", "relief-height", "base-thickness"] {
+        let matches = keywords
+            .iter()
+            .filter(|keyword| keyword.name == required)
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Err(type_error(
+                name,
+                &format!("expected one `:{required}`"),
+                &format!("got {}", matches.len()),
+                node.span,
+            ));
+        }
+        let value = matches[0].source_node();
+        verify_expected_node(name, 0, required, ExpectedKind::Number, value, env)?;
+        if let CoreNodeKind::Literal(CoreLiteral::Number(literal)) = &value.kind {
+            if !literal.is_finite() || *literal <= 0.0 {
+                return Err(type_error(
+                    name,
+                    &format!("`:{required}` expected finite value greater than zero"),
+                    &format!("got {literal}"),
+                    value.span,
+                ));
+            }
+        }
+    }
+    let invert_keywords = keywords
+        .iter()
+        .filter(|keyword| keyword.name == "invert")
+        .collect::<Vec<_>>();
+    if invert_keywords.len() > 1 {
+        return Err(type_error(
+            name,
+            "expected at most one `:invert`",
+            &format!("got {}", invert_keywords.len()),
+            node.span,
+        ));
+    }
+    if let Some(invert) = invert_keywords.first() {
+        verify_expected_node(
+            name,
+            0,
+            "invert",
+            ExpectedKind::Boolean,
+            invert.source_node(),
+            env,
+        )?;
+    }
+    if let Some(keyword) = keywords.iter().find(|keyword| {
+        !matches!(
+            keyword.name.as_str(),
+            "width" | "depth" | "relief-height" | "base-thickness" | "invert"
+        )
+    }) {
+        return Err(type_error(
+            name,
+            "expected heightfield dimension options",
+            &format!("got `:{}`", keyword.name),
+            keyword.source_node().span,
+        ));
+    }
+    verify_result(name, ExpectedKind::Solid, node, env)
+}
+
+fn verify_mesh_literal(
+    name: &str,
+    args: &[CoreNode],
+    keywords: &[CoreKeywordArg],
+    node: &CoreNode,
+    env: &KindEnv,
+) -> CoreResult<()> {
+    verify_exact(name, args, &[], env)?;
+
+    for required in ["vertices", "triangles"] {
+        let matches = keywords
+            .iter()
+            .filter(|keyword| keyword.name == required)
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            return Err(type_error(
+                name,
+                &format!("expected `:{required}`"),
+                &format!("got no :{required}"),
+                node.span,
+            ));
+        }
+        if matches.len() > 1 {
+            return Err(type_error(
+                name,
+                &format!("expected one `:{required}`"),
+                &format!("got {}", matches.len()),
+                node.span,
+            ));
+        }
+        verify_expected_node(
+            name,
+            0,
+            required,
+            ExpectedKind::Point3List,
+            matches[0].source_node(),
+            env,
+        )?;
+        if let Some(items) = literal_list_items(matches[0].source_node()) {
+            for (index, item) in items.iter().enumerate() {
+                verify_expected_point3(name, index, required, item, env)?;
+            }
+        }
+    }
+
+    if let Some(keyword) = keywords
+        .iter()
+        .find(|keyword| !matches!(keyword.name.as_str(), "vertices" | "triangles"))
+    {
+        return Err(type_error(
+            name,
+            "expected only `:vertices` and `:triangles`",
+            &format!("got `:{}`", keyword.name),
+            keyword.source_node().span,
+        ));
+    }
+
+    verify_static_mesh_indices(name, keywords)?;
+
+    verify_result(
+        name,
+        if name == "mesh" {
+            ExpectedKind::Mesh
+        } else {
+            ExpectedKind::Solid
+        },
+        node,
+        env,
+    )
+}
+
+fn verify_static_mesh_indices(name: &str, keywords: &[CoreKeywordArg]) -> CoreResult<()> {
+    let vertices = keywords
+        .iter()
+        .find(|keyword| keyword.name == "vertices")
+        .expect("required mesh keyword checked above")
+        .source_node();
+    let triangles = keywords
+        .iter()
+        .find(|keyword| keyword.name == "triangles")
+        .expect("required mesh keyword checked above")
+        .source_node();
+    let Some(vertex_nodes) = literal_list_items(vertices) else {
+        return Ok(());
+    };
+    let Some(triangle_nodes) = literal_list_items(triangles) else {
+        return Ok(());
+    };
+
+    for (vertex_index, vertex) in vertex_nodes.iter().enumerate() {
+        let Some(point) = literal_point3(vertex) else {
+            continue;
+        };
+        if point.iter().any(|component| !component.is_finite()) {
+            return Err(type_error(
+                name,
+                "vertices expected finite coordinates",
+                &format!("vertex {vertex_index} contains non-finite coordinate"),
+                vertex.span,
+            ));
+        }
+    }
+
+    for (triangle_index, triangle) in triangle_nodes.iter().enumerate() {
+        let Some(indices) = literal_point3(triangle) else {
+            continue;
+        };
+        for value in indices {
+            if !value.is_finite() || value < 0.0 || value.fract() != 0.0 {
+                return Err(type_error(
+                    name,
+                    "triangle indices expected non-negative integers",
+                    &format!("triangle {triangle_index} contains index {value}"),
+                    triangle.span,
+                ));
+            }
+            if value > usize::MAX as f64 || value as usize >= vertex_nodes.len() {
+                return Err(type_error(
+                    name,
+                    "triangle indices expected existing vertices",
+                    &format!(
+                        "triangle {triangle_index} references index {value}, but mesh has {} vertices",
+                        vertex_nodes.len()
+                    ),
+                    triangle.span,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn literal_list_items(node: &CoreNode) -> Option<&[CoreNode]> {
+    match &node.kind {
+        CoreNodeKind::List(items) | CoreNodeKind::Group(items) => Some(items),
+        _ => None,
+    }
+}
+
+fn literal_point3(node: &CoreNode) -> Option<[f64; 3]> {
+    match &node.kind {
+        CoreNodeKind::Literal(CoreLiteral::Point3(point)) => Some(*point),
+        CoreNodeKind::List(items) | CoreNodeKind::Group(items) if items.len() == 3 => {
+            let mut point = [0.0; 3];
+            for (index, item) in items.iter().enumerate() {
+                let CoreNodeKind::Literal(CoreLiteral::Number(value)) = &item.kind else {
+                    return None;
+                };
+                point[index] = *value;
+            }
+            Some(point)
+        }
+        _ => None,
+    }
 }
 
 fn verify_typed_hole(
@@ -1269,6 +1513,7 @@ fn kind_matches(expected: ExpectedKind, actual: CoreValueKind) -> bool {
         ExpectedKind::Any => true,
         ExpectedKind::Boolean => actual == CoreValueKind::Boolean,
         ExpectedKind::Number => actual == CoreValueKind::Number,
+        ExpectedKind::Text => actual == CoreValueKind::Text,
         ExpectedKind::Point2List | ExpectedKind::Point3List => matches!(
             actual,
             CoreValueKind::Any
@@ -1284,10 +1529,12 @@ fn kind_matches(expected: ExpectedKind, actual: CoreValueKind) -> bool {
         ExpectedKind::Sketch => actual == CoreValueKind::Sketch,
         ExpectedKind::Path => actual == CoreValueKind::Path,
         ExpectedKind::Frame => actual == CoreValueKind::Frame,
+        ExpectedKind::Mesh => actual == CoreValueKind::Mesh,
         ExpectedKind::Shape => matches!(
             actual,
             CoreValueKind::Sketch
                 | CoreValueKind::Path
+                | CoreValueKind::Mesh
                 | CoreValueKind::Compound
                 | CoreValueKind::Solid
         ),
@@ -1806,6 +2053,7 @@ fn expected_label(expected: ExpectedKind) -> &'static str {
         ExpectedKind::Any => "value",
         ExpectedKind::Boolean => "boolean",
         ExpectedKind::Number => "number",
+        ExpectedKind::Text => "text",
         ExpectedKind::List => "list",
         ExpectedKind::Point2List => "2D point list",
         ExpectedKind::Point3List => "3D point list",
@@ -1813,6 +2061,7 @@ fn expected_label(expected: ExpectedKind) -> &'static str {
         ExpectedKind::Sketch => "2D sketch (sketch)",
         ExpectedKind::Path => "3D path (path)",
         ExpectedKind::Frame => "frame",
+        ExpectedKind::Mesh => "mesh",
         ExpectedKind::Shape => "shape (sketch, path, compound, or solid)",
         ExpectedKind::Solid => "solid",
     }
@@ -1830,6 +2079,7 @@ fn kind_label(kind: CoreValueKind) -> &'static str {
         CoreValueKind::Sketch => "sketch",
         CoreValueKind::Path => "path",
         CoreValueKind::Frame => "frame",
+        CoreValueKind::Mesh => "mesh",
         CoreValueKind::Compound => "compound",
         CoreValueKind::Solid => "solid",
     }

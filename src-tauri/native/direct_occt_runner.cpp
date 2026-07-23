@@ -76,11 +76,13 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -104,6 +106,7 @@
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
+#include <manifold/manifold.h>
 #include "vendor/yyjson/yyjson.h"
 
 namespace fs = std::filesystem;
@@ -180,17 +183,22 @@ struct Plan {
 };
 
 struct ShapeRecord {
+    enum class Kind { Shape, Manifold };
+
     std::string part_id;
     std::string label;
+    Kind kind = Kind::Shape;
     TopoDS_Shape shape;
+    manifold::Manifold manifold;
 };
 
 struct SlotValue {
-    enum class Kind { Shape, Frame };
+    enum class Kind { Shape, Frame, Manifold };
 
     Kind kind = Kind::Shape;
     TopoDS_Shape shape;
     gp_Trsf frame;
+    manifold::Manifold manifold;
 
     SlotValue() = default;
 
@@ -211,6 +219,13 @@ struct SlotValue {
         slot.frame = value;
         return slot;
     }
+
+    static SlotValue manifold_value(const manifold::Manifold& value) {
+        SlotValue slot;
+        slot.kind = Kind::Manifold;
+        slot.manifold = value;
+        return slot;
+    }
 };
 
 struct ParseError : std::runtime_error {
@@ -225,9 +240,70 @@ struct EvalError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
+struct OcctRuntimeError : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
 struct IoError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
+
+std::string direct_occt_current_stage = "startup";
+std::string quote_json_string(const std::string& value);
+
+// Stable diagnostics contract. Each stage appears in this fixed order, even
+// when the plan never exercises it, so callers can distinguish skipped work
+// from a missing report entry.
+const std::array<const char*, 8> kStageReportNames = {
+    "import", "validate", "solidify", "boolean", "cleanup", "mesh", "verify", "export"
+};
+std::map<std::string, std::uint32_t> direct_occt_stage_execution_counts;
+std::map<std::string, std::chrono::steady_clock::duration> direct_occt_stage_elapsed;
+std::chrono::steady_clock::time_point direct_occt_report_started_at =
+    std::chrono::steady_clock::now();
+
+class StageExecutionTimer {
+public:
+    explicit StageExecutionTimer(const char* name)
+        : name_(name), started_at_(std::chrono::steady_clock::now()) {
+        ++direct_occt_stage_execution_counts[name_];
+    }
+
+    ~StageExecutionTimer() {
+        direct_occt_stage_elapsed[name_] += std::chrono::steady_clock::now() - started_at_;
+    }
+
+private:
+    std::string name_;
+    std::chrono::steady_clock::time_point started_at_;
+};
+
+void write_stage_report(const fs::path& path) {
+    std::ofstream out(path);
+    if (!out) {
+        throw IoError("failed to open stage report file");
+    }
+    const auto total_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - direct_occt_report_started_at).count();
+    out << "{\"schemaVersion\":1,\"totalElapsedMs\":" << total_elapsed << ",\"stages\":[";
+    for (std::size_t index = 0; index < kStageReportNames.size(); ++index) {
+        if (index != 0) {
+            out << ",";
+        }
+        const std::string name = kStageReportNames[index];
+        const std::uint32_t execution_count = direct_occt_stage_execution_counts[name];
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            direct_occt_stage_elapsed[name]).count();
+        out << "{\"name\":" << quote_json_string(name)
+            << ",\"status\":" << quote_json_string(execution_count == 0 ? "skipped" : "executed")
+            << ",\"executionCount\":" << execution_count
+            << ",\"elapsedMs\":" << elapsed << "}";
+    }
+    out << "]}";
+    if (!out.good()) {
+        throw IoError("failed to write stage report file");
+    }
+}
 
 yyjson_val* json_require(yyjson_val* value, const char* key) {
     if (!value || !yyjson_is_obj(value)) {
@@ -825,7 +901,9 @@ void write_topology_report(const fs::path& topology_path, const std::vector<Shap
     out << "{\"parts\":[";
     bool first_part = true;
     for (const auto& part : parts) {
-        write_part_topology(out, part.part_id, part.label, part.shape, first_part);
+        if (part.kind == ShapeRecord::Kind::Shape) {
+            write_part_topology(out, part.part_id, part.label, part.shape, first_part);
+        }
     }
     out << "]}";
     if (!out.good()) {
@@ -1852,28 +1930,33 @@ TopoDS_Shape make_rounded_rect_face(double width, double height, double radius) 
     }
     double arc_mid = r * std::sqrt(0.5);
     BRepBuilderAPI_MakeWire wire_builder;
-    wire_builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(x0 + r, y0, 0), gp_Pnt(x1 - r, y0, 0)).Edge());
+    auto add_line_if_distinct = [&](const gp_Pnt& start, const gp_Pnt& end) {
+        if (start.SquareDistance(end) > 1.0e-24) {
+            wire_builder.Add(BRepBuilderAPI_MakeEdge(start, end).Edge());
+        }
+    };
+    add_line_if_distinct(gp_Pnt(x0 + r, y0, 0), gp_Pnt(x1 - r, y0, 0));
     wire_builder.Add(BRepBuilderAPI_MakeEdge(
                          GC_MakeArcOfCircle(gp_Pnt(x1 - r, y0, 0),
                                             gp_Pnt(x1 - r + arc_mid, y0 + r - arc_mid, 0),
                                             gp_Pnt(x1, y0 + r, 0))
                              .Value())
                          .Edge());
-    wire_builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(x1, y0 + r, 0), gp_Pnt(x1, y1 - r, 0)).Edge());
+    add_line_if_distinct(gp_Pnt(x1, y0 + r, 0), gp_Pnt(x1, y1 - r, 0));
     wire_builder.Add(BRepBuilderAPI_MakeEdge(
                          GC_MakeArcOfCircle(gp_Pnt(x1, y1 - r, 0),
                                             gp_Pnt(x1 - r + arc_mid, y1 - r + arc_mid, 0),
                                             gp_Pnt(x1 - r, y1, 0))
                              .Value())
                          .Edge());
-    wire_builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(x1 - r, y1, 0), gp_Pnt(x0 + r, y1, 0)).Edge());
+    add_line_if_distinct(gp_Pnt(x1 - r, y1, 0), gp_Pnt(x0 + r, y1, 0));
     wire_builder.Add(BRepBuilderAPI_MakeEdge(
                          GC_MakeArcOfCircle(gp_Pnt(x0 + r, y1, 0),
                                             gp_Pnt(x0 + r - arc_mid, y1 - r + arc_mid, 0),
                                             gp_Pnt(x0, y1 - r, 0))
                              .Value())
                          .Edge());
-    wire_builder.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(x0, y1 - r, 0), gp_Pnt(x0, y0 + r, 0)).Edge());
+    add_line_if_distinct(gp_Pnt(x0, y1 - r, 0), gp_Pnt(x0, y0 + r, 0));
     wire_builder.Add(BRepBuilderAPI_MakeEdge(
                          GC_MakeArcOfCircle(gp_Pnt(x0, y0 + r, 0),
                                             gp_Pnt(x0 + r - arc_mid, y0 + r - arc_mid, 0),
@@ -2355,6 +2438,7 @@ TopoDS_Shape checked_boolean_shapes(
     const std::vector<TopoDS_Shape>& tool_shapes,
     const std::string& op
 ) {
+    StageExecutionTimer stage_timer("boolean");
     TopTools_ListOfShape arguments;
     for (const TopoDS_Shape& shape : argument_shapes) {
         arguments.Append(shape);
@@ -2625,6 +2709,44 @@ TopoDS_Shape convex_hull_shapes(const std::vector<TopoDS_Shape>& shapes) {
     GProp_GProps props;
     BRepGProp::VolumeProperties(solid, props);
     if (props.Mass() < 0.0) {
+        solid.Reverse();
+    }
+    return solid;
+}
+
+TopoDS_Shape solidify_shape(const TopoDS_Shape& input) {
+    TopoDS_Shell shell;
+    bool found_shell = false;
+    for (TopExp_Explorer shell_explorer(input, TopAbs_SHELL);
+         shell_explorer.More();
+         shell_explorer.Next()) {
+        shell = TopoDS::Shell(shell_explorer.Current());
+        found_shell = true;
+        break;
+    }
+    if (!found_shell) {
+        BRep_Builder builder;
+        builder.MakeShell(shell);
+        std::size_t face_count = 0;
+        for (TopExp_Explorer face_explorer(input, TopAbs_FACE);
+             face_explorer.More();
+             face_explorer.Next()) {
+            builder.Add(shell, TopoDS::Face(face_explorer.Current()));
+            ++face_count;
+        }
+        if (face_count == 0) {
+            throw EvalError("solidify input contains no faces");
+        }
+    }
+
+    BRepBuilderAPI_MakeSolid maker(shell);
+    if (!maker.IsDone()) {
+        throw EvalError("solidify failed to build a solid from its shell");
+    }
+    TopoDS_Solid solid = maker.Solid();
+    GProp_GProps properties;
+    BRepGProp::VolumeProperties(solid, properties);
+    if (properties.Mass() < 0.0) {
         solid.Reverse();
     }
     return solid;
@@ -3129,24 +3251,12 @@ TopoDS_Shape fillet_shape(
     std::optional<double> radius2,
     const std::optional<SelectorPayload>& selector
 ) {
-    BRepFilletAPI_MakeFillet fillet(shape);
-    auto add_edge = [&](const TopoDS_Edge& edge) {
-        if (radius2.has_value()) {
-            fillet.Add(radius, *radius2, edge);
-        } else {
-            fillet.Add(radius, edge);
-        }
-    };
+    std::vector<TopoDS_Edge> edges;
     if (!selector.has_value()) {
         TopTools_IndexedMapOfShape edge_map;
         TopExp::MapShapes(shape, TopAbs_EDGE, edge_map);
-        int edge_count = 0;
         for (int edge_ordinal = 1; edge_ordinal <= edge_map.Extent(); ++edge_ordinal) {
-            add_edge(TopoDS::Edge(edge_map.FindKey(edge_ordinal)));
-            ++edge_count;
-        }
-        if (edge_count == 0) {
-            throw EvalError("fillet found no edges");
+            edges.push_back(TopoDS::Edge(edge_map.FindKey(edge_ordinal)));
         }
     } else {
         std::vector<int> matched_indexes;
@@ -3164,10 +3274,48 @@ TopoDS_Shape fillet_shape(
             if (std::find(matched_indexes.begin(), matched_indexes.end(), edge_index) == matched_indexes.end()) {
                 continue;
             }
-            add_edge(TopoDS::Edge(edge_map.FindKey(edge_ordinal)));
+            edges.push_back(TopoDS::Edge(edge_map.FindKey(edge_ordinal)));
         }
     }
-    return fillet.Shape();
+    if (edges.empty()) {
+        throw EvalError("fillet found no edges");
+    }
+
+    auto try_build = [&](double attempt_radius, std::optional<double> attempt_radius2)
+        -> std::optional<TopoDS_Shape> {
+        try {
+            BRepFilletAPI_MakeFillet fillet(shape);
+            for (const TopoDS_Edge& edge : edges) {
+                if (attempt_radius2.has_value()) {
+                    fillet.Add(attempt_radius, *attempt_radius2, edge);
+                } else {
+                    fillet.Add(attempt_radius, edge);
+                }
+            }
+            fillet.Build();
+            if (!fillet.IsDone()) {
+                return std::nullopt;
+            }
+            TopoDS_Shape result = fillet.Shape();
+            if (result.IsNull()) {
+                return std::nullopt;
+            }
+            return result;
+        } catch (const Standard_Failure&) {
+            return std::nullopt;
+        }
+    };
+
+    if (std::optional<TopoDS_Shape> result = try_build(radius, radius2)) {
+        return *result;
+    }
+    std::optional<double> retry_radius2 = radius2.has_value()
+        ? std::optional<double>(*radius2 * 0.5)
+        : std::nullopt;
+    if (std::optional<TopoDS_Shape> result = try_build(radius * 0.5, retry_radius2)) {
+        return *result;
+    }
+    return shape;
 }
 
 TopoDS_Shape chamfer_shape(
@@ -3766,6 +3914,118 @@ const gp_Trsf& lookup_frame(
     return it->second.frame;
 }
 
+void require_manifold_status(const manifold::Manifold& value, const std::string& op) {
+    if (value.Status() != manifold::Manifold::Error::NoError) {
+        throw EvalError(op + " produced invalid Manifold status " +
+                        std::to_string(static_cast<int>(value.Status())));
+    }
+}
+
+const manifold::Manifold& lookup_manifold(
+    const std::map<std::uint64_t, SlotValue>& slots,
+    std::uint64_t slot,
+    const std::string& op
+) {
+    auto it = slots.find(slot);
+    if (it == slots.end()) {
+        throw EvalError(op + " references unknown slot");
+    }
+    if (it->second.kind != SlotValue::Kind::Manifold) {
+        throw EvalError(op + " expects a Manifold slot");
+    }
+    return it->second.manifold;
+}
+
+manifold::Manifold make_indexed_manifold(const Command& command) {
+    const std::string op = "import-indexed-mesh";
+    if (command.args.size() != 3 || command.args[0].kind != Arg::Kind::List ||
+        command.args[1].kind != Arg::Kind::List ||
+        (command.args[2].kind != Arg::Kind::Text && command.args[2].kind != Arg::Kind::Symbol) ||
+        command.args[2].text_value.empty()) {
+        throw EvalError(op + " expects vertices, triangles, and contentDigest");
+    }
+    StageExecutionTimer stage_timer("validate");
+    manifold::MeshGL64 mesh;
+    mesh.numProp = 3;
+    mesh.vertProperties.reserve(command.args[0].list_value.size() * 3);
+    for (const Arg& vertex : command.args[0].list_value) {
+        const auto point = require_point3_arg(vertex, op);
+        for (double coordinate : point) {
+            if (!std::isfinite(coordinate)) {
+                throw EvalError(op + " vertex must be finite");
+            }
+            mesh.vertProperties.push_back(coordinate);
+        }
+    }
+    if (mesh.vertProperties.empty()) {
+        throw EvalError(op + " requires at least one vertex");
+    }
+    using MeshIndex = typename decltype(mesh.triVerts)::value_type;
+    mesh.triVerts.reserve(command.args[1].list_value.size() * 3);
+    for (const Arg& triangle : command.args[1].list_value) {
+        if (triangle.kind != Arg::Kind::List || triangle.list_value.size() != 3) {
+            throw EvalError(op + " triangles must contain exactly three indices");
+        }
+        for (const Arg& raw_index : triangle.list_value) {
+            if (raw_index.kind != Arg::Kind::Number || !std::isfinite(raw_index.number_value) ||
+                raw_index.number_value < 0.0 || std::floor(raw_index.number_value) != raw_index.number_value ||
+                raw_index.number_value > static_cast<double>(std::numeric_limits<MeshIndex>::max()) ||
+                raw_index.number_value >= static_cast<double>(mesh.NumVert())) {
+                throw EvalError(op + " triangle index is out of bounds");
+            }
+            mesh.triVerts.push_back(static_cast<MeshIndex>(raw_index.number_value));
+        }
+    }
+    if (mesh.triVerts.empty()) {
+        throw EvalError(op + " requires at least one triangle");
+    }
+    manifold::Manifold result(mesh);
+    require_manifold_status(result, op);
+    return result;
+}
+
+manifold::Manifold manifold_from_occt_shape(const TopoDS_Shape& shape, const std::string& op) {
+    StageExecutionTimer stage_timer("mesh");
+    BRepMesh_IncrementalMesh mesher(shape, 0.04, Standard_False, 0.25, Standard_True);
+    (void)mesher;
+    manifold::MeshGL64 mesh;
+    mesh.numProp = 3;
+    std::map<std::string, std::uint64_t> vertex_ids;
+    auto vertex_id = [&](const gp_Pnt& point) {
+        std::ostringstream key;
+        key << std::setprecision(17) << point.X() << ':' << point.Y() << ':' << point.Z();
+        auto [it, inserted] = vertex_ids.emplace(key.str(), vertex_ids.size());
+        if (inserted) {
+            mesh.vertProperties.push_back(point.X());
+            mesh.vertProperties.push_back(point.Y());
+            mesh.vertProperties.push_back(point.Z());
+        }
+        return it->second;
+    };
+    for (TopExp_Explorer explorer(shape, TopAbs_FACE); explorer.More(); explorer.Next()) {
+        const TopoDS_Face face = TopoDS::Face(explorer.Current());
+        TopLoc_Location location;
+        const Handle(Poly_Triangulation) triangulation = BRep_Tool::Triangulation(face, location);
+        if (triangulation.IsNull()) continue;
+        const gp_Trsf transform = location.Transformation();
+        for (Standard_Integer index = 1; index <= triangulation->NbTriangles(); ++index) {
+            Standard_Integer a, b, c;
+            triangulation->Triangle(index).Get(a, b, c);
+            std::uint64_t ia = vertex_id(triangulation->Node(a).Transformed(transform));
+            std::uint64_t ib = vertex_id(triangulation->Node(b).Transformed(transform));
+            std::uint64_t ic = vertex_id(triangulation->Node(c).Transformed(transform));
+            if (face.Orientation() == TopAbs_REVERSED) std::swap(ib, ic);
+            mesh.triVerts.push_back(ia);
+            mesh.triVerts.push_back(ib);
+            mesh.triVerts.push_back(ic);
+        }
+    }
+    if (mesh.triVerts.empty()) throw EvalError(op + " OCCT operand produced no triangles");
+    manifold::Manifold result(mesh);
+    require_manifold_status(result, op + " OCCT tessellation");
+    return result;
+}
+
 SlotValue evaluate_command(
     const Command& command,
     const std::map<std::uint64_t, SlotValue>& slots,
@@ -3796,7 +4056,7 @@ SlotValue evaluate_command(
     if (!command.keywords.empty() && op != "box" && op != "sphere" && op != "cylinder" &&
         op != "cone" && op != "torus" && op != "wedge" && op != "profile" && op != "plane" &&
         op != "clip-box" && op != "fillet" && op != "chamfer" && op != "shell" && op != "bspline" &&
-        op != "sweep" && op != "draft") {
+        op != "sweep" && op != "draft" && op != "path-frame") {
         throw EvalError(op + " keywords unsupported yet");
     }
 
@@ -3908,10 +4168,27 @@ SlotValue evaluate_command(
         }
         TopoDS_Shape shape;
         StlAPI_Reader reader;
+        StageExecutionTimer stage_timer("import");
         if (!reader.Read(shape, command.args[0].text_value.c_str())) {
             throw EvalError(op + " could not read STL file");
         }
         return shape;
+    }
+    if (op == "import-indexed-mesh") {
+        return SlotValue::manifold_value(make_indexed_manifold(command));
+    }
+    if (op == "solidify") {
+        if (command.args.size() != 1) {
+            throw EvalError(op + " expects exactly one shape reference");
+        }
+        StageExecutionTimer stage_timer("solidify");
+        if (command.args[0].kind == Arg::Kind::Ref) {
+            auto input = slots.find(command.args[0].ref_value);
+            if (input != slots.end() && input->second.kind == SlotValue::Kind::Manifold) {
+                return SlotValue::manifold_value(input->second.manifold);
+            }
+        }
+        return solidify_shape(get_ref_shape(0));
     }
     if (op == "extrude") {
         return extrude_shape(get_ref_shape(0), require_number_arg(command.args, 1, op));
@@ -4019,6 +4296,33 @@ SlotValue evaluate_command(
                 shapes_to_compound.push_back(lookup_shape(slots, arg.ref_value, op));
             }
             return compound_shapes(shapes_to_compound);
+        }
+        bool has_manifold = false;
+        for (const Arg& arg : refs) {
+            auto input = slots.find(arg.ref_value);
+            if (input == slots.end()) throw EvalError(op + " references unknown slot");
+            has_manifold = has_manifold || input->second.kind == SlotValue::Kind::Manifold;
+            if (input->second.kind == SlotValue::Kind::Frame) {
+                throw EvalError(op + " expects shape or Manifold operands");
+            }
+        }
+        if (has_manifold) {
+            StageExecutionTimer stage_timer("boolean");
+            auto input_manifold = [&](const Arg& arg) {
+                const SlotValue& input = slots.at(arg.ref_value);
+                return input.kind == SlotValue::Kind::Manifold
+                    ? input.manifold
+                    : manifold_from_occt_shape(input.shape, op);
+            };
+            manifold::Manifold result = input_manifold(refs.front());
+            for (std::size_t index = 1; index < refs.size(); ++index) {
+                manifold::Manifold next = input_manifold(refs[index]);
+                if (op == "union") result = result + next;
+                else if (op == "difference") result = result - next;
+                else result = result ^ next;
+                require_manifold_status(result, op);
+            }
+            return SlotValue::manifold_value(result);
         }
         if (op == "union") {
             std::vector<TopoDS_Shape> shapes_to_fuse;
@@ -4151,18 +4455,43 @@ std::vector<ShapeRecord> evaluate_plan(const Plan& plan) {
     std::vector<ShapeRecord> parts;
     for (const Part& part : plan.parts) {
         std::map<std::uint64_t, SlotValue> slots;
-        for (const Command& command : part.commands) {
-            SlotValue value = evaluate_command(command, slots, part.part_id);
-            slots[command.output] = value;
+        for (std::size_t command_index = 0; command_index < part.commands.size(); ++command_index) {
+            const Command& command = part.commands[command_index];
+            direct_occt_current_stage =
+                "evaluate part `" + part.part_id + "` command #" +
+                std::to_string(command_index) + " output slot " +
+                std::to_string(command.output) + " op `" + command.op + "`";
+            try {
+                SlotValue value = evaluate_command(command, slots, part.part_id);
+                slots[command.output] = value;
+            } catch (const Standard_Failure& error) {
+                const char* raw_message = error.GetMessageString();
+                const std::string message = raw_message ? raw_message : "unknown OCCT failure";
+                throw OcctRuntimeError(
+                    "Direct OCCT part `" + part.part_id + "` command #" +
+                    std::to_string(command_index) + " output slot " +
+                    std::to_string(command.output) + " op `" + command.op +
+                    "` failed: " + message
+                );
+            }
         }
         auto root = slots.find(part.root);
         if (root == slots.end()) {
             throw EvalError("missing root shape for part `" + part.part_id + "`");
         }
-        if (root->second.kind != SlotValue::Kind::Shape) {
-            throw EvalError("root slot for part `" + part.part_id + "` is not a shape");
+        if (root->second.kind == SlotValue::Kind::Frame) {
+            throw EvalError("root slot for part `" + part.part_id + "` is not geometry");
         }
-        parts.push_back(ShapeRecord{part.part_id, part.label, root->second.shape});
+        ShapeRecord record;
+        record.part_id = part.part_id;
+        record.label = part.label;
+        if (root->second.kind == SlotValue::Kind::Manifold) {
+            record.kind = ShapeRecord::Kind::Manifold;
+            record.manifold = root->second.manifold;
+        } else {
+            record.shape = root->second.shape;
+        }
+        parts.push_back(std::move(record));
     }
     return parts;
 }
@@ -4236,6 +4565,7 @@ private:
 };
 
 void write_stl_file(const fs::path& path, const TopoDS_Shape& shape) {
+    StageExecutionTimer stage_timer("mesh");
     BRepMesh_IncrementalMesh mesh(
         shape, kStlLinearDeflection, Standard_False, kStlAngularDeflection, Standard_True);
     // Collect triangles first (welded, degenerate-skipped), then write as binary
@@ -4254,13 +4584,13 @@ void write_stl_file(const fs::path& path, const TopoDS_Shape& shape) {
             continue;
         }
         gp_Trsf transform = location.Transformation();
-        const Poly_Array1OfTriangle& tri_arr = triangulation->Triangles();
-        for (Standard_Integer triangle_index = tri_arr.Lower(); triangle_index <= tri_arr.Upper();
+        for (Standard_Integer triangle_index = 1;
+             triangle_index <= triangulation->NbTriangles();
              ++triangle_index) {
             Standard_Integer n1 = 0;
             Standard_Integer n2 = 0;
             Standard_Integer n3 = 0;
-            tri_arr(triangle_index).Get(n1, n2, n3);
+            triangulation->Triangle(triangle_index).Get(n1, n2, n3);
             gp_Pnt p1 = welder.weld(triangulation->Node(n1).Transformed(transform));
             gp_Pnt p2 = welder.weld(triangulation->Node(n2).Transformed(transform));
             gp_Pnt p3 = welder.weld(triangulation->Node(n3).Transformed(transform));
@@ -4319,6 +4649,52 @@ void write_stl_file(const fs::path& path, const TopoDS_Shape& shape) {
     }
 }
 
+void write_manifold_stl_file(const fs::path& path, const manifold::Manifold& value) {
+    StageExecutionTimer stage_timer("mesh");
+    require_manifold_status(value, "mesh export");
+    const manifold::MeshGL64 mesh = value.GetMeshGL64();
+    if (mesh.numProp < 3 || mesh.triVerts.empty() || mesh.triVerts.size() % 3 != 0 ||
+        mesh.NumTri() > std::numeric_limits<std::uint32_t>::max()) {
+        throw IoError("failed to write STL: Manifold produced invalid mesh");
+    }
+    std::ofstream out(path, std::ios::binary);
+    if (!out) throw IoError("failed to write STL");
+    std::string header(80, '\0');
+    out.write(header.data(), 80);
+    const std::uint32_t count = static_cast<std::uint32_t>(mesh.NumTri());
+    out.write(reinterpret_cast<const char*>(&count), 4);
+    auto write_float = [&](double number) {
+        const float value = static_cast<float>(number);
+        out.write(reinterpret_cast<const char*>(&value), 4);
+    };
+    for (std::size_t triangle = 0; triangle < mesh.NumTri(); ++triangle) {
+        const auto a = mesh.triVerts[triangle * 3];
+        const auto b = mesh.triVerts[triangle * 3 + 1];
+        const auto c = mesh.triVerts[triangle * 3 + 2];
+        if (a >= mesh.NumVert() || b >= mesh.NumVert() || c >= mesh.NumVert()) {
+            throw IoError("failed to write STL: Manifold triangle index is out of bounds");
+        }
+        const auto point = [&](std::uint64_t index, int component) {
+            return mesh.vertProperties[static_cast<std::size_t>(index) * mesh.numProp + component];
+        };
+        const double ax = point(a, 0), ay = point(a, 1), az = point(a, 2);
+        const double bx = point(b, 0), by = point(b, 1), bz = point(b, 2);
+        const double cx = point(c, 0), cy = point(c, 1), cz = point(c, 2);
+        double nx = (by - ay) * (cz - az) - (bz - az) * (cy - ay);
+        double ny = (bz - az) * (cx - ax) - (bx - ax) * (cz - az);
+        double nz = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+        const double length = std::sqrt(nx * nx + ny * ny + nz * nz);
+        if (length > 0.0) { nx /= length; ny /= length; nz /= length; }
+        write_float(nx); write_float(ny); write_float(nz);
+        write_float(ax); write_float(ay); write_float(az);
+        write_float(bx); write_float(by); write_float(bz);
+        write_float(cx); write_float(cy); write_float(cz);
+        const std::uint16_t attribute = 0;
+        out.write(reinterpret_cast<const char*>(&attribute), 2);
+    }
+    if (!out.good()) throw IoError("failed to write STL: I/O error after writing triangles");
+}
+
 std::string read_text_file(const fs::path& path) {
     std::ifstream input(path);
     if (!input) {
@@ -4346,7 +4722,27 @@ void write_error_json(
     std::cerr << "}" << std::endl;
 }
 
+void run_occt_export_stage(
+    const std::string& stage,
+    const std::function<void()>& action
+) {
+    direct_occt_current_stage = stage;
+    try {
+        action();
+    } catch (const Standard_Failure& error) {
+        const char* raw_message = error.GetMessageString();
+        const std::string message = raw_message ? raw_message : "unknown OCCT failure";
+        throw OcctRuntimeError(
+            "Direct OCCT export stage `" + stage + "` failed: " + message
+        );
+    }
+}
+
 int run(int argc, char** argv) {
+    direct_occt_stage_execution_counts.clear();
+    direct_occt_stage_elapsed.clear();
+    direct_occt_report_started_at = std::chrono::steady_clock::now();
+    direct_occt_current_stage = "parse-arguments";
     fs::path plan_path;
     fs::path out_dir;
     for (int index = 1; index < argc; ++index) {
@@ -4374,7 +4770,9 @@ int run(int argc, char** argv) {
         throw ParseError("usage: direct-occt-runner --plan PLAN --out DIR");
     }
 
+    direct_occt_current_stage = "read-plan";
     std::string plan_text = read_text_file(plan_path);
+    direct_occt_current_stage = "parse-plan";
     yyjson_read_err json_error;
     std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)> document(
         yyjson_read_opts(plan_text.data(), plan_text.size(), YYJSON_READ_NOFLAG, nullptr, &json_error),
@@ -4387,13 +4785,24 @@ int run(int argc, char** argv) {
         );
     }
     const Plan plan = parse_plan(yyjson_doc_get_root(document.get()));
+    direct_occt_current_stage = "evaluate-plan";
     const std::vector<ShapeRecord> parts = evaluate_plan(plan);
 
     fs::create_directories(out_dir);
     const fs::path step_path = out_dir / "model.step";
     const fs::path stl_path = out_dir / "preview.stl";
     const fs::path topology_path = out_dir / "topology.json";
+    const fs::path stage_report_path = out_dir / "stage-report.json";
 
+    const bool mesh_only = std::all_of(parts.begin(), parts.end(), [](const ShapeRecord& part) {
+        return part.kind == ShapeRecord::Kind::Manifold;
+    });
+    if (!mesh_only && std::any_of(parts.begin(), parts.end(), [](const ShapeRecord& part) {
+            return part.kind == ShapeRecord::Kind::Manifold;
+        })) {
+        throw EvalError("mixed BRep and Manifold part roots cannot share one export bundle");
+    }
+    direct_occt_current_stage = "assemble-export-shape";
     TopoDS_Shape export_shape = parts.size() == 1 ? parts.front().shape : compound_shapes([&]() {
         std::vector<TopoDS_Shape> shapes;
         shapes.reserve(parts.size());
@@ -4403,8 +4812,24 @@ int run(int argc, char** argv) {
         return shapes;
     }());
 
-    write_step_file(step_path, export_shape);
-    write_stl_file(stl_path, export_shape);
+    if (mesh_only) {
+        if (parts.size() != 1) {
+            throw EvalError("Manifold export currently requires exactly one part");
+        }
+        run_occt_export_stage("write-preview-stl", [&]() {
+            StageExecutionTimer stage_timer("export");
+            write_manifold_stl_file(stl_path, parts.front().manifold);
+        });
+    } else {
+        run_occt_export_stage("write-step", [&]() {
+            StageExecutionTimer stage_timer("export");
+            write_step_file(step_path, export_shape);
+        });
+        run_occt_export_stage("write-preview-stl", [&]() {
+            StageExecutionTimer stage_timer("export");
+            write_stl_file(stl_path, export_shape);
+        });
+    }
     // Write per-part binary STL files so multipart export (3MF / zip) has
     // distinct geometry per part instead of duplicating the merged mesh.
     if (parts.size() > 1) {
@@ -4419,10 +4844,21 @@ int run(int argc, char** argv) {
                 name = "part_" + std::to_string(i);
             }
             const fs::path part_stl = parts_dir / (name + ".stl");
-            write_stl_file(part_stl, parts[i].shape);
+            run_occt_export_stage("write-part-stl:" + name, [&]() {
+                StageExecutionTimer stage_timer("export");
+                if (parts[i].kind == ShapeRecord::Kind::Manifold) {
+                    write_manifold_stl_file(part_stl, parts[i].manifold);
+                } else {
+                    write_stl_file(part_stl, parts[i].shape);
+                }
+            });
         }
     }
+    direct_occt_current_stage = "write-topology";
     write_topology_report(topology_path, parts);
+    direct_occt_current_stage = "write-stage-report";
+    write_stage_report(stage_report_path);
+    direct_occt_current_stage = "complete";
     return 0;
 }
 
@@ -4454,12 +4890,19 @@ int main(int argc, char** argv) {
     } catch (const IoError& error) {
         write_error_json("io_error", "io_failed", error.what(), error.what());
         return 4;
+    } catch (const OcctRuntimeError& error) {
+        write_error_json("runtime_error", "occt_command_failed", error.what(), error.what());
+        return 5;
     } catch (const StdFail_NotDone& error) {
-        std::string message = error.GetMessageString();
+        const char* raw_message = error.GetMessageString();
+        std::string message = "Direct OCCT stage `" + direct_occt_current_stage +
+            "` failed: " + (raw_message ? raw_message : "unknown OCCT failure");
         write_error_json("runtime_error", "occt_not_done", message, message);
         return 5;
     } catch (const Standard_Failure& error) {
-        std::string message = error.GetMessageString();
+        const char* raw_message = error.GetMessageString();
+        std::string message = "Direct OCCT stage `" + direct_occt_current_stage +
+            "` failed: " + (raw_message ? raw_message : "unknown OCCT failure");
         write_error_json("runtime_error", "occt_failure", message, message);
         return 5;
     } catch (const std::exception& error) {

@@ -24,17 +24,54 @@ PureOcct  → existing OCCT path (no change)
 PureMesh  → existing mesh renderer path (no change)
 
 Hybrid:
-  1. Mesh renderer evaluates the WHOLE part (extrude + wall-pattern + any
-     mesh-safe ops). Produces a displaced STL.
-  2. OCCT plan: import-stl(displaced.stl) → solidify → post-boundary booleans.
-  3. Export STL + STEP from OCCT.
+  1. Mesh renderer evaluates each independent mesh island until the first
+     BRep-required operation and emits STL.
+  2. Each STL becomes an engine-independent MeshAsset.
+  3. OCCT plan: import-stl(asset.stl) → solidify → post-boundary
+     BRep-required ops.
+  4. Export STL + STEP from OCCT with representation provenance.
 ```
 
-The key simplification vs the original design: we do NOT tessellate OCCT
-exact geometry to feed the mesh renderer (T2), and we do NOT teach wall-pattern
-to accept external meshes (T3). The mesh renderer already evaluates its own
-sub-tree including extrude; wall-pattern runs on that. OCCT only sees the
-final displaced STL.
+`MeshAsset` contains validated STL plus provenance, not renderer state.
+Internal displacement, imported meshes, and provider/LLM-generated meshes use
+the same OCCT bridge. Typed `polyhedron` is the direct LLM-friendly input.
+
+### Surface Operation Route Authority
+
+`chamfer` and `fillet` are BRep surface operations. For analytic Core IR
+inputs, they belong to Direct OCCT and must not be rewritten into mesh
+operations. For hybrid parts, they stop the mesh phase exactly like booleans,
+shell, and offset. The OCCT phase then applies them to either analytic BRep
+or a solidified mesh-origin poly BRep.
+
+The Rust mesh evaluator may keep mesh-native edge-op helpers only for geometry
+whose origin is already mesh-native (`mesh`, `polyhedron`, `import-stl`, or a
+mesh-only op such as `wall-pattern`). It is not an alternate implementation
+for analytic `box/cylinder/extrude -> chamfer/fillet`.
+
+Mesh-origin surface ops have an explicit admission policy, not an exception
+or fallback. After `solidify(import-stl(...))`, OCCT may apply
+`chamfer`/`fillet` only when the selected edge set is bounded and intentional:
+
+- exact target ids or a selector that resolves to a small, reported edge set;
+- estimated selected-edge count and faceted-face count under configured
+  limits;
+- resulting STEP is marked `facetedPolyBRep`, never `analyticBrep`.
+
+If a broad selector such as `all` would touch thousands of polyhedral edges,
+render validation rejects the model with the selected-edge count and the
+route reason. It must not silently fall back to polygon chamfer, global
+simplification, or a different kernel.
+
+This boundary prevents three failure modes:
+
+- analytic models silently losing exact topology because Direct OCCT was
+  unavailable or a dispatcher used a mesh fallback;
+- hybrid partition rewriting a post-boundary surface op into the mesh island;
+- broad chamfer/fillet on decorative faceted shells becoming a multi-minute
+  OCCT job with poor semantics;
+- UI/MCP/tooling claiming “mesh” or “OCCT” from `geometryBackend` instead of
+  artifact representation truth.
 
 ### Partition Boundary Definition
 
@@ -64,6 +101,9 @@ Partition rules (implemented in `poly_partition.rs`):
 - **Hybrid**: at least one mesh-only op AND at least one BRep-required op
   whose input is post-boundary (consumes displaced output, directly or
   transitively).
+- **Surface op stop**: `chamfer` and `fillet` are BRep-required and stop the
+  mesh phase. The mesh output node is the last mesh-native node below them,
+  not the surface op itself.
 
 ### OCCT Planar Faceted BRep
 
@@ -84,9 +124,9 @@ determine inside/outside without shell topology. The `solidify` OcctOp solves
 this:
 
 ```
-BRepBuilderAPI_Sewing(1.0e-6)  → merges coincident edges → closed shell
-BRepBuilderAPI_MakeSolid(shell) → closes shell into solid
-VolumeProperties check          → reverse if inverted
+StlAPI_Reader shared shell       → preserve triangle topology
+BRepBuilderAPI_MakeSolid(shell)  → close shell into solid
+VolumeProperties check           → reverse if inverted
 ```
 
 This is proven: `solidify(import-stl(genie))` → `difference(cylinder)` → 0
@@ -101,7 +141,7 @@ of faces). Emits C++ that sews + makes solid. The pattern mirrors the existing
 Source: `src-tauri/src/ecky_cad_host/direct_occt_executor.rs`,
 `OcctOp::Solidify` match arm.
 
-### Hybrid Dispatch Wiring (the remaining work)
+### Hybrid Dispatch Wiring
 
 In `render_model_unlocked` (services/render.rs), after the existing
 backend-resolution logic:
@@ -118,11 +158,10 @@ backend-resolution logic:
 For each Hybrid part:
 
 ```
-1. Render the part through the mesh renderer (existing path, unmodified).
-   The mesh renderer handles extrude + wall-pattern + mesh-safe transforms.
-2. The mesh renderer produces an STL at a known path.
+1. Find maximal mesh islands. Multiple mesh branches remain separate assets.
+2. Render each mesh island and validate its STL as `MeshAsset`.
 3. Construct an OCCT plan for the post-boundary ops:
-   - import-stl(mesh_stl_path) → solidify → [post-boundary ops]
+   - import-stl(mesh_asset_path) → solidify → [post-boundary ops]
    - Post-boundary ops are reconstructed from the CoreNode tree: everything
      above the boundary that is BRep-required (difference, chamfer, etc.).
    This reconstruction is the main implementation challenge — the part tree
@@ -141,15 +180,33 @@ For each Hybrid part:
 
 ## Design Decisions
 
-### Decision: mesh renderer handles the full pre-boundary chain
+### Decision: BRep surface ops are never polygon pushdown
 
-The mesh renderer already evaluates extrude, profile, and wall-pattern. We do
-not need to tessellate OCCT exact geometry and feed it to wall-pattern. This
-avoids the T2 (OCCT tessellation) and T3 (mesh ops on external mesh) tasks
-from the original design. Trade-off: the base geometry under wall-pattern is
-the mesh renderer's tessellation, not OCCT's exact NURBS. This is acceptable
-because wall-pattern displaces the surface anyway — the exact base precision
-is lost regardless.
+Ordinary mesh-native inputs stay in the mesh renderer until they meet a
+BRep-required consumer. `chamfer` and `fillet` are consumers. They do not get
+pushed into the mesh island, because applying those operations to triangle
+soup changes semantics and breaks the exact-CAD contract. Once a mesh-origin
+island is solidified into a poly BRep, OCCT applies the surface operation.
+
+Exact prelude exists only for the opposite crossing: when an exact BRep shape
+is deliberately converted into a mesh-only operation input. It must not be
+used to justify polygon edge-op fallback for analytic CAD.
+
+### Decision: representation provenance is authoritative
+
+`geometryBackend` describes the requested/runtime bucket. It does not prove
+the representation of the artifact. Every render path must publish artifact
+truth:
+
+- Direct OCCT pure exact path: `GeometryRepresentation::AnalyticBrep` on the
+  bundle, manifest, and STEP export.
+- Hybrid OCCT poly bridge: `FacetedPolyBrep` on the bundle, manifest, and
+  STEP export when STEP is emitted.
+- Mesh-only path: `MeshNative`, no fabricated STEP.
+
+MCP digests, export labels, and UI evidence read these fields. They must not
+infer STEP exactness, faceting, or mesh fallback from the name `EckyRust`,
+`mesh`, or from presence of a preview STL.
 
 ### Decision: solidify is a separate op, not bundled into import-stl
 
@@ -166,12 +223,12 @@ on raw triangle soup. The mesh CSG (csgrs) fails on displaced meshes because
 it assumes coincident vertices and clean edge topology that displacement
 destroys.
 
-### Decision: no MeshAsset abstraction yet
+### Decision: MeshAsset is provider-neutral
 
-There is one mesh source today: `wall-pattern`. The bridge works on any STL
-path. When a second source (imported mesh, image relief, AI-generated) exists,
-it plugs into the same `import-stl` + `solidify` path. Designing the enum now
-would be premature.
+`MeshAsset` validates a non-empty STL and records provenance only:
+`EckyMeshPhase`, `Imported`, or `Generated { provider, model }`. Hybrid
+consumers never depend on csgrs, Meshy, or another generator SDK. OBJ and other
+formats require normalization to STL before entering this contract.
 
 ## Technical Risks
 
@@ -195,11 +252,17 @@ case with thousands of displaced triangles may be slower. Mitigation: control
 tessellation density at the mesh renderer stage; allow coarse poly for the
 boolean pass if profiling shows a need.
 
-### Risk: chamfer/fillet on poly edges
+### Risk: chamfer/fillet on poly-origin BRep edges
 
 OCCT `BRepFilletAPI_MakeChamfer` on polyhedral edges may produce approximate
-results. This is acceptable — the user chose mesh displacement, accepting
-surface approximation.
+results. This is acceptable only for mesh-origin geometry. Analytic geometry
+must stay analytic and use OCCT directly.
+
+Mitigation: require mesh-origin surface-op admission before execution. Small
+explicit selected edge sets may run in OCCT; broad selected sets over dense
+faceted shells reject with diagnostics and no hidden fallback. A future
+mesh-native decorative bevel op can be added under a separate name if the
+product needs “soften every triangle edge” behavior.
 
 ### Risk: STEP file size
 
@@ -224,8 +287,10 @@ Reference implementations avoid these patterns:
   result simplification.
 - CadQuery, build123d, and FreeCAD submit operand lists to one Boolean builder,
   enable parallel execution, and clean results with same-domain unification.
-- Manifold provides batch Boolean operations over validated indexed manifold
-  meshes. It explicitly warns that STL round-trips lose topology.
+- Manifold provides Boolean operations over validated indexed manifold meshes.
+  It explicitly warns that STL round-trips lose topology. Ecky preserves
+  authored operand order with explicit folds because `BatchBoolean` does not
+  provide the required ordered head-minus-tail contract.
 - meshoptimizer exposes error-bounded simplification with achieved-error
   reporting and protected vertices/borders.
 - OpenSCAD is moving toward selective Manifold-node caching rather than an
@@ -248,11 +313,25 @@ The canonical hybrid artifact is an indexed, oriented, validated mesh with a
 content digest. STL is an export format, not the internal cache or handoff
 format.
 
+Indexed sidecar schema v2 stores IEEE-754 vertex bits, indexed triangles, and
+the content digest. Bit storage makes cache write/read exact instead of relying
+on JSON decimal float round-trips. Evaluated CAD meshes use a named 1e-6 mm
+topology seam weld before admission; explicitly authored indexed assets retain
+their supplied coordinates. The native runner receives vertices/triangles
+inline and never discovers sidecars from the filesystem.
+
 - Exact BRep chains and analytic STEP requests stay in OCCT.
 - Mesh islands targeting STL/3MF use a mesh Boolean kernel after local exact
   hosts are tessellated.
 - Faceted STEP may use the poly-BRep bridge only under an explicit face budget.
 - Pure placement/assembly of imported mesh skips Boolean conversion entirely.
+
+When an admitted indexed island participates in a Boolean with exact OCCT
+operands, those exact operands are tessellated directly in memory to
+`MeshGL64`. Manifold output stays mesh-native and emits STL without a fabricated
+STEP. Invalid indexed topology selects the existing OCCT solidification route
+before kernel execution and records the admission reason; errors after
+Manifold starts never fall through to another kernel.
 
 This prevents the common decorative-mesh case from turning thousands of
 triangles into thousands of OCCT faces before intersection.
@@ -271,6 +350,12 @@ for deterministic semantics and cache keys.
 `SetNonDestructive(true)` is evaluated for cached operands, with memory usage
 benchmarked before becoming default. `SetCheckInverted(false)` is allowed only
 after solid validity and positive orientation have been proven.
+
+`solidify(import-stl(...))` is part of the precompiled runner vocabulary. The
+runner extracts the shared shell produced by `StlAPI_Reader`, falls back to a
+face-built shell only when needed, constructs a solid, and normalizes negative
+volume orientation. This matches the generated executor and prevents every
+hybrid mesh boundary from falling back to compile-per-render C++.
 
 Global glue is forbidden: OCCT documents it for coincident shapes without real
 intersections; the ladybug/dome case has real intersections. Fuzzy tolerance
@@ -305,6 +390,17 @@ Only successful immutable artifacts enter the bounded cache. Concurrent
 identical renders share one in-flight computation. A failed computation is
 not cached; every subscriber receives the raw failure.
 
+The process-local singleflight key is computed before the global kernel lock
+from source, effective parameters, requested dialect/backend, post-processing,
+render-relevant configuration, runtime directories, and previous tagged-anchor
+identity. Dense anonymous topology arrays are excluded because selector
+rebinding reads only `tagged_anchors`; hashing the full manifest would add a
+multi-megabyte serialization to the warm path. The flight is removed on
+success, raw failure, cancellation, or panic, so later retries become owners.
+Imported STL bytes plus the resolved precompiled-runner/runtime-manifest bytes
+participate in that key. Replacing a file at the same path or replacing the
+native runtime therefore cannot join an older in-flight render.
+
 ### Decision: process actor with progress and cancellation
 
 Each kernel job runs behind a process/job actor. Stages are observable as
@@ -313,6 +409,28 @@ Each kernel job runs behind a process/job actor. Stages are observable as
 progress and user break where available. Cancellation kills the child process
 when a kernel cannot stop cooperatively. Shared in-flight work is cancelled
 only after its last subscriber leaves.
+
+Recursive Direct OCCT normalization must never poll on a default Tokio worker
+stack. Dependency-plan normalization used by the singleflight identity runs on
+the named Direct OCCT worker with the same explicit stack contract as kernel
+planning. The normalizer also rejects pathological expression depth with a raw
+validation error before the process stack guard. This is a runtime boundary,
+not a global `RUST_MIN_STACK` workaround; progress/cancellation actor work
+remains separate.
+
+The precompiled runner writes `stage-report.json` schema v1 beside topology.
+Its fixed ordered stages are `import`, `validate`, `solidify`, `boolean`,
+`cleanup`, `mesh`, `verify`, and `export`; skipped work remains explicit with
+zero count/time. Executed stages record count and elapsed milliseconds, plus
+total runner elapsed time. This artifact is benchmark evidence, not live agent
+terminal output.
+
+Mesh Boolean routing is owned by AST boundaries, never by a scene-global list.
+Each part records post-order Boolean node ID, operation, authored operand node
+order, and which operands depend on mesh work. Difference therefore preserves
+head/cutter order, nested boundaries remain topological, and separate parts
+cannot be accidentally batched together. XOR stays ineligible until an
+explicit equivalent is specified.
 
 ### Batch order
 
@@ -323,7 +441,7 @@ only after its last subscriber leaves.
 3. Benchmark same-domain cleanup before enabling any cleanup policy.
 4. Add immutable whole-artifact reuse and in-flight deduplication.
 5. Add stage progress and cancellation to the kernel actor.
-6. Add validated indexed-mesh handoff and Manifold batch routing.
+6. Add validated indexed-mesh handoff and ordered Manifold routing.
 7. Add explicit decoration simplification only if the route still needs it.
 
 Each slice must preserve components, manifoldness, bounding box, signed volume,

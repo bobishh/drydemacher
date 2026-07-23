@@ -9,13 +9,15 @@ use std::sync::{Mutex, OnceLock};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use super::direct_occt::{OcctArg, OcctOp};
 use super::direct_occt_sdk::{DirectOcctSdkLayout, NativeExportOutcome};
 use crate::ecky_core_ir::{CorePart, CoreProgram, CoreSelectorTagDecl};
 use crate::models::{
     AppError, AppResult, ArtifactBundle, DesignParams, DocumentMetadata, EngineKind,
-    EnrichmentStatus, ExportArtifact, GeometryBackend, ManifestEnrichmentState, ModelManifest,
-    ModelSourceKind, ParameterGroup, PartBinding, PathResolver, SelectionTarget,
-    SelectionTargetKind, SourceLanguage, ViewerEdgePoint, ViewerEdgeTarget, ViewerFaceTarget,
+    EnrichmentStatus, ExportArtifact, GeometryBackend, GeometryProvenance,
+    GeometryRepresentation, ManifestEnrichmentState, ModelManifest, ModelSourceKind,
+    ParameterGroup, PartBinding, PathResolver, SelectionTarget, SelectionTargetKind,
+    SourceLanguage, ViewerEdgePoint, ViewerEdgeTarget, ViewerFaceTarget,
     MODEL_RUNTIME_SCHEMA_VERSION,
 };
 use crate::topology_target_ids::{
@@ -32,6 +34,16 @@ const STEP_FILE_NAME: &str = "model.step";
 const TOPOLOGY_FILE_NAME: &str = "topology.json";
 const DIRECT_OCCT_TEXT_FONT_ENV: &str = "ECKYCAD_FONT_PATH";
 const DIRECT_OCCT_HOT_CACHE_CAPACITY: usize = 2;
+const DIRECT_OCCT_CACHE_SCHEMA: &str = "direct-occt-v5-analytic-brep-cache-contract";
+
+fn direct_occt_analytic_brep_provenance() -> GeometryProvenance {
+    GeometryProvenance {
+        representation: GeometryRepresentation::AnalyticBrep,
+        source_mesh_digests: Vec::new(),
+        closed: None,
+        boundary_or_non_manifold_edge_count: None,
+    }
+}
 
 #[derive(Clone)]
 struct DirectOcctHotCacheEntry {
@@ -131,8 +143,13 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
 ) -> AppResult<(ArtifactBundle, ModelManifest)> {
     let params_json =
         serde_json::to_string(parameters).map_err(|err| AppError::validation(err.to_string()))?;
-    let content_hash =
-        content_hash_with_font_path(source_identity, &params_json, cad_text_font_path);
+    let content_hash = content_hash_with_runtime_inputs(
+        program,
+        source_identity,
+        &params_json,
+        parameters,
+        cad_text_font_path,
+    )?;
     let model_id = model_id_from_hash(&content_hash);
     if let Some(cached) = read_complete_cached_bundle(app, &model_id, &content_hash) {
         return Ok(cached);
@@ -160,92 +177,100 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
         }
     };
 
-    match export_outcome {
+    let (step_path, stl_path, part_stl_paths) = match export_outcome {
         NativeExportOutcome::Exported {
             step_path,
             stl_path,
             part_stl_paths,
-        } => {
-            if program.parts.is_empty() {
-                return Err(AppError::validation(
-                    "Direct OCCT runtime requires at least one Core IR part.",
-                ));
-            }
-            let topology_path = bundle_dir.join(TOPOLOGY_FILE_NAME);
-            let topology_report = read_direct_occt_topology_report(&topology_path)?;
-            let topology_report = Some(&topology_report);
-            let parameter_keys = program
-                .parameters
-                .iter()
-                .map(|parameter| parameter.key.clone())
-                .collect::<Vec<_>>();
-            let part_specs = program
-                .parts
-                .iter()
-                .map(|part| (part.key.clone(), part.label.clone()))
-                .collect::<Vec<_>>();
-            let part_root_node_ids = program
-                .parts
-                .iter()
-                .map(|part| (part.key.clone(), part.root.id.raw()))
-                .collect::<HashMap<_, _>>();
-            let part_stable_node_keys = program
-                .parts
-                .iter()
-                .filter_map(|part| {
-                    direct_occt_source_stable_node_key(source_identity, part)
-                        .map(|stable_node_key| (part.key.clone(), stable_node_key))
-                })
-                .collect::<HashMap<_, _>>();
-            // Build a map of part_key -> bundle-relative STL path. Per-part STL
-            // files are written by the executor into `parts/NNN-label.stl`. When
-            // the backend only produced a merged preview, fall back to that.
-            let part_asset_paths = part_stl_paths
-                .iter()
-                .filter_map(|(key, abs_path)| {
-                    let rel = abs_path
-                        .strip_prefix(&bundle_dir)
-                        .ok()?;
-                    Some((key.clone(), path_to_string(rel).unwrap_or_else(|_| rel.to_string_lossy().to_string())))
-                })
-                .collect::<HashMap<_, _>>();
-            let manifest = build_direct_occt_manifest_with_stable_node_keys(
-                &model_id,
-                &source_path,
-                &part_specs,
-                &parameter_keys,
-                &program.selector_tags,
-                topology_report,
-                &part_stable_node_keys,
-                &part_root_node_ids,
-                &part_asset_paths,
-            )?;
-            let bundle = build_direct_occt_bundle(
-                &model_id,
-                &content_hash,
-                &source_path,
-                &stl_path,
-                &step_path,
-                topology_report,
-                &manifest,
-            )?;
-            let stored =
-                crate::model_runtime::write_runtime_bundle(app, &model_id, &bundle, &manifest)?;
-            remember_complete_cached_bundle(&bundle_dir, &content_hash, &stored);
-            Ok(stored)
-        }
+        } => (Some(step_path), stl_path, part_stl_paths),
+        NativeExportOutcome::MeshExported {
+            stl_path,
+            part_stl_paths,
+        } => (None, stl_path, part_stl_paths),
         NativeExportOutcome::Blocked { blockers } => {
             let _ = fs::remove_dir_all(&bundle_dir);
-            Err(AppError::render(format!(
+            return Err(AppError::render(format!(
                 "Direct OCCT runtime blocked: {}",
                 if blockers.is_empty() {
                     "unknown runtime blocker".to_string()
                 } else {
                     blockers.join("; ")
                 }
-            )))
+            )));
         }
+    };
+
+    if program.parts.is_empty() {
+        return Err(AppError::validation(
+            "Direct OCCT runtime requires at least one Core IR part.",
+        ));
     }
+    let topology_path = bundle_dir.join(TOPOLOGY_FILE_NAME);
+    let topology_report = read_direct_occt_topology_report(&topology_path)?;
+    let topology_report = Some(&topology_report);
+    let parameter_keys = program
+        .parameters
+        .iter()
+        .map(|parameter| parameter.key.clone())
+        .collect::<Vec<_>>();
+    let part_specs = program
+        .parts
+        .iter()
+        .map(|part| (part.key.clone(), part.label.clone()))
+        .collect::<Vec<_>>();
+    let part_root_node_ids = program
+        .parts
+        .iter()
+        .map(|part| (part.key.clone(), part.root.id.raw()))
+        .collect::<HashMap<_, _>>();
+    let part_stable_node_keys = program
+        .parts
+        .iter()
+        .filter_map(|part| {
+            direct_occt_source_stable_node_key(source_identity, part)
+                .map(|stable_node_key| (part.key.clone(), stable_node_key))
+        })
+        .collect::<HashMap<_, _>>();
+    // Build a map of part_key -> bundle-relative STL path. Per-part STL
+    // files are written by the executor into `parts/NNN-label.stl`. When
+    // the backend only produced a merged preview, fall back to that.
+    let part_asset_paths = part_stl_paths
+        .iter()
+        .filter_map(|(key, abs_path)| {
+            let rel = abs_path.strip_prefix(&bundle_dir).ok()?;
+            Some((
+                key.clone(),
+                path_to_string(rel).unwrap_or_else(|_| rel.to_string_lossy().to_string()),
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+    let manifest = build_direct_occt_manifest_with_stable_node_keys(
+        &model_id,
+        &source_path,
+        &part_specs,
+        &parameter_keys,
+        &program.selector_tags,
+        topology_report,
+        &part_stable_node_keys,
+        &part_root_node_ids,
+        &part_asset_paths,
+    )?;
+    let fallback_step_path = bundle_dir.join(STEP_FILE_NAME);
+    let mut bundle = build_direct_occt_bundle(
+        &model_id,
+        &content_hash,
+        &source_path,
+        &stl_path,
+        step_path.as_deref().unwrap_or(&fallback_step_path),
+        topology_report,
+        &manifest,
+    )?;
+    if step_path.is_none() {
+        bundle.export_artifacts.clear();
+    }
+    let stored = crate::model_runtime::write_runtime_bundle(app, &model_id, &bundle, &manifest)?;
+    remember_complete_cached_bundle(&bundle_dir, &content_hash, &stored);
+    Ok(stored)
 }
 
 fn read_complete_cached_bundle(
@@ -255,18 +280,44 @@ fn read_complete_cached_bundle(
 ) -> Option<(ArtifactBundle, ModelManifest)> {
     let bundle_dir = crate::model_runtime::runtime_bundle_dir(app, model_id).ok()?;
     if let Some(cached) = read_hot_cached_bundle(&bundle_dir, content_hash) {
-        return Some(cached);
+        if cached_direct_occt_bundle_is_current(&cached.0, &cached.1, model_id, content_hash) {
+            return Some(cached);
+        }
+        forget_hot_cached_bundle(&bundle_dir);
     }
     let (bundle, manifest) = crate::model_runtime::read_runtime_bundle(app, model_id).ok()?;
-    if bundle.content_hash != content_hash || manifest.model_id != model_id {
-        return None;
-    }
-    if !runtime_bundle_artifacts_ready(&bundle) {
+    if !cached_direct_occt_bundle_is_current(&bundle, &manifest, model_id, content_hash) {
         return None;
     }
     let cached = (bundle, manifest);
     remember_complete_cached_bundle(&bundle_dir, content_hash, &cached);
     Some(cached)
+}
+
+fn cached_direct_occt_bundle_is_current(
+    bundle: &ArtifactBundle,
+    manifest: &ModelManifest,
+    model_id: &str,
+    content_hash: &str,
+) -> bool {
+    let is_analytic_brep = |provenance: Option<&GeometryProvenance>| {
+        matches!(
+            provenance.map(|provenance| &provenance.representation),
+            Some(GeometryRepresentation::AnalyticBrep)
+        )
+    };
+
+    bundle.content_hash == content_hash
+        && bundle.model_id == model_id
+        && manifest.model_id == model_id
+        && is_analytic_brep(bundle.geometry_provenance.as_ref())
+        && is_analytic_brep(manifest.geometry_provenance.as_ref())
+        && bundle
+            .export_artifacts
+            .iter()
+            .filter(|artifact| artifact.format.eq_ignore_ascii_case("step"))
+            .all(|artifact| is_analytic_brep(artifact.geometry_provenance.as_ref()))
+        && runtime_bundle_artifacts_ready(bundle)
 }
 
 fn runtime_bundle_artifacts_ready(bundle: &ArtifactBundle) -> bool {
@@ -308,6 +359,13 @@ fn read_hot_cached_bundle(
     let cached = (entry.bundle.clone(), entry.manifest.clone());
     cache.push_front(entry);
     Some(cached)
+}
+
+fn forget_hot_cached_bundle(bundle_dir: &Path) {
+    let Ok(mut cache) = direct_occt_hot_cache().lock() else {
+        return;
+    };
+    cache.retain(|entry| entry.bundle_dir != bundle_dir);
 }
 
 fn remember_complete_cached_bundle(
@@ -386,6 +444,7 @@ pub(crate) fn build_direct_occt_manifest_with_stable_node_keys(
     )?;
 
     Ok(ModelManifest {
+        geometry_provenance: Some(direct_occt_analytic_brep_provenance()),
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind: ModelSourceKind::Generated,
@@ -494,6 +553,7 @@ pub(crate) fn build_direct_occt_bundle(
     manifest: &ModelManifest,
 ) -> AppResult<ArtifactBundle> {
     Ok(ArtifactBundle {
+        geometry_provenance: Some(direct_occt_analytic_brep_provenance()),
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind: ModelSourceKind::Generated,
@@ -519,6 +579,7 @@ pub(crate) fn direct_occt_step_export_artifacts(
     step_path: &Path,
 ) -> AppResult<Vec<ExportArtifact>> {
     Ok(vec![ExportArtifact {
+        geometry_provenance: Some(direct_occt_analytic_brep_provenance()),
         label: "STEP".to_string(),
         format: "step".to_string(),
         path: path_to_string(step_path)?,
@@ -526,8 +587,14 @@ pub(crate) fn direct_occt_step_export_artifacts(
     }])
 }
 
+#[cfg(test)]
 fn content_hash(source_identity: &str, params_json: &str) -> String {
-    content_hash_with_font_path(source_identity, params_json, None)
+    let program = crate::ecky_scheme::compile_to_core_program(source_identity)
+        .expect("test source must compile for runtime cache key");
+    let parameters = serde_json::from_str(params_json)
+        .expect("test parameter JSON must deserialize for runtime cache key");
+    content_hash_with_runtime_inputs(&program, source_identity, params_json, &parameters, None)
+        .expect("test runtime cache key")
 }
 
 fn content_hash_with_font_path(
@@ -535,7 +602,6 @@ fn content_hash_with_font_path(
     params_json: &str,
     cad_text_font_path: Option<&str>,
 ) -> String {
-    const DIRECT_OCCT_CACHE_SCHEMA: &str = "direct-occt-v2-nary-parallel-obb";
     let mut hasher = Sha256::new();
     hasher.update(DIRECT_OCCT_CACHE_SCHEMA.as_bytes());
     hasher.update(b"|");
@@ -547,6 +613,68 @@ fn content_hash_with_font_path(
         hasher.update(cad_text_font_path.as_bytes());
     }
     format!("{:x}", hasher.finalize())
+}
+
+/// Hash every input that can affect the produced artifact. Source text alone is
+/// insufficient: normalization/expansion can change the executable plan and an
+/// `import-stl` command dereferences bytes outside that source text.
+fn content_hash_with_runtime_inputs(
+    program: &CoreProgram,
+    source_identity: &str,
+    params_json: &str,
+    parameters: &DesignParams,
+    cad_text_font_path: Option<&str>,
+) -> AppResult<String> {
+    const RUNNER_PLAN_SCHEMA_VERSION: &str = "1";
+    let plan = super::direct_occt::plan_core_program_with_params(program, parameters)?;
+    let mut hasher = Sha256::new();
+    hasher.update(content_hash_with_font_path(
+        source_identity,
+        params_json,
+        cad_text_font_path,
+    ));
+    hasher.update(b"|planned-input-v1|");
+    hasher.update(format!("{plan:#?}").as_bytes());
+    hasher.update(b"|runner-plan-schema|");
+    hasher.update(RUNNER_PLAN_SCHEMA_VERSION.as_bytes());
+
+    for (part_index, part) in plan.parts.iter().enumerate() {
+        for (command_index, command) in part.commands.iter().enumerate() {
+            if command.op != OcctOp::ImportStl {
+                continue;
+            }
+            let Some(OcctArg::Text(path) | OcctArg::Symbol(path)) = command.args.first() else {
+                continue;
+            };
+            let bytes = fs::read(path).map_err(|err| {
+                AppError::validation(format!(
+                    "Direct OCCT cache key could not read imported STL '{}': {}",
+                    path, err
+                ))
+            })?;
+            hasher.update(b"|import-stl|");
+            hasher.update(part_index.to_le_bytes());
+            hasher.update(command_index.to_le_bytes());
+            hasher.update(path.as_bytes());
+            hasher.update(b"|");
+            hasher.update(bytes);
+            let indexed_sidecar = Path::new(path).with_extension("indexed-mesh.json");
+            if indexed_sidecar.is_file() {
+                let indexed_bytes = fs::read(&indexed_sidecar).map_err(|err| {
+                    AppError::validation(format!(
+                        "Direct OCCT cache key could not read indexed mesh '{}': {}",
+                        indexed_sidecar.display(),
+                        err
+                    ))
+                })?;
+                hasher.update(b"|indexed-mesh|");
+                hasher.update(indexed_sidecar.to_string_lossy().as_bytes());
+                hasher.update(b"|");
+                hasher.update(indexed_bytes);
+            }
+        }
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn normalized_cad_text_font_path(cad_text_font_path: Option<&str>) -> Option<&str> {
@@ -1307,7 +1435,14 @@ mod tests {
         let params = DesignParams::new();
         let source_identity = source.to_string();
         let params_json = serde_json::to_string(&params).expect("params json");
-        let content_hash = content_hash(&source_identity, &params_json);
+        let content_hash = content_hash_with_runtime_inputs(
+            &program,
+            &source_identity,
+            &params_json,
+            &params,
+            None,
+        )
+        .expect("content hash");
         let model_id = model_id_from_hash(&content_hash);
         let direct_dir = root.join("direct");
         fs::create_dir_all(&direct_dir).expect("direct dir");
@@ -1318,7 +1453,7 @@ mod tests {
         let NativeExportOutcome::Exported {
             step_path: direct_step_path,
             stl_path: direct_stl_path,
-        ..
+            ..
         } = direct_outcome
         else {
             panic!("expected generated-source export");
@@ -1421,6 +1556,9 @@ mkdir -p "$out"
 cp "$source_dir/model.step" "$out/model.step"
 cp "$source_dir/preview.stl" "$out/preview.stl"
 cp "$source_dir/topology.json" "$out/topology.json"
+cat > "$out/stage-report.json" <<'EOF'
+{{"schemaVersion":1,"totalElapsedMs":0,"stages":[{{"name":"import","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"validate","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"solidify","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"boolean","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"cleanup","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"mesh","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"verify","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"export","status":"skipped","executionCount":0,"elapsedMs":0}}]}}
+EOF
 printf '%s\n' "$plan" > "$invoked_marker"
 echo "fake runner plan: $plan"
 "#,
@@ -1504,7 +1642,14 @@ echo "fake runner plan: $plan"
         let params = DesignParams::new();
         let source_identity = source.to_string();
         let params_json = serde_json::to_string(&params).expect("params json");
-        let content_hash = content_hash(&source_identity, &params_json);
+        let content_hash = content_hash_with_runtime_inputs(
+            &program,
+            &source_identity,
+            &params_json,
+            &params,
+            None,
+        )
+        .expect("content hash");
         let model_id = model_id_from_hash(&content_hash);
         let direct_dir = root.join("direct");
         fs::create_dir_all(&direct_dir).expect("direct dir");
@@ -1515,7 +1660,7 @@ echo "fake runner plan: $plan"
         let NativeExportOutcome::Exported {
             step_path: direct_step_path,
             stl_path: direct_stl_path,
-        ..
+            ..
         } = direct_outcome
         else {
             panic!("expected generated-source export");
@@ -1618,6 +1763,9 @@ mkdir -p "$out"
 cp "$source_dir/model.step" "$out/model.step"
 cp "$source_dir/preview.stl" "$out/preview.stl"
 cp "$source_dir/topology.json" "$out/topology.json"
+cat > "$out/stage-report.json" <<'EOF'
+{{"schemaVersion":1,"totalElapsedMs":0,"stages":[{{"name":"import","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"validate","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"solidify","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"boolean","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"cleanup","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"mesh","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"verify","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"export","status":"skipped","executionCount":0,"elapsedMs":0}}]}}
+EOF
 printf '%s\n' "$plan" > "$invoked_marker"
 echo "fake runner plan: $plan"
 "#,
@@ -1730,15 +1878,103 @@ echo "fake runner plan: $plan"
 
         assert!(stored.fcstd_path.is_empty());
         assert_eq!(stored.geometry_backend, GeometryBackend::EckyRust);
+        assert_eq!(
+            stored.geometry_provenance.as_ref().map(|p| &p.representation),
+            Some(&GeometryRepresentation::AnalyticBrep)
+        );
         assert_eq!(stored.export_artifacts[0].format, "step");
+        assert_eq!(
+            stored.export_artifacts[0]
+                .geometry_provenance
+                .as_ref()
+                .map(|p| &p.representation),
+            Some(&GeometryRepresentation::AnalyticBrep)
+        );
         assert_eq!(stored.viewer_assets.len(), 1);
         assert_eq!(stored.viewer_assets[0].format, ViewerAssetFormat::Stl);
         assert_eq!(stored_manifest.parts[0].viewer_node_ids, vec!["body"]);
+        assert_eq!(
+            stored_manifest
+                .geometry_provenance
+                .as_ref()
+                .map(|p| &p.representation),
+            Some(&GeometryRepresentation::AnalyticBrep)
+        );
 
         let (read_bundle, read_manifest) =
             crate::model_runtime::read_runtime_bundle(&resolver, &model_id).expect("read");
         assert_eq!(read_bundle.model_id, model_id);
         assert_eq!(read_manifest.model_id, model_id);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_cached_direct_occt_bundle_without_analytic_brep_provenance() {
+        let root = temp_root("direct-occt-cache-legacy-provenance");
+        let resolver = TestResolver { root: root.clone() };
+        let source = "(model (part body (box 10 20 30)))";
+        let hash = content_hash(source, "{}");
+        let model_id = model_id_from_hash(&hash);
+        let bundle_dir =
+            crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
+        fs::create_dir_all(&bundle_dir).expect("bundle dir");
+        let source_path = bundle_dir.join(SOURCE_FILE_NAME);
+        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let step_path = bundle_dir.join(STEP_FILE_NAME);
+        fs::write(&source_path, source).expect("source");
+        fs::write(&preview_path, b"solid legacy preview").expect("preview");
+        fs::write(&step_path, b"ISO-10303-21; legacy step").expect("step");
+
+        let mut manifest = build_direct_occt_manifest(
+            &model_id,
+            &source_path,
+            &[("body".to_string(), "Body".to_string())],
+            &[],
+            &[],
+            None,
+            &HashMap::new(),
+        )
+        .expect("manifest");
+        let mut bundle = build_direct_occt_bundle(
+            &model_id,
+            &hash,
+            &source_path,
+            &preview_path,
+            &step_path,
+            None,
+            &manifest,
+        )
+        .expect("bundle");
+        bundle.geometry_provenance = None;
+        manifest.geometry_provenance = None;
+        for artifact in &mut bundle.export_artifacts {
+            artifact.geometry_provenance = None;
+        }
+        let (stored_bundle, stored_manifest) = crate::model_runtime::write_runtime_bundle(
+            &resolver,
+            &model_id,
+            &bundle,
+            &manifest,
+        )
+        .expect("write legacy runtime bundle");
+        assert_eq!(stored_bundle.content_hash, hash);
+        assert_eq!(stored_manifest.model_id, model_id);
+        assert!(stored_bundle.geometry_provenance.is_none());
+        assert!(stored_manifest.geometry_provenance.is_none());
+        assert!(runtime_bundle_artifacts_ready(&stored_bundle));
+
+        let (read_bundle, read_manifest) =
+            crate::model_runtime::read_runtime_bundle(&resolver, &model_id)
+                .expect("read legacy runtime bundle");
+        assert_eq!(read_bundle.content_hash, hash);
+        assert_eq!(read_manifest.model_id, model_id);
+        assert!(runtime_bundle_artifacts_ready(&read_bundle));
+
+        assert!(
+            read_complete_cached_bundle(&resolver, &model_id, &hash).is_none(),
+            "Direct OCCT cache must reject artifacts without analytic BRep provenance"
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1751,7 +1987,8 @@ echo "fake runner plan: $plan"
         let program = compile(source);
         let params = DesignParams::new();
         let params_json = serde_json::to_string(&params).expect("params");
-        let hash = content_hash(source, &params_json);
+        let hash = content_hash_with_runtime_inputs(&program, source, &params_json, &params, None)
+            .expect("content hash");
         let model_id = model_id_from_hash(&hash);
         let bundle_dir =
             crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
@@ -1824,6 +2061,70 @@ echo "fake runner plan: $plan"
             "missing artifact must invalidate cache hit"
         );
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn content_key_changes_when_imported_stl_bytes_change_at_same_path() {
+        let root = temp_root("direct-occt-cache-import-stl-bytes");
+        fs::create_dir_all(&root).expect("fixture dir");
+        let stl_path = root.join("fixture.stl");
+        fs::write(&stl_path, b"solid fixture\nendsolid fixture\n").expect("first stl");
+        let source = format!(
+            "(model (part body (import-stl {:?})))",
+            stl_path.to_string_lossy()
+        );
+        let program = compile(&source);
+        let params = DesignParams::new();
+        let params_json = serde_json::to_string(&params).expect("params");
+
+        let first =
+            content_hash_with_runtime_inputs(&program, &source, &params_json, &params, None)
+                .expect("first content key");
+        fs::write(
+            &stl_path,
+            b"solid fixture changed\nendsolid fixture changed\n",
+        )
+        .expect("mutated stl");
+        let second =
+            content_hash_with_runtime_inputs(&program, &source, &params_json, &params, None)
+                .expect("second content key");
+
+        assert_ne!(
+            first, second,
+            "mutated imported STL must miss artifact cache"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn content_key_changes_when_indexed_sidecar_bytes_change_at_same_path() {
+        let root = temp_root("direct-occt-cache-indexed-sidecar-bytes");
+        fs::create_dir_all(&root).expect("fixture dir");
+        let stl_path = root.join("fixture.stl");
+        let sidecar_path = stl_path.with_extension("indexed-mesh.json");
+        fs::write(&stl_path, b"solid fixture\nendsolid fixture\n").expect("stl");
+        fs::write(&sidecar_path, b"indexed-v1").expect("first sidecar");
+        let source = format!(
+            "(model (part body (import-stl {:?})))",
+            stl_path.to_string_lossy()
+        );
+        let program = compile(&source);
+        let params = DesignParams::new();
+        let params_json = serde_json::to_string(&params).expect("params");
+
+        let first =
+            content_hash_with_runtime_inputs(&program, &source, &params_json, &params, None)
+                .expect("first content key");
+        fs::write(&sidecar_path, b"indexed-v2").expect("mutated sidecar");
+        let second =
+            content_hash_with_runtime_inputs(&program, &source, &params_json, &params, None)
+                .expect("second content key");
+
+        assert_ne!(
+            first, second,
+            "mutated indexed sidecar must miss artifact cache"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2790,18 +3091,21 @@ echo "fake runner plan: $plan"
         let root = temp_root("direct-occt-export-error");
         let resolver = TestResolver { root: root.clone() };
         let source = "(model)";
-        let hash = content_hash(source, "{}");
-        let model_id = model_id_from_hash(&hash);
         let program = CoreProgram::new(
             crate::ecky_core_ir::ProgramId::new(1),
             Vec::new(),
             Vec::new(),
         );
+        let params = DesignParams::new();
+        let params_json = serde_json::to_string(&params).expect("params");
+        let hash = content_hash_with_runtime_inputs(&program, source, &params_json, &params, None)
+            .expect("content hash");
+        let model_id = model_id_from_hash(&hash);
 
         let err = render_core_program_runtime_bundle(
             &program,
             source,
-            &DesignParams::new(),
+            &params,
             &blocked_layout(root.clone()),
             &resolver,
         )
@@ -4067,14 +4371,8 @@ echo "fake runner plan: $plan"
         ];
         let param_keys = vec!["width".to_string()];
         let mut asset_paths = std::collections::HashMap::new();
-        asset_paths.insert(
-            "base".to_string(),
-            "parts/base.stl".to_string(),
-        );
-        asset_paths.insert(
-            "lid".to_string(),
-            "parts/lid.stl".to_string(),
-        );
+        asset_paths.insert("base".to_string(), "parts/base.stl".to_string());
+        asset_paths.insert("lid".to_string(), "parts/lid.stl".to_string());
 
         let bindings = direct_occt_part_bindings(&parts, &param_keys, &asset_paths);
         assert_eq!(bindings.len(), 2);

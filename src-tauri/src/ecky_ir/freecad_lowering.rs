@@ -111,6 +111,7 @@ fn core_value_kind_tag_local(kind: CoreValueKind) -> &'static str {
         CoreValueKind::Sketch => "sketch",
         CoreValueKind::Path => "path",
         CoreValueKind::Frame => "frame",
+        CoreValueKind::Mesh => "mesh",
         CoreValueKind::Compound => "compound",
         CoreValueKind::Solid => "solid",
     }
@@ -935,6 +936,7 @@ impl FreecadLowerer {
             }
             Some(
                 CoreValueKind::Solid
+                | CoreValueKind::Mesh
                 | CoreValueKind::Sketch
                 | CoreValueKind::Compound
                 | CoreValueKind::Path,
@@ -2365,9 +2367,7 @@ impl FreecadLowerer {
             "torus" => {
                 let parsed = ParsedCallArgs::parse("torus", args, &["align"])?;
                 if parsed.positional.len() != 2 {
-                    return Err(validation(
-                        "`torus` expects major radius and minor radius.",
-                    ));
+                    return Err(validation("`torus` expects major radius and minor radius."));
                 }
                 let major = self.lower_num_expr(&parsed.positional[0], scope)?;
                 let minor = self.lower_num_expr(&parsed.positional[1], scope)?;
@@ -3313,7 +3313,10 @@ impl FreecadLowerer {
                 let profile = self.lower_geom_expr(&args[1], scope)?;
                 let path = self.lower_geom_expr(&args[2], scope)?;
                 let swept = self.next_var();
-                self.emit(format!("{swept} = _ecky_sweep({}, {})", profile.expr, path.expr));
+                self.emit(format!(
+                    "{swept} = _ecky_sweep({}, {})",
+                    profile.expr, path.expr
+                ));
                 let helper = if op == "rib" {
                     "_ecky_fuse_many"
                 } else {
@@ -4192,7 +4195,18 @@ struct BuildBinding {
 
 #[cfg(test)]
 mod tests {
-    use super::{lower_core_program_to_freecad, lower_to_freecad};
+    use super::{lower_core_program_to_freecad, lower_to_freecad as lower_to_freecad_raw};
+
+    fn lower_to_freecad(source: &str) -> crate::models::AppResult<String> {
+        let source = source.to_string();
+        std::thread::Builder::new()
+            .name("freecad-lowering-test".to_string())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || lower_to_freecad_raw(&source))
+            .expect("spawn FreeCAD lowering thread")
+            .join()
+            .expect("join FreeCAD lowering thread")
+    }
 
     fn surface_fixture(name: &str) -> String {
         let path = format!(
@@ -4333,7 +4347,8 @@ mod tests {
         let err = lower_to_freecad("(model (part p (draft 10 (box 20 20 20))))")
             .expect_err("draft unsupported on freecad");
         assert!(
-            err.to_string().contains("not supported on the FreeCAD backend"),
+            err.to_string()
+                .contains("not supported on the FreeCAD backend"),
             "expected freecad draft caveat, got {err}"
         );
     }
@@ -4355,19 +4370,28 @@ mod tests {
         // chamfer rejects taper
         let err = lower_to_freecad("(model (part p (chamfer 3 :to-radius 1 (box 20 20 20))))")
             .expect_err("chamfer taper rejected");
-        assert!(err.to_string().contains("only supported on `fillet`"), "got {err}");
+        assert!(
+            err.to_string().contains("only supported on `fillet`"),
+            "got {err}"
+        );
     }
 
     #[test]
     fn freecad_lowering_emits_thread_helper() {
-        let code = lower_to_freecad("(model (part screw (thread :radius 8 :pitch 2 :length 16 :depth 1)))")
-            .expect("lower");
+        let code = lower_to_freecad(
+            "(model (part screw (thread :radius 8 :pitch 2 :length 16 :depth 1)))",
+        )
+        .expect("lower");
         assert!(
             code.contains("_ecky_thread(8.0, 2.0, 16.0, 1.0,"),
             "thread call: {}",
             code
         );
-        assert!(code.contains("def _ecky_thread("), "thread helper: {}", code);
+        assert!(
+            code.contains("def _ecky_thread("),
+            "thread helper: {}",
+            code
+        );
     }
 
     #[test]
@@ -4388,8 +4412,9 @@ mod tests {
 
     #[test]
     fn freecad_lowering_emits_slot_center_point_helper() {
-        let code = lower_to_freecad("(model (part body (extrude (slot-center-point 0 0 15 0 10) 5)))")
-            .expect("lower");
+        let code =
+            lower_to_freecad("(model (part body (extrude (slot-center-point 0 0 15 0 10) 5)))")
+                .expect("lower");
         assert!(
             code.contains("_ecky_slot_center_point(0.0, 0.0, 15.0, 0.0, 10.0)"),
             "slot-center-point call: {}",
@@ -4864,7 +4889,7 @@ mod tests {
                   :z-steps 6
                   :theta-steps 24
                   :radius (+ 20 (* 2 (sin (+ (* theta 6) (* fz 3.141592653589793)))))
-                  :z-map (+ z (* fz 2))))))"#;
+                  :z-map (+ z (* fz 2)))))"#;
         let code = crate::ecky_ir::lower_to_freecad(src).expect("lower");
         assert!(code.contains("_zi in range("), "{code}");
         assert!(code.contains("_ti in range("), "{code}");
@@ -5385,9 +5410,8 @@ mod tests {
         assert!(
             code.contains(
                 "def _ecky_fillet(shape, radius, selector=None, object_name=None, to_radius=None):"
-            ) && code.contains(
-                "def _ecky_chamfer(shape, distance, selector=None, object_name=None):"
-            ),
+            ) && code
+                .contains("def _ecky_chamfer(shape, distance, selector=None, object_name=None):"),
             "selector defaults not normalized: {}",
             code
         );

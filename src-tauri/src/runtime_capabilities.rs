@@ -140,10 +140,9 @@ pub fn probe_direct_occt_runtime(app: &dyn PathResolver) -> RuntimeBackendCapabi
         // is absent (runner-first export never compiles a shim).
         let output = Command::new(&runner).arg("--version").output();
         return match output {
-            Ok(output) if output.status.success() => available_capability(
-                "available".to_string(),
-                Some(runner.display().to_string()),
-            ),
+            Ok(output) if output.status.success() => {
+                available_capability("available".to_string(), Some(runner.display().to_string()))
+            }
             Ok(output) => unavailable_capability(format!(
                 "Direct OCCT unavailable: runner failed: {}\nstdout: {}\nstderr: {}",
                 output
@@ -273,6 +272,9 @@ pub(crate) fn resolve_direct_occt_runtime_root(app: &dyn PathResolver) -> AppRes
 }
 
 fn runtime_root_from_python_path(path: &Path) -> Option<PathBuf> {
+    if !path.is_file() {
+        return None;
+    }
     let bin_dir = path.parent()?;
     (bin_dir.file_name()? == "bin").then(|| bin_dir.parent().map(Path::to_path_buf))?
 }

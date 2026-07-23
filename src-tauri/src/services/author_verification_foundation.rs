@@ -1655,6 +1655,7 @@ mod tests {
 
     fn sample_manifest() -> ModelManifest {
         ModelManifest {
+            geometry_provenance: None,
             schema_version: 1,
             model_id: "model-1".to_string(),
             source_kind: ModelSourceKind::Generated,
@@ -1755,6 +1756,7 @@ mod tests {
 
     fn sample_bundle() -> ArtifactBundle {
         ArtifactBundle {
+            geometry_provenance: None,
             schema_version: 1,
             model_id: "model-1".to_string(),
             source_kind: ModelSourceKind::Generated,
@@ -1809,12 +1811,14 @@ mod tests {
             measurement_guides: vec![],
             export_artifacts: vec![
                 ExportArtifact {
+                    geometry_provenance: None,
                     label: "STEP".to_string(),
                     format: "step".to_string(),
                     path: "/tmp/model.step".to_string(),
                     role: "step".to_string(),
                 },
                 ExportArtifact {
+                    geometry_provenance: None,
                     label: "Preview STL".to_string(),
                     format: "stl".to_string(),
                     path: "/tmp/preview.stl".to_string(),

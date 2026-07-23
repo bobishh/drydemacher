@@ -74,6 +74,10 @@ fn run() -> Result<(), String> {
             println!("stl={}", stl_path.display());
             Ok(())
         }
+        direct_occt_sdk::NativeExportOutcome::MeshExported { stl_path, .. } => {
+            println!("stl={}", stl_path.display());
+            Ok(())
+        }
         direct_occt_sdk::NativeExportOutcome::Blocked { blockers } => Err(format!(
             "Direct OCCT export blocked: {}",
             blockers.join("; ")

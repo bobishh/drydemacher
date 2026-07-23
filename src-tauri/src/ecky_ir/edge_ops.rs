@@ -78,7 +78,6 @@ pub(crate) struct EdgeSelectorSpec {
 }
 
 impl EdgeSelectorSpec {
-    #[cfg(test)]
     pub(crate) fn canonical_string(&self) -> &str {
         &self.canonical_string
     }
@@ -100,7 +99,6 @@ pub(crate) struct FaceSelectorSpec {
 }
 
 impl FaceSelectorSpec {
-    #[cfg(test)]
     pub(crate) fn canonical_string(&self) -> &str {
         &self.canonical_string
     }

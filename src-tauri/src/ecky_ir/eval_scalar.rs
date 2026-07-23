@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use crate::ecky_deterministic;
 use crate::models::{AppResult, ParamValue};
 
-use super::model::{expr_head_symbol, expr_list_items, inline_let_expr, IrExpr};
+use super::model::{expr_head_symbol, expr_list_items, inline_let_expr, IrExpr, IrSelectorExpr};
 use super::shared::{unsupported, validation};
 
 pub(super) fn eval_number(value: &IrExpr, env: &BTreeMap<String, ParamValue>) -> AppResult<f64> {
@@ -283,6 +283,12 @@ pub(super) fn eval_stringish(
             }
             return eval_stringish(&items[3], env);
         }
+    }
+    if let IrExpr::Selector(selector) = &value {
+        return Ok(match selector {
+            IrSelectorExpr::Edge(selector) => selector.canonical_string().to_string(),
+            IrSelectorExpr::Face(selector) => selector.canonical_string().to_string(),
+        });
     }
     Err(validation("Expected a string value."))
 }

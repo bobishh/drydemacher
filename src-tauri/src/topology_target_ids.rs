@@ -1516,6 +1516,7 @@ mod tests {
 
     fn sample_manifest() -> ModelManifest {
         ModelManifest {
+            geometry_provenance: None,
             schema_version: 1,
             model_id: "model-1".to_string(),
             source_kind: ModelSourceKind::Generated,

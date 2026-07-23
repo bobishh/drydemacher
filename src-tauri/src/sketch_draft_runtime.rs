@@ -884,6 +884,7 @@ fn compact_primitive_for_source(
         closed: primitive.closed,
         radius: primitive.radius,
         topology: primitive.topology.clone(),
+        provenance: primitive.provenance.clone(),
     }
 }
 
@@ -2483,6 +2484,7 @@ mod tests {
             radius: None,
             closed: true,
             topology: None,
+            provenance: None,
         }
     }
 
@@ -2803,6 +2805,7 @@ mod tests {
 
     fn sample_artifact_bundle(manifest_path: &str) -> ArtifactBundle {
         ArtifactBundle {
+            geometry_provenance: None,
             schema_version: crate::models::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: "generated-abc123".to_string(),
             source_kind: crate::models::ModelSourceKind::Generated,

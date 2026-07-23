@@ -41,6 +41,7 @@ function createDefaultConfig(): AppConfig {
       model: 'gemini-2.5-flash',
       lightModel: 'gemini-2.5-flash-lite',
       baseUrl: '',
+      visionOverrides: {},
     },
     {
       id: 'default-openai',
@@ -50,6 +51,7 @@ function createDefaultConfig(): AppConfig {
       model: 'gpt-4o',
       lightModel: 'gpt-4o-mini',
       baseUrl: '',
+      visionOverrides: {},
     },
   ];
 

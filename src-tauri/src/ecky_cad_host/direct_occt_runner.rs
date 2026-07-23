@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::direct_occt::{OcctArg, OcctCommand, OcctKeyword, OcctOp, OcctPlan};
@@ -45,6 +46,89 @@ pub(crate) mod test_discovery {
 }
 const MODEL_STEP_FILE_NAME: &str = "model.step";
 const PREVIEW_STL_FILE_NAME: &str = "preview.stl";
+const STAGE_REPORT_FILE_NAME: &str = "stage-report.json";
+const RUNNER_STAGE_NAMES: [&str; 8] = [
+    "import", "validate", "solidify", "boolean", "cleanup", "mesh", "verify", "export",
+];
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct RunnerStageReport {
+    schema_version: u32,
+    total_elapsed_ms: u64,
+    stages: Vec<RunnerStageReportEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct RunnerStageReportEntry {
+    name: String,
+    status: String,
+    execution_count: u32,
+    elapsed_ms: u64,
+}
+
+fn validate_runner_stage_report(report: &RunnerStageReport) -> AppResult<()> {
+    if report.schema_version != 1 {
+        return Err(AppError::validation(format!(
+            "Direct OCCT runner stage report has unsupported schemaVersion {}.",
+            report.schema_version
+        )));
+    }
+    if report.stages.len() != RUNNER_STAGE_NAMES.len() {
+        return Err(AppError::validation(format!(
+            "Direct OCCT runner stage report must contain {} ordered stages, got {}.",
+            RUNNER_STAGE_NAMES.len(),
+            report.stages.len()
+        )));
+    }
+    for (entry, expected_name) in report.stages.iter().zip(RUNNER_STAGE_NAMES) {
+        if entry.name != expected_name {
+            return Err(AppError::validation(format!(
+                "Direct OCCT runner stage report expected stage `{expected_name}`, got `{}`.",
+                entry.name
+            )));
+        }
+        let expected_status = if entry.execution_count == 0 {
+            "skipped"
+        } else {
+            "executed"
+        };
+        if entry.status != expected_status {
+            return Err(AppError::validation(format!(
+                "Direct OCCT runner stage `{expected_name}` status `{}` conflicts with executionCount {}.",
+                entry.status, entry.execution_count
+            )));
+        }
+        if entry.execution_count == 0 && entry.elapsed_ms != 0 {
+            return Err(AppError::validation(format!(
+                "Direct OCCT runner skipped stage `{expected_name}` reported elapsedMs {}.",
+                entry.elapsed_ms
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn read_runner_stage_report(output_dir: &Path) -> AppResult<RunnerStageReport> {
+    let path = output_dir.join(STAGE_REPORT_FILE_NAME);
+    let report_text = fs::read_to_string(&path).map_err(|err| {
+        AppError::validation(format!(
+            "Direct OCCT runner did not write stage report '{}': {}",
+            path.display(),
+            err
+        ))
+    })?;
+    let report: RunnerStageReport = serde_json::from_str(&report_text).map_err(|err| {
+        AppError::validation(format!(
+            "Direct OCCT runner wrote invalid stage report '{}': {}",
+            path.display(),
+            err
+        ))
+    })?;
+    validate_runner_stage_report(&report)?;
+    Ok(report)
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -200,6 +284,8 @@ pub(crate) fn run_plan_step_stl_with_mode(
         ));
     }
 
+    read_runner_stage_report(output_dir)?;
+
     // Scan for per-part binary STL files written by the runner into parts/.
     let mut part_stl_paths = Vec::new();
     let parts_dir = output_dir.join("parts");
@@ -217,13 +303,20 @@ pub(crate) fn run_plan_step_stl_with_mode(
         }
     }
 
-    Ok(Some(
+    let stl_path = output_dir.join(PREVIEW_STL_FILE_NAME);
+    let step_path = output_dir.join(MODEL_STEP_FILE_NAME);
+    Ok(Some(if step_path.is_file() {
         super::direct_occt_sdk::NativeExportOutcome::Exported {
             step_path: output_dir.join(MODEL_STEP_FILE_NAME),
-            stl_path: output_dir.join(PREVIEW_STL_FILE_NAME),
+            stl_path,
             part_stl_paths,
-        },
-    ))
+        }
+    } else {
+        super::direct_occt_sdk::NativeExportOutcome::MeshExported {
+            stl_path,
+            part_stl_paths,
+        }
+    }))
 }
 
 pub(crate) fn discover_direct_occt_runner_with_mode(
@@ -308,10 +401,20 @@ fn serialize_runner_plan(plan: &OcctPlan) -> AppResult<Option<String>> {
 fn runner_plan(plan: &OcctPlan) -> AppResult<Option<RunnerPlan>> {
     let mut parts = Vec::with_capacity(plan.parts.len());
     for part in &plan.parts {
+        let indexed_imports = if plan.parts.len() == 1 {
+            indexed_mesh_imports_for_root_boolean(part)?
+        } else {
+            HashMap::new()
+        };
         let mut commands = Vec::with_capacity(part.commands.len());
         for command in &part.commands {
-            let Some(runner_command) = runner_command(command)? else {
-                return Ok(None);
+            let runner_command = if let Some(asset) = indexed_imports.get(&command.output.0) {
+                runner_indexed_mesh_command(command, asset)?
+            } else {
+                let Some(runner_command) = runner_command(command)? else {
+                    return Ok(None);
+                };
+                runner_command
             };
             commands.push(runner_command);
         }
@@ -329,6 +432,140 @@ fn runner_plan(plan: &OcctPlan) -> AppResult<Option<RunnerPlan>> {
         parts,
     };
     Ok(Some(body))
+}
+
+fn indexed_mesh_imports_for_root_boolean(
+    part: &super::direct_occt::OcctPartPlan,
+) -> AppResult<HashMap<u64, crate::ecky_ir::mesh_asset::IndexedMeshAsset>> {
+    let mut consumers = HashMap::<u64, Vec<&OcctCommand>>::new();
+    for command in &part.commands {
+        let mut refs = Vec::new();
+        for arg in &command.args {
+            collect_runner_arg_refs(arg, &mut refs);
+        }
+        for keyword in &command.keywords {
+            collect_runner_arg_refs(keyword.source_arg(), &mut refs);
+        }
+        for slot in refs {
+            consumers.entry(slot).or_default().push(command);
+        }
+    }
+
+    let mut admitted = HashMap::new();
+    for command in &part.commands {
+        if command.op != OcctOp::ImportStl || command.args.len() != 1 {
+            continue;
+        }
+        let path = match &command.args[0] {
+            OcctArg::Text(path) | OcctArg::Symbol(path) => PathBuf::from(path),
+            _ => continue,
+        };
+        let sidecar = path.with_extension("indexed-mesh.json");
+        if !sidecar.is_file() {
+            continue;
+        }
+        let Some([solidify]) = consumers.get(&command.output.0).map(Vec::as_slice) else {
+            continue;
+        };
+        if solidify.op != OcctOp::Solidify
+            || solidify.args.as_slice() != [OcctArg::Ref(command.output)]
+        {
+            continue;
+        }
+        let Some([boolean]) = consumers.get(&solidify.output.0).map(Vec::as_slice) else {
+            continue;
+        };
+        if !matches!(
+            boolean.op,
+            OcctOp::Union | OcctOp::Difference | OcctOp::Intersection
+        ) || boolean.output != part.root
+        {
+            continue;
+        }
+
+        let asset = crate::ecky_ir::mesh_asset::IndexedMeshAsset::read_cache(
+            crate::ecky_ir::mesh_asset::MeshAssetSource::Imported,
+            &sidecar,
+        )?;
+        if asset.validate_for_boolean().is_err() {
+            continue;
+        }
+        admitted.insert(command.output.0, asset);
+    }
+    Ok(admitted)
+}
+
+fn collect_runner_arg_refs(arg: &OcctArg, refs: &mut Vec<u64>) {
+    match arg {
+        OcctArg::Ref(slot) => refs.push(slot.0),
+        OcctArg::List(items) => {
+            for item in items {
+                collect_runner_arg_refs(item, refs);
+            }
+        }
+        OcctArg::Number(_)
+        | OcctArg::Boolean(_)
+        | OcctArg::Text(_)
+        | OcctArg::Symbol(_)
+        | OcctArg::Point2(_)
+        | OcctArg::Point3(_)
+        | OcctArg::Param(_) => {}
+    }
+}
+
+fn runner_indexed_mesh_command(
+    command: &OcctCommand,
+    asset: &crate::ecky_ir::mesh_asset::IndexedMeshAsset,
+) -> AppResult<RunnerCommand> {
+    let vertices = asset
+        .vertices()
+        .iter()
+        .map(|point| RunnerArg {
+            kind: "point3".to_string(),
+            value: serde_json::json!(point),
+        })
+        .collect::<Vec<_>>();
+    let triangles = asset
+        .triangles()
+        .iter()
+        .map(|triangle| RunnerArg {
+            kind: "list".to_string(),
+            value: serde_json::json!(triangle
+                .iter()
+                .map(|index| RunnerArg {
+                    kind: "number".to_string(),
+                    value: serde_json::json!(index),
+                })
+                .collect::<Vec<_>>()),
+        })
+        .collect::<Vec<_>>();
+    Ok(RunnerCommand {
+        output: command.output.0,
+        op: "import-indexed-mesh".to_string(),
+        args: vec![
+            RunnerArg {
+                kind: "list".to_string(),
+                value: serde_json::to_value(vertices).map_err(|err| {
+                    AppError::validation(format!(
+                        "Direct OCCT indexed vertex serialization failed: {err}"
+                    ))
+                })?,
+            },
+            RunnerArg {
+                kind: "list".to_string(),
+                value: serde_json::to_value(triangles).map_err(|err| {
+                    AppError::validation(format!(
+                        "Direct OCCT indexed triangle serialization failed: {err}"
+                    ))
+                })?,
+            },
+            RunnerArg {
+                kind: "text".to_string(),
+                value: serde_json::json!(asset.content_digest()),
+            },
+        ],
+        keywords: Vec::new(),
+    })
 }
 
 fn runner_plan_id(parts: &[RunnerPart]) -> AppResult<String> {
@@ -637,20 +874,23 @@ fn runner_exact_edge_selector_supported(command: &OcctCommand) -> bool {
     if command.keywords.is_empty() {
         return true;
     }
-    command.keywords.iter().all(|keyword| match keyword.name.as_str() {
-        "edges" => matches!(
-            keyword.selector_payload(),
-            Some(crate::ecky_core_ir::CoreSelectorPayload::EdgeAll)
-                | Some(crate::ecky_core_ir::CoreSelectorPayload::EdgeTargetIds(_))
-                | Some(crate::ecky_core_ir::CoreSelectorPayload::EdgeClauses(_))
-        ),
-        // Tapered fillet: `:to-radius` rides alongside the edge selector and is
-        // consumed by the cpp runner's `fillet_shape`.
-        "to-radius" | "to_radius" => {
-            matches!(keyword.source_arg(), OcctArg::Number(_))
-        }
-        _ => false,
-    })
+    command
+        .keywords
+        .iter()
+        .all(|keyword| match keyword.name.as_str() {
+            "edges" => matches!(
+                keyword.selector_payload(),
+                Some(crate::ecky_core_ir::CoreSelectorPayload::EdgeAll)
+                    | Some(crate::ecky_core_ir::CoreSelectorPayload::EdgeTargetIds(_))
+                    | Some(crate::ecky_core_ir::CoreSelectorPayload::EdgeClauses(_))
+            ),
+            // Tapered fillet: `:to-radius` rides alongside the edge selector and is
+            // consumed by the cpp runner's `fillet_shape`.
+            "to-radius" | "to_radius" => {
+                matches!(keyword.source_arg(), OcctArg::Number(_))
+            }
+            _ => false,
+        })
 }
 
 fn runner_exact_face_selector_supported(command: &OcctCommand) -> bool {
@@ -709,6 +949,7 @@ fn runner_op_supported(op: OcctOp) -> bool {
             | OcctOp::Profile
             | OcctOp::MakeFace
             | OcctOp::ImportStl
+            | OcctOp::Solidify
             | OcctOp::Extrude
             | OcctOp::Revolve
             | OcctOp::Loft
@@ -1089,8 +1330,180 @@ mod tests {
         std::env::temp_dir().join(format!("ecky-direct-occt-runner-{}", unique))
     }
 
-    fn write_executable(path: &Path, contents: &str) {
-        fs::write(path, contents).expect("write script");
+    #[test]
+    fn native_runner_reports_part_command_context_for_occt_failures() {
+        let source = include_str!("../../native/direct_occt_runner.cpp");
+
+        assert!(
+            source.contains("Direct OCCT part `")
+                && source.contains("command #")
+                && source.contains("output slot")
+                && source.contains("op `"),
+            "native runner must preserve the failing part, command index, output slot, and op"
+        );
+        assert!(
+            source.contains("Direct OCCT export stage `")
+                && source.contains("write-step")
+                && source.contains("write-preview-stl")
+                && source.contains("write-part-stl:"),
+            "native runner must preserve the failing STEP/STL export stage"
+        );
+        assert!(
+            source.contains("direct_occt_current_stage")
+                && source.contains("write-topology")
+                && source.contains("assemble-export-shape"),
+            "native runner must retain context outside command and file-writer wrappers"
+        );
+    }
+
+    #[test]
+    fn runner_stage_report_contract_requires_fixed_order_and_explicit_skips() {
+        let report = RunnerStageReport {
+            schema_version: 1,
+            total_elapsed_ms: 3,
+            stages: RUNNER_STAGE_NAMES
+                .into_iter()
+                .map(|name| {
+                    let execution_count = u32::from(matches!(name, "boolean" | "mesh" | "export"));
+                    RunnerStageReportEntry {
+                        name: name.to_string(),
+                        status: if execution_count == 0 {
+                            "skipped".to_string()
+                        } else {
+                            "executed".to_string()
+                        },
+                        execution_count,
+                        elapsed_ms: u64::from(execution_count),
+                    }
+                })
+                .collect(),
+        };
+
+        validate_runner_stage_report(&report).expect("valid stage report");
+    }
+
+    #[test]
+    fn native_runner_writes_stage_report_beside_topology() {
+        let source = include_str!("../../native/direct_occt_runner.cpp");
+
+        assert!(source.contains("stage-report.json"));
+        assert!(source.contains("write_stage_report(stage_report_path)"));
+        for stage in RUNNER_STAGE_NAMES {
+            assert!(
+                source.contains(&format!("\"{stage}\"")),
+                "missing `{stage}` stage"
+            );
+        }
+        assert!(source.contains("StageExecutionTimer stage_timer(\"import\")"));
+        assert!(source.contains("StageExecutionTimer stage_timer(\"solidify\")"));
+        assert!(source.contains("StageExecutionTimer stage_timer(\"boolean\")"));
+        assert!(source.contains("StageExecutionTimer stage_timer(\"mesh\")"));
+        assert!(source.contains("StageExecutionTimer stage_timer(\"export\")"));
+    }
+
+    #[test]
+    fn live_runner_stage_report_marks_unused_stages_skipped_when_available() {
+        let Some((root, _topology)) =
+            run_real_runner_plan_json("live-runner-stage-report", &supported_sample_plan())
+        else {
+            return;
+        };
+
+        let report = read_runner_stage_report(&root.join("bundle")).expect("stage report");
+        assert_eq!(
+            report
+                .stages
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            RUNNER_STAGE_NAMES
+        );
+        for skipped in [
+            "import", "validate", "solidify", "boolean", "cleanup", "verify",
+        ] {
+            let entry = report
+                .stages
+                .iter()
+                .find(|entry| entry.name == skipped)
+                .expect("stage");
+            assert_eq!(entry.status, "skipped");
+            assert_eq!(entry.execution_count, 0);
+            assert_eq!(entry.elapsed_ms, 0);
+        }
+        assert!(report.total_elapsed_ms > 0);
+        assert_eq!(report.stages[5].status, "executed");
+        assert_eq!(report.stages[7].status, "executed");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_runner_stage_report_observes_hybrid_boundary_when_available() {
+        let Some((root, _topology)) = run_real_runner_plan_json(
+            "live-runner-hybrid-stage-report",
+            &solidify_boolean_import_stl_parity_plan(),
+        ) else {
+            return;
+        };
+
+        let report = read_runner_stage_report(&root.join("bundle")).expect("stage report");
+        for executed in ["import", "solidify", "boolean", "mesh", "export"] {
+            let entry = report
+                .stages
+                .iter()
+                .find(|entry| entry.name == executed)
+                .expect("stage");
+            assert_eq!(entry.status, "executed", "{executed}");
+            assert!(entry.execution_count > 0, "{executed}");
+        }
+        for skipped in ["validate", "cleanup", "verify"] {
+            let entry = report
+                .stages
+                .iter()
+                .find(|entry| entry.name == skipped)
+                .expect("stage");
+            assert_eq!(entry.status, "skipped", "{skipped}");
+            assert_eq!(entry.elapsed_ms, 0, "{skipped}");
+        }
+        assert!(report.total_elapsed_ms > 0);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_runner_fillet_builds_checks_and_retries_once() {
+        let source = include_str!("../../native/direct_occt_runner.cpp");
+
+        assert!(source.contains("fillet.Build()"));
+        assert!(source.contains("fillet.IsDone()"));
+        assert!(source.contains("radius * 0.5"));
+    }
+
+    #[test]
+    fn native_runner_uses_current_occt_triangle_accessor() {
+        let source = include_str!("../../native/direct_occt_runner.cpp");
+
+        assert!(source.contains("triangulation->Triangle(triangle_index)"));
+        assert!(!source.contains("triangulation->Triangles()"));
+    }
+
+    #[test]
+    fn native_runner_keyword_allowlist_includes_path_frame() {
+        let source = include_str!("../../native/direct_occt_runner.cpp");
+
+        assert!(source.contains("op != \"draft\" && op != \"path-frame\""));
+    }
+
+    #[test]
+    fn native_runner_build_treats_occt_headers_as_system_headers() {
+        let script = include_str!("../../../scripts/build_direct_occt_runner.sh");
+
+        assert!(script.contains("-isystem\n  \"$OUT_DIR/include/opencascade\""));
+        assert!(!script.contains("-I\"$OUT_DIR/include/opencascade\""));
+    }
+
+    fn write_executable(path: &Path, contents: impl AsRef<str>) {
+        fs::write(path, contents.as_ref()).expect("write script");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1098,6 +1511,10 @@ mod tests {
             permissions.set_mode(0o755);
             fs::set_permissions(path, permissions).expect("chmod");
         }
+    }
+
+    fn fake_runner_stage_report_command() -> &'static str {
+        "printf '%s' '{\"schemaVersion\":1,\"totalElapsedMs\":0,\"stages\":[{\"name\":\"import\",\"status\":\"skipped\",\"executionCount\":0,\"elapsedMs\":0},{\"name\":\"validate\",\"status\":\"skipped\",\"executionCount\":0,\"elapsedMs\":0},{\"name\":\"solidify\",\"status\":\"skipped\",\"executionCount\":0,\"elapsedMs\":0},{\"name\":\"boolean\",\"status\":\"skipped\",\"executionCount\":0,\"elapsedMs\":0},{\"name\":\"cleanup\",\"status\":\"skipped\",\"executionCount\":0,\"elapsedMs\":0},{\"name\":\"mesh\",\"status\":\"skipped\",\"executionCount\":0,\"elapsedMs\":0},{\"name\":\"verify\",\"status\":\"skipped\",\"executionCount\":0,\"elapsedMs\":0},{\"name\":\"export\",\"status\":\"skipped\",\"executionCount\":0,\"elapsedMs\":0}]}' > \"$out/stage-report.json\"\nexit 0\n"
     }
 
     fn run_real_runner_plan_json(
@@ -1344,6 +1761,117 @@ mod tests {
             ],
             keywords: Vec::new(),
         })
+    }
+
+    fn indexed_mesh_boolean_plan(stl_path: &Path, post_boolean: bool) -> OcctPlan {
+        let mut commands = vec![
+            OcctCommand {
+                output: OcctSlot(1),
+                op: OcctOp::ImportStl,
+                args: vec![OcctArg::Text(stl_path.to_string_lossy().to_string())],
+                keywords: Vec::new(),
+            },
+            OcctCommand {
+                output: OcctSlot(2),
+                op: OcctOp::Solidify,
+                args: vec![OcctArg::Ref(OcctSlot(1))],
+                keywords: Vec::new(),
+            },
+            OcctCommand {
+                output: OcctSlot(3),
+                op: OcctOp::Cylinder,
+                args: vec![OcctArg::Number(0.5), OcctArg::Number(4.0)],
+                keywords: Vec::new(),
+            },
+            OcctCommand {
+                output: OcctSlot(4),
+                op: OcctOp::Difference,
+                args: vec![OcctArg::Ref(OcctSlot(2)), OcctArg::Ref(OcctSlot(3))],
+                keywords: Vec::new(),
+            },
+        ];
+        let root = if post_boolean {
+            commands.push(OcctCommand {
+                output: OcctSlot(5),
+                op: OcctOp::Chamfer,
+                args: vec![OcctArg::Number(0.1), OcctArg::Ref(OcctSlot(4))],
+                keywords: Vec::new(),
+            });
+            OcctSlot(5)
+        } else {
+            OcctSlot(4)
+        };
+        sample_plan_for_commands(root, commands)
+    }
+
+    fn write_indexed_cube_sidecar(stl_path: &Path) {
+        fs::write(stl_path, b"solid indexed\nendsolid indexed\n").expect("stl fixture");
+        let asset = crate::ecky_ir::mesh_asset::IndexedMeshAsset::new(
+            crate::ecky_ir::mesh_asset::MeshAssetSource::Imported,
+            vec![
+                [-1.0, -1.0, -1.0],
+                [1.0, -1.0, -1.0],
+                [1.0, 1.0, -1.0],
+                [-1.0, 1.0, -1.0],
+                [-1.0, -1.0, 1.0],
+                [1.0, -1.0, 1.0],
+                [1.0, 1.0, 1.0],
+                [-1.0, 1.0, 1.0],
+            ],
+            vec![
+                [0, 2, 1],
+                [0, 3, 2],
+                [4, 5, 6],
+                [4, 6, 7],
+                [0, 1, 5],
+                [0, 5, 4],
+                [1, 2, 6],
+                [1, 6, 5],
+                [2, 3, 7],
+                [2, 7, 6],
+                [3, 0, 4],
+                [3, 4, 7],
+            ],
+        )
+        .expect("indexed cube");
+        asset
+            .write_cache(&stl_path.with_extension("indexed-mesh.json"))
+            .expect("indexed sidecar");
+    }
+
+    #[test]
+    fn runner_plan_inlines_valid_indexed_mesh_for_root_boolean_only() {
+        let root = temp_root("indexed-mesh-runner-plan");
+        fs::create_dir_all(&root).expect("fixture dir");
+        let stl_path = root.join("island.stl");
+        write_indexed_cube_sidecar(&stl_path);
+
+        let plan = runner_plan(&indexed_mesh_boolean_plan(&stl_path, false))
+            .expect("runner plan")
+            .expect("supported plan");
+        let import = &plan.parts[0].commands[0];
+        assert_eq!(import.op, "import-indexed-mesh");
+        assert_eq!(import.args.len(), 3);
+        assert_eq!(import.args[0].kind, "list");
+        assert_eq!(import.args[1].kind, "list");
+        assert_eq!(import.args[2].kind, "text");
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn runner_plan_keeps_occt_import_when_boolean_has_post_brep_consumer() {
+        let root = temp_root("indexed-mesh-post-brep");
+        fs::create_dir_all(&root).expect("fixture dir");
+        let stl_path = root.join("island.stl");
+        write_indexed_cube_sidecar(&stl_path);
+
+        let plan = runner_plan(&indexed_mesh_boolean_plan(&stl_path, true))
+            .expect("runner plan")
+            .expect("supported plan");
+        assert_eq!(plan.parts[0].commands[0].op, "import-stl");
+
+        fs::remove_dir_all(root).expect("cleanup");
     }
 
     fn expanded_transform_plan() -> OcctPlan {
@@ -1705,6 +2233,146 @@ mod tests {
                 commands,
             }],
         }
+    }
+
+    fn compiled_plan(source: &str) -> OcctPlan {
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("compile fixture");
+        crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan fixture")
+    }
+
+    fn combine_fixture_plans(label: &str, plans: Vec<OcctPlan>) -> OcctPlan {
+        let mut parts = Vec::new();
+        for (plan_index, plan) in plans.into_iter().enumerate() {
+            for (part_index, mut part) in plan.parts.into_iter().enumerate() {
+                part.key = format!("{label}-{plan_index}-{part_index}");
+                part.label = part.key.clone();
+                parts.push(part);
+            }
+        }
+        OcctPlan {
+            parameters: Vec::new(),
+            parts,
+        }
+    }
+
+    fn primitive_profile_parity_plan() -> OcctPlan {
+        compiled_plan(
+            r#"
+            (model
+              (part torus-body (torus 6 1.5))
+              (part wedge-body (wedge 12 8 10 2 1 10 8))
+              (part ellipse-body (extrude (ellipse 4 2) 3))
+              (part slot-body (extrude (slot-overall 12 4) 3))
+              (part slot-arc-body (extrude (slot-arc 8 0 100 3) 3))
+              (part polygon-face-body
+                (extrude (make-face (polygon ((0 0) (7 0) (6 5) (1 6)))) 3))
+              (part basic-primitives
+                (compound
+                  (box 3 4 5)
+                  (translate 8 0 0 (sphere 2.5))
+                  (translate 16 0 0 (cylinder 2 5))
+                  (translate 24 0 0 (cone 2.5 1 5))))
+              (part profile-primitives
+                (compound
+                  (extrude (circle 2) 2)
+                  (translate 8 0 0 (extrude (rectangle 5 3) 2))
+                  (translate 16 0 0 (extrude (rounded-rect 5 3 0.5) 2))
+                  (translate 24 0 0
+                    (extrude
+                      (rounded-polygon ((-2 -1) (2 -1) (2 1) (-2 1)) 0.25)
+                      2))))
+            )
+            "#,
+        )
+    }
+
+    fn frame_path_parity_plan() -> OcctPlan {
+        compiled_plan(
+            r#"
+            (model
+              (part plane-location-body
+                (build
+                  (shape base (plane :origin (0 0 4) :normal (0 0 1)))
+                  (shape loc (location base))
+                  (shape peg (box 2 4 6))
+                  (shape placed (place loc peg))
+                  (result (clip-box placed :x (0 10) :y (-5 5) :z (0 12)))))
+              (part path-frame-body
+                (build
+                  (shape rail (path ((0 0 0) (6 0 8) (0 0 18))))
+                  (shape peg (cylinder 2 6))
+                  (shape end-frame (path-frame rail :at end :up (0 1 0)))
+                  (result (place end-frame peg))))
+            )
+            "#,
+        )
+    }
+
+    fn boolean_hull_parity_plan() -> OcctPlan {
+        compiled_plan(
+            r#"
+            (model
+              (part boolean-hull-body
+                (build
+                  (shape base (box 20 14 10))
+                  (shape lobe (translate 7 0 0 (sphere 7)))
+                  (shape fused (union base lobe))
+                  (shape bore (cylinder 3 16))
+                  (shape cut-body (difference fused bore))
+                  (shape overlap (intersection base lobe))
+                  (shape blended
+                    (hull (sphere 3) (translate 10 0 0 (sphere 3))))
+                  (result
+                    (compound
+                      cut-body
+                      (translate 35 0 0 overlap)
+                      (translate 55 0 0 blended)))))
+            )
+            "#,
+        )
+    }
+
+    fn helical_path_parity_plan() -> OcctPlan {
+        compiled_plan(
+            r#"
+            (model
+              (part body
+                (helical-ridge
+                  :radius 8
+                  :pitch 4
+                  :height 10
+                  :base-width 1.5
+                  :crest-width 0.8
+                  :depth 1.0)))
+            "#,
+        )
+    }
+
+    fn import_stl_parity_plan() -> OcctPlan {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vertex-genie-ecky.stl");
+        compiled_plan(&format!(
+            "(model (part imported (import-stl {:?})))",
+            fixture.to_string_lossy()
+        ))
+    }
+
+    fn solidify_import_stl_parity_plan() -> OcctPlan {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vertex-genie-ecky.stl");
+        compiled_plan(&format!(
+            "(model (part imported (solidify (import-stl {:?}))))",
+            fixture.to_string_lossy()
+        ))
+    }
+
+    fn solidify_boolean_import_stl_parity_plan() -> OcctPlan {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/vertex-genie-ecky.stl");
+        compiled_plan(&format!(
+            "(model (part imported (difference (solidify (import-stl {:?})) (cylinder 0.5 4))))",
+            fixture.to_string_lossy()
+        ))
     }
 
     fn keyword_free_plane_plan() -> OcctPlan {
@@ -2239,63 +2907,301 @@ mod tests {
         )
     }
 
+    fn runner_supported_ops() -> Vec<OcctOp> {
+        vec![
+            OcctOp::Box,
+            OcctOp::Sphere,
+            OcctOp::Cylinder,
+            OcctOp::Cone,
+            OcctOp::Torus,
+            OcctOp::Wedge,
+            OcctOp::Circle,
+            OcctOp::Ellipse,
+            OcctOp::Slot,
+            OcctOp::SlotArc,
+            OcctOp::Rectangle,
+            OcctOp::RoundedRectangle,
+            OcctOp::RoundedPolygon,
+            OcctOp::Polygon,
+            OcctOp::Profile,
+            OcctOp::MakeFace,
+            OcctOp::ImportStl,
+            OcctOp::Solidify,
+            OcctOp::Extrude,
+            OcctOp::Revolve,
+            OcctOp::Loft,
+            OcctOp::Sweep,
+            OcctOp::Twist,
+            OcctOp::Taper,
+            OcctOp::Draft,
+            OcctOp::Offset,
+            OcctOp::Path,
+            OcctOp::HelixPath,
+            OcctOp::BezierPath,
+            OcctOp::Bspline,
+            OcctOp::Plane,
+            OcctOp::Location,
+            OcctOp::PathFrame,
+            OcctOp::Place,
+            OcctOp::ClipBox,
+            OcctOp::LinearArray,
+            OcctOp::RadialArray,
+            OcctOp::GridArray,
+            OcctOp::ArcArray,
+            OcctOp::Union,
+            OcctOp::Difference,
+            OcctOp::Intersection,
+            OcctOp::Fillet,
+            OcctOp::Chamfer,
+            OcctOp::Shell,
+            OcctOp::Translate,
+            OcctOp::Rotate,
+            OcctOp::Scale,
+            OcctOp::Mirror,
+            OcctOp::Compound,
+            OcctOp::Hull,
+        ]
+    }
+
+    fn runner_parity_fixture_plans() -> Vec<(&'static str, OcctPlan)> {
+        vec![
+            ("primitives-profiles", primitive_profile_parity_plan()),
+            (
+                "surfaces",
+                combine_fixture_plans(
+                    "surface",
+                    vec![
+                        expanded_profile_surface_plan(),
+                        expanded_revolve_plan(),
+                        expanded_profile_offset_twist_plan(),
+                        keyword_profile_holes_plan(),
+                    ],
+                ),
+            ),
+            (
+                "transforms-arrays",
+                combine_fixture_plans(
+                    "transform-array",
+                    vec![expanded_transform_plan(), expanded_array_plan()],
+                ),
+            ),
+            ("frames-paths", frame_path_parity_plan()),
+            ("booleans-hull", boolean_hull_parity_plan()),
+            ("selector-fillet-all", edge_all_fillet_plan()),
+            ("selector-fillet-clause", clause_fillet_plan()),
+            ("selector-fillet-exact", exact_fillet_plan()),
+            ("selector-chamfer-all", edge_all_chamfer_plan()),
+            ("selector-chamfer-clause", clause_chamfer_plan()),
+            ("selector-chamfer-exact", exact_chamfer_plan()),
+            ("selector-shell-default", shell_plan()),
+            ("selector-shell-clause", shell_clause_plan()),
+            ("selector-shell-exact", exact_shell_plan()),
+            ("draft", draft_plan()),
+            ("draft-neutral-z", draft_neutral_z_plan()),
+            ("helix", helical_path_parity_plan()),
+            ("import-stl", import_stl_parity_plan()),
+            ("solidify-import-stl", solidify_import_stl_parity_plan()),
+        ]
+    }
+
+    #[test]
+    fn generated_source_runner_parity_matrix_covers_every_runner_supported_op() {
+        let covered = runner_parity_fixture_plans()
+            .into_iter()
+            .flat_map(|(_, plan)| {
+                plan.parts
+                    .into_iter()
+                    .flat_map(|part| part.commands.into_iter())
+                    .map(|command| runner_op_token(command.op))
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let missing = runner_supported_ops()
+            .into_iter()
+            .map(runner_op_token)
+            .filter(|op| !covered.contains(op))
+            .collect::<Vec<_>>();
+
+        assert!(
+            missing.is_empty(),
+            "runner-supported ops missing generated-source A/B fixtures: {}",
+            missing.join(", ")
+        );
+    }
+
+    fn topology_signature(path: &Path) -> Vec<(usize, usize)> {
+        let report: serde_json::Value = serde_json::from_slice(
+            &fs::read(path).unwrap_or_else(|err| panic!("read topology {path:?}: {err}")),
+        )
+        .unwrap_or_else(|err| panic!("parse topology {path:?}: {err}"));
+        report["parts"]
+            .as_array()
+            .expect("topology parts")
+            .iter()
+            .map(|part| {
+                (
+                    part["faces"].as_array().expect("topology faces").len(),
+                    part["edges"].as_array().expect("topology edges").len(),
+                )
+            })
+            .collect()
+    }
+
+    fn assert_metric_close(label: &str, metric: &str, generated: f64, runner: f64, rel: f64) {
+        let tolerance = generated.abs().max(runner.abs()).mul_add(rel, 1.0e-4);
+        assert!(
+            (generated - runner).abs() <= tolerance,
+            "{label} {metric} differs: generated={generated}, runner={runner}, tolerance={tolerance}"
+        );
+    }
+
+    fn assert_real_runner_matches_generated_source(label: &str, plan: &OcctPlan) {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root =
+            crate::ecky_cad_host::direct_occt_sdk::bundled_build123d_runtime_root_from_repo(
+                repo_root,
+            );
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout =
+            crate::ecky_cad_host::direct_occt_sdk::inspect_build123d_ocp_runtime(&runtime_root);
+        if !layout.can_compile_native_shim() {
+            return;
+        }
+
+        let root = temp_root(&format!("generated-runner-parity-{label}"));
+        let resolver = TestResolver { root: root.clone() };
+        let Some(runner_binary) = discover_direct_occt_runner_with_mode(&resolver, true) else {
+            return;
+        };
+        if !runner_binary.is_file() {
+            return;
+        }
+        assert!(
+            runner_supports_plan(plan),
+            "runner support gate for {label}: {plan:#?}"
+        );
+
+        let generated_dir = root.join("generated");
+        let runner_dir = root.join("runner");
+        let generated =
+            crate::ecky_cad_host::direct_occt_executor::export_plan_step_stl_with_params(
+                plan,
+                &crate::models::DesignParams::new(),
+                &layout,
+                &generated_dir,
+            )
+            .unwrap_or_else(|err| panic!("generated-source export failed for {label}: {err:?}"));
+        let crate::ecky_cad_host::direct_occt_sdk::NativeExportOutcome::Exported {
+            step_path: generated_step,
+            stl_path: generated_stl,
+            ..
+        } = generated
+        else {
+            panic!("generated-source export blocked for {label}");
+        };
+
+        let runner = run_plan_step_stl_with_mode(plan, &runner_dir, &resolver, true)
+            .unwrap_or_else(|err| panic!("runner export failed for {label}: {err:?}"));
+        let Some(crate::ecky_cad_host::direct_occt_sdk::NativeExportOutcome::Exported {
+            step_path: runner_step,
+            stl_path: runner_stl,
+            ..
+        }) = runner
+        else {
+            panic!("runner did not accept parity fixture {label}");
+        };
+
+        let generated_metrics =
+            crate::ecky_cad_host::native_parity_harness::stl_metrics(&generated_stl);
+        let runner_metrics = crate::ecky_cad_host::native_parity_harness::stl_metrics(&runner_stl);
+        assert_metric_close(
+            label,
+            "volume",
+            generated_metrics.volume,
+            runner_metrics.volume,
+            0.002,
+        );
+        assert_metric_close(
+            label,
+            "area",
+            generated_metrics.area,
+            runner_metrics.area,
+            0.002,
+        );
+        for axis in 0..3 {
+            assert!(
+                (generated_metrics.bbox_min[axis] - runner_metrics.bbox_min[axis]).abs() <= 0.05,
+                "{label} bbox-min-{axis} differs: generated={}, runner={}",
+                generated_metrics.bbox_min[axis],
+                runner_metrics.bbox_min[axis]
+            );
+            assert!(
+                (generated_metrics.bbox_max[axis] - runner_metrics.bbox_max[axis]).abs() <= 0.05,
+                "{label} bbox-max-{axis} differs: generated={}, runner={}",
+                generated_metrics.bbox_max[axis],
+                runner_metrics.bbox_max[axis]
+            );
+        }
+        assert_eq!(
+            runner_metrics.components, generated_metrics.components,
+            "{label} connected components differ"
+        );
+        assert_eq!(
+            crate::ecky_cad_host::native_parity_harness::ascii_stl_non_manifold_edge_count(
+                &runner_stl
+            ),
+            crate::ecky_cad_host::native_parity_harness::ascii_stl_non_manifold_edge_count(
+                &generated_stl
+            ),
+            "{label} non-manifold edge counts differ"
+        );
+        assert_eq!(
+            topology_signature(&runner_dir.join("topology.json")),
+            topology_signature(&generated_dir.join("topology.json")),
+            "{label} topology face/edge counts differ"
+        );
+        for step in [&generated_step, &runner_step] {
+            assert!(
+                fs::metadata(step).expect("STEP metadata").len() > 1024,
+                "{label} STEP too small: {step:?}"
+            );
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_generated_source_runner_parity_matrix_when_available() {
+        for (label, plan) in runner_parity_fixture_plans() {
+            assert_real_runner_matches_generated_source(label, &plan);
+        }
+    }
+
+    #[test]
+    fn live_generated_source_matches_runner_for_each_surface_result_when_available() {
+        let plan = expanded_profile_surface_plan();
+        for (label, root) in [
+            ("surface-extrude", OcctSlot(2)),
+            ("surface-taper", OcctSlot(4)),
+            ("surface-loft", OcctSlot(7)),
+            ("surface-sweep", OcctSlot(10)),
+            ("surface-bspline-extrude", OcctSlot(12)),
+        ] {
+            let mut result_plan = plan.clone();
+            result_plan.parts[0].root = root;
+            assert_real_runner_matches_generated_source(label, &result_plan);
+        }
+    }
+
     #[test]
     fn runner_support_gate_matches_proven_subset() {
-        let cases = [
-            (OcctOp::Box, true),
-            (OcctOp::Sphere, true),
-            (OcctOp::Cylinder, true),
-            (OcctOp::Cone, true),
-            (OcctOp::Torus, true),
-            (OcctOp::Wedge, true),
-            (OcctOp::Circle, true),
-            (OcctOp::Ellipse, true),
-            (OcctOp::Slot, true),
-            (OcctOp::SlotArc, true),
-            (OcctOp::Rectangle, true),
-            (OcctOp::RoundedRectangle, true),
-            (OcctOp::RoundedPolygon, true),
-            (OcctOp::Polygon, true),
-            (OcctOp::Profile, true),
-            (OcctOp::MakeFace, true),
-            (OcctOp::ImportStl, true),
-            (OcctOp::Extrude, true),
-            (OcctOp::Revolve, true),
-            (OcctOp::Loft, true),
-            (OcctOp::Sweep, true),
-            (OcctOp::Twist, true),
-            (OcctOp::Taper, true),
-            (OcctOp::Offset, true),
-            (OcctOp::Path, true),
-            (OcctOp::HelixPath, true),
-            (OcctOp::BezierPath, true),
-            (OcctOp::Bspline, true),
-            (OcctOp::Plane, true),
-            (OcctOp::Location, true),
-            (OcctOp::PathFrame, true),
-            (OcctOp::Place, true),
-            (OcctOp::ClipBox, true),
-            (OcctOp::LinearArray, true),
-            (OcctOp::RadialArray, true),
-            (OcctOp::GridArray, true),
-            (OcctOp::ArcArray, true),
-            (OcctOp::Union, true),
-            (OcctOp::Difference, true),
-            (OcctOp::Intersection, true),
-            (OcctOp::Fillet, true),
-            (OcctOp::Chamfer, true),
-            (OcctOp::Shell, true),
-            (OcctOp::Translate, true),
-            (OcctOp::Rotate, true),
-            (OcctOp::Scale, true),
-            (OcctOp::Mirror, true),
-            (OcctOp::Compound, true),
-        ];
-
-        for (op, supported) in cases {
+        for op in runner_supported_ops() {
             assert_eq!(
                 runner_op_supported(op),
-                supported,
+                true,
                 "runner support gate for {}",
                 runner_op_token(op)
             );
@@ -2391,8 +3297,9 @@ mkdir -p "$out"
 : > "$out/model.step"
 : > "$out/preview.stl"
 printf '{"parts":[{"partId":"honjo_stay_clamp_v2","label":"Honjo Stay Clamp V2","edges":[],"faces":[]}]}' > "$out/topology.json"
-exit 0
-"#,
+"#
+            .to_owned()
+                + &fake_runner_stage_report_command(),
         );
         let resolver = TestResolver { root: root.clone() };
         let layout = crate::ecky_cad_host::direct_occt_sdk::DirectOcctSdkLayout {
@@ -2418,7 +3325,7 @@ exit 0
         let crate::ecky_cad_host::direct_occt_sdk::NativeExportOutcome::Exported {
             step_path,
             stl_path,
-        ..
+            ..
         } = outcome
         else {
             panic!("expected runner export for user honjo stay clamp");
@@ -2713,8 +3620,9 @@ cp "$source_dir/model.step" "$out/model.step"
 cp "$source_dir/preview.stl" "$out/preview.stl"
 cp "$source_dir/topology.json" "$out/topology.json"
 echo "fake runner plan: $plan"
- "#,
-            source_dir.display()
+{}"#,
+            source_dir.display(),
+            fake_runner_stage_report_command()
         );
         write_executable(&runner, &runner_script);
         let resolver = TestResolver { root: root.clone() };
@@ -2725,7 +3633,7 @@ echo "fake runner plan: $plan"
         let Some(crate::ecky_cad_host::direct_occt_sdk::NativeExportOutcome::Exported {
             step_path,
             stl_path,
-        ..
+            ..
         }) = outcome
         else {
             panic!("expected runner export");
@@ -2779,8 +3687,9 @@ mkdir -p "$out"
 : > "$out/model.step"
 : > "$out/preview.stl"
 : > "$out/topology.json"
-exit 0
-"#,
+"#
+            .to_owned()
+                + &fake_runner_stage_report_command(),
         );
         let resolver = TestResolver { root: root.clone() };
 
@@ -2791,7 +3700,7 @@ exit 0
         let Some(crate::ecky_cad_host::direct_occt_sdk::NativeExportOutcome::Exported {
             step_path,
             stl_path,
-        ..
+            ..
         }) = outcome
         else {
             panic!("expected frame runner export");
@@ -2836,8 +3745,9 @@ mkdir -p "$out"
 : > "$out/model.step"
 : > "$out/preview.stl"
 printf '{"parts":[{"partId":"body","label":"Body","edges":[],"faces":[]}]}' > "$out/topology.json"
-exit 0
-"#,
+"#
+            .to_owned()
+                + &fake_runner_stage_report_command(),
         );
         let resolver = TestResolver { root: root.clone() };
 
@@ -2847,7 +3757,7 @@ exit 0
             let Some(crate::ecky_cad_host::direct_occt_sdk::NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
-            ..
+                ..
             }) = outcome
             else {
                 panic!("expected keyword runner export");
@@ -2894,8 +3804,9 @@ mkdir -p "$out"
 : > "$out/model.step"
 : > "$out/preview.stl"
 printf '{"parts":[{"partId":"body","label":"Body","edges":[],"faces":[]}]}' > "$out/topology.json"
-exit 0
-"#,
+"#
+            .to_owned()
+                + &fake_runner_stage_report_command(),
         );
         let resolver = TestResolver { root: root.clone() };
 
@@ -2915,7 +3826,7 @@ exit 0
             let Some(crate::ecky_cad_host::direct_occt_sdk::NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
-            ..
+                ..
             }) = outcome
             else {
                 panic!("expected exact selector runner export");
@@ -2980,7 +3891,7 @@ exit 7
         let Some(crate::ecky_cad_host::direct_occt_sdk::NativeExportOutcome::Exported {
             step_path,
             stl_path,
-        ..
+            ..
         }) = outcome
         else {
             panic!("expected live runner export");
@@ -3028,7 +3939,7 @@ exit 7
             let Some(crate::ecky_cad_host::direct_occt_sdk::NativeExportOutcome::Exported {
                 step_path,
                 stl_path,
-            ..
+                ..
             }) = outcome
             else {
                 panic!("expected live runner export for {label}");
@@ -3097,8 +4008,7 @@ exit 7
         .expect("compile");
         let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
 
-        let Some((root, topology)) =
-            run_real_runner_plan_json("live-runner-svg-wire-soup", &plan)
+        let Some((root, topology)) = run_real_runner_plan_json("live-runner-svg-wire-soup", &plan)
         else {
             return;
         };
@@ -3202,4 +4112,3 @@ exit 7
         let _ = fs::remove_dir_all(param_root);
     }
 }
-

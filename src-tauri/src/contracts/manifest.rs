@@ -522,6 +522,8 @@ pub struct ModelManifest {
     pub warnings: Vec<String>,
     #[serde(default = "default_manifest_enrichment_state")]
     pub enrichment_state: ManifestEnrichmentState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry_provenance: Option<super::GeometryProvenance>,
 }
 
 fn default_model_runtime_schema_version() -> u32 {

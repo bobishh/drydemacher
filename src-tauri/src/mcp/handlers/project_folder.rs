@@ -1,4 +1,7 @@
-use super::{handle_commit_preview_version, handle_macro_preview_render, now_secs, AgentContext};
+use super::{
+    handle_commit_preview_version, handle_macro_preview_render, handle_verify_generated_model,
+    now_secs, AgentContext,
+};
 use crate::db;
 use crate::mcp::contracts::{AgentIdentityOverride, MacroReplaceRequest, VersionSaveRequest};
 use crate::models::{AppError, AppResult, AppState, PathResolver};
@@ -198,7 +201,7 @@ pub async fn handle_project_folder_apply(
     })?;
     let state_before = status.state;
 
-    let preview = handle_macro_preview_render(
+    let preview = Box::pin(handle_macro_preview_render(
         state,
         app,
         MacroReplaceRequest {
@@ -213,9 +216,24 @@ pub async fn handle_project_folder_apply(
             geometry_backend: None,
         },
         ctx,
-    )
+    ))
     .await?;
-    let commit = handle_commit_preview_version(
+    let verification = Box::pin(handle_verify_generated_model(
+        state,
+        app,
+        &preview.thread_id,
+        &preview.message_id,
+        &preview.artifact_bundle.model_id,
+        "",
+    ))
+    .await?;
+    if !verification.result.passed {
+        return Err(AppError::validation(format!(
+            "Project folder `{}` preview verification failed: {}",
+            req.slug, verification.result.summary
+        )));
+    }
+    let commit = Box::pin(handle_commit_preview_version(
         state,
         app,
         VersionSaveRequest {
@@ -226,7 +244,7 @@ pub async fn handle_project_folder_apply(
             version_name: req.version_name,
         },
         ctx,
-    )
+    ))
     .await?;
 
     // Rebase the manifest onto the committed version; the file bytes we

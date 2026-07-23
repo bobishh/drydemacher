@@ -1,19 +1,22 @@
 pub mod backend_capabilities;
-pub mod poly_partition;
 mod build123d_lowering;
 pub(crate) mod edge_ops;
 mod eval_scalar;
 mod freecad_lowering;
+mod heightfield;
+pub mod mesh_asset;
+pub(crate) mod mesh_literal;
 mod mesh_ops;
 mod model;
 pub mod op_suggest;
+pub mod poly_partition;
 mod runtime;
 mod shared;
 mod sketch;
 mod syntax;
 
 use crate::contracts::{AppResult, DesignParams, ParsedParamsResult};
-use crate::ecky_core_ir::{CoreNode, CoreNodeKind, CoreOperation, CoreProgram};
+use crate::ecky_core_ir::{CoreNode, CoreNodeKind, CoreOperation, CoreProgram, CoreSurfaceOp};
 use crate::ecky_scheme::try_compile_to_core_program;
 use crate::models::ArtifactBundle;
 use crate::models::ModelManifest;
@@ -108,6 +111,18 @@ pub fn render_model_with_previous_manifest(
         return runtime::render_core_program(&program, source, parameters, app);
     }
     runtime::render_model(source, parameters, app)
+}
+
+/// Render a pre-compiled CoreProgram through the mesh renderer. Used by the
+/// hybrid dispatch to render the mesh-phase program (wall-pattern subtree only)
+/// without re-compiling from source.
+pub fn render_core_program(
+    program: &CoreProgram,
+    source_identity: &str,
+    parameters: &DesignParams,
+    app: &dyn PathResolver,
+) -> AppResult<ArtifactBundle> {
+    runtime::render_core_program(program, source_identity, parameters, app)
 }
 
 pub(crate) fn build_core_program_param_env_for_eval(
@@ -304,8 +319,10 @@ pub(crate) fn is_ecky_rust_only_cad_head(head: &str) -> bool {
 }
 
 fn is_direct_occt_required_cad_head(head: &str) -> bool {
-    matches!(head, "text" | "svg" | "import-stl" | "helical-ridge")
-        || crate::ecky_language_surface::ECKY_RUST_DIRECT_ONLY_CAD_OPS.contains(&head)
+    matches!(
+        head,
+        "text" | "svg" | "import-stl" | "helical-ridge" | "chamfer" | "fillet"
+    ) || crate::ecky_language_surface::ECKY_RUST_DIRECT_ONLY_CAD_OPS.contains(&head)
 }
 
 fn is_direct_occt_required_core_op(op: &CoreOperation) -> bool {
@@ -314,6 +331,7 @@ fn is_direct_occt_required_core_op(op: &CoreOperation) -> bool {
         CoreOperation::Primitive(crate::ecky_core_ir::CorePrimitive::Text)
             | CoreOperation::Primitive(crate::ecky_core_ir::CorePrimitive::Svg)
             | CoreOperation::Primitive(crate::ecky_core_ir::CorePrimitive::Stl)
+            | CoreOperation::Surface(CoreSurfaceOp::Chamfer | CoreSurfaceOp::Fillet)
     ) || matches!(op, CoreOperation::Custom(name)
         if name == "helical-ridge"
             || crate::ecky_language_surface::ECKY_RUST_DIRECT_ONLY_CAD_OPS.contains(&name.as_str()))

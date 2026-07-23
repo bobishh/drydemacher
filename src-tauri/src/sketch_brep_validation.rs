@@ -982,6 +982,7 @@ mod tests {
             closed: true,
             radius: None,
             topology: None,
+            provenance: None,
         }
     }
 

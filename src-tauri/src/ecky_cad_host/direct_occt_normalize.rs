@@ -1,10 +1,41 @@
 use std::collections::BTreeMap;
+use std::cell::Cell;
 use std::fs;
 
 use crate::contracts::{AppError, AppResult, DesignParams, ParamValue};
 use crate::ecky_cad_host::svg_profile::{
     extract_svg_wire_soup_profile, parse_svg_profile, SvgFillRule, SvgFitMode,
 };
+
+const DIRECT_OCCT_NORMALIZATION_STACK_SIZE: usize = 64 * 1024 * 1024;
+const MAX_DIRECT_OCCT_NORMALIZATION_DEPTH: usize = 128;
+
+thread_local! {
+    static DIRECT_OCCT_NORMALIZATION_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+struct DirectOcctNormalizationDepthGuard;
+
+impl DirectOcctNormalizationDepthGuard {
+    fn enter() -> AppResult<Self> {
+        DIRECT_OCCT_NORMALIZATION_DEPTH.with(|depth| {
+            let next = depth.get() + 1;
+            if next > MAX_DIRECT_OCCT_NORMALIZATION_DEPTH {
+                return Err(AppError::validation(format!(
+                    "Direct OCCT normalizer rejects expression nesting deeper than {MAX_DIRECT_OCCT_NORMALIZATION_DEPTH} nodes. Split the model into named bindings or simplify nested operations."
+                )));
+            }
+            depth.set(next);
+            Ok(Self)
+        })
+    }
+}
+
+impl Drop for DirectOcctNormalizationDepthGuard {
+    fn drop(&mut self) {
+        DIRECT_OCCT_NORMALIZATION_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
 use crate::ecky_core_ir::{
     CoreArrayOp, CoreBinding, CoreKeywordArg, CoreLiteral, CoreNode, CoreNodeKind, CoreOperation,
     CorePart, CorePrimitive, CoreProgram, CoreShapeBinding, CoreSymbol, CoreValueKind, NodeId,
@@ -12,6 +43,25 @@ use crate::ecky_core_ir::{
 };
 
 pub fn normalize_core_program_for_direct_occt(
+    program: &CoreProgram,
+    parameters: &DesignParams,
+) -> AppResult<CoreProgram> {
+    let program = program.clone();
+    let parameters = parameters.clone();
+    std::thread::Builder::new()
+        .name("ecky-direct-occt-normalize".to_string())
+        .stack_size(DIRECT_OCCT_NORMALIZATION_STACK_SIZE)
+        .spawn(move || normalize_core_program_for_direct_occt_inner(&program, &parameters))
+        .map_err(|err| {
+            AppError::internal(format!(
+                "Failed to spawn Direct OCCT normalization worker: {err}"
+            ))
+        })?
+        .join()
+        .map_err(|_| AppError::internal("Direct OCCT normalization worker panicked."))?
+}
+
+fn normalize_core_program_for_direct_occt_inner(
     program: &CoreProgram,
     parameters: &DesignParams,
 ) -> AppResult<CoreProgram> {
@@ -58,6 +108,7 @@ fn normalize_node_for_direct_occt(
     env: &BTreeMap<String, ParamValue>,
     next_node_id: &mut u64,
 ) -> AppResult<CoreNode> {
+    let _depth_guard = DirectOcctNormalizationDepthGuard::enter()?;
     match &node.kind {
         CoreNodeKind::Literal(_) => Ok(node.clone()),
         CoreNodeKind::Reference(_) => Ok(node.clone()),
@@ -192,13 +243,21 @@ fn normalize_node_for_direct_occt(
                 // node's id: build bindings register their value node's id, and
                 // references elsewhere (`RefNode(if_id)`) must keep resolving.
                 Ok(true) => {
-                    let branch =
-                        normalize_node_for_direct_occt(then_branch, param_names, env, next_node_id)?;
+                    let branch = normalize_node_for_direct_occt(
+                        then_branch,
+                        param_names,
+                        env,
+                        next_node_id,
+                    )?;
                     Ok(rebuild_node(node, branch.kind))
                 }
                 Ok(false) => {
-                    let branch =
-                        normalize_node_for_direct_occt(else_branch, param_names, env, next_node_id)?;
+                    let branch = normalize_node_for_direct_occt(
+                        else_branch,
+                        param_names,
+                        env,
+                        next_node_id,
+                    )?;
                     Ok(rebuild_node(node, branch.kind))
                 }
                 Err(_) => Ok(rebuild_node(
@@ -1535,11 +1594,8 @@ fn normalize_svg_node(
                 .collect::<Vec<_>>();
             // Same positional-vs-keyword split as text glyphs: executors reject
             // a positional outer mixed with a `:holes` keyword.
-            let (args, keywords) = crate::ecky_cad_host::direct_occt::profile_components(
-                outer,
-                holes,
-                next_node_id,
-            );
+            let (args, keywords) =
+                crate::ecky_cad_host::direct_occt::profile_components(outer, holes, next_node_id);
 
             Ok(rebuild_node(
                 node,
@@ -1551,8 +1607,7 @@ fn normalize_svg_node(
             ))
         }
         Err(_) => {
-            let soup =
-                extract_svg_wire_soup_profile(&svg_text, target_width, target_height, fit)?;
+            let soup = extract_svg_wire_soup_profile(&svg_text, target_width, target_height, fit)?;
             let wire_nodes = soup
                 .wires
                 .iter()
@@ -2271,5 +2326,19 @@ mod tests {
         }
 
         assert!(std::fs::remove_file(svg_path).is_ok());
+    }
+
+    #[test]
+    fn rejects_pathological_normalization_depth_before_stack_overflow() {
+        let mut body = "(box 1 1 1)".to_string();
+        for _ in 0..=MAX_DIRECT_OCCT_NORMALIZATION_DEPTH {
+            body = format!("(translate 0 0 0 {body})");
+        }
+        let program = compile(&format!("(model (part body {body}))"));
+
+        let error = normalize_core_program_for_direct_occt(&program, &Default::default())
+            .expect_err("pathological nesting must fail before the process stack guard");
+
+        assert!(error.message.contains("nesting deeper than"), "{error}");
     }
 }

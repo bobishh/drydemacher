@@ -236,8 +236,21 @@ Tasks:
   proof `live_precompiled_runner_accepts_exact_selector_plans_when_available`
   exercises `clause_fillet_plan`/`clause_chamfer_plan` through the real
   runner binary — reran green.
-- [ ] 10.9 Add generated-source vs runner parity fixtures for every remaining
-  Direct OCCT op before removing generated-source fallback. PROGRESS
+- [x] 10.9 Add generated-source vs runner parity fixtures for every remaining
+  Direct OCCT op before removing generated-source fallback. VERIFIED
+  2026-07-17: `runner_supported_ops` enumerates all 50 runner-supported
+  `OcctOp` variants; `generated_source_runner_parity_matrix_covers_every_runner_supported_op`
+  fails on any uncovered op; `live_generated_source_runner_parity_matrix_when_available`
+  executes real generated C++ and the rebuilt precompiled runner across
+  primitive/profile, surface, transform/array, frame/path, boolean/hull,
+  selector, helix, and import-STL fixtures and compares volume, area, bbox,
+  connected components, non-manifold edges, BRep face/edge counts, and STEP
+  output. The live matrix is green. Surface results also have per-result
+  isolation proof. During closure the matrix exposed and drove fixes for
+  multi-part C++ symbol collisions, mesh deflection drift, Bézier runner
+  sampling, missing sweep transition/solid healing, missing helix 3D curves,
+  path-frame keyword dispatch, and generated fillet/chamfer Build semantics.
+  HISTORICAL PROGRESS
   2026-07-06: `draft` was the only `OcctOp` variant with zero runner dispatch
   (generated-source-only, C++ `BRepOffsetAPI_DraftAngle` side-wall-face
   algorithm existed only in `direct_occt_executor.rs`'s emitted-source path).
@@ -311,10 +324,10 @@ Tasks:
 - [x] G12 Runner-first path replaces per-render generated C++ compile by
   default for runner-supported plans; generated C++ stays fallback for
   unsupported/keyword plans.
-- [ ] G13 Full Direct OCCT op set has generated-source vs runner parity proof,
-  including path/array/surface/selector-driven plans. Same remaining scope as
-  10.9: the runner-supported subset works and is proven live, but not every
-  op has a systematic generated-source-vs-runner A/B fixture.
+- [x] G13 Full Direct OCCT op set has generated-source vs runner parity proof,
+  including path/array/surface/selector-driven plans. VERIFIED 2026-07-17 by
+  the exhaustive coverage gate and green live 50-op generated-source/runner
+  A/B matrix documented in 10.9.
 - [x] G14 Runner keyword/selector plans execute without generated-source
   fallback. VERIFIED 2026-07-06 (see 11.7): re-ran the 12 live
   `live_direct_occt_runtime_applies_*_when_{sdk,runner}_ready` tests in

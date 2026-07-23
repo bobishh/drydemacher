@@ -1,9 +1,25 @@
 use crate::models::{
-    AgentOrigin, AgentScenePacket, ArtifactBundle, ControlPrimitive, ControlView,
-    CorrespondenceGraph, DesignOutput, DesignParams, FeatureGraph, MeasurementAnnotation,
-    ModelManifest, StructuralVerificationResult, TargetLeaseInfo, Thread, ThreadStatus, UiSpec,
+    AgentOrigin, AgentScenePacket, ArtifactBundle, AuthoringTargetRef, ControlPrimitive,
+    ControlView, CorrespondenceGraph, DesignOutput, DesignParams, FeatureGraph,
+    MeasurementAnnotation, ModelManifest, StructuralVerificationResult, TargetLeaseInfo, Thread,
+    ThreadStatus, UiSpec,
 };
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AuthoringTargetResolutionFailureKind {
+    NotFound,
+    Stale,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthoringTargetResolutionEvidence {
+    pub kind: AuthoringTargetResolutionFailureKind,
+    pub requested_target: AuthoringTargetRef,
+    pub resolved_target: Option<AuthoringTargetRef>,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1145,6 +1161,10 @@ pub struct ArtifactBundleDigest {
     pub has_step_export: bool,
     pub step_export_path: Option<String>,
     pub multipart: bool,
+    pub geometry_representation: Option<crate::models::GeometryRepresentation>,
+    pub faceted_step: bool,
+    pub analytic_step: bool,
+    pub source_mesh_digests: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1819,4 +1839,40 @@ pub struct SemanticTransformPreviewResponse {
     pub preview_support_status: crate::services::printability::TransformRecipeSupportStatus,
     pub apply_support_status: crate::services::printability::TransformRecipeSupportStatus,
     pub artifact_digest: ArtifactBundleDigest,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authoring_target_ref_uses_tagged_camel_case_wire_contract() {
+        let draft = AuthoringTargetRef::Draft {
+            thread_id: "thread-1".to_string(),
+            preview_id: "preview-1".to_string(),
+            session_id: "session-1".to_string(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&draft).expect("serialize draft ref"),
+            serde_json::json!({
+                "kind": "draft",
+                "threadId": "thread-1",
+                "previewId": "preview-1",
+                "sessionId": "session-1"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<AuthoringTargetRef>(serde_json::json!({
+                "kind": "savedVersion",
+                "threadId": "thread-1",
+                "messageId": "msg-1"
+            }))
+            .expect("deserialize saved ref"),
+            AuthoringTargetRef::SavedVersion {
+                thread_id: "thread-1".to_string(),
+                message_id: "msg-1".to_string(),
+            }
+        );
+    }
 }

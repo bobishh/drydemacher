@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use portable_pty::PtySize;
 use tauri::{AppHandle, Manager, State};
@@ -277,27 +277,6 @@ pub async fn resize_agent_terminal(
     state: State<'_, AppState>,
 ) -> AppResult<()> {
     resize_agent_terminal_impl(&agent_id, cols, rows, &state)
-}
-
-fn last_snapshot_path(app: &AppHandle) -> PathBuf {
-    app.path()
-        .app_config_dir()
-        .unwrap()
-        .join("last_design.json")
-}
-
-pub(crate) fn write_last_snapshot(app: &AppHandle, snapshot: Option<&LastDesignSnapshot>) {
-    let path = last_snapshot_path(app);
-    match snapshot {
-        Some(snapshot) => {
-            if let Ok(serialized) = serde_json::to_string_pretty(snapshot) {
-                let _ = fs::write(path, serialized);
-            }
-        }
-        None => {
-            let _ = fs::remove_file(path);
-        }
-    }
 }
 
 fn sanitize_attachment_file_name(name: &str) -> String {
@@ -714,24 +693,6 @@ pub async fn get_message_attachments(
     get_message_attachments_impl(&message_id, &state).await
 }
 
-pub(crate) fn build_runtime_snapshot(
-    design: Option<crate::models::DesignOutput>,
-    thread_id: Option<String>,
-    message_id: Option<String>,
-    artifact_bundle: Option<crate::models::ArtifactBundle>,
-    model_manifest: Option<crate::models::ModelManifest>,
-    selected_part_id: Option<String>,
-) -> LastDesignSnapshot {
-    LastDesignSnapshot {
-        design,
-        thread_id,
-        message_id,
-        artifact_bundle,
-        model_manifest,
-        selected_part_id,
-    }
-}
-
 async fn resolve_thread_agent_state_inputs(
     state: &AppState,
     thread_id: &str,
@@ -801,7 +762,7 @@ pub async fn save_last_design(
         let mut last = state.last_snapshot.lock().unwrap();
         *last = snapshot.clone();
     }
-    write_last_snapshot(&app, snapshot.as_ref());
+    crate::services::session::write_last_snapshot(&app, snapshot.as_ref());
     Ok(())
 }
 

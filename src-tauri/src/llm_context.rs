@@ -618,6 +618,7 @@ mod tests {
 
     fn test_manifest() -> ModelManifest {
         ModelManifest {
+            geometry_provenance: None,
             schema_version: 2,
             model_id: "model-1".to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,

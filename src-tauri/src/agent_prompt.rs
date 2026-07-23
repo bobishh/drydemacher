@@ -14,6 +14,10 @@
 use crate::ecky_language_surface::supported_surface_reference;
 use crate::models::GeometryBackend;
 
+const CANONICAL_BOOK_SOURCE: &str = include_str!("../../public/docs/ecky-ir.md");
+const AGENT_REFERENCE_START: &str = "<!-- ECKY_AGENT_REFERENCE_START -->";
+const AGENT_REFERENCE_END: &str = "<!-- ECKY_AGENT_REFERENCE_END -->";
+
 /// Upper bound for the assembled prompt. ~8K tokens ≈ 32K chars (see the change's
 /// design.md). Overflow is a signal to tighten the body, not to raise the limit.
 pub const AGENT_PROMPT_CHAR_CEILING: usize = 32_000;
@@ -41,12 +45,27 @@ everything you need to write valid source is in this prompt.
 
 /// The full self-contained language reference for `backend`.
 pub fn agent_language_reference(backend: GeometryBackend) -> String {
+    let backend_label = match backend {
+        GeometryBackend::Build123d => "build123d",
+        GeometryBackend::Freecad => "freecad",
+        GeometryBackend::EckyRust => "mesh",
+    };
     format!(
-        "{contract}\n{guide}\n\n{catalogue}",
+        "{contract}\nTarget geometryBackend: `{backend_label}`.\n\n{guide}\n\n{catalogue}",
         contract = API_OPERATING_CONTRACT,
-        guide = crate::commands::generation::ecky_source_guide_text(),
+        guide = canonical_agent_reference(),
         catalogue = op_catalogue(backend),
     )
+}
+
+/// Agent-facing language body embedded in the canonical human book source.
+/// Human renderers remove this marked projection; API and MCP prompts consume it verbatim.
+pub fn canonical_agent_reference() -> &'static str {
+    CANONICAL_BOOK_SOURCE
+        .split_once(AGENT_REFERENCE_START)
+        .and_then(|(_, tail)| tail.split_once(AGENT_REFERENCE_END))
+        .map(|(body, _)| body.trim())
+        .expect("public/docs/ecky-ir.md must contain one agent-reference projection")
 }
 
 /// Op catalogue as documentation-by-example: one worked `.ecky` snippet per form
@@ -62,6 +81,9 @@ fn op_catalogue(backend: GeometryBackend) -> String {
          a `[...]` note marks a backend restriction.\n\n```scheme\n",
     );
     for entry in &reference.entries {
+        out.push_str("; `");
+        out.push_str(&entry.name);
+        out.push_str("`\n");
         // Prefer the real example; fall back to the signature shape if absent.
         let code = if entry.example.trim().is_empty() {
             entry.signature.as_str()
@@ -124,6 +146,17 @@ mod tests {
                 prompt.contains("operating contract"),
                 "{backend:?} prompt missing the API contract"
             );
+        }
+    }
+
+    #[test]
+    fn agent_prompt_body_is_projected_verbatim_from_the_canonical_book() {
+        let body = canonical_agent_reference();
+        assert!(body.contains("`mesh` and `polyhedron`"));
+        assert!(body.contains("`heightfield`"));
+
+        for backend in backends() {
+            assert!(agent_language_reference(backend).contains(body));
         }
     }
 

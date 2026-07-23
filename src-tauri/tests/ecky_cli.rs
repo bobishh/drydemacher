@@ -88,7 +88,7 @@ fn check_reports_compile_error_on_stderr_for_invalid_source() {
         "check should fail for invalid source\nstderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("Expected a proper list for model form."),
+        stderr.contains("parse:") && stderr.contains('$'),
         "stderr should surface compile error\nstderr:\n{stderr}"
     );
 }

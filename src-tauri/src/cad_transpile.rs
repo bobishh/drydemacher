@@ -82,7 +82,10 @@ mod tests {
                 agent_language_reference(backend),
                 "{backend:?} system prompt must be the shared reference verbatim"
             );
-            assert!(user.contains(source), "{backend:?} user must contain the source");
+            assert!(
+                user.contains(source),
+                "{backend:?} user must contain the source"
+            );
             assert!(
                 user.starts_with("Translate the CAD source"),
                 "{backend:?} user must lead with the translate instruction"

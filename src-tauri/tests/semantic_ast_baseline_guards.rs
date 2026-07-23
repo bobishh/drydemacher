@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::PathBuf;
 
-use ecky_cad_lib::ecky_scheme::compiler::{compile_to_core_program, compile_to_legacy_source};
 use ecky_cad_lib::ecky_core_ir::CoreProgram;
+use ecky_cad_lib::ecky_scheme::compiler::{compile_to_core_program, compile_to_legacy_source};
 
 /// List of fixtures that are known to have round-trip issues.
 /// Each entry is (fixture_name, reason_for_failure).
@@ -55,8 +55,12 @@ fn programs_semantically_equal(a: &CoreProgram, b: &CoreProgram) -> bool {
     // Strip all span information from debug representation for comparison.
     // Spans can change without affecting semantics.
     let re = Regex::new(r"span:\s*Some\([^)]*\)").unwrap();
-    let a_repr = re.replace_all(&format!("{:?}", a), "span:Some(...)").to_string();
-    let b_repr = re.replace_all(&format!("{:?}", b), "span:Some(...)").to_string();
+    let a_repr = re
+        .replace_all(&format!("{:?}", a), "span:Some(...)")
+        .to_string();
+    let b_repr = re
+        .replace_all(&format!("{:?}", b), "span:Some(...)")
+        .to_string();
 
     // Also strip SourceFileId which changes per compilation
     let file_re = Regex::new(r"file:\s*Some\(SourceFileId\([^)]*\)\)|file:\s*None").unwrap();
@@ -116,8 +120,8 @@ fn emit_back_round_trip_all_fixtures() {
             .and_then(|s| s.to_str())
             .unwrap_or("unknown");
 
-        let source = fs::read_to_string(fixture_path)
-            .expect(&format!("read {}", fixture_path.display()));
+        let source =
+            fs::read_to_string(fixture_path).expect(&format!("read {}", fixture_path.display()));
 
         // Skip allowlisted fixtures with a message
         if allowlist.contains(fixture_name) {
@@ -129,10 +133,7 @@ fn emit_back_round_trip_all_fixtures() {
         let original_program = match compile_to_core_program(&source) {
             Ok(prog) => prog,
             Err(err) => {
-                panic!(
-                    "Failed to parse fixture {}: {}",
-                    fixture_name, err
-                );
+                panic!("Failed to parse fixture {}: {}", fixture_name, err);
             }
         };
 
@@ -163,25 +164,16 @@ fn emit_back_round_trip_all_fixtures() {
             let twice_reparsed_program = match compile_to_core_program(&emitted_twice) {
                 Ok(prog) => prog,
                 Err(err) => {
-                    panic!(
-                        "Failed to reparse 2nd emit for {}: {}",
-                        fixture_name, err
-                    );
+                    panic!("Failed to reparse 2nd emit for {}: {}", fixture_name, err);
                 }
             };
 
             // Check if second round is stable (idempotent)
             if programs_semantically_equal(&reparsed_program, &twice_reparsed_program) {
                 // Stable after normalization, this is acceptable
-                println!(
-                    "OK (semantically stable): {}",
-                    fixture_name
-                );
+                println!("OK (semantically stable): {}", fixture_name);
             } else {
-                panic!(
-                    "Round-trip not idempotent after 2 passes: {}",
-                    fixture_name
-                );
+                panic!("Round-trip not idempotent after 2 passes: {}", fixture_name);
             }
         } else {
             println!("OK (byte-stable): {}", fixture_name);
@@ -208,8 +200,8 @@ fn digest_guard_all_fixtures_compile() {
             .and_then(|s| s.to_str())
             .unwrap_or("unknown");
 
-        let source = fs::read_to_string(fixture_path)
-            .expect(&format!("read {}", fixture_path.display()));
+        let source =
+            fs::read_to_string(fixture_path).expect(&format!("read {}", fixture_path.display()));
 
         // Compile to CoreProgram (this is the "digest")
         let program = compile_to_core_program(&source)

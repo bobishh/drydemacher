@@ -1,8 +1,8 @@
 use super::{
     artifact_bundle_digest, carry_forward_semantic_manifest,
     draft_feedback_from_structural_verification, mark_live_session_busy, persist_agent_session,
-    push_mcp_profile, push_trace_event_with_conn, session_render_preview_for_request,
-    reserve_authoring_actor_revision, session_target_ref, settle_live_render_phase,
+    push_mcp_profile, push_trace_event_with_conn, reserve_authoring_actor_revision,
+    session_render_preview_for_request, session_target_ref, settle_live_render_phase,
     store_session_render_preview_at_revision, try_record_agent_error, AgentContext,
     StoreSessionRenderPreviewRequest, TraceEvent,
 };
@@ -341,6 +341,28 @@ pub(super) fn infer_macro_source_language(dialect: &MacroDialect) -> crate::mode
     }
 }
 
+fn macro_dialect_for_source_language(
+    source_language: crate::models::SourceLanguage,
+) -> MacroDialect {
+    match source_language {
+        crate::models::SourceLanguage::EckyIrV0 => MacroDialect::EckyIrV0,
+        crate::models::SourceLanguage::Build123d => MacroDialect::Build123d,
+        crate::models::SourceLanguage::LegacyPython => MacroDialect::Legacy,
+    }
+}
+
+pub(super) fn resolve_macro_replace_dialect(
+    saved_target_dialect: &MacroDialect,
+    first_version: bool,
+    configured_source_language: crate::models::SourceLanguage,
+) -> MacroDialect {
+    if first_version {
+        macro_dialect_for_source_language(configured_source_language)
+    } else {
+        saved_target_dialect.clone()
+    }
+}
+
 fn configured_authoring_context(state: &AppState) -> MacroAuthoringContext {
     let config = state.config.lock().unwrap();
     MacroAuthoringContext {
@@ -535,16 +557,17 @@ pub async fn handle_macro_preview_render(
                 AppError::validation("thread_id is required to create the first version.")
             })?;
             tracked_thread_id = Some(thread_id.clone());
+            let configured = configured_authoring_context(state);
             let stub = DesignOutput {
                 title: String::new(),
                 version_name: String::new(),
                 response: String::new(),
                 interaction_mode: InteractionMode::Design,
                 macro_code: String::new(),
-                macro_dialect: MacroDialect::Legacy,
+                macro_dialect: macro_dialect_for_source_language(configured.source_language),
                 engine_kind: crate::models::EngineKind::default(),
-                source_language: crate::models::SourceLanguage::default(),
-                geometry_backend: crate::models::GeometryBackend::default(),
+                source_language: configured.source_language,
+                geometry_backend: configured.geometry_backend,
                 ui_spec: UiSpec { fields: vec![] },
                 initial_params: std::collections::BTreeMap::new(),
                 post_processing: None,
@@ -595,10 +618,12 @@ pub async fn handle_macro_preview_render(
             },
         );
 
-        let requested_macro_dialect = req
-            .macro_dialect
-            .clone()
-            .unwrap_or_else(|| crate::contracts::infer_macro_dialect_from_code(&req.macro_code));
+        let configured_source_language = state.config.lock().unwrap().default_source_language;
+        let requested_macro_dialect = resolve_macro_replace_dialect(
+            &base_design.macro_dialect,
+            base_design.macro_code.trim().is_empty(),
+            configured_source_language,
+        );
         let is_ir = requested_macro_dialect == MacroDialect::EckyIrV0;
         let framework_parsed = if requested_macro_dialect == MacroDialect::CadFrameworkV1 {
             crate::commands::design::derive_framework_controls(&req.macro_code)?
@@ -869,7 +894,11 @@ pub async fn handle_macro_preview_render(
             macro_dialect,
             engine_kind,
             source_language: authoring_context.source_language,
-            geometry_backend: render_geometry_backend,
+            // Mesh-only Ecky operations are dispatched to the mesh renderer even
+            // when configuration requested a BRep backend. Persist the backend
+            // that actually produced this artifact so draft snapshots remain
+            // internally consistent with their bundle and manifest.
+            geometry_backend: artifact_bundle.geometry_backend,
             ui_spec: ui_spec.clone(),
             initial_params: initial_params.clone(),
             post_processing: next_post_processing,

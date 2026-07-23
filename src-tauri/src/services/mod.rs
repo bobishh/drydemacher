@@ -5,6 +5,7 @@ pub mod design;
 pub mod history;
 pub mod printability;
 pub mod render;
+pub mod render_snapshot;
 pub mod session;
 pub mod sketch_preview_draft;
 pub mod structural_verification;

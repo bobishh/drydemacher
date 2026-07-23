@@ -447,7 +447,10 @@ fn validate_source_budget_before_steel(source: &str) -> CoreResult<()> {
                 if depth == 0 {
                     return Err(CompilerError::new(
                         CompilerErrorKind::Parse,
-                        format!("Unexpected `)` at byte {offset} (line {}).", byte_to_line(source, offset)),
+                        format!(
+                            "Unexpected `)` at byte {offset} (line {}).",
+                            byte_to_line(source, offset)
+                        ),
                     ));
                 }
                 depth -= 1;
@@ -476,7 +479,84 @@ fn validate_source_budget_before_steel(source: &str) -> CoreResult<()> {
         ));
     }
 
+    let forms = Parser::parse_without_lowering(source)
+        .map_err(|err| compiler_error(CompilerErrorKind::Parse, err))?;
+    validate_mesh_sequence_budgets(&forms)?;
+
     Ok(())
+}
+
+fn validate_mesh_sequence_budgets(forms: &[ExprKind]) -> CoreResult<()> {
+    for form in forms {
+        validate_mesh_sequence_budget_expr(form)?;
+    }
+    Ok(())
+}
+
+fn validate_mesh_sequence_budget_expr(expr: &ExprKind) -> CoreResult<()> {
+    match expr {
+        ExprKind::List(list) => {
+            let head = list.args.first().and_then(expr_head_name);
+            if head
+                .as_deref()
+                .is_some_and(|name| matches!(name, "mesh" | "polyhedron"))
+            {
+                let operation = head.expect("checked above");
+                let mut index = 1usize;
+                while index + 1 < list.args.len() {
+                    if let Some(keyword) = instantiation_keyword_name(&list.args[index]) {
+                        let limit = match keyword.as_str() {
+                            "vertices" => crate::ecky_ir::mesh_literal::MAX_MESH_LITERAL_VERTICES,
+                            "triangles" => crate::ecky_ir::mesh_literal::MAX_MESH_LITERAL_TRIANGLES,
+                            _ => {
+                                index += 2;
+                                continue;
+                            }
+                        };
+                        if let Some(observed) = static_mesh_sequence_length(&list.args[index + 1]) {
+                            if observed > limit {
+                                return Err(source_budget_error(format!(
+                                    "`{operation}` {keyword} count {observed} exceeds allowed count {limit} before Steel lowering."
+                                )));
+                            }
+                        }
+                        index += 2;
+                        continue;
+                    }
+                    index += 1;
+                }
+            }
+            for item in &list.args {
+                validate_mesh_sequence_budget_expr(item)?;
+            }
+        }
+        ExprKind::Begin(begin) => validate_mesh_sequence_budgets(&begin.exprs)?,
+        ExprKind::Define(definition) => validate_mesh_sequence_budget_expr(&definition.body)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn static_mesh_sequence_length(expr: &ExprKind) -> Option<usize> {
+    let items = expr_list_items(expr, "mesh sequence").ok()?;
+    let head = items.first().and_then(expr_head_name);
+    match head.as_deref() {
+        Some("map") if items.len() >= 3 => static_mesh_sequence_length(&items[2]),
+        Some("reverse") if items.len() == 2 => static_mesh_sequence_length(&items[1]),
+        Some("append") => items
+            .iter()
+            .skip(1)
+            .map(static_mesh_sequence_length)
+            .try_fold(0usize, |total, count| total.checked_add(count?)),
+        Some("range") if items.len() == 3 => {
+            let start = parse_integer_literal(&items[1], "mesh range start").ok()?;
+            let end = parse_integer_literal(&items[2], "mesh range end").ok()?;
+            usize::try_from((end - start).max(0)).ok()
+        }
+        Some("list") => Some(items.len().saturating_sub(1)),
+        Some(_) => None,
+        None => Some(items.len()),
+    }
 }
 
 fn byte_to_line(source: &str, byte_offset: usize) -> usize {
@@ -488,7 +568,9 @@ fn byte_to_line(source: &str, byte_offset: usize) -> usize {
 }
 
 fn source_line_at(source: &str, byte_offset: usize) -> String {
-    let start = source[..byte_offset.min(source.len())].rfind('\n').map_or(0, |p| p + 1);
+    let start = source[..byte_offset.min(source.len())]
+        .rfind('\n')
+        .map_or(0, |p| p + 1);
     let end = source[byte_offset.min(source.len())..]
         .find('\n')
         .map_or(source.len(), |p| byte_offset + p);
@@ -6905,6 +6987,7 @@ fn core_value_kind_label(kind: CoreValueKind) -> &'static str {
         CoreValueKind::Sketch => "sketch",
         CoreValueKind::Path => "path",
         CoreValueKind::Frame => "frame",
+        CoreValueKind::Mesh => "mesh",
         CoreValueKind::Compound => "compound",
         CoreValueKind::Solid => "solid",
     }
@@ -8268,7 +8351,9 @@ fn parse_node(
                                                 value.clone(),
                                                 selector,
                                             ),
-                                            None => CoreKeywordArg::expr(keyword_name.clone(), value),
+                                            None => {
+                                                CoreKeywordArg::expr(keyword_name.clone(), value)
+                                            }
                                         },
                                     );
                                     index += 2;
@@ -8717,12 +8802,33 @@ fn infer_value_kind(name: &str) -> CoreValueKind {
         | "logistic-bifurcation-points"
         | "henon-points" => CoreValueKind::List,
         "jitter2" | "superellipse-point" => CoreValueKind::Point2,
-        "circle" | "ellipse" | "ring" | "rectangle" | "rounded-rect" | "rounded_rect" | "rounded-polygon"
-        | "rounded_polygon" | "regular-polygon" | "regular_polygon" | "trapezoid"
-        | "slot-overall" | "slot_overall" | "slot-center-to-center" | "slot_center_to_center"
-        | "slot-center-point" | "slot_center_point" | "slot-arc" | "slot_arc"
-        | "polygon" | "profile"
-        | "make-face" | "text" | "svg" | "offset" | "offset-rounded" => CoreValueKind::Sketch,
+        "mesh" => CoreValueKind::Mesh,
+        "circle"
+        | "ellipse"
+        | "ring"
+        | "rectangle"
+        | "rounded-rect"
+        | "rounded_rect"
+        | "rounded-polygon"
+        | "rounded_polygon"
+        | "regular-polygon"
+        | "regular_polygon"
+        | "trapezoid"
+        | "slot-overall"
+        | "slot_overall"
+        | "slot-center-to-center"
+        | "slot_center_to_center"
+        | "slot-center-point"
+        | "slot_center_point"
+        | "slot-arc"
+        | "slot_arc"
+        | "polygon"
+        | "profile"
+        | "make-face"
+        | "text"
+        | "svg"
+        | "offset"
+        | "offset-rounded" => CoreValueKind::Sketch,
         "bezier-path" | "path" | "polyline" => CoreValueKind::Path,
         "bspline" => CoreValueKind::Sketch,
         "plane" | "location" | "path-frame" => CoreValueKind::Frame,
@@ -12325,37 +12431,60 @@ mod tests {
                 // Extract top-level clause heads from both source and re-emitted
                 let extract_clause_heads = |text: &str| -> Vec<String> {
                     let mut heads = Vec::new();
+                    let Some(model_start) = text.find("(model") else {
+                        return heads;
+                    };
                     let mut depth = 0;
-                    let mut current_word = String::new();
-                    let mut in_word = false;
-
-                    for ch in text.chars() {
-                        match ch {
+                    let mut in_string = false;
+                    let mut escaped = false;
+                    let mut in_comment = false;
+                    let chars = text[model_start..].char_indices().collect::<Vec<_>>();
+                    for (index, (_, ch)) in chars.iter().enumerate() {
+                        if in_comment {
+                            if *ch == '\n' {
+                                in_comment = false;
+                            }
+                            continue;
+                        }
+                        if in_string {
+                            if escaped {
+                                escaped = false;
+                            } else if *ch == '\\' {
+                                escaped = true;
+                            } else if *ch == '"' {
+                                in_string = false;
+                            }
+                            continue;
+                        }
+                        match *ch {
+                            ';' => in_comment = true,
+                            '"' => in_string = true,
                             '(' => {
+                                if depth == 1 {
+                                    let head = chars[index + 1..]
+                                        .iter()
+                                        .skip_while(|(_, ch)| ch.is_whitespace())
+                                        .map(|(_, ch)| *ch)
+                                        .take_while(|ch| {
+                                            !ch.is_whitespace() && *ch != '(' && *ch != ')'
+                                        })
+                                        .collect::<String>();
+                                    if matches!(
+                                        head.as_str(),
+                                        "params" | "part" | "feature" | "verify" | "meta"
+                                    ) {
+                                        heads.push(head);
+                                    }
+                                }
                                 depth += 1;
-                                in_word = false;
-                                current_word.clear();
                             }
                             ')' => {
-                                if depth == 2 && !current_word.is_empty() {
-                                    heads.push(current_word.clone());
-                                }
                                 depth -= 1;
-                                current_word.clear();
-                                in_word = false;
-                            }
-                            ' ' | '\t' | '\n' | '\r' => {
-                                in_word = false;
-                            }
-                            _ => {
-                                if depth == 2 {
-                                    if !in_word {
-                                        in_word = true;
-                                        current_word.clear();
-                                    }
-                                    current_word.push(ch);
+                                if depth == 0 {
+                                    break;
                                 }
                             }
+                            _ => {}
                         }
                     }
                     heads
@@ -12662,6 +12791,129 @@ mod tests {
 
         assert_eq!(program.parts.len(), 1);
     }
+
+    #[test]
+    fn polyhedron_compiles_as_typed_custom_solid_with_mesh_keywords() {
+        let source = r#"(model
+          (part tetra
+            (polyhedron
+              :vertices ((0 0 0) (10 0 0) (0 10 0) (0 0 10))
+              :triangles ((0 2 1) (0 1 3) (1 2 3) (2 0 3)))))"#;
+        let program = compile_to_core_program(source).expect("polyhedron compile");
+        let CoreNodeKind::Call { op, keywords, .. } = &program.parts[0].root.kind else {
+            panic!("expected polyhedron call");
+        };
+        assert!(matches!(op, CoreOperation::Custom(name) if name == "polyhedron"));
+        assert_eq!(program.parts[0].root.value_kind, CoreValueKind::Solid);
+        assert_eq!(
+            keywords
+                .iter()
+                .map(|keyword| keyword.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["vertices", "triangles"]
+        );
+        assert!(program.parts[0].root.span.is_some(), "root span required");
+    }
+
+    #[test]
+    fn mesh_literal_requires_vertices_and_triangles_during_compile_validation() {
+        let err = compile_to_core_program(
+            r#"(model (part open (mesh :vertices ((0 0 0) (1 0 0) (0 1 0)))))"#,
+        )
+        .expect_err("missing triangles must fail before render");
+        let message = err.to_string();
+        assert!(message.contains("mesh"), "{message}");
+        assert!(message.contains(":triangles"), "{message}");
+    }
+
+    #[test]
+    fn open_mesh_compiles_as_mesh_kind_not_solid() {
+        let program = compile_to_core_program(
+            r#"(model (part open (mesh :vertices ((0 0 0) (1 0 0) (0 1 0)) :triangles ((0 1 2)))))"#,
+        )
+        .expect("open mesh compile");
+        assert_eq!(program.parts[0].root.value_kind, CoreValueKind::Mesh);
+    }
+
+    #[test]
+    fn mesh_literal_requires_point3_vertices_during_compile_validation() {
+        let err = compile_to_core_program(
+            r#"(model (part bad (mesh :vertices ((0 0) (1 0 0) (0 1 0)) :triangles ((0 1 2)))))"#,
+        )
+        .expect_err("2D vertex must fail before render");
+        let message = err.to_string();
+        assert!(message.contains("vertices"), "{message}");
+        assert!(message.contains("3D point"), "{message}");
+    }
+
+    #[test]
+    fn mesh_literal_rejects_non_integer_triangle_index_during_compile_validation() {
+        let err = compile_to_core_program(
+            r#"(model (part bad (mesh :vertices ((0 0 0) (1 0 0) (0 1 0)) :triangles ((0 1 1.5)))))"#,
+        )
+        .expect_err("fractional index must fail before render");
+        let message = err.to_string();
+        assert!(message.contains("triangle 0"), "{message}");
+        assert!(message.contains("integer"), "{message}");
+    }
+
+    #[test]
+    fn mesh_literal_rejects_out_of_range_index_during_compile_validation() {
+        let err = compile_to_core_program(
+            r#"(model (part bad (mesh :vertices ((0 0 0) (1 0 0) (0 1 0)) :triangles ((0 1 3)))))"#,
+        )
+        .expect_err("out-of-range index must fail before render");
+        let message = err.to_string();
+        assert!(message.contains("triangle 0"), "{message}");
+        assert!(message.contains("index 3"), "{message}");
+        assert!(message.contains("3 vertices"), "{message}");
+    }
+
+    #[test]
+    fn heightfield_rejects_non_positive_dimensions_during_compile_validation() {
+        let err = compile_to_core_program(
+            r#"(model (part bad (heightfield "/tmp/map.png" :width 0 :depth 20 :relief-height 4 :base-thickness 1 :invert #f)))"#,
+        )
+        .expect_err("zero width must fail before image decode");
+        let message = err.to_string();
+        assert!(message.contains("heightfield"), "{message}");
+        assert!(message.contains(":width"), "{message}");
+        assert!(message.contains("greater than zero"), "{message}");
+    }
+
+    #[test]
+    fn heightfield_image_parameter_compiles_with_typed_dimensions_and_span() {
+        let program = compile_to_core_program(
+            r#"(model
+              (params (image heightmap "" :label "Height map"))
+              (part relief
+                (heightfield heightmap
+                  :width 100 :depth 70 :relief-height 4 :base-thickness 1.2 :invert #f)))"#,
+        )
+        .expect("typed heightfield compile");
+        let root = &program.parts[0].root;
+        let CoreNodeKind::Call { op, args, keywords } = &root.kind else {
+            panic!("expected heightfield call");
+        };
+        assert!(matches!(op, CoreOperation::Custom(name) if name == "heightfield"));
+        assert_eq!(root.value_kind, CoreValueKind::Solid);
+        assert_eq!(args.len(), 1);
+        assert_eq!(keywords.len(), 5);
+        assert!(root.span.is_some());
+    }
+
+    #[test]
+    fn procedural_mesh_budget_rejects_before_steel_expansion() {
+        let source = r#"(model
+          (part too-large
+            (mesh
+              :vertices
+                (map (lambda (i) (list i 0 0)) (range 0 100001))
+              :triangles ((0 1 2)))))"#;
+        let err = compile_to_core_program(source).expect_err("oversized range must reject");
+        assert_eq!(err.kind, CompilerErrorKind::UnsupportedFeature);
+        assert!(err.message.contains("vertices count 100001"), "{err}");
+        assert!(err.message.contains("allowed count 100000"), "{err}");
+        assert!(err.message.contains("before Steel lowering"), "{err}");
+    }
 }
-
-

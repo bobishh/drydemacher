@@ -1,4 +1,4 @@
-
+use super::render_preview::resolve_macro_replace_dialect;
 use super::*;
 use crate::contracts::{
     AppErrorCode, Config, ControlPrimitiveKind, ControlRelationMode, ControlViewScope,
@@ -186,7 +186,10 @@ fn first_version_authoring_context_uses_config_defaults_for_new_thread() {
         base.source_language,
         crate::models::SourceLanguage::EckyIrV0
     );
-    assert_eq!(base.geometry_backend, crate::models::GeometryBackend::EckyRust);
+    assert_eq!(
+        base.geometry_backend,
+        crate::models::GeometryBackend::EckyRust
+    );
 
     // Explicit per-render request still wins.
     let base_explicit = first_version_authoring_context(
@@ -218,7 +221,10 @@ fn first_version_authoring_context_rejects_raw_freecad_by_policy() {
         base.source_language,
         crate::models::SourceLanguage::EckyIrV0
     );
-    assert_eq!(base.geometry_backend, crate::models::GeometryBackend::EckyRust);
+    assert_eq!(
+        base.geometry_backend,
+        crate::models::GeometryBackend::EckyRust
+    );
 
     let err = resolve_macro_authoring_context(
         base.source_language,
@@ -231,6 +237,28 @@ fn first_version_authoring_context_rejects_raw_freecad_by_policy() {
 
     assert_eq!(err.code, AppErrorCode::Validation);
     assert!(err.message.contains("source language"));
+}
+
+#[test]
+fn macro_replace_dialect_uses_saved_target_config_without_content_fallback() {
+    let resolved = resolve_macro_replace_dialect(
+        &MacroDialect::EckyIrV0,
+        false,
+        crate::models::SourceLanguage::LegacyPython,
+    );
+
+    assert_eq!(resolved, MacroDialect::EckyIrV0);
+}
+
+#[test]
+fn first_macro_replace_dialect_uses_global_config_without_content_fallback() {
+    let resolved = resolve_macro_replace_dialect(
+        &MacroDialect::Legacy,
+        true,
+        crate::models::SourceLanguage::EckyIrV0,
+    );
+
+    assert_eq!(resolved, MacroDialect::EckyIrV0);
 }
 
 #[test]
@@ -278,8 +306,8 @@ fn ecky_geometry_backend_follows_global_config_over_version() {
         crate::models::SourceLanguage::EckyIrV0,
         crate::models::GeometryBackend::Build123d, // version's stored backend
         &MacroDialect::EckyIrV0,
-        None,                                       // no explicit override
-        crate::models::GeometryBackend::EckyRust,   // config default
+        None,                                     // no explicit override
+        crate::models::GeometryBackend::EckyRust, // config default
     )
     .expect("ecky source resolves a backend");
     assert_eq!(
@@ -367,6 +395,7 @@ fn sample_design(title: &str, version_name: &str, macro_code: &str) -> DesignOut
 
 fn sample_bundle(model_id: &str, preview_name: &str) -> ArtifactBundle {
     ArtifactBundle {
+        geometry_provenance: None,
         schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind: ModelSourceKind::Generated,
@@ -390,6 +419,7 @@ fn sample_bundle(model_id: &str, preview_name: &str) -> ArtifactBundle {
 
 fn sample_manifest(model_id: &str) -> ModelManifest {
     ModelManifest {
+        geometry_provenance: None,
         schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind: ModelSourceKind::Generated,
@@ -552,6 +582,7 @@ async fn seed_ecky_verify_target(
     bundle.preview_stl_path = preview_stl_path.display().to_string();
     if include_step_export {
         bundle.export_artifacts.push(crate::models::ExportArtifact {
+            geometry_provenance: None,
             label: "STEP".to_string(),
             format: "step".to_string(),
             path: format!("/tmp/{model_id}.step"),
@@ -727,6 +758,7 @@ async fn seed_target_with_macro(
     base_bundle
         .export_artifacts
         .push(crate::models::ExportArtifact {
+            geometry_provenance: None,
             label: "STEP".to_string(),
             format: "step".to_string(),
             path: "/tmp/model-base.step".to_string(),
@@ -1045,6 +1077,7 @@ async fn request_user_prompt_target_does_not_fall_back_to_current_snapshot() {
             artifact_bundle: Some(sample_bundle("model-base", "base.stl")),
             model_manifest: None,
             selected_part_id: None,
+            target_ref: None,
         });
     }
 
@@ -1286,6 +1319,7 @@ async fn passive_session_log_in_allows_no_thread_target_without_snapshot_fallbac
             artifact_bundle: Some(sample_bundle("model-base", "base.stl")),
             model_manifest: None,
             selected_part_id: None,
+            target_ref: None,
         });
     }
 
@@ -1355,6 +1389,7 @@ async fn managed_session_log_in_keeps_runtime_thread_without_snapshot_message_fa
             artifact_bundle: Some(sample_bundle("model-base", "base.stl")),
             model_manifest: None,
             selected_part_id: None,
+            target_ref: None,
         });
     }
 
@@ -1939,9 +1974,68 @@ fn artifact_bundle_digest_reports_topology_target_counts() {
 }
 
 #[test]
+fn artifact_bundle_digest_marks_polyhedral_step_faceted_not_analytic() {
+    let mut bundle = sample_bundle("model-faceted-step", "faceted.stl");
+    let provenance = crate::models::GeometryProvenance {
+        representation: crate::models::GeometryRepresentation::FacetedPolyBrep,
+        source_mesh_digests: vec!["sha256:mesh-source".to_string()],
+        closed: Some(true),
+        boundary_or_non_manifold_edge_count: Some(0),
+    };
+    bundle.geometry_provenance = Some(provenance.clone());
+    bundle.export_artifacts.push(crate::models::ExportArtifact {
+        geometry_provenance: Some(provenance),
+        label: "STEP (faceted poly-BRep)".to_string(),
+        format: "step".to_string(),
+        path: "/tmp/model-faceted-step.step".to_string(),
+        role: "cad-exchange".to_string(),
+    });
+
+    let digest = artifact_bundle_digest(&bundle);
+
+    assert_eq!(
+        digest.geometry_representation,
+        Some(crate::models::GeometryRepresentation::FacetedPolyBrep)
+    );
+    assert!(digest.faceted_step);
+    assert!(!digest.analytic_step);
+    assert_eq!(digest.source_mesh_digests, vec!["sha256:mesh-source"]);
+}
+
+#[test]
+fn artifact_bundle_digest_marks_direct_occt_step_analytic() {
+    let mut bundle = sample_bundle("model-analytic-step", "analytic.stl");
+    let provenance = crate::models::GeometryProvenance {
+        representation: crate::models::GeometryRepresentation::AnalyticBrep,
+        source_mesh_digests: Vec::new(),
+        closed: None,
+        boundary_or_non_manifold_edge_count: None,
+    };
+    bundle.geometry_provenance = Some(provenance.clone());
+    bundle.export_artifacts.push(crate::models::ExportArtifact {
+        geometry_provenance: Some(provenance),
+        label: "STEP".to_string(),
+        format: "step".to_string(),
+        path: "/tmp/model-analytic-step.step".to_string(),
+        role: "cad-exchange".to_string(),
+    });
+
+    let digest = artifact_bundle_digest(&bundle);
+
+    assert_eq!(
+        digest.geometry_representation,
+        Some(crate::models::GeometryRepresentation::AnalyticBrep)
+    );
+    assert!(digest.analytic_step);
+    assert!(!digest.faceted_step);
+    assert!(digest.source_mesh_digests.is_empty());
+}
+
+#[test]
 fn render_mutation_responses_include_artifact_digest_for_export_truth() {
     let mut bundle = sample_bundle("model-render", "render.stl");
     bundle.export_artifacts.push(crate::models::ExportArtifact {
+        geometry_provenance: None,
         label: "STEP".to_string(),
         format: "step".to_string(),
         path: "/tmp/model-render.step".to_string(),
@@ -4283,6 +4377,22 @@ async fn given_film_coupon_fixture_when_film_gap_patch_preview_then_commit_retur
         preview.artifact_bundle.content_hash
     );
 
+    let verification = handle_verify_generated_model(
+        &state,
+        &resolver,
+        &preview.thread_id,
+        &preview.message_id,
+        &preview.artifact_bundle.model_id,
+        "",
+    )
+    .await
+    .expect("verify film gap preview before commit");
+    assert!(
+        verification.result.passed,
+        "{}",
+        verification.result.summary
+    );
+
     let commit = handle_commit_preview_version(
         &state,
         &resolver,
@@ -4555,6 +4665,177 @@ async fn given_macro_preview_adds_first_params_to_existing_target_then_new_macro
         preview.initial_params.get("height"),
         Some(&ParamValue::Number(7.0))
     );
+}
+
+#[tokio::test]
+async fn macro_preview_uses_saved_ecky_dialect_when_request_omits_it() {
+    let source = "(model (part body (box 1 2 3)))";
+    let (state, resolver) =
+        seed_target_with_macro("Top-level helper", "V-top-level-helper", source).await;
+    let edited = r#"(define (scaled-box width)
+  (box width width 4))
+
+(model
+  (params
+    (number width 12 :label "Width" :min 5 :max 20 :step 1))
+  (part body
+    (scaled-box width)))"#;
+
+    let preview = handle_macro_preview_render(
+        &state,
+        &resolver,
+        MacroReplaceRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some("thread-1".to_string()),
+            message_id: Some("msg-1".to_string()),
+            macro_code: edited.to_string(),
+            macro_dialect: None,
+            ui_spec: None,
+            parameters: None,
+            post_processing: None,
+            geometry_backend: None,
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("top-level helper preview");
+
+    assert_eq!(
+        preview.initial_params.get("width"),
+        Some(&ParamValue::Number(12.0))
+    );
+    assert_eq!(
+        preview.artifact_bundle.source_language,
+        crate::models::SourceLanguage::EckyIrV0
+    );
+}
+
+#[tokio::test]
+async fn bounded_polyhedron_mcp_inspect_validate_preview_verify_commit_smoke() {
+    let source = r#"(model
+  (params
+    (number size 1 :label "Scale" :min 0.5 :max 4 :step 0.5))
+  (verify
+    (tag mesh_clean)
+    (metric bad_edges (stl non-manifold-edge-count))
+    (expect bad_edges (= 0)))
+  (part body
+    (scale size size size
+      (polyhedron
+        :vertices ((0 0 0) (10 0 0) (0 10 0) (0 0 10))
+        :triangles ((0 2 1) (0 1 3) (1 2 3) (2 0 3))))))"#;
+    let (state, resolver) = seed_target_with_macro("Polyhedron", "V-base", source).await;
+    state.config.lock().unwrap().mcp.ecky_ast_authoring = true;
+
+    let inspect = handle_target_detail_get(
+        &state,
+        &resolver,
+        TargetDetailRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some("thread-1".to_string()),
+            message_id: Some("msg-1".to_string()),
+            section: TargetDetailSection::ShapeGraph,
+            shape_graph_filters: None,
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("inspect shape graph");
+    assert_eq!(inspect.section, TargetDetailSection::ShapeGraph);
+
+    let path = "/params/size";
+    let source_digest = crate::mcp::macro_buffer::source_digest(source);
+    let expected_node_digest = source_edit_digest(source, path);
+    let replacement = "(number size 2 :label \"Scale\" :min 0.5 :max 4 :step 0.5)".to_string();
+    let validate = handle_ecky_ast_patch_validate(
+        &state,
+        &resolver,
+        EckyAstPatchValidateRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some("thread-1".to_string()),
+            message_id: Some("msg-1".to_string()),
+            operation: EckyAstEditOperation::Replace,
+            source_digest: source_digest.clone(),
+            stable_node_key: None,
+            path: Some(path.to_string()),
+            expected_node_digest: expected_node_digest.clone(),
+            replacement_source: Some(replacement.clone()),
+            new_name: None,
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("validate bounded patch");
+    assert_eq!(validate.status, "valid");
+
+    let preview = handle_ecky_ast_replace_and_render(
+        &state,
+        &resolver,
+        EckyAstReplaceAndRenderRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some("thread-1".to_string()),
+            message_id: Some("msg-1".to_string()),
+            operation: EckyAstEditOperation::Replace,
+            source_digest,
+            stable_node_key: None,
+            path: Some(path.to_string()),
+            expected_node_digest,
+            replacement_source: Some(replacement),
+            new_name: None,
+            parameters: None,
+            post_processing: None,
+            geometry_backend: None,
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("preview bounded polyhedron");
+    assert_eq!(
+        preview
+            .artifact_bundle
+            .geometry_provenance
+            .as_ref()
+            .map(|value| &value.representation),
+        Some(&crate::models::GeometryRepresentation::MeshNative)
+    );
+
+    let verification = handle_verify_generated_model(
+        &state,
+        &resolver,
+        &preview.thread_id,
+        &preview.message_id,
+        &preview.artifact_bundle.model_id,
+        "",
+    )
+    .await
+    .expect("verify preview");
+    assert!(
+        verification.result.passed,
+        "{}",
+        verification.result.summary
+    );
+    assert!(verification
+        .result
+        .authored_verify_checks
+        .iter()
+        .any(|check| check.tag == "mesh_clean"
+            && check.status == crate::contracts::AuthoredVerifyCheckStatus::Passed));
+
+    let commit = handle_commit_preview_version(
+        &state,
+        &resolver,
+        VersionSaveRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some(preview.thread_id.clone()),
+            message_id: Some(preview.message_id.clone()),
+            title: Some("Polyhedron".to_string()),
+            version_name: Some("V-verified".to_string()),
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("commit verified preview");
+    assert_eq!(commit.model_id, preview.artifact_bundle.model_id);
 }
 
 #[tokio::test]
@@ -4887,10 +5168,7 @@ async fn given_render_lowering_failures_when_macro_preview_render_then_mcp_error
     assert_eq!(malformed_err.operation.as_deref(), Some("lower:build123d"));
     // The raw parser diagnostic (naming the offending `$` token) must survive
     // to the MCP error, whatever the parser's exact phrasing is.
-    assert!(
-        malformed_err.message.contains('$'),
-        "{malformed_err:?}"
-    );
+    assert!(malformed_err.message.contains('$'), "{malformed_err:?}");
     assert!(
         malformed_err
             .start_line
@@ -5365,6 +5643,7 @@ async fn artifact_manifest_get_rejects_bundle_manifest_mismatch() {
     bad_bundle
         .export_artifacts
         .push(crate::models::ExportArtifact {
+            geometry_provenance: None,
             label: "STEP".to_string(),
             format: "step".to_string(),
             path: "/tmp/model-bad.step".to_string(),
@@ -5420,6 +5699,7 @@ async fn artifact_feature_graph_get_reads_runtime_manifest_and_returns_backfille
     let model_id = "generated-feature-graph";
     let mut bundle = sample_bundle(model_id, "feature-graph.stl");
     bundle.export_artifacts.push(crate::models::ExportArtifact {
+        geometry_provenance: None,
         label: "STEP".to_string(),
         format: "step".to_string(),
         path: "/tmp/generated-feature-graph.step".to_string(),
@@ -5856,6 +6136,7 @@ async fn structural_verification_summary_includes_artifact_digest() {
     let model_id = "generated-verify";
     let mut bundle = sample_bundle(model_id, "verify.stl");
     bundle.export_artifacts.push(crate::models::ExportArtifact {
+        geometry_provenance: None,
         label: "STEP".to_string(),
         format: "step".to_string(),
         path: "/tmp/generated-verify.step".to_string(),
@@ -5867,6 +6148,7 @@ async fn structural_verification_summary_includes_artifact_digest() {
 
     let response =
         handle_structural_verification_summary(&state, &resolver, "thread-1", "msg-1", model_id)
+            .await
             .expect("verification summary");
 
     assert_eq!(response.artifact_digest.model_id, model_id);
@@ -5893,9 +6175,20 @@ async fn verify_generated_model_merges_authored_verify_failure_into_structural_r
     let model_id = "generated-authored-verify-fail";
     let (state, resolver) =
         seed_ecky_verify_target(source, model_id, "authored-verify-fail.stl", true).await;
+    {
+        let conn = state.db.lock().await;
+        let (mut saved, _) = db::get_message_output_and_thread(&conn, "msg-1")
+            .expect("saved output lookup")
+            .expect("saved output");
+        saved
+            .initial_params
+            .insert("clearance".to_string(), ParamValue::Number(15.0));
+        db::update_message_output(&conn, "msg-1", &saved).expect("saved params update");
+    }
 
     let response =
         handle_verify_generated_model(&state, &resolver, "thread-1", "msg-1", model_id, "")
+            .await
             .expect("verification response");
 
     assert!(!response.result.passed);
@@ -5938,6 +6231,10 @@ async fn verify_generated_model_merges_authored_verify_failure_into_structural_r
         .expect("verify diagnostic context");
     assert_eq!(context.part_key.as_deref(), Some("body"));
     assert_eq!(context.op_name.as_deref(), Some("verify:manifest/has-step"));
+    assert!(context
+        .resolved_params
+        .iter()
+        .any(|param| { param.key == "clearance" && param.value == ParamValue::Number(15.0) }));
     let resolved_keys = context
         .resolved_params
         .iter()
@@ -5956,6 +6253,93 @@ async fn verify_generated_model_merges_authored_verify_failure_into_structural_r
 }
 
 #[tokio::test]
+async fn verify_generated_model_uses_matching_draft_preview_params() {
+    // Given a preview whose rendered model uses a non-default clearance.
+    let source = r#"
+            (model
+              (params (number clearance 10.5))
+              (verify
+                (tag body_shell)
+                (metric check (manifest has-step))
+                (expect check (= true)))
+              (part body (box clearance 10 10)))
+        "#;
+    let model_id = "generated-draft-verify-params";
+    let (state, resolver) =
+        seed_ecky_verify_target(source, model_id, "draft-verify-params.stl", false).await;
+    let mut design = sample_design("Draft verify", "V-draft", source);
+    design.macro_dialect = MacroDialect::EckyIrV0;
+    design.engine_kind = crate::models::EngineKind::EckyIrV0;
+    design.geometry_backend = crate::models::GeometryBackend::EckyRust;
+    design.source_language = crate::models::SourceLanguage::EckyIrV0;
+    design.post_processing = None;
+    design.initial_params = BTreeMap::from([("clearance".to_string(), ParamValue::Number(25.0))]);
+    let draft = crate::models::AgentDraft {
+        preview_id: "preview-draft-verify-params".to_string(),
+        session_id: test_ctx().session_id,
+        thread_id: "thread-1".to_string(),
+        base_message_id: Some("msg-1".to_string()),
+        design_output: design,
+        artifact_bundle: crate::model_runtime::read_artifact_bundle(&resolver, model_id)
+            .expect("preview bundle"),
+        model_manifest: crate::model_runtime::read_model_manifest(&resolver, model_id)
+            .expect("preview manifest"),
+        draft_feedback: None,
+        updated_at: now_secs(),
+    };
+    {
+        let conn = state.db.lock().await;
+        db::upsert_agent_draft(&conn, &draft).expect("persist preview draft");
+    }
+
+    // When verify targets that preview.
+    let response = handle_verify_generated_model(
+        &state,
+        &resolver,
+        "thread-1",
+        &draft.preview_id,
+        model_id,
+        "",
+    )
+    .await
+    .expect("verify preview");
+
+    // Then diagnostics report the exact draft parameters, not source defaults.
+    let context = response.result.authored_verify_checks[0]
+        .diagnostic_context
+        .as_ref()
+        .expect("failed verify diagnostic context");
+    assert!(context
+        .resolved_params
+        .iter()
+        .any(|param| { param.key == "clearance" && param.value == ParamValue::Number(25.0) }));
+
+    // And a stale draft with another artifact cannot bleed its params into this model.
+    let mut stale_draft = draft;
+    stale_draft.artifact_bundle.model_id = "another-model".to_string();
+    {
+        let conn = state.db.lock().await;
+        db::upsert_agent_draft(&conn, &stale_draft).expect("replace with stale preview draft");
+    }
+    let stale_error = handle_verify_generated_model(
+        &state,
+        &resolver,
+        "thread-1",
+        &stale_draft.preview_id,
+        model_id,
+        "",
+    )
+    .await
+    .expect_err("stale preview artifact must not fall back to source defaults");
+    assert_eq!(stale_error.code, AppErrorCode::Conflict);
+    assert!(stale_error
+        .details
+        .as_deref()
+        .unwrap_or_default()
+        .contains("previewModelId=another-model"));
+}
+
+#[tokio::test]
 async fn verify_generated_model_surfaces_authored_verify_errors() {
     let source = r#"
             (model
@@ -5971,6 +6355,7 @@ async fn verify_generated_model_surfaces_authored_verify_errors() {
 
     let response =
         handle_verify_generated_model(&state, &resolver, "thread-1", "msg-1", model_id, "")
+            .await
             .expect("verification response");
 
     assert!(!response.result.passed);
@@ -5997,6 +6382,7 @@ async fn structural_verification_summary_reflects_authored_verify_failures() {
 
     let response =
         handle_structural_verification_summary(&state, &resolver, "thread-1", "msg-1", model_id)
+            .await
             .expect("verification summary");
 
     assert!(!response.passed);
@@ -6013,6 +6399,7 @@ async fn printability_analyze_reads_preview_stl_and_includes_artifact_digest() {
     let mut bundle = sample_bundle(model_id, "printability-preview.stl");
     bundle.preview_stl_path = preview_stl_path.display().to_string();
     bundle.export_artifacts.push(crate::models::ExportArtifact {
+        geometry_provenance: None,
         label: "STEP".to_string(),
         format: "step".to_string(),
         path: "/tmp/generated-printability.step".to_string(),
@@ -6891,7 +7278,10 @@ async fn given_preview_render_when_commit_runs_then_history_gets_one_version() {
         db::get_thread_messages(&conn, "thread-1").unwrap().len()
     };
     let preview_design = sample_design("Preview Pot", "", "preview_macro()");
-    let preview_bundle = sample_bundle("model-preview", "preview.stl");
+    let preview_stl_path = resolver.root.join("preview.stl");
+    write_closed_tetra_binary_stl(&preview_stl_path);
+    let mut preview_bundle = sample_bundle("model-preview", "preview.stl");
+    preview_bundle.preview_stl_path = preview_stl_path.display().to_string();
     let preview_manifest = sample_manifest("model-preview");
 
     let preview = store_session_render_preview(
@@ -6928,6 +7318,17 @@ async fn given_preview_render_when_commit_runs_then_history_gets_one_version() {
         .macro_code,
         "preview_macro()"
     );
+    let verified = handle_verify_generated_model(
+        &state,
+        &resolver,
+        &preview.thread_id,
+        &preview.preview_id,
+        &preview.artifact_bundle.model_id,
+        "",
+    )
+    .await
+    .expect("verify preview");
+    assert!(verified.result.passed, "{}", verified.result.summary);
 
     let response = handle_commit_preview_version(
         &state,
@@ -6967,7 +7368,189 @@ async fn given_preview_render_when_commit_runs_then_history_gets_one_version() {
 }
 
 #[tokio::test]
-async fn given_preview_render_when_session_memory_clears_then_commit_by_preview_id_uses_durable_draft(
+async fn given_unverified_preview_when_commit_runs_then_commit_is_rejected_without_history_write() {
+    let (state, resolver) = seed_target().await;
+    let ctx = test_ctx();
+    let initial_count = {
+        let conn = state.db.lock().await;
+        db::get_thread_messages(&conn, "thread-1").unwrap().len()
+    };
+    let preview = store_session_render_preview(
+        &state,
+        &resolver,
+        &ctx,
+        StoreSessionRenderPreviewRequest {
+            thread_id: "thread-1".to_string(),
+            base_message_id: Some("msg-1".to_string()),
+            design_output: sample_design("Unverified", "", "unverified_preview_macro()"),
+            artifact_bundle: sample_bundle("model-unverified-preview", "unverified-preview.stl"),
+            model_manifest: sample_manifest("model-unverified-preview"),
+            draft_feedback: None,
+        },
+    )
+    .await
+    .expect("store preview");
+
+    let error = handle_commit_preview_version(
+        &state,
+        &resolver,
+        VersionSaveRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some(preview.thread_id.clone()),
+            message_id: Some(preview.preview_id.clone()),
+            title: None,
+            version_name: None,
+        },
+        &ctx,
+    )
+    .await
+    .expect_err("unverified preview must not commit");
+
+    assert_eq!(error.code, AppErrorCode::Conflict);
+    assert_eq!(error.operation.as_deref(), Some("commit_preview_version"));
+    let conn = state.db.lock().await;
+    assert_eq!(
+        db::get_thread_messages(&conn, "thread-1").unwrap().len(),
+        initial_count
+    );
+}
+
+#[tokio::test]
+async fn given_green_verified_preview_after_ram_cache_loss_when_commit_runs_then_durable_record_allows_commit(
+) {
+    let (state, resolver) = seed_target().await;
+    let ctx = test_ctx();
+    let preview_stl_path = resolver.root.join("verified-preview.stl");
+    write_closed_tetra_binary_stl(&preview_stl_path);
+    let mut bundle = sample_bundle("model-verified-preview", "verified-preview.stl");
+    bundle.preview_stl_path = preview_stl_path.display().to_string();
+    let preview = store_session_render_preview(
+        &state,
+        &resolver,
+        &ctx,
+        StoreSessionRenderPreviewRequest {
+            thread_id: "thread-1".to_string(),
+            base_message_id: Some("msg-1".to_string()),
+            design_output: sample_design("Verified", "", "verified_preview_macro()"),
+            artifact_bundle: bundle,
+            model_manifest: sample_manifest("model-verified-preview"),
+            draft_feedback: None,
+        },
+    )
+    .await
+    .expect("store preview");
+
+    let verified = handle_verify_generated_model(
+        &state,
+        &resolver,
+        &preview.thread_id,
+        &preview.preview_id,
+        &preview.artifact_bundle.model_id,
+        "",
+    )
+    .await
+    .expect("verify preview");
+    assert!(verified.result.passed, "{}", verified.result.summary);
+
+    clear_session_render_preview(&ctx.session_id);
+    let committed = handle_commit_preview_version(
+        &state,
+        &resolver,
+        VersionSaveRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some(preview.thread_id.clone()),
+            message_id: Some(preview.preview_id.clone()),
+            title: None,
+            version_name: Some("V-verified-durable".to_string()),
+        },
+        &ctx,
+    )
+    .await
+    .expect("verified durable preview commits");
+
+    assert_eq!(committed.model_id, preview.artifact_bundle.model_id);
+}
+
+#[tokio::test]
+async fn given_verified_snapshot_a_when_params_change_to_snapshot_b_then_commit_b_rejects_stale_verification(
+) {
+    let (state, resolver) = seed_target().await;
+    let ctx = test_ctx();
+    let preview_stl_path = resolver.root.join("snapshot-a.stl");
+    write_closed_tetra_binary_stl(&preview_stl_path);
+    let mut first_design = sample_design("Snapshot A", "", "snapshot_macro()");
+    first_design
+        .initial_params
+        .insert("diameter".to_string(), ParamValue::Number(10.0));
+    let mut first_bundle = sample_bundle("model-snapshot", "snapshot-a.stl");
+    first_bundle.preview_stl_path = preview_stl_path.display().to_string();
+    let first = store_session_render_preview(
+        &state,
+        &resolver,
+        &ctx,
+        StoreSessionRenderPreviewRequest {
+            thread_id: "thread-1".to_string(),
+            base_message_id: Some("msg-1".to_string()),
+            design_output: first_design,
+            artifact_bundle: first_bundle,
+            model_manifest: sample_manifest("model-snapshot"),
+            draft_feedback: None,
+        },
+    )
+    .await
+    .expect("store snapshot a");
+    let verified = handle_verify_generated_model(
+        &state,
+        &resolver,
+        &first.thread_id,
+        &first.preview_id,
+        &first.artifact_bundle.model_id,
+        "",
+    )
+    .await
+    .expect("verify snapshot a");
+    assert!(verified.result.passed, "{}", verified.result.summary);
+
+    let mut second_design = first.design_output.clone();
+    second_design
+        .initial_params
+        .insert("diameter".to_string(), ParamValue::Number(25.0));
+    let second = store_session_render_preview(
+        &state,
+        &resolver,
+        &ctx,
+        StoreSessionRenderPreviewRequest {
+            thread_id: "thread-1".to_string(),
+            base_message_id: Some("msg-1".to_string()),
+            design_output: second_design,
+            artifact_bundle: first.artifact_bundle.clone(),
+            model_manifest: first.model_manifest.clone(),
+            draft_feedback: None,
+        },
+    )
+    .await
+    .expect("store snapshot b");
+
+    let error = handle_commit_preview_version(
+        &state,
+        &resolver,
+        VersionSaveRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some(second.thread_id),
+            message_id: Some(second.preview_id),
+            title: None,
+            version_name: None,
+        },
+        &ctx,
+    )
+    .await
+    .expect_err("changed parameters require a new verification");
+    assert_eq!(error.code, AppErrorCode::Conflict);
+    assert!(error.message.contains("green verification"));
+}
+
+#[tokio::test]
+async fn given_unverified_preview_after_session_memory_clears_when_commit_runs_then_commit_is_rejected(
 ) {
     let (state, resolver) = seed_target().await;
     let ctx = test_ctx();
@@ -7034,7 +7617,7 @@ async fn given_preview_render_when_session_memory_clears_then_commit_by_preview_
         "Draft failed structural verification."
     );
 
-    let response = handle_commit_preview_version(
+    let error = handle_commit_preview_version(
         &state,
         &resolver,
         VersionSaveRequest {
@@ -7047,28 +7630,52 @@ async fn given_preview_render_when_session_memory_clears_then_commit_by_preview_
         &ctx,
     )
     .await
-    .expect("commit durable preview");
+    .expect_err("unverified durable preview must not commit");
 
     let conn = state.db.lock().await;
     let messages = db::get_thread_messages(&conn, "thread-1").unwrap();
-    assert_eq!(messages.len(), initial_count + 1);
-    let committed = messages
-        .iter()
-        .find(|message| message.id == response.message_id)
-        .expect("committed message");
-    assert_eq!(
-        committed.output.as_ref().unwrap().macro_code,
-        "durable_preview_macro()"
-    );
-    assert_eq!(committed.output.as_ref().unwrap().version_name, "V-durable");
+    assert_eq!(messages.len(), initial_count);
+    assert_eq!(error.code, AppErrorCode::Conflict);
     assert!(db::get_agent_draft_for_session(&conn, &ctx.session_id)
         .unwrap()
-        .is_none());
+        .is_some());
 }
 
 #[tokio::test]
-async fn given_parallel_preview_revisions_when_older_finishes_last_then_newer_draft_remains_active(
-) {
+async fn given_draft_persistence_failure_when_preview_stored_then_ram_preview_is_not_published() {
+    let (state, resolver) = seed_target().await;
+    let ctx = test_ctx();
+
+    {
+        let conn = state.db.lock().await;
+        conn.execute_batch("DROP TABLE agent_drafts")
+            .expect("remove drafts table to force persistence failure");
+    }
+
+    let error = store_session_render_preview(
+        &state,
+        &resolver,
+        &ctx,
+        StoreSessionRenderPreviewRequest {
+            thread_id: "thread-1".to_string(),
+            base_message_id: Some("msg-1".to_string()),
+            design_output: sample_design("Failed preview", "", "failed_preview_macro()"),
+            artifact_bundle: sample_bundle("model-failed-preview", "failed-preview.stl"),
+            model_manifest: sample_manifest("model-failed-preview"),
+            draft_feedback: None,
+        },
+    )
+    .await
+    .expect_err("draft persistence failure must reject preview publication");
+
+    assert_eq!(error.code, AppErrorCode::Persistence);
+    assert!(session_render_preview_for_request(&ctx, Some("thread-1"), None).is_none());
+    assert!(state.last_snapshot.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn given_parallel_preview_revisions_when_older_finishes_last_then_newer_draft_remains_active()
+{
     let (state, resolver) = seed_target().await;
     let ctx = test_ctx();
     let older_revision = reserve_authoring_actor_revision(&ctx, "thread-1").await;
@@ -7112,12 +7719,9 @@ async fn given_parallel_preview_revisions_when_older_finishes_last_then_newer_dr
     assert_eq!(error.operation.as_deref(), Some("authoring_actor_publish"));
     assert!(error.message.contains("superseded"));
 
-    let active = session_render_preview_for_request(
-        &ctx,
-        Some("thread-1"),
-        Some(newer.preview_id.as_str()),
-    )
-    .expect("newer preview remains active");
+    let active =
+        session_render_preview_for_request(&ctx, Some("thread-1"), Some(newer.preview_id.as_str()))
+            .expect("newer preview remains active");
     assert_eq!(active.artifact_bundle.model_id, "model-newer");
 
     let conn = state.db.lock().await;
@@ -7126,6 +7730,155 @@ async fn given_parallel_preview_revisions_when_older_finishes_last_then_newer_dr
         .expect("durable newer draft");
     assert_eq!(durable.preview_id, newer.preview_id);
     assert_eq!(durable.artifact_bundle.model_id, "model-newer");
+}
+
+#[tokio::test]
+async fn given_one_session_with_two_thread_previews_when_each_is_resolved_then_neither_overwrites_the_other(
+) {
+    let (state, resolver) = seed_target().await;
+    let ctx = test_ctx();
+
+    let first = store_session_render_preview(
+        &state,
+        &resolver,
+        &ctx,
+        StoreSessionRenderPreviewRequest {
+            thread_id: "thread-1".to_string(),
+            base_message_id: Some("msg-1".to_string()),
+            design_output: sample_design("Thread one", "", "thread_one_macro()"),
+            artifact_bundle: sample_bundle("model-thread-one", "thread-one.stl"),
+            model_manifest: sample_manifest("model-thread-one"),
+            draft_feedback: None,
+        },
+    )
+    .await
+    .expect("store first preview");
+    let second = store_session_render_preview(
+        &state,
+        &resolver,
+        &ctx,
+        StoreSessionRenderPreviewRequest {
+            thread_id: "thread-2".to_string(),
+            base_message_id: Some("msg-2".to_string()),
+            design_output: sample_design("Thread two", "", "thread_two_macro()"),
+            artifact_bundle: sample_bundle("model-thread-two", "thread-two.stl"),
+            model_manifest: sample_manifest("model-thread-two"),
+            draft_feedback: None,
+        },
+    )
+    .await
+    .expect("store second preview");
+
+    assert_eq!(
+        session_render_preview_for_request(&ctx, Some("thread-1"), Some(&first.preview_id))
+            .expect("first in memory")
+            .artifact_bundle
+            .model_id,
+        "model-thread-one"
+    );
+    assert_eq!(
+        session_render_preview_for_request(&ctx, Some("thread-2"), Some(&second.preview_id))
+            .expect("second in memory")
+            .artifact_bundle
+            .model_id,
+        "model-thread-two"
+    );
+    assert!(
+        session_render_preview_for_request(&ctx, None, None).is_none(),
+        "no-thread request cannot choose between two actor drafts"
+    );
+    assert_eq!(
+        session_render_preview_for_request(&ctx, None, Some(&first.preview_id))
+            .expect("exact preview id identifies one in-memory draft")
+            .artifact_bundle
+            .model_id,
+        "model-thread-one"
+    );
+
+    clear_session_render_preview(&ctx.session_id);
+    assert!(
+        resolve_session_render_preview_for_request(&state, &ctx, None, None)
+            .await
+            .expect("resolve unscoped durable draft")
+            .is_none(),
+        "durable no-thread resolution is ambiguous too"
+    );
+    assert_eq!(
+        resolve_session_render_preview_for_request(&state, &ctx, None, Some(&first.preview_id))
+            .await
+            .expect("resolve exact durable draft")
+            .expect("exact preview id identifies one durable draft")
+            .artifact_bundle
+            .model_id,
+        "model-thread-one"
+    );
+    assert_eq!(
+        resolve_session_render_preview_for_request(
+            &state,
+            &ctx,
+            Some("thread-1"),
+            Some(&first.preview_id),
+        )
+        .await
+        .expect("resolve first durable draft")
+        .expect("first durable draft")
+        .artifact_bundle
+        .model_id,
+        "model-thread-one"
+    );
+    assert_eq!(
+        resolve_session_render_preview_for_request(
+            &state,
+            &ctx,
+            Some("thread-2"),
+            Some(&second.preview_id),
+        )
+        .await
+        .expect("resolve second durable draft")
+        .expect("second durable draft")
+        .artifact_bundle
+        .model_id,
+        "model-thread-two"
+    );
+}
+
+#[tokio::test]
+async fn given_ram_preview_diverges_from_durable_draft_when_resolved_then_durable_authority_wins() {
+    let (state, resolver) = seed_target().await;
+    let ctx = test_ctx();
+    let durable = store_session_render_preview(
+        &state,
+        &resolver,
+        &ctx,
+        StoreSessionRenderPreviewRequest {
+            thread_id: "thread-1".to_string(),
+            base_message_id: Some("msg-1".to_string()),
+            design_output: sample_design("Durable", "", "durable_macro()"),
+            artifact_bundle: sample_bundle("model-durable", "durable.stl"),
+            model_manifest: sample_manifest("model-durable"),
+            draft_feedback: None,
+        },
+    )
+    .await
+    .expect("store durable preview");
+
+    let mut stale_cache = durable.clone();
+    stale_cache.design_output.macro_code = "stale_ram_macro()".to_string();
+    session_render_previews().lock().unwrap().insert(
+        render_preview_key(&ctx.session_id, &durable.thread_id),
+        stale_cache,
+    );
+
+    let resolved = resolve_session_render_preview_for_request(
+        &state,
+        &ctx,
+        Some(&durable.thread_id),
+        Some(&durable.preview_id),
+    )
+    .await
+    .expect("resolve preview")
+    .expect("preview exists");
+    assert_eq!(resolved.design_output.macro_code, "durable_macro()");
 }
 
 #[tokio::test]
@@ -7146,9 +7899,12 @@ async fn superseded_actor_completion_does_not_mark_agent_session_failed() {
         &error,
     );
 
-    let sessions = db::get_sessions_by_ids(&conn, &[ctx.session_id.clone()])
-        .expect("agent session lookup");
-    assert!(sessions.is_empty(), "superseded work is not a session error");
+    let sessions =
+        db::get_sessions_by_ids(&conn, &[ctx.session_id.clone()]).expect("agent session lookup");
+    assert!(
+        sessions.is_empty(),
+        "superseded work is not a session error"
+    );
 }
 
 #[tokio::test]
@@ -7875,6 +8631,21 @@ async fn project_folder_apply_refuses_stale_and_conflicted_folders() {
     )
     .await
     .expect("in-app preview");
+    let verification = handle_verify_generated_model(
+        &state,
+        &resolver,
+        &preview.thread_id,
+        &preview.message_id,
+        &preview.artifact_bundle.model_id,
+        "",
+    )
+    .await
+    .expect("in-app verification");
+    assert!(
+        verification.result.passed,
+        "{}",
+        verification.result.summary
+    );
     handle_commit_preview_version(
         &state,
         &resolver,

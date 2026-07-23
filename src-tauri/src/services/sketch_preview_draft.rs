@@ -37,6 +37,7 @@ fn persist_sketch_preview_draft(
     scope_id: Option<&str>,
     draft_source: SketchDraftSource,
     artifact_bundle: ArtifactBundle,
+    sketch_document: Option<crate::models::SketchDocument>,
 ) -> AppResult<SketchPreviewDraft> {
     let draft = SketchPreviewDraft {
         scope_id: scope_id
@@ -44,6 +45,7 @@ fn persist_sketch_preview_draft(
             .or(Some(GLOBAL_SCOPE_ID.to_string())),
         draft_source,
         artifact_bundle,
+        sketch_document,
         updated_at: now_secs(),
     };
     let serialized = serde_json::to_string_pretty(&draft).map_err(|e| {
@@ -94,6 +96,7 @@ pub fn save_sketch_preview_draft(
         request.scope_id.as_deref(),
         request.draft_source,
         request.artifact_bundle,
+        request.sketch_document,
     )?;
     if request_scope != GLOBAL_SCOPE_ID {
         let global_path = sketch_preview_draft_path(app, Some(GLOBAL_SCOPE_ID));
@@ -153,7 +156,9 @@ pub fn clear_sketch_preview_draft(
 mod tests {
     use super::*;
     use crate::models::{
-        ArtifactBundle, EngineKind, GeometryBackend, MacroDialect, ModelSourceKind, SourceLanguage,
+        ArtifactBundle, EngineKind, GeometryBackend, MacroDialect, ModelSourceKind,
+        RasterTraceAssetIdentity, RasterTraceCalibration, RasterTraceProvenance, SketchDefinition,
+        SketchDocument, SketchPrimitive, SketchPrimitiveKind, SketchView, SourceLanguage,
     };
     use std::path::Path;
 
@@ -177,6 +182,7 @@ mod tests {
 
     fn test_artifact_bundle() -> ArtifactBundle {
         ArtifactBundle {
+            geometry_provenance: None,
             schema_version: 1,
             model_id: "model-1".to_string(),
             source_kind: ModelSourceKind::Generated,
@@ -223,6 +229,7 @@ mod tests {
             scope_id: Some("thread-a".to_string()),
             draft_source: test_draft_source(),
             artifact_bundle: test_artifact_bundle(),
+            sketch_document: None,
         };
 
         let saved = save_sketch_preview_draft(&resolver, request).unwrap();
@@ -274,5 +281,79 @@ mod tests {
         )
         .unwrap()
         .is_none());
+    }
+
+    #[test]
+    fn raster_trace_state_roundtrips_and_clear_keeps_external_asset() {
+        let root =
+            std::env::temp_dir().join(format!("ecky-sketch-raster-draft-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let external_asset =
+            std::env::temp_dir().join(format!("ecky-user-raster-{}.png", uuid::Uuid::new_v4()));
+        fs::write(&external_asset, b"user-owned-raster").unwrap();
+        let resolver = test_resolver(&root);
+        let provenance = RasterTraceProvenance {
+            kind: "rasterTrace".to_string(),
+            asset: RasterTraceAssetIdentity {
+                image_path: external_asset.to_string_lossy().to_string(),
+                digest: "sha256:raster".to_string(),
+                width_pixels: 800,
+                height_pixels: 600,
+            },
+            view: SketchView::Front,
+            calibration: RasterTraceCalibration {
+                physical_width: 120.0,
+                physical_height: 80.0,
+            },
+            threshold: 143,
+            invert: true,
+            contour_id: "raster-front-0".to_string(),
+            extractor_version: "raster-trace-v1".to_string(),
+        };
+        let sketch_document = SketchDocument {
+            document_id: "raster-draft".to_string(),
+            sketches: vec![SketchDefinition {
+                sketch_id: "sketch-front".to_string(),
+                view: SketchView::Front,
+                plane: None,
+                primitives: vec![SketchPrimitive {
+                    primitive_id: "raster-front".to_string(),
+                    kind: SketchPrimitiveKind::Polyline,
+                    points: vec![[0.0, 0.0], [120.0, 0.0], [120.0, 80.0], [0.0, 80.0]],
+                    closed: true,
+                    radius: None,
+                    topology: None,
+                    provenance: Some(provenance.clone()),
+                }],
+                constraints: vec![],
+            }],
+            active_sketch_id: Some("sketch-front".to_string()),
+            units: Some("mm".to_string()),
+            metadata: None,
+        };
+
+        let saved = save_sketch_preview_draft(
+            &resolver,
+            SaveSketchPreviewDraftRequest {
+                scope_id: Some("raster-thread".to_string()),
+                draft_source: test_draft_source(),
+                artifact_bundle: test_artifact_bundle(),
+                sketch_document: Some(sketch_document.clone()),
+            },
+        )
+        .unwrap();
+        assert_eq!(saved.sketch_document, Some(sketch_document));
+
+        clear_sketch_preview_draft(
+            &resolver,
+            ClearSketchPreviewDraftRequest {
+                scope_id: Some("raster-thread".to_string()),
+            },
+        )
+        .unwrap();
+        assert!(external_asset.is_file());
+
+        let _ = fs::remove_file(external_asset);
+        let _ = fs::remove_dir_all(root);
     }
 }

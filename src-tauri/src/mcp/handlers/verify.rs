@@ -1,9 +1,13 @@
 use super::artifact_bundle_digest;
 use crate::mcp::contracts::{StructuralVerificationSummaryResponse, VerifyGeneratedModelResponse};
-use crate::models::{AppResult, AppState, ArtifactBundle, ModelManifest, PathResolver};
+use crate::models::{
+    AppError, AppErrorCode, AppResult, AppState, ArtifactBundle, ModelManifest, PathResolver,
+    RenderSnapshot, VerificationRecord,
+};
 use std::collections::BTreeMap;
+use uuid::Uuid;
 
-pub fn handle_verify_generated_model(
+pub async fn handle_verify_generated_model(
     state: &AppState,
     app: &dyn PathResolver,
     thread_id: &str,
@@ -11,8 +15,17 @@ pub fn handle_verify_generated_model(
     model_id: &str,
     _original_prompt: &str,
 ) -> AppResult<VerifyGeneratedModelResponse> {
-    let bundle = crate::model_runtime::read_artifact_bundle(app, model_id)?;
-    let manifest = crate::model_runtime::read_model_manifest(app, model_id)?;
+    let snapshot = load_draft_render_snapshot(state, message_id, model_id).await?;
+    let (bundle, manifest) = match &snapshot {
+        Some(snapshot) => (
+            snapshot.artifact_bundle.clone(),
+            snapshot.model_manifest.clone(),
+        ),
+        None => (
+            crate::model_runtime::read_artifact_bundle(app, model_id)?,
+            crate::model_runtime::read_model_manifest(app, model_id)?,
+        ),
+    };
     let artifact_digest = artifact_bundle_digest(&bundle);
     let result = enrich_verify_result_with_diagnostic_context(
         crate::services::author_verification_foundation::verify_structure_with_author_verification(
@@ -22,7 +35,11 @@ pub fn handle_verify_generated_model(
         message_id,
         &bundle,
         &manifest,
-    );
+    )
+    .await?;
+    if let Some(snapshot) = snapshot {
+        persist_verification_record(state, message_id, &snapshot, &result).await?;
+    }
     Ok(VerifyGeneratedModelResponse {
         thread_id: thread_id.to_string(),
         message_id: message_id.to_string(),
@@ -32,7 +49,61 @@ pub fn handle_verify_generated_model(
     })
 }
 
-pub fn handle_structural_verification_summary(
+async fn load_draft_render_snapshot(
+    state: &AppState,
+    preview_id: &str,
+    requested_model_id: &str,
+) -> AppResult<Option<RenderSnapshot>> {
+    let draft = {
+        let conn = state.db.lock().await;
+        crate::db::get_agent_draft_by_preview_id(&conn, preview_id)
+            .map_err(|error| AppError::persistence(error.to_string()))?
+    };
+    let Some(draft) = draft else {
+        return Ok(None);
+    };
+    if draft.artifact_bundle.model_id != requested_model_id {
+        return Err(AppError::with_details(
+            AppErrorCode::Conflict,
+            "Verification preview does not match the requested artifact.",
+            format!(
+                "previewId={} previewModelId={} requestedModelId={requested_model_id}",
+                draft.preview_id, draft.artifact_bundle.model_id
+            ),
+        )
+        .with_operation("verify_generated_model"));
+    }
+    crate::services::render_snapshot::build_render_snapshot(
+        crate::services::render_snapshot::RenderSnapshotInput {
+            design: &draft.design_output,
+            effective_params: &draft.design_output.initial_params,
+            artifact_bundle: &draft.artifact_bundle,
+            model_manifest: &draft.model_manifest,
+        },
+    )
+    .map(Some)
+}
+
+async fn persist_verification_record(
+    state: &AppState,
+    preview_id: &str,
+    snapshot: &RenderSnapshot,
+    result: &crate::models::StructuralVerificationResult,
+) -> AppResult<()> {
+    let record = VerificationRecord {
+        verification_id: Uuid::new_v4().to_string(),
+        snapshot_id: snapshot.snapshot_id.clone(),
+        artifact_digest: snapshot.artifact_digest.clone(),
+        passed: result.passed,
+        verifier_status: result.verifier_status.clone(),
+        verifier_source: result.verifier_source.clone(),
+    };
+    let conn = state.db.lock().await;
+    crate::db::upsert_verification_record(&conn, preview_id, &record, super::now_secs())
+        .map_err(|error| AppError::persistence(error.to_string()))
+}
+
+pub async fn handle_structural_verification_summary(
     state: &AppState,
     app: &dyn PathResolver,
     thread_id: &str,
@@ -50,7 +121,8 @@ pub fn handle_structural_verification_summary(
         message_id,
         &bundle,
         &manifest,
-    );
+    )
+    .await?;
     Ok(StructuralVerificationSummaryResponse {
         thread_id: thread_id.to_string(),
         message_id: message_id.to_string(),
@@ -82,11 +154,11 @@ fn core_param_value_to_param_value(
     }
 }
 
-fn resolved_verify_diagnostic_params(
+async fn resolved_verify_diagnostic_params(
     state: &AppState,
     message_id: &str,
     bundle: &ArtifactBundle,
-) -> Vec<crate::models::DiagnosticParamValue> {
+) -> AppResult<Vec<crate::models::DiagnosticParamValue>> {
     let mut resolved = BTreeMap::new();
     let Some(source_path) = bundle
         .macro_path
@@ -94,22 +166,22 @@ fn resolved_verify_diagnostic_params(
         .map(str::trim)
         .filter(|path| !path.is_empty())
     else {
-        return resolved
+        return Ok(resolved
             .into_iter()
             .map(|(key, value)| crate::models::DiagnosticParamValue { key, value })
-            .collect();
+            .collect());
     };
     let Ok(source) = std::fs::read_to_string(source_path) else {
-        return resolved
+        return Ok(resolved
             .into_iter()
             .map(|(key, value)| crate::models::DiagnosticParamValue { key, value })
-            .collect();
+            .collect());
     };
     let Ok(program) = crate::ecky_scheme::compile_to_core_program(&source) else {
-        return resolved
+        return Ok(resolved
             .into_iter()
             .map(|(key, value)| crate::models::DiagnosticParamValue { key, value })
-            .collect();
+            .collect());
     };
 
     for param in &program.parameters {
@@ -119,20 +191,40 @@ fn resolved_verify_diagnostic_params(
         );
     }
 
-    if let Ok(conn) = state.db.try_lock() {
-        if let Ok(Some((output, _thread_id))) =
-            crate::db::get_message_output_and_thread(&conn, message_id)
+    let persisted_params = {
+        let conn = state.db.lock().await;
+        match crate::db::get_agent_draft_by_preview_id(&conn, message_id)
+            .map_err(|error| crate::models::AppError::persistence(error.to_string()))?
         {
-            for (key, value) in output.initial_params {
-                resolved.insert(key, value);
+            Some(draft) if draft.artifact_bundle.model_id == bundle.model_id => {
+                Some(draft.design_output.initial_params)
             }
+            Some(draft) => {
+                return Err(crate::models::AppError::with_details(
+                    crate::models::AppErrorCode::Conflict,
+                    "Verification preview does not match the requested artifact.",
+                    format!(
+                        "previewId={} previewModelId={} requestedModelId={}",
+                        draft.preview_id, draft.artifact_bundle.model_id, bundle.model_id
+                    ),
+                )
+                .with_operation("verify_generated_model"));
+            }
+            None => crate::db::get_message_output_and_thread(&conn, message_id)
+                .map_err(|error| crate::models::AppError::persistence(error.to_string()))?
+                .map(|(output, _thread_id)| output.initial_params),
+        }
+    };
+    if let Some(params) = persisted_params {
+        for (key, value) in params {
+            resolved.insert(key, value);
         }
     }
 
-    resolved
+    Ok(resolved
         .into_iter()
         .map(|(key, value)| crate::models::DiagnosticParamValue { key, value })
-        .collect()
+        .collect())
 }
 
 fn verify_check_op_name(check: &crate::models::AuthoredVerifyCheck) -> Option<String> {
@@ -144,15 +236,15 @@ fn verify_check_op_name(check: &crate::models::AuthoredVerifyCheck) -> Option<St
     }
 }
 
-fn enrich_verify_result_with_diagnostic_context(
+async fn enrich_verify_result_with_diagnostic_context(
     mut result: crate::models::StructuralVerificationResult,
     state: &AppState,
     message_id: &str,
     bundle: &ArtifactBundle,
     manifest: &ModelManifest,
-) -> crate::models::StructuralVerificationResult {
+) -> AppResult<crate::models::StructuralVerificationResult> {
     let part_key = (manifest.parts.len() == 1).then(|| manifest.parts[0].part_id.clone());
-    let resolved_params = resolved_verify_diagnostic_params(state, message_id, bundle);
+    let resolved_params = resolved_verify_diagnostic_params(state, message_id, bundle).await?;
 
     let mut failing_contexts = Vec::new();
     for check in &mut result.authored_verify_checks {
@@ -188,5 +280,5 @@ fn enrich_verify_result_with_diagnostic_context(
         failing_index += 1;
     }
 
-    result
+    Ok(result)
 }

@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::contracts::{
-    ArtifactBundle, ManifestBounds, ModelManifest, StructuralIssue, StructuralMetrics,
-    StructuralVerificationResult, VerifierSource, VerifierStatus,
+    AppError, AppResult, ArtifactBundle, ManifestBounds, ModelManifest, StructuralIssue,
+    StructuralMetrics, StructuralVerificationResult, VerifierSource, VerifierStatus,
 };
 
 const OVERHANG_NORMAL_Z_THRESHOLD: f32 = -0.70710677;
@@ -107,12 +107,22 @@ pub fn verify_structure(
     for part in &manifest.parts {
         // Viewer asset path exists
         if let Some(ref asset_path) = part.viewer_asset_path {
-            if !Path::new(asset_path).exists() {
+            let asset_path = Path::new(asset_path);
+            let resolved_asset_path = if asset_path.is_absolute() {
+                PathBuf::from(asset_path)
+            } else {
+                Path::new(&bundle.manifest_path)
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(asset_path)
+            };
+            if !resolved_asset_path.exists() {
                 issues.push(StructuralIssue {
                     code: "PART_ASSET_MISSING".into(),
                     message: format!(
                         "Part '{}' viewer asset not found: {}",
-                        part.label, asset_path
+                        part.label,
+                        resolved_asset_path.display()
                     ),
                     part_id: Some(part.part_id.clone()),
                     numeric_payload: None,
@@ -588,6 +598,24 @@ fn preview_stl_topology_summary(triangles: &[StlTriangle]) -> StlTopologySummary
     }
 }
 
+pub(crate) fn preview_stl_non_manifold_edge_count(path: &Path) -> AppResult<usize> {
+    match preview_stl_triangles(path).map_err(|err| {
+        AppError::render(format!("Failed to read STL '{}': {err}", path.display()))
+    })? {
+        StlPreview::Parsed(triangles) if !triangles.is_empty() => {
+            Ok(preview_stl_topology_summary(&triangles).non_manifold_edge_count)
+        }
+        StlPreview::Parsed(_) => Err(AppError::render(format!(
+            "STL '{}' contains no triangles.",
+            path.display()
+        ))),
+        StlPreview::Unreadable => Err(AppError::render(format!(
+            "STL '{}' is neither valid binary nor ASCII STL.",
+            path.display()
+        ))),
+    }
+}
+
 fn add_preview_stl_topology_issues(
     issues: &mut Vec<StructuralIssue>,
     topology: StlTopologySummary,
@@ -742,6 +770,7 @@ mod tests {
         fs::write(&manifest_path, "{}").unwrap();
 
         ArtifactBundle {
+            geometry_provenance: None,
             schema_version: 1,
             model_id: "generated-test-001".into(),
             source_kind: ModelSourceKind::Generated,
@@ -844,6 +873,7 @@ mod tests {
 
     fn test_manifest() -> ModelManifest {
         ModelManifest {
+            geometry_provenance: None,
             schema_version: 1,
             model_id: "generated-test-001".into(),
             source_kind: ModelSourceKind::Generated,
@@ -1265,6 +1295,19 @@ mod tests {
         let result = verify_structure(&bundle, &manifest);
         assert!(!result.passed);
         assert!(result.issues.iter().any(|i| i.code == "PART_ASSET_MISSING"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn relative_part_asset_is_resolved_from_manifest_directory() {
+        let dir = temp_dir("relative_part_asset");
+        let bundle = test_bundle(&dir);
+        let mut manifest = test_manifest();
+        manifest.parts[0].viewer_asset_path = Some("preview.stl".into());
+
+        let result = verify_structure(&bundle, &manifest);
+
+        assert!(result.passed, "Expected pass, got: {:?}", result.issues);
         fs::remove_dir_all(&dir).ok();
     }
 

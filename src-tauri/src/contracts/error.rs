@@ -418,7 +418,10 @@ mod authoring_error_tests {
             })
             .into();
         let json = serde_json::to_string(&app).expect("serialize");
-        assert!(json.contains("\"layer\":\"backend\""), "camelCase layer: {json}");
+        assert!(
+            json.contains("\"layer\":\"backend\""),
+            "camelCase layer: {json}"
+        );
         assert!(json.contains("\"fix\""), "fix present: {json}");
         let round: AppError = serde_json::from_str(&json).expect("round trip");
         assert_eq!(round, app);

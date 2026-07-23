@@ -3,13 +3,20 @@ use tauri::{AppHandle, State};
 use crate::models::{
     AppError, AppResult, AppState, ArtifactBundle, BrepHiddenLineProjectionRequest,
     ClearSketchPreviewDraftRequest, ComponentPackage, DesignParams, GeometryBackend,
-    LoadSketchPreviewDraftRequest, MacroDialect, SaveSketchPreviewDraftRequest,
-    SketchAcceptedBrepComponentPackageRequest, SketchBrepCandidateAcceptRequest,
-    SketchBrepCandidateAcceptResponse, SketchBrepCandidateRequest, SketchBrepCandidateResponse,
-    SketchDraftRequest, SketchDraftSource, SketchPreviewDraft, SketchPreviewHullRequest,
-    SketchSuggestionRequest, SketchSuggestionResponse, SketchView,
+    LoadSketchPreviewDraftRequest, MacroDialect, RasterTraceRequest, RasterTraceResponse,
+    SaveSketchPreviewDraftRequest, SketchAcceptedBrepComponentPackageRequest,
+    SketchBrepCandidateAcceptRequest, SketchBrepCandidateAcceptResponse,
+    SketchBrepCandidateRequest, SketchBrepCandidateResponse, SketchDraftRequest, SketchDraftSource,
+    SketchPreviewDraft, SketchPreviewHullRequest, SketchSuggestionRequest,
+    SketchSuggestionResponse, SketchView,
 };
 use crate::sketch_draft_runtime;
+
+#[tauri::command]
+#[specta::specta]
+pub async fn trace_raster_reference(request: RasterTraceRequest) -> AppResult<RasterTraceResponse> {
+    crate::raster_trace::extract_raster_contours(request)
+}
 
 #[tauri::command]
 #[specta::specta]

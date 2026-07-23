@@ -187,6 +187,35 @@ pub struct SketchPrimitiveTopology {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct RasterTraceCalibration {
+    pub physical_width: f64,
+    pub physical_height: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RasterTraceAssetIdentity {
+    pub image_path: String,
+    pub digest: String,
+    pub width_pixels: u32,
+    pub height_pixels: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RasterTraceProvenance {
+    pub kind: String,
+    pub asset: RasterTraceAssetIdentity,
+    pub view: SketchView,
+    pub calibration: RasterTraceCalibration,
+    pub threshold: u8,
+    pub invert: bool,
+    pub contour_id: String,
+    pub extractor_version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct SketchPrimitive {
     pub primitive_id: String,
     pub kind: SketchPrimitiveKind,
@@ -198,6 +227,43 @@ pub struct SketchPrimitive {
     pub radius: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topology: Option<SketchPrimitiveTopology>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<RasterTraceProvenance>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RasterTraceRequest {
+    pub image_path: String,
+    pub view: SketchView,
+    pub calibration: RasterTraceCalibration,
+    pub threshold: u8,
+    #[serde(default)]
+    pub invert: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_contours: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RasterTraceContour {
+    pub contour_id: String,
+    pub points: Vec<[f64; 2]>,
+    pub closed: bool,
+    pub foreground_pixel_count: usize,
+    pub signed_area: f64,
+    pub provenance: RasterTraceProvenance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RasterTraceResponse {
+    pub asset: RasterTraceAssetIdentity,
+    pub contours: Vec<RasterTraceContour>,
+    pub connected_component_count: usize,
+    pub extractor_version: String,
+    #[serde(default)]
+    pub evidence: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -359,6 +425,8 @@ pub struct SketchPreviewDraft {
     pub scope_id: Option<String>,
     pub draft_source: SketchDraftSource,
     pub artifact_bundle: ArtifactBundle,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sketch_document: Option<SketchDocument>,
     pub updated_at: u64,
 }
 
@@ -369,6 +437,8 @@ pub struct SaveSketchPreviewDraftRequest {
     pub scope_id: Option<String>,
     pub draft_source: SketchDraftSource,
     pub artifact_bundle: ArtifactBundle,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sketch_document: Option<SketchDocument>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]

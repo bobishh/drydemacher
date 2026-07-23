@@ -52,6 +52,7 @@ fn rectangle_sketch(closed: bool) -> SketchDefinition {
             closed,
             radius: None,
             topology: None,
+            provenance: None,
         }],
         constraints: vec![],
     }
@@ -74,6 +75,7 @@ fn rectangle_view_sketch(
             closed: true,
             radius: None,
             topology: None,
+            provenance: None,
         }],
         constraints: vec![],
     }
@@ -200,6 +202,7 @@ fn holed_front_hull_document() -> SketchDocument {
                         closed: true,
                         radius: None,
                         topology: None,
+                        provenance: None,
                     },
                     SketchPrimitive {
                         primitive_id: "front-hole".to_string(),
@@ -214,6 +217,7 @@ fn holed_front_hull_document() -> SketchDocument {
                         closed: true,
                         radius: None,
                         topology: None,
+                        provenance: None,
                     },
                 ],
                 constraints: vec![],
@@ -258,6 +262,7 @@ fn circle_sketch(sketch_id: &str, primitive_id: &str, radius: f64) -> SketchDefi
             closed: true,
             radius: Some(radius),
             topology: None,
+            provenance: None,
         }],
         constraints: vec![],
     }
@@ -482,6 +487,7 @@ fn sketch_draft_compacts_dense_profile_before_steel_lowering() {
                 closed: true,
                 radius: None,
                 topology: None,
+                provenance: None,
             }],
             constraints: vec![],
         },
@@ -856,6 +862,7 @@ fn accepted_brep_candidate_source_rejects_unknown_solution() {
 #[test]
 fn accepted_brep_step_gate_rejects_mesh_only_bundle() {
     let bundle = ecky_cad_lib::models::ArtifactBundle {
+        geometry_provenance: None,
         schema_version: 1,
         model_id: "mesh-only".to_string(),
         source_kind: ecky_cad_lib::models::ModelSourceKind::Generated,
@@ -889,6 +896,7 @@ fn accepted_step_bundle_with_edge_target(target_id: &str) -> ArtifactBundle {
     let alias_ids = topology_alias_ids(&public_target_id, target_id);
     let manifest_path = write_accepted_test_manifest("edge", &public_target_id, &alias_ids);
     ArtifactBundle {
+        geometry_provenance: None,
         schema_version: 1,
         model_id: "accepted-step".to_string(),
         source_kind: ModelSourceKind::Generated,
@@ -926,6 +934,7 @@ fn accepted_step_bundle_with_edge_target(target_id: &str) -> ArtifactBundle {
         callout_anchors: vec![],
         measurement_guides: vec![],
         export_artifacts: vec![ecky_cad_lib::models::ExportArtifact {
+            geometry_provenance: None,
             label: "STEP".to_string(),
             format: "step".to_string(),
             path: "/tmp/accepted.step".to_string(),
@@ -939,6 +948,7 @@ fn accepted_step_bundle_with_face_target(target_id: &str) -> ArtifactBundle {
     let alias_ids = topology_alias_ids(&public_target_id, target_id);
     let manifest_path = write_accepted_test_manifest("face", &public_target_id, &alias_ids);
     ArtifactBundle {
+        geometry_provenance: None,
         schema_version: 1,
         model_id: "accepted-step".to_string(),
         source_kind: ModelSourceKind::Generated,
@@ -973,6 +983,7 @@ fn accepted_step_bundle_with_face_target(target_id: &str) -> ArtifactBundle {
         callout_anchors: vec![],
         measurement_guides: vec![],
         export_artifacts: vec![ecky_cad_lib::models::ExportArtifact {
+            geometry_provenance: None,
             label: "STEP".to_string(),
             format: "step".to_string(),
             path: "/tmp/accepted.step".to_string(),

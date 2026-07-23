@@ -126,6 +126,26 @@ pub(super) fn forget_authoring_actors_for_session(session_id: &str) {
         .retain(|key, _| key.session_id != session_id);
 }
 
+pub(crate) async fn invalidate_authoring_actors_for_thread(thread_id: &str) {
+    let states = {
+        let mut actors = authoring_actors().lock().unwrap();
+        let states = actors
+            .iter()
+            .filter(|(key, _)| key.thread_id == thread_id)
+            .map(|(_, state)| state.clone())
+            .collect::<Vec<_>>();
+        actors.retain(|key, _| key.thread_id != thread_id);
+        states
+    };
+
+    for state in states {
+        let mut state = state.lock().await;
+        state.generation = NEXT_ACTOR_GENERATION.fetch_add(1, Ordering::Relaxed);
+        state.current_revision = 0;
+        state.published_revision = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,5 +205,33 @@ mod tests {
             .await
             .expect("current actor generation publishes");
         forget_authoring_actors_for_session(&ctx.session_id);
+    }
+
+    #[tokio::test]
+    async fn ui_mutation_invalidates_every_session_actor_for_only_its_thread() {
+        let ctx_a = context("ui-invalidation-session-a");
+        let ctx_b = context("ui-invalidation-session-b");
+        let stale_a = reserve_authoring_actor_revision(&ctx_a, "thread-a").await;
+        let stale_b = reserve_authoring_actor_revision(&ctx_b, "thread-a").await;
+        let other_thread = reserve_authoring_actor_revision(&ctx_a, "thread-b").await;
+
+        invalidate_authoring_actors_for_thread("thread-a").await;
+
+        assert!(
+            acquire_authoring_actor_publish_permit(&ctx_a, "thread-a", stale_a)
+                .await
+                .is_err()
+        );
+        assert!(
+            acquire_authoring_actor_publish_permit(&ctx_b, "thread-a", stale_b)
+                .await
+                .is_err()
+        );
+        acquire_authoring_actor_publish_permit(&ctx_a, "thread-b", other_thread)
+            .await
+            .expect("other thread remains publishable");
+
+        forget_authoring_actors_for_session(&ctx_a.session_id);
+        forget_authoring_actors_for_session(&ctx_b.session_id);
     }
 }

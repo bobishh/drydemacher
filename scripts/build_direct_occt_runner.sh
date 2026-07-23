@@ -3,12 +3,18 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${ECKY_OCCT_RUNTIME_DIR:-$ROOT/.dist/runtime/occt}"
+MANIFOLD_DIR="${ECKY_MANIFOLD_RUNTIME_DIR:-$ROOT/.dist/runtime/manifold}"
 SOURCE="$ROOT/src-tauri/native/direct_occt_runner.cpp"
 YYJSON_SOURCE="$ROOT/src-tauri/native/vendor/yyjson/yyjson.c"
 YYJSON_INCLUDE_DIR="$ROOT/src-tauri/native/vendor/yyjson"
 
 if [[ ! -d "$OUT_DIR/include/opencascade" || ! -d "$OUT_DIR/lib" ]]; then
   echo "OCCT runtime missing. Run scripts/prepare_occt_runtime.sh first." >&2
+  exit 1
+fi
+
+if [[ ! -d "$MANIFOLD_DIR/include/manifold" || ! -f "$MANIFOLD_DIR/lib/libmanifold.a" ]]; then
+  echo "Manifold runtime missing. Run scripts/prepare_manifold_runtime.sh first." >&2
   exit 1
 fi
 
@@ -62,10 +68,14 @@ command=(
   "$CXX_BIN"
   -std=c++17
   -O2
-  -I"$OUT_DIR/include/opencascade"
+  -isystem
+  "$OUT_DIR/include/opencascade"
+  -isystem
+  "$MANIFOLD_DIR/include"
   -I"$YYJSON_INCLUDE_DIR"
   "$SOURCE"
   "$YYJSON_OBJECT"
+  "$MANIFOLD_DIR/lib/libmanifold.a"
   -L"$OUT_DIR/lib"
   $RPATH
 )
