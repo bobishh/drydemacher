@@ -1,0 +1,1240 @@
+;; ================================================================
+;; iPhone 17e reinforced TPU case
+;; + open positive-edge TPU rear lattice
+;; + compact one-way PETG lens snap ring
+;;
+;; Lattice builds connected ribs directly; no perforated back plate.
+;; ================================================================
+
+
+;; ----------------------------------------------------------------
+;; POSITIVE TPU LATTICE HELPERS
+;; ----------------------------------------------------------------
+
+(define-component lattice-strut
+  ((number x1 0.0)
+   (number y1 0.0)
+   (number x2 10.0)
+   (number y2 0.0)
+   (number width 2.0)
+   (number height 1.8))
+
+  (let* (
+    (mid-x (/ (+ x1 x2) 2.0))
+    (mid-y (/ (+ y1 y2) 2.0))
+  )
+  (extrude
+    (slot-center-point mid-x mid-y x2 y2 width)
+    height)))
+
+
+;; ----------------------------------------------------------------
+;; COMPACT PETG LENS GUARD
+;; ----------------------------------------------------------------
+
+(define-component lens-guard-snap-ring
+  ((number flange-diameter 22.0)
+   (number opening-diameter 16.6)
+   (number flange-thickness 1.2)
+   (number collar-diameter 18.2)
+   (number collar-length 1.2)
+   (number snap-bead-extra-radius 0.32)
+   (number snap-bead-height 0.45))
+
+  (let* (
+    (flange-radius (/ flange-diameter 2.0))
+    (opening-radius (/ opening-diameter 2.0))
+    (collar-radius (/ collar-diameter 2.0))
+    (snap-bead-radius
+      (+ collar-radius snap-bead-extra-radius))
+    (through-height
+      (+ flange-thickness collar-length snap-bead-height 1.0))
+
+    (opening-cutter
+      (translate 0 0 -0.5
+        (cylinder opening-radius through-height 64)))
+
+    (flange
+      (difference
+        (cylinder flange-radius flange-thickness 64)
+        opening-cutter))
+
+    (collar
+      (difference
+        (translate 0 0 flange-thickness
+          (cylinder collar-radius collar-length 64))
+        opening-cutter))
+
+    ;; Tapered lead-in. TPU socket flexes; PETG ring stays stiff.
+    (snap-bead-start-z
+      (+ flange-thickness
+         collar-length
+         (- 0.0 snap-bead-height)))
+
+    (snap-bead
+      (difference
+        (translate 0 0 snap-bead-start-z
+          (cone
+            snap-bead-radius
+            collar-radius
+            snap-bead-height
+            64))
+        opening-cutter))
+  )
+
+  (union flange collar snap-bead)))
+
+
+;; ================================================================
+;; COMPLETE TWO-PART MODEL
+;; ================================================================
+
+(model
+  (params
+    ;; Print/backend controls
+
+    (toggle use-back-cellular-pattern #t
+      :label "Use Back Edge Lattice")
+
+    ;; TPU fit
+
+    (number phone-pocket-clearance 0.0
+      :label "Phone Pocket Clearance Per Side"
+      :min -0.15
+      :max 0.40
+      :step 0.05
+      :unit length)
+
+    (number side-wall-thickness 2.6
+      :label "Side Wall Thickness"
+      :min 1.8
+      :max 4.0
+      :step 0.1
+      :unit length)
+
+    (number rear-panel-thickness 1.7
+      :label "Rear Panel Thickness"
+      :min 1.2
+      :max 2.8
+      :step 0.1
+      :unit length)
+
+    ;; Edge finishing
+
+    (number outer-top-edge-chamfer 0.65
+      :label "Outer Top Edge Chamfer"
+      :min 0.1
+      :max 1.2
+      :step 0.05
+      :unit length)
+
+    (number outer-bottom-edge-chamfer 0.45
+      :label "Outer Bottom Edge Chamfer"
+      :min 0.1
+      :max 1.0
+      :step 0.05
+      :unit length)
+
+    ;; Front retaining rim
+
+    (number front-lip-height 1.2
+      :label "Front Lip Height"
+      :min 0.7
+      :max 2.0
+      :step 0.1
+      :unit length)
+
+    (number front-rim-bottom-overlap 1.05
+      :label "Front Rim Bottom Overlap"
+      :min 0.5
+      :max 1.5
+      :step 0.05
+      :unit length)
+
+    (number front-rim-top-overlap 0.35
+      :label "Front Rim Top Overlap"
+      :min 0.1
+      :max 0.8
+      :step 0.05
+      :unit length)
+
+    ;; Lightweight cellular back lattice
+
+    (number back-cell-web-width 2.0
+      :label "Back Lattice Web Width"
+      :min 1.6
+      :max 3.2
+      :step 0.1
+      :unit length)
+
+    (number back-pattern-u-frequency 5
+      :label "Back Lattice Columns"
+      :min 3
+      :max 14
+      :step 1
+      :unit count)
+
+    (number back-pattern-v-frequency 9
+      :label "Back Lattice Rows"
+      :min 5
+      :max 24
+      :step 1
+      :unit count)
+
+    (number back-lattice-seed 0.18
+      :label "Back Lattice Seed"
+      :min 0
+      :max 1
+      :step 0.01
+      :unit ratio)
+
+    ;; Ports
+
+
+    (number rear-mic-hole-diameter 2.4
+      :label "TPU Mic Hole Diameter"
+      :min 1.5
+      :max 4.0
+      :step 0.1
+      :unit length)
+
+    (number rear-flash-hole-diameter 7.2
+      :label "TPU Flash Hole Diameter"
+      :min 5.0
+      :max 10.0
+      :step 0.1
+      :unit length)
+
+    (number usb-c-port-opening-width 16.8
+      :label "USB-C Opening Width"
+      :min 12.0
+      :max 21.0
+      :step 0.1
+      :unit length)
+
+    (number usb-c-port-opening-height 9.0
+      :label "USB-C Opening Height"
+      :min 5.0
+      :max 12.0
+      :step 0.1
+      :unit length)
+
+    (number bottom-port-hole-diameter 1.8
+      :label "Bottom Port Hole Diameter"
+      :min 1.2
+      :max 3.0
+      :step 0.1
+      :unit length)
+
+    (number bottom-port-hole-pitch 3.6
+      :label "Bottom Port Hole Pitch"
+      :min 3.0
+      :max 5.0
+      :step 0.1
+      :unit length)
+
+    (number bottom-port-gap-from-usb-edge 3.6
+      :label "Bottom Port Gap From USB"
+      :min 1.0
+      :max 6.0
+      :step 0.1
+      :unit length)
+
+    ;; Buttons
+
+    (number side-button-pad-width 5.0
+      :label "Button Pad Width"
+      :min 4.0
+      :max 6.5
+      :step 0.1
+      :unit length)
+
+    (number side-button-pad-raise 0.9
+      :label "Button Pad Raise"
+      :min 0.4
+      :max 1.4
+      :step 0.1
+      :unit length)
+
+    (number side-button-membrane-thickness 0.45
+      :label "Button Membrane Thickness"
+      :min 0.30
+      :max 1.0
+      :step 0.05
+      :unit length)
+
+    (number side-button-inner-relief-width 5.8
+      :label "Button Inner Relief Width"
+      :min 4.0
+      :max 7.0
+      :step 0.1
+      :unit length)
+
+    (number side-button-inner-relief-extra-length 3.0
+      :label "Button Relief Extra Length"
+      :min 1.0
+      :max 5.0
+      :step 0.1
+      :unit length)
+
+    ;; Compact PETG lens-guard fit. TPU carries snap deformation.
+
+    (number lens-guard-flange-diameter 22.0
+      :label "Lens Guard Flange Diameter"
+      :min 20.0
+      :max 25.0
+      :step 0.1
+      :unit length)
+
+    (number lens-guard-opening-diameter 16.6
+      :label "Lens Guard Clear Opening"
+      :min 16.0
+      :max 18.0
+      :step 0.1
+      :unit length)
+
+    (number lens-guard-flange-thickness 1.2
+      :label "Lens Guard Flange Thickness"
+      :min 0.8
+      :max 1.8
+      :step 0.1
+      :unit length)
+
+    (number lens-guard-collar-diameter 18.2
+      :label "Lens Guard Collar Diameter"
+      :min 17.4
+      :max 19.2
+      :step 0.1
+      :unit length)
+
+    (number lens-guard-seat-depth 0.6
+      :label "TPU Lens Guard Seat Depth"
+      :min 0.4
+      :max 0.9
+      :step 0.05
+      :unit length)
+
+    (number lens-guard-seat-clearance 0.18
+      :label "TPU Snap Clearance"
+      :min 0.1
+      :max 0.35
+      :step 0.01
+      :unit length)
+
+    (number lens-guard-snap-bead-extra-radius 0.32
+      :label "Lens Guard Snap Bead"
+      :min 0.2
+      :max 0.5
+      :step 0.01
+      :unit length)
+
+    (number lens-guard-snap-bead-height 0.45
+      :label "Lens Guard Snap Bead Height"
+      :min 0.3
+      :max 0.7
+      :step 0.05
+      :unit length))
+
+  (verify
+    (tag preview_exists)
+    (metric check (manifest has-preview-stl))
+    (expect check (= true)))
+
+  (verify
+    (tag all_parts_present)
+    (metric count (manifest part-count))
+    (expect count (= 2)))
+
+  (verify
+    (tag mesh_clean)
+    (metric bad_edges (stl non-manifold-edge-count))
+    (expect bad_edges (= 0)))
+
+  (verify
+    (tag back_lattice_printable)
+    (metric overhang_faces (stl overhang-face-count))
+    (expect overhang_faces (< 6000)))
+
+  ;; ==============================================================
+  ;; PART 1: TPU CASE
+  ;; ==============================================================
+
+  (part iphone-17e-tpu-case
+    (let* (
+      ;; iPhone 17e specification
+
+      (phone-body-length 146.71)
+      (phone-body-width 71.52)
+      (phone-body-thickness 7.8)
+      (phone-body-corner-radius 12.0)
+
+      ;; Back-view coordinates from phone top-left
+
+      (rear-camera-left 58.20)
+      (rear-camera-top 13.32)
+
+      (rear-mic-left 47.22)
+      (rear-mic-top 13.32)
+
+      (rear-flash-left 41.84)
+      (rear-flash-top 13.32)
+
+      ;; Button dimensions
+
+      (action-button-length 7.54)
+      (action-button-top 31.28)
+
+      (volume-up-button-length 11.84)
+      (volume-up-button-top 45.43)
+
+      (volume-down-button-length 11.84)
+      (volume-down-button-top 59.63)
+
+      (power-button-length 18.34)
+      (power-button-top 52.53)
+
+      ;; Derived pocket/body dimensions
+
+      (phone-pocket-width
+        (+ phone-body-width
+           (* 2.0 phone-pocket-clearance)))
+
+      (phone-pocket-length
+        (+ phone-body-length
+           (* 2.0 phone-pocket-clearance)))
+
+      (phone-pocket-corner-radius
+        (+ phone-body-corner-radius
+           phone-pocket-clearance))
+
+      (outer-case-width
+        (+ phone-pocket-width
+           (* 2.0 side-wall-thickness)))
+
+      (outer-case-length
+        (+ phone-pocket-length
+           (* 2.0 side-wall-thickness)))
+
+      (outer-case-corner-radius
+        (+ phone-pocket-corner-radius
+           side-wall-thickness))
+
+      (side-wall-height
+        (+ phone-body-thickness
+           front-lip-height))
+
+      (boolean-overlap 0.4)
+
+      ;; Profiles
+
+      (outer-case-profile
+        (rounded-rect
+          outer-case-width
+          outer-case-length
+          outer-case-corner-radius))
+
+      (phone-pocket-profile
+        (rounded-rect
+          phone-pocket-width
+          phone-pocket-length
+          phone-pocket-corner-radius))
+
+      ;; Rear TPU material: perimeter + positive edge lattice. No full plate.
+
+      (rear-panel-raw
+        (extrude outer-case-profile rear-panel-thickness))
+
+      (rear-panel-outer-finished
+        (chamfer
+          outer-bottom-edge-chamfer
+          :edges "bottom"
+          rear-panel-raw))
+
+      (back-cell-frame-width
+        (+ side-wall-thickness 1.4))
+
+      (back-cell-grid-width
+        (- phone-pocket-width
+           (* 2.0 back-cell-frame-width)))
+
+      (back-cell-grid-length
+        (- phone-pocket-length
+           (* 2.0 back-cell-frame-width)))
+
+      (lattice-cols back-pattern-u-frequency)
+      (lattice-rows back-pattern-v-frequency)
+
+      (back-cell-pitch-x
+        (/ back-cell-grid-width lattice-cols))
+
+      (back-cell-pitch-y
+        (/ back-cell-grid-length lattice-rows))
+
+      (back-cell-jitter
+        (* (min back-cell-pitch-x back-cell-pitch-y) 0.20))
+
+      (back-cell-seed
+        (* 1000.0 back-lattice-seed))
+
+      ;; Named overlap keeps strut side edges inside the perimeter boolean.
+      (lattice-frame-overlap
+        (+ boolean-overlap (* 0.5 back-cell-web-width)))
+
+      (horizontal-edge-total lattice-rows)
+
+      (vertical-edge-total lattice-cols)
+
+      (rear-panel-inner-cutter
+        (translate 0 0 (- 0.0 boolean-overlap)
+          (extrude
+            (rounded-rect
+              back-cell-grid-width
+              back-cell-grid-length
+              (max 1.0
+                   (- phone-pocket-corner-radius
+                      back-cell-frame-width)))
+            (+ rear-panel-thickness
+               (* 2.0 boolean-overlap)))))
+
+      (rear-panel-perimeter
+        (difference
+          rear-panel-outer-finished
+          rear-panel-inner-cutter))
+
+      ;; Slanted rows and columns cross directly. Every shape is positive TPU.
+
+      (horizontal-struts
+        (apply union
+          (map
+            (lambda (row)
+              (extrude
+                (slot-center-point
+                  0.0
+                  (+ (- 0.0 (/ back-cell-grid-length 2.0))
+                     (* row back-cell-pitch-y)
+                     (* 0.5 back-cell-jitter
+                        (+ (hash-signed row 0 back-cell-seed)
+                           (hash-signed row 1 (+ back-cell-seed 31.0)))))
+                  (+ (/ back-cell-grid-width 2.0) lattice-frame-overlap)
+                  (+ (- 0.0 (/ back-cell-grid-length 2.0))
+                     (* row back-cell-pitch-y)
+                     (* back-cell-jitter
+                        (hash-signed row 1 (+ back-cell-seed 31.0))))
+                  back-cell-web-width)
+                rear-panel-thickness))
+            (range 1 horizontal-edge-total))))
+
+      (vertical-struts
+        (apply union
+          (map
+            (lambda (col)
+              (extrude
+                (slot-center-point
+                  (+ (- 0.0 (/ back-cell-grid-width 2.0))
+                     (* col back-cell-pitch-x)
+                     (* 0.5 back-cell-jitter
+                        (+ (hash-signed col 2 (+ back-cell-seed 67.0))
+                           (hash-signed col 3 (+ back-cell-seed 101.0)))))
+                  0.0
+                  (+ (- 0.0 (/ back-cell-grid-width 2.0))
+                     (* col back-cell-pitch-x)
+                     (* back-cell-jitter
+                        (hash-signed col 3 (+ back-cell-seed 101.0))))
+                  (+ (/ back-cell-grid-length 2.0) lattice-frame-overlap)
+                  back-cell-web-width)
+                rear-panel-thickness))
+            (range 1 vertical-edge-total))))
+
+      ;; Compact support islands. Lens island carries TPU snap socket.
+
+      (back-camera-center-x
+        (- rear-camera-left (/ phone-body-width 2.0)))
+
+      (back-camera-center-y
+        (- (/ phone-body-length 2.0) rear-camera-top))
+
+      (back-mic-center-x
+        (- rear-mic-left (/ phone-body-width 2.0)))
+
+      (back-mic-center-y
+        (- (/ phone-body-length 2.0) rear-mic-top))
+
+      (back-flash-center-x
+        (- rear-flash-left (/ phone-body-width 2.0)))
+
+      (back-flash-center-y
+        (- (/ phone-body-length 2.0) rear-flash-top))
+
+      (lens-support-radius
+        (+ (/ lens-guard-flange-diameter 2.0) 1.4))
+
+      (lens-support
+        (translate back-camera-center-x back-camera-center-y 0
+          (cylinder lens-support-radius rear-panel-thickness 64)))
+
+      (mic-support
+        (translate back-mic-center-x back-mic-center-y 0
+          (cylinder
+            (+ (/ rear-mic-hole-diameter 2.0) 2.0)
+            rear-panel-thickness
+            32)))
+
+      (flash-support
+        (translate back-flash-center-x back-flash-center-y 0
+          (cylinder
+            (+ (/ rear-flash-hole-diameter 2.0) 2.0)
+            rear-panel-thickness
+            48)))
+
+      (camera-to-mic-strut
+        (lattice-strut
+          :x1 back-camera-center-x :y1 back-camera-center-y
+          :x2 back-mic-center-x :y2 back-mic-center-y
+          :width back-cell-web-width
+          :height rear-panel-thickness))
+
+      (mic-to-flash-strut
+        (lattice-strut
+          :x1 back-mic-center-x :y1 back-mic-center-y
+          :x2 back-flash-center-x :y2 back-flash-center-y
+          :width back-cell-web-width
+          :height rear-panel-thickness))
+
+      (rear-panel-bottom-finished
+        (if use-back-cellular-pattern
+          (union
+            rear-panel-perimeter
+            horizontal-struts
+            vertical-struts
+            lens-support
+            mic-support
+            flash-support
+            camera-to-mic-strut
+            mic-to-flash-strut)
+          rear-panel-outer-finished))
+
+      ;; Main side-wall ring
+
+      (side-wall-ring-profile
+        (profile
+          :outer outer-case-profile
+          :holes phone-pocket-profile))
+
+      (side-wall-ring-raw
+        (translate 0 0 rear-panel-thickness
+          (extrude
+            side-wall-ring-profile
+            side-wall-height)))
+
+      (side-wall-ring
+        (chamfer
+          outer-top-edge-chamfer
+          :edges "top"
+          side-wall-ring-raw))
+
+      ;; Corner reinforcement
+
+      (corner-bumper-radius
+        (+ outer-case-corner-radius 1.1))
+
+      (corner-bumper-center-x
+        (- (/ outer-case-width 2.0)
+           outer-case-corner-radius))
+
+      (corner-bumper-center-y
+        (- (/ outer-case-length 2.0)
+           outer-case-corner-radius))
+
+      (top-left-bumper
+        (translate
+          (- 0.0 corner-bumper-center-x)
+          corner-bumper-center-y
+          rear-panel-thickness
+          (cylinder
+            corner-bumper-radius
+            side-wall-height
+            64)))
+
+      (top-right-bumper
+        (translate
+          corner-bumper-center-x
+          corner-bumper-center-y
+          rear-panel-thickness
+          (cylinder
+            corner-bumper-radius
+            side-wall-height
+            64)))
+
+      (bottom-left-bumper
+        (translate
+          (- 0.0 corner-bumper-center-x)
+          (- 0.0 corner-bumper-center-y)
+          rear-panel-thickness
+          (cylinder
+            corner-bumper-radius
+            side-wall-height
+            64)))
+
+      (bottom-right-bumper
+        (translate
+          corner-bumper-center-x
+          (- 0.0 corner-bumper-center-y)
+          rear-panel-thickness
+          (cylinder
+            corner-bumper-radius
+            side-wall-height
+            64)))
+
+      (all-corner-bumpers
+        (union
+          top-left-bumper
+          top-right-bumper
+          bottom-left-bumper
+          bottom-right-bumper))
+
+      (corner-pocket-cutter
+        (translate 0 0 rear-panel-thickness
+          (extrude
+            phone-pocket-profile
+            side-wall-height)))
+
+      (hollow-corner-bumpers
+        (difference
+          all-corner-bumpers
+          corner-pocket-cutter))
+
+      ;; Front retaining rim
+
+      (front-rim-step-height
+        (/ front-lip-height 3.0))
+
+      (front-rim-middle-overlap
+        (/ (+ front-rim-bottom-overlap
+              front-rim-top-overlap)
+           2.0))
+
+      (rim-bottom-hole-profile
+        (rounded-rect
+          (- phone-pocket-width
+             (* 2.0 front-rim-bottom-overlap))
+          (- phone-pocket-length
+             (* 2.0 front-rim-bottom-overlap))
+          (- phone-pocket-corner-radius
+             front-rim-bottom-overlap)))
+
+      (rim-middle-hole-profile
+        (rounded-rect
+          (- phone-pocket-width
+             (* 2.0 front-rim-middle-overlap))
+          (- phone-pocket-length
+             (* 2.0 front-rim-middle-overlap))
+          (- phone-pocket-corner-radius
+             front-rim-middle-overlap)))
+
+      (rim-top-hole-profile
+        (rounded-rect
+          (- phone-pocket-width
+             (* 2.0 front-rim-top-overlap))
+          (- phone-pocket-length
+             (* 2.0 front-rim-top-overlap))
+          (- phone-pocket-corner-radius
+             front-rim-top-overlap)))
+
+      (rim-bottom-profile
+        (profile
+          :outer outer-case-profile
+          :holes rim-bottom-hole-profile))
+
+      (rim-middle-profile
+        (profile
+          :outer outer-case-profile
+          :holes rim-middle-hole-profile))
+
+      (rim-top-profile
+        (profile
+          :outer outer-case-profile
+          :holes rim-top-hole-profile))
+
+      (rim-base-z
+        (+ rear-panel-thickness
+           phone-body-thickness))
+
+      (rim-bottom-solid
+        (translate 0 0 rim-base-z
+          (extrude
+            rim-bottom-profile
+            (+ front-rim-step-height boolean-overlap))))
+
+      (rim-middle-solid
+        (translate
+          0
+          0
+          (+ rim-base-z front-rim-step-height)
+          (extrude
+            rim-middle-profile
+            (+ front-rim-step-height boolean-overlap))))
+
+      (rim-top-solid-raw
+        (translate
+          0
+          0
+          (+ rim-base-z
+             (* 2.0 front-rim-step-height))
+          (extrude
+            rim-top-profile
+            (+ front-rim-step-height boolean-overlap))))
+
+      (rim-top-solid
+        (chamfer
+          outer-top-edge-chamfer
+          :edges "top"
+          rim-top-solid-raw))
+
+      ;; Button coordinates
+
+      (action-button-y
+        (- (/ phone-body-length 2.0)
+           action-button-top))
+
+      (volume-up-button-y
+        (- (/ phone-body-length 2.0)
+           volume-up-button-top))
+
+      (volume-down-button-y
+        (- (/ phone-body-length 2.0)
+           volume-down-button-top))
+
+      (power-button-y
+        (- (/ phone-body-length 2.0)
+           power-button-top))
+
+      (button-center-z
+        (+ rear-panel-thickness
+           (/ phone-body-thickness 2.0)))
+
+      (left-outer-wall-x
+        (- 0.0 (/ outer-case-width 2.0)))
+
+      (right-outer-wall-x
+        (/ outer-case-width 2.0))
+
+      (button-pad-corner-radius 2.0)
+
+      ;; External button pads
+
+      (left-action-pad
+        (translate
+          (- left-outer-wall-x side-button-pad-raise)
+          action-button-y
+          button-center-z
+          (rotate 0 90 0
+            (extrude
+              (rounded-rect
+                side-button-pad-width
+                action-button-length
+                button-pad-corner-radius)
+              (+ side-button-pad-raise boolean-overlap)))))
+
+      (left-volume-up-pad
+        (translate
+          (- left-outer-wall-x side-button-pad-raise)
+          volume-up-button-y
+          button-center-z
+          (rotate 0 90 0
+            (extrude
+              (rounded-rect
+                side-button-pad-width
+                volume-up-button-length
+                button-pad-corner-radius)
+              (+ side-button-pad-raise boolean-overlap)))))
+
+      (left-volume-down-pad
+        (translate
+          (- left-outer-wall-x side-button-pad-raise)
+          volume-down-button-y
+          button-center-z
+          (rotate 0 90 0
+            (extrude
+              (rounded-rect
+                side-button-pad-width
+                volume-down-button-length
+                button-pad-corner-radius)
+              (+ side-button-pad-raise boolean-overlap)))))
+
+      (right-power-pad
+        (translate
+          (+ right-outer-wall-x side-button-pad-raise)
+          power-button-y
+          button-center-z
+          (rotate 0 -90 0
+            (extrude
+              (rounded-rect
+                side-button-pad-width
+                power-button-length
+                button-pad-corner-radius)
+              (+ side-button-pad-raise boolean-overlap)))))
+
+      ;; Positive TPU body
+
+      (positive-case-body
+        (union
+          rear-panel-bottom-finished
+          side-wall-ring
+
+          hollow-corner-bumpers
+
+          rim-bottom-solid
+          rim-middle-solid
+          rim-top-solid
+
+          left-action-pad
+          left-volume-up-pad
+          left-volume-down-pad
+          right-power-pad))
+
+      ;; Inner button relief cutters
+
+      (left-inner-wall-x
+        (- 0.0 (/ phone-pocket-width 2.0)))
+
+      (right-inner-wall-x
+        (/ phone-pocket-width 2.0))
+
+      (button-relief-depth
+        (- side-wall-thickness
+           side-button-membrane-thickness))
+
+      (button-relief-entry-depth 0.45)
+
+      (button-relief-cutter-depth
+        (+ button-relief-depth
+           button-relief-entry-depth))
+
+      (button-relief-corner-radius 1.9)
+
+      (action-relief-length
+        (+ action-button-length
+           (* 2.0 side-button-inner-relief-extra-length)))
+
+      (volume-up-relief-length
+        (+ volume-up-button-length
+           (* 2.0 side-button-inner-relief-extra-length)))
+
+      (volume-down-relief-length
+        (+ volume-down-button-length
+           (* 2.0 side-button-inner-relief-extra-length)))
+
+      (power-relief-length
+        (+ power-button-length
+           (* 2.0 side-button-inner-relief-extra-length)))
+
+      (left-action-relief-cutter
+        (translate
+          (+ left-inner-wall-x button-relief-entry-depth)
+          action-button-y
+          button-center-z
+          (rotate 0 -90 0
+            (extrude
+              (rounded-rect
+                side-button-inner-relief-width
+                action-relief-length
+                button-relief-corner-radius)
+              button-relief-cutter-depth))))
+
+      (left-volume-up-relief-cutter
+        (translate
+          (+ left-inner-wall-x button-relief-entry-depth)
+          volume-up-button-y
+          button-center-z
+          (rotate 0 -90 0
+            (extrude
+              (rounded-rect
+                side-button-inner-relief-width
+                volume-up-relief-length
+                button-relief-corner-radius)
+              button-relief-cutter-depth))))
+
+      (left-volume-down-relief-cutter
+        (translate
+          (+ left-inner-wall-x button-relief-entry-depth)
+          volume-down-button-y
+          button-center-z
+          (rotate 0 -90 0
+            (extrude
+              (rounded-rect
+                side-button-inner-relief-width
+                volume-down-relief-length
+                button-relief-corner-radius)
+              button-relief-cutter-depth))))
+
+      (right-power-relief-cutter
+        (translate
+          (- right-inner-wall-x button-relief-entry-depth)
+          power-button-y
+          button-center-z
+          (rotate 0 90 0
+            (extrude
+              (rounded-rect
+                side-button-inner-relief-width
+                power-relief-length
+                button-relief-corner-radius)
+              button-relief-cutter-depth))))
+
+      ;; Camera cluster coordinates
+
+      (camera-center-x
+        (- rear-camera-left
+           (/ phone-body-width 2.0)))
+
+      (camera-center-y
+        (- (/ phone-body-length 2.0)
+           rear-camera-top))
+
+      (mic-center-x
+        (- rear-mic-left
+           (/ phone-body-width 2.0)))
+
+      (mic-center-y
+        (- (/ phone-body-length 2.0)
+           rear-mic-top))
+
+      (flash-center-x
+        (- rear-flash-left
+           (/ phone-body-width 2.0)))
+
+      (flash-center-y
+        (- (/ phone-body-length 2.0)
+           rear-flash-top))
+
+      ;; Compact circular lens-guard socket. No posts, no inner plate.
+
+      (rear-through-cutter-height
+        (+ rear-panel-thickness 1.0))
+
+      (lens-guard-flange-radius
+        (/ lens-guard-flange-diameter 2.0))
+
+      (lens-guard-collar-radius
+        (/ lens-guard-collar-diameter 2.0))
+
+      (lens-guard-snap-bead-radius
+        (+ lens-guard-collar-radius
+           lens-guard-snap-bead-extra-radius))
+
+      (lens-guard-seat-radius
+        (+ lens-guard-flange-radius
+           lens-guard-seat-clearance))
+
+      (lens-guard-neck-radius
+        (+ lens-guard-collar-radius
+           lens-guard-seat-clearance))
+
+      (lens-guard-groove-radius
+        (+ lens-guard-snap-bead-radius
+           lens-guard-seat-clearance))
+
+      (lens-guard-installed-collar-length
+        (- rear-panel-thickness
+           lens-guard-seat-depth))
+
+      (lens-guard-seat-cutter
+        (translate camera-center-x camera-center-y -0.2
+          (cylinder
+            lens-guard-seat-radius
+            (+ lens-guard-seat-depth 0.2)
+            64)))
+
+      (lens-guard-neck-cutter
+        (translate
+          camera-center-x
+          camera-center-y
+          (- lens-guard-seat-depth boolean-overlap)
+          (cylinder
+            lens-guard-neck-radius
+            (+ lens-guard-installed-collar-length
+               (* 2.0 boolean-overlap))
+            64)))
+
+      (lens-guard-groove-cutter
+        (translate
+          camera-center-x
+          camera-center-y
+          (- rear-panel-thickness
+             lens-guard-snap-bead-height
+             boolean-overlap)
+          (cylinder
+            lens-guard-groove-radius
+            (+ lens-guard-snap-bead-height
+               (* 2.0 boolean-overlap))
+            64)))
+
+      (mic-hole-cutter
+        (translate
+          mic-center-x
+          mic-center-y
+          -0.5
+          (cylinder
+            (/ rear-mic-hole-diameter 2.0)
+            rear-through-cutter-height
+            32)))
+
+      (flash-hole-cutter
+        (translate
+          flash-center-x
+          flash-center-y
+          -0.5
+          (cylinder
+            (/ rear-flash-hole-diameter 2.0)
+            rear-through-cutter-height
+            48)))
+
+      ;; USB-C bottom opening
+
+      (bottom-cutter-depth
+        (+ side-wall-thickness 12.0))
+
+      (bottom-outer-y
+        (- 0.0 (/ outer-case-length 2.0)))
+
+      (bottom-cutter-start-y
+        (+ bottom-outer-y bottom-cutter-depth))
+
+      (usb-center-z
+        (+ rear-panel-thickness
+           (/ phone-body-thickness 2.0)))
+
+      (usb-cutter
+        (translate
+          0
+          bottom-cutter-start-y
+          usb-center-z
+          (rotate 90 0 0
+            (extrude
+              (rounded-rect
+                usb-c-port-opening-width
+                usb-c-port-opening-height
+                2.6)
+              (* 2.0 bottom-cutter-depth)))))
+
+      ;; Bottom acoustic holes
+
+      (bottom-port-radius
+        (/ bottom-port-hole-diameter 2.0))
+
+      (usb-half-width
+        (/ usb-c-port-opening-width 2.0))
+
+      (left-inner-port-x
+        (- 0.0
+           usb-half-width
+           bottom-port-gap-from-usb-edge
+           bottom-port-radius))
+
+      (right-inner-port-x
+        (+ usb-half-width
+           bottom-port-gap-from-usb-edge
+           bottom-port-radius))
+
+      (left-port-4-x left-inner-port-x)
+      (left-port-3-x (- left-port-4-x bottom-port-hole-pitch))
+      (left-port-2-x (- left-port-3-x bottom-port-hole-pitch))
+      (left-port-1-x (- left-port-2-x bottom-port-hole-pitch))
+
+      (right-port-5-x right-inner-port-x)
+      (right-port-6-x (+ right-port-5-x bottom-port-hole-pitch))
+      (right-port-7-x (+ right-port-6-x bottom-port-hole-pitch))
+      (right-port-8-x (+ right-port-7-x bottom-port-hole-pitch))
+
+      (bottom-port-cutter-length
+        (* 2.0 bottom-cutter-depth))
+
+      (bottom-port-1
+        (translate left-port-1-x bottom-cutter-start-y usb-center-z
+          (rotate 90 0 0
+            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+
+      (bottom-port-2
+        (translate left-port-2-x bottom-cutter-start-y usb-center-z
+          (rotate 90 0 0
+            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+
+      (bottom-port-3
+        (translate left-port-3-x bottom-cutter-start-y usb-center-z
+          (rotate 90 0 0
+            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+
+      (bottom-port-4
+        (translate left-port-4-x bottom-cutter-start-y usb-center-z
+          (rotate 90 0 0
+            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+
+      (bottom-port-5
+        (translate right-port-5-x bottom-cutter-start-y usb-center-z
+          (rotate 90 0 0
+            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+
+      (bottom-port-6
+        (translate right-port-6-x bottom-cutter-start-y usb-center-z
+          (rotate 90 0 0
+            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+
+      (bottom-port-7
+        (translate right-port-7-x bottom-cutter-start-y usb-center-z
+          (rotate 90 0 0
+            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+
+      (bottom-port-8
+        (translate right-port-8-x bottom-cutter-start-y usb-center-z
+          (rotate 90 0 0
+            (cylinder bottom-port-radius bottom-port-cutter-length 32))))
+    )
+
+    (difference
+      positive-case-body
+
+      left-action-relief-cutter
+      left-volume-up-relief-cutter
+      left-volume-down-relief-cutter
+      right-power-relief-cutter
+
+      lens-guard-seat-cutter
+      lens-guard-neck-cutter
+      lens-guard-groove-cutter
+
+      mic-hole-cutter
+      flash-hole-cutter
+
+      usb-cutter
+
+      bottom-port-1
+      bottom-port-2
+      bottom-port-3
+      bottom-port-4
+      bottom-port-5
+      bottom-port-6
+      bottom-port-7
+      bottom-port-8)))
+
+  ;; ==============================================================
+  ;; PART 2: COMPACT PETG LENS GUARD
+  ;; ==============================================================
+
+  (part camera-lens-guard-petg
+    (let* (
+      (installed-collar-length
+        (- rear-panel-thickness
+           lens-guard-seat-depth))
+
+      (preview-x 65.0)
+    )
+
+    (translate preview-x 0 0
+      (lens-guard-snap-ring
+        :flange-diameter lens-guard-flange-diameter
+        :opening-diameter lens-guard-opening-diameter
+        :flange-thickness lens-guard-flange-thickness
+        :collar-diameter lens-guard-collar-diameter
+        :collar-length installed-collar-length
+        :snap-bead-extra-radius lens-guard-snap-bead-extra-radius
+        :snap-bead-height lens-guard-snap-bead-height))))
+)
