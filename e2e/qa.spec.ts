@@ -397,6 +397,10 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
             title: 'A Box',
             versionName: 'V1',
             macroCode: 'create_box()',
+            macroDialect: 'ecky',
+            engineKind: 'ecky',
+            sourceLanguage: 'ecky',
+            geometryBackend: 'mesh',
             initialParams: { size: 10, height: 14 },
             uiSpec: {
               fields: [
@@ -465,7 +469,9 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
         if (cmd === 'get_mess_stl_path') return '/mock/mess.stl';
         if (cmd === 'plugin:dialog|open') return '/mock/imported.FCStd';
         if (cmd === 'plugin:dialog|save') return '/mock/exported.step';
-        if (cmd === 'plugin:dialog|confirm') return mockOptions.forkConfirmResult ?? true;
+        if (cmd === 'plugin:dialog|message') {
+          return (mockOptions.forkConfirmResult ?? true) ? 'OK' : 'Cancel';
+        }
         if (cmd === 'export_file') return null;
         
         if (cmd === 'init_generation_attempt') {
@@ -524,6 +530,10 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
               title: 'A Box',
               versionName: 'V1',
               macroCode: 'create_box()',
+              macroDialect: 'ecky',
+              engineKind: 'ecky',
+              sourceLanguage: 'ecky',
+              geometryBackend: 'mesh',
               initialParams: { size: 10, height: 14 },
               uiSpec: {
                 fields: [
@@ -910,7 +920,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await page.waitForSelector('.microwave-unit', { timeout: 5000 });
     await openParams(page);
     await page.waitForSelector('.part-chip', { timeout: 10000 });
-    await expect(page.locator('.part-chip')).toContainText(['Shell', 'Lid']);
+    await expect(page.locator('.part-chip')).toContainText(['shell', 'lid']);
     const calls = await page.evaluate(() => (window as any).__MOCK_CALLS__);
     expect(calls.some((entry: { cmd: string }) => entry.cmd === 'render_model')).toBeTruthy();
   });
@@ -972,7 +982,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await expect
       .poll(async () => {
         const calls = await page.evaluate(() => (window as any).__MOCK_CALLS__);
-        return calls.filter((entry: { cmd: string }) => entry.cmd === 'plugin:dialog|confirm').length;
+        return calls.filter((entry: { cmd: string }) => entry.cmd === 'plugin:dialog|message').length;
       })
       .toBe(1);
     await expect
@@ -1009,7 +1019,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await expect
       .poll(async () => {
         const calls = await page.evaluate(() => (window as any).__MOCK_CALLS__);
-        return calls.filter((entry: { cmd: string }) => entry.cmd === 'plugin:dialog|confirm').length;
+        return calls.filter((entry: { cmd: string }) => entry.cmd === 'plugin:dialog|message').length;
       })
       .toBe(1);
     await expect
@@ -1141,7 +1151,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await expect(stepButton).toBeVisible();
     await expect(stepButton).toBeDisabled();
     await expect(stepButton).toContainText(
-      'STEP unavailable for mesh/EckyRust render: Direct OCCT unavailable: missing TKDESTEP',
+      'STEP unavailable for Ecky Native render: Direct OCCT unavailable: missing TKDESTEP',
     );
   });
 
@@ -1164,7 +1174,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await expect(stepButton).toBeVisible();
     await expect(stepButton).toBeDisabled();
     await expect(stepButton).toContainText(
-      'STEP unavailable for mesh/EckyRust render: no BRep STEP artifact was produced.',
+      'STEP unavailable for Ecky Native render: no BRep STEP artifact was produced.',
     );
   });
 
@@ -1208,7 +1218,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await page.waitForSelector('.part-chip', { timeout: 10000 });
 
     await page.locator('.part-chip').filter({ hasText: 'Shell' }).click();
-    await expect(page.locator('.part-chip.part-chip-active')).toContainText('Shell');
+    await expect(page.locator('.part-chip.part-chip-active')).toContainText('shell');
 
     await expect(page.locator('.viewer-part-overlay')).toHaveCount(0);
     await expect(page.locator('.param-field', { hasText: 'Size' })).toBeVisible();
@@ -1382,7 +1392,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
       if (activePartText?.includes('Shell')) break;
     }
 
-    await expect(page.locator('.part-chip.part-chip-active')).toContainText('Shell');
+    await expect(page.locator('.part-chip.part-chip-active')).toContainText('shell');
     await expect(page.locator('.viewer-part-overlay')).toHaveCount(0);
   });
 

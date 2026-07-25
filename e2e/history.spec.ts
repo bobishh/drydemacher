@@ -4,6 +4,11 @@ function installProjectSwitcherMocks(options?: {
   history?: Array<Record<string, unknown>>;
   inventory?: Array<Record<string, unknown>>;
   inventoryError?: { message: string; details?: string };
+  deletedProjectPages?: Record<string, {
+    items: Array<Record<string, unknown>>;
+    nextBefore: string | null;
+    hasMore: boolean;
+  }>;
   latestVersions?: Record<string, Record<string, unknown> | null>;
   messagePages?: Record<string, Array<Record<string, unknown>>>;
   latestVersionDelayMs?: number;
@@ -11,16 +16,20 @@ function installProjectSwitcherMocks(options?: {
   const history = options?.history ?? [];
   const inventory = options?.inventory ?? [];
   const inventoryError = options?.inventoryError ?? null;
+  const deletedProjectPages = options?.deletedProjectPages ?? {};
   const latestVersions = options?.latestVersions ?? {};
   const messagePages = options?.messagePages ?? {};
   const latestVersionDelayMs = options?.latestVersionDelayMs ?? 0;
 
   return async ({ page }: { page: import('@playwright/test').Page }) => {
     await page.addInitScript(
-      ({ history, inventory, inventoryError, latestVersions, messagePages, latestVersionDelayMs }) => {
+      ({ history, inventory, inventoryError, deletedProjectPages, latestVersions, messagePages, latestVersionDelayMs }) => {
         const mockWindow = window as any;
         localStorage.clear();
         mockWindow.__PROJECTS_CALLS__ = [];
+        let mutableHistory = structuredClone(history);
+        let mutableInventory = structuredClone(inventory);
+        let mutableDeletedProjectPages = structuredClone(deletedProjectPages);
 
         const config = {
           engines: [{ id: 'mock', name: 'Mock', provider: 'openai', apiKey: '', model: 'mock', baseUrl: '', enabled: true }],
@@ -62,14 +71,72 @@ function installProjectSwitcherMocks(options?: {
               },
             };
           }
-          if (cmd === 'get_history') return structuredClone(history);
+          if (cmd === 'get_animal_cap_catalog') {
+            return { schemaVersion: 1, generatedAt: 0, entries: [] };
+          }
+          if (cmd === 'list_installed_component_package_headers') return [];
+          if (cmd === 'get_history') return structuredClone(mutableHistory);
           if (cmd === 'get_inventory') {
             if (inventoryError) {
               throw { code: 'persistence', message: inventoryError.message, details: inventoryError.details };
             }
-            return structuredClone(inventory);
+            return structuredClone(mutableInventory);
+          }
+          if (cmd === 'finalize_thread') {
+            const id = String(args?.id ?? '');
+            const project = mutableHistory.find((item: any) => item.id === id);
+            if (project) {
+              mutableHistory = mutableHistory.filter((item: any) => item.id !== id);
+              mutableInventory = [
+                {
+                  ...project,
+                  status: 'finalized',
+                  finalizedAt: Date.UTC(2026, 6, 25),
+                },
+                ...mutableInventory.filter((item: any) => item.id !== id),
+              ];
+            }
+            return null;
           }
           if (cmd === 'get_deleted_messages') return [];
+          if (cmd === 'get_deleted_threads_page') {
+            const cursor = String(args?.before ?? 'first');
+            return structuredClone(
+              mutableDeletedProjectPages[cursor] ?? {
+                items: [],
+                nextBefore: null,
+                hasMore: false,
+              },
+            );
+          }
+          if (cmd === 'restore_deleted_thread') {
+            const id = String(args?.id ?? '');
+            for (const page of Object.values(mutableDeletedProjectPages) as any[]) {
+              const project = page.items.find((item: any) => item.id === id);
+              if (!project) continue;
+              page.items = page.items.filter((item: any) => item.id !== id);
+              mutableHistory = [
+                {
+                  id: project.id,
+                  title: project.title,
+                  summary: project.summary,
+                  updatedAt: project.updatedAt,
+                  messages: [],
+                  versionCount: project.versionCount,
+                  pendingCount: 0,
+                  queuedCount: 0,
+                  errorCount: 0,
+                  status: 'active',
+                  finalizedAt: null,
+                  pendingConfirm: null,
+                },
+                ...mutableHistory,
+              ];
+              break;
+            }
+            return null;
+          }
+          if (cmd === 'get_deleted_thread_preview') return null;
           if (cmd === 'get_last_design') return null;
           if (cmd === 'get_active_agent_sessions') return [];
           if (cmd === 'get_agent_terminal_snapshots') return [];
@@ -100,12 +167,20 @@ function installProjectSwitcherMocks(options?: {
           return null;
         };
       },
-      { history, inventory, inventoryError, latestVersions, messagePages, latestVersionDelayMs },
+      {
+        history,
+        inventory,
+        inventoryError,
+        deletedProjectPages,
+        latestVersions,
+        messagePages,
+        latestVersionDelayMs,
+      },
     );
   };
 }
 
-test.describe('History Panel', () => {
+test.describe('Projects', () => {
   test('shows search input', async ({ page }) => {
     await page.goto('/');
     await page.getByRole('button', { name: 'PROJECTS' }).click();
@@ -286,12 +361,211 @@ test.describe('History Panel', () => {
     await expect(card.getByText('NO PREVIEW')).toHaveCount(0);
   });
 
-  test.describe('Archived projects', () => {
+  test('Given an active project When it is completed Then the same project and full history appear in Completed', async ({ page }) => {
+    await installProjectSwitcherMocks({
+      history: [
+        {
+          id: 'project-same-id',
+          title: 'Bike light enclosure',
+          summary: 'Three successful iterations',
+          updatedAt: Date.UTC(2026, 6, 24),
+          messages: [],
+          genieTraits: null,
+          versionCount: 3,
+          pendingCount: 0,
+          queuedCount: 0,
+          errorCount: 0,
+          status: 'active',
+          finalizedAt: null,
+          pendingConfirm: null,
+        },
+      ],
+    })({ page });
+
+    await page.goto('/');
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+
+    const projectsWindow = page.locator('[data-window-id="projects"]');
+    const activeCard = projectsWindow.locator('.project-card').filter({ hasText: 'Bike light enclosure' });
+    await activeCard.getByRole('button', { name: 'MORE ACTIONS' }).click();
+    await activeCard.getByRole('button', { name: 'COMPLETE' }).click();
+    await projectsWindow.getByRole('button', { name: 'COMPLETED' }).click();
+
+    const completedCard = projectsWindow.locator('.project-card').filter({ hasText: 'Bike light enclosure' });
+    await expect(completedCard).toHaveAttribute('data-project-id', 'project-same-id');
+    await expect(completedCard).toContainText('3 versions');
+
+    const calls = await page.evaluate(() => (window as any).__PROJECTS_CALLS__);
+    expect(calls).toContainEqual({
+      cmd: 'finalize_thread',
+      args: expect.objectContaining({ id: 'project-same-id' }),
+    });
+  });
+
+  test('Given a deleted project When it is recovered Then the same project ID returns to Active', async ({ page }) => {
+    await installProjectSwitcherMocks({
+      deletedProjectPages: {
+        first: {
+          items: [
+            {
+              id: 'deleted-project-id',
+              title: 'Recovered enclosure',
+              summary: 'Deleted by mistake',
+              updatedAt: Date.UTC(2026, 6, 23),
+              deletedAt: Date.UTC(2026, 6, 24),
+              versionCount: 4,
+            },
+          ],
+          nextBefore: null,
+          hasMore: false,
+        },
+      },
+    })({ page });
+
+    await page.goto('/');
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+
+    const projectsWindow = page.locator('[data-window-id="projects"]');
+    await projectsWindow.getByRole('button', { name: 'TRASH' }).click();
+    const deletedCard = projectsWindow.locator('.project-card').filter({ hasText: 'Recovered enclosure' });
+    await expect(deletedCard).toHaveAttribute('data-project-id', 'deleted-project-id');
+    await deletedCard.getByRole('button', { name: 'RECOVER' }).click();
+
+    await projectsWindow.getByRole('button', { name: 'ACTIVE' }).click();
+    const restoredCard = projectsWindow.locator('.project-card').filter({ hasText: 'Recovered enclosure' });
+    await expect(restoredCard).toHaveAttribute('data-project-id', 'deleted-project-id');
+
+    const calls = await page.evaluate(() => (window as any).__PROJECTS_CALLS__);
+    expect(calls).toContainEqual({
+      cmd: 'restore_deleted_thread',
+      args: { id: 'deleted-project-id' },
+    });
+  });
+
+  test('Given more deleted projects exist When Trash opens Then it loads 24 and requests the next cursor on demand', async ({ page }) => {
+    const firstItems = Array.from({ length: 24 }, (_, index) => ({
+      id: `deleted-${index + 1}`,
+      title: `Deleted project ${index + 1}`,
+      summary: '',
+      updatedAt: Date.UTC(2026, 6, 1),
+      deletedAt: Date.UTC(2026, 6, 24),
+      versionCount: 1,
+    }));
+    await installProjectSwitcherMocks({
+      deletedProjectPages: {
+        first: {
+          items: firstItems,
+          nextBefore: 'cursor-24',
+          hasMore: true,
+        },
+        'cursor-24': {
+          items: [
+            {
+              id: 'deleted-25',
+              title: 'Deleted project 25',
+              summary: '',
+              updatedAt: Date.UTC(2026, 6, 1),
+              deletedAt: Date.UTC(2026, 6, 23),
+              versionCount: 2,
+            },
+          ],
+          nextBefore: null,
+          hasMore: false,
+        },
+      },
+    })({ page });
+
+    await page.goto('/');
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+
+    const projectsWindow = page.locator('[data-window-id="projects"]');
+    await projectsWindow.getByRole('button', { name: 'TRASH' }).click();
+    await expect(projectsWindow.locator('.project-card')).toHaveCount(24);
+    await expect(projectsWindow.getByText('Deleted project 25', { exact: true })).toHaveCount(0);
+
+    await projectsWindow.getByRole('button', { name: 'LOAD MORE' }).click();
+    await expect(projectsWindow.locator('.project-card')).toHaveCount(25);
+    await expect(projectsWindow.getByText('Deleted project 25', { exact: true })).toBeVisible();
+
+    const pageCalls = await page.evaluate(() =>
+      ((window as any).__PROJECTS_CALLS__ as Array<{ cmd: string; args?: Record<string, unknown> }>)
+        .filter((entry) => entry.cmd === 'get_deleted_threads_page'),
+    );
+    expect(pageCalls).toEqual([
+      { cmd: 'get_deleted_threads_page', args: { before: null, limit: 24 } },
+      { cmd: 'get_deleted_threads_page', args: { before: 'cursor-24', limit: 24 } },
+    ]);
+  });
+
+  test('Given project navigation When reusable assets are needed Then Library is a separate window', async ({ page }) => {
+    await installProjectSwitcherMocks()({ page });
+
+    await page.goto('/');
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+
+    const projectsWindow = page.locator('[data-window-id="projects"]');
+    await expect(projectsWindow.getByRole('button', { name: 'PACKAGES' })).toHaveCount(0);
+    await expect(projectsWindow.getByRole('button', { name: 'ACTIVE' })).toBeVisible();
+    await expect(projectsWindow.getByRole('button', { name: 'COMPLETED' })).toBeVisible();
+
+    await page.getByRole('button', { name: 'LIBRARY' }).click();
+    const libraryWindow = page.locator('[data-window-id="library"]');
+    await expect(libraryWindow).toBeVisible();
+    await expect(libraryWindow.getByRole('button', { name: 'COMPONENT PACKAGES' })).toBeVisible();
+    await expect(libraryWindow.getByRole('button', { name: 'FREECAD PARTS' })).toBeVisible();
+    await expect(libraryWindow.getByRole('button', { name: 'CATALOG' })).toBeVisible();
+  });
+
+  test('Given Projects is open When viewport narrows Then window and compact card remain fully reachable', async ({ page }) => {
+    await installProjectSwitcherMocks({
+      history: [
+        {
+          id: 'responsive-project',
+          title: 'Responsive enclosure',
+          summary: 'Compact card proof',
+          updatedAt: Date.UTC(2026, 6, 25),
+          messages: [],
+          genieTraits: null,
+          versionCount: 2,
+          pendingCount: 0,
+          queuedCount: 0,
+          errorCount: 0,
+          status: 'active',
+          finalizedAt: null,
+          pendingConfirm: null,
+        },
+      ],
+    })({ page });
+
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto('/');
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    await page.setViewportSize({ width: 320, height: 700 });
+
+    const projectsWindow = page.locator('[data-window-id="projects"]');
+    await expect.poll(async () =>
+      projectsWindow.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return {
+          left: Math.round(rect.left),
+          top: Math.round(rect.top),
+          right: Math.round(rect.right),
+          bottom: Math.round(rect.bottom),
+        };
+      }),
+    ).toEqual({ left: 0, top: 80, right: 320, bottom: 580 });
+
+    const card = projectsWindow.locator('.project-card').filter({ hasText: 'Responsive enclosure' });
+    await expect(card).toBeVisible();
+    await expect(card.getByRole('button', { name: 'MORE ACTIONS' })).toBeVisible();
+  });
+
+  test.describe('Completed projects', () => {
     test.beforeEach(
       installProjectSwitcherMocks({
         inventory: [
           {
-            id: 'archived-1',
+            id: 'completed-1',
             title: 'Tradescantia zebrina pot',
             summary: 'twisted wall pot',
             updatedAt: Date.UTC(2026, 4, 22),
@@ -310,10 +584,10 @@ test.describe('History Panel', () => {
       }),
     );
 
-    test('Given slow preview metadata, when archived opens, then cards render without waiting', async ({ page }) => {
+    test('Given slow preview metadata, when Completed opens, then cards render without waiting', async ({ page }) => {
       await page.goto('/');
       await page.getByRole('button', { name: 'PROJECTS' }).click();
-      await page.locator('[data-window-id="projects"]').getByRole('button', { name: 'ARCHIVED' }).click();
+      await page.locator('[data-window-id="projects"]').getByRole('button', { name: 'COMPLETED' }).click();
 
       const projectsWindow = page.locator('[data-window-id="projects"]');
       await expect(projectsWindow.locator('.project-card')).toHaveCount(1);
@@ -324,7 +598,7 @@ test.describe('History Panel', () => {
     });
   });
 
-  test('Given inventory backend failure, when archived opens, then raw error shows', async ({ page }) => {
+  test('Given completed-project loading fails, when Completed opens, then raw error shows', async ({ page }) => {
     await installProjectSwitcherMocks({
       inventoryError: {
         message: 'Inventory query failed',
@@ -334,10 +608,10 @@ test.describe('History Panel', () => {
 
     await page.goto('/');
     await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.locator('[data-window-id="projects"]').getByRole('button', { name: 'ARCHIVED' }).click();
+    await page.locator('[data-window-id="projects"]').getByRole('button', { name: 'COMPLETED' }).click();
 
     const projectsWindow = page.locator('[data-window-id="projects"]');
-    await expect(projectsWindow.getByText('ARCHIVED LOAD ERROR')).toBeVisible();
+    await expect(projectsWindow.getByText('COMPLETED LOAD ERROR')).toBeVisible();
     await expect(projectsWindow.getByText('Inventory query failed')).toBeVisible();
     await expect(projectsWindow.getByText('database is locked')).toBeVisible();
   });

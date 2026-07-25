@@ -1,5 +1,11 @@
 import { test, expect } from '@playwright/test';
 
+declare global {
+  interface Window {
+    __releaseConcurrencyGeneration?: () => void;
+  }
+}
+
 test.describe('Concurrency Isolation', () => {
   test('switching threads during generation does not mutate the new thread', async ({ page }) => {
     await page.route(/\/mock\.stl(?:\?.*)?$/, async (route) => {
@@ -74,8 +80,9 @@ endsolid mock
           return { messages: [], nextBefore: null, hasMore: false };
         }
         if (cmd === 'generate_design') {
-          // Artificial delay
-          await new Promise(resolve => setTimeout(resolve, 1000));
+          await new Promise<void>((resolve) => {
+            window.__releaseConcurrencyGeneration = resolve;
+          });
           return {
             threadId: args.threadId || 'mock-thread-1',
             messageId: 'mock-msg-1',
@@ -148,6 +155,14 @@ endsolid mock
             verifierSource: 'mock',
           };
         }
+        if (cmd === 'verify_render') {
+          return {
+            passed: true,
+            summary: 'Visual checks passed.',
+            issues: [],
+            usage: null,
+          };
+        }
         if (cmd === 'save_config') return null;
         if (cmd === 'init_generation_attempt') return 'mock-msg-1';
         if (cmd === 'classify_intent') {
@@ -181,6 +196,7 @@ endsolid mock
     await page.waitForSelector('.workbench');
     await page.getByRole('button', { name: 'PROJECTS' }).click();
     await expect(page.locator('.project-card')).toContainText('Existing Thread');
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
     await page.getByRole('button', { name: 'DIALOGUE' }).click();
 
     // Type a prompt
@@ -189,19 +205,23 @@ endsolid mock
     const sendBtn = page.locator('button:has-text("PROCESS")');
     await expect(sendBtn).toBeEnabled();
     await textarea.press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+    await expect
+      .poll(() => page.evaluate(() => typeof window.__releaseConcurrencyGeneration))
+      .toBe('function');
 
-    // Immediately click the existing thread in history
     await page.getByRole('button', { name: 'PROJECTS' }).click({ force: true });
     const projectCard = page.locator('.project-card', { hasText: 'Existing Thread' }).first();
     await expect(projectCard).toBeVisible();
     await projectCard.getByRole('button', { name: 'OPEN' }).click({ force: true });
-
-    // Wait for the mock generation delay
-    await page.waitForTimeout(1500);
-
-    // Assert that the generated output did not bleed into the newly selected thread view
-    // i.e., the active thread should be mock-thread-2 and not mock-thread-1
+    await expect(projectCard).toHaveCount(0);
     await page.getByRole('button', { name: 'PROJECTS' }).click({ force: true });
-    await expect(page.locator('.project-card.active')).toContainText('Existing Thread');
+    const activeProjectCard = page.locator('.project-card.active', {
+      hasText: 'Existing Thread',
+    });
+    await expect(activeProjectCard).toBeVisible();
+
+    await page.evaluate(() => window.__releaseConcurrencyGeneration?.());
+
+    await expect(activeProjectCard).toContainText('Existing Thread');
   });
 });

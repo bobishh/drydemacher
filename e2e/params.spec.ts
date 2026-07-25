@@ -372,8 +372,16 @@ endsolid mock
           };
         }
         if (cmd === 'render_model') {
+          const scenarioModelIds: Record<string, string> = {
+            'seeded-macro': 'seeded-macro-model',
+            'editable-macro-pair': 'editable-macro-pair-model',
+            'dense-macro': 'dense-macro-model',
+            'editable-macro': 'editable-macro-model',
+            'narrow-layout-box': 'narrow-layout-box',
+          };
+          const modelId = scenarioModelIds[(window as any).__PARAM_SCENARIO__] ?? 'litho-model';
           return {
-            modelId: 'litho-model',
+            modelId,
             sourceKind: 'generated',
             contentHash: 'mock-hash',
             fcstdPath: '/mock.FCStd',
@@ -708,6 +716,14 @@ endsolid mock
             },
             verifierStatus: 'ok',
             verifierSource: 'mock',
+          };
+        }
+        if (cmd === 'verify_render') {
+          return {
+            passed: true,
+            summary: 'Visual checks passed.',
+            issues: [],
+            usage: null,
           };
         }
         if (cmd === 'get_thread') {

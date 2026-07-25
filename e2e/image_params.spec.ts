@@ -139,6 +139,14 @@ endsolid mock
             verifierSource: 'mock',
           };
         }
+        if (cmd === 'verify_render') {
+          return {
+            passed: true,
+            summary: 'Visual checks passed.',
+            issues: [],
+            usage: null,
+          };
+        }
         if (cmd === 'get_thread') {
           return {
             id: args.id,

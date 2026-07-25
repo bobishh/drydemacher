@@ -13,6 +13,7 @@ type MockOptions = {
   runtimeFilesExist?: boolean;
   allowRuntimeRebuild?: boolean;
   messagesPageDelayMs?: number;
+  messagesPageFails?: boolean;
   latestVersionDelayMs?: number;
 };
 
@@ -135,6 +136,9 @@ async function installPassiveThreadAgentMock(page: Page, options: MockOptions = 
       if (cmd === 'get_thread_messages_page') {
         if (mockOptions.messagesPageDelayMs) {
           await new Promise((resolve) => setTimeout(resolve, mockOptions.messagesPageDelayMs));
+        }
+        if (mockOptions.messagesPageFails) {
+          throw new Error('Thread messages load timed out');
         }
         return { messages: mockMessages, nextBefore: null, hasMore: false };
       }
@@ -1160,6 +1164,93 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await expect(page.locator('.viewer-shell canvas')).toBeVisible();
   });
 
+  test('Given thread message backfill times out When cached current version opens Then model stays visible without a global error', async ({ page }) => {
+    const now = Math.floor(Date.now() / 1000);
+    await installPassiveThreadAgentMock(page, {
+      messagesPageFails: true,
+      messages: [
+        {
+          id: 'version-page-timeout',
+          role: 'assistant',
+          content: 'Cached current version.',
+          status: 'success',
+          output: {
+            title: 'Cached Timeout Thread',
+            versionName: 'V-cached',
+            interactionMode: 'design',
+            macroCode: '(model)',
+            macroDialect: 'ecky',
+            sourceLanguage: 'ecky',
+            geometryBackend: 'build123d',
+            uiSpec: { fields: [] },
+            initialParams: {},
+            postProcessing: null,
+          },
+          usage: null,
+          artifactBundle: {
+            modelId: 'cached-timeout-model',
+            sourceKind: 'generated',
+            engineKind: 'ecky',
+            sourceLanguage: 'ecky',
+            geometryBackend: 'build123d',
+            contentHash: 'cached-timeout-hash',
+            artifactVersion: 1,
+            fcstdPath: '',
+            manifestPath: '/mock/cached-timeout.json',
+            macroPath: '/mock/cached-timeout.ecky',
+            previewStlPath: '/mock/cached-timeout.stl',
+            viewerAssets: [],
+          },
+          modelManifest: {
+            modelId: 'cached-timeout-model',
+            sourceKind: 'generated',
+            sourceLanguage: 'ecky',
+            geometryBackend: 'build123d',
+            document: {
+              documentName: 'Cached Timeout Thread',
+              documentLabel: 'Cached Timeout Thread',
+              objectCount: 1,
+              warnings: [],
+            },
+            parts: [],
+            parameterGroups: [],
+            controlPrimitives: [],
+            controlRelations: [],
+            controlViews: [],
+            selectionTargets: [],
+            advisories: [],
+            measurementAnnotations: [],
+            warnings: [],
+            enrichmentState: { status: 'none', proposals: [] },
+          },
+          agentOrigin: null,
+          imageData: null,
+          visualKind: null,
+          attachmentImages: [],
+          timestamp: now - 1,
+        },
+      ],
+    });
+
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.waitForSelector('.workbench');
+
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    await page.getByRole('button', { name: 'OPEN' }).click();
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+
+    await expect(page.locator('.viewer-shell canvas')).toBeVisible();
+    await expect(page.getByText(/Thread Messages Error:/i)).toHaveCount(0);
+
+    const calls = await page.evaluate(() =>
+      ((window as Window & typeof globalThis & {
+        __MOCK_AGENT_INVOKE_CALLS__?: Array<{ cmd: string; args: unknown }>;
+      }).__MOCK_AGENT_INVOKE_CALLS__ ?? []).map((call) => call.cmd),
+    );
+    expect(calls).not.toContain('render_model');
+  });
+
   test('Given projects prefetched latest version When open thread has slow latest and page calls Then dialogue still boots from cache', async ({ page }) => {
     const now = Math.floor(Date.now() / 1000);
     await installPassiveThreadAgentMock(page, {
@@ -1341,20 +1432,19 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await page.waitForSelector('.workbench');
 
     await page.getByRole('button', { name: 'PROJECTS' }).click();
+    await page.getByRole('button', { name: 'MORE ACTIONS' }).click();
     await page.getByRole('button', { name: 'DELETE' }).click();
 
     const modal = page.getByRole('dialog', { name: /TRASH PROJECT/i });
     await expect(modal).toBeVisible();
     await expect(modal).toContainText('Move Passive MCP Thread to trash?');
-    await expect(modal).toContainText('recover it from TRASH');
+    await expect(modal).toContainText('recover the complete project and its versions from TRASH');
     await expect(modal).not.toContainText('DELETE FOREVER');
 
     const cancelButton = modal.getByRole('button', { name: 'CANCEL' });
     const trashButton = modal.getByRole('button', { name: 'MOVE TO TRASH' });
     await expect(cancelButton).toBeVisible();
     await expect(trashButton).toBeVisible();
-    await expect(cancelButton).toHaveClass(/btn/);
-    await expect(trashButton).toHaveClass(/btn/);
 
     const styles = await Promise.all([
       cancelButton.evaluate((node) => {
@@ -1544,7 +1634,8 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await page.getByRole('button', { name: 'DIALOGUE' }).click();
     await expect(page.locator('.thread-loading')).toContainText('LOADING THREAD MESSAGES');
 
-    await page.locator('button[title="New project"]').click();
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    await page.locator('[data-window-id="projects"]').getByRole('button', { name: '+ NEW' }).click();
     await page.getByRole('button', { name: 'Blank Project' }).click();
 
     await expect(page.locator('.thread-loading')).toHaveCount(0);
@@ -1588,7 +1679,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
 
     await drawViewportAnnotation(page);
     await expect(page.locator('.workspace-capture-hint')).toContainText(
-      'Enabled automatically because the current viewport has drawn annotations.',
+      'Enabled automatically because the current viewport has annotated content.',
     );
     await expect(captureToggle).not.toBeChecked();
 
@@ -1610,7 +1701,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await expect(captureToggle).not.toBeChecked();
   });
 
-  test('Given queued inbox work and pending confirm When opening projects Then project card shows both badges', async ({ page }) => {
+  test('Given queued work and pending confirmation When opening projects Then one action sentence replaces badges', async ({ page }) => {
     await installPassiveThreadAgentMock(page, {
       queuedCount: 2,
       pendingConfirm: 'review-lens-fit',
@@ -1623,7 +1714,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await page.getByRole('button', { name: 'PROJECTS' }).click();
 
     const card = page.locator('.project-card').filter({ hasText: 'Passive MCP Thread' }).first();
-    await expect(card).toContainText('INBOX 2');
-    await expect(card).toContainText('CONFIRM');
+    await expect(card).toContainText('ACTION REQUIRED · 2 queued');
+    await expect(card.locator('.card-badge')).toHaveCount(0);
   });
 });

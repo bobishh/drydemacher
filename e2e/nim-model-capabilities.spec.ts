@@ -170,7 +170,7 @@ test.describe('NVIDIA NIM vision capability hints', () => {
 
     await expect(
       page.getByTestId('engine-vision-warning'),
-    ).toContainText(/concept-preview reuse, and screenshot verification are unavailable/i);
+    ).toContainText(/concept-preview reuse, screenshot capture, and drawing annotations are unavailable/i);
   });
 
   test('Given vision-capable NIM model When engine settings open Then preview warning stays hidden', async ({ page }) => {

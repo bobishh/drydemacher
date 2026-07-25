@@ -156,30 +156,27 @@ async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMo
 }
 
 test.describe('Component package library', () => {
-  test('lists installed package interfaces in the Projects window', async ({ page }) => {
+  test('Given installed packages When Library opens Then concise package facts are visible', async ({ page }) => {
     await installProjectLibraryMocks(page, 'ok');
     await page.goto('/');
     await expect(page.locator('.boot-overlay')).toHaveCount(0);
 
-    await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'PACKAGES' }).click();
+    await page.getByRole('button', { name: 'LIBRARY' }).click();
 
     await expect(page.getByText('Bike Bottle System')).toBeVisible();
     await expect(page.getByText('bike-bottle-system / 0.1.0')).toBeVisible();
     await expect(page.getByText('2 components')).toBeVisible();
     await expect(page.getByText('2 port types')).toBeVisible();
-    await expect(page.getByText('Bottle Cage')).toBeVisible();
-    await expect(page.getByText('dovetail_slot')).toBeVisible();
-    await expect(page.getByText('Rail Cage Mount')).toBeVisible();
+    await expect(page.getByText('Bottle Cage')).toHaveCount(0);
+    await expect(page.getByText('dovetail_slot')).toHaveCount(0);
   });
 
-  test('shows raw backend error when package library load fails', async ({ page }) => {
+  test('Given package loading fails When Library opens Then raw backend body stays visible', async ({ page }) => {
     await installProjectLibraryMocks(page, 'error');
     await page.goto('/');
     await expect(page.locator('.boot-overlay')).toHaveCount(0);
 
-    await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'PACKAGES' }).click();
+    await page.getByRole('button', { name: 'LIBRARY' }).click();
 
     await expect(page.getByText('component library failed')).toBeVisible();
     await expect(page.getByText('raw package index missing')).toBeVisible();
@@ -190,9 +187,8 @@ test.describe('Component package library', () => {
     await page.goto('/');
     await expect(page.locator('.boot-overlay')).toHaveCount(0);
 
-    await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'PACKAGES' }).click();
-    await expect(page.getByText('NO PACKAGES INSTALLED')).toBeVisible();
+    await page.getByRole('button', { name: 'LIBRARY' }).click();
+    await expect(page.getByText('NO COMPONENT PACKAGES')).toBeVisible();
 
     await page.getByRole('button', { name: 'IMPORT PACKAGE' }).click();
 
@@ -206,8 +202,7 @@ test.describe('Component package library', () => {
     await page.goto('/');
     await expect(page.locator('.boot-overlay')).toHaveCount(0);
 
-    await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'PACKAGES' }).click();
+    await page.getByRole('button', { name: 'LIBRARY' }).click();
     await page.getByRole('button', { name: 'IMPORT PACKAGE' }).click();
 
     await expect(page.getByText('package install failed')).toBeVisible();

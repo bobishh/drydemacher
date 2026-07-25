@@ -253,17 +253,15 @@ test.describe('FreeCAD library catalog', () => {
     await page.goto('/');
     await expect(page.locator('.boot-overlay')).toHaveCount(0);
 
-    await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'PACKAGES' }).click();
+    await page.getByRole('button', { name: 'LIBRARY' }).click();
+    await page.getByRole('button', { name: 'FREECAD PARTS' }).click();
 
-    await expect(page.getByText('FREECAD LIBRARY')).toBeVisible();
-    await page.getByPlaceholder('Search FreeCAD library...').fill('608 bearing');
-    await page.getByRole('button', { name: 'SEARCH FREECAD' }).click();
+    await expect(page.getByText('LOCAL SOURCE')).toBeVisible();
+    await page.getByPlaceholder('Search library...').fill('608 bearing');
+    await page.getByRole('button', { name: 'SEARCH', exact: true }).click();
 
     await expect(page.getByText('608 Bearing')).toBeVisible();
     await expect(page.getByText('Mechanical Parts / Bearings')).toBeVisible();
-    await expect(page.getByText('step')).toBeVisible();
-
     await page.getByRole('button', { name: 'IMPORT 608 Bearing' }).click();
 
     await expect(page.evaluate(() => (window as any).__IMPORT_CALLS__)).resolves.toEqual([
@@ -279,9 +277,9 @@ test.describe('FreeCAD library catalog', () => {
     await page.goto('/');
     await expect(page.locator('.boot-overlay')).toHaveCount(0);
 
-    await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'PACKAGES' }).click();
-    await page.getByRole('button', { name: 'SET LIBRARY FOLDER' }).click();
+    await page.getByRole('button', { name: 'LIBRARY' }).click();
+    await page.getByRole('button', { name: 'FREECAD PARTS' }).click();
+    await page.getByRole('button', { name: 'SET FOLDER' }).click();
 
     await expect(page.evaluate(() => (window as any).__SAVED_CONFIG__?.freecadLibraryRoots)).resolves.toEqual([
       '/mock/freecad-library',
@@ -293,10 +291,10 @@ test.describe('FreeCAD library catalog', () => {
     await page.goto('/');
     await expect(page.locator('.boot-overlay')).toHaveCount(0);
 
-    await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'PACKAGES' }).click();
-    await page.getByPlaceholder('Search FreeCAD library...').fill('bearing');
-    await page.getByRole('button', { name: 'SEARCH FREECAD' }).click();
+    await page.getByRole('button', { name: 'LIBRARY' }).click();
+    await page.getByRole('button', { name: 'FREECAD PARTS' }).click();
+    await page.getByPlaceholder('Search library...').fill('bearing');
+    await page.getByRole('button', { name: 'SEARCH', exact: true }).click();
 
     await expect(page.getByText('FreeCAD library scan failed')).toBeVisible();
     await expect(page.getByText('raw root missing: /mock/freecad-library')).toBeVisible();
@@ -307,10 +305,10 @@ test.describe('FreeCAD library catalog', () => {
     await page.goto('/');
     await expect(page.locator('.boot-overlay')).toHaveCount(0);
 
-    await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'PACKAGES' }).click();
-    await page.getByPlaceholder('Search FreeCAD library...').fill('608');
-    await page.getByRole('button', { name: 'SEARCH FREECAD' }).click();
+    await page.getByRole('button', { name: 'LIBRARY' }).click();
+    await page.getByRole('button', { name: 'FREECAD PARTS' }).click();
+    await page.getByPlaceholder('Search library...').fill('608');
+    await page.getByRole('button', { name: 'SEARCH', exact: true }).click();
     await page.getByRole('button', { name: 'IMPORT 608 Bearing' }).click();
 
     await expect(page.getByRole('button', { name: 'IMPORTING 608 Bearing' })).toBeDisabled();
@@ -321,13 +319,12 @@ test.describe('FreeCAD library catalog', () => {
     await page.goto('/');
     await expect(page.locator('.boot-overlay')).toHaveCount(0);
 
-    await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'PACKAGES' }).click();
-    await page.getByPlaceholder('Search FreeCAD library...').fill('fan guard');
-    await page.getByRole('button', { name: 'SEARCH FREECAD' }).click();
+    await page.getByRole('button', { name: 'LIBRARY' }).click();
+    await page.getByRole('button', { name: 'FREECAD PARTS' }).click();
+    await page.getByPlaceholder('Search library...').fill('fan guard');
+    await page.getByRole('button', { name: 'SEARCH', exact: true }).click();
 
     await expect(page.getByText('Fan Guard')).toBeVisible();
-    await expect(page.getByText('meshOnly')).toBeVisible();
     await page.getByRole('button', { name: 'IMPORT Fan Guard' }).click();
 
     await expect

@@ -7,7 +7,15 @@ async function installSpeechPolicyMocks(page: Page, mode: SpeechMockMessageMode)
     await route.fulfill({
       status: 200,
       contentType: 'model/stl',
-      body: 'solid speech-policy\nendsolid speech-policy',
+      body: `solid speech-policy
+facet normal 0 0 1
+  outer loop
+    vertex 0 0 0
+    vertex 1 0 0
+    vertex 0 1 0
+  endloop
+endfacet
+endsolid speech-policy`,
     });
   });
 
@@ -214,19 +222,23 @@ async function installSpeechPolicyMocks(page: Page, mode: SpeechMockMessageMode)
 test.describe('Audio controls', () => {
   test('Given idle workbench, audio mute toggle remains visible', async ({ page }) => {
     await page.goto('/');
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.getByRole('button', { name: 'APP' }).click();
 
     await expect(page.locator('.microwave-unit')).toHaveCount(0);
-    await expect(page.getByRole('button', { name: /mute ecky audio/i })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'AUDIO ON' })).toBeVisible();
   });
 
   test('Given audio toggle, muting keeps control available for unmute', async ({ page }) => {
     await page.goto('/');
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.getByRole('button', { name: 'APP' }).click();
 
-    const toggle = page.getByRole('button', { name: /mute ecky audio/i });
+    const toggle = page.getByRole('button', { name: 'AUDIO ON' });
     await expect(toggle).toBeVisible();
     await toggle.click();
 
-    await expect(page.getByRole('button', { name: /unmute ecky audio/i })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'AUDIO OFF' })).toBeVisible();
   });
 
   test('Given MCP draft update is latest bubble When thread opens Then speech stays silent', async ({ page }) => {
