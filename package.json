@@ -9,6 +9,8 @@
     "dev:server": "tsx watch server/index.ts",
     "build": "vite build",
     "build:book": "tsx scripts/build_ecky_ir_book.ts",
+    "sync:animal-caps": "node scripts/sync_animal_cap_catalog.mjs",
+    "check:animal-caps": "node --test scripts/animal_cap_catalog.test.mjs && node scripts/sync_animal_cap_catalog.mjs --check",
     "sync:book-source": "tsx scripts/sync_ecky_ir_sources.ts",
     "check:book-source": "tsx scripts/sync_ecky_ir_sources.ts --check",
     "preview": "vite preview",

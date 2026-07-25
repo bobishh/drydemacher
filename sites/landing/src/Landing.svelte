@@ -1,6 +1,7 @@
 <script lang="ts">
   import EckyMascot from './EckyMascot.svelte';
   import CaseWorkbench from './showcase/CaseWorkbench.svelte';
+  import AnimalCapWorkbench from './showcase/AnimalCapWorkbench.svelte';
 
   const repoUrl = 'https://github.com/bobishh/ecky';
   const docsUrl = '/docs/';
@@ -99,6 +100,18 @@
   </div>
   <CaseWorkbench />
 </header>
+
+<section class="section" id="animal-caps">
+  <div class="section-head">
+    <span class="kicker">MANIFEST-DRIVEN MESH + NATIVE BORE</span>
+    <h2>Animals with engineering problems.</h2>
+    <p class="section-sub">
+      Licensed source mesh. Uniform scale. Named blind Presta fit. Ecky owns the cut,
+      verification, and saved version; one manifest publishes the desktop and web subsets.
+    </p>
+  </div>
+  <AnimalCapWorkbench />
+</section>
 
 <section class="section">
   <div class="section-head">
