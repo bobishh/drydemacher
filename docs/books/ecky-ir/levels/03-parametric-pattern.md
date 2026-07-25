@@ -1,4 +1,8 @@
-## Repetition: Ribs, Slots, and Patterns
+## Level 03: Parametric Pattern
+
+**Mission:** Replace copied geometry with one repeated rule.
+
+**Clear condition:** Changing count or pitch moves the whole pattern without editing shape blocks.
 
 Represent repeated geometry with one body and an index. This keeps count, spacing, and fit math editable in one place.
 

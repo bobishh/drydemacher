@@ -1,4 +1,8 @@
-## Final Model: Integrated Film Adapter Open Helicoid v9
+## Level 06: Film Adapter
+
+**Mission:** Read and modify a production-scale multipart mechanism with named fit relations.
+
+**Clear condition:** A fit parameter changes both mating sides while preview-only placement leaves export geometry unchanged.
 
 The final example is a multi-part film adapter with sliding rail joints and a two-start helicoid. Its base, insert stack, tunnel, cover, and lens carrier share fit dimensions but remain separate printable parts.
 

@@ -1,4 +1,8 @@
-## Cut and Join: Mounting Plate
+## Level 02: Mounting Plate
+
+**Mission:** Turn a blank into a useful plate with repeated through-holes.
+
+**Clear condition:** Every cutter crosses the plate and the exported STL remains one component.
 
 Use `build` when a part needs several boolean stages. Each `shape` names an intermediate result; `result` identifies the final geometry. Names keep cutters and later selectors readable.
 

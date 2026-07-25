@@ -7,7 +7,7 @@ export type SplitBookChapter = {
   markdown: string;
 };
 
-const CHAPTER_LINK = /^- \[([^\]]+)\]\((chapters\/[^)]+\.md)\)$/gm;
+const CHAPTER_LINK = /^- \[([^\]]+)\]\(((?:chapters|levels)\/[^)]+\.md)\)$/gm;
 
 export function projectSplitBook(canonicalMarkdown: string, indexMarkdown: string): SplitBookChapter[] {
   const chapters: SplitBookChapter[] = [];
@@ -25,7 +25,7 @@ export function projectSplitBook(canonicalMarkdown: string, indexMarkdown: strin
   }
 
   if (!chapters.length) {
-    throw new Error('Book index contains no linked chapter entries.');
+    throw new Error('Campaign index contains no linked level entries.');
   }
 
   return chapters;
@@ -33,7 +33,7 @@ export function projectSplitBook(canonicalMarkdown: string, indexMarkdown: strin
 
 export function syncSplitBook(root: string, check = false): void {
   const bookRoot = path.join(root, 'docs', 'books', 'ecky-ir');
-  const canonicalPath = path.join(root, 'public', 'docs', 'ecky-ir.md');
+  const canonicalPath = path.join(root, 'public', 'tutorials', 'ecky-campaign.md');
   const indexPath = path.join(bookRoot, 'index.md');
   const chapters = projectSplitBook(
     fs.readFileSync(canonicalPath, 'utf8'),
@@ -54,7 +54,7 @@ export function syncSplitBook(root: string, check = false): void {
   }
 
   if (drift.length) {
-    throw new Error(`Split book drifted from public/docs/ecky-ir.md: ${drift.join(', ')}`);
+    throw new Error(`Split campaign drifted from public/tutorials/ecky-campaign.md: ${drift.join(', ')}`);
   }
 }
 

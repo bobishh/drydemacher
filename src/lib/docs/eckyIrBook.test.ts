@@ -9,80 +9,23 @@ function fixturePath(...parts: string[]): string {
   return path.join(process.cwd(), ...parts);
 }
 
-test('buildEckyIrBook assembles source docs and complex model walkthrough into book html', () => {
+test('buildEckyIrBook assembles campaign levels into book html', () => {
   const docsMarkdown = bookMarkdownFixture();
 
   const book = buildEckyIrBook({
     docsMarkdown,
   });
 
-  assert.equal(book.title, 'Ecky IR Field Guide');
+  assert.equal(book.title, 'Ecky Campaign');
   assert.match(book.html, /Table of Contents/i);
-  assert.equal(book.chapters[0]?.title, 'How Ecky Thinks');
-  assert.ok(book.chapters.some((chapter) => chapter.title === 'First Solid: Ball on a Base'));
-  assert.match(book.html, /fixed vocabulary/i);
-  assert.match(book.html, /native.*OCCT/i);
-  assert.ok(book.chapters.some((chapter) => chapter.title === 'Final Model: Integrated Film Adapter Open Helicoid v9'));
-  assert.ok(book.chapters.some((chapter) => chapter.title === 'Appendix: Language Reference'));
-  assert.match(book.html, /Sketch to Solid: Plate from a Profile/);
-  assert.match(book.html, /<code>assembly<\/code> \(planned\)/i);
-  assert.match(book.html, /planned top-level clause for explicit multi-part assembly recipes/i);
-  assert.match(book.html, /runtime\/compiler support deferred/i);
-  assert.match(book.html, /views prove the display\/manufacturing split/i);
-  assert.match(book.html, /formalize what component packages already do at the package layer/i);
-  assert.match(book.html, /assemblies stay placement-based as today/i);
-  assert.match(book.html, /examples here mark intent only, not accepted source today/i);
-  assert.match(book.html, /use <code>view<\/code> for preview-only offsets/i);
-  assert.match(book.html, /<code>export<\/code> \(planned\)/i);
-  assert.match(book.html, /planned top-level clause for authored export\/manufacturing policy/i);
-  assert.match(book.html, /preview transforms never affect STL or STEP artifacts/i);
-  assert.match(book.html, /artifact manifests, and package output modes outside <code>\.ecky<\/code> source/i);
-  assert.match(book.html, /model-level <code>let\*<\/code>/i);
-  assert.match(book.html, /helper <code>define<\/code>/i);
-  assert.match(book.html, /<code>define-component<\/code>/i);
-  assert.match(book.html, /<code>divider-depth<\/code> owns the offset calculation/i);
-  assert.match(book.html, /Verification: State What Must Stay True/);
-  assert.match(book.html, /generation should emit suffixed literals like mm\/cm\/in\/deg\/rad/i);
-  assert.match(book.html, /emit suffixed literals for lengths and angles/i);
-  assert.match(book.html, /bare numbers only for counts, ratios, and unitless math/i);
-  assert.match(book.html, /stores measurable requirements/i);
-  assert.match(book.html, /reports the measured delta/i);
-  assert.match(book.html, /verify_generated_model/);
-  assert.match(book.html, /Re-render and run verification again/i);
-  assert.match(book.html, /Real Model Patterns: Procedural Cuts and Arrayed Frames/);
-  assert.match(book.html, /assets\/10-real-model-patterns-01\.png/);
-  assert.match(book.html, /assets\/10-real-model-patterns-02\.png/);
-  assert.match(book.html, /assets\/10-real-model-patterns-03\.png/);
-  assert.match(book.html, /Woodlouse hotel/);
-  assert.match(book.html, /voronoi2/);
-  assert.match(book.html, /linear-array/);
-  assert.match(book.html, /radial-array/);
-  assert.match(book.html, /helical-ridge/);
-  assert.match(book.html, /clip-box/);
-  assert.match(book.html, /tunnel_female_bottom_male_top/);
-  assert.match(book.html, /base_recessed_male_rails/);
-  assert.match(book.html, /Tag any fit-critical selector\./);
-  assert.match(book.html, /:created-by pocket/);
-  assert.match(book.html, /limits face candidates to the cavity created from <code>pocket<\/code>/);
-  assert.match(book.html, /resolves only on the native backend/i);
-  assert.ok(book.chapters.some((chapter) => chapter.title === 'Components and Reuse: Lift a Proven Part'));
-  assert.match(book.html, /Closedness makes reuse reliable/i);
-  assert.match(book.html, /Verification expands per instance/i);
-  assert.match(book.html, /component_extract/);
-  assert.ok(book.chapters.some((chapter) => chapter.title === 'Projects as Folders: Edit Anywhere, Stay Canonical'));
-  assert.ok(book.chapters.some((chapter) => chapter.title === 'Mesh and Image Geometry: Polygons in 3D'));
-  assert.match(book.html, /<code>polyhedron<\/code> requires one closed orientable component/i);
-  assert.match(book.html, /Faceted poly-BRep/i);
-  assert.match(book.html, /one perspective photo remains an inferred approximation/i);
-  assert.match(book.html, /Two-tick settle/i);
-  assert.match(book.html, /the folder is a mirror, not a second database/i);
-  assert.match(book.html, /millimeters for length.*degrees for angles/i);
-  assert.match(book.html, /do not type-check dimensions/i);
-  assert.match(book.html, /A renderable file needs a <code>model<\/code>/i);
-  assert.match(book.html, /Booleans also rebuild topology/i);
+  assert.equal(book.chapters.length, 6);
+  assert.equal(book.chapters[0]?.title, 'Level 01: Marker');
+  assert.ok(book.chapters.some((chapter) => chapter.title === 'Level 05: Perforated Toothbrush Holder'));
+  assert.ok(book.chapters.some((chapter) => chapter.title === 'Level 06: Film Adapter'));
+  assert.match(book.html, /Mission:/i);
+  assert.match(book.html, /Clear condition:/i);
+  assert.match(book.html, /one n-ary <code>difference<\/code>/i);
   assert.doesNotMatch(book.html, /ECKY_AGENT_REFERENCE/);
-  assert.doesNotMatch(book.html, /Current fileExtension/);
-  assert.doesNotMatch(book.html, /render-source/);
   assert.ok(book.assets.length > 0);
   assert.match(book.html, /assets\/01-first-solid-01\.png/);
   assert.deepEqual(book.assets[0], {
@@ -93,5 +36,5 @@ test('buildEckyIrBook assembles source docs and complex model walkthrough into b
 });
 
 function bookMarkdownFixture(): string {
-  return fs.readFileSync(fixturePath('public', 'docs', 'ecky-ir.md'), 'utf8');
+  return fs.readFileSync(fixturePath('public', 'tutorials', 'ecky-campaign.md'), 'utf8');
 }

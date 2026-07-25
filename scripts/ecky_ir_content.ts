@@ -1,0 +1,159 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const REFERENCE_HEADING = '## Appendix: Language Reference';
+const AGENT_START = '<!-- ECKY_AGENT_REFERENCE_START -->';
+const AGENT_END = '<!-- ECKY_AGENT_REFERENCE_END -->';
+
+type CampaignLevel = {
+  sourceTitle: string;
+  title: string;
+  mission: string;
+  clear: string;
+};
+
+const CAMPAIGN_LEVELS: CampaignLevel[] = [
+  {
+    sourceTitle: 'First Solid: Ball on a Base',
+    title: 'Level 01: Marker',
+    mission: 'Build one printable part from two primitives.',
+    clear: 'Preview shows one connected ball-on-base solid and the first code block compiles.',
+  },
+  {
+    sourceTitle: 'Cut and Join: Mounting Plate',
+    title: 'Level 02: Mounting Plate',
+    mission: 'Turn a blank into a useful plate with repeated through-holes.',
+    clear: 'Every cutter crosses the plate and the exported STL remains one component.',
+  },
+  {
+    sourceTitle: 'Repetition: Ribs, Slots, and Patterns',
+    title: 'Level 03: Parametric Pattern',
+    mission: 'Replace copied geometry with one repeated rule.',
+    clear: 'Changing count or pitch moves the whole pattern without editing shape blocks.',
+  },
+  {
+    sourceTitle: 'Real Model Patterns: Procedural Cuts and Arrayed Frames',
+    title: 'Level 04: Procedural Workshop',
+    mission: 'Build generated cutters and path-driven attachments from data.',
+    clear: 'One parameter change regenerates the pattern; final geometry still exports as a valid solid.',
+  },
+  {
+    sourceTitle: 'Worked Project: Perforated Toothbrush Holder',
+    title: 'Level 05: Perforated Toothbrush Holder',
+    mission: 'Build a shelled product, prove one custom cutter, then repeat it across curved walls.',
+    clear: 'All four checkpoints compile and the final boolean is one body minus one generated cutter group.',
+  },
+  {
+    sourceTitle: 'Final Model: Integrated Film Adapter Open Helicoid v9',
+    title: 'Level 06: Film Adapter',
+    mission: 'Read and modify a production-scale multipart mechanism with named fit relations.',
+    clear: 'A fit parameter changes both mating sides while preview-only placement leaves export geometry unchanged.',
+  },
+];
+
+export type EckyIrContentProjection = {
+  campaign: string;
+  reference: string;
+  agentReference: string;
+};
+
+export function projectEckyIrContent(corpus: string): EckyIrContentProjection {
+  const normalized = corpus.replace(/\r\n/g, '\n');
+  const referenceStart = normalized.indexOf(REFERENCE_HEADING);
+  if (referenceStart === -1) {
+    throw new Error(`Ecky corpus missing ${REFERENCE_HEADING}`);
+  }
+  const agentStart = normalized.indexOf(AGENT_START);
+  const agentEnd = normalized.indexOf(AGENT_END);
+  if (agentStart === -1 || agentEnd === -1 || agentEnd <= agentStart) {
+    throw new Error('Ecky corpus must contain one bounded agent reference.');
+  }
+
+  const lessonCorpus = normalized.slice(0, referenceStart).trim();
+  const referenceBody = normalized
+    .slice(referenceStart + REFERENCE_HEADING.length, agentStart)
+    .trim()
+    .replace(/^### Generated Operation Index$/m, '## Operation Index');
+  const agentReference = normalized
+    .slice(agentStart + AGENT_START.length, agentEnd)
+    .trim();
+
+  const campaignSections = CAMPAIGN_LEVELS.map((level) => {
+    const body = extractSection(lessonCorpus, level.sourceTitle);
+    return [
+      `## ${level.title}`,
+      '',
+      `**Mission:** ${level.mission}`,
+      '',
+      `**Clear condition:** ${level.clear}`,
+      '',
+      body,
+    ].join('\n');
+  });
+
+  return {
+    campaign: [
+      '# Ecky Campaign',
+      '',
+      'Learn Ecky as six modeling levels. Each level ends in geometry you can preview,',
+      'compile, and export as STL. Finish the clear condition before moving forward;',
+      'the dry operation reference lives under `/docs/ecky-ir`.',
+      '',
+      ...campaignSections,
+      '',
+    ].join('\n'),
+    reference: [
+      '# Ecky Language Reference',
+      '',
+      'Dry syntax, signatures, selectors, backend support, and verification grammar.',
+      'For project-driven learning, use the campaign under `/learn/ecky-ir`.',
+      '',
+      referenceBody,
+      '',
+    ].join('\n'),
+    agentReference: `${agentReference}\n`,
+  };
+}
+
+export function syncEckyIrContent(root: string, check = false): void {
+  const corpusPath = path.join(root, 'docs/books/ecky-ir/ecky-ir-corpus.md');
+  const projection = projectEckyIrContent(fs.readFileSync(corpusPath, 'utf8'));
+  const outputs = [
+    [path.join(root, 'public/tutorials/ecky-campaign.md'), projection.campaign],
+    [path.join(root, 'public/docs/ecky-ir.md'), projection.reference],
+    [path.join(root, 'public/docs/ecky-agent-reference.md'), projection.agentReference],
+  ] as const;
+  const drift: string[] = [];
+
+  for (const [outputPath, content] of outputs) {
+    const current = fs.existsSync(outputPath) ? fs.readFileSync(outputPath, 'utf8') : null;
+    if (current === content) continue;
+    if (check) {
+      drift.push(path.relative(root, outputPath));
+      continue;
+    }
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+    fs.writeFileSync(outputPath, content);
+  }
+
+  if (drift.length) {
+    throw new Error(`Published Ecky content drifted: ${drift.join(', ')}`);
+  }
+}
+
+function extractSection(markdown: string, title: string): string {
+  const heading = `## ${title}`;
+  const start = markdown.indexOf(heading);
+  if (start === -1) throw new Error(`Ecky corpus missing campaign section: ${heading}`);
+  const bodyStart = start + heading.length;
+  const next = markdown.indexOf('\n## ', bodyStart);
+  return markdown.slice(bodyStart, next === -1 ? markdown.length : next).trim();
+}
+
+const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : '';
+if (invokedPath === fileURLToPath(import.meta.url)) {
+  const check = process.argv.includes('--check');
+  syncEckyIrContent(process.cwd(), check);
+  console.log(check ? 'Published Ecky content is current.' : 'Published Ecky content synchronized.');
+}

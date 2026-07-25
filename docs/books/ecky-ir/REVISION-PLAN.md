@@ -46,18 +46,11 @@ the API/MCP prompt builder.
 
 ## Known follow-up (discovered, not a book-content task)
 
-- **Render pipeline can't handle native-only examples.**
-  `scripts/render_book_examples.py` collects every ```` ```scheme ```` block that
-  starts with `(model` and lowers it through **build123d only** (`ecky lower
-  --backend build123d`). ch05's `:created-by` example is a full `(model ...)`,
-  so a real (non-`--check`) render run would fail — build123d deliberately
-  rejects `:created-by` (the native-only split documented in A1). The book's
-  committed ch05 assets predate that example, which is why nothing has broken
-  yet. Fix options for a later pass: (a) let the renderer fall back to the native
-  OCCT backend for blocks it can't lower via build123d, (b) add a marker to skip
-  a block from build123d rendering, or (c) carry a pre-rendered asset for it.
-  My B1 worked example sidesteps this — it starts with `(define-component`, so
-  the collector skips it (the `startswith("(model")` filter).
+- **Book image assets are committed snapshots.**
+  The old build123d-only example renderer was removed from `scripts/`; it was
+  not wired into package scripts or CI and could not handle native-only examples
+  such as `:created-by`. Future image regeneration should use a current
+  render-path command that understands backend-specific examples.
 
 ## Tasks
 
@@ -121,7 +114,7 @@ the API/MCP prompt builder.
   filename). Verified: built HTML references `11-...png` (no `10-` left), asset
   present in EPUB OEBPS, book test green, and the chapters/ glob now sorts
   correctly (`10-real` → `10a-projects` → `11-complex`), killing the footgun.
-  Note: did NOT run a full `render_book_examples.py` re-render — it lowers every
+  Note: did NOT run a full image re-render — the old renderer lowered every
   example through build123d, which would fail on ch05's native-only
   `:created-by`; the byte-identical artifact rename is sufficient and safe.
   Original spec:
@@ -129,9 +122,8 @@ the API/MCP prompt builder.
   `10-complex-film-adapter.md` becomes **11** (it is literally "the final
   model", and real-patterns says "before the final adapter"). Update
   `index.md` and any `render-source`/build references.
-  COST NOTE (verified): the chapter filename IS the asset stem
-  (`render_book_examples.py`: `asset_stem = f"{chapter_slug}-{index:02d}"`).
-  Renaming the file to `11-` also requires renaming the committed PNG
+  COST NOTE (verified): the chapter filename was the asset stem for generated
+  image names. Renaming the file to `11-` also requires renaming the committed PNG
   `assets/10-complex-film-adapter-01.png` → `11-...`, updating its reference in
   `public/docs/ecky-ir.md:633` and the chapters mirror, then regenerating
   through the render stack. Served order is ALREADY correct (real-patterns

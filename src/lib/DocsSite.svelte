@@ -32,6 +32,7 @@
   let copyState = $state<'idle' | 'copied' | 'failed'>('idle');
   let epubState = $state<'idle' | 'saving' | 'saved' | 'failed'>('idle');
   let epubError = $state('');
+  let campaignMode = $state(true);
 
   onMount(() => {
     void loadDocs();
@@ -42,7 +43,9 @@
     error = '';
 
     try {
-      const response = await fetch(docsSourcePath(), { cache: 'no-store' });
+      const sourcePath = docsSourcePath(window.location.pathname);
+      campaignMode = sourcePath.startsWith('/tutorials/');
+      const response = await fetch(sourcePath, { cache: 'no-store' });
       if (!response.ok) {
         throw new Error(`Docs request failed: ${response.status}`);
       }
@@ -120,7 +123,7 @@
 
 <svelte:head>
   {#if showHead}
-    <title>Ecky IR Field Guide</title>
+    <title>{documentData?.title ?? 'Ecky Language'}</title>
   {/if}
 </svelte:head>
 
@@ -131,16 +134,20 @@
     <div class="docs-state docs-state--error">{error}</div>
   {:else if documentData && activeSection}
     <header class="docs-header">
-      <div class="docs-header__kicker">Ecky language / docs</div>
+      <div class="docs-header__kicker">
+        {campaignMode ? 'Ecky language / campaign' : 'Ecky language / reference'}
+      </div>
       <h1>{documentData.title}</h1>
       <div class="docs-header__summary">
         {@html documentData.summaryHtml}
       </div>
-      <div class="docs-actions docs-actions--header">
-        <button type="button" class="docs-action docs-action--primary" onclick={() => void downloadEpub()}>
-          {epubState === 'saving' ? 'SAVING EPUB...' : 'DOWNLOAD EPUB'}
-        </button>
-      </div>
+      {#if campaignMode}
+        <div class="docs-actions docs-actions--header">
+          <button type="button" class="docs-action docs-action--primary" onclick={() => void downloadEpub()}>
+            {epubState === 'saving' ? 'SAVING EPUB...' : 'DOWNLOAD CAMPAIGN'}
+          </button>
+        </div>
+      {/if}
       {#if epubError}
         <div class="docs-inline-error">{epubError}</div>
       {/if}
@@ -391,6 +398,26 @@
   .docs-article__body :global(code) {
     font-family: 'SFMono-Regular', ui-monospace, monospace;
     color: var(--text);
+  }
+
+  .docs-article__body :global(table) {
+    width: 100%;
+    margin: 14px 0;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+
+  .docs-article__body :global(th),
+  .docs-article__body :global(td) {
+    border: 1px solid var(--bg-300);
+    padding: 8px 10px;
+    text-align: left;
+    vertical-align: top;
+  }
+
+  .docs-article__body :global(th) {
+    color: var(--secondary);
+    background: rgba(108, 80, 8, 0.24);
   }
 
   .docs-state {

@@ -42,15 +42,9 @@ test('Given parsed docs When site html built Then every section title appears as
 test('Given parsed docs When site html built Then section bodies render in the page', () => {
   const html = buildSite();
 
-  // A real section with code + content: the first solid guide.
-  assert.ok(html.includes('First Solid'), 'missing first section heading');
-  // Code blocks from the markdown must survive into the HTML.
+  assert.ok(html.includes('Primitive Signatures'), 'missing primitive reference');
   assert.ok(/<pre><code/.test(html), 'no code blocks rendered');
-  // Images (figures) from rendered examples must reference /docs/assets.
-  assert.ok(
-    /<img src="\/docs\/assets\//.test(html),
-    'images not resolved under /docs/assets',
-  );
+  assert.ok(!/<img src=/.test(html), 'dry reference should not contain tutorial renders');
 });
 
 test('Given parsed docs When site html built Then agent markdown and epub download links present', () => {

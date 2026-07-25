@@ -1,0 +1,23 @@
+;; Worked project, stage 1: one hollow D-shaped body.
+(model
+  (params
+    (number width 36.0 :min 20.0 :max 60.0 :label "Width")
+    (number depth 25.0 :min 15.0 :max 50.0 :label "Depth")
+    (number wall_thickness 2.6 :min 1.5 :max 5.0 :label "Wall thickness")
+    (number height 85.0 :min 40.0 :max 150.0 :label "Height"))
+  (part toothbrush_holder
+    (let* ((radius (/ width 2.0))
+           (inner_width (- width (* 2.0 wall_thickness)))
+           (inner_depth (- depth wall_thickness))
+           (inner_radius (- radius wall_thickness))
+           (outer
+             (union
+               (box width depth height :align '(center max center))
+               (cylinder radius height :align '(center center center))))
+           (cavity
+             (union
+               (box inner_width inner_depth (+ height 10.0)
+                 :align '(center max center))
+               (cylinder inner_radius (+ height 10.0)
+                 :align '(center center center)))))
+      (difference outer cavity))))

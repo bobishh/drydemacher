@@ -1,6 +1,12 @@
-## First Solid: Ball on a Base
+## Level 01: Marker
 
-A renderable file needs a `model`, a named `part`, and geometry. Start with one primitive so each added transform or boolean has an obvious effect.
+**Mission:** Build one printable part from two primitives.
+
+**Clear condition:** Preview shows one connected ball-on-base solid and the first code block compiles.
+
+A renderable file needs a `model`, a named `part`, and geometry. We are making
+a marker: first its ball, then the base. Starting with one primitive keeps each
+added transform or boolean obvious.
 
 ```scheme
 (model

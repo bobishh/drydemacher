@@ -31,7 +31,16 @@ export function isDocsRoute(pathname: string): boolean {
     || pathname.startsWith('/learn/ecky-ir/');
 }
 
-export function docsSourcePath(): string {
+export function docsSourcePath(pathname = '/'): string {
+  if (
+    pathname === '/learn/ecky-ir'
+    || pathname.startsWith('/learn/ecky-ir/')
+    || pathname === '/ecky-ir'
+    || pathname === '/ecky-ir/'
+    || pathname === '/'
+  ) {
+    return '/tutorials/ecky-campaign.md';
+  }
   return '/docs/ecky-ir.md';
 }
 
@@ -100,6 +109,28 @@ export function renderMarkdownFragment(markdown: string, options: DocsRenderOpti
       chunks.push(
         `<pre><code${className}>${escapeHtml(codeLines.join('\n').trimEnd())}</code></pre>`,
       );
+      continue;
+    }
+
+    const nextTrimmed = (lines[index + 1] ?? '').trim();
+    if (isTableRow(trimmed) && isTableDivider(nextTrimmed)) {
+      flushParagraph();
+      const headers = parseTableCells(trimmed);
+      const rows: string[][] = [];
+      let tableIndex = index + 2;
+      while (tableIndex < lines.length) {
+        const candidate = (lines[tableIndex] ?? '').trim();
+        if (!isTableRow(candidate)) break;
+        rows.push(parseTableCells(candidate));
+        tableIndex += 1;
+      }
+      chunks.push(
+        `<table><thead><tr>${headers.map((cell) => `<th>${renderInline(cell)}</th>`).join('')}</tr></thead>`
+          + `<tbody>${rows
+            .map((row) => `<tr>${row.map((cell) => `<td>${renderInline(cell)}</td>`).join('')}</tr>`)
+            .join('')}</tbody></table>`,
+      );
+      index = tableIndex - 1;
       continue;
     }
 
@@ -223,6 +254,22 @@ function parseImageBlock(text: string): { alt: string; src: string } | null {
     alt: matched[1].trim(),
     src: matched[2].trim(),
   };
+}
+
+function isTableRow(text: string): boolean {
+  return text.startsWith('|') && text.endsWith('|') && parseTableCells(text).length > 1;
+}
+
+function isTableDivider(text: string): boolean {
+  return isTableRow(text)
+    && parseTableCells(text).every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function parseTableCells(text: string): string[] {
+  return text
+    .slice(1, -1)
+    .split('|')
+    .map((cell) => cell.trim());
 }
 
 function resolveAssetSrc(src: string, options: DocsRenderOptions): string {

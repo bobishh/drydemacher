@@ -27,7 +27,7 @@ export type EckyIrBook = {
 
 export function buildEckyIrBook(input: EckyIrBookInput): EckyIrBook {
   const docs = parseDocsDocument(input.docsMarkdown);
-  const title = 'Ecky IR Field Guide';
+  const title = docs.title;
   const assets = collectBookAssets(
     input.docsMarkdown,
     input.assetSourceRoot ?? 'target/book/public/docs',

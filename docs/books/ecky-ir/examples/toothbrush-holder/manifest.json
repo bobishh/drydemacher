@@ -1,0 +1,29 @@
+{
+  "project": "Perforated toothbrush holder",
+  "stages": [
+    {
+      "id": "shell",
+      "title": "Subtract one named cavity",
+      "source": "docs/books/ecky-ir/examples/toothbrush-holder/01-shell.ecky",
+      "focus": ["params", "let*", "union", "difference", "align"]
+    },
+    {
+      "id": "drained-base",
+      "title": "Close the bottom and overshoot one drain",
+      "source": "docs/books/ecky-ir/examples/toothbrush-holder/02-drained-base.ecky",
+      "focus": ["named dimensions", "translate", "overshooting cutters"]
+    },
+    {
+      "id": "single-cutter",
+      "title": "Prove one custom spade cutter",
+      "source": "docs/books/ecky-ir/examples/toothbrush-holder/03-single-cutter.ecky",
+      "focus": ["polygon", "extrude", "location", "place"]
+    },
+    {
+      "id": "repeated-cutters",
+      "title": "Generate every cutter, then subtract once",
+      "source": "src-tauri/tests/fixtures/cad/perf/toothbrush_holder_versions.ecky",
+      "focus": ["repeat-union", "nested let*", "one n-ary difference", "DAG planning"]
+    }
+  ]
+}
