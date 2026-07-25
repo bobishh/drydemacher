@@ -8,29 +8,28 @@ use steel_core::parser::span::Span;
 use steel_core::parser::tokens::TokenType;
 use steel_core::rvals::SteelVal;
 
-use crate::contracts::{AppError, AppErrorCode, AppResult};
-use crate::ecky_core_ir::{
-    CompilerError, CompilerErrorKind, CoreArrayOp, CoreBinding, CoreBooleanOp, CoreFeatureDecl,
-    CoreFrameOp, CoreKeywordArg, CoreLiteral, CoreMetaOp, CoreNode, CoreNodeKind, CoreOperation,
-    CoreParameter, CoreParameterConstraints, CoreParameterKind, CoreParameterValue, CorePart,
-    CorePathOp, CorePreviewPartOffset, CorePreviewViewDecl, CorePrimitive, CoreProgram,
-    CoreProgramConstraints, CoreReference, CoreRelationConstraint, CoreRelationOperand,
-    CoreRelationOperator, CoreResult, CoreSelectorPayload, CoreSelectorTagDecl,
-    CoreSelectorTagKind, CoreShapeBinding, CoreSurfaceOp, CoreSymbol, CoreTransformOp,
-    CoreValueKind, CoreVerifyClause, CoreVerifySection, CoreVerifyValue, NodeId, ParamId, PartId,
-    ProgramId, SourceFileId, SourceSpan,
+use crate::core_ir::{
+    parse_core_edge_selector_payload, parse_core_face_selector_payload, CompilerError,
+    CompilerErrorKind, CoreArrayOp, CoreBinding, CoreBooleanOp, CoreFeatureDecl, CoreFrameOp,
+    CoreKeywordArg, CoreLiteral, CoreMetaOp, CoreNode, CoreNodeKind, CoreOperation, CoreParameter,
+    CoreParameterConstraints, CoreParameterKind, CoreParameterValue, CorePart, CorePathOp,
+    CorePreviewPartOffset, CorePreviewViewDecl, CorePrimitive, CoreProgram, CoreProgramConstraints,
+    CoreReference, CoreRelationConstraint, CoreRelationOperand, CoreRelationOperator, CoreResult,
+    CoreSelectorPayload, CoreSelectorTagDecl, CoreSelectorTagKind, CoreShapeBinding, CoreSurfaceOp,
+    CoreSymbol, CoreTransformOp, CoreValueKind, CoreVerifyClause, CoreVerifySection,
+    CoreVerifyValue, NodeId, ParamId, PartId, ProgramId, SourceFileId, SourceSpan,
 };
-use crate::ecky_deterministic;
-use crate::ecky_ir::edge_ops::{
-    parse_core_edge_selector_payload, parse_core_face_selector_payload,
-};
+use crate::deterministic as ecky_deterministic;
 
 use super::bootstrap;
 
+#[cfg(not(target_arch = "wasm32"))]
 const ECKY_COMPILE_STACK_SIZE: usize = 32 * 1024 * 1024;
 const ECKY_SOURCE_MAX_BYTES: usize = 512 * 1024;
 const ECKY_SOURCE_MAX_LIST_FORMS: usize = 20_000;
 const ECKY_SOURCE_MAX_PAREN_DEPTH: usize = 256;
+pub const MAX_MESH_LITERAL_VERTICES: usize = 100_000;
+pub const MAX_MESH_LITERAL_TRIANGLES: usize = 200_000;
 
 /// Internal representation of a component clause in the compiler's AST.
 /// Tracks the role of a component (root for model, output for part/feature, library for define-component)
@@ -92,12 +91,8 @@ fn selector_payload_for_keyword(
     // specific message (with the shared selector help) at compile time instead
     // of degrading to a generic expr keyword that fails later.
     match name {
-        "edges" => parse_core_edge_selector_payload(selector)
-            .map(Some)
-            .map_err(|err| CompilerError::new(CompilerErrorKind::TypeMismatch, err.message)),
-        "faces" => parse_core_face_selector_payload(selector)
-            .map(Some)
-            .map_err(|err| CompilerError::new(CompilerErrorKind::TypeMismatch, err.message)),
+        "edges" => parse_core_edge_selector_payload(selector).map(Some),
+        "faces" => parse_core_face_selector_payload(selector).map(Some),
         _ => Ok(None),
     }
 }
@@ -119,7 +114,7 @@ fn selector_tag_reference_name(value: &CoreNode) -> Option<&str> {
     }
 }
 
-pub fn try_compile_to_legacy_source(source: &str) -> Option<AppResult<String>> {
+pub fn try_compile_to_legacy_source(source: &str) -> Option<CoreResult<String>> {
     match compile_to_legacy_source(source) {
         Ok(compiled) => Some(Ok(compiled)),
         Err(err) if should_fallback_to_legacy(source, &err) => None,
@@ -127,20 +122,20 @@ pub fn try_compile_to_legacy_source(source: &str) -> Option<AppResult<String>> {
     }
 }
 
-pub fn try_compile_to_core_program(source: &str) -> Option<AppResult<CoreProgram>> {
+pub fn try_compile_to_core_program(source: &str) -> Option<CoreResult<CoreProgram>> {
     match compile_to_core_program(source) {
         Ok(program) => Some(Ok(program)),
         // Parse errors (syntax) are genuine and must never be swallowed by
         // legacy fallback — they mean the source is malformed, not that it
         // uses a different dialect.
-        Err(err) if err.kind == CompilerErrorKind::Parse => Some(Err(core_err_to_app(err))),
-        Err(err) if should_fallback_to_legacy(source, &core_err_to_app(err.clone())) => None,
-        Err(err) => Some(Err(core_err_to_app(err))),
+        Err(err) if err.kind == CompilerErrorKind::Parse => Some(Err(err)),
+        Err(err) if should_fallback_to_legacy(source, &err) => None,
+        Err(err) => Some(Err(err)),
     }
 }
 
-pub fn compile_to_legacy_source(source: &str) -> AppResult<String> {
-    let program = compile_to_core_program(source).map_err(core_err_to_app)?;
+pub fn compile_to_legacy_source(source: &str) -> CoreResult<String> {
+    let program = compile_to_core_program(source)?;
     Ok(emit_program(&program))
 }
 
@@ -149,6 +144,7 @@ pub fn compile_to_core_program(source: &str) -> CoreResult<CoreProgram> {
     compile_to_core_program_on_guarded_stack(source)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn compile_to_core_program_on_guarded_stack(source: &str) -> CoreResult<CoreProgram> {
     let source = source.to_owned();
     let handle = std::thread::Builder::new()
@@ -168,6 +164,11 @@ fn compile_to_core_program_on_guarded_stack(source: &str) -> CoreResult<CoreProg
             "Ecky compiler panicked while lowering source.",
         )
     })?
+}
+
+#[cfg(target_arch = "wasm32")]
+fn compile_to_core_program_on_guarded_stack(source: &str) -> CoreResult<CoreProgram> {
+    compile_to_core_program_inner(source)
 }
 
 fn compile_to_core_program_inner(source: &str) -> CoreResult<CoreProgram> {
@@ -221,7 +222,7 @@ fn verify_compiled_core_program(
 ) -> CoreResult<CoreProgram> {
     apply_authored_part_root_spans(&mut program, source);
     let literal_dimensions = literal_dimensions_from_program_source(&program, source);
-    let _warnings = crate::ecky_core_ir::verify_core_program_with_literal_dimensions(
+    let _warnings = crate::core_ir::verify_core_program_with_literal_dimensions(
         &program,
         &literal_dimensions,
         strict_units,
@@ -506,8 +507,8 @@ fn validate_mesh_sequence_budget_expr(expr: &ExprKind) -> CoreResult<()> {
                 while index + 1 < list.args.len() {
                     if let Some(keyword) = instantiation_keyword_name(&list.args[index]) {
                         let limit = match keyword.as_str() {
-                            "vertices" => crate::ecky_ir::mesh_literal::MAX_MESH_LITERAL_VERTICES,
-                            "triangles" => crate::ecky_ir::mesh_literal::MAX_MESH_LITERAL_TRIANGLES,
+                            "vertices" => MAX_MESH_LITERAL_VERTICES,
+                            "triangles" => MAX_MESH_LITERAL_TRIANGLES,
                             _ => {
                                 index += 2;
                                 continue;
@@ -589,7 +590,7 @@ fn can_use_expanded_ast(source: &str) -> bool {
 
 fn compile_to_core_program_via_runtime(source: &str) -> CoreResult<CoreProgram> {
     let mut engine = bootstrap::new_engine();
-    let runtime_source = rewrite_runtime_model_clause_wrappers(&source)?;
+    let runtime_source = rewrite_runtime_model_clause_wrappers(source)?;
     seed_symbol_bindings(&mut engine, &runtime_source);
     let wrapped = bootstrap::wrap_user_source(&runtime_source);
     let values = engine
@@ -1490,10 +1491,8 @@ fn check_component_closedness(
 /// Free-variable analysis over an authored expression using the compiler's
 /// binding resolution (let/let*/lambda/repeat/build scopes, builtin table).
 /// Used by component closedness checks and by component extraction.
-pub(crate) fn collect_free_variables(
-    expr: &ExprKind,
-    bound: &BTreeSet<String>,
-) -> BTreeSet<String> {
+#[doc(hidden)]
+pub fn collect_free_variables(expr: &ExprKind, bound: &BTreeSet<String>) -> BTreeSet<String> {
     let registry = BTreeMap::new();
     let mut scope = bound.clone();
     let mut free = BTreeSet::new();
@@ -2485,7 +2484,8 @@ fn expr_list_head_is(items: &[ExprKind], expected: &str) -> bool {
     items.first().and_then(expr_head_name).as_deref() == Some(expected)
 }
 
-pub(crate) fn expr_head_name(value: &ExprKind) -> Option<String> {
+#[doc(hidden)]
+pub fn expr_head_name(value: &ExprKind) -> Option<String> {
     match value {
         ExprKind::Atom(atom) => match &atom.syn.ty {
             TokenType::Begin => Some("begin".to_string()),
@@ -3207,7 +3207,7 @@ fn parse_expanded_param_unit(value: &ExprKind) -> CoreResult<String> {
     parse_param_unit_name(expr_value_symbol_or_text(value, "param unit")?)
 }
 
-fn parse_expanded_choice(value: &ExprKind) -> CoreResult<crate::ecky_core_ir::CoreChoice> {
+fn parse_expanded_choice(value: &ExprKind) -> CoreResult<crate::core_ir::CoreChoice> {
     let items = expr_list_items(value, "select option")?;
     if items.len() != 2 {
         return Err(CompilerError::new(
@@ -3215,7 +3215,7 @@ fn parse_expanded_choice(value: &ExprKind) -> CoreResult<crate::ecky_core_ir::Co
             "Select options must be `(label value)` pairs.",
         ));
     }
-    Ok(crate::ecky_core_ir::CoreChoice {
+    Ok(crate::core_ir::CoreChoice {
         label: expr_value_symbol_or_text(&items[0], "option label")?,
         value: if expr_numeric_literal(&items[1]).is_some() {
             CoreParameterValue::Number(expr_number_value(&items[1], "option number")?)
@@ -7289,7 +7289,8 @@ fn parse_expanded_build_node(
     Ok(CoreNodeKind::Build { bindings, result })
 }
 
-pub(crate) fn expr_list_items(value: &ExprKind, context: &str) -> CoreResult<Vec<ExprKind>> {
+#[doc(hidden)]
+pub fn expr_list_items(value: &ExprKind, context: &str) -> CoreResult<Vec<ExprKind>> {
     match value {
         ExprKind::List(list) => Ok(list.args.iter().cloned().collect()),
         ExprKind::Vector(vector) => Ok(vector.args.iter().cloned().collect()),
@@ -7321,7 +7322,8 @@ fn normalize_hygienic_op_name(name: &str) -> String {
     name.rsplit("__%#__").next().unwrap_or(name).to_string()
 }
 
-pub(crate) fn expr_identifier(value: &ExprKind) -> Option<String> {
+#[doc(hidden)]
+pub fn expr_identifier(value: &ExprKind) -> Option<String> {
     match value {
         ExprKind::Atom(atom) => match &atom.syn.ty {
             TokenType::Identifier(name) => Some(name.to_string()),
@@ -7477,22 +7479,7 @@ fn compiler_error(kind: CompilerErrorKind, err: impl std::fmt::Display) -> Compi
     CompilerError::new(kind, err.to_string())
 }
 
-fn core_err_to_app(err: CompilerError) -> AppError {
-    match err.kind {
-        CompilerErrorKind::Parse => AppError::parse(err.to_string()),
-        CompilerErrorKind::Resolve | CompilerErrorKind::TypeMismatch => {
-            AppError::validation(err.to_string())
-        }
-        CompilerErrorKind::UnsupportedFeature => {
-            AppError::new(AppErrorCode::Validation, err.to_string())
-        }
-        CompilerErrorKind::Backend | CompilerErrorKind::Internal => {
-            AppError::internal(err.to_string())
-        }
-    }
-}
-
-fn should_fallback_to_legacy(source: &str, err: &AppError) -> bool {
+fn should_fallback_to_legacy(source: &str, err: &CompilerError) -> bool {
     let message = err.message.to_lowercase();
     !source.contains("(require ")
         && !source.contains("(define ")
@@ -8006,7 +7993,7 @@ fn parse_param_unit_name(unit: String) -> CoreResult<String> {
     }
 }
 
-fn parse_choice(value: &SteelVal) -> CoreResult<crate::ecky_core_ir::CoreChoice> {
+fn parse_choice(value: &SteelVal) -> CoreResult<crate::core_ir::CoreChoice> {
     let items = list_items(value, "select option")?;
     if items.len() != 2 {
         return Err(CompilerError::new(
@@ -8014,7 +8001,7 @@ fn parse_choice(value: &SteelVal) -> CoreResult<crate::ecky_core_ir::CoreChoice>
             "Select options must be `(label value)` pairs.",
         ));
     }
-    Ok(crate::ecky_core_ir::CoreChoice {
+    Ok(crate::core_ir::CoreChoice {
         label: value_symbol_or_text(&items[0], "option label")?,
         value: if steel_numeric_literal(&items[1]).is_some() {
             CoreParameterValue::Number(number_value(&items[1], "option number")?)
@@ -9067,6 +9054,30 @@ fn emit_relation_operand(
     }
 }
 
+fn emit_local_identifier(name: &str) -> String {
+    const HYGIENIC_PREFIX: &str = "ecky-hygienic-x";
+    if let Some(wrapped) = name.strip_prefix("##").and_then(|name| {
+        let encoded = name.strip_prefix(HYGIENIC_PREFIX)?;
+        let delimiter = encoded.rfind('x')?;
+        encoded[delimiter + 1..]
+            .chars()
+            .all(|ch| ch.is_ascii_digit())
+            .then(|| &name[..HYGIENIC_PREFIX.len() + delimiter + 1])
+    }) {
+        return wrapped.to_string();
+    }
+    if !name.contains('#') {
+        return name.to_string();
+    }
+
+    let mut encoded = String::with_capacity(name.len() * 2);
+    for byte in name.as_bytes() {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!("{HYGIENIC_PREFIX}{encoded}x")
+}
+
 fn emit_node(
     node: &CoreNode,
     param_names: &BTreeMap<u64, String>,
@@ -9101,14 +9112,14 @@ fn emit_node(
             emit_number(point[1]),
             emit_number(point[2])
         ),
-        CoreNodeKind::Reference(CoreReference::Local(name)) => name.clone(),
+        CoreNodeKind::Reference(CoreReference::Local(name)) => emit_local_identifier(name),
         CoreNodeKind::Reference(CoreReference::Parameter(id)) => param_names
             .get(&id.raw())
             .cloned()
             .unwrap_or_else(|| "param-ref".to_string()),
         CoreNodeKind::Reference(CoreReference::Node(id)) => node_names
             .get(&id.raw())
-            .cloned()
+            .map(|name| emit_local_identifier(name))
             .unwrap_or_else(|| "node-ref".to_string()),
         CoreNodeKind::Reference(CoreReference::Part(_)) => "part-ref".to_string(),
         CoreNodeKind::Build { bindings, result } => {
@@ -9121,7 +9132,7 @@ fn emit_node(
                 .map(|binding| {
                     format!(
                         "(shape {} {})",
-                        binding.name,
+                        emit_local_identifier(&binding.name),
                         emit_node(&binding.value, param_names, &nested)
                     )
                 })
@@ -9155,7 +9166,11 @@ fn emit_node(
             sources,
             body,
         } => {
-            let params = params.join(" ");
+            let params = params
+                .iter()
+                .map(|name| emit_local_identifier(name))
+                .collect::<Vec<_>>()
+                .join(" ");
             let mut items = vec![format!(
                 "(lambda ({}) {})",
                 params,
@@ -9203,7 +9218,7 @@ fn emit_node(
                 .map(|binding| {
                     format!(
                         "({} {})",
-                        binding.name,
+                        emit_local_identifier(&binding.name),
                         emit_node(&binding.value, param_names, node_names)
                     )
                 })
@@ -9343,14 +9358,21 @@ mod tests {
         CoreReference, CoreSurfaceOp, CoreSymbol,
     };
 
+    #[cfg(feature = "workspace-fixtures")]
     static SOURCE_FILE_ID_RE: std::sync::LazyLock<Regex> =
         std::sync::LazyLock::new(|| Regex::new(r"SourceFileId\(\s*\d+,?\s*\)").unwrap());
+    #[cfg(feature = "workspace-fixtures")]
     static SOURCE_SPAN_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(
             r"SourceSpan\s*\{\s*file:\s*(?:Some\(SourceFileId\(_\)\)|None),\s*start:\s*\d+,\s*end:\s*\d+,\s*\}",
         )
         .unwrap()
     });
+
+    #[cfg(feature = "workspace-fixtures")]
+    fn repository_root() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
+    }
 
     #[test]
     fn blocks_mutation_surface() {
@@ -10330,6 +10352,25 @@ mod tests {
         let source = emit_program(&program);
         assert!(source.contains("(box 25.4 20 500)"), "{source}");
         assert!(source.contains("(rotate 0 0 28.6478897565"), "{source}");
+    }
+
+    #[test]
+    fn emitted_hygienic_local_names_reparse() {
+        let source = r#"
+            (define (cup-body radius height)
+              (extrude (circle radius) height))
+            (model
+              (part body (cup-body 12 30)))
+        "#;
+
+        let emitted = compile_to_legacy_source(source).expect("emit expanded helper");
+        assert!(
+            !emitted.contains("##"),
+            "emitted source leaked parser-invalid hygienic names: {emitted}"
+        );
+        compile_to_core_program(&emitted).expect("reparse emitted helper");
+        let emitted_twice = compile_to_legacy_source(&emitted).expect("emit helper twice");
+        assert_eq!(emitted_twice, emitted);
     }
 
     #[test]
@@ -12312,12 +12353,12 @@ mod tests {
 
     // T0: Compatibility lock tests — freeze current behavior before component work
 
+    #[cfg(feature = "workspace-fixtures")]
     #[test]
     fn fixture_lock_captures_stable_node_keys_for_all_parts() {
-        let snapshot_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/snapshots/component-unification/fixture-lock.snap");
-        let fixtures_dir =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../model-runtime/examples");
+        let snapshot_path = repository_root()
+            .join("src-tauri/tests/snapshots/component-unification/fixture-lock.snap");
+        let fixtures_dir = repository_root().join("model-runtime/examples");
 
         let mut entries: Vec<_> = std::fs::read_dir(&fixtures_dir)
             .expect("fixture dir exists")
@@ -12400,10 +12441,10 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "workspace-fixtures")]
     #[test]
     fn emit_spelling_lock_preserves_clause_heads_in_roundtrip() {
-        let fixtures_dir =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../model-runtime/examples");
+        let fixtures_dir = repository_root().join("model-runtime/examples");
 
         let mut entries: Vec<_> = std::fs::read_dir(&fixtures_dir)
             .expect("fixture dir exists")
@@ -12502,12 +12543,12 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "workspace-fixtures")]
     #[test]
     fn core_program_digest_lock_captures_structural_stability() {
-        let snapshot_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/snapshots/component-unification/core-digest.snap");
-        let fixtures_dir =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../model-runtime/examples");
+        let snapshot_path = repository_root()
+            .join("src-tauri/tests/snapshots/component-unification/core-digest.snap");
+        let fixtures_dir = repository_root().join("model-runtime/examples");
 
         let mut entries: Vec<_> = std::fs::read_dir(&fixtures_dir)
             .expect("fixture dir exists")
@@ -12572,20 +12613,16 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "workspace-fixtures")]
     #[test]
     fn permissive_units_lock_keeps_existing_fixture_emit_digests() {
-        let snapshot_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/snapshots/units/permissive-emit-digest.snap");
+        let snapshot_path =
+            repository_root().join("src-tauri/tests/snapshots/units/permissive-emit-digest.snap");
         let fixture_roots = [
-            (
-                "examples",
-                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("../model-runtime/examples"),
-            ),
+            ("examples", repository_root().join("model-runtime/examples")),
             (
                 "surface",
-                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("tests/fixtures/cad/surface"),
+                repository_root().join("src-tauri/tests/fixtures/cad/surface"),
             ),
         ];
 

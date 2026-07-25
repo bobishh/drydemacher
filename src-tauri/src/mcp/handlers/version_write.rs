@@ -3,12 +3,13 @@ use super::{
     persist_agent_session, push_mcp_profile, resolve_session_render_preview_for_request,
     resolve_turn_working_target, try_record_agent_error, AgentContext,
 };
+use crate::contracts::{AppError, AppErrorCode, AppResult, RenderSnapshot};
 use crate::db;
 use crate::mcp::contracts::{
     ThreadForkRequest, ThreadForkResponse, VersionRestoreRequest, VersionRestoreResponse,
     VersionSaveRequest, VersionSaveResponse,
 };
-use crate::models::{AppError, AppErrorCode, AppResult, AppState, PathResolver, RenderSnapshot};
+use crate::models::{AppState, PathResolver};
 use crate::services::agent_versions::{
     save_or_update_agent_version_for_session, SaveOrUpdateAgentVersionRequest,
 };

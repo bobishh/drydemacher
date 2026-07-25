@@ -70,7 +70,7 @@ pub(in crate::mcp::handlers) fn build_shape_graph_packet(
 ) -> AppResult<ShapeGraphPacket> {
     let source = design_output.macro_code.as_str();
     let source_digest = crate::mcp::macro_buffer::source_digest(source);
-    let program = if design_output.source_language == crate::models::SourceLanguage::EckyIrV0 {
+    let program = if design_output.source_language == crate::contracts::SourceLanguage::EckyIrV0 {
         Some(
             crate::ecky_scheme::compile_to_core_program(source).map_err(|err| {
                 compile_error_with_diagnostics(

@@ -1,4 +1,4 @@
-use crate::models::{
+use crate::contracts::{
     BrepHiddenLineProjectionResponse, BrepProjectedEdge2d, BrepProjectedLoop2d,
     BrepProjectedLoopRole, SketchBrepProjectionValidation, SketchDefinition, SketchDocument,
     SketchPrimitive, SketchPrimitiveKind, SketchPrimitiveTopology, SketchValidationIssue,
@@ -1047,8 +1047,8 @@ mod tests {
     fn view(
         view: SketchView,
         edges: Vec<BrepProjectedEdge2d>,
-    ) -> crate::models::BrepHiddenLineProjectionView {
-        crate::models::BrepHiddenLineProjectionView {
+    ) -> crate::contracts::BrepHiddenLineProjectionView {
+        crate::contracts::BrepHiddenLineProjectionView {
             view,
             direction: [0.0, 0.0, 1.0],
             visible_edges: edges,
@@ -1060,7 +1060,7 @@ mod tests {
     fn base_rect_view(
         view_name: SketchView,
         prefix: &str,
-    ) -> crate::models::BrepHiddenLineProjectionView {
+    ) -> crate::contracts::BrepHiddenLineProjectionView {
         view(
             view_name,
             vec![
@@ -1239,13 +1239,13 @@ mod tests {
         assert_eq!(
             loops
                 .iter()
-                .filter(|item| item.role == crate::models::BrepProjectedLoopRole::Outer)
+                .filter(|item| item.role == crate::contracts::BrepProjectedLoopRole::Outer)
                 .count(),
             1
         );
         let hole = loops
             .iter()
-            .find(|item| item.role == crate::models::BrepProjectedLoopRole::Hole)
+            .find(|item| item.role == crate::contracts::BrepProjectedLoopRole::Hole)
             .expect("hole loop");
         assert_eq!(hole.edge_ids.len(), 4);
         assert!(hole.edge_ids.iter().any(|edge_id| edge_id == "hole-bottom"));
@@ -1254,7 +1254,7 @@ mod tests {
     #[test]
     fn projected_loop_roles_use_containment_parity_for_nested_islands() {
         let loops = classify_projected_loops(vec![
-            crate::models::BrepProjectedLoop2d {
+            crate::contracts::BrepProjectedLoop2d {
                 loop_id: "outer".to_string(),
                 edge_ids: Vec::new(),
                 points: vec![
@@ -1264,32 +1264,32 @@ mod tests {
                     [0.0, 10.0],
                     [0.0, 0.0],
                 ],
-                role: crate::models::BrepProjectedLoopRole::Unknown,
+                role: crate::contracts::BrepProjectedLoopRole::Unknown,
                 source_class: "derived".to_string(),
             },
-            crate::models::BrepProjectedLoop2d {
+            crate::contracts::BrepProjectedLoop2d {
                 loop_id: "hole".to_string(),
                 edge_ids: Vec::new(),
                 points: vec![[2.0, 2.0], [8.0, 2.0], [8.0, 8.0], [2.0, 8.0], [2.0, 2.0]],
-                role: crate::models::BrepProjectedLoopRole::Unknown,
+                role: crate::contracts::BrepProjectedLoopRole::Unknown,
                 source_class: "derived".to_string(),
             },
-            crate::models::BrepProjectedLoop2d {
+            crate::contracts::BrepProjectedLoop2d {
                 loop_id: "island".to_string(),
                 edge_ids: Vec::new(),
                 points: vec![[4.0, 4.0], [6.0, 4.0], [6.0, 6.0], [4.0, 6.0], [4.0, 4.0]],
-                role: crate::models::BrepProjectedLoopRole::Unknown,
+                role: crate::contracts::BrepProjectedLoopRole::Unknown,
                 source_class: "derived".to_string(),
             },
         ]);
 
         let outer_count = loops
             .iter()
-            .filter(|item| item.role == crate::models::BrepProjectedLoopRole::Outer)
+            .filter(|item| item.role == crate::contracts::BrepProjectedLoopRole::Outer)
             .count();
         let hole_count = loops
             .iter()
-            .filter(|item| item.role == crate::models::BrepProjectedLoopRole::Hole)
+            .filter(|item| item.role == crate::contracts::BrepProjectedLoopRole::Hole)
             .count();
 
         assert_eq!(outer_count, 2);
@@ -1300,7 +1300,7 @@ mod tests {
                 .find(|item| item.loop_id == "island")
                 .expect("island loop")
                 .role,
-            crate::models::BrepProjectedLoopRole::Outer
+            crate::contracts::BrepProjectedLoopRole::Outer
         );
     }
 
@@ -1316,10 +1316,10 @@ mod tests {
                 [0.0, 0.0],
             ],
         );
-        outer.topology = Some(crate::models::SketchPrimitiveTopology {
+        outer.topology = Some(crate::contracts::SketchPrimitiveTopology {
             loop_id: Some("front-outer".to_string()),
             edge_ids: vec!["outer-a".to_string()],
-            loop_role: Some(crate::models::BrepProjectedLoopRole::Outer),
+            loop_role: Some(crate::contracts::BrepProjectedLoopRole::Outer),
             source_class: Some("derived".to_string()),
         });
         let mut hole = polyline(
@@ -1332,10 +1332,10 @@ mod tests {
                 [40.0, 0.0],
             ],
         );
-        hole.topology = Some(crate::models::SketchPrimitiveTopology {
+        hole.topology = Some(crate::contracts::SketchPrimitiveTopology {
             loop_id: Some("front-hole".to_string()),
             edge_ids: vec!["inner-a".to_string()],
-            loop_role: Some(crate::models::BrepProjectedLoopRole::Hole),
+            loop_role: Some(crate::contracts::BrepProjectedLoopRole::Hole),
             source_class: Some("derived".to_string()),
         });
         let sketch = SketchDefinition {
@@ -1349,8 +1349,8 @@ mod tests {
         assert_eq!(
             source_profile_roles(&sketch),
             vec![
-                crate::models::BrepProjectedLoopRole::Outer,
-                crate::models::BrepProjectedLoopRole::Hole
+                crate::contracts::BrepProjectedLoopRole::Outer,
+                crate::contracts::BrepProjectedLoopRole::Hole
             ]
         );
     }

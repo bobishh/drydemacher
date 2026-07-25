@@ -5,17 +5,18 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::contracts::{
+    validate_model_runtime_bundle, AppError, AppResult, ArtifactBundle, DesignParams,
+    DocumentMetadata, EnrichmentStatus, ExportArtifact, GeometryBackend, ManifestBounds,
+    ManifestEnrichmentState, ModelManifest, ModelSourceKind, PartBinding, PreviewView,
+    PreviewViewOffset, SelectionTarget, SelectionTargetKind, SourceLanguage, ViewerAsset,
+    ViewerAssetFormat, ViewerEdgePoint, ViewerEdgeTarget, ViewerFaceTarget,
+    MODEL_RUNTIME_SCHEMA_VERSION,
+};
 use crate::ecky_core_ir::{CorePreviewViewDecl, CoreSelectorTagDecl};
 use crate::ecky_scheme::compiler::try_compile_to_core_program;
 use crate::freecad::resolve_resource_path;
-use crate::models::{
-    validate_model_runtime_bundle, AppError, AppResult, ArtifactBundle, DesignParams,
-    DocumentMetadata, EnrichmentStatus, ExportArtifact, GeometryBackend, ManifestBounds,
-    ManifestEnrichmentState, ModelManifest, ModelSourceKind, PartBinding, PathResolver,
-    PreviewView, PreviewViewOffset, SelectionTarget, SelectionTargetKind, SourceLanguage,
-    ViewerAsset, ViewerAssetFormat, ViewerEdgePoint, ViewerEdgeTarget, ViewerFaceTarget,
-    MODEL_RUNTIME_SCHEMA_VERSION,
-};
+use crate::models::PathResolver;
 use crate::topology_target_ids::{
     durable_edge_target_id, durable_edge_target_id_for_stable_node_key, durable_face_target_id,
     durable_face_target_id_for_stable_node_key, preferred_public_topology_target_id,
@@ -311,7 +312,7 @@ fn run_runner(
 
     if !output.status.success() {
         return Err(AppError::with_details(
-            crate::models::AppErrorCode::Render,
+            crate::contracts::AppErrorCode::Render,
             "build123d runner failed.",
             format!(
                 "stdout:\n{}\n\nstderr:\n{}",
@@ -1198,7 +1199,7 @@ fn path_to_string(path: &Path) -> AppResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::EngineKind;
+    use crate::contracts::EngineKind;
     use sha2::{Digest, Sha256};
     use std::collections::BTreeMap;
 
@@ -2002,7 +2003,7 @@ _ecky_parts = [("body", _body)]
         )
         .expect("render");
 
-        let manifest: crate::models::ModelManifest = serde_json::from_str(
+        let manifest: crate::contracts::ModelManifest = serde_json::from_str(
             &std::fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
         )
         .expect("parse manifest");
@@ -2053,7 +2054,7 @@ _ecky_parts = [("body", _body)]
         assert_eq!(bundle.export_artifacts[0].format, "step");
         assert!(Path::new(&bundle.export_artifacts[0].path).exists());
 
-        let manifest: crate::models::ModelManifest = serde_json::from_str(
+        let manifest: crate::contracts::ModelManifest = serde_json::from_str(
             &std::fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
         )
         .expect("parse manifest");
@@ -2091,7 +2092,7 @@ _ecky_parts = [("body", _body)]
             SourceLanguage::EckyIrV0,
         )
         .expect("render base box");
-        let base_manifest: crate::models::ModelManifest = serde_json::from_str(
+        let base_manifest: crate::contracts::ModelManifest = serde_json::from_str(
             &std::fs::read_to_string(&base_bundle.manifest_path).expect("read base manifest"),
         )
         .expect("parse base manifest");
@@ -2124,7 +2125,7 @@ _ecky_parts = [("body", _body)]
             .export_artifacts
             .iter()
             .any(|artifact| artifact.format == "step" && Path::new(&artifact.path).exists()));
-        let manifest: crate::models::ModelManifest = serde_json::from_str(
+        let manifest: crate::contracts::ModelManifest = serde_json::from_str(
             &std::fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
         )
         .expect("parse manifest");
@@ -2167,7 +2168,7 @@ _ecky_parts = [("body", _body)]
         assert_eq!(bundle.export_artifacts[0].format, "step");
         assert!(Path::new(&bundle.export_artifacts[0].path).exists());
 
-        let manifest: crate::models::ModelManifest = serde_json::from_str(
+        let manifest: crate::contracts::ModelManifest = serde_json::from_str(
             &std::fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
         )
         .expect("parse manifest");
@@ -2205,7 +2206,7 @@ _ecky_parts = [("body", _body)]
             SourceLanguage::EckyIrV0,
         )
         .expect("render base box");
-        let base_manifest: crate::models::ModelManifest = serde_json::from_str(
+        let base_manifest: crate::contracts::ModelManifest = serde_json::from_str(
             &std::fs::read_to_string(&base_bundle.manifest_path).expect("read base manifest"),
         )
         .expect("parse base manifest");
@@ -2238,7 +2239,7 @@ _ecky_parts = [("body", _body)]
             .export_artifacts
             .iter()
             .any(|artifact| artifact.format == "step" && Path::new(&artifact.path).exists()));
-        let manifest: crate::models::ModelManifest = serde_json::from_str(
+        let manifest: crate::contracts::ModelManifest = serde_json::from_str(
             &std::fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
         )
         .expect("parse manifest");
@@ -2284,11 +2285,11 @@ _ecky_parts = [("body", _body)]
         )
         .expect("render viewed");
 
-        let base_manifest: crate::models::ModelManifest = serde_json::from_str(
+        let base_manifest: crate::contracts::ModelManifest = serde_json::from_str(
             &std::fs::read_to_string(&base_bundle.manifest_path).expect("read base manifest"),
         )
         .expect("parse base manifest");
-        let viewed_manifest: crate::models::ModelManifest = serde_json::from_str(
+        let viewed_manifest: crate::contracts::ModelManifest = serde_json::from_str(
             &std::fs::read_to_string(&viewed_bundle.manifest_path).expect("read viewed manifest"),
         )
         .expect("parse viewed manifest");
@@ -2333,7 +2334,7 @@ _ecky_parts = [("body", _body)]
         .expect("render coarse face selector");
 
         assert!(Path::new(&bundle.preview_stl_path).exists());
-        let manifest: crate::models::ModelManifest = serde_json::from_str(
+        let manifest: crate::contracts::ModelManifest = serde_json::from_str(
             &std::fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
         )
         .expect("parse manifest");
@@ -2376,7 +2377,7 @@ _ecky_parts = [("body", _body)]
         .expect("render richer face selector");
 
         assert!(Path::new(&bundle.preview_stl_path).exists());
-        let manifest: crate::models::ModelManifest = serde_json::from_str(
+        let manifest: crate::contracts::ModelManifest = serde_json::from_str(
             &std::fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
         )
         .expect("parse manifest");

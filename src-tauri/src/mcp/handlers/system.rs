@@ -1,7 +1,8 @@
+use crate::contracts::{AppError, AppResult};
 use crate::mcp::contracts::{
     AgentUiDispatchEvent, HealthCheckResponse, UiDispatchRequest, UiDispatchResponse,
 };
-use crate::models::{AppError, AppResult, AppState, PathResolver};
+use crate::models::{AppState, PathResolver};
 use crate::services::render;
 use tauri::Emitter;
 

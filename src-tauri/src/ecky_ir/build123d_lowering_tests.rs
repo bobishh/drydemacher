@@ -12,7 +12,7 @@ use super::lower_core_program_to_build123d;
 /// deeply nested fixtures overflow the default ~2 MiB test-thread stack. Running
 /// every test call through this shim exercises the same large-stack path prod
 /// uses, and keeps the ~60 call sites edit-free.
-fn lower_to_build123d(source: &str) -> crate::models::AppResult<String> {
+fn lower_to_build123d(source: &str) -> crate::contracts::AppResult<String> {
     let code = source.to_string();
     std::thread::Builder::new()
         .stack_size(32 * 1024 * 1024)

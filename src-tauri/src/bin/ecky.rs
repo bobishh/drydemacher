@@ -41,7 +41,7 @@ fn lower_to_build123d_text(source: &str) -> Result<(), String> {
 }
 
 fn lower_backend_text(backend: &str, source: &str) -> Result<String, String> {
-    let lower: fn(&str) -> ecky_cad_lib::models::AppResult<String> = match backend {
+    let lower: fn(&str) -> ecky_cad_lib::contracts::AppResult<String> = match backend {
         "build123d" => ecky_cad_lib::ecky_ir::lower_to_build123d,
         "freecad" => ecky_cad_lib::ecky_ir::lower_to_freecad,
         other => {

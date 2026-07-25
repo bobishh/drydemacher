@@ -11,18 +11,18 @@ use ecky_cad_lib::component_package_runtime::{
     write_component_package_manifest, COMPONENT_PACKAGE_FILE_NAME,
     COMPONENT_PACKAGE_HEADER_FILE_NAME,
 };
-use ecky_cad_lib::models::{
-    component_package_header, validate_component_package, AppState,
-    ArtifactBundleComponentPackageRequest, AssemblyComponentRef, AssemblyDefinition, AssemblyMate,
-    AssemblyOperation, AssemblyOutput, AssemblyOutputMode, ComponentDefinition,
-    ComponentFusionZone, ComponentInterfaceValue, ComponentKeepoutVolume, ComponentPackage,
-    ComponentParam, ComponentParamKind, ComponentPort, Config, EngineKind, GeometryBackend,
-    KeepoutVolumeKind, MacroDialect, MatePortTypePair, MateTypeDefinition, McpConfig,
-    ModelSourceKind, OperationKind, PackageVisibility, PathResolver, PortFrame, PortReference,
-    PortTypeDefinition, SketchAcceptedBrepComponentPackageRequest, SketchConstraint,
+use ecky_cad_lib::contracts::{
+    component_package_header, validate_component_package, ArtifactBundleComponentPackageRequest,
+    AssemblyComponentRef, AssemblyDefinition, AssemblyMate, AssemblyOperation, AssemblyOutput,
+    AssemblyOutputMode, ComponentDefinition, ComponentFusionZone, ComponentInterfaceValue,
+    ComponentKeepoutVolume, ComponentPackage, ComponentParam, ComponentParamKind, ComponentPort,
+    Config, EngineKind, GeometryBackend, KeepoutVolumeKind, MacroDialect, MatePortTypePair,
+    MateTypeDefinition, McpConfig, ModelSourceKind, OperationKind, PackageVisibility, PortFrame,
+    PortReference, PortTypeDefinition, SketchAcceptedBrepComponentPackageRequest, SketchConstraint,
     SketchConstraintKind, SketchDefinition, SketchDocument, SketchPrimitive, SketchPrimitiveKind,
     SketchView, SourceLanguage, VoiceConfig, COMPONENT_PACKAGE_SCHEMA_VERSION,
 };
+use ecky_cad_lib::models::{AppState, PathResolver};
 use ecky_cad_lib::sketch_draft_runtime::write_accepted_brep_component_package_project;
 use zip::ZipArchive;
 
@@ -107,8 +107,8 @@ fn sample_component(
             kind: ComponentParamKind::Number,
             unit: Some("mm".to_string()),
         }],
-        ui_spec: ecky_cad_lib::models::UiSpec {
-            fields: vec![ecky_cad_lib::models::UiField::Number {
+        ui_spec: ecky_cad_lib::contracts::UiSpec {
+            fields: vec![ecky_cad_lib::contracts::UiField::Number {
                 key: "mount_spacing".to_string(),
                 label: "Mount Spacing".to_string(),
                 min: Some(40.0),
@@ -121,7 +121,7 @@ fn sample_component(
         },
         initial_params: [(
             "mount_spacing".to_string(),
-            ecky_cad_lib::models::ParamValue::Number(64.0),
+            ecky_cad_lib::contracts::ParamValue::Number(64.0),
         )]
         .into_iter()
         .collect(),
@@ -835,7 +835,7 @@ fn package_archive_installs_into_local_library_and_lists_header() {
     assert_eq!(resolved.component.ui_spec.fields.len(), 1);
     assert_eq!(
         resolved.component.initial_params.get("mount_spacing"),
-        Some(&ecky_cad_lib::models::ParamValue::Number(64.0))
+        Some(&ecky_cad_lib::contracts::ParamValue::Number(64.0))
     );
     assert!(std::path::Path::new(&resolved.source_path).is_file());
     assert!(resolved
@@ -858,7 +858,7 @@ fn package_header_exposes_interface_not_source_refs() {
     assert_eq!(header.components[0].ui_spec.fields.len(), 1);
     assert_eq!(
         header.components[0].initial_params.get("mount_spacing"),
-        Some(&ecky_cad_lib::models::ParamValue::Number(64.0))
+        Some(&ecky_cad_lib::contracts::ParamValue::Number(64.0))
     );
     assert_eq!(header.assemblies[0].mate_count, 1);
     assert_eq!(header.assemblies[0].operation_count, 1);
@@ -1073,8 +1073,8 @@ async fn resolve_installed_component_controls_merges_package_initial_params_with
                     kind: ComponentParamKind::Number,
                     unit: None,
                 }],
-                ui_spec: ecky_cad_lib::models::UiSpec {
-                    fields: vec![ecky_cad_lib::models::UiField::Number {
+                ui_spec: ecky_cad_lib::contracts::UiSpec {
+                    fields: vec![ecky_cad_lib::contracts::UiField::Number {
                         key: "width".to_string(),
                         label: "Width".to_string(),
                         min: Some(1.0),
@@ -1087,7 +1087,7 @@ async fn resolve_installed_component_controls_merges_package_initial_params_with
                 },
                 initial_params: [(
                     "width".to_string(),
-                    ecky_cad_lib::models::ParamValue::Number(42.0),
+                    ecky_cad_lib::contracts::ParamValue::Number(42.0),
                 )]
                 .into_iter()
                 .collect(),
@@ -1112,7 +1112,7 @@ async fn resolve_installed_component_controls_merges_package_initial_params_with
     .expect("resolve default controls");
     assert_eq!(
         resolved_default.parameters.get("width"),
-        Some(&ecky_cad_lib::models::ParamValue::Number(42.0))
+        Some(&ecky_cad_lib::contracts::ParamValue::Number(42.0))
     );
 
     let resolved_override =
@@ -1123,7 +1123,7 @@ async fn resolve_installed_component_controls_merges_package_initial_params_with
             "parametric-body".to_string(),
             [(
                 "width".to_string(),
-                ecky_cad_lib::models::ParamValue::Number(24.0),
+                ecky_cad_lib::contracts::ParamValue::Number(24.0),
             )]
             .into_iter()
             .collect(),
@@ -1132,7 +1132,7 @@ async fn resolve_installed_component_controls_merges_package_initial_params_with
         .expect("resolve override controls");
     assert_eq!(
         resolved_override.parameters.get("width"),
-        Some(&ecky_cad_lib::models::ParamValue::Number(24.0))
+        Some(&ecky_cad_lib::contracts::ParamValue::Number(24.0))
     );
     assert_eq!(
         resolved_override
@@ -1176,7 +1176,7 @@ async fn resolve_installed_component_assembly_controls_merge_instance_initial_pa
                 "rail".to_string(),
                 [(
                     "mount_spacing".to_string(),
-                    ecky_cad_lib::models::ParamValue::Number(72.0),
+                    ecky_cad_lib::contracts::ParamValue::Number(72.0),
                 )]
                 .into_iter()
                 .collect(),
@@ -1203,11 +1203,11 @@ async fn resolve_installed_component_assembly_controls_merge_instance_initial_pa
 
     assert_eq!(
         rail.parameters.get("mount_spacing"),
-        Some(&ecky_cad_lib::models::ParamValue::Number(72.0))
+        Some(&ecky_cad_lib::contracts::ParamValue::Number(72.0))
     );
     assert_eq!(
         cage.parameters.get("mount_spacing"),
-        Some(&ecky_cad_lib::models::ParamValue::Number(64.0))
+        Some(&ecky_cad_lib::contracts::ParamValue::Number(64.0))
     );
     assert_eq!(rail.placement_frame, Some(PortFrame::identity()));
     assert_eq!(cage.placement_frame, Some(PortFrame::identity()));
@@ -1269,8 +1269,8 @@ async fn render_installed_component_source_merges_package_initial_params_with_ov
                     kind: ComponentParamKind::Number,
                     unit: None,
                 }],
-                ui_spec: ecky_cad_lib::models::UiSpec {
-                    fields: vec![ecky_cad_lib::models::UiField::Number {
+                ui_spec: ecky_cad_lib::contracts::UiSpec {
+                    fields: vec![ecky_cad_lib::contracts::UiField::Number {
                         key: "width".to_string(),
                         label: "Width".to_string(),
                         min: Some(1.0),
@@ -1283,7 +1283,7 @@ async fn render_installed_component_source_merges_package_initial_params_with_ov
                 },
                 initial_params: [(
                     "width".to_string(),
-                    ecky_cad_lib::models::ParamValue::Number(42.0),
+                    ecky_cad_lib::contracts::ParamValue::Number(42.0),
                 )]
                 .into_iter()
                 .collect(),
@@ -1309,7 +1309,7 @@ async fn render_installed_component_source_merges_package_initial_params_with_ov
     .expect("render default component");
     assert_eq!(
         rendered_default.parameters.get("width"),
-        Some(&ecky_cad_lib::models::ParamValue::Number(42.0))
+        Some(&ecky_cad_lib::contracts::ParamValue::Number(42.0))
     );
     let default_bounds = rendered_default.model_manifest.parts[0]
         .bounds
@@ -1325,7 +1325,7 @@ async fn render_installed_component_source_merges_package_initial_params_with_ov
         "parametric-body".to_string(),
         [(
             "width".to_string(),
-            ecky_cad_lib::models::ParamValue::Number(24.0),
+            ecky_cad_lib::contracts::ParamValue::Number(24.0),
         )]
         .into_iter()
         .collect(),
@@ -1334,7 +1334,7 @@ async fn render_installed_component_source_merges_package_initial_params_with_ov
     .expect("render override component");
     assert_eq!(
         rendered_override.parameters.get("width"),
-        Some(&ecky_cad_lib::models::ParamValue::Number(24.0))
+        Some(&ecky_cad_lib::contracts::ParamValue::Number(24.0))
     );
     let override_bounds = rendered_override.model_manifest.parts[0]
         .bounds
@@ -1516,7 +1516,7 @@ async fn runtime_bundle_component_package_project_preserves_exact_source_and_rer
                 kind: ComponentParamKind::Number,
                 unit: Some("mm".to_string()),
             }],
-            ui_spec: ecky_cad_lib::models::UiSpec::default(),
+            ui_spec: ecky_cad_lib::contracts::UiSpec::default(),
             initial_params: Default::default(),
             ports: vec![ComponentPort {
                 port_id: "mount".to_string(),
@@ -1689,7 +1689,7 @@ async fn freecad_runtime_bundle_component_package_project_preserves_exact_source
                 vec!["mechanical.plane.mount.v1".to_string()],
             )],
             params: Vec::new(),
-            ui_spec: ecky_cad_lib::models::UiSpec::default(),
+            ui_spec: ecky_cad_lib::contracts::UiSpec::default(),
             initial_params: Default::default(),
             ports: vec![ComponentPort {
                 port_id: "mount".to_string(),
@@ -1833,7 +1833,7 @@ async fn runtime_bundle_component_package_project_derives_component_params_from_
                 vec!["mechanical.plane.mount.v1".to_string()],
             )],
             params: Vec::new(),
-            ui_spec: ecky_cad_lib::models::UiSpec::default(),
+            ui_spec: ecky_cad_lib::contracts::UiSpec::default(),
             initial_params: Default::default(),
             ports: vec![ComponentPort {
                 port_id: "mount".to_string(),
@@ -1883,17 +1883,17 @@ async fn runtime_bundle_component_package_project_derives_component_params_from_
     assert_eq!(package.components[0].ui_spec.fields[0].key(), "amp");
     assert_eq!(
         package.components[0].initial_params.get("amp"),
-        Some(&ecky_cad_lib::models::ParamValue::Number(2.0))
+        Some(&ecky_cad_lib::contracts::ParamValue::Number(2.0))
     );
     assert_eq!(
         package.components[0].initial_params.get("profile"),
-        Some(&ecky_cad_lib::models::ParamValue::String(
+        Some(&ecky_cad_lib::contracts::ParamValue::String(
             "bulb".to_string()
         ))
     );
     assert_eq!(
         package.components[0].initial_params.get("vents"),
-        Some(&ecky_cad_lib::models::ParamValue::Boolean(true))
+        Some(&ecky_cad_lib::contracts::ParamValue::Boolean(true))
     );
 
     fs::remove_dir_all(temp_root).ok();
@@ -1951,7 +1951,7 @@ async fn runtime_bundle_component_package_project_allows_zero_port_geometry_comp
             artifact_bundle: bundle,
             port_types: Vec::new(),
             params: Vec::new(),
-            ui_spec: ecky_cad_lib::models::UiSpec::default(),
+            ui_spec: ecky_cad_lib::contracts::UiSpec::default(),
             initial_params: Default::default(),
             ports: Vec::new(),
         },
@@ -1966,7 +1966,7 @@ async fn runtime_bundle_component_package_project_allows_zero_port_geometry_comp
     assert_eq!(package.components[0].ui_spec.fields.len(), 1);
     assert_eq!(
         package.components[0].initial_params.get("amp"),
-        Some(&ecky_cad_lib::models::ParamValue::Number(2.0))
+        Some(&ecky_cad_lib::contracts::ParamValue::Number(2.0))
     );
 
     let archive_path = temp_root.join("generated-zero-port.ecky");
@@ -1987,7 +1987,7 @@ async fn runtime_bundle_component_package_project_allows_zero_port_geometry_comp
     assert_eq!(resolved.component.ui_spec.fields.len(), 1);
     assert_eq!(
         resolved.component.initial_params.get("amp"),
-        Some(&ecky_cad_lib::models::ParamValue::Number(2.0))
+        Some(&ecky_cad_lib::contracts::ParamValue::Number(2.0))
     );
 
     let rendered = component_package_commands::render_installed_component_source_common(
@@ -2010,7 +2010,7 @@ async fn runtime_bundle_component_package_project_allows_zero_port_geometry_comp
             .component
             .initial_params
             .get("amp"),
-        Some(&ecky_cad_lib::models::ParamValue::Number(2.0))
+        Some(&ecky_cad_lib::contracts::ParamValue::Number(2.0))
     );
 
     fs::remove_dir_all(temp_root).ok();
@@ -2028,9 +2028,9 @@ async fn runtime_bundle_component_package_project_preserves_explicit_ui_contract
     let manifest_path = temp_root.join("manifest.json");
     fs::write(
         &manifest_path,
-        serde_json::to_string_pretty(&ecky_cad_lib::models::ModelManifest {
+        serde_json::to_string_pretty(&ecky_cad_lib::contracts::ModelManifest {
             geometry_provenance: None,
-            schema_version: ecky_cad_lib::models::MODEL_RUNTIME_SCHEMA_VERSION,
+            schema_version: ecky_cad_lib::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: "step-model".to_string(),
             source_kind: ModelSourceKind::ImportedStep,
             source_digest: None,
@@ -2039,7 +2039,7 @@ async fn runtime_bundle_component_package_project_preserves_explicit_ui_contract
             engine_kind: EngineKind::Freecad,
             source_language: SourceLanguage::LegacyPython,
             geometry_backend: GeometryBackend::Freecad,
-            document: ecky_cad_lib::models::DocumentMetadata {
+            document: ecky_cad_lib::contracts::DocumentMetadata {
                 document_name: "Step".to_string(),
                 document_label: "Step".to_string(),
                 source_path: Some(step_path.to_string_lossy().to_string()),
@@ -2059,8 +2059,8 @@ async fn runtime_bundle_component_package_project_preserves_explicit_ui_contract
             feature_graph: None,
             correspondence_graph: None,
             warnings: Vec::new(),
-            enrichment_state: ecky_cad_lib::models::ManifestEnrichmentState {
-                status: ecky_cad_lib::models::EnrichmentStatus::None,
+            enrichment_state: ecky_cad_lib::contracts::ManifestEnrichmentState {
+                status: ecky_cad_lib::contracts::EnrichmentStatus::None,
                 proposals: Vec::new(),
             },
         })
@@ -2070,9 +2070,9 @@ async fn runtime_bundle_component_package_project_preserves_explicit_ui_contract
     let preview_path = temp_root.join("preview.stl");
     fs::write(&preview_path, "solid fake\nendsolid fake\n").expect("write preview");
 
-    let ui_spec = ecky_cad_lib::models::UiSpec {
+    let ui_spec = ecky_cad_lib::contracts::UiSpec {
         fields: vec![
-            ecky_cad_lib::models::UiField::Number {
+            ecky_cad_lib::contracts::UiField::Number {
                 key: "diameter".to_string(),
                 label: "Diameter".to_string(),
                 min: Some(60.0),
@@ -2082,31 +2082,31 @@ async fn runtime_bundle_component_package_project_preserves_explicit_ui_contract
                 max_from: None,
                 frozen: false,
             },
-            ecky_cad_lib::models::UiField::Select {
+            ecky_cad_lib::contracts::UiField::Select {
                 key: "profile".to_string(),
                 label: "Profile".to_string(),
                 options: vec![
-                    ecky_cad_lib::models::SelectOption {
+                    ecky_cad_lib::contracts::SelectOption {
                         label: "Bulb".to_string(),
-                        value: ecky_cad_lib::models::SelectValue::String("bulb".to_string()),
+                        value: ecky_cad_lib::contracts::SelectValue::String("bulb".to_string()),
                     },
-                    ecky_cad_lib::models::SelectOption {
+                    ecky_cad_lib::contracts::SelectOption {
                         label: "Lantern".to_string(),
-                        value: ecky_cad_lib::models::SelectValue::String("lantern".to_string()),
+                        value: ecky_cad_lib::contracts::SelectValue::String("lantern".to_string()),
                     },
                 ],
                 frozen: false,
             },
         ],
     };
-    let initial_params: ecky_cad_lib::models::DesignParams = [
+    let initial_params: ecky_cad_lib::contracts::DesignParams = [
         (
             "diameter".to_string(),
-            ecky_cad_lib::models::ParamValue::Number(120.0),
+            ecky_cad_lib::contracts::ParamValue::Number(120.0),
         ),
         (
             "profile".to_string(),
-            ecky_cad_lib::models::ParamValue::String("bulb".to_string()),
+            ecky_cad_lib::contracts::ParamValue::String("bulb".to_string()),
         ),
     ]
     .into_iter()
@@ -2124,9 +2124,9 @@ async fn runtime_bundle_component_package_project_preserves_explicit_ui_contract
             component_version: "1.0.0".to_string(),
             component_display_name: "Step Body".to_string(),
             source_ref: None,
-            artifact_bundle: ecky_cad_lib::models::ArtifactBundle {
+            artifact_bundle: ecky_cad_lib::contracts::ArtifactBundle {
                 geometry_provenance: None,
-                schema_version: ecky_cad_lib::models::MODEL_RUNTIME_SCHEMA_VERSION,
+                schema_version: ecky_cad_lib::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
                 model_id: "step-model".to_string(),
                 source_kind: ModelSourceKind::ImportedStep,
                 engine_kind: EngineKind::Freecad,
@@ -2143,7 +2143,7 @@ async fn runtime_bundle_component_package_project_preserves_explicit_ui_contract
                 face_targets: Vec::new(),
                 callout_anchors: Vec::new(),
                 measurement_guides: Vec::new(),
-                export_artifacts: vec![ecky_cad_lib::models::ExportArtifact {
+                export_artifacts: vec![ecky_cad_lib::contracts::ExportArtifact {
                     geometry_provenance: None,
                     label: "source.step".to_string(),
                     format: "step".to_string(),
@@ -2237,7 +2237,7 @@ async fn resolve_installed_component_source_backfills_params_from_source_when_ma
                 keepouts: Vec::new(),
                 fusion_zones: Vec::new(),
                 params: Vec::new(),
-                ui_spec: ecky_cad_lib::models::UiSpec::default(),
+                ui_spec: ecky_cad_lib::contracts::UiSpec::default(),
                 initial_params: Default::default(),
                 ports: Vec::new(),
             }],
@@ -2281,11 +2281,11 @@ async fn resolve_installed_component_source_backfills_params_from_source_when_ma
     assert_eq!(resolved.component.ui_spec.fields.len(), 2);
     assert_eq!(
         resolved.component.initial_params.get("amp"),
-        Some(&ecky_cad_lib::models::ParamValue::Number(2.0))
+        Some(&ecky_cad_lib::contracts::ParamValue::Number(2.0))
     );
     assert_eq!(
         resolved.component.initial_params.get("vents"),
-        Some(&ecky_cad_lib::models::ParamValue::Boolean(true))
+        Some(&ecky_cad_lib::contracts::ParamValue::Boolean(true))
     );
 
     fs::remove_dir_all(temp_root).ok();
@@ -2303,9 +2303,9 @@ async fn runtime_bundle_component_package_project_rejects_unknown_runtime_target
     let manifest_path = temp_root.join("manifest.json");
     fs::write(
         &manifest_path,
-        serde_json::to_string_pretty(&ecky_cad_lib::models::ModelManifest {
+        serde_json::to_string_pretty(&ecky_cad_lib::contracts::ModelManifest {
             geometry_provenance: None,
-            schema_version: ecky_cad_lib::models::MODEL_RUNTIME_SCHEMA_VERSION,
+            schema_version: ecky_cad_lib::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: "fake-model".to_string(),
             source_kind: ModelSourceKind::Generated,
             source_digest: None,
@@ -2314,7 +2314,7 @@ async fn runtime_bundle_component_package_project_rejects_unknown_runtime_target
             engine_kind: EngineKind::EckyIrV0,
             source_language: SourceLanguage::EckyIrV0,
             geometry_backend: GeometryBackend::Build123d,
-            document: ecky_cad_lib::models::DocumentMetadata {
+            document: ecky_cad_lib::contracts::DocumentMetadata {
                 document_name: "Fake".to_string(),
                 document_label: "Fake".to_string(),
                 source_path: Some(source_path.to_string_lossy().to_string()),
@@ -2334,8 +2334,8 @@ async fn runtime_bundle_component_package_project_rejects_unknown_runtime_target
             feature_graph: None,
             correspondence_graph: None,
             warnings: Vec::new(),
-            enrichment_state: ecky_cad_lib::models::ManifestEnrichmentState {
-                status: ecky_cad_lib::models::EnrichmentStatus::None,
+            enrichment_state: ecky_cad_lib::contracts::ManifestEnrichmentState {
+                status: ecky_cad_lib::contracts::EnrichmentStatus::None,
                 proposals: Vec::new(),
             },
         })
@@ -2356,9 +2356,9 @@ async fn runtime_bundle_component_package_project_rejects_unknown_runtime_target
             component_version: "1.0.0".to_string(),
             component_display_name: "Body".to_string(),
             source_ref: None,
-            artifact_bundle: ecky_cad_lib::models::ArtifactBundle {
+            artifact_bundle: ecky_cad_lib::contracts::ArtifactBundle {
                 geometry_provenance: None,
-                schema_version: ecky_cad_lib::models::MODEL_RUNTIME_SCHEMA_VERSION,
+                schema_version: ecky_cad_lib::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
                 model_id: "fake-model".to_string(),
                 source_kind: ModelSourceKind::Generated,
                 engine_kind: EngineKind::EckyIrV0,
@@ -2382,7 +2382,7 @@ async fn runtime_bundle_component_package_project_rejects_unknown_runtime_target
                 vec!["mechanical.plane.mount.v1".to_string()],
             )],
             params: Vec::new(),
-            ui_spec: ecky_cad_lib::models::UiSpec::default(),
+            ui_spec: ecky_cad_lib::contracts::UiSpec::default(),
             initial_params: Default::default(),
             ports: vec![ComponentPort {
                 port_id: "mount".to_string(),
@@ -2475,7 +2475,7 @@ async fn direct_runtime_bundle_component_package_project_preserves_topology_targ
                 vec!["mechanical.patch.mate.v1".to_string()],
             )],
             params: Vec::new(),
-            ui_spec: ecky_cad_lib::models::UiSpec::default(),
+            ui_spec: ecky_cad_lib::contracts::UiSpec::default(),
             initial_params: Default::default(),
             ports: vec![ComponentPort {
                 port_id: "patch".to_string(),
@@ -2599,7 +2599,7 @@ async fn accepted_brep_step_component_package_project_preserves_exact_target_ids
                 vec!["mechanical.patch.mate.v1".to_string()],
             )],
             params: Vec::new(),
-            ui_spec: ecky_cad_lib::models::UiSpec::default(),
+            ui_spec: ecky_cad_lib::contracts::UiSpec::default(),
             initial_params: Default::default(),
             ports: vec![ComponentPort {
                 port_id: "patch".to_string(),
@@ -3087,7 +3087,7 @@ async fn render_installed_assembly_merges_component_initial_params_per_instance(
             "rail".to_string(),
             [(
                 "mount_spacing".to_string(),
-                ecky_cad_lib::models::ParamValue::Number(72.0),
+                ecky_cad_lib::contracts::ParamValue::Number(72.0),
             )]
             .into_iter()
             .collect(),
@@ -3110,11 +3110,11 @@ async fn render_installed_assembly_merges_component_initial_params_per_instance(
         .expect("cage instance");
     assert_eq!(
         rail.parameters.get("mount_spacing"),
-        Some(&ecky_cad_lib::models::ParamValue::Number(72.0))
+        Some(&ecky_cad_lib::contracts::ParamValue::Number(72.0))
     );
     assert_eq!(
         cage.parameters.get("mount_spacing"),
-        Some(&ecky_cad_lib::models::ParamValue::Number(64.0))
+        Some(&ecky_cad_lib::contracts::ParamValue::Number(64.0))
     );
 
     fs::remove_dir_all(temp_root).ok();

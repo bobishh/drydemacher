@@ -12,8 +12,8 @@ use std::path::PathBuf;
 
 use ecky_cad_lib::cad_transpile::{build_transpile_messages, strip_code_fence};
 use ecky_cad_lib::contracts::Config;
+use ecky_cad_lib::contracts::GeometryBackend;
 use ecky_cad_lib::llm::{extract_openai_message_content, send_openai_request};
-use ecky_cad_lib::models::GeometryBackend;
 
 fn usage() -> &'static str {
     "Usage: cad_to_ecky <input> [--backend mesh|build123d|freecad] [--model M] \

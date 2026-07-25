@@ -2,6 +2,9 @@ use std::collections::BTreeMap;
 
 use lexpr::Value;
 
+use crate::contracts::{
+    AppResult, DesignParams, ParamValue, ParsedParamsResult, SelectOption, SelectValue, UiField,
+};
 #[cfg(test)]
 use crate::ecky_core_ir::{
     CoreArrayOp, CoreBooleanOp, CoreFrameOp, CoreLiteral, CoreMetaOp, CoreNode, CoreNodeKind,
@@ -10,9 +13,6 @@ use crate::ecky_core_ir::{
 };
 use crate::ecky_core_ir::{
     CoreParameter, CoreParameterKind, CoreParameterValue, CoreProgram, CoreValueKind,
-};
-use crate::models::{
-    AppResult, DesignParams, ParamValue, ParsedParamsResult, SelectOption, SelectValue, UiField,
 };
 
 #[cfg(test)]

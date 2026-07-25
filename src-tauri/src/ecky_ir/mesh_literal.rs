@@ -1,14 +1,15 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::models::{AppError, AppErrorCode, AppResult};
+use crate::contracts::{AppError, AppErrorCode, AppResult};
 use csgrs::float_types::parry3d::na::{Point3, Vector3};
 use csgrs::mesh::polygon::Polygon as IrPolygon;
 use csgrs::mesh::vertex::Vertex as IrVertex;
 
 use super::shared::IrMesh;
 
-pub(crate) const MAX_MESH_LITERAL_VERTICES: usize = 100_000;
-pub(crate) const MAX_MESH_LITERAL_TRIANGLES: usize = 200_000;
+pub(crate) use ecky_render::scheme::compiler::{
+    MAX_MESH_LITERAL_TRIANGLES, MAX_MESH_LITERAL_VERTICES,
+};
 
 pub(super) fn build_mesh_literal(
     operation: &str,

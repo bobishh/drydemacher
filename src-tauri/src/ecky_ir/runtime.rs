@@ -6,13 +6,14 @@ use csgrs::float_types::parry3d::na::Vector3;
 use csgrs::traits::CSG;
 use sha2::{Digest, Sha256};
 
-use crate::models::{
+use crate::contracts::{
     AppError, AppResult, ArtifactBundle, DesignParams, DocumentMetadata, EngineKind,
     ExportArtifact, FeatureGraph, FeatureNode, FeatureOutputRef, GeometryBackend,
     GeometryProvenance, GeometryRepresentation, ManifestBounds, ModelManifest, ModelSourceKind,
-    ParamValue, ParameterGroup, ParsedParamsResult, PartBinding, PathResolver, SelectionTarget,
-    SourceLanguage, SourceRef, ViewerAsset, ViewerAssetFormat, MODEL_RUNTIME_SCHEMA_VERSION,
+    ParamValue, ParameterGroup, ParsedParamsResult, PartBinding, SelectionTarget, SourceLanguage,
+    SourceRef, ViewerAsset, ViewerAssetFormat, MODEL_RUNTIME_SCHEMA_VERSION,
 };
+use crate::models::PathResolver;
 
 use super::eval_scalar::eval_stringish;
 use super::mesh_ops::{eval_geometry_expr, sanitize_mesh_for_export};
@@ -1208,7 +1209,7 @@ fn render_prepared_parts(
 
     let selection_targets = Vec::new();
     let feature_graph = runtime_part_feature_graph(parts, &selection_targets);
-    let geometry_provenance = exposes_mesh_literal.then(|| GeometryProvenance {
+    let geometry_provenance = exposes_mesh_literal.then_some(GeometryProvenance {
         representation: GeometryRepresentation::MeshNative,
         source_mesh_digests,
         closed: Some(mesh_literal_topology_closed),
@@ -1253,8 +1254,8 @@ fn render_prepared_parts(
         feature_graph: Some(feature_graph),
         correspondence_graph: None,
         warnings: mesh_warnings,
-        enrichment_state: crate::models::ManifestEnrichmentState {
-            status: crate::models::EnrichmentStatus::None,
+        enrichment_state: crate::contracts::ManifestEnrichmentState {
+            status: crate::contracts::EnrichmentStatus::None,
             proposals: Vec::new(),
         },
     };
@@ -1346,7 +1347,7 @@ fn heightfield_asset_digest(
     for path in paths {
         if path.trim().is_empty() {
             return Err(AppError::with_details(
-                crate::models::AppErrorCode::Validation,
+                crate::contracts::AppErrorCode::Validation,
                 "Invalid `heightfield` geometry.",
                 "image path is empty; image selection remains pending",
             )
@@ -1354,7 +1355,7 @@ fn heightfield_asset_digest(
         }
         let bytes = fs::read(&path).map_err(|error| {
             AppError::with_details(
-                crate::models::AppErrorCode::Validation,
+                crate::contracts::AppErrorCode::Validation,
                 "Invalid `heightfield` geometry.",
                 format!("failed to read '{path}': {error}"),
             )
@@ -1461,13 +1462,13 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
+    use crate::contracts::ModelManifest;
     use crate::ecky_core_ir::{
         CoreNode, CoreNodeKind, CoreOperation, CoreParameter, CoreParameterConstraints,
         CoreParameterKind, CoreParameterValue, CorePart, CorePrimitive, CoreProgram, CoreValueKind,
         NodeId, ParamId, PartId, ProgramId, SourceFileId, SourceSpan,
     };
     use crate::ecky_ir::model::{core_part_to_ir_part, core_program_to_model, parse_model};
-    use crate::models::ModelManifest;
 
     fn render_root() -> PathBuf {
         std::env::temp_dir().join(format!("ecky-ir-runtime-test-{}", uuid::Uuid::new_v4()))
@@ -1962,7 +1963,7 @@ mod tests {
             source_ref: runtime_part_source_ref("body", None),
             dependency_ids: vec!["width".to_string()],
         }];
-        let selection_targets = vec![crate::models::SelectionTarget {
+        let selection_targets = vec![crate::contracts::SelectionTarget {
             target_id: Some("target-body".to_string()),
             durable_target_id: None,
             canonical_target_id: None,
@@ -1970,7 +1971,7 @@ mod tests {
             part_id: "body".to_string(),
             viewer_node_id: "body".to_string(),
             label: "Body".to_string(),
-            kind: crate::models::SelectionTargetKind::Object,
+            kind: crate::contracts::SelectionTargetKind::Object,
             editable: true,
             parameter_keys: vec!["width".to_string()],
             primitive_ids: Vec::new(),

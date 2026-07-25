@@ -1,7 +1,8 @@
-use crate::models::{
+use crate::contracts::{
     normalize_design_output, upgraded_or_default_genie_traits, AgentDraft, ArtifactBundle,
-    DeletedMessage, DesignOutput, DesignParams, GenieTraits, Message, MessageRole, MessageStatus,
-    ModelManifest, TargetLeaseInfo, Thread, ThreadMessagesPage, ThreadReference, UiSpec,
+    DeletedMessage, DeletedThreadSummary, DeletedThreadsPage, DesignOutput, DesignParams,
+    GenieTraits, Message, MessageRole, MessageStatus, ModelManifest, TargetLeaseInfo, Thread,
+    ThreadMessagesPage, ThreadReference, UiSpec,
 };
 use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
 use serde::de::DeserializeOwned;
@@ -24,6 +25,7 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
     // Enable WAL mode for better concurrency and prevent "database is locked" errors
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
+         PRAGMA foreign_keys = ON;
          PRAGMA synchronous = NORMAL;
          PRAGMA busy_timeout = 5000;",
     )?;
@@ -265,7 +267,7 @@ fn deserialize_thread_genie_traits(thread_id: &str, raw: Option<&str>) -> GenieT
     upgraded_or_default_genie_traits(thread_id, raw)
 }
 
-fn deserialize_agent_origin(raw: Option<&str>) -> Option<crate::models::AgentOrigin> {
+fn deserialize_agent_origin(raw: Option<&str>) -> Option<crate::contracts::AgentOrigin> {
     raw.and_then(|json| serde_json::from_str(json).ok())
 }
 
@@ -412,7 +414,7 @@ pub fn get_all_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
             error_count: row.get::<_, i64>(8)? as usize,
             status: status_str
                 .parse()
-                .unwrap_or(crate::models::ThreadStatus::Active),
+                .unwrap_or(crate::contracts::ThreadStatus::Active),
             finalized_at: row.get::<_, Option<i64>>(10)?.map(|v| v as u64),
             pending_confirm: row.get(11)?,
         })
@@ -472,7 +474,7 @@ pub fn get_recent_threads_limited(conn: &Connection, limit: usize) -> SqlResult<
             error_count: row.get::<_, i64>(8)? as usize,
             status: status_str
                 .parse()
-                .unwrap_or(crate::models::ThreadStatus::Active),
+                .unwrap_or(crate::contracts::ThreadStatus::Active),
             finalized_at: row.get::<_, Option<i64>>(10)?.map(|v| v as u64),
             pending_confirm: row.get(11)?,
         })
@@ -633,7 +635,7 @@ pub fn get_thread_summary(conn: &Connection, thread_id: &str) -> SqlResult<Optio
 }
 
 pub struct ThreadLifecycle {
-    pub status: crate::models::ThreadStatus,
+    pub status: crate::contracts::ThreadStatus,
     pub finalized_at: Option<u64>,
     pub pending_confirm: Option<String>,
 }
@@ -648,7 +650,7 @@ pub fn get_thread_lifecycle(
         |row| {
             let status_str: String = row.get::<_, String>(0).unwrap_or_else(|_| "active".to_string());
             Ok(ThreadLifecycle {
-                status: status_str.parse().unwrap_or(crate::models::ThreadStatus::Active),
+                status: status_str.parse().unwrap_or(crate::contracts::ThreadStatus::Active),
                 finalized_at: row.get::<_, Option<i64>>(1)?.map(|v| v as u64),
                 pending_confirm: row.get(2)?,
             })
@@ -717,7 +719,7 @@ pub fn get_inventory_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
             error_count: row.get::<_, i64>(8)? as usize,
             status: status_str
                 .parse()
-                .unwrap_or(crate::models::ThreadStatus::Finalized),
+                .unwrap_or(crate::contracts::ThreadStatus::Finalized),
             finalized_at: row.get::<_, Option<i64>>(10)?.map(|v| v as u64),
             pending_confirm: row.get(11)?,
         })
@@ -919,20 +921,22 @@ pub fn get_thread_messages_page(
 ) -> SqlResult<ThreadMessagesPage> {
     let safe_limit = limit.clamp(1, 200);
     let mut rows = if let Some(before_ts) = before {
-        load_thread_message_rows_with_clause(
+        load_thread_message_rows_with_clause_and_projection(
             conn,
             "thread_id = ?1 AND status != 'discarded' AND timestamp < ?2",
             &[&thread_id, &(before_ts as i64)],
             "timestamp DESC, rowid DESC",
             Some(safe_limit + 1),
+            !include_visual_payloads,
         )?
     } else {
-        load_thread_message_rows_with_clause(
+        load_thread_message_rows_with_clause_and_projection(
             conn,
             "thread_id = ?1 AND status != 'discarded'",
             &[&thread_id],
             "timestamp DESC, rowid DESC",
             Some(safe_limit + 1),
+            !include_visual_payloads,
         )?
     };
 
@@ -962,6 +966,13 @@ pub fn get_thread_messages_page(
             if !include_visual_payloads {
                 row.message.image_data = None;
                 row.message.attachment_images.clear();
+                if let Some(bundle) = row.message.artifact_bundle.as_mut() {
+                    bundle.edge_targets.clear();
+                    bundle.face_targets.clear();
+                    bundle.callout_anchors.clear();
+                    bundle.measurement_guides.clear();
+                }
+                row.message.model_manifest = None;
             }
             Some(row.message)
         })
@@ -979,7 +990,7 @@ pub fn get_thread_messages_page(
 pub fn get_thread_window_layout(
     conn: &Connection,
     thread_id: &str,
-) -> SqlResult<Option<crate::models::ThreadWindowLayout>> {
+) -> SqlResult<Option<crate::contracts::ThreadWindowLayout>> {
     conn.query_row(
         "SELECT layout_json FROM thread_window_layouts WHERE thread_id = ?1",
         [thread_id],
@@ -1000,7 +1011,7 @@ pub fn get_thread_window_layout(
 pub fn save_thread_window_layout(
     conn: &Connection,
     thread_id: &str,
-    layout: &crate::models::ThreadWindowLayout,
+    layout: &crate::contracts::ThreadWindowLayout,
     updated_at: i64,
 ) -> SqlResult<bool> {
     let thread_exists = conn
@@ -1117,12 +1128,55 @@ fn load_thread_message_rows_with_clause(
     order_by: &str,
     limit: Option<usize>,
 ) -> SqlResult<Vec<ThreadMessageRow>> {
+    load_thread_message_rows_with_clause_and_projection(
+        conn,
+        where_clause,
+        params,
+        order_by,
+        limit,
+        false,
+    )
+}
+
+fn load_thread_message_rows_with_clause_and_projection(
+    conn: &Connection,
+    where_clause: &str,
+    params: &[&dyn rusqlite::ToSql],
+    order_by: &str,
+    limit: Option<usize>,
+    compact_visual_payloads: bool,
+) -> SqlResult<Vec<ThreadMessageRow>> {
+    let columns = if compact_visual_payloads {
+        "id, role, content, status, output, usage,
+         CASE
+           WHEN artifact_bundle IS NULL THEN NULL
+           ELSE json_remove(
+             artifact_bundle,
+             '$.edgeTargets',
+             '$.faceTargets',
+             '$.calloutAnchors',
+             '$.measurementGuides'
+           )
+         END,
+         NULL,
+         structural_verification,
+         agent_origin,
+         timestamp,
+         NULL,
+         visual_kind,
+         NULL,
+         deleted_at"
+    } else {
+        "id, role, content, status, output, usage, artifact_bundle, model_manifest,
+         structural_verification, agent_origin, timestamp, image_data, visual_kind,
+         attachment_images, deleted_at"
+    };
     let mut sql = format!(
-        "SELECT id, role, content, status, output, usage, artifact_bundle, model_manifest, structural_verification, agent_origin, timestamp, image_data, visual_kind, attachment_images, deleted_at
+        "SELECT {}
          FROM messages
          WHERE {}
          ORDER BY {}",
-        where_clause, order_by
+        columns, where_clause, order_by
     );
     if let Some(limit) = limit {
         sql.push_str(" LIMIT ");
@@ -1332,11 +1386,11 @@ pub fn update_message_status_and_output(
 pub struct MessageStatusUpdate<'a> {
     pub status: &'a MessageStatus,
     pub output: Option<&'a DesignOutput>,
-    pub usage: Option<&'a crate::models::UsageSummary>,
-    pub artifact_bundle: Option<&'a crate::models::ArtifactBundle>,
-    pub model_manifest: Option<&'a crate::models::ModelManifest>,
-    pub structural_verification: Option<&'a crate::models::StructuralVerificationResult>,
-    pub visual_kind: Option<&'a crate::models::MessageVisualKind>,
+    pub usage: Option<&'a crate::contracts::UsageSummary>,
+    pub artifact_bundle: Option<&'a crate::contracts::ArtifactBundle>,
+    pub model_manifest: Option<&'a crate::contracts::ModelManifest>,
+    pub structural_verification: Option<&'a crate::contracts::StructuralVerificationResult>,
+    pub visual_kind: Option<&'a crate::contracts::MessageVisualKind>,
     pub content: Option<&'a str>,
 }
 
@@ -1453,6 +1507,119 @@ pub fn restore_version_cluster(conn: &Connection, id: &str) -> SqlResult<Option<
         params![now, message.thread_id],
     )?;
     Ok(Some(message.thread_id))
+}
+
+pub fn get_deleted_threads_page(
+    conn: &Connection,
+    before: Option<&str>,
+    limit: usize,
+) -> SqlResult<DeletedThreadsPage> {
+    let safe_limit = limit.clamp(1, 100);
+    let (before_deleted_at, before_id) = match before {
+        Some(cursor) => {
+            let (deleted_at, id) = cursor
+                .split_once(':')
+                .ok_or_else(|| rusqlite::Error::InvalidParameterName("before".to_string()))?;
+            let deleted_at = deleted_at
+                .parse::<i64>()
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            (Some(deleted_at), Some(id.to_string()))
+        }
+        None => (None, None),
+    };
+
+    let mut stmt = conn.prepare(
+        "
+        SELECT t.id, t.title, COALESCE(t.summary, ''), t.updated_at, t.deleted_at,
+               (
+                   SELECT COUNT(*)
+                   FROM messages m
+                   WHERE m.thread_id = t.id
+                     AND m.role = 'assistant'
+                     AND m.status = 'success'
+                     AND m.artifact_bundle IS NOT NULL
+                     AND m.deleted_at IS NULL
+               ) AS version_count
+        FROM threads t
+        WHERE t.deleted_at IS NOT NULL
+          AND (
+              ?1 IS NULL
+              OR t.deleted_at < ?1
+              OR (t.deleted_at = ?1 AND t.id < ?2)
+          )
+        ORDER BY t.deleted_at DESC, t.id DESC
+        LIMIT ?3
+        ",
+    )?;
+    let iter = stmt.query_map(
+        params![before_deleted_at, before_id, (safe_limit + 1) as i64],
+        |row| {
+            Ok(DeletedThreadSummary {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                summary: row.get(2)?,
+                updated_at: row.get::<_, i64>(3)? as u64,
+                deleted_at: row.get::<_, i64>(4)? as u64,
+                version_count: row.get::<_, i64>(5)? as usize,
+            })
+        },
+    )?;
+
+    let mut items = iter.collect::<SqlResult<Vec<_>>>()?;
+    let has_more = items.len() > safe_limit;
+    if has_more {
+        items.truncate(safe_limit);
+    }
+    let next_before = if has_more {
+        items
+            .last()
+            .map(|item| format!("{}:{}", item.deleted_at, item.id))
+    } else {
+        None
+    };
+
+    Ok(DeletedThreadsPage {
+        items,
+        next_before,
+        has_more,
+    })
+}
+
+pub fn restore_deleted_thread(conn: &Connection, id: &str) -> SqlResult<bool> {
+    let now = unix_now_i64();
+    let changed = conn.execute(
+        "
+        UPDATE threads
+        SET deleted_at = NULL,
+            status = 'active',
+            finalized_at = NULL,
+            updated_at = ?1
+        WHERE id = ?2
+          AND deleted_at IS NOT NULL
+        ",
+        params![now, id],
+    )?;
+    Ok(changed > 0)
+}
+
+pub fn get_deleted_thread_preview(conn: &Connection, thread_id: &str) -> SqlResult<Option<String>> {
+    conn.query_row(
+        "
+        SELECT image_data
+        FROM messages
+        WHERE thread_id = ?1
+          AND role = 'assistant'
+          AND status = 'success'
+          AND artifact_bundle IS NOT NULL
+          AND deleted_at IS NULL
+          AND image_data IS NOT NULL
+        ORDER BY timestamp DESC, rowid DESC
+        LIMIT 1
+        ",
+        [thread_id],
+        |row| row.get(0),
+    )
+    .optional()
 }
 
 pub fn get_deleted_messages(conn: &Connection) -> SqlResult<Vec<DeletedMessage>> {
@@ -1592,7 +1759,7 @@ pub fn update_message_parameters(
 pub fn update_message_model_manifest(
     conn: &Connection,
     message_id: &str,
-    manifest: &crate::models::ModelManifest,
+    manifest: &crate::contracts::ModelManifest,
 ) -> SqlResult<()> {
     let serialized = serde_json::to_string(manifest)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
@@ -1606,7 +1773,7 @@ pub fn update_message_model_manifest(
 pub fn update_message_artifact_bundle(
     conn: &Connection,
     message_id: &str,
-    bundle: &crate::models::ArtifactBundle,
+    bundle: &crate::contracts::ArtifactBundle,
 ) -> SqlResult<()> {
     let serialized = serde_json::to_string(bundle)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
@@ -1620,7 +1787,7 @@ pub fn update_message_artifact_bundle(
 pub fn update_message_structural_verification(
     conn: &Connection,
     message_id: &str,
-    result: Option<&crate::models::StructuralVerificationResult>,
+    result: Option<&crate::contracts::StructuralVerificationResult>,
 ) -> SqlResult<()> {
     let serialized = match result {
         Some(result) => Some(
@@ -1683,7 +1850,7 @@ pub fn upsert_agent_draft(conn: &Connection, draft: &AgentDraft) -> SqlResult<()
 pub fn upsert_verification_record(
     conn: &Connection,
     preview_id: &str,
-    record: &crate::models::VerificationRecord,
+    record: &crate::contracts::VerificationRecord,
     verified_at: u64,
 ) -> SqlResult<()> {
     let artifact_digest = serde_json::to_string(&record.artifact_digest)
@@ -1717,7 +1884,7 @@ pub fn upsert_verification_record(
 pub fn get_verification_record(
     conn: &Connection,
     snapshot_id: &str,
-) -> SqlResult<Option<crate::models::VerificationRecord>> {
+) -> SqlResult<Option<crate::contracts::VerificationRecord>> {
     conn.query_row(
         "SELECT verification_record FROM verification_records WHERE snapshot_id = ?1",
         params![snapshot_id],
@@ -1908,14 +2075,14 @@ pub fn update_message_output(
 
 pub fn upsert_agent_session(
     conn: &Connection,
-    session: &crate::models::AgentSession,
+    session: &crate::contracts::AgentSession,
 ) -> SqlResult<()> {
     upsert_agent_session_with_ownership(conn, session, session.client_kind == "managed-mcp-http")
 }
 
 pub fn upsert_agent_session_with_ownership(
     conn: &Connection,
-    session: &crate::models::AgentSession,
+    session: &crate::contracts::AgentSession,
     managed_runtime: bool,
 ) -> SqlResult<()> {
     conn.execute(
@@ -1961,10 +2128,15 @@ pub fn delete_agent_session(conn: &Connection, session_id: &str) -> SqlResult<()
     Ok(())
 }
 
+pub fn delete_all_agent_sessions(conn: &Connection) -> SqlResult<()> {
+    conn.execute("DELETE FROM agent_sessions", [])?;
+    Ok(())
+}
+
 pub fn get_active_agent_sessions(
     conn: &Connection,
     stale_threshold_secs: u64,
-) -> SqlResult<Vec<crate::models::AgentSession>> {
+) -> SqlResult<Vec<crate::contracts::AgentSession>> {
     let now = unix_now_i64();
     let threshold = now - (stale_threshold_secs as i64);
 
@@ -1976,7 +2148,7 @@ pub fn get_active_agent_sessions(
          ORDER BY updated_at DESC"
     )?;
     let iter = stmt.query_map([threshold], |row| {
-        Ok(crate::models::AgentSession {
+        Ok(crate::contracts::AgentSession {
             session_id: row.get(0)?,
             client_kind: row.get(1)?,
             host_label: row.get(2)?,
@@ -2003,7 +2175,7 @@ pub fn get_active_agent_sessions(
 pub fn get_sessions_by_ids(
     conn: &Connection,
     ids: &[String],
-) -> SqlResult<Vec<crate::models::AgentSession>> {
+) -> SqlResult<Vec<crate::contracts::AgentSession>> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -2022,7 +2194,7 @@ pub fn get_sessions_by_ids(
     );
     let mut stmt = conn.prepare(&sql)?;
     let iter = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
-        Ok(crate::models::AgentSession {
+        Ok(crate::contracts::AgentSession {
             session_id: row.get(0)?,
             client_kind: row.get(1)?,
             host_label: row.get(2)?,
@@ -2047,7 +2219,7 @@ pub fn get_sessions_by_ids(
 pub fn get_thread_last_agent_session(
     conn: &Connection,
     thread_id: &str,
-) -> SqlResult<Option<crate::models::AgentSession>> {
+) -> SqlResult<Option<crate::contracts::AgentSession>> {
     conn.query_row(
         "SELECT session_id, client_kind, host_label, agent_label, llm_model_id, llm_model_label, thread_id, message_id, model_id, phase, status_text, updated_at
          FROM agent_sessions
@@ -2056,7 +2228,7 @@ pub fn get_thread_last_agent_session(
          LIMIT 1",
         [thread_id],
         |row| {
-            Ok(crate::models::AgentSession {
+            Ok(crate::contracts::AgentSession {
                 session_id: row.get(0)?,
                 client_kind: row.get(1)?,
                 host_label: row.get(2)?,
@@ -2078,7 +2250,7 @@ pub fn get_thread_last_agent_session(
 pub fn get_thread_last_agent_session_for_agent(
     conn: &Connection,
     agent_label: &str,
-) -> SqlResult<Option<crate::models::AgentSession>> {
+) -> SqlResult<Option<crate::contracts::AgentSession>> {
     conn.query_row(
         "SELECT session_id, client_kind, host_label, agent_label, llm_model_id, llm_model_label, thread_id, message_id, model_id, phase, status_text, updated_at
          FROM agent_sessions
@@ -2087,7 +2259,7 @@ pub fn get_thread_last_agent_session_for_agent(
          LIMIT 1",
         [agent_label],
         |row| {
-            Ok(crate::models::AgentSession {
+            Ok(crate::contracts::AgentSession {
                 session_id: row.get(0)?,
                 client_kind: row.get(1)?,
                 host_label: row.get(2)?,
@@ -2342,7 +2514,7 @@ pub fn get_message_runtime_and_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{
+    use crate::contracts::{
         DesignParams, InteractionMode, MessageRole, MessageStatus, ParamValue, UiField, UiSpec,
     };
     use std::fs;
@@ -2483,10 +2655,10 @@ mod tests {
             response: "".to_string(),
             interaction_mode: InteractionMode::Design,
             macro_code: "print('hi')".to_string(),
-            macro_dialect: crate::models::MacroDialect::Legacy,
-            engine_kind: crate::models::EngineKind::Freecad,
-            source_language: crate::models::SourceLanguage::LegacyPython,
-            geometry_backend: crate::models::GeometryBackend::Freecad,
+            macro_dialect: crate::contracts::MacroDialect::Legacy,
+            engine_kind: crate::contracts::EngineKind::Freecad,
+            source_language: crate::contracts::SourceLanguage::LegacyPython,
+            geometry_backend: crate::contracts::GeometryBackend::Freecad,
             ui_spec: UiSpec { fields: Vec::new() },
             initial_params: DesignParams::from([("x".to_string(), ParamValue::Number(10.0))]),
             post_processing: None,
@@ -2498,10 +2670,10 @@ mod tests {
             geometry_provenance: None,
             schema_version: 1,
             model_id: model_id.to_string(),
-            source_kind: crate::models::ModelSourceKind::Generated,
-            engine_kind: crate::models::EngineKind::Freecad,
-            source_language: crate::models::SourceLanguage::LegacyPython,
-            geometry_backend: crate::models::GeometryBackend::Freecad,
+            source_kind: crate::contracts::ModelSourceKind::Generated,
+            engine_kind: crate::contracts::EngineKind::Freecad,
+            source_language: crate::contracts::SourceLanguage::LegacyPython,
+            geometry_backend: crate::contracts::GeometryBackend::Freecad,
             content_hash: format!("hash-{model_id}"),
             artifact_version: 1,
             fcstd_path: format!("/tmp/{model_id}.FCStd"),
@@ -2794,6 +2966,67 @@ mod tests {
     }
 
     #[test]
+    fn deleted_thread_page_is_cursor_paginated_and_restore_keeps_identity() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db_internal(&conn).unwrap();
+
+        for (id, title, updated_at, deleted_at) in [
+            ("deleted-newer", "Newer project", 300_i64, 500_i64),
+            ("deleted-older", "Older project", 200_i64, 400_i64),
+        ] {
+            create_or_update_thread(&conn, id, title, updated_at as u64, None).unwrap();
+            add_message(
+                &conn,
+                id,
+                &Message {
+                    id: format!("{id}-version"),
+                    role: MessageRole::Assistant,
+                    content: title.to_string(),
+                    status: MessageStatus::Success,
+                    output: Some(sample_output()),
+                    usage: None,
+                    artifact_bundle: Some(sample_artifact_bundle(id)),
+                    model_manifest: None,
+                    structural_verification: None,
+                    agent_origin: None,
+                    timestamp: updated_at as u64,
+                    image_data: Some(format!("data:image/png;base64,{id}")),
+                    visual_kind: None,
+                    attachment_images: Vec::new(),
+                },
+            )
+            .unwrap();
+            assert!(delete_thread(&conn, id).unwrap());
+            conn.execute(
+                "UPDATE threads SET deleted_at = ?1 WHERE id = ?2",
+                params![deleted_at, id],
+            )
+            .unwrap();
+        }
+
+        let first = get_deleted_threads_page(&conn, None, 1).unwrap();
+        assert_eq!(first.items.len(), 1);
+        assert_eq!(first.items[0].id, "deleted-newer");
+        assert_eq!(first.items[0].version_count, 1);
+        assert!(first.has_more);
+        assert!(first.next_before.is_some());
+
+        let second = get_deleted_threads_page(&conn, first.next_before.as_deref(), 1).unwrap();
+        assert_eq!(second.items.len(), 1);
+        assert_eq!(second.items[0].id, "deleted-older");
+        assert!(!second.has_more);
+
+        assert!(restore_deleted_thread(&conn, "deleted-newer").unwrap());
+        let restored = get_all_threads(&conn).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].id, "deleted-newer");
+        assert_eq!(
+            get_thread_messages(&conn, "deleted-newer").unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
     fn test_message_attachment_images_round_trip() {
         let conn = Connection::open_in_memory().unwrap();
         init_db_internal(&conn).unwrap();
@@ -2814,7 +3047,7 @@ mod tests {
             agent_origin: None,
             timestamp: 300,
             image_data: Some("data:image/png;base64,viewport".to_string()),
-            visual_kind: Some(crate::models::MessageVisualKind::ConceptPreview),
+            visual_kind: Some(crate::contracts::MessageVisualKind::ConceptPreview),
             attachment_images: vec![
                 "data:image/png;base64,ref-1".to_string(),
                 "data:image/png;base64,ref-2".to_string(),
@@ -2831,7 +3064,7 @@ mod tests {
         );
         assert_eq!(
             messages[0].visual_kind,
-            Some(crate::models::MessageVisualKind::ConceptPreview)
+            Some(crate::contracts::MessageVisualKind::ConceptPreview)
         );
         assert_eq!(
             messages[0].attachment_images,
@@ -3131,7 +3364,7 @@ mod tests {
             artifact_bundle: None,
             model_manifest: None,
             structural_verification: None,
-            agent_origin: Some(crate::models::AgentOrigin {
+            agent_origin: Some(crate::contracts::AgentOrigin {
                 host_label: "Codex MCP Client".to_string(),
                 client_kind: "mcp-http".to_string(),
                 agent_label: "Ecky".to_string(),
@@ -3339,7 +3572,10 @@ mod tests {
         let legacy_traits = get_thread_genie_traits(&conn, "legacy-thread")
             .unwrap()
             .expect("legacy thread should have traits after migration");
-        assert_eq!(legacy_traits.version, crate::models::GENIE_TRAITS_VERSION);
+        assert_eq!(
+            legacy_traits.version,
+            crate::contracts::GENIE_TRAITS_VERSION
+        );
         assert_eq!(legacy_traits.seed, 77);
         assert_eq!(legacy_traits.color_hue, 150.0);
         assert_eq!(legacy_traits.vertex_count, 18);
@@ -3349,10 +3585,13 @@ mod tests {
         let missing_traits = get_thread_genie_traits(&conn, "missing-thread")
             .unwrap()
             .expect("missing thread should get synthesized traits");
-        assert_eq!(missing_traits.version, crate::models::GENIE_TRAITS_VERSION);
+        assert_eq!(
+            missing_traits.version,
+            crate::contracts::GENIE_TRAITS_VERSION
+        );
         assert_eq!(
             missing_traits.seed,
-            crate::models::derive_thread_seed("missing-thread")
+            crate::contracts::derive_thread_seed("missing-thread")
         );
 
         let raw: String = conn
@@ -3365,7 +3604,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(
             parsed.get("version").and_then(serde_json::Value::as_u64),
-            Some(crate::models::GENIE_TRAITS_VERSION as u64)
+            Some(crate::contracts::GENIE_TRAITS_VERSION as u64)
         );
     }
 
@@ -3431,6 +3670,30 @@ mod tests {
             Some("29c64fc4-803b-4d75-bac0-e0f656304881")
         );
         assert!(!last_panelka_session.session_id.is_empty());
+    }
+
+    #[test]
+    fn init_db_enforces_foreign_keys_for_returned_connection() {
+        let db_path =
+            std::env::temp_dir().join(format!("ecky-fk-enforced-{}", uuid::Uuid::new_v4()));
+        let conn = init_db(&db_path).unwrap();
+
+        let foreign_keys_enabled: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(foreign_keys_enabled, 1);
+
+        let err = conn
+            .execute(
+                "INSERT INTO messages (id, thread_id, role, content, status, timestamp)
+                 VALUES ('orphan-message', 'missing-thread', 'assistant', '', 'success', 1)",
+                [],
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("FOREIGN KEY"),
+            "orphan message insert must fail by FK, got: {err}"
+        );
     }
 
     #[test]
@@ -3532,13 +3795,13 @@ mod tests {
     fn verification_record_roundtrip_is_keyed_by_snapshot_and_preserves_artifact_digest() {
         let conn = Connection::open_in_memory().unwrap();
         init_db_internal(&conn).unwrap();
-        let record = crate::models::VerificationRecord {
+        let record = crate::contracts::VerificationRecord {
             verification_id: "verification-1".to_string(),
             snapshot_id: "snapshot-1".to_string(),
             artifact_digest: "sha256:artifact-1".to_string(),
             passed: true,
-            verifier_status: crate::models::VerifierStatus::Ok,
-            verifier_source: Some(crate::models::VerifierSource::RustStructural),
+            verifier_status: crate::contracts::VerifierStatus::Ok,
+            verifier_source: Some(crate::contracts::VerifierSource::RustStructural),
         };
 
         upsert_verification_record(&conn, "preview-1", &record, 123).unwrap();
@@ -3559,16 +3822,16 @@ mod tests {
             session_id: "session-1".to_string(),
             thread_id: "thread-1".to_string(),
             base_message_id: Some("msg-1".to_string()),
-            design_output: crate::models::DesignOutput {
+            design_output: crate::contracts::DesignOutput {
                 title: "Draft".to_string(),
                 version_name: String::new(),
                 response: "ok".to_string(),
                 interaction_mode: InteractionMode::Design,
                 macro_code: "draft_macro()".to_string(),
-                macro_dialect: crate::models::MacroDialect::Legacy,
-                engine_kind: crate::models::EngineKind::Freecad,
-                source_language: crate::models::SourceLanguage::LegacyPython,
-                geometry_backend: crate::models::GeometryBackend::Freecad,
+                macro_dialect: crate::contracts::MacroDialect::Legacy,
+                engine_kind: crate::contracts::EngineKind::Freecad,
+                source_language: crate::contracts::SourceLanguage::LegacyPython,
+                geometry_backend: crate::contracts::GeometryBackend::Freecad,
                 ui_spec: UiSpec { fields: Vec::new() },
                 initial_params: DesignParams::from([(
                     "diameter".to_string(),
@@ -3578,12 +3841,12 @@ mod tests {
             },
             artifact_bundle: ArtifactBundle {
                 geometry_provenance: None,
-                schema_version: crate::models::MODEL_RUNTIME_SCHEMA_VERSION,
+                schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
                 model_id: "model-1".to_string(),
-                source_kind: crate::models::ModelSourceKind::Generated,
-                engine_kind: crate::models::EngineKind::Freecad,
-                geometry_backend: crate::models::GeometryBackend::Freecad,
-                source_language: crate::models::SourceLanguage::LegacyPython,
+                source_kind: crate::contracts::ModelSourceKind::Generated,
+                engine_kind: crate::contracts::EngineKind::Freecad,
+                geometry_backend: crate::contracts::GeometryBackend::Freecad,
+                source_language: crate::contracts::SourceLanguage::LegacyPython,
                 content_hash: "hash-1".to_string(),
                 artifact_version: 1,
                 fcstd_path: "/tmp/model-1.FCStd".to_string(),
@@ -3597,25 +3860,25 @@ mod tests {
                 measurement_guides: Vec::new(),
                 export_artifacts: Vec::new(),
             },
-            model_manifest: crate::models::ModelManifest {
+            model_manifest: crate::contracts::ModelManifest {
                 geometry_provenance: None,
-                schema_version: crate::models::MODEL_RUNTIME_SCHEMA_VERSION,
+                schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
                 model_id: "model-1".to_string(),
-                source_kind: crate::models::ModelSourceKind::Generated,
+                source_kind: crate::contracts::ModelSourceKind::Generated,
                 source_digest: None,
                 core_digest: None,
                 ast_schema_version: None,
-                engine_kind: crate::models::EngineKind::Freecad,
-                source_language: crate::models::SourceLanguage::LegacyPython,
-                geometry_backend: crate::models::GeometryBackend::Freecad,
-                document: crate::models::DocumentMetadata {
+                engine_kind: crate::contracts::EngineKind::Freecad,
+                source_language: crate::contracts::SourceLanguage::LegacyPython,
+                geometry_backend: crate::contracts::GeometryBackend::Freecad,
+                document: crate::contracts::DocumentMetadata {
                     document_name: "Doc".to_string(),
                     document_label: "Doc".to_string(),
                     source_path: None,
                     object_count: 1,
                     warnings: Vec::new(),
                 },
-                parts: vec![crate::models::PartBinding {
+                parts: vec![crate::contracts::PartBinding {
                     part_id: "body".to_string(),
                     freecad_object_name: "Body".to_string(),
                     label: "Body".to_string(),
@@ -3646,18 +3909,18 @@ mod tests {
                     proposals: Vec::new(),
                 },
             },
-            draft_feedback: Some(crate::models::AgentDraftFeedback {
+            draft_feedback: Some(crate::contracts::AgentDraftFeedback {
                 session_id: "session-1".to_string(),
                 thread_id: "thread-1".to_string(),
                 preview_id: "preview-1".to_string(),
-                status: crate::models::AgentDraftFeedbackStatus::Failed,
+                status: crate::contracts::AgentDraftFeedbackStatus::Failed,
                 summary: "Preview STL file not found.".to_string(),
-                items: vec![crate::models::AgentDraftFeedbackItem {
+                items: vec![crate::contracts::AgentDraftFeedbackItem {
                     code: "PREVIEW_STL_MISSING".to_string(),
                     message: "Preview STL file not found.".to_string(),
                 }],
                 authoring_lints: Vec::new(),
-                source: crate::models::AgentDraftFeedbackSource::StructuralVerification,
+                source: crate::contracts::AgentDraftFeedbackSource::StructuralVerification,
             }),
             updated_at: 123,
         };
@@ -3716,7 +3979,7 @@ mod tests {
         let mut windows = std::collections::HashMap::new();
         windows.insert(
             "projects".to_string(),
-            crate::models::ThreadWindowState {
+            crate::contracts::ThreadWindowState {
                 visible: true,
                 minimized: false,
                 x: 50.0,
@@ -3726,7 +3989,7 @@ mod tests {
                 z: 1,
             },
         );
-        let layout = crate::models::ThreadWindowLayout {
+        let layout = crate::contracts::ThreadWindowLayout {
             schema_version: 1,
             remember_layout: true,
             windows,
@@ -3756,7 +4019,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db_internal(&conn).unwrap();
 
-        let layout = crate::models::ThreadWindowLayout {
+        let layout = crate::contracts::ThreadWindowLayout {
             schema_version: 1,
             remember_layout: true,
             windows: std::collections::HashMap::new(),
@@ -3776,7 +4039,7 @@ mod tests {
         create_or_update_thread(&conn, t1, "A", 100, None).unwrap();
         create_or_update_thread(&conn, t2, "B", 100, None).unwrap();
 
-        let layout1 = crate::models::ThreadWindowLayout {
+        let layout1 = crate::contracts::ThreadWindowLayout {
             schema_version: 1,
             remember_layout: true,
             windows: std::collections::HashMap::new(),
@@ -3784,7 +4047,7 @@ mod tests {
         let mut windows2 = std::collections::HashMap::new();
         windows2.insert(
             "params".to_string(),
-            crate::models::ThreadWindowState {
+            crate::contracts::ThreadWindowState {
                 visible: false,
                 minimized: false,
                 x: 10.0,
@@ -3794,7 +4057,7 @@ mod tests {
                 z: 0,
             },
         );
-        let layout2 = crate::models::ThreadWindowLayout {
+        let layout2 = crate::contracts::ThreadWindowLayout {
             schema_version: 1,
             remember_layout: true,
             windows: windows2,

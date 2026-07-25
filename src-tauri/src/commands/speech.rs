@@ -6,8 +6,9 @@ use tauri::{AppHandle, State};
 use tokio::process::Command;
 use uuid::Uuid;
 
+use crate::contracts::{AppError, AppErrorCode, AppResult, Config, Engine};
 use crate::contracts::{PromptTranscription, TranscribePromptAudioInput};
-use crate::models::{AppError, AppErrorCode, AppResult, AppState, Config, Engine, PathResolver};
+use crate::models::{AppState, PathResolver};
 
 const NVIDIA_SPEECH_PROVIDER: &str = "nvidia-speech";
 const DEFAULT_NVIDIA_SPEECH_SERVER: &str = "grpc.nvcf.nvidia.com:443";
@@ -340,7 +341,7 @@ pub async fn transcribe_prompt_audio(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Config, EngineKind, GeometryBackend, McpConfig, SourceLanguage};
+    use crate::contracts::{Config, EngineKind, GeometryBackend, McpConfig, SourceLanguage};
 
     fn engine(id: &str, name: &str, base_url: &str, api_key: &str, enabled: bool) -> Engine {
         Engine {
@@ -365,7 +366,7 @@ mod tests {
             freecad_library_roots: Vec::new(),
             assets: vec![],
             microwave: None,
-            voice: crate::models::VoiceConfig::default(),
+            voice: crate::contracts::VoiceConfig::default(),
             mcp: McpConfig::default(),
             has_seen_onboarding: true,
             connection_type: None,

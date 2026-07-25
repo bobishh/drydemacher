@@ -4,8 +4,8 @@ use rustpython_parser::ast::{self, Constant, Expr, Stmt};
 use rustpython_parser::{parse, Mode};
 
 use crate::commands::design::parse_macro_params;
+use crate::contracts::{AppError, AppResult, ParamValue};
 use crate::contracts::{ParsedParamsResult, SelectValue, UiField};
-use crate::models::{AppError, AppResult, ParamValue};
 
 const THOMAS_REQUIRED_PARAMS: &[&str] = &[
     "gauge",

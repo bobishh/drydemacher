@@ -13,11 +13,12 @@ use super::{
     persist_agent_session, push_unique_strings, selection_target_match_ids,
     session_render_preview_for_request, try_record_agent_error, AgentContext,
 };
-use crate::mcp::contracts::*;
-use crate::models::{
-    AppError, AppResult, AppState, ArtifactBundle, DesignOutput, DesignParams, MacroDialect,
-    ModelManifest, ParamValue, PathResolver,
+use crate::contracts::{
+    AppError, AppResult, ArtifactBundle, DesignOutput, DesignParams, MacroDialect, ModelManifest,
+    ParamValue,
 };
+use crate::mcp::contracts::*;
+use crate::models::{AppState, PathResolver};
 use std::collections::{HashMap, HashSet};
 
 fn ecky_ast_authoring_enabled(state: &AppState) -> bool {
@@ -708,7 +709,7 @@ fn compile_error_with_diagnostics(
     error
 }
 
-fn stable_node_key_for_program_path(
+pub(super) fn stable_node_key_for_program_path(
     source: &str,
     program: &crate::ecky_core_ir::CoreProgram,
     path: &str,
@@ -959,7 +960,7 @@ fn param_id_for_dependency_key(
 fn selection_targets_by_id<'a>(
     manifest: &'a ModelManifest,
     requested_id: &str,
-) -> Vec<&'a crate::models::SelectionTarget> {
+) -> Vec<&'a crate::contracts::SelectionTarget> {
     manifest
         .selection_targets
         .iter()
@@ -974,7 +975,7 @@ fn selection_targets_by_id<'a>(
 fn selection_target_by_id<'a>(
     manifest: &'a ModelManifest,
     requested_id: &str,
-) -> Option<&'a crate::models::SelectionTarget> {
+) -> Option<&'a crate::contracts::SelectionTarget> {
     selection_targets_by_id(manifest, requested_id)
         .into_iter()
         .next()
@@ -1045,19 +1046,19 @@ fn feature_bindings_for_target_ids(
     (feature_ids, source_paths)
 }
 
-fn selection_target_kind_role(kind: &crate::models::SelectionTargetKind) -> String {
+fn selection_target_kind_role(kind: &crate::contracts::SelectionTargetKind) -> String {
     match kind {
-        crate::models::SelectionTargetKind::Part => "part".to_string(),
-        crate::models::SelectionTargetKind::Object => "object".to_string(),
-        crate::models::SelectionTargetKind::Group => "group".to_string(),
-        crate::models::SelectionTargetKind::Edge => "edge".to_string(),
-        crate::models::SelectionTargetKind::Face => "face".to_string(),
+        crate::contracts::SelectionTargetKind::Part => "part".to_string(),
+        crate::contracts::SelectionTargetKind::Object => "object".to_string(),
+        crate::contracts::SelectionTargetKind::Group => "group".to_string(),
+        crate::contracts::SelectionTargetKind::Edge => "edge".to_string(),
+        crate::contracts::SelectionTargetKind::Face => "face".to_string(),
     }
 }
 
 fn collect_selector_provenance_candidates(
     manifest: &ModelManifest,
-    selected_targets: &[&crate::models::SelectionTarget],
+    selected_targets: &[&crate::contracts::SelectionTarget],
     source: Option<&str>,
 ) -> EckySelectorResolveProvenanceCandidates {
     let mut source_paths = Vec::new();
@@ -1766,6 +1767,13 @@ fn anonymous_delta_suggested_param_key(param_key: &str, delta: f64) -> String {
     format!("delta_{param_key}_{token}")
 }
 
+fn is_fit_critical_param_key(param_key: &str) -> bool {
+    let lower = param_key.to_ascii_lowercase();
+    ["clearance", "gap", "tolerance", "bore", "slot"]
+        .iter()
+        .any(|token| lower.contains(token))
+}
+
 pub(super) fn collect_ecky_constraint_authoring_lints(
     source: &str,
     program: &crate::ecky_core_ir::CoreProgram,
@@ -1790,7 +1798,8 @@ pub(super) fn collect_ecky_constraint_authoring_lints(
 
     let mut lints = Vec::new();
     for ((part_key, param_key, delta_bits), group_uses) in grouped {
-        if group_uses.len() < 2 {
+        let fit_critical = is_fit_critical_param_key(&param_key);
+        if group_uses.len() < 2 && !fit_critical {
             continue;
         }
         let delta = f64::from_bits(delta_bits);
@@ -1808,16 +1817,29 @@ pub(super) fn collect_ecky_constraint_authoring_lints(
                 }
             }
         }
+        let (kind, message) = if occurrence_count < 2 && fit_critical {
+            (
+                "fitCriticalAnonymousDelta",
+                format!(
+                    "Fit-critical anonymous delta on `{param_key}` in part `{part_key}`. Extract `{suggested_param_key}` named parameter or verify constraint before reuse."
+                ),
+            )
+        } else {
+            (
+                "anonymousDelta",
+                format!(
+                    "Repeated anonymous delta on `{param_key}` in part `{part_key}`. Extract `{suggested_param_key}` parameter and reuse."
+                ),
+            )
+        };
         lints.push(EckyConstraintAuthoringLint {
-            kind: "anonymousDelta".to_string(),
+            kind: kind.to_string(),
             part_key: part_key.clone(),
             param_key: param_key.clone(),
             delta,
             occurrence_count,
             suggested_param_key: suggested_param_key.clone(),
-            message: format!(
-                "Repeated anonymous delta on `{param_key}` in part `{part_key}`. Extract `{suggested_param_key}` parameter and reuse."
-            ),
+            message,
             source_stable_node_keys,
         });
     }
@@ -2359,10 +2381,31 @@ fn source_target_for_ecky_path<'a>(
     })
 }
 
-fn source_span_for_ecky_path(source: &str, path: &str) -> AppResult<(usize, usize)> {
+pub(super) fn source_span_for_ecky_path(source: &str, path: &str) -> AppResult<(usize, usize)> {
     let exprs = SourceExprParser::new(source).parse_all()?;
     let target = source_target_for_ecky_path(&exprs, source, path)?;
     Ok((target.expr.start, target.expr.end))
+}
+
+#[cfg(test)]
+pub(super) fn assert_source_ref_resolves_current_source(
+    source: &str,
+    source_ref: &crate::contracts::SourceRef,
+) -> AppResult<()> {
+    let Some(path) = source_ref.path.as_deref() else {
+        return Ok(());
+    };
+    let (actual_start, actual_end) = source_span_for_ecky_path(source, path)?;
+    let expected_start = source_ref.start_byte.map(|value| value as usize);
+    let expected_end = source_ref.end_byte.map(|value| value as usize);
+    if let (Some(expected_start), Some(expected_end)) = (expected_start, expected_end) {
+        if (expected_start, expected_end) != (actual_start, actual_end) {
+            return Err(AppError::validation(format!(
+                "Ecky sourceRef for {path} is stale: expected byte range {expected_start}..{expected_end}, current range is {actual_start}..{actual_end}."
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn source_anchor_span_for_edit(source: &str, path: &str) -> AppResult<(usize, usize)> {

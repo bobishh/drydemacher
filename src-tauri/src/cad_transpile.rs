@@ -8,7 +8,7 @@
 //! request and (in the binary) performs the call.
 
 use crate::agent_prompt::agent_language_reference;
-use crate::models::GeometryBackend;
+use crate::contracts::GeometryBackend;
 
 /// Fixed translate instruction prepended to the foreign source in the user
 /// message. It carries the *semantic* ask the deterministic transpiler could not
@@ -52,7 +52,7 @@ pub fn strip_code_fence(reply: &str) -> String {
         return trimmed.to_string();
     };
     // Drop the rest of the opening fence line (an optional language tag).
-    let body = rest.splitn(2, '\n').nth(1).unwrap_or("");
+    let body = rest.split_once('\n').map(|x| x.1).unwrap_or("");
     body.trim()
         .strip_suffix("```")
         .unwrap_or(body)

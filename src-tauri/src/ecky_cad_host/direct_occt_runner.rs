@@ -3,11 +3,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde::{Deserialize, Serialize};
+use ecky_render::{
+    KernelArg as RunnerArg, KernelCommand as RunnerCommand, KernelKeyword as RunnerKeyword,
+    KernelPart as RunnerPart, KernelPlan as RunnerPlan,
+};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use super::direct_occt::{OcctArg, OcctCommand, OcctKeyword, OcctOp, OcctPlan};
-use crate::models::{AppError, AppResult, PathResolver};
+use crate::contracts::{AppError, AppResult};
+use crate::models::PathResolver;
 
 const PLAN_FILE_NAME: &str = "plan.json";
 const RUNNER_RESOURCE_PATH: &str = "runtime/occt/bin/direct-occt-runner";
@@ -130,50 +135,6 @@ fn read_runner_stage_report(output_dir: &Path) -> AppResult<RunnerStageReport> {
     Ok(report)
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RunnerPlan {
-    schema_version: u32,
-    plan_id: String,
-    parts: Vec<RunnerPart>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RunnerPart {
-    key: String,
-    label: String,
-    root: u64,
-    commands: Vec<RunnerCommand>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RunnerCommand {
-    output: u64,
-    op: String,
-    args: Vec<RunnerArg>,
-    keywords: Vec<RunnerKeyword>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RunnerArg {
-    kind: String,
-    value: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RunnerKeyword {
-    name: String,
-    kind: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    value: Option<RunnerArg>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    payload: Option<serde_json::Value>,
-}
-
 pub(crate) fn run_plan_step_stl_if_available(
     plan: &OcctPlan,
     output_dir: impl AsRef<Path>,
@@ -250,7 +211,7 @@ pub(crate) fn run_plan_step_stl_with_mode(
             return Ok(None);
         }
         return Err(AppError::with_details(
-            crate::models::AppErrorCode::Validation,
+            crate::contracts::AppErrorCode::Validation,
             "Direct OCCT runner rejected a plan that runner support gate accepted.",
             format!(
                 "runner: {}\nexit: {}\nstdout: {}\nstderr: {}",
@@ -268,7 +229,7 @@ pub(crate) fn run_plan_step_stl_with_mode(
 
     if !output.status.success() {
         return Err(AppError::with_details(
-            crate::models::AppErrorCode::Validation,
+            crate::contracts::AppErrorCode::Validation,
             "Direct OCCT runner failed.",
             format!(
                 "runner: {}\nexit: {}\nstdout: {}\nstderr: {}",
@@ -401,11 +362,7 @@ fn serialize_runner_plan(plan: &OcctPlan) -> AppResult<Option<String>> {
 fn runner_plan(plan: &OcctPlan) -> AppResult<Option<RunnerPlan>> {
     let mut parts = Vec::with_capacity(plan.parts.len());
     for part in &plan.parts {
-        let indexed_imports = if plan.parts.len() == 1 {
-            indexed_mesh_imports_for_root_boolean(part)?
-        } else {
-            HashMap::new()
-        };
+        let indexed_imports = indexed_mesh_imports_for_root_boolean(part)?;
         let mut commands = Vec::with_capacity(part.commands.len());
         for command in &part.commands {
             let runner_command = if let Some(asset) = indexed_imports.get(&command.output.0) {
@@ -460,10 +417,6 @@ fn indexed_mesh_imports_for_root_boolean(
             OcctArg::Text(path) | OcctArg::Symbol(path) => PathBuf::from(path),
             _ => continue,
         };
-        let sidecar = path.with_extension("indexed-mesh.json");
-        if !sidecar.is_file() {
-            continue;
-        }
         let Some([solidify]) = consumers.get(&command.output.0).map(Vec::as_slice) else {
             continue;
         };
@@ -472,9 +425,18 @@ fn indexed_mesh_imports_for_root_boolean(
         {
             continue;
         }
-        let Some([boolean]) = consumers.get(&solidify.output.0).map(Vec::as_slice) else {
-            continue;
+        let mut current = solidify.output;
+        let boolean = loop {
+            let Some([consumer]) = consumers.get(&current.0).map(Vec::as_slice) else {
+                break None;
+            };
+            if runner_manifold_transform(consumer, current) {
+                current = consumer.output;
+                continue;
+            }
+            break Some(*consumer);
         };
+        let Some(boolean) = boolean else { continue };
         if !matches!(
             boolean.op,
             OcctOp::Union | OcctOp::Difference | OcctOp::Intersection
@@ -483,16 +445,37 @@ fn indexed_mesh_imports_for_root_boolean(
             continue;
         }
 
-        let asset = crate::ecky_ir::mesh_asset::IndexedMeshAsset::read_cache(
-            crate::ecky_ir::mesh_asset::MeshAssetSource::Imported,
-            &sidecar,
-        )?;
+        let source = crate::ecky_ir::mesh_asset::MeshAssetSource::Imported;
+        let sidecar = path.with_extension("indexed-mesh.json");
+        let asset = if sidecar.is_file() {
+            crate::ecky_ir::mesh_asset::IndexedMeshAsset::read_cache(source, &sidecar)?
+        } else {
+            let mesh = crate::ecky_ir::read_stl_mesh(&path)?;
+            crate::ecky_ir::mesh_asset::IndexedMeshAsset::from_ir_mesh(source, &mesh)?
+        };
         if asset.validate_for_boolean().is_err() {
             continue;
         }
         admitted.insert(command.output.0, asset);
     }
     Ok(admitted)
+}
+
+fn runner_manifold_transform(command: &OcctCommand, input: super::direct_occt::OcctSlot) -> bool {
+    if !matches!(
+        command.op,
+        OcctOp::Translate | OcctOp::Rotate | OcctOp::Scale
+    ) {
+        return false;
+    }
+    let mut refs = Vec::new();
+    for arg in &command.args {
+        collect_runner_arg_refs(arg, &mut refs);
+    }
+    for keyword in &command.keywords {
+        collect_runner_arg_refs(keyword.source_arg(), &mut refs);
+    }
+    refs.as_slice() == [input.0]
 }
 
 fn collect_runner_arg_refs(arg: &OcctArg, refs: &mut Vec<u64>) {
@@ -608,6 +591,7 @@ fn runner_command_supported(command: &OcctCommand) -> bool {
         OcctOp::Wedge => runner_primitive_align_keywords_supported(command, 7),
         OcctOp::Profile => runner_profile_keywords_supported(command),
         OcctOp::Plane => runner_plane_keywords_supported(command),
+        OcctOp::Location => runner_location_keywords_supported(command),
         OcctOp::PathFrame => runner_path_frame_keywords_supported(command),
         OcctOp::ClipBox => runner_clip_box_keywords_supported(command),
         OcctOp::Fillet | OcctOp::Chamfer => runner_exact_edge_selector_supported(command),
@@ -755,7 +739,7 @@ fn runner_plane_keywords_supported(command: &OcctCommand) -> bool {
         }
         match keyword.name.as_str() {
             "origin" | "x" | "normal" => {
-                if !matches!(keyword.source_arg(), OcctArg::Point3(_)) {
+                if !runner_point3_like_arg_supported(keyword.source_arg()) {
                     return false;
                 }
             }
@@ -763,6 +747,27 @@ fn runner_plane_keywords_supported(command: &OcctCommand) -> bool {
         }
     }
     true
+}
+
+fn runner_location_keywords_supported(command: &OcctCommand) -> bool {
+    if command.args.len() > 1
+        || command
+            .args
+            .first()
+            .is_some_and(|arg| !matches!(arg, OcctArg::Ref(_)))
+    {
+        return false;
+    }
+    command.keywords.iter().all(|keyword| {
+        keyword.selector_payload().is_none()
+            && matches!(keyword.name.as_str(), "offset" | "rotate")
+            && runner_point3_like_arg_supported(keyword.source_arg())
+    })
+}
+
+fn runner_point3_like_arg_supported(arg: &OcctArg) -> bool {
+    matches!(arg, OcctArg::Point3(_))
+        || matches!(arg, OcctArg::List(items) if items.len() == 3 && items.iter().all(|item| matches!(item, OcctArg::Number(_))))
 }
 
 fn runner_path_frame_keywords_supported(command: &OcctCommand) -> bool {
@@ -1297,6 +1302,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::OnceLock;
+    use std::time::Instant;
 
     struct TestResolver {
         root: PathBuf,
@@ -1447,7 +1453,7 @@ mod tests {
         };
 
         let report = read_runner_stage_report(&root.join("bundle")).expect("stage report");
-        for executed in ["import", "solidify", "boolean", "mesh", "export"] {
+        for executed in ["validate", "solidify", "boolean", "mesh", "export"] {
             let entry = report
                 .stages
                 .iter()
@@ -1456,7 +1462,7 @@ mod tests {
             assert_eq!(entry.status, "executed", "{executed}");
             assert!(entry.execution_count > 0, "{executed}");
         }
-        for skipped in ["validate", "cleanup", "verify"] {
+        for skipped in ["import", "cleanup", "verify"] {
             let entry = report
                 .stages
                 .iter()
@@ -1591,6 +1597,142 @@ mod tests {
         assert!(source.contains("fuse_shapes(shapes_to_fuse)"), "{source}");
     }
 
+    #[test]
+    fn serializes_plane_list_origin_and_location_rotate_point3_or_list() {
+        let plan = OcctPlan {
+            parameters: Vec::new(),
+            parts: vec![OcctPartPlan {
+                key: "body".to_string(),
+                label: "Body".to_string(),
+                root: OcctSlot(4),
+                commands: vec![
+                    OcctCommand {
+                        output: OcctSlot(1),
+                        op: OcctOp::Plane,
+                        args: Vec::new(),
+                        keywords: vec![
+                            OcctKeyword::arg(
+                                "origin".to_string(),
+                                OcctArg::List(vec![
+                                    OcctArg::Number(2.0),
+                                    OcctArg::Number(3.0),
+                                    OcctArg::Number(4.0),
+                                ]),
+                            ),
+                            OcctKeyword::arg(
+                                "normal".to_string(),
+                                OcctArg::Point3([0.0, 0.0, 1.0]),
+                            ),
+                        ],
+                    },
+                    OcctCommand {
+                        output: OcctSlot(2),
+                        op: OcctOp::Location,
+                        args: vec![OcctArg::Ref(OcctSlot(1))],
+                        keywords: vec![OcctKeyword::arg(
+                            "rotate".to_string(),
+                            OcctArg::Point3([0.0, 0.0, 90.0]),
+                        )],
+                    },
+                    OcctCommand {
+                        output: OcctSlot(3),
+                        op: OcctOp::Location,
+                        args: vec![OcctArg::Ref(OcctSlot(2))],
+                        keywords: vec![OcctKeyword::arg(
+                            "rotate".to_string(),
+                            OcctArg::List(vec![
+                                OcctArg::Number(0.0),
+                                OcctArg::Number(90.0),
+                                OcctArg::Number(0.0),
+                            ]),
+                        )],
+                    },
+                    OcctCommand {
+                        output: OcctSlot(4),
+                        op: OcctOp::Place,
+                        args: vec![OcctArg::Ref(OcctSlot(3)), OcctArg::Ref(OcctSlot(5))],
+                        keywords: Vec::new(),
+                    },
+                    OcctCommand {
+                        output: OcctSlot(5),
+                        op: OcctOp::Box,
+                        args: vec![
+                            OcctArg::Number(2.0),
+                            OcctArg::Number(3.0),
+                            OcctArg::Number(4.0),
+                        ],
+                        keywords: Vec::new(),
+                    },
+                ],
+            }],
+        };
+
+        let json = serialize_runner_plan(&plan)
+            .expect("plan serialization")
+            .expect("runner accepts plane/location point3-like forms");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("runner JSON");
+        assert_eq!(
+            value["parts"][0]["commands"][0]["keywords"][0]["value"]["kind"],
+            "list"
+        );
+        assert_eq!(
+            value["parts"][0]["commands"][1]["keywords"][0]["value"]["kind"],
+            "point3"
+        );
+        assert_eq!(
+            value["parts"][0]["commands"][2]["keywords"][0]["value"]["kind"],
+            "list"
+        );
+
+        let mut native_plan = plan.clone();
+        let box_command = native_plan.parts[0].commands.remove(4);
+        native_plan.parts[0].commands.insert(0, box_command);
+        let Some((root, _topology)) =
+            run_real_runner_plan_json("plane-location-point3-like", &native_plan)
+        else {
+            return;
+        };
+        assert!(root.join("bundle/model.step").is_file());
+        assert!(root.join("bundle/preview.stl").is_file());
+        fs::remove_dir_all(root).expect("cleanup runner bundle");
+    }
+
+    #[test]
+    fn native_runner_treats_singleton_union_as_identity() {
+        let plan = OcctPlan {
+            parameters: Vec::new(),
+            parts: vec![OcctPartPlan {
+                key: "body".to_string(),
+                label: "Body".to_string(),
+                root: OcctSlot(2),
+                commands: vec![
+                    OcctCommand {
+                        output: OcctSlot(1),
+                        op: OcctOp::Box,
+                        args: vec![
+                            OcctArg::Number(2.0),
+                            OcctArg::Number(3.0),
+                            OcctArg::Number(4.0),
+                        ],
+                        keywords: Vec::new(),
+                    },
+                    OcctCommand {
+                        output: OcctSlot(2),
+                        op: OcctOp::Union,
+                        args: vec![OcctArg::Ref(OcctSlot(1))],
+                        keywords: Vec::new(),
+                    },
+                ],
+            }],
+        };
+        let Some((root, topology)) = run_real_runner_plan_json("singleton-union", &plan) else {
+            return;
+        };
+        assert_eq!(topology["parts"][0]["partId"], "body");
+        assert!(root.join("bundle/model.step").is_file());
+        fs::remove_dir_all(root).expect("cleanup runner bundle");
+    }
+
     fn sample_plan() -> OcctPlan {
         OcctPlan {
             parameters: vec![OcctParameter {
@@ -1701,8 +1843,8 @@ mod tests {
         .expect("program")
     }
 
-    fn user_honjo_stay_clamp_params() -> crate::models::DesignParams {
-        use crate::models::ParamValue;
+    fn user_honjo_stay_clamp_params() -> crate::contracts::DesignParams {
+        use crate::contracts::ParamValue;
 
         [
             ("tube_od".to_string(), ParamValue::Number(14.5)),
@@ -1839,6 +1981,27 @@ mod tests {
             .expect("indexed sidecar");
     }
 
+    fn write_closed_tetra_stl(stl_path: &Path) {
+        let triangles = [
+            [[0.0_f32, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]],
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [[0.0, 1.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+        ];
+        let mut bytes = vec![0_u8; 80];
+        bytes.extend_from_slice(&(triangles.len() as u32).to_le_bytes());
+        for triangle in triangles {
+            bytes.extend_from_slice(&[0_u8; 12]);
+            for vertex in triangle {
+                for coordinate in vertex {
+                    bytes.extend_from_slice(&coordinate.to_le_bytes());
+                }
+            }
+            bytes.extend_from_slice(&0_u16.to_le_bytes());
+        }
+        fs::write(stl_path, bytes).expect("tetra STL");
+    }
+
     #[test]
     fn runner_plan_inlines_valid_indexed_mesh_for_root_boolean_only() {
         let root = temp_root("indexed-mesh-runner-plan");
@@ -1857,6 +2020,147 @@ mod tests {
         assert_eq!(import.args[2].kind, "text");
 
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn runner_plan_admits_indexed_root_booleans_per_part() {
+        let root = temp_root("indexed-mesh-multipart-runner-plan");
+        fs::create_dir_all(&root).expect("fixture dir");
+        let stl_path = root.join("island.stl");
+        write_indexed_cube_sidecar(&stl_path);
+
+        let mut source = indexed_mesh_boolean_plan(&stl_path, false);
+        let mut second = source.parts[0].clone();
+        second.key = "second".to_string();
+        second.label = "Second".to_string();
+        source.parts.push(second);
+
+        let plan = runner_plan(&source)
+            .expect("runner plan")
+            .expect("supported plan");
+        assert_eq!(plan.parts.len(), 2);
+        assert!(
+            plan.parts
+                .iter()
+                .all(|part| part.commands[0].op == "import-indexed-mesh"),
+            "each root Boolean part must keep the imported STL on the Manifold path"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn runner_plan_builds_indexed_import_when_sidecar_is_missing() {
+        let root = temp_root("indexed-mesh-sidecar-missing");
+        fs::create_dir_all(&root).expect("fixture dir");
+        let stl_path = root.join("island.stl");
+        write_closed_tetra_stl(&stl_path);
+
+        let plan = runner_plan(&indexed_mesh_boolean_plan(&stl_path, false))
+            .expect("runner plan")
+            .expect("supported plan");
+        assert_eq!(plan.parts[0].commands[0].op, "import-indexed-mesh");
+        assert!(
+            !stl_path.with_extension("indexed-mesh.json").exists(),
+            "admission fallback must remain in memory"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn runner_plan_admits_indexed_import_through_transform_chain() {
+        let root = temp_root("indexed-mesh-transform-chain");
+        fs::create_dir_all(&root).expect("fixture dir");
+        let stl_path = root.join("island.stl");
+        write_closed_tetra_stl(&stl_path);
+        let mut source = indexed_mesh_boolean_plan(&stl_path, false);
+        let commands = &mut source.parts[0].commands;
+        commands.insert(
+            2,
+            OcctCommand {
+                output: OcctSlot(5),
+                op: OcctOp::Rotate,
+                args: vec![
+                    OcctArg::Number(180.0),
+                    OcctArg::Number(0.0),
+                    OcctArg::Number(0.0),
+                    OcctArg::Ref(OcctSlot(2)),
+                ],
+                keywords: Vec::new(),
+            },
+        );
+        commands.insert(
+            3,
+            OcctCommand {
+                output: OcctSlot(6),
+                op: OcctOp::Scale,
+                args: vec![
+                    OcctArg::Number(14.0),
+                    OcctArg::Number(14.0),
+                    OcctArg::Number(14.0),
+                    OcctArg::Ref(OcctSlot(5)),
+                ],
+                keywords: Vec::new(),
+            },
+        );
+        commands.insert(
+            4,
+            OcctCommand {
+                output: OcctSlot(7),
+                op: OcctOp::Translate,
+                args: vec![
+                    OcctArg::Number(45.0),
+                    OcctArg::Number(0.0),
+                    OcctArg::Number(7.0),
+                    OcctArg::Ref(OcctSlot(6)),
+                ],
+                keywords: Vec::new(),
+            },
+        );
+        commands
+            .iter_mut()
+            .find(|command| command.op == OcctOp::Difference)
+            .expect("difference")
+            .args[0] = OcctArg::Ref(OcctSlot(7));
+
+        let plan = runner_plan(&source)
+            .expect("runner plan")
+            .expect("supported plan");
+        assert_eq!(plan.parts[0].commands[0].op, "import-indexed-mesh");
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_runner_exports_multipart_manifold_roots() {
+        let fixture = temp_root("multipart-manifold-fixture");
+        fs::create_dir_all(&fixture).expect("fixture dir");
+        let stl_path = fixture.join("island.stl");
+        write_closed_tetra_stl(&stl_path);
+        let mut source = indexed_mesh_boolean_plan(&stl_path, false);
+        let mut second = source.parts[0].clone();
+        second.key = "second".to_string();
+        second.label = "Second".to_string();
+        source.parts.push(second);
+
+        let Some((root, _topology)) =
+            run_real_runner_plan_json("multipart-manifold-export", &source)
+        else {
+            fs::remove_dir_all(fixture).expect("cleanup fixture");
+            return;
+        };
+        let bundle = root.join("bundle");
+        assert!(bundle.join("preview.stl").is_file());
+        assert!(bundle.join("parts/body.stl").is_file());
+        assert!(bundle.join("parts/second.stl").is_file());
+        assert!(
+            !bundle.join("model.step").exists(),
+            "mesh-native multipart export must not fabricate STEP"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup runner");
+        fs::remove_dir_all(fixture).expect("cleanup fixture");
     }
 
     #[test]
@@ -3089,7 +3393,7 @@ mod tests {
         let generated =
             crate::ecky_cad_host::direct_occt_executor::export_plan_step_stl_with_params(
                 plan,
-                &crate::models::DesignParams::new(),
+                &crate::contracts::DesignParams::new(),
                 &layout,
                 &generated_dir,
             )
@@ -3299,7 +3603,7 @@ mkdir -p "$out"
 printf '{"parts":[{"partId":"honjo_stay_clamp_v2","label":"Honjo Stay Clamp V2","edges":[],"faces":[]}]}' > "$out/topology.json"
 "#
             .to_owned()
-                + &fake_runner_stage_report_command(),
+                + fake_runner_stage_report_command(),
         );
         let resolver = TestResolver { root: root.clone() };
         let layout = crate::ecky_cad_host::direct_occt_sdk::DirectOcctSdkLayout {
@@ -3437,6 +3741,291 @@ exit 11
             json["parts"][0]["commands"][1]["keywords"][0]["payload"]["type"],
             "clauses"
         );
+    }
+
+    #[test]
+    fn serializes_flattened_cutters_as_one_nary_difference() {
+        let plan = compiled_plan(
+            r#"
+            (model
+              (part body
+                (difference
+                  (box 40 30 20)
+                  (union
+                    (translate -8 0 0 (cylinder 2 24))
+                    (union
+                      (cylinder 2 24)
+                      (translate 8 0 0 (cylinder 2 24)))))))
+            "#,
+        );
+        let plan_json = serialize_runner_plan(&plan)
+            .expect("plan serialization")
+            .expect("runner plan");
+        let json: serde_json::Value = serde_json::from_str(&plan_json).expect("json");
+        let commands = json["parts"][0]["commands"].as_array().expect("commands");
+        let difference = commands
+            .iter()
+            .find(|command| command["op"] == "difference")
+            .expect("difference");
+
+        assert_eq!(
+            difference["args"]
+                .as_array()
+                .expect("difference args")
+                .len(),
+            4
+        );
+        assert!(
+            commands.iter().all(|command| command["op"] != "union"),
+            "dead cutter unions must not reach runner ABI"
+        );
+    }
+
+    #[test]
+    fn difference_tools_remain_before_fillet_and_chamfer_barriers() {
+        let plan = compiled_plan(
+            r#"
+            (model
+              (part filleted
+                (fillet 0.5 :edges "vertical"
+                  (difference
+                    (box 40 30 20)
+                    (union
+                      (translate -7 0 -2 (cylinder 2 24))
+                      (translate 7 0 -2 (cylinder 2 24))))))
+              (part chamfered
+                (chamfer 0.4 :edges "top"
+                  (difference
+                    (box 40 30 20)
+                    (union
+                      (translate -7 0 -2 (cylinder 2 24))
+                      (translate 7 0 -2 (cylinder 2 24)))))))
+            "#,
+        );
+
+        for part in &plan.parts {
+            let difference_index = part
+                .commands
+                .iter()
+                .position(|command| command.op == OcctOp::Difference)
+                .expect("difference");
+            let barrier_index = part
+                .commands
+                .iter()
+                .position(|command| matches!(command.op, OcctOp::Fillet | OcctOp::Chamfer))
+                .expect("topology barrier");
+            assert!(difference_index < barrier_index);
+            assert_eq!(part.commands[difference_index].args.len(), 3);
+            assert_eq!(
+                part.commands[barrier_index].args.last(),
+                Some(&OcctArg::Ref(part.commands[difference_index].output))
+            );
+        }
+    }
+
+    #[test]
+    fn live_optimized_difference_preserves_fillet_and_chamfer_when_runner_available() {
+        let source = r#"
+            (model
+              (part filleted
+                (fillet 0.5 :edges "vertical"
+                  (difference
+                    (box 40 30 20)
+                    (union
+                      (translate -7 0 -2 (cylinder 2 24))
+                      (translate 7 0 -2 (cylinder 2 24))))))
+              (part chamfered
+                (chamfer 0.4 :edges "top"
+                  (difference
+                    (box 40 30 20)
+                    (union
+                      (translate -7 0 -2 (cylinder 2 24))
+                      (translate 7 0 -2 (cylinder 2 24)))))))
+            "#;
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("compile");
+        let baseline = crate::ecky_cad_host::direct_occt::plan_core_program_unoptimized(&program)
+            .expect("unoptimized plan");
+        let optimized =
+            crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("optimized plan");
+
+        let Some((baseline_root, baseline_topology)) =
+            run_real_runner_plan_json("difference-topology-baseline", &baseline)
+        else {
+            return;
+        };
+        let Some((optimized_root, optimized_topology)) =
+            run_real_runner_plan_json("difference-topology-optimized", &optimized)
+        else {
+            let _ = fs::remove_dir_all(baseline_root);
+            return;
+        };
+
+        let baseline_metrics = crate::ecky_cad_host::native_parity_harness::stl_metrics(
+            &baseline_root.join("bundle/preview.stl"),
+        );
+        let optimized_metrics = crate::ecky_cad_host::native_parity_harness::stl_metrics(
+            &optimized_root.join("bundle/preview.stl"),
+        );
+        assert_metric_close(
+            "difference-topology",
+            "volume",
+            baseline_metrics.volume,
+            optimized_metrics.volume,
+            0.002,
+        );
+        assert_metric_close(
+            "difference-topology",
+            "area",
+            baseline_metrics.area,
+            optimized_metrics.area,
+            0.002,
+        );
+        assert_eq!(baseline_metrics.components, optimized_metrics.components);
+        for part_index in 0..2 {
+            assert_eq!(
+                baseline_topology["parts"][part_index]["faces"]
+                    .as_array()
+                    .map(Vec::len),
+                optimized_topology["parts"][part_index]["faces"]
+                    .as_array()
+                    .map(Vec::len),
+                "part {part_index} face count"
+            );
+            assert_eq!(
+                baseline_topology["parts"][part_index]["edges"]
+                    .as_array()
+                    .map(Vec::len),
+                optimized_topology["parts"][part_index]["edges"]
+                    .as_array()
+                    .map(Vec::len),
+                "part {part_index} edge count"
+            );
+        }
+
+        let _ = fs::remove_dir_all(baseline_root);
+        let _ = fs::remove_dir_all(optimized_root);
+    }
+
+    #[test]
+    #[ignore = "manual native performance benchmark"]
+    fn benchmarks_toothbrush_holder_grouped_difference() {
+        let source = include_str!("../../tests/fixtures/cad/perf/toothbrush_holder_versions.ecky");
+        let program =
+            crate::ecky_scheme::compile_to_core_program(source).expect("compile toothbrush");
+        let baseline = crate::ecky_cad_host::direct_occt::plan_core_program_unoptimized(&program)
+            .expect("baseline plan");
+        let optimized =
+            crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("optimized plan");
+
+        for (label, plan) in [("baseline", &baseline), ("optimized", &optimized)] {
+            let unsupported = plan
+                .parts
+                .iter()
+                .flat_map(|part| {
+                    part.commands
+                        .iter()
+                        .filter(|command| !runner_command_supported(command))
+                })
+                .fold(std::collections::BTreeMap::new(), |mut counts, command| {
+                    let keywords = command
+                        .keywords
+                        .iter()
+                        .map(|keyword| format!("{}:{:?}", keyword.name, keyword.source_arg()))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    *counts
+                        .entry(format!("op={:?} keywords=[{keywords}]", command.op))
+                        .or_insert(0usize) += 1;
+                    counts
+                });
+            assert!(
+                unsupported.is_empty(),
+                "toothbrush {label} plan cannot enter precompiled native runner; unsupported command forms: {unsupported:?}"
+            );
+        }
+
+        let baseline_start = Instant::now();
+        let Some((baseline_root, baseline_topology)) =
+            run_real_runner_plan_json("toothbrush-dag-baseline", &baseline)
+        else {
+            eprintln!("toothbrush benchmark skipped: native runner unavailable");
+            return;
+        };
+        let baseline_elapsed = baseline_start.elapsed();
+
+        let optimized_start = Instant::now();
+        let Some((optimized_root, optimized_topology)) =
+            run_real_runner_plan_json("toothbrush-dag-optimized", &optimized)
+        else {
+            eprintln!("toothbrush benchmark skipped: native runner unavailable");
+            let _ = fs::remove_dir_all(baseline_root);
+            return;
+        };
+        let optimized_elapsed = optimized_start.elapsed();
+
+        let baseline_metrics = crate::ecky_cad_host::native_parity_harness::stl_metrics(
+            &baseline_root.join("bundle/preview.stl"),
+        );
+        let optimized_metrics = crate::ecky_cad_host::native_parity_harness::stl_metrics(
+            &optimized_root.join("bundle/preview.stl"),
+        );
+        assert_metric_close(
+            "toothbrush-dag",
+            "volume",
+            baseline_metrics.volume,
+            optimized_metrics.volume,
+            0.002,
+        );
+        assert_metric_close(
+            "toothbrush-dag",
+            "area",
+            baseline_metrics.area,
+            optimized_metrics.area,
+            0.002,
+        );
+        assert_eq!(baseline_metrics.components, optimized_metrics.components);
+        assert_eq!(
+            baseline_topology["parts"][0]["faces"]
+                .as_array()
+                .map(Vec::len),
+            optimized_topology["parts"][0]["faces"]
+                .as_array()
+                .map(Vec::len)
+        );
+        assert_eq!(
+            baseline_topology["parts"][0]["edges"]
+                .as_array()
+                .map(Vec::len),
+            optimized_topology["parts"][0]["edges"]
+                .as_array()
+                .map(Vec::len)
+        );
+
+        let command_count = |plan: &OcctPlan| {
+            plan.parts
+                .iter()
+                .map(|part| part.commands.len())
+                .sum::<usize>()
+        };
+        let union_count = |plan: &OcctPlan| {
+            plan.parts
+                .iter()
+                .flat_map(|part| &part.commands)
+                .filter(|command| command.op == OcctOp::Union)
+                .count()
+        };
+        eprintln!(
+            "toothbrush geometry DAG benchmark sourceDigest=sha256:81f7ded44df1dbd1d38588fe2db876e721130889acbc235e4faa5c3b3c7e033f baselineMs={} optimizedMs={} baselineCommands={} optimizedCommands={} baselineUnions={} optimizedUnions={}",
+            baseline_elapsed.as_millis(),
+            optimized_elapsed.as_millis(),
+            command_count(&baseline),
+            command_count(&optimized),
+            union_count(&baseline),
+            union_count(&optimized),
+        );
+
+        let _ = fs::remove_dir_all(baseline_root);
+        let _ = fs::remove_dir_all(optimized_root);
     }
 
     #[test]
@@ -3689,7 +4278,7 @@ mkdir -p "$out"
 : > "$out/topology.json"
 "#
             .to_owned()
-                + &fake_runner_stage_report_command(),
+                + fake_runner_stage_report_command(),
         );
         let resolver = TestResolver { root: root.clone() };
 
@@ -3747,7 +4336,7 @@ mkdir -p "$out"
 printf '{"parts":[{"partId":"body","label":"Body","edges":[],"faces":[]}]}' > "$out/topology.json"
 "#
             .to_owned()
-                + &fake_runner_stage_report_command(),
+                + fake_runner_stage_report_command(),
         );
         let resolver = TestResolver { root: root.clone() };
 
@@ -3806,7 +4395,7 @@ mkdir -p "$out"
 printf '{"parts":[{"partId":"body","label":"Body","edges":[],"faces":[]}]}' > "$out/topology.json"
 "#
             .to_owned()
-                + &fake_runner_stage_report_command(),
+                + fake_runner_stage_report_command(),
         );
         let resolver = TestResolver { root: root.clone() };
 

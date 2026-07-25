@@ -2,6 +2,11 @@ use super::{
     artifact_bundle_digest, ensure_turn_working_version_message, now_secs, persist_agent_session,
     try_record_agent_error, AgentContext,
 };
+use crate::contracts::{
+    AppError, AppResult, ArtifactBundle, ControlPrimitive, ControlView, ControlViewSource,
+    DesignOutput, MeasurementAnnotation, MeasurementAnnotationSource, ModelManifest,
+    ModelSourceKind,
+};
 use crate::mcp::contracts::{
     ControlPrimitiveDeleteRequest, ControlPrimitiveSaveRequest, ControlViewDeleteRequest,
     ControlViewSaveRequest, MeasurementAnnotationDeleteRequest, MeasurementAnnotationSaveRequest,
@@ -9,11 +14,7 @@ use crate::mcp::contracts::{
     SemanticManifestMutationResponse, SemanticManifestRequest, SemanticManifestResponse,
     SemanticManifestSection,
 };
-use crate::models::{
-    AppError, AppResult, AppState, ArtifactBundle, ControlPrimitive, ControlView,
-    ControlViewSource, DesignOutput, MeasurementAnnotation, MeasurementAnnotationSource,
-    ModelManifest, ModelSourceKind, PathResolver,
-};
+use crate::models::{AppState, PathResolver};
 use crate::services::agent_versions::{
     save_or_update_agent_version_for_session, SaveOrUpdateAgentVersionRequest,
 };
@@ -73,7 +74,7 @@ fn resolve_semantic_target(
         ));
     }
 
-    crate::models::validate_model_runtime_bundle(&model_manifest, &artifact_bundle)?;
+    crate::contracts::validate_model_runtime_bundle(&model_manifest, &artifact_bundle)?;
 
     Ok(SemanticTargetState {
         thread_id: target.thread_id,
@@ -95,7 +96,7 @@ async fn save_semantic_manifest_version(
     version_name: Option<String>,
     response_text: String,
 ) -> AppResult<SemanticManifestMutationResponse> {
-    crate::models::validate_model_runtime_bundle(&next_manifest, &target.artifact_bundle)?;
+    crate::contracts::validate_model_runtime_bundle(&next_manifest, &target.artifact_bundle)?;
 
     let mut design_output = target.design_output.clone();
     if let Some(next_title) = title.clone() {

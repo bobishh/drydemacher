@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::models::{AppError, AppResult, PathResolver};
+use crate::contracts::{AppError, AppResult};
+use crate::models::PathResolver;
 
 pub const PROJECT_SOURCE_FILE_NAME: &str = "model.ecky";
 pub const PROJECT_MANIFEST_FILE_NAME: &str = "ecky-project.json";

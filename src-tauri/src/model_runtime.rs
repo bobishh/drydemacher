@@ -1,11 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::models::{
+use crate::contracts::{
     validate_artifact_bundle, validate_model_manifest, validate_model_runtime_bundle, AppError,
     AppResult, ArtifactBundle, FeatureGraph, FeatureNode, FeatureOutputRef, ModelManifest,
-    ModelSourceKind, PathResolver, SelectionTarget, ViewerAsset, ViewerAssetFormat,
+    ModelSourceKind, SelectionTarget, ViewerAsset, ViewerAssetFormat,
 };
+use crate::models::PathResolver;
 
 const MODEL_RUNTIME_ROOT: &str = "model-runtime";
 const GENERATED_ARTIFACT_DIR: &str = "generated";
@@ -432,7 +433,7 @@ fn path_to_string(path: &Path) -> AppResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{
+    use crate::contracts::{
         DocumentMetadata, EngineKind, EnrichmentStatus, GeometryBackend, ManifestEnrichmentState,
         PartBinding, SelectionTarget, SelectionTargetKind, SourceLanguage,
         MODEL_RUNTIME_SCHEMA_VERSION,

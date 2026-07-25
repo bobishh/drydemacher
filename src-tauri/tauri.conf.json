@@ -38,6 +38,7 @@
       "../model-runtime/cad_framework_contract.md": "model-runtime/cad_framework_contract.md",
       "../templates/cache_pot_default.FCMacro": "templates/cache_pot_default.FCMacro",
       "../templates/mess.stl": "templates/mess.stl",
+      "../catalogs/animal-caps": "catalogs/animal-caps",
       "../.dist/build123d-runtime": "runtime/build123d",
       "../.dist/runtime/occt": "runtime/occt",
       "../.dist/speech-runtime": "runtime/speech"

@@ -1,4 +1,4 @@
-use crate::models::{
+use crate::contracts::{
     AppError, AppResult, RasterTraceAssetIdentity, RasterTraceContour, RasterTraceProvenance,
     RasterTraceRequest, RasterTraceResponse,
 };
@@ -360,12 +360,12 @@ fn signed_area(points: &[[f64; 2]]) -> f64 {
         * 0.5
 }
 
-fn sketch_view_label(view: &crate::models::SketchView) -> &'static str {
+fn sketch_view_label(view: &crate::contracts::SketchView) -> &'static str {
     match view {
-        crate::models::SketchView::Front => "front",
-        crate::models::SketchView::Top => "top",
-        crate::models::SketchView::Side => "side",
-        crate::models::SketchView::Custom => "custom",
+        crate::contracts::SketchView::Front => "front",
+        crate::contracts::SketchView::Top => "top",
+        crate::contracts::SketchView::Side => "side",
+        crate::contracts::SketchView::Custom => "custom",
     }
 }
 
@@ -383,7 +383,7 @@ fn raster_error(request: &RasterTraceRequest, detail: impl AsRef<str>) -> AppErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{RasterTraceCalibration, SketchView};
+    use crate::contracts::{RasterTraceCalibration, SketchView};
     use image::{GrayImage, Luma};
     use std::path::{Path, PathBuf};
 

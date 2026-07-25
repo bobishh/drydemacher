@@ -70,6 +70,22 @@ fn programs_semantically_equal(a: &CoreProgram, b: &CoreProgram) -> bool {
     a_normalized == b_normalized
 }
 
+fn first_text_difference(left: &str, right: &str) -> String {
+    let byte = left
+        .bytes()
+        .zip(right.bytes())
+        .position(|(left, right)| left != right)
+        .unwrap_or_else(|| left.len().min(right.len()));
+    let start = byte.saturating_sub(80);
+    let left_end = (byte + 160).min(left.len());
+    let right_end = (byte + 160).min(right.len());
+    format!(
+        "byte {byte}\nfirst: {:?}\nsecond: {:?}",
+        &left[start..left_end],
+        &right[start..right_end]
+    )
+}
+
 fn fixture_paths() -> Vec<PathBuf> {
     let base_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -120,8 +136,8 @@ fn emit_back_round_trip_all_fixtures() {
             .and_then(|s| s.to_str())
             .unwrap_or("unknown");
 
-        let source =
-            fs::read_to_string(fixture_path).expect(&format!("read {}", fixture_path.display()));
+        let source = fs::read_to_string(fixture_path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", fixture_path.display()));
 
         // Skip allowlisted fixtures with a message
         if allowlist.contains(fixture_name) {
@@ -139,7 +155,7 @@ fn emit_back_round_trip_all_fixtures() {
 
         // Emit back to source
         let emitted_once = compile_to_legacy_source(&source)
-            .expect(&format!("Failed to emit-back {}", fixture_name));
+            .unwrap_or_else(|error| panic!("Failed to emit-back {fixture_name}: {error}"));
 
         // Parse the emitted source
         let reparsed_program = match compile_to_core_program(&emitted_once) {
@@ -158,8 +174,9 @@ fn emit_back_round_trip_all_fixtures() {
         // Check semantic equivalence, ignoring spans
         if !programs_semantically_equal(&original_program, &reparsed_program) {
             // Try one more emit/parse cycle to check for idempotence
-            let emitted_twice = compile_to_legacy_source(&emitted_once)
-                .expect(&format!("Failed to emit-back (2nd pass) {}", fixture_name));
+            let emitted_twice = compile_to_legacy_source(&emitted_once).unwrap_or_else(|error| {
+                panic!("Failed to emit-back (2nd pass) {fixture_name}: {error}")
+            });
 
             let twice_reparsed_program = match compile_to_core_program(&emitted_twice) {
                 Ok(prog) => prog,
@@ -173,7 +190,11 @@ fn emit_back_round_trip_all_fixtures() {
                 // Stable after normalization, this is acceptable
                 println!("OK (semantically stable): {}", fixture_name);
             } else {
-                panic!("Round-trip not idempotent after 2 passes: {}", fixture_name);
+                panic!(
+                    "Round-trip not idempotent after 2 passes: {}\n{}",
+                    fixture_name,
+                    first_text_difference(&emitted_once, &emitted_twice)
+                );
             }
         } else {
             println!("OK (byte-stable): {}", fixture_name);
@@ -200,16 +221,16 @@ fn digest_guard_all_fixtures_compile() {
             .and_then(|s| s.to_str())
             .unwrap_or("unknown");
 
-        let source =
-            fs::read_to_string(fixture_path).expect(&format!("read {}", fixture_path.display()));
+        let source = fs::read_to_string(fixture_path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", fixture_path.display()));
 
         // Compile to CoreProgram (this is the "digest")
         let program = compile_to_core_program(&source)
-            .expect(&format!("Failed to compile fixture {}", fixture_name));
+            .unwrap_or_else(|error| panic!("Failed to compile fixture {fixture_name}: {error}"));
 
         // A minimal assertion: program structure is non-empty where expected
         assert!(
-            program.parts.len() > 0 || !program.parameters.is_empty(),
+            !program.parts.is_empty() || !program.parameters.is_empty(),
             "Fixture {} compiled to empty program",
             fixture_name
         );

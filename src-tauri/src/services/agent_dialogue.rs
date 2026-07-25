@@ -1,6 +1,7 @@
+use crate::contracts::{AgentOrigin, AppError, AppResult, Message};
 use crate::contracts::{Attachment, AttachmentKind};
 use crate::db;
-use crate::models::{AgentOrigin, AppError, AppResult, AppState, Message};
+use crate::models::AppState;
 
 #[derive(Debug, Clone)]
 pub struct AgentDialogueIdentity {
@@ -197,13 +198,13 @@ mod tests {
             freecad_library_roots: Vec::new(),
             assets: Vec::new(),
             microwave: None,
-            voice: crate::models::VoiceConfig::default(),
+            voice: crate::contracts::VoiceConfig::default(),
             mcp: McpConfig::default(),
             has_seen_onboarding: true,
             connection_type: None,
-            default_engine_kind: crate::models::EngineKind::Freecad,
-            default_source_language: crate::models::SourceLanguage::LegacyPython,
-            default_geometry_backend: crate::models::GeometryBackend::Freecad,
+            default_engine_kind: crate::contracts::EngineKind::Freecad,
+            default_source_language: crate::contracts::SourceLanguage::LegacyPython,
+            default_geometry_backend: crate::contracts::GeometryBackend::Freecad,
             max_generation_attempts: 3,
             max_verify_attempts: 0,
             projects_root: None,
@@ -440,18 +441,18 @@ mod tests {
         let conn = crate::db::init_db(&test_db_path("snapshot-target")).expect("db");
         let state = AppState::new(
             test_config(),
-            Some(crate::models::LastDesignSnapshot {
+            Some(crate::contracts::LastDesignSnapshot {
                 design: None,
                 thread_id: Some("thread-snapshot".to_string()),
                 message_id: Some("msg-snapshot".to_string()),
-                artifact_bundle: Some(crate::models::ArtifactBundle {
+                artifact_bundle: Some(crate::contracts::ArtifactBundle {
                     geometry_provenance: None,
                     schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
                     model_id: "model-snapshot".to_string(),
-                    source_kind: crate::models::ModelSourceKind::Generated,
-                    engine_kind: crate::models::EngineKind::Freecad,
-                    source_language: crate::models::SourceLanguage::LegacyPython,
-                    geometry_backend: crate::models::GeometryBackend::Freecad,
+                    source_kind: crate::contracts::ModelSourceKind::Generated,
+                    engine_kind: crate::contracts::EngineKind::Freecad,
+                    source_language: crate::contracts::SourceLanguage::LegacyPython,
+                    geometry_backend: crate::contracts::GeometryBackend::Freecad,
                     content_hash: "hash-snapshot".to_string(),
                     artifact_version: 1,
                     fcstd_path: "/tmp/model.FCStd".to_string(),

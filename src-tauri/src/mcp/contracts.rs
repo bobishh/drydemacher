@@ -1,4 +1,4 @@
-use crate::models::{
+use crate::contracts::{
     AgentOrigin, AgentScenePacket, ArtifactBundle, AuthoringTargetRef, ControlPrimitive,
     ControlView, CorrespondenceGraph, DesignOutput, DesignParams, FeatureGraph,
     MeasurementAnnotation, ModelManifest, StructuralVerificationResult, TargetLeaseInfo, Thread,
@@ -321,7 +321,7 @@ pub struct ThreadMetaResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_pending_message_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub claim_owner: Option<crate::models::AgentSession>,
+    pub claim_owner: Option<crate::contracts::AgentSession>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -374,7 +374,7 @@ pub struct WorkspaceOverviewTarget {
     pub has_draft: bool,
     pub has_version: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub claim_owner: Option<crate::models::AgentSession>,
+    pub claim_owner: Option<crate::contracts::AgentSession>,
 }
 
 #[derive(Debug, Serialize)]
@@ -432,7 +432,7 @@ pub struct ThreadGetRequest {
 pub struct ThreadGetResponse {
     pub thread: Thread,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub claim_owner: Option<crate::models::AgentSession>,
+    pub claim_owner: Option<crate::contracts::AgentSession>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -556,8 +556,8 @@ pub struct TargetMacroResponse {
     pub window_end_line: usize,
     pub truncated: bool,
     pub lines: Vec<MacroBufferLine>,
-    pub macro_dialect: crate::models::MacroDialect,
-    pub post_processing: Option<crate::models::PostProcessingSpec>,
+    pub macro_dialect: crate::contracts::MacroDialect,
+    pub post_processing: Option<crate::contracts::PostProcessingSpec>,
     pub authoring_context: TargetAuthoringContext,
     pub artifact_digest: Option<ArtifactBundleDigest>,
 }
@@ -595,9 +595,9 @@ pub struct MacroBufferGetResponse {
     pub truncated: bool,
     pub lines: Vec<MacroBufferLine>,
     pub source_language: String,
-    pub macro_dialect: crate::models::MacroDialect,
+    pub macro_dialect: crate::contracts::MacroDialect,
     pub geometry_backend: String,
-    pub post_processing: Option<crate::models::PostProcessingSpec>,
+    pub post_processing: Option<crate::contracts::PostProcessingSpec>,
     pub authoring_context: TargetAuthoringContext,
     pub artifact_digest: Option<ArtifactBundleDigest>,
 }
@@ -875,8 +875,8 @@ pub struct EckyAstReplaceAndRenderRequest {
     pub new_name: Option<String>,
     pub parameters: Option<DesignParams>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub post_processing: Option<crate::models::PostProcessingSpec>,
-    pub geometry_backend: Option<crate::models::GeometryBackend>,
+    pub post_processing: Option<crate::contracts::PostProcessingSpec>,
+    pub geometry_backend: Option<crate::contracts::GeometryBackend>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -984,7 +984,7 @@ pub struct MacroBufferRenderRequest {
     pub ui_spec: Option<UiSpec>,
     pub parameters: Option<DesignParams>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub post_processing: Option<crate::models::PostProcessingSpec>,
+    pub post_processing: Option<crate::contracts::PostProcessingSpec>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1010,8 +1010,8 @@ pub struct MacroBufferReplaceAndRenderRequest {
     pub ui_spec: Option<UiSpec>,
     pub parameters: Option<DesignParams>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub post_processing: Option<crate::models::PostProcessingSpec>,
-    pub geometry_backend: Option<crate::models::GeometryBackend>,
+    pub post_processing: Option<crate::contracts::PostProcessingSpec>,
+    pub geometry_backend: Option<crate::contracts::GeometryBackend>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1161,7 +1161,7 @@ pub struct ArtifactBundleDigest {
     pub has_step_export: bool,
     pub step_export_path: Option<String>,
     pub multipart: bool,
-    pub geometry_representation: Option<crate::models::GeometryRepresentation>,
+    pub geometry_representation: Option<crate::contracts::GeometryRepresentation>,
     pub faceted_step: bool,
     pub analytic_step: bool,
     pub source_mesh_digests: Vec<String>,
@@ -1241,11 +1241,11 @@ pub struct TargetDetailResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_paths: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub viewer_assets: Option<Vec<crate::models::ViewerAsset>>,
+    pub viewer_assets: Option<Vec<crate::contracts::ViewerAsset>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub export_artifacts: Option<Vec<crate::models::ExportArtifact>>,
+    pub export_artifacts: Option<Vec<crate::contracts::ExportArtifact>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub latest_draft: Option<Option<crate::models::AgentDraft>>,
+    pub latest_draft: Option<Option<crate::contracts::AgentDraft>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape_graph: Option<ShapeGraphPacket>,
 }
@@ -1263,7 +1263,7 @@ pub struct TargetGetResponse {
     pub artifact_bundle: Option<ArtifactBundle>,
     pub artifact_digest: Option<ArtifactBundleDigest>,
     pub model_manifest: Option<ModelManifest>,
-    pub latest_draft: Option<crate::models::AgentDraft>,
+    pub latest_draft: Option<crate::contracts::AgentDraft>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1320,15 +1320,15 @@ pub struct SemanticManifestDetailResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_primitives: Option<Vec<ControlPrimitive>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub control_relations: Option<Vec<crate::models::ControlRelation>>,
+    pub control_relations: Option<Vec<crate::contracts::ControlRelation>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_views: Option<Vec<ControlView>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub advisories: Option<Vec<crate::models::Advisory>>,
+    pub advisories: Option<Vec<crate::contracts::Advisory>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measurement_annotations: Option<Vec<MeasurementAnnotation>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parts: Option<Vec<crate::models::PartBinding>>,
+    pub parts: Option<Vec<crate::contracts::PartBinding>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1340,8 +1340,8 @@ pub struct ParamsPatchRequest {
     pub message_id: Option<String>,
     pub parameter_patch: DesignParams,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub post_processing: Option<crate::models::PostProcessingSpec>,
-    pub geometry_backend: Option<crate::models::GeometryBackend>,
+    pub post_processing: Option<crate::contracts::PostProcessingSpec>,
+    pub geometry_backend: Option<crate::contracts::GeometryBackend>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1514,12 +1514,12 @@ pub struct MacroReplaceRequest {
     pub thread_id: Option<String>,
     pub message_id: Option<String>,
     pub macro_code: String,
-    pub macro_dialect: Option<crate::models::MacroDialect>,
+    pub macro_dialect: Option<crate::contracts::MacroDialect>,
     pub ui_spec: Option<UiSpec>,
     pub parameters: Option<DesignParams>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub post_processing: Option<crate::models::PostProcessingSpec>,
-    pub geometry_backend: Option<crate::models::GeometryBackend>,
+    pub post_processing: Option<crate::contracts::PostProcessingSpec>,
+    pub geometry_backend: Option<crate::contracts::GeometryBackend>,
 }
 
 #[derive(Debug, Serialize)]

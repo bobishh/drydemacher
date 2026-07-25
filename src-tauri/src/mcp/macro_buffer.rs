@@ -1,4 +1,4 @@
-use crate::models::{AppError, AppResult};
+use crate::contracts::{AppError, AppResult};
 use sha2::{Digest, Sha256};
 
 pub fn source_digest(source: &str) -> String {

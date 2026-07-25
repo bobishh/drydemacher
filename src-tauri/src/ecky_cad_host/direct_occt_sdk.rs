@@ -6,7 +6,7 @@ use std::process::Command;
 
 use serde::Deserialize;
 
-use crate::models::{AppError, AppResult};
+use crate::contracts::{AppError, AppResult};
 
 const PYTHON_SITE_PACKAGES: &str = "lib/python3.12/site-packages";
 const OCP_PACKAGE: &str = "OCP";
@@ -496,7 +496,7 @@ pub fn run_native_export_source(
     })?;
     if !output.status.success() {
         return Err(AppError::with_details(
-            crate::models::AppErrorCode::Validation,
+            crate::contracts::AppErrorCode::Validation,
             "Direct OCCT native shim compile failed.",
             format!(
                 "stdout: {}\nstderr: {}",
@@ -517,7 +517,7 @@ pub fn run_native_export_source(
     })?;
     if !run.status.success() {
         return Err(AppError::with_details(
-            crate::models::AppErrorCode::Validation,
+            crate::contracts::AppErrorCode::Validation,
             "Direct OCCT native shim probe failed.",
             format!(
                 "stdout: {}\nstderr: {}",
@@ -1081,7 +1081,7 @@ fn rewrite_probe_install_names(exe_path: &Path, dylib_paths: &[PathBuf]) -> AppR
             })?;
         if !output.status.success() {
             return Err(AppError::with_details(
-                crate::models::AppErrorCode::Validation,
+                crate::contracts::AppErrorCode::Validation,
                 "Direct OCCT native shim install-name rewrite failed.",
                 format!(
                     "rewrite: {} -> {}\nstdout: {}\nstderr: {}",

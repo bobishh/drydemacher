@@ -6,11 +6,12 @@ use super::direct_occt::{
 };
 use super::direct_occt_runner;
 use super::direct_occt_sdk::{run_native_export_source, DirectOcctSdkLayout, NativeExportOutcome};
+use crate::contracts::{AppError, AppResult, DesignParams, ParamValue};
 use crate::ecky_core_ir::{
     CoreEdgeAxis, CoreEdgeBound, CoreEdgeSelectorClause, CoreFaceAreaRank, CoreFaceSelectorClause,
     CoreParameterValue, CoreProgram, CoreSelectorPayload,
 };
-use crate::models::{AppError, AppResult, DesignParams, ParamValue, PathResolver};
+use crate::models::PathResolver;
 
 const PREVIEW_MESH_LINEAR_DEFLECTION_MM: f64 = 0.04;
 const PREVIEW_MESH_ANGULAR_DEFLECTION_RAD: f64 = 0.25;
@@ -6467,7 +6468,7 @@ mod tests {
     /// available.
     #[test]
     fn live_woodlouse_hotel_macro_exports_end_to_end_when_runtime_ready() {
-        use crate::models::ParamValue;
+        use crate::contracts::ParamValue;
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
@@ -6567,7 +6568,7 @@ mod tests {
 
     #[test]
     fn live_differential_woodlouse_with_artwork_params_matches_build123d() {
-        use crate::models::ParamValue;
+        use crate::contracts::ParamValue;
         let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cad/svg");
         let mut params = DesignParams::new();
         params.insert(
@@ -7958,7 +7959,7 @@ mod tests {
             &program,
             &DesignParams::new(),
             &layout,
-            &temp_root("direct-occt-hull-capsule"),
+            temp_root("direct-occt-hull-capsule"),
             &TestResolver,
         )
         .expect("hull export");
@@ -8279,8 +8280,8 @@ mod tests {
 
         // The two parts MUST have distinct triangle counts (base slab vs peg
         // cylinder — completely different tessellation densities).
-        let bytes0 = std::fs::read(&path0).unwrap();
-        let bytes1 = std::fs::read(&path1).unwrap();
+        let bytes0 = std::fs::read(path0).unwrap();
+        let bytes1 = std::fs::read(path1).unwrap();
         let count0 = u32::from_le_bytes([bytes0[80], bytes0[81], bytes0[82], bytes0[83]]);
         let count1 = u32::from_le_bytes([bytes1[80], bytes1[81], bytes1[82], bytes1[83]]);
         assert_ne!(
@@ -8376,7 +8377,7 @@ mod tests {
     }
 
     #[test]
-    fn poly_brep_boolean_cut_of_vertex_genie_produces_manifold_result_when_runtime_ready() {
+    fn indexed_mesh_boolean_cut_of_vertex_genie_produces_manifold_result_when_runtime_ready() {
         let Some(genie_stl) = vertex_genie_fixture() else {
             return;
         };
@@ -8437,19 +8438,16 @@ mod tests {
         )
         .expect("poly BRep boolean export must succeed");
 
-        let NativeExportOutcome::Exported {
-            step_path,
-            stl_path,
-            ..
-        } = outcome
-        else {
-            panic!("expected direct OCCT poly BRep export, got failure");
+        let NativeExportOutcome::MeshExported { stl_path, .. } = outcome else {
+            panic!("expected mesh-native Manifold export, got {outcome:?}");
         };
-        assert!(step_path.is_file(), "missing STEP export: {step_path:?}");
         assert!(stl_path.is_file(), "missing STL export: {stl_path:?}");
+        assert!(
+            !output_dir.join("model.step").exists(),
+            "mesh-native Boolean must not fabricate STEP"
+        );
 
-        // The proof: the result must be manifold. If OCCT's poly faceted
-        // BRep boolean is reliable, the cut genie has 0 non-manifold edges.
+        // The proof: the indexed Manifold Boolean preserves watertightness.
         let result_non_manifold = ascii_stl_non_manifold_edge_count(&stl_path);
         assert_eq!(
             result_non_manifold, 0,

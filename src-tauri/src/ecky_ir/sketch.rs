@@ -11,8 +11,8 @@ use geo::{
     Polygon as GeoPolygon,
 };
 
+use crate::contracts::{AppResult, ParamValue};
 use crate::ecky_ir_patterns::ContourSweepSlice;
-use crate::models::{AppResult, ParamValue};
 
 use super::eval_scalar::{approx_eq, eval_bool, eval_number, eval_points, parse_count};
 use super::model::{expr_head_symbol, expr_keyword_name, expr_list_items, IrExpr};

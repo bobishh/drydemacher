@@ -5,12 +5,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, State};
 use uuid::Uuid;
 
-use crate::models::{
+use crate::contracts::{
     validate_artifact_bundle, validate_design_output, validate_design_params, validate_ui_spec,
-    AppError, AppResult, AppState, ArtifactBundle, DesignParams, GeometryBackend, Message,
-    MessageRole, MessageStatus, ModelManifest, ParamValue, ParsedParamsResult, SelectOption,
-    SelectValue, SourceLanguage, UiField, UiSpec,
+    AppError, AppResult, ArtifactBundle, DesignParams, GeometryBackend, Message, MessageRole,
+    MessageStatus, ModelManifest, ParamValue, ParsedParamsResult, SelectOption, SelectValue,
+    SourceLanguage, UiField, UiSpec,
 };
+use crate::models::AppState;
 use crate::services::session::{build_runtime_snapshot, write_last_snapshot};
 use crate::{db, persist_thread_summary};
 
@@ -25,7 +26,7 @@ pub struct AddManualVersionInput {
     pub geometry_backend: Option<GeometryBackend>,
     pub parameters: DesignParams,
     pub ui_spec: UiSpec,
-    pub post_processing: Option<crate::models::PostProcessingSpec>,
+    pub post_processing: Option<crate::contracts::PostProcessingSpec>,
     pub artifact_bundle: Option<ArtifactBundle>,
     pub model_manifest: Option<ModelManifest>,
 }
@@ -785,7 +786,7 @@ fn scan_stmt_for_params_get(stmt: &Stmt, fields: &mut Vec<UiField>, params: &mut
 #[specta::specta]
 pub fn parse_macro_params(macro_code: String) -> ParsedParamsResult {
     if crate::contracts::infer_macro_dialect_from_code(&macro_code)
-        == crate::models::MacroDialect::EckyIrV0
+        == crate::contracts::MacroDialect::EckyIrV0
     {
         return crate::ecky_ir::derive_controls(&macro_code).unwrap_or_else(|_| {
             ParsedParamsResult {
@@ -899,7 +900,7 @@ pub async fn add_imported_model_version(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<String> {
-    crate::models::validate_model_runtime_bundle(&model_manifest, &artifact_bundle)?;
+    crate::contracts::validate_model_runtime_bundle(&model_manifest, &artifact_bundle)?;
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1078,7 +1079,7 @@ pub async fn update_parameters(
 #[specta::specta]
 pub async fn update_post_processing(
     message_id: String,
-    post_processing: Option<crate::models::PostProcessingSpec>,
+    post_processing: Option<crate::contracts::PostProcessingSpec>,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<()> {
@@ -1132,7 +1133,7 @@ pub async fn update_version_runtime(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<()> {
-    crate::models::validate_model_runtime_bundle(&model_manifest, &artifact_bundle)?;
+    crate::contracts::validate_model_runtime_bundle(&model_manifest, &artifact_bundle)?;
 
     let (current_output, current_thread_id) = {
         let db = state.db.lock().await;
@@ -1222,7 +1223,7 @@ fn same_artifact_version(stored: Option<&ArtifactBundle>, expected: &ArtifactBun
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{EngineKind, ModelSourceKind};
+    use crate::contracts::{EngineKind, ModelSourceKind};
 
     fn sample_artifact_bundle(model_id: &str) -> ArtifactBundle {
         ArtifactBundle {

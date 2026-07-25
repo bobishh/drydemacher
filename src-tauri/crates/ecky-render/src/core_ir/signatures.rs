@@ -1,3 +1,5 @@
+//! Type, arity, selector, and unit validation for Core IR.
+
 use std::collections::HashMap;
 
 use super::{
@@ -218,7 +220,7 @@ pub fn verify_core_program_strict_units(program: &CoreProgram) -> CoreResult<()>
     verify_core_program_with_unit_mode(program, UnitCheckMode::Strict)
 }
 
-pub(crate) fn verify_core_program_with_literal_dimensions(
+pub fn verify_core_program_with_literal_dimensions(
     program: &CoreProgram,
     literal_dimensions: &HashMap<SourceSpan, String>,
     strict_units: bool,
@@ -993,15 +995,8 @@ fn verify_surface(
                 "height, scale, profile or height, scale-x, scale-y, profile",
             )?;
             verify_expected_node(name, 0, "height", ExpectedKind::Number, &args[0], env)?;
-            for index in 1..args.len() - 1 {
-                verify_expected_node(
-                    name,
-                    index,
-                    "scale",
-                    ExpectedKind::Number,
-                    &args[index],
-                    env,
-                )?;
+            for (index, arg) in args.iter().enumerate().take(args.len() - 1).skip(1) {
+                verify_expected_node(name, index, "scale", ExpectedKind::Number, arg, env)?;
             }
             verify_expected_node(
                 name,
@@ -2152,7 +2147,7 @@ fn operation_name(op: &CoreOperation) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ecky_core_ir::{
+    use crate::core_ir::{
         CompilerErrorKind, CoreBinding, CoreLiteral, CoreNode, CoreNodeKind, CoreOperation,
         CoreParameter, CoreParameterConstraints, CoreParameterKind, CoreParameterValue, CorePart,
         CorePathOp, CorePrimitive, CoreSurfaceOp, CoreTransformOp, CoreValueKind, NodeId, ParamId,
@@ -2404,14 +2399,14 @@ mod tests {
     fn verify_err(program: CoreProgram) -> String {
         let err = verify_core_program(&program).expect_err("expected verifier failure");
         assert_eq!(err.kind, CompilerErrorKind::TypeMismatch);
-        err.message
+        err.message.into()
     }
 
     fn strict_units_err(program: CoreProgram) -> String {
         let err = verify_core_program_with_unit_mode(&program, UnitCheckMode::Strict)
             .expect_err("expected verifier failure");
         assert_eq!(err.kind, CompilerErrorKind::TypeMismatch);
-        err.message
+        err.message.into()
     }
 
     fn permissive_unit_warnings(
@@ -2466,22 +2461,22 @@ mod tests {
             CoreOperation::Path(CorePathOp::Polyline),
             CoreOperation::Path(CorePathOp::BezierPath),
             CoreOperation::Path(CorePathOp::Bspline),
-            CoreOperation::Array(crate::ecky_core_ir::CoreArrayOp::LinearArray),
-            CoreOperation::Array(crate::ecky_core_ir::CoreArrayOp::RadialArray),
-            CoreOperation::Array(crate::ecky_core_ir::CoreArrayOp::GridArray),
-            CoreOperation::Array(crate::ecky_core_ir::CoreArrayOp::ArcArray),
-            CoreOperation::Array(crate::ecky_core_ir::CoreArrayOp::Repeat),
-            CoreOperation::Array(crate::ecky_core_ir::CoreArrayOp::RepeatUnion),
-            CoreOperation::Array(crate::ecky_core_ir::CoreArrayOp::RepeatCompound),
-            CoreOperation::Array(crate::ecky_core_ir::CoreArrayOp::RepeatPick),
-            CoreOperation::Frame(crate::ecky_core_ir::CoreFrameOp::Plane),
-            CoreOperation::Frame(crate::ecky_core_ir::CoreFrameOp::Location),
-            CoreOperation::Frame(crate::ecky_core_ir::CoreFrameOp::PathFrame),
-            CoreOperation::Frame(crate::ecky_core_ir::CoreFrameOp::Place),
-            CoreOperation::Frame(crate::ecky_core_ir::CoreFrameOp::ClipBox),
-            CoreOperation::Meta(crate::ecky_core_ir::CoreMetaOp::Group),
-            CoreOperation::Meta(crate::ecky_core_ir::CoreMetaOp::Comment),
-            CoreOperation::Meta(crate::ecky_core_ir::CoreMetaOp::Annotate),
+            CoreOperation::Array(crate::core_ir::CoreArrayOp::LinearArray),
+            CoreOperation::Array(crate::core_ir::CoreArrayOp::RadialArray),
+            CoreOperation::Array(crate::core_ir::CoreArrayOp::GridArray),
+            CoreOperation::Array(crate::core_ir::CoreArrayOp::ArcArray),
+            CoreOperation::Array(crate::core_ir::CoreArrayOp::Repeat),
+            CoreOperation::Array(crate::core_ir::CoreArrayOp::RepeatUnion),
+            CoreOperation::Array(crate::core_ir::CoreArrayOp::RepeatCompound),
+            CoreOperation::Array(crate::core_ir::CoreArrayOp::RepeatPick),
+            CoreOperation::Frame(crate::core_ir::CoreFrameOp::Plane),
+            CoreOperation::Frame(crate::core_ir::CoreFrameOp::Location),
+            CoreOperation::Frame(crate::core_ir::CoreFrameOp::PathFrame),
+            CoreOperation::Frame(crate::core_ir::CoreFrameOp::Place),
+            CoreOperation::Frame(crate::core_ir::CoreFrameOp::ClipBox),
+            CoreOperation::Meta(crate::core_ir::CoreMetaOp::Group),
+            CoreOperation::Meta(crate::core_ir::CoreMetaOp::Comment),
+            CoreOperation::Meta(crate::core_ir::CoreMetaOp::Annotate),
         ]
     }
 
@@ -2818,7 +2813,7 @@ mod tests {
                 condition: Box::new(bool_lit(11, true)),
                 then_branch: Box::new(call(
                     20,
-                    CoreOperation::Meta(crate::ecky_core_ir::CoreMetaOp::Group),
+                    CoreOperation::Meta(crate::core_ir::CoreMetaOp::Group),
                     vec![box_node(30)],
                     CoreValueKind::Compound,
                 )),
@@ -2924,7 +2919,7 @@ mod tests {
                         CoreValueKind::Number,
                     )
                     .with_span(SourceSpan::new(
-                        Some(crate::ecky_core_ir::SourceFileId::new(1)),
+                        Some(crate::core_ir::SourceFileId::new(1)),
                         12,
                         16,
                     )),
@@ -2946,7 +2941,7 @@ mod tests {
         assert_eq!(
             err.primary_span,
             Some(SourceSpan::new(
-                Some(crate::ecky_core_ir::SourceFileId::new(1)),
+                Some(crate::core_ir::SourceFileId::new(1)),
                 12,
                 16,
             ))

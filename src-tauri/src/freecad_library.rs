@@ -4,12 +4,13 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::models::{
+use crate::contracts::{
     AppError, AppResult, ArtifactBundle, DocumentMetadata, EngineKind, EnrichmentStatus,
     ExportArtifact, FreecadLibraryImportRequest, FreecadLibraryItem, FreecadLibrarySearchRequest,
     GeometryBackend, ManifestEnrichmentState, ModelManifest, ModelSourceKind, PartBinding,
-    PathResolver, SourceLanguage, ViewerAsset, ViewerAssetFormat, MODEL_RUNTIME_SCHEMA_VERSION,
+    SourceLanguage, ViewerAsset, ViewerAssetFormat, MODEL_RUNTIME_SCHEMA_VERSION,
 };
+use crate::models::PathResolver;
 
 const SUPPORTED_EXTENSIONS: &[&str] = &["fcstd", "step", "stp", "stl", "obj", "3mf", "brep", "brp"];
 const CAD_IMPORTABLE_EXTENSIONS: &[&str] = &["step", "stp", "fcstd"];
@@ -243,7 +244,7 @@ pub fn import_mesh_from_request(
             role: "source".to_string(),
         }],
     };
-    crate::models::validate_model_runtime_bundle(&manifest, &bundle)?;
+    crate::contracts::validate_model_runtime_bundle(&manifest, &bundle)?;
     write_json(&manifest_path, &manifest)?;
     write_json(&bundle_path, &bundle)?;
     Ok(bundle)

@@ -1,9 +1,9 @@
-use crate::freecad;
-use crate::models::{
-    AppError, AppResult, AppState, ArtifactBundle, DesignParams, DiagnosticContext,
-    DiagnosticParamValue, GeometryBackend, GeometryProvenance, GeometryRepresentation,
-    MacroDialect, ModelManifest, PathResolver,
+use crate::contracts::{
+    AppError, AppResult, ArtifactBundle, DesignParams, DiagnosticContext, DiagnosticParamValue,
+    GeometryBackend, GeometryProvenance, GeometryRepresentation, MacroDialect, ModelManifest,
 };
+use crate::freecad;
+use crate::models::{AppState, PathResolver};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,7 +27,7 @@ struct RenderFlight {
 
 #[derive(Clone)]
 struct RenderConfigSnapshot {
-    default_source_language: crate::models::SourceLanguage,
+    default_source_language: crate::contracts::SourceLanguage,
     default_geometry_backend: GeometryBackend,
     freecad_cmd: String,
     cad_text_font_path: String,
@@ -262,7 +262,7 @@ fn render_flight_key(
         geometry_backend: Option<GeometryBackend>,
         post_processing: Option<&'a crate::contracts::PostProcessingSpec>,
         previous_manifest: Option<PreviousManifestFlightIdentity<'a>>,
-        default_source_language: crate::models::SourceLanguage,
+        default_source_language: crate::contracts::SourceLanguage,
         default_geometry_backend: GeometryBackend,
         freecad_cmd: &'a str,
         cad_text_font_path: &'a str,
@@ -788,7 +788,8 @@ fn apply_requested_post_processing(
     }
 
     if let Some(disp) = &post_proc.displacement {
-        let Some(crate::models::ParamValue::String(image_path)) = parameters.get(&disp.image_param)
+        let Some(crate::contracts::ParamValue::String(image_path)) =
+            parameters.get(&disp.image_param)
         else {
             return Ok(());
         };
@@ -1307,7 +1308,7 @@ fn direct_occt_plan_diagnostic(macro_code: &str, parameters: &DesignParams) -> R
 
 fn unsupported_required_direct_occt_error(details: String) -> AppError {
     AppError::with_details(
-        crate::models::AppErrorCode::Validation,
+        crate::contracts::AppErrorCode::Validation,
         "Direct OCCT required for this Ecky Native model. Native render unavailable.",
         details,
     )
@@ -1315,7 +1316,7 @@ fn unsupported_required_direct_occt_error(details: String) -> AppError {
 
 fn blocked_direct_occt_native_error(details: String) -> AppError {
     AppError::with_details(
-        crate::models::AppErrorCode::Validation,
+        crate::contracts::AppErrorCode::Validation,
         "Ecky Native direct OCCT render failed.",
         details,
     )
@@ -1436,9 +1437,9 @@ fn render_model_unlocked(
     app: &dyn PathResolver,
 ) -> AppResult<ArtifactBundle> {
     let configured_dialect = match config.default_source_language {
-        crate::models::SourceLanguage::EckyIrV0 => MacroDialect::EckyIrV0,
-        crate::models::SourceLanguage::Build123d => MacroDialect::Build123d,
-        crate::models::SourceLanguage::LegacyPython => MacroDialect::Legacy,
+        crate::contracts::SourceLanguage::EckyIrV0 => MacroDialect::EckyIrV0,
+        crate::contracts::SourceLanguage::Build123d => MacroDialect::Build123d,
+        crate::contracts::SourceLanguage::LegacyPython => MacroDialect::Legacy,
     };
     let effective_dialect = macro_dialect.unwrap_or(configured_dialect);
     let config_default_backend = config.default_geometry_backend;
@@ -1644,9 +1645,9 @@ fn render_model_unlocked(
         }
         GeometryBackend::Build123d => {
             let source_language = if effective_dialect == MacroDialect::EckyIrV0 {
-                crate::models::SourceLanguage::EckyIrV0
+                crate::contracts::SourceLanguage::EckyIrV0
             } else {
-                crate::models::SourceLanguage::Build123d
+                crate::contracts::SourceLanguage::Build123d
             };
             crate::build123d::render_model_with_sources(
                 dispatch_source,
@@ -1662,9 +1663,9 @@ fn render_model_unlocked(
         }
         GeometryBackend::Freecad => {
             let source_language = if effective_dialect == MacroDialect::EckyIrV0 {
-                crate::models::SourceLanguage::EckyIrV0
+                crate::contracts::SourceLanguage::EckyIrV0
             } else {
-                crate::models::SourceLanguage::LegacyPython
+                crate::contracts::SourceLanguage::LegacyPython
             };
             freecad::render_model_with_sources_and_font_path(
                 dispatch_source,
@@ -1737,7 +1738,7 @@ fn append_tagged_selector_rebind_warning(app: &dyn PathResolver, bundle: &Artifa
 
 pub async fn render_model_source(
     source_path: &Path,
-    source_language: Option<crate::models::SourceLanguage>,
+    source_language: Option<crate::contracts::SourceLanguage>,
     macro_dialect: Option<MacroDialect>,
     geometry_backend: Option<GeometryBackend>,
     parameters: &DesignParams,
@@ -1760,7 +1761,7 @@ pub async fn render_model_source(
 
 fn render_model_source_unlocked(
     source_path: &Path,
-    source_language: Option<crate::models::SourceLanguage>,
+    source_language: Option<crate::contracts::SourceLanguage>,
     macro_dialect: Option<MacroDialect>,
     geometry_backend: Option<GeometryBackend>,
     parameters: &DesignParams,
@@ -1825,17 +1826,17 @@ fn render_model_source_unlocked(
 }
 
 fn resolve_source_macro_dialect(
-    source_language: Option<crate::models::SourceLanguage>,
+    source_language: Option<crate::contracts::SourceLanguage>,
     macro_dialect: Option<MacroDialect>,
-    configured_source_language: crate::models::SourceLanguage,
+    configured_source_language: crate::contracts::SourceLanguage,
 ) -> MacroDialect {
     if let Some(explicit) = macro_dialect {
         return explicit;
     }
     match source_language.unwrap_or(configured_source_language) {
-        crate::models::SourceLanguage::LegacyPython => MacroDialect::Legacy,
-        crate::models::SourceLanguage::EckyIrV0 => MacroDialect::EckyIrV0,
-        crate::models::SourceLanguage::Build123d => MacroDialect::Build123d,
+        crate::contracts::SourceLanguage::LegacyPython => MacroDialect::Legacy,
+        crate::contracts::SourceLanguage::EckyIrV0 => MacroDialect::EckyIrV0,
+        crate::contracts::SourceLanguage::Build123d => MacroDialect::Build123d,
     }
 }
 
@@ -1850,15 +1851,15 @@ mod tests {
         RenderFlightRole,
     };
     use crate::contracts::{
+        AppError, DesignParams, GeometryBackend, GeometryRepresentation, ParamValue, SourceLanguage,
+    };
+    use crate::contracts::{
         Config, DisplacementSpec, LithophaneAttachment, LithophaneAttachmentSource,
         LithophaneColor, LithophaneColorMode, LithophanePlacement, LithophanePlacementMode,
         LithophaneRelief, LithophaneSide, MacroDialect, McpConfig, OverflowMode,
         PostProcessingSpec, ProjectionType,
     };
-    use crate::models::{
-        AppError, AppState, DesignParams, GeometryBackend, GeometryRepresentation, ParamValue,
-        PathResolver, SourceLanguage,
-    };
+    use crate::models::{AppState, PathResolver};
     use std::path::PathBuf;
 
     #[derive(Clone)]
@@ -1986,12 +1987,12 @@ endsolid sample
             freecad_library_roots: Vec::new(),
             assets: Vec::new(),
             microwave: None,
-            voice: crate::models::VoiceConfig::default(),
+            voice: crate::contracts::VoiceConfig::default(),
             mcp: McpConfig::default(),
             has_seen_onboarding: true,
             connection_type: None,
-            default_engine_kind: crate::models::EngineKind::Freecad,
-            default_source_language: crate::models::SourceLanguage::LegacyPython,
+            default_engine_kind: crate::contracts::EngineKind::Freecad,
+            default_source_language: crate::contracts::SourceLanguage::LegacyPython,
             default_geometry_backend: GeometryBackend::Freecad,
             max_generation_attempts: 3,
             max_verify_attempts: 0,
@@ -2311,16 +2312,16 @@ endsolid sample
     fn apply_requested_displacement_surfaces_raw_displacement_errors() {
         let params = DesignParams::from([(
             "image".to_string(),
-            crate::models::ParamValue::String("/definitely/missing/lithophane.png".to_string()),
+            crate::contracts::ParamValue::String("/definitely/missing/lithophane.png".to_string()),
         )]);
-        let mut bundle = crate::models::ArtifactBundle {
+        let mut bundle = crate::contracts::ArtifactBundle {
             geometry_provenance: None,
             schema_version: 1,
             model_id: "model".to_string(),
-            source_kind: crate::models::ModelSourceKind::Generated,
-            engine_kind: crate::models::EngineKind::Freecad,
-            source_language: crate::models::SourceLanguage::LegacyPython,
-            geometry_backend: crate::models::GeometryBackend::Freecad,
+            source_kind: crate::contracts::ModelSourceKind::Generated,
+            engine_kind: crate::contracts::EngineKind::Freecad,
+            source_language: crate::contracts::SourceLanguage::LegacyPython,
+            geometry_backend: crate::contracts::GeometryBackend::Freecad,
             content_hash: "unchanged".to_string(),
             artifact_version: 1,
             fcstd_path: "/tmp/model.FCStd".to_string(),
@@ -2495,14 +2496,14 @@ endsolid sample
     #[test]
     fn post_processing_noop_preserves_existing_step_export_artifacts() {
         let params = DesignParams::new();
-        let mut bundle = crate::models::ArtifactBundle {
+        let mut bundle = crate::contracts::ArtifactBundle {
             geometry_provenance: None,
             schema_version: 1,
             model_id: "model".to_string(),
-            source_kind: crate::models::ModelSourceKind::Generated,
-            engine_kind: crate::models::EngineKind::EckyIrV0,
-            source_language: crate::models::SourceLanguage::EckyIrV0,
-            geometry_backend: crate::models::GeometryBackend::EckyRust,
+            source_kind: crate::contracts::ModelSourceKind::Generated,
+            engine_kind: crate::contracts::EngineKind::EckyIrV0,
+            source_language: crate::contracts::SourceLanguage::EckyIrV0,
+            geometry_backend: crate::contracts::GeometryBackend::EckyRust,
             content_hash: "unchanged".to_string(),
             artifact_version: 1,
             fcstd_path: String::new(),
@@ -2514,7 +2515,7 @@ endsolid sample
             face_targets: vec![],
             callout_anchors: vec![],
             measurement_guides: vec![],
-            export_artifacts: vec![crate::models::ExportArtifact {
+            export_artifacts: vec![crate::contracts::ExportArtifact {
                 geometry_provenance: None,
                 label: "STEP".to_string(),
                 format: "step".to_string(),
@@ -2555,14 +2556,14 @@ endsolid sample
         .unwrap();
 
         let params = DesignParams::new();
-        let mut bundle = crate::models::ArtifactBundle {
+        let mut bundle = crate::contracts::ArtifactBundle {
             geometry_provenance: None,
             schema_version: 1,
             model_id: "model".to_string(),
-            source_kind: crate::models::ModelSourceKind::Generated,
-            engine_kind: crate::models::EngineKind::Freecad,
-            source_language: crate::models::SourceLanguage::LegacyPython,
-            geometry_backend: crate::models::GeometryBackend::Freecad,
+            source_kind: crate::contracts::ModelSourceKind::Generated,
+            engine_kind: crate::contracts::EngineKind::Freecad,
+            source_language: crate::contracts::SourceLanguage::LegacyPython,
+            geometry_backend: crate::contracts::GeometryBackend::Freecad,
             content_hash: "unchanged".to_string(),
             artifact_version: 1,
             fcstd_path: "/tmp/model.FCStd".to_string(),
@@ -2634,25 +2635,25 @@ endsolid sample
         let manifest_path = root.join("manifest.json");
         std::fs::write(
             &manifest_path,
-            serde_json::to_vec_pretty(&crate::models::ModelManifest {
+            serde_json::to_vec_pretty(&crate::contracts::ModelManifest {
                 geometry_provenance: None,
                 schema_version: 1,
                 model_id: "model".to_string(),
-                source_kind: crate::models::ModelSourceKind::Generated,
+                source_kind: crate::contracts::ModelSourceKind::Generated,
                 source_digest: None,
                 core_digest: None,
                 ast_schema_version: None,
-                engine_kind: crate::models::EngineKind::EckyIrV0,
-                source_language: crate::models::SourceLanguage::EckyIrV0,
-                geometry_backend: crate::models::GeometryBackend::EckyRust,
-                document: crate::models::DocumentMetadata {
+                engine_kind: crate::contracts::EngineKind::EckyIrV0,
+                source_language: crate::contracts::SourceLanguage::EckyIrV0,
+                geometry_backend: crate::contracts::GeometryBackend::EckyRust,
+                document: crate::contracts::DocumentMetadata {
                     document_name: "doc".to_string(),
                     document_label: "doc".to_string(),
                     source_path: None,
                     object_count: 1,
                     warnings: vec![],
                 },
-                parts: vec![crate::models::PartBinding {
+                parts: vec![crate::contracts::PartBinding {
                     part_id: "body".to_string(),
                     freecad_object_name: "body".to_string(),
                     label: "Body".to_string(),
@@ -2662,7 +2663,7 @@ endsolid sample
                     viewer_node_ids: vec![],
                     parameter_keys: vec![],
                     editable: true,
-                    bounds: Some(crate::models::ManifestBounds {
+                    bounds: Some(crate::contracts::ManifestBounds {
                         x_min: -10.0,
                         y_min: -10.0,
                         z_min: 0.0,
@@ -2685,8 +2686,8 @@ endsolid sample
                 feature_graph: None,
                 correspondence_graph: None,
                 warnings: vec![],
-                enrichment_state: crate::models::ManifestEnrichmentState {
-                    status: crate::models::EnrichmentStatus::None,
+                enrichment_state: crate::contracts::ManifestEnrichmentState {
+                    status: crate::contracts::EnrichmentStatus::None,
                     proposals: vec![],
                 },
             })
@@ -2699,14 +2700,14 @@ endsolid sample
             .unwrap();
 
         let params = DesignParams::new();
-        let mut bundle = crate::models::ArtifactBundle {
+        let mut bundle = crate::contracts::ArtifactBundle {
             geometry_provenance: None,
             schema_version: 1,
             model_id: "model".to_string(),
-            source_kind: crate::models::ModelSourceKind::Generated,
-            engine_kind: crate::models::EngineKind::EckyIrV0,
-            source_language: crate::models::SourceLanguage::EckyIrV0,
-            geometry_backend: crate::models::GeometryBackend::EckyRust,
+            source_kind: crate::contracts::ModelSourceKind::Generated,
+            engine_kind: crate::contracts::EngineKind::EckyIrV0,
+            source_language: crate::contracts::SourceLanguage::EckyIrV0,
+            geometry_backend: crate::contracts::GeometryBackend::EckyRust,
             content_hash: "unchanged".to_string(),
             artifact_version: 1,
             fcstd_path: String::new(),
@@ -2904,14 +2905,14 @@ endsolid sample
     #[test]
     fn tagged_selector_mismatch_detector_matches_runner_target_id_errors() {
         let err = AppError::with_details(
-            crate::models::AppErrorCode::Render,
+            crate::contracts::AppErrorCode::Render,
             "build123d runner failed.",
             "stderr:\nValueError: Edge selector `{'kind': 'targetIds'}` did not match target ids: ['body:edge:old']",
         );
         assert!(is_tagged_selector_mismatch_error(&err));
 
         let direct_occt = AppError::with_details(
-            crate::models::AppErrorCode::Render,
+            crate::contracts::AppErrorCode::Render,
             "Direct OCCT native shim probe failed.",
             "stderr:\nDirect OCCT edge selector target ids did not match current topology for part `body`. requested=body:edge:old",
         );
@@ -4062,7 +4063,7 @@ exit 5
         let edge_alias_target_id = base_manifest
             .selection_targets
             .iter()
-            .find(|target| target.kind == crate::models::SelectionTargetKind::Edge)
+            .find(|target| target.kind == crate::contracts::SelectionTargetKind::Edge)
             .and_then(|target| target.canonical_target_id.clone())
             .expect("box edge alias target");
 
@@ -4206,7 +4207,7 @@ exit 5
         let face_alias_target_id = base_manifest
             .selection_targets
             .iter()
-            .find(|target| target.kind == crate::models::SelectionTargetKind::Face)
+            .find(|target| target.kind == crate::contracts::SelectionTargetKind::Face)
             .and_then(|target| target.canonical_target_id.clone())
             .expect("box face alias target");
 
@@ -4484,7 +4485,7 @@ exit 5
     /// displacement). The renderer must either produce valid geometry or
     /// return a clean `AppError` — it must never panic the worker thread.
     #[tokio::test]
-    async fn ecky_rust_renders_iphone_case_wall_pattern_csg_without_panic() {
+    async fn ecky_rust_rejects_iphone_case_dense_broad_chamfer_without_panic() {
         let root = temp_root("iphone-case-wall-pattern");
         let resolver = TestResolver { root: root.clone() };
         let source = example_fixture_source("iphone-17e-case-multipart.ecky");
@@ -4500,41 +4501,13 @@ exit 5
         )
         .await;
 
-        // The critical assertion: no panic, and either success or a
-        // well-formed AppError. A thread panic is a test failure by
-        // definition (the .await never resolves).
-        match result {
-            Ok(bundle) => {
-                assert!(
-                    !bundle.preview_stl_path.is_empty(),
-                    "must produce a preview STL"
-                );
-                assert!(
-                    std::path::Path::new(&bundle.preview_stl_path).is_file(),
-                    "preview STL must exist on disk"
-                );
-                let manifest = load_manifest_for_bundle(&bundle).expect("load manifest");
-                if let Some(manifest) = manifest {
-                    assert_eq!(manifest.document.object_count, 3, "three parts expected");
-                    let part_ids: Vec<_> =
-                        manifest.parts.iter().map(|p| p.part_id.as_str()).collect();
-                    assert_eq!(
-                        part_ids,
-                        vec![
-                            "iphone-17e-tpu-case",
-                            "camera-frame-outer-petg",
-                            "camera-frame-inner-petg"
-                        ]
-                    );
-                }
-            }
-            Err(err) => {
-                // If it fails, it must be a clean validation/runtime error —
-                // NOT a panic. We surface the error so the test message is
-                // actionable, but we fail: the goal is a successful render.
-                panic!("iPhone case wall-pattern render failed (expected success): {err:?}");
-            }
-        }
+        let err = result.expect_err("dense broad faceted chamfer must be rejected");
+        assert_eq!(err.code, crate::contracts::AppErrorCode::Validation);
+        assert!(err.message.contains("Mesh-origin faceted BRep `chamfer`"));
+        assert!(err.message.contains("selector `edge-clauses`"));
+        assert!(err
+            .message
+            .contains("rejected before OCCT kernel execution"));
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -4570,7 +4543,7 @@ exit 5
         // Render via EckyRust to get a real bundle with actual geometry.
         let mut bundle = crate::ecky_ir::render_model(
             r#"(model (part body (extrude (rounded_rect 32 32 4 12) 10)))"#,
-            &crate::models::DesignParams::new(),
+            &crate::contracts::DesignParams::new(),
             &resolver,
         )
         .expect("IR render");
@@ -4578,7 +4551,7 @@ exit 5
         // Override the geometry_backend field to simulate a Build123d bundle.
         // This is the core of the Phase 7 invariant: post-processing must not
         // branch on the backend.
-        bundle.geometry_backend = crate::models::GeometryBackend::Build123d;
+        bundle.geometry_backend = crate::contracts::GeometryBackend::Build123d;
 
         let image_path = root.join("panel.png");
         image::RgbImage::from_fn(3, 3, |x, y| {
@@ -4593,7 +4566,7 @@ exit 5
 
         apply_requested_post_processing(
             &mut bundle,
-            &crate::models::DesignParams::new(),
+            &crate::contracts::DesignParams::new(),
             Some(&PostProcessingSpec {
                 displacement: None,
                 lithophane_attachments: vec![LithophaneAttachment {
@@ -4630,7 +4603,7 @@ exit 5
 
         assert_eq!(
             bundle.geometry_backend,
-            crate::models::GeometryBackend::Build123d,
+            crate::contracts::GeometryBackend::Build123d,
             "geometry_backend must not be mutated by post-processing"
         );
         assert!(
@@ -4892,7 +4865,10 @@ exit 5
         .await
         .expect_err("broad mesh-origin chamfer must be rejected before kernel");
         let diagnostic = format!("{} {}", error, error.details.as_deref().unwrap_or(""));
-        assert!(diagnostic.contains("Mesh-origin faceted BRep `chamfer`"), "{diagnostic}");
+        assert!(
+            diagnostic.contains("Mesh-origin faceted BRep `chamfer`"),
+            "{diagnostic}"
+        );
         assert!(diagnostic.contains("selector `all`"), "{diagnostic}");
         assert!(
             diagnostic.contains("rejected before OCCT kernel execution"),
@@ -4956,7 +4932,10 @@ exit 5
             .geometry_provenance
             .as_ref()
             .expect("mesh-native provenance");
-        assert_eq!(provenance.representation, GeometryRepresentation::MeshNative);
+        assert_eq!(
+            provenance.representation,
+            GeometryRepresentation::MeshNative
+        );
         assert_eq!(provenance.closed, Some(true));
         assert!(!provenance.source_mesh_digests.is_empty());
         let manifest = crate::model_runtime::read_model_manifest(&resolver, &bundle.model_id)
@@ -5131,7 +5110,7 @@ exit 5
     /// The bridge routing is correct (classification, slicing, dispatch all
     /// work), but chamfer/fillet on poly edges is best-effort per design.md.
     #[tokio::test]
-    async fn hybrid_poly_brep_iphone_case_fixture_produces_manifold_parts() {
+    async fn hybrid_poly_brep_iphone_case_rejects_dense_broad_chamfer_before_kernel() {
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
@@ -5227,41 +5206,13 @@ exit 5
         )
         .await;
 
-        let bundle = match result {
-            Ok(bundle) => bundle,
-            Err(err) => {
-                panic!("iPhone case hybrid render failed: {err:?}");
-            }
-        };
-
-        assert!(
-            std::path::Path::new(&bundle.preview_stl_path).is_file(),
-            "preview STL must exist"
-        );
-
-        let main_part_path = bundle
-            .viewer_assets
-            .iter()
-            .find(|asset| asset.part_id == "iphone-17e-tpu-case")
-            .map(|asset| std::path::Path::new(&asset.path))
-            .expect("main TPU part STL");
-        let main_metrics = crate::ecky_cad_host::native_parity_harness::stl_metrics(main_part_path);
-        assert!(
-            main_metrics.bbox_min[2] < -0.1,
-            "hybrid main part lost the displaced rear panel: min Z is {} (expected below -0.1)",
-            main_metrics.bbox_min[2]
-        );
-
-        // The result must also remain manifold after preserving the rear panel.
-        let non_manifold =
-            crate::ecky_cad_host::native_parity_harness::ascii_stl_non_manifold_edge_count(
-                std::path::Path::new(&bundle.preview_stl_path),
-            );
-        assert!(
-            non_manifold < 100,
-            "iPhone case hybrid render has {non_manifold} non-manifold edges (expected < 100). \
-             wall-pattern + chamfer + difference must route through the hybrid poly BRep bridge."
-        );
+        let err = result.expect_err("dense broad faceted chamfer must be rejected");
+        assert_eq!(err.code, crate::contracts::AppErrorCode::Validation);
+        assert!(err.message.contains("Mesh-origin faceted BRep `chamfer`"));
+        assert!(err.message.contains("selector `edge-clauses`"));
+        assert!(err
+            .message
+            .contains("rejected before OCCT kernel execution"));
 
         std::fs::remove_dir_all(root).unwrap();
     }

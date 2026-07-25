@@ -77,7 +77,7 @@ pub async fn handle_ecky_ast_get(
             "",
         )?;
 
-        if design_output.source_language != crate::models::SourceLanguage::EckyIrV0 {
+        if design_output.source_language != crate::contracts::SourceLanguage::EckyIrV0 {
             return Err(AppError::validation(format!(
                 "ecky_ast_get only supports sourceLanguage=ecky. Target sourceLanguage={}.",
                 design_output.source_language.as_str()
@@ -302,7 +302,7 @@ pub async fn handle_ecky_dependency_get(
             "",
         )?;
 
-        if design_output.source_language != crate::models::SourceLanguage::EckyIrV0 {
+        if design_output.source_language != crate::contracts::SourceLanguage::EckyIrV0 {
             return Err(AppError::validation(format!(
                 "ecky_dependency_get only supports sourceLanguage=ecky. Target sourceLanguage={}.",
                 design_output.source_language.as_str()
@@ -674,7 +674,7 @@ pub async fn handle_ecky_constraints_validate(
             "",
         )?;
 
-        if design_output.source_language != crate::models::SourceLanguage::EckyIrV0 {
+        if design_output.source_language != crate::contracts::SourceLanguage::EckyIrV0 {
             return Err(AppError::validation(format!(
                 "ecky_constraints_validate only supports sourceLanguage=ecky. Target sourceLanguage={}.",
                 design_output.source_language.as_str()
@@ -760,7 +760,7 @@ pub async fn handle_ecky_ast_replace_and_render(
         (target.thread_id, target.message_id, target.design_output)
     };
 
-    if design_output.source_language != crate::models::SourceLanguage::EckyIrV0 {
+    if design_output.source_language != crate::contracts::SourceLanguage::EckyIrV0 {
         return Err(AppError::validation(format!(
             "ecky_ast_replace_and_render only supports sourceLanguage=ecky. Target sourceLanguage={}.",
             design_output.source_language.as_str()
@@ -828,7 +828,7 @@ pub async fn handle_ecky_ast_patch_validate(
     )?;
     drop(conn);
 
-    if target.design_output.source_language != crate::models::SourceLanguage::EckyIrV0 {
+    if target.design_output.source_language != crate::contracts::SourceLanguage::EckyIrV0 {
         return Err(AppError::validation(format!(
             "ecky_ast_patch_validate only supports sourceLanguage=ecky. Target sourceLanguage={}.",
             target.design_output.source_language.as_str()

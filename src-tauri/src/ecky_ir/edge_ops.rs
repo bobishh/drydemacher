@@ -4,11 +4,11 @@ use csgrs::float_types::parry3d::na::{Point3, Vector3};
 use csgrs::mesh::polygon::Polygon as IrPolygon;
 use csgrs::mesh::vertex::Vertex as IrVertex;
 
+use crate::contracts::{AppResult, ParamValue};
 use crate::ecky_core_ir::{
     CoreEdgeAxis, CoreEdgeBound, CoreEdgeSelectorClause, CoreFaceAreaRank, CoreFaceSelectorClause,
     CoreSelectorPayload,
 };
-use crate::models::{AppResult, ParamValue};
 
 use super::eval_scalar::eval_stringish;
 use super::model::{expr_keyword_name, IrExpr};
@@ -363,35 +363,15 @@ pub(crate) fn parse_edge_selector_spec(selector_str: &str) -> AppResult<EdgeSele
 pub(crate) fn parse_core_edge_selector_payload(
     selector_str: &str,
 ) -> AppResult<CoreSelectorPayload> {
-    let parsed = parse_edge_selector_value(selector_str)?;
-    Ok(match parsed {
-        EdgeSelector::All => CoreSelectorPayload::EdgeAll,
-        EdgeSelector::TargetIds(target_ids) => CoreSelectorPayload::EdgeTargetIds(target_ids),
-        selector => {
-            let clauses = selector
-                .clauses()
-                .unwrap_or_default()
-                .into_iter()
-                .map(core_edge_selector_clause_from_edge_clause)
-                .collect();
-            CoreSelectorPayload::EdgeClauses(clauses)
-        }
-    })
+    crate::ecky_core_ir::parse_core_edge_selector_payload(selector_str)
+        .map_err(|err| validation(err.message))
 }
 
 pub(crate) fn parse_core_face_selector_payload(
     selector_str: &str,
 ) -> AppResult<CoreSelectorPayload> {
-    let parsed = parse_face_selector_value(selector_str)?;
-    Ok(match parsed {
-        FaceSelector::TargetIds(target_ids) => CoreSelectorPayload::FaceTargetIds(target_ids),
-        FaceSelector::Clauses(clauses) => CoreSelectorPayload::FaceClauses(
-            clauses
-                .into_iter()
-                .map(core_face_selector_clause_from_face_clause)
-                .collect(),
-        ),
-    })
+    crate::ecky_core_ir::parse_core_face_selector_payload(selector_str)
+        .map_err(|err| validation(err.message))
 }
 
 pub(crate) fn edge_selector_spec_from_core_payload(
@@ -692,54 +672,6 @@ fn parse_face_selector_clause(token: &str, full_selector: &str) -> AppResult<Fac
         "Unknown face selector `{}`. Use {}",
         full_selector, FACE_SELECTOR_HELP
     )))
-}
-
-fn core_edge_selector_clause_from_edge_clause(
-    clause: EdgeSelectorClause,
-) -> CoreEdgeSelectorClause {
-    match clause {
-        EdgeSelectorClause::Axis(axis) => {
-            CoreEdgeSelectorClause::Axis(core_edge_axis_from_edge_axis(axis))
-        }
-        EdgeSelectorClause::Boundary { axis, bound } => CoreEdgeSelectorClause::Boundary {
-            axis: core_edge_axis_from_edge_axis(axis),
-            bound: core_edge_bound_from_edge_bound(bound),
-        },
-    }
-}
-
-fn core_face_selector_clause_from_face_clause(
-    clause: FaceSelectorClause,
-) -> CoreFaceSelectorClause {
-    match clause {
-        FaceSelectorClause::Boundary { axis, bound } => CoreFaceSelectorClause::Boundary {
-            axis: core_edge_axis_from_edge_axis(axis),
-            bound: core_edge_bound_from_edge_bound(bound),
-        },
-        FaceSelectorClause::Planar => CoreFaceSelectorClause::Planar,
-        FaceSelectorClause::Normal(axis) => {
-            CoreFaceSelectorClause::Normal(core_edge_axis_from_edge_axis(axis))
-        }
-        FaceSelectorClause::Area(rank) => CoreFaceSelectorClause::Area(match rank {
-            FaceAreaRank::Min => CoreFaceAreaRank::Min,
-            FaceAreaRank::Max => CoreFaceAreaRank::Max,
-        }),
-    }
-}
-
-fn core_edge_axis_from_edge_axis(axis: EdgeAxis) -> CoreEdgeAxis {
-    match axis {
-        EdgeAxis::X => CoreEdgeAxis::X,
-        EdgeAxis::Y => CoreEdgeAxis::Y,
-        EdgeAxis::Z => CoreEdgeAxis::Z,
-    }
-}
-
-fn core_edge_bound_from_edge_bound(bound: EdgeBound) -> CoreEdgeBound {
-    match bound {
-        EdgeBound::Min => CoreEdgeBound::Min,
-        EdgeBound::Max => CoreEdgeBound::Max,
-    }
 }
 
 fn edge_axis_from_core_edge_axis(axis: CoreEdgeAxis) -> EdgeAxis {

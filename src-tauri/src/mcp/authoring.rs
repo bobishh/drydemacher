@@ -1,5 +1,5 @@
+use crate::contracts::{DesignOutput, GeometryBackend, MacroDialect, SourceLanguage};
 use crate::mcp::contracts::TargetAuthoringContext;
-use crate::models::{DesignOutput, GeometryBackend, MacroDialect, SourceLanguage};
 
 pub(crate) const ECKY_AUTHORING_CARD: &str = concat!(
     "Ecky authoring card\n",

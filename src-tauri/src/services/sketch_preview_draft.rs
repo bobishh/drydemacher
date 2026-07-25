@@ -1,8 +1,9 @@
-use crate::models::{
+use crate::contracts::{
     AppError, AppResult, ArtifactBundle, ClearSketchPreviewDraftRequest,
-    LoadSketchPreviewDraftRequest, PathResolver, SaveSketchPreviewDraftRequest, SketchDraftSource,
+    LoadSketchPreviewDraftRequest, SaveSketchPreviewDraftRequest, SketchDraftSource,
     SketchPreviewDraft,
 };
+use crate::models::PathResolver;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -37,7 +38,7 @@ fn persist_sketch_preview_draft(
     scope_id: Option<&str>,
     draft_source: SketchDraftSource,
     artifact_bundle: ArtifactBundle,
-    sketch_document: Option<crate::models::SketchDocument>,
+    sketch_document: Option<crate::contracts::SketchDocument>,
 ) -> AppResult<SketchPreviewDraft> {
     let draft = SketchPreviewDraft {
         scope_id: scope_id
@@ -155,7 +156,7 @@ pub fn clear_sketch_preview_draft(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{
+    use crate::contracts::{
         ArtifactBundle, EngineKind, GeometryBackend, MacroDialect, ModelSourceKind,
         RasterTraceAssetIdentity, RasterTraceCalibration, RasterTraceProvenance, SketchDefinition,
         SketchDocument, SketchPrimitive, SketchPrimitiveKind, SketchView, SourceLanguage,

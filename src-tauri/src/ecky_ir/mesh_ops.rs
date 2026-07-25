@@ -7,10 +7,10 @@ use csgrs::mesh::polygon::Polygon as IrPolygon;
 use csgrs::mesh::vertex::Vertex as IrVertex;
 use csgrs::traits::CSG;
 
+use crate::contracts::{AppResult, ParamValue};
 use crate::ecky_ir_patterns::{
     apply_wall_pattern, WallPatternMode, WallPatternSpec, WallPatternTarget,
 };
-use crate::models::{AppResult, ParamValue};
 
 use super::edge_ops::{chamfer_mesh, fillet_mesh, parse_edge_selector};
 use super::eval_scalar::{
@@ -195,13 +195,13 @@ pub(super) fn sanitize_mesh_for_export(mesh: &IrMesh) -> IrMesh {
         match result {
             Ok(tris) if !tris.is_empty() => {
                 for tri in tris {
-                    triangles.push(IrPolygon::new(tri.to_vec(), poly.metadata.clone()));
+                    triangles.push(IrPolygon::new(tri.to_vec(), poly.metadata));
                 }
             }
             _ => { /* degenerate polygon — skip */ }
         }
     }
-    IrMesh::from_polygons(&triangles, mesh.metadata.clone())
+    IrMesh::from_polygons(&triangles, mesh.metadata)
 }
 
 fn is_empty_mesh(mesh: &IrMesh) -> bool {
@@ -2407,7 +2407,7 @@ fn add_mesh_bridge_overlap(mesh: &IrMesh) -> IrMesh {
     overlapped
 }
 
-fn read_stl_mesh(path: &Path) -> AppResult<IrMesh> {
+pub(crate) fn read_stl_mesh(path: &Path) -> AppResult<IrMesh> {
     let bytes = std::fs::read(path)
         .map_err(|err| validation(format!("Failed to read STL '{}': {err}", path.display())))?;
     let triangles = if bytes.len() >= 84 {

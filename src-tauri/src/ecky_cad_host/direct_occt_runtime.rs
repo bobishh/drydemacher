@@ -11,15 +11,15 @@ use sha2::{Digest, Sha256};
 
 use super::direct_occt::{OcctArg, OcctOp};
 use super::direct_occt_sdk::{DirectOcctSdkLayout, NativeExportOutcome};
-use crate::ecky_core_ir::{CorePart, CoreProgram, CoreSelectorTagDecl};
-use crate::models::{
+use crate::contracts::{
     AppError, AppResult, ArtifactBundle, DesignParams, DocumentMetadata, EngineKind,
-    EnrichmentStatus, ExportArtifact, GeometryBackend, GeometryProvenance,
-    GeometryRepresentation, ManifestEnrichmentState, ModelManifest, ModelSourceKind,
-    ParameterGroup, PartBinding, PathResolver, SelectionTarget, SelectionTargetKind,
-    SourceLanguage, ViewerEdgePoint, ViewerEdgeTarget, ViewerFaceTarget,
-    MODEL_RUNTIME_SCHEMA_VERSION,
+    EnrichmentStatus, ExportArtifact, GeometryBackend, GeometryProvenance, GeometryRepresentation,
+    ManifestEnrichmentState, ModelManifest, ModelSourceKind, ParameterGroup, PartBinding,
+    SelectionTarget, SelectionTargetKind, SourceLanguage, ViewerEdgePoint, ViewerEdgeTarget,
+    ViewerFaceTarget, MODEL_RUNTIME_SCHEMA_VERSION,
 };
+use crate::ecky_core_ir::{CorePart, CoreProgram, CoreSelectorTagDecl};
+use crate::models::PathResolver;
 use crate::topology_target_ids::{
     durable_edge_target_id, durable_edge_target_id_for_stable_node_key, durable_face_target_id,
     durable_face_target_id_for_stable_node_key, preferred_public_topology_target_id,
@@ -1344,16 +1344,17 @@ fn path_to_string(path: &Path) -> AppResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contracts::{
+        validate_model_runtime_bundle, ParamValue, SelectionTargetKind, TaggedAnchorKind,
+        ViewerAssetFormat,
+    };
     use crate::ecky_cad_host::direct_occt_executor::export_core_program_step_stl_with_params;
     use crate::ecky_cad_host::direct_occt_sdk::{
         bundled_build123d_runtime_root_from_repo, bundled_occt_runtime_root_from_repo,
         inspect_build123d_ocp_runtime,
     };
     use crate::ecky_core_ir::CoreSelectorTagKind;
-    use crate::models::{
-        validate_model_runtime_bundle, ParamValue, PathResolver, SelectionTargetKind,
-        TaggedAnchorKind, ViewerAssetFormat,
-    };
+    use crate::models::PathResolver;
     use std::path::PathBuf;
 
     #[derive(Clone)]
@@ -1879,7 +1880,10 @@ echo "fake runner plan: $plan"
         assert!(stored.fcstd_path.is_empty());
         assert_eq!(stored.geometry_backend, GeometryBackend::EckyRust);
         assert_eq!(
-            stored.geometry_provenance.as_ref().map(|p| &p.representation),
+            stored
+                .geometry_provenance
+                .as_ref()
+                .map(|p| &p.representation),
             Some(&GeometryRepresentation::AnalyticBrep)
         );
         assert_eq!(stored.export_artifacts[0].format, "step");
@@ -1951,13 +1955,9 @@ echo "fake runner plan: $plan"
         for artifact in &mut bundle.export_artifacts {
             artifact.geometry_provenance = None;
         }
-        let (stored_bundle, stored_manifest) = crate::model_runtime::write_runtime_bundle(
-            &resolver,
-            &model_id,
-            &bundle,
-            &manifest,
-        )
-        .expect("write legacy runtime bundle");
+        let (stored_bundle, stored_manifest) =
+            crate::model_runtime::write_runtime_bundle(&resolver, &model_id, &bundle, &manifest)
+                .expect("write legacy runtime bundle");
         assert_eq!(stored_bundle.content_hash, hash);
         assert_eq!(stored_manifest.model_id, model_id);
         assert!(stored_bundle.geometry_provenance.is_none());
