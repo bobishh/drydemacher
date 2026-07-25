@@ -10,11 +10,13 @@ fi
 
 matches="$(
   rg -n --no-heading -S \
-    -g '!scripts/build_mcp_regression_fixture.py' \
     -g '!scripts/guard_no_direct_db_write.sh' \
+    -e 'history\.sqlite' \
+    -e '\bsqlite3\b' \
     -e 'sqlite3\.connect' \
     -e 'INSERT INTO' \
     -e 'UPDATE\s+[A-Za-z_]+' \
+    -e 'DELETE FROM' \
     "$ROOT/scripts" || true
 )"
 

@@ -254,6 +254,14 @@ async function installApiDialogueMocks(
           verifierStatus: 'ok',
         };
       }
+      if (cmd === 'verify_render') {
+        return {
+          passed: true,
+          summary: 'Visual checks passed.',
+          issues: [],
+          usage: null,
+        };
+      }
       if (cmd === 'save_last_design') {
         mockWindow.__MOCK_LAST_DESIGN__ = args.snapshot ?? null;
         return null;

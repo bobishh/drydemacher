@@ -45,7 +45,7 @@ function installVersionTimelineMocks() {
               tag: 'rib_clearance',
               status: 'failed',
               message: 'Gap below minimum.',
-              stableNodeId: 'verify:0',
+              stableNodeId: 'verify:rib_clearance',
               metricSource: 'clearance',
               metricKey: 'min-distance',
               comparator: '>=',
@@ -85,9 +85,9 @@ function installVersionTimelineMocks() {
           sourceLanguage: 'ecky',
           geometryBackend: 'build123d',
           contentHash: 'hash-verify',
-          fcstdPath: '/mock/model.FCStd',
-          manifestPath: '/mock/manifest.json',
-          previewStlPath: '/mock/model.stl',
+          fcstdPath: '/mock/model-runtime/model.FCStd',
+          manifestPath: '/mock/model-runtime/manifest.json',
+          previewStlPath: '/mock/model-runtime/model.stl',
           viewerAssets: [],
           exportArtifacts: [],
         },
@@ -153,6 +153,22 @@ function installVersionTimelineMocks() {
   };
 
   return async ({ page }: { page: import('@playwright/test').Page }) => {
+    await page.route(/\/model-runtime\/model\.stl(?:\?.*)?$/, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'model/stl',
+        body: `solid mock
+facet normal 0 0 1
+outer loop
+vertex 0 0 0
+vertex 1 0 0
+vertex 0 1 0
+endloop
+endfacet
+endsolid mock
+`,
+      });
+    });
     await page.addInitScript(({ thread }) => {
       const mockWindow = window as any;
       localStorage.clear();
@@ -209,7 +225,9 @@ function installVersionTimelineMocks() {
           return [structuredClone(thread)];
         }
         if (cmd === 'get_thread') return structuredClone(thread);
-        if (cmd === 'get_thread_latest_version') return structuredClone(thread.messages[0]);
+        if (cmd === 'get_thread_latest_version' || cmd === 'get_thread_message_version') {
+          return structuredClone(thread.messages[0]);
+        }
         if (cmd === 'get_thread_messages_page') {
           return {
             messages: structuredClone(thread.messages),
@@ -242,8 +260,8 @@ test('Given persisted authored verify chips When opening version thread Then chi
 
   await page.goto('/');
   await page.getByRole('button', { name: 'PROJECTS' }).click();
-  await page.locator('[data-window-id="projects"]').getByRole('button', { name: 'ARCHIVED' }).click();
-  await page.locator('.project-card', { hasText: 'Verify Timeline Thread' }).getByTitle('Open', { exact: true }).click();
+  await page.locator('[data-window-id="projects"]').getByRole('button', { name: 'COMPLETED' }).click();
+  await page.locator('.project-card', { hasText: 'Verify Timeline Thread' }).getByRole('button', { name: 'VIEW' }).click();
   await page.getByRole('button', { name: 'DIALOGUE' }).click();
   await page.getByRole('button', { name: 'PARAMS' }).click();
 

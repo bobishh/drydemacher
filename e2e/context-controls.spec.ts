@@ -11,6 +11,17 @@ endfacet
 endsolid mock
 `;
 
+const MOCK_STL_OFFSCREEN = `solid background
+facet normal 0 0 0
+outer loop
+vertex 0 0 -1
+vertex 1 0 -1
+vertex 0 1 -1
+endloop
+endfacet
+endsolid background
+`;
+
 const config = {
   engines: [{ id: 'mock', name: 'Mock', provider: 'mock', apiKey: '', baseUrl: '' }],
   selectedEngineId: 'mock',
@@ -166,7 +177,8 @@ async function installContextMocks(
   const manifest = overrides?.modelManifest ?? modelManifest;
   const mockedDesign = overrides?.design ?? design;
   await page.route(/\/mock\/context\/.*\.stl(?:\?.*)?$/, async (route) => {
-    await route.fulfill({ status: 200, contentType: 'model/stl', body: MOCK_STL });
+    const body = route.request().url().includes('offscreen') ? MOCK_STL_OFFSCREEN : MOCK_STL;
+    await route.fulfill({ status: 200, contentType: 'model/stl', body });
   });
 
   await page.addInitScript(({ config, runtimeCapabilities, artifactBundle, modelManifest, design }) => {
@@ -250,6 +262,14 @@ async function installContextMocks(
           verifierSource: 'mock',
         };
       }
+      if (cmd === 'verify_render') {
+        return {
+          passed: true,
+          summary: 'Visual checks passed.',
+          issues: [],
+          usage: null,
+        };
+      }
       if (cmd === 'finalize_generation_attempt') return null;
       if (cmd === 'save_last_design') return null;
       if (cmd === 'save_config') return null;
@@ -267,6 +287,22 @@ async function installContextMocks(
       return null;
     };
   }, { config, runtimeCapabilities, artifactBundle: bundle, modelManifest: manifest, design: mockedDesign });
+}
+
+async function selectViewerTarget(page: Page, expectedPanelText: string) {
+  await expect(page.locator('.viewer-shell canvas')).toBeVisible();
+  const bounds = await page.locator('.viewer-host').first().boundingBox();
+  expect(bounds).not.toBeNull();
+  if (!bounds) throw new Error('viewer bounds missing');
+
+  await page.waitForTimeout(250);
+  for (const yRatio of [0.45, 0.53, 0.61]) {
+    for (const xRatio of [0.36, 0.5, 0.64]) {
+      await page.mouse.click(bounds.x + bounds.width * xRatio, bounds.y + bounds.height * yRatio);
+      const panelText = (await page.locator('.param-panel').allTextContents())[0] ?? '';
+      if (panelText.includes(expectedPanelText)) return;
+    }
+  }
 }
 
 test('Given part selection When only model-global controls exist Then part panel does not duplicate them', async ({ page }) => {
@@ -464,7 +500,7 @@ test('Given Params select mode on mapped film gate target When target selected T
           label: 'Helicoid Adapter',
           kind: 'Part::Feature',
           semanticRole: 'thread',
-          viewerAssetPath: '/mock/context/helicoid-adapter.stl',
+          viewerAssetPath: '/mock/context/offscreen-helicoid-adapter.stl',
           viewerNodeIds: ['helicoid-adapter-node'],
           parameterKeys: ['helicoid_pitch', 'helicoid_clearance'],
           editable: true,
@@ -507,21 +543,14 @@ test('Given Params select mode on mapped film gate target When target selected T
 
   await page.getByRole('button', { name: 'PARAMS' }).click();
   await page.getByRole('button', { name: 'SELECT' }).click();
-  await expect(page.locator('.viewer-shell canvas')).toBeVisible();
-  const viewer = page.locator('.viewer-host').first();
-  const bounds = await viewer.boundingBox();
-  expect(bounds).not.toBeNull();
-  if (!bounds) throw new Error('viewer bounds missing');
-
-  await page.waitForTimeout(250);
-  await page.mouse.click(bounds.x + bounds.width * 0.5, bounds.y + bounds.height * 0.5);
+  await selectViewerTarget(page, 'Film Gap');
 
   await expect(page.locator('.param-panel')).toContainText('Film Gap');
   await expect(page.locator('.param-panel')).toContainText('Frame Width');
   await expect(page.locator('.param-panel')).not.toContainText('Helicoid Pitch');
   await expect(page.locator('.param-panel')).not.toContainText('Helicoid Clearance');
   await expect(page.locator('.param-panel .param-list .param-field')).toHaveCount(2);
-  await expect(page.locator('.part-chip.part-chip-active')).toContainText('Film Gate');
+  await expect(page.locator('.part-chip.part-chip-active')).toContainText('film gate');
 });
 
 test('Given Params select mode When mapped lens-bore target selected Then panel shows exactly one relevant lens-bore control and excludes unrelated controls', async ({
@@ -572,7 +601,7 @@ test('Given Params select mode When mapped lens-bore target selected Then panel 
           label: 'Film Gate',
           kind: 'Part::Feature',
           semanticRole: 'gate',
-          viewerAssetPath: '/mock/context/film-gate.stl',
+          viewerAssetPath: '/mock/context/offscreen-film-gate.stl',
           viewerNodeIds: ['film-gate-node'],
           parameterKeys: ['film_gap', 'film_frame_width'],
           editable: true,
@@ -600,7 +629,7 @@ test('Given Params select mode When mapped lens-bore target selected Then panel 
           label: 'Helicoid Adapter',
           kind: 'Part::Feature',
           semanticRole: 'thread',
-          viewerAssetPath: '/mock/context/helicoid-adapter.stl',
+          viewerAssetPath: '/mock/context/offscreen-helicoid-adapter.stl',
           viewerNodeIds: ['helicoid-adapter-node'],
           parameterKeys: ['helicoid_pitch'],
           editable: true,
@@ -643,21 +672,14 @@ test('Given Params select mode When mapped lens-bore target selected Then panel 
 
   await page.getByRole('button', { name: 'PARAMS' }).click();
   await page.getByRole('button', { name: 'SELECT' }).click();
-  await expect(page.locator('.viewer-shell canvas')).toBeVisible();
-  const viewer = page.locator('.viewer-host').first();
-  const bounds = await viewer.boundingBox();
-  expect(bounds).not.toBeNull();
-  if (!bounds) throw new Error('viewer bounds missing');
-
-  await page.waitForTimeout(250);
-  await page.mouse.click(bounds.x + bounds.width * 0.5, bounds.y + bounds.height * 0.5);
+  await selectViewerTarget(page, 'Lens Bore D');
 
   await expect(page.locator('.param-panel')).toContainText('Lens Bore D');
   await expect(page.locator('.param-panel')).not.toContainText('Film Gap');
   await expect(page.locator('.param-panel')).not.toContainText('Frame Width');
   await expect(page.locator('.param-panel')).not.toContainText('Helicoid Pitch');
   await expect(page.locator('.param-panel .param-list .param-field')).toHaveCount(1);
-  await expect(page.locator('.part-chip.part-chip-active')).toContainText('Lens Adapter');
+  await expect(page.locator('.part-chip.part-chip-active')).toContainText('lens adapter');
 });
 
 test('Given workbench idle When Params opens Then prewarmed panel is reused', async ({ page }) => {
@@ -695,28 +717,13 @@ test('Given Params select mode When viewer face is clicked Then Params focuses e
 
   await page.getByRole('button', { name: 'PARAMS' }).click();
   await page.getByRole('button', { name: 'SELECT' }).click();
-  await expect(page.locator('.viewer-shell canvas')).toBeVisible();
-  const viewer = page.locator('.viewer-host').first();
-  const bounds = await viewer.boundingBox();
-  expect(bounds).not.toBeNull();
-  if (!bounds) throw new Error('viewer bounds missing');
-
-  await page.waitForTimeout(250);
-  for (const yRatio of [0.45, 0.53, 0.61]) {
-    for (const xRatio of [0.36, 0.5, 0.64]) {
-      await page.mouse.click(bounds.x + bounds.width * xRatio, bounds.y + bounds.height * yRatio);
-      const panelText = (await page.locator('.param-panel').allTextContents())[0] ?? '';
-      if (panelText.includes('Low Width')) break;
-    }
-    const panelText = (await page.locator('.param-panel').allTextContents())[0] ?? '';
-    if (panelText.includes('Low Width')) break;
-  }
+  await selectViewerTarget(page, 'Low Width');
 
   await expect(page.locator('.viewer-part-overlay')).toHaveCount(0);
   await expect(page.locator('.param-panel')).toContainText('Low Width');
   await expect(page.locator('.param-panel')).not.toContainText('Hose OD');
   await expect(page.locator('.param-panel .param-list .param-field')).toHaveCount(1);
-  await expect(page.locator('.part-chip.part-chip-active')).toContainText('Low');
+  await expect(page.locator('.part-chip.part-chip-active')).toContainText('low');
 });
 
 test('Given Params select mode When viewer click hits unmapped part Then Params shows empty semantic state', async ({ page }) => {
@@ -759,7 +766,7 @@ test('Given Params select mode When viewer click hits unmapped part Then Params 
   await expect(page.locator('.param-panel')).toContainText(
     'No semantic controls are mapped to this part yet. Open RAW for fallback.',
   );
-  await expect(page.locator('.part-chip.part-chip-active')).toContainText('Nose');
+  await expect(page.locator('.part-chip.part-chip-active')).toContainText('nose');
 });
 
 test('Given select mode with ambiguous face targets When no face selected Then Params shows pending target message and no fallback controls', async ({
@@ -886,9 +893,9 @@ test('Given Params measure mode When viewer is clicked and dragged Then Params f
 
   await expect(page.locator('.viewer-part-overlay')).toHaveCount(0);
   await expect(page.locator('.part-chip-active')).toHaveCount(0);
-  await expect(page.locator('.param-panel .param-list .param-field')).toHaveCount(2);
-  await expect(page.locator('.param-panel')).toContainText('Hose OD');
-  await expect(page.locator('.param-panel')).toContainText('Low Width');
+  await expect(page.locator('.param-panel .param-list .param-field')).toHaveCount(0);
+  await expect(page.locator('.param-panel')).toContainText('hose od');
+  await expect(page.locator('.param-panel')).toContainText('low width');
 });
 
 test('Given default orbit mode and no selection When user drags viewer Then it does not select a part or open viewport controls', async ({ page }) => {

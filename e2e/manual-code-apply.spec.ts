@@ -144,6 +144,9 @@ function manualCodeApplyMockScript() {
       };
     }
     if (cmd === 'render_model') {
+      const sourceLanguage = window.__manualCodeApplyMockConfig?.sourceLanguage ?? 'legacyPython';
+      const engineKind = sourceLanguage === 'ecky' ? 'ecky' : 'freecad';
+      const geometryBackend = sourceLanguage === 'ecky' ? 'build123d' : 'freecad';
       const payload = {
         macroCode: String(args?.macroCode ?? ''),
         parameters: (args?.parameters as Record<string, unknown>) ?? {},
@@ -156,9 +159,9 @@ function manualCodeApplyMockScript() {
       return {
         modelId: `mock-model-${renderIndex}`,
         sourceKind: 'generated',
-        sourceLanguage: 'legacyPython',
-        geometryBackend: 'freecad',
-        engineKind: 'freecad',
+        sourceLanguage,
+        geometryBackend,
+        engineKind,
         contentHash: `mock-hash-${renderIndex}`,
         fcstdPath: `/mock-${renderIndex}.FCStd`,
         manifestPath: `/mock-${renderIndex}/manifest.json`,
@@ -170,11 +173,13 @@ function manualCodeApplyMockScript() {
       };
     }
     if (cmd === 'get_model_manifest') {
+      const sourceLanguage = window.__manualCodeApplyMockConfig?.sourceLanguage ?? 'legacyPython';
+      const geometryBackend = sourceLanguage === 'ecky' ? 'build123d' : 'freecad';
       return {
         modelId: String(args?.modelId ?? 'mock-model-1'),
         sourceKind: 'generated',
-        sourceLanguage: 'legacyPython',
-        geometryBackend: 'freecad',
+        sourceLanguage,
+        geometryBackend,
         document: {
           documentName: 'Bracket',
           documentLabel: 'Bracket',
@@ -207,6 +212,14 @@ function manualCodeApplyMockScript() {
         },
         verifierStatus: 'ok',
         verifierSource: 'mock',
+      };
+    }
+    if (cmd === 'verify_render') {
+      return {
+        passed: true,
+        summary: 'Visual checks passed.',
+        issues: [],
+        usage: null,
       };
     }
     if (cmd === 'get_thread') {
@@ -281,10 +294,14 @@ endsolid mock
   await page.getByRole('button', { name: 'DIALOGUE' }).click();
   await page.fill('textarea.prompt-input', 'make bracket');
   await page.locator('textarea.prompt-input').press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+  await expect
+    .poll(() => page.evaluate(() => window.__manualCodeApplyMock?.renderModelCalls.length ?? 0))
+    .toBeGreaterThan(0);
   await page.getByRole('button', { name: 'PARAMS' }).click({ force: true });
   const paramPanel = page.locator('.param-panel');
   await expect(paramPanel).toBeVisible({ timeout: 10000 });
-  await paramPanel.getByRole('button', { name: 'RAW' }).click();
+  await page.locator('[data-window-id="params"] .window-header').click({ force: true });
+  await paramPanel.getByRole('button', { name: 'RAW' }).click({ force: true });
   await expect(paramPanel.locator('[data-param-key="width"]')).toBeVisible();
 }
 
@@ -543,7 +560,7 @@ test.describe('Manual code apply/version coverage', () => {
     await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A');
     await page.keyboard.type('print("draft bracket")');
 
-    await page.locator('.code-modal-footer').getByRole('button', { name: 'APPLY' }).click();
+    await modal.getByRole('button', { name: 'APPLY', exact: true }).click();
 
     await expect
       .poll(async () =>
@@ -575,7 +592,7 @@ test.describe('Manual code apply/version coverage', () => {
     await editor.click();
     await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A');
     await page.keyboard.type('print("diffed bracket")');
-    await page.locator('.code-modal-footer').getByRole('button', { name: 'APPLY' }).click();
+    await modal.getByRole('button', { name: 'APPLY', exact: true }).click();
 
     const diffPanel = modal.getByTestId('last-macro-diff');
     await expect(diffPanel).toBeVisible();
@@ -604,7 +621,7 @@ test.describe('Manual code apply/version coverage', () => {
     await expect(modal.getByRole('button', { name: 'VERIFY INSERTED' })).toBeDisabled();
     await expect(modal.locator('.cm-content')).toContainText('(verify');
 
-    await modal.locator('.code-modal-footer').getByRole('button', { name: 'APPLY' }).click();
+    await modal.getByRole('button', { name: 'APPLY', exact: true }).click();
 
     await expect
       .poll(async () =>
@@ -678,7 +695,7 @@ test.describe('Manual code apply/version coverage', () => {
 
     const widthInput = page.locator('[data-param-key="width"] input[type="number"]').first();
     await widthInput.fill('42');
-    await page.getByRole('button', { name: 'APPLY' }).click();
+    await page.locator('.param-panel').getByRole('button', { name: 'APPLY' }).click();
 
     await expect
       .poll(async () =>
@@ -694,7 +711,11 @@ test.describe('Manual code apply/version coverage', () => {
 
     await page.getByLabel('Version title').fill('Final Bracket');
     await page.getByLabel('Version name').fill('V-fit');
-    await page.locator('.code-modal-footer').getByRole('button', { name: 'COMMIT VERSION' }).click();
+    await page
+      .locator('[role="dialog"]')
+      .filter({ hasText: 'MACRO INSPECTOR:' })
+      .getByRole('button', { name: 'COMMIT VERSION', exact: true })
+      .click();
 
     await expect
       .poll(async () =>
@@ -736,7 +757,7 @@ test.describe('Manual code apply/version coverage', () => {
     await modal.getByRole('button', { name: 'INSERT VERIFY' }).click();
     await modal.getByLabel('Version title').fill('Verified Bracket');
     await modal.getByLabel('Version name').fill('V-verify');
-    await modal.locator('.code-modal-footer').getByRole('button', { name: 'COMMIT VERSION' }).click();
+    await modal.getByRole('button', { name: 'COMMIT VERSION', exact: true }).click();
 
     await expect
       .poll(async () =>
@@ -788,7 +809,11 @@ test.describe('Manual code apply/version coverage', () => {
     await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A');
     await page.keyboard.type('print("edited bracket")');
 
-    await page.locator('.code-modal-footer').getByRole('button', { name: 'COMMIT VERSION' }).click();
+    await page
+      .locator('[role="dialog"]')
+      .filter({ hasText: 'MACRO INSPECTOR:' })
+      .getByRole('button', { name: 'COMMIT VERSION', exact: true })
+      .click();
 
     await expect
       .poll(async () => page.evaluate(() => window.__manualCodeApplyMock?.addManualVersionCalls.length ?? 0))
@@ -798,7 +823,9 @@ test.describe('Manual code apply/version coverage', () => {
     await expect(
       page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR:' }),
     ).toBeHidden();
-    await expect(page.locator('.code-modal-footer').getByRole('button', { name: 'COMMITTING...' })).toHaveCount(0);
+    await expect(
+      page.locator('.commit-actions').getByRole('button', { name: 'COMMITTING...' }),
+    ).toHaveCount(0);
   });
 
   test('Given first render fails When closing and reopening from viewport code button Then failed draft stays editable without a successful model', async ({

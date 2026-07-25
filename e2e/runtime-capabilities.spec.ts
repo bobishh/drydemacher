@@ -290,7 +290,8 @@ test.describe('Runtime capability boot repair', () => {
     await expect(page.locator('.boot-overlay')).toHaveCount(0);
     await page.waitForSelector('.workbench');
 
-    await page.getByRole('button', { name: '+' }).click();
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    await page.locator('[data-window-id="projects"]').getByRole('button', { name: '+ NEW' }).click();
     const importButton = page.getByRole('button', { name: 'Import FreeCAD' }).last();
     await expect(importButton).toBeDisabled();
     await expect(importButton).toHaveAttribute('title', /FreeCAD executable not found/);
