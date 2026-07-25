@@ -1,5 +1,5 @@
 use super::AgentContext;
-use crate::models::{AppError, AppResult};
+use crate::contracts::{AppError, AppResult};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};

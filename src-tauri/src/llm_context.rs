@@ -10,7 +10,7 @@ use crate::contracts::{ManifestBounds, ModelManifest, StructuralVerificationResu
 
 #[cfg(test)]
 use crate::contracts::ControlPrimitive;
-use crate::models::{DesignOutput, ParamValue};
+use crate::contracts::{DesignOutput, ParamValue};
 
 pub const MAX_DIGEST_PARTS: usize = 6;
 pub const MAX_DIGEST_PARAMS: usize = 12;
@@ -564,11 +564,11 @@ pub fn build_context_delta(
 mod tests {
     use super::*;
     use crate::contracts::{
-        ManifestBounds, PartBinding, StructuralIssue, StructuralMetrics, VerifierStatus,
-    };
-    use crate::models::{
         DesignOutput, EngineKind, GeometryBackend, InteractionMode, MacroDialect, SourceLanguage,
         UiSpec,
+    };
+    use crate::contracts::{
+        ManifestBounds, PartBinding, StructuralIssue, StructuralMetrics, VerifierStatus,
     };
     use std::collections::BTreeMap;
 

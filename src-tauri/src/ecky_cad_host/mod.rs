@@ -9,6 +9,7 @@ pub mod direct_occt_runtime;
 pub mod direct_occt_sdk;
 #[cfg(test)]
 pub(crate) mod native_parity_harness;
+pub mod source_compiler;
 pub mod svg_profile;
 pub mod text_profile;
 

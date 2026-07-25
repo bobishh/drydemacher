@@ -6,13 +6,14 @@ use base64::{engine::general_purpose, Engine as _};
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
-use crate::models::{
+use crate::contracts::{
     component_package_header, validate_component_package, validate_component_package_header,
     validate_design_params, validate_ui_spec, AppError, AppResult, ComponentDefinition,
     ComponentPackage, ComponentPackageHeader, ComponentParam, ComponentParamKind, DesignParams,
     InstalledAssemblyComponentSource, InstalledAssemblySource, InstalledComponentPackage,
-    InstalledComponentSource, ParamValue, ParsedParamsResult, PathResolver, UiField, UiSpec,
+    InstalledComponentSource, ParamValue, ParsedParamsResult, UiField, UiSpec,
 };
+use crate::models::PathResolver;
 
 pub const COMPONENT_PACKAGE_FILE_NAME: &str = "ecky-package.json";
 pub const COMPONENT_PACKAGE_HEADER_FILE_NAME: &str = "ecky-header.json";

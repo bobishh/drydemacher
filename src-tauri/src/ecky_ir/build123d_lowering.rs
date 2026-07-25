@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::contracts::{AppResult, ParamValue};
 use crate::ecky_core_ir::{
     CoreArrayOp, CoreBooleanOp, CoreFrameOp, CoreLiteral, CoreMetaOp, CoreNode, CoreNodeKind,
     CoreOperation, CorePathOp, CorePrimitive, CoreProgram, CoreReference, CoreSelectorPayload,
     CoreShapeBinding, CoreSurfaceOp, CoreSymbol, CoreTransformOp, CoreValueKind,
 };
-use crate::models::{AppResult, ParamValue};
 
 use super::edge_ops::{
     edge_selector_spec_from_core_payload, face_selector_spec_from_core_payload,
@@ -126,7 +126,7 @@ pub fn lower_to_build123d(source: &str) -> AppResult<String> {
         Ok(model) => lower_model_to_build123d(&model),
         Err(_) => {
             let program = crate::ecky_scheme::compile_to_core_program(source).map_err(|err| {
-                crate::models::AppError::from(crate::contracts::AuthoringError::surface(
+                crate::contracts::AppError::from(crate::contracts::AuthoringError::surface(
                     crate::contracts::AuthoringReason::ParseSyntax,
                     err.to_string(),
                 ))
@@ -647,10 +647,10 @@ fn lower_scalar_binding(value: &Value, scope: &LoweringScope<'_>) -> AppResult<L
     if let Ok(stringish) = lower_stringish_expr(value, scope) {
         return Ok(LoweredBinding::Stringish(stringish));
     }
-    if number_err.code == crate::models::AppErrorCode::Validation {
+    if number_err.code == crate::contracts::AppErrorCode::Validation {
         return Err(number_err);
     }
-    if bool_err.code == crate::models::AppErrorCode::Validation {
+    if bool_err.code == crate::contracts::AppErrorCode::Validation {
         return Err(bool_err);
     }
     Err(number_err)
@@ -3831,10 +3831,10 @@ impl<'a> ExprLowerer<'a> {
         if let Ok(stringish) = lower_stringish_expr(value, scope) {
             return Ok(LoweredBinding::Stringish(stringish));
         }
-        if number_err.code == crate::models::AppErrorCode::Validation {
+        if number_err.code == crate::contracts::AppErrorCode::Validation {
             return Err(number_err);
         }
-        if bool_err.code == crate::models::AppErrorCode::Validation {
+        if bool_err.code == crate::contracts::AppErrorCode::Validation {
             return Err(bool_err);
         }
         Err(number_err)

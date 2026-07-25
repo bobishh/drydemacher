@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::models::{AppError, AppErrorCode, AppResult};
+use crate::contracts::{AppError, AppErrorCode, AppResult};
 
 use super::mesh_literal::{
     build_mesh_literal, MAX_MESH_LITERAL_TRIANGLES, MAX_MESH_LITERAL_VERTICES,

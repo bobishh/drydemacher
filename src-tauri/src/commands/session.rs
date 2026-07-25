@@ -5,12 +5,12 @@ use std::path::Path;
 use portable_pty::PtySize;
 use tauri::{AppHandle, Manager, State};
 
+use crate::contracts::{
+    AgentSession, AppError, AppResult, LastDesignSnapshot, McpServerStatus, ThreadAgentState,
+};
 use crate::db;
 use crate::mcp::runtime;
-use crate::models::{
-    AgentSession, AppError, AppResult, AppState, LastDesignSnapshot, McpServerStatus,
-    ThreadAgentState, ViewportScreenshotCapture,
-};
+use crate::models::{AppState, ViewportScreenshotCapture};
 use crate::services::agent_dialogue;
 
 const HARD_BUSY_STALE_TIMEOUT_SECS: u64 = 30;
@@ -159,7 +159,7 @@ fn encode_agent_terminal_input(input: &crate::contracts::AgentTerminalInput) -> 
 pub async fn get_active_agent_sessions(state: State<'_, AppState>) -> AppResult<Vec<AgentSession>> {
     let conn = state.db.lock().await;
     db::get_active_agent_sessions(&conn, 600)
-        .map_err(|e| crate::models::AppError::persistence(e.to_string()))
+        .map_err(|e| crate::contracts::AppError::persistence(e.to_string()))
 }
 
 #[tauri::command]
@@ -638,11 +638,11 @@ async fn queue_agent_prompt_impl(
         crate::db::add_message(
             &conn,
             &thread_id,
-            &crate::models::Message {
+            &crate::contracts::Message {
                 id: message_id.clone(),
-                role: crate::models::MessageRole::User,
+                role: crate::contracts::MessageRole::User,
                 content,
-                status: crate::models::MessageStatus::Pending,
+                status: crate::contracts::MessageStatus::Pending,
                 output: None,
                 usage: None,
                 artifact_bundle: None,
@@ -869,7 +869,7 @@ async fn resolve_agent_prompt_impl(
                     &conn,
                     message_id,
                     crate::db::MessageStatusUpdate {
-                        status: &crate::models::MessageStatus::Working,
+                        status: &crate::contracts::MessageStatus::Working,
                         output: None,
                         usage: None,
                         artifact_bundle: None,
@@ -897,11 +897,11 @@ async fn resolve_agent_prompt_impl(
         agent_dialogue::add_dialogue_message(
             state,
             &thread_id,
-            &crate::models::Message {
+            &crate::contracts::Message {
                 id: message_id.clone(),
-                role: crate::models::MessageRole::User,
+                role: crate::contracts::MessageRole::User,
                 content: reply_content,
-                status: crate::models::MessageStatus::Working,
+                status: crate::contracts::MessageStatus::Working,
                 output: None,
                 usage: None,
                 artifact_bundle: None,
@@ -1053,8 +1053,9 @@ pub async fn restart_primary_auto_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contracts::AgentSession;
     use crate::contracts::{Config, McpConfig};
-    use crate::models::{AgentSession, McpSessionState, McpTargetRef};
+    use crate::models::{McpSessionState, McpTargetRef};
     use portable_pty::native_pty_system;
     use std::path::PathBuf;
 
@@ -1071,13 +1072,13 @@ mod tests {
             freecad_library_roots: Vec::new(),
             assets: Vec::new(),
             microwave: None,
-            voice: crate::models::VoiceConfig::default(),
+            voice: crate::contracts::VoiceConfig::default(),
             mcp: McpConfig::default(),
             has_seen_onboarding: true,
             connection_type: None,
-            default_engine_kind: crate::models::EngineKind::Freecad,
-            default_source_language: crate::models::SourceLanguage::LegacyPython,
-            default_geometry_backend: crate::models::GeometryBackend::Freecad,
+            default_engine_kind: crate::contracts::EngineKind::Freecad,
+            default_source_language: crate::contracts::SourceLanguage::LegacyPython,
+            default_geometry_backend: crate::contracts::GeometryBackend::Freecad,
             max_generation_attempts: 3,
             max_verify_attempts: 0,
             projects_root: None,
@@ -1114,11 +1115,11 @@ mod tests {
         assert_eq!(stored_thread.messages[0].id, queued.message_id);
         assert_eq!(
             stored_thread.messages[0].role,
-            crate::models::MessageRole::User
+            crate::contracts::MessageRole::User
         );
         assert_eq!(
             stored_thread.messages[0].status,
-            crate::models::MessageStatus::Pending
+            crate::contracts::MessageStatus::Pending
         );
         assert_eq!(stored_thread.messages[0].content, "Make the rim thinner.");
         assert_eq!(
@@ -1132,8 +1133,8 @@ mod tests {
         let conn =
             crate::db::init_db(&test_db_path("queue-agent-prompt-authoring-defaults")).expect("db");
         let mut config = test_config();
-        config.default_source_language = crate::models::SourceLanguage::EckyIrV0;
-        config.default_geometry_backend = crate::models::GeometryBackend::Freecad;
+        config.default_source_language = crate::contracts::SourceLanguage::EckyIrV0;
+        config.default_geometry_backend = crate::contracts::GeometryBackend::Freecad;
         let state = AppState::new(config, None, conn);
 
         let queued = queue_agent_prompt_impl(
@@ -1160,8 +1161,8 @@ mod tests {
         let conn =
             crate::db::init_db(&test_db_path("queue-agent-prompt-existing-authoring")).expect("db");
         let mut config = test_config();
-        config.default_source_language = crate::models::SourceLanguage::EckyIrV0;
-        config.default_geometry_backend = crate::models::GeometryBackend::Freecad;
+        config.default_source_language = crate::contracts::SourceLanguage::EckyIrV0;
+        config.default_geometry_backend = crate::contracts::GeometryBackend::Freecad;
         let state = AppState::new(config, None, conn);
 
         {
@@ -1286,11 +1287,11 @@ mod tests {
             crate::db::get_thread_messages(&conn, "thread-1").expect("messages")
         };
         assert_eq!(stored_messages.len(), 1);
-        assert_eq!(stored_messages[0].role, crate::models::MessageRole::User);
+        assert_eq!(stored_messages[0].role, crate::contracts::MessageRole::User);
         assert_eq!(stored_messages[0].content, "Use the smoother lip.");
         assert_eq!(
             stored_messages[0].status,
-            crate::models::MessageStatus::Working
+            crate::contracts::MessageStatus::Working
         );
         assert_eq!(
             stored_messages[0].attachment_images,
@@ -1350,7 +1351,7 @@ mod tests {
         assert_eq!(stored_messages[0].id, queued.message_id);
         assert_eq!(
             stored_messages[0].status,
-            crate::models::MessageStatus::Working
+            crate::contracts::MessageStatus::Working
         );
         assert_eq!(stored_messages[0].content, "Add a softer chamfer.");
     }
@@ -1416,8 +1417,14 @@ mod tests {
             .iter()
             .find(|message| message.id == second.message_id)
             .expect("second");
-        assert_eq!(first_message.status, crate::models::MessageStatus::Working);
-        assert_eq!(second_message.status, crate::models::MessageStatus::Working);
+        assert_eq!(
+            first_message.status,
+            crate::contracts::MessageStatus::Working
+        );
+        assert_eq!(
+            second_message.status,
+            crate::contracts::MessageStatus::Working
+        );
         assert_eq!(first_message.content, "Make it taller.");
         assert_eq!(second_message.content, "Then soften the rim.");
     }

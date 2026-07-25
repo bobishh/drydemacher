@@ -1,19 +1,20 @@
-use crate::models::SketchDocument;
-use crate::models::{
+use crate::contracts::SketchDocument;
+use crate::contracts::{
     validate_component_package, validate_design_params, validate_sketch_definition,
     validate_ui_spec, AppError, AppResult, ArtifactBundle, BrepProjectedLoopRole,
     ComponentDefinition, ComponentPackage, ComponentPort, DesignParams, ExportArtifact,
-    GeometryBackend, MacroDialect, PackageVisibility, PathResolver,
-    SketchAcceptedBrepCandidateSource, SketchAcceptedBrepComponentPackageRequest,
-    SketchBrepCandidateAcceptRequest, SketchBrepCandidateCell, SketchBrepCandidateEdge,
-    SketchBrepCandidateGraph, SketchBrepCandidateRequest, SketchBrepCandidateResponse,
-    SketchBrepCandidateSearch, SketchBrepCandidateSolution, SketchBrepCandidateSourceStrategy,
-    SketchBrepCandidateVertex, SketchBrepProjectionValidation, SketchDefinition,
-    SketchDraftOperationKind, SketchDraftRequest, SketchDraftSource, SketchFeatureSuggestion,
-    SketchPreviewHullRequest, SketchPrimitive, SketchPrimitiveKind, SketchSuggestionRequest,
-    SketchSuggestionResponse, SketchValidationIssue, SketchValidationIssueKind,
-    SketchValidationSeverity, SketchView, SourceLanguage, COMPONENT_PACKAGE_SCHEMA_VERSION,
+    GeometryBackend, MacroDialect, PackageVisibility, SketchAcceptedBrepCandidateSource,
+    SketchAcceptedBrepComponentPackageRequest, SketchBrepCandidateAcceptRequest,
+    SketchBrepCandidateCell, SketchBrepCandidateEdge, SketchBrepCandidateGraph,
+    SketchBrepCandidateRequest, SketchBrepCandidateResponse, SketchBrepCandidateSearch,
+    SketchBrepCandidateSolution, SketchBrepCandidateSourceStrategy, SketchBrepCandidateVertex,
+    SketchBrepProjectionValidation, SketchDefinition, SketchDraftOperationKind, SketchDraftRequest,
+    SketchDraftSource, SketchFeatureSuggestion, SketchPreviewHullRequest, SketchPrimitive,
+    SketchPrimitiveKind, SketchSuggestionRequest, SketchSuggestionResponse, SketchValidationIssue,
+    SketchValidationIssueKind, SketchValidationSeverity, SketchView, SourceLanguage,
+    COMPONENT_PACKAGE_SCHEMA_VERSION,
 };
+use crate::models::PathResolver;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json;
 use std::collections::{HashMap, HashSet};
@@ -488,7 +489,7 @@ fn accepted_brep_target_ids(bundle: &ArtifactBundle) -> AppResult<HashSet<String
             bundle.manifest_path, err
         ))
     })?;
-    let manifest: crate::models::ModelManifest = serde_json::from_str(&raw).map_err(|err| {
+    let manifest: crate::contracts::ModelManifest = serde_json::from_str(&raw).map_err(|err| {
         AppError::parse(format!(
             "Failed to parse accepted BRep manifest '{}': {}",
             bundle.manifest_path, err
@@ -537,7 +538,7 @@ fn normalize_accepted_brep_ports(
             bundle.manifest_path, err
         ))
     })?;
-    let manifest: crate::models::ModelManifest = serde_json::from_str(&raw).map_err(|err| {
+    let manifest: crate::contracts::ModelManifest = serde_json::from_str(&raw).map_err(|err| {
         AppError::parse(format!(
             "Failed to parse accepted BRep manifest '{}': {}",
             bundle.manifest_path, err
@@ -622,7 +623,7 @@ fn normalize_accepted_brep_ports(
         .collect())
 }
 
-fn preferred_accepted_brep_target_id(target: &crate::models::SelectionTarget) -> Option<String> {
+fn preferred_accepted_brep_target_id(target: &crate::contracts::SelectionTarget) -> Option<String> {
     target
         .target_id
         .clone()
@@ -2607,7 +2608,7 @@ mod tests {
                 [0.0, 0.0],
             ],
         );
-        outer.topology = Some(crate::models::SketchPrimitiveTopology {
+        outer.topology = Some(crate::contracts::SketchPrimitiveTopology {
             loop_id: Some("front-outer".to_string()),
             edge_ids: vec!["outer-a".to_string()],
             loop_role: Some(BrepProjectedLoopRole::Outer),
@@ -2623,7 +2624,7 @@ mod tests {
                 [40.0, 0.0],
             ],
         );
-        hole.topology = Some(crate::models::SketchPrimitiveTopology {
+        hole.topology = Some(crate::contracts::SketchPrimitiveTopology {
             loop_id: Some("front-hole".to_string()),
             edge_ids: vec!["inner-a".to_string()],
             loop_role: Some(BrepProjectedLoopRole::Hole),
@@ -2750,7 +2751,7 @@ mod tests {
 
     fn sample_manifest_value(alias_ids: &[&str]) -> serde_json::Value {
         serde_json::json!({
-            "schemaVersion": crate::models::MODEL_RUNTIME_SCHEMA_VERSION,
+            "schemaVersion": crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             "modelId": "generated-abc123",
             "sourceKind": "generated",
             "engineKind": "freecad",
@@ -2806,10 +2807,10 @@ mod tests {
     fn sample_artifact_bundle(manifest_path: &str) -> ArtifactBundle {
         ArtifactBundle {
             geometry_provenance: None,
-            schema_version: crate::models::MODEL_RUNTIME_SCHEMA_VERSION,
+            schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: "generated-abc123".to_string(),
-            source_kind: crate::models::ModelSourceKind::Generated,
-            engine_kind: crate::models::EngineKind::Freecad,
+            source_kind: crate::contracts::ModelSourceKind::Generated,
+            engine_kind: crate::contracts::EngineKind::Freecad,
             source_language: SourceLanguage::LegacyPython,
             geometry_backend: GeometryBackend::Freecad,
             content_hash: "hash".to_string(),
@@ -2819,7 +2820,7 @@ mod tests {
             macro_path: Some("/tmp/model.py".to_string()),
             preview_stl_path: "/tmp/model.stl".to_string(),
             viewer_assets: Vec::new(),
-            edge_targets: vec![crate::models::ViewerEdgeTarget {
+            edge_targets: vec![crate::contracts::ViewerEdgeTarget {
                 target_id: "alias-edge".to_string(),
                 durable_target_id: None,
                 canonical_target_id: None,
@@ -2828,18 +2829,18 @@ mod tests {
                 viewer_node_id: "node-shell".to_string(),
                 label: "Shell edge".to_string(),
                 editable: true,
-                start: crate::models::ViewerEdgePoint {
+                start: crate::contracts::ViewerEdgePoint {
                     x: 0.0,
                     y: 0.0,
                     z: 0.0,
                 },
-                end: crate::models::ViewerEdgePoint {
+                end: crate::contracts::ViewerEdgePoint {
                     x: 1.0,
                     y: 0.0,
                     z: 0.0,
                 },
             }],
-            face_targets: vec![crate::models::ViewerFaceTarget {
+            face_targets: vec![crate::contracts::ViewerFaceTarget {
                 target_id: "alias-face".to_string(),
                 durable_target_id: None,
                 canonical_target_id: None,
@@ -2848,7 +2849,7 @@ mod tests {
                 viewer_node_id: "node-shell".to_string(),
                 label: "Shell face".to_string(),
                 editable: true,
-                center: crate::models::ViewerEdgePoint {
+                center: crate::contracts::ViewerEdgePoint {
                     x: 0.0,
                     y: 0.0,
                     z: 0.0,
@@ -2920,7 +2921,7 @@ mod tests {
             artifact_bundle: Some(sample_artifact_bundle(&manifest_path.to_string_lossy())),
             document: three_view_box_document(),
             solution_id: "solution0".to_string(),
-            port_types: vec![crate::models::PortTypeDefinition {
+            port_types: vec![crate::contracts::PortTypeDefinition {
                 type_id: "mechanical.anchor.v1".to_string(),
                 display_name: "Anchor".to_string(),
                 base: None,
@@ -2930,9 +2931,9 @@ mod tests {
                 params: Vec::new(),
             }],
             params: Vec::new(),
-            ui_spec: crate::models::UiSpec::default(),
+            ui_spec: crate::contracts::UiSpec::default(),
             initial_params: DesignParams::new(),
-            ports: vec![crate::models::ComponentPort {
+            ports: vec![crate::contracts::ComponentPort {
                 port_id: "anchor".to_string(),
                 type_id: "mechanical.anchor.v1".to_string(),
                 target_ids: vec!["legacy-shell".to_string()],
@@ -2974,7 +2975,7 @@ mod tests {
             artifact_bundle: Some(sample_artifact_bundle(&manifest_path.to_string_lossy())),
             document: three_view_box_document(),
             solution_id: "solution0".to_string(),
-            port_types: vec![crate::models::PortTypeDefinition {
+            port_types: vec![crate::contracts::PortTypeDefinition {
                 type_id: "mechanical.anchor.v1".to_string(),
                 display_name: "Anchor".to_string(),
                 base: None,
@@ -2984,9 +2985,9 @@ mod tests {
                 params: Vec::new(),
             }],
             params: Vec::new(),
-            ui_spec: crate::models::UiSpec::default(),
+            ui_spec: crate::contracts::UiSpec::default(),
             initial_params: DesignParams::new(),
-            ports: vec![crate::models::ComponentPort {
+            ports: vec![crate::contracts::ComponentPort {
                 port_id: "anchor".to_string(),
                 type_id: "mechanical.anchor.v1".to_string(),
                 target_ids: vec!["legacy-edge".to_string()],
@@ -3028,7 +3029,7 @@ mod tests {
             artifact_bundle: Some(sample_artifact_bundle(&manifest_path.to_string_lossy())),
             document: three_view_box_document(),
             solution_id: "solution0".to_string(),
-            port_types: vec![crate::models::PortTypeDefinition {
+            port_types: vec![crate::contracts::PortTypeDefinition {
                 type_id: "mechanical.anchor.v1".to_string(),
                 display_name: "Anchor".to_string(),
                 base: None,
@@ -3038,9 +3039,9 @@ mod tests {
                 params: Vec::new(),
             }],
             params: Vec::new(),
-            ui_spec: crate::models::UiSpec::default(),
+            ui_spec: crate::contracts::UiSpec::default(),
             initial_params: DesignParams::new(),
-            ports: vec![crate::models::ComponentPort {
+            ports: vec![crate::contracts::ComponentPort {
                 port_id: "anchor".to_string(),
                 type_id: "mechanical.anchor.v1".to_string(),
                 target_ids: vec!["legacy-edge".to_string()],
@@ -3192,25 +3193,25 @@ mod tests {
         let edge_target_id = manifest
             .selection_targets
             .iter()
-            .find(|target| target.kind == crate::models::SelectionTargetKind::Edge)
+            .find(|target| target.kind == crate::contracts::SelectionTargetKind::Edge)
             .and_then(|target| target.target_id.clone())
             .expect("edge target");
         let face_target_id = manifest
             .selection_targets
             .iter()
-            .find(|target| target.kind == crate::models::SelectionTargetKind::Face)
+            .find(|target| target.kind == crate::contracts::SelectionTargetKind::Face)
             .and_then(|target| target.target_id.clone())
             .expect("face target");
         let expected_edge_target_id = manifest
             .selection_targets
             .iter()
-            .find(|target| target.kind == crate::models::SelectionTargetKind::Edge)
+            .find(|target| target.kind == crate::contracts::SelectionTargetKind::Edge)
             .and_then(|target| target.target_id.clone())
             .expect("edge target");
         let expected_face_target_id = manifest
             .selection_targets
             .iter()
-            .find(|target| target.kind == crate::models::SelectionTargetKind::Face)
+            .find(|target| target.kind == crate::contracts::SelectionTargetKind::Face)
             .and_then(|target| target.target_id.clone())
             .expect("face target");
 
@@ -3230,7 +3231,7 @@ mod tests {
                 artifact_bundle: Some(bundle),
                 document: three_view_box_document(),
                 solution_id: "solution0".to_string(),
-                port_types: vec![crate::models::PortTypeDefinition {
+                port_types: vec![crate::contracts::PortTypeDefinition {
                     type_id: "mechanical.anchor.v1".to_string(),
                     display_name: "Anchor".to_string(),
                     base: None,
@@ -3240,9 +3241,9 @@ mod tests {
                     params: Vec::new(),
                 }],
                 params: Vec::new(),
-                ui_spec: crate::models::UiSpec::default(),
+                ui_spec: crate::contracts::UiSpec::default(),
                 initial_params: DesignParams::new(),
-                ports: vec![crate::models::ComponentPort {
+                ports: vec![crate::contracts::ComponentPort {
                     port_id: "anchor".to_string(),
                     type_id: "mechanical.anchor.v1".to_string(),
                     target_ids: vec![edge_target_id, face_target_id],
@@ -3268,9 +3269,9 @@ mod tests {
                 .expect("import packaged step");
         let imported_manifest_raw = fs::read_to_string(imported_bundle.manifest_path.trim())
             .expect("read imported manifest");
-        let imported_manifest: crate::models::ModelManifest =
+        let imported_manifest: crate::contracts::ModelManifest =
             serde_json::from_str(&imported_manifest_raw).expect("parse imported manifest");
-        let installed_source = crate::models::InstalledComponentSource {
+        let installed_source = crate::contracts::InstalledComponentSource {
             package_id: package.package_id.clone(),
             version: package.version.clone(),
             package_display_name: package.display_name.clone(),

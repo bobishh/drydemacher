@@ -1,4 +1,5 @@
-use crate::models::{AppResult, PathResolver};
+use crate::contracts::AppResult;
+use crate::models::PathResolver;
 
 // --- Component library tools (component-unification T5) ---
 

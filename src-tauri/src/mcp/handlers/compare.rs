@@ -1,6 +1,7 @@
+use crate::contracts::{AppError, AppErrorCode, AppResult};
 use crate::freecad::resolve_resource_path;
 use crate::mcp::contracts::{CompareModelsRequest, CompareModelsResponse};
-use crate::models::{AppError, AppErrorCode, AppResult, PathResolver};
+use crate::models::PathResolver;
 
 pub async fn handle_compare_models(
     app: &dyn PathResolver,

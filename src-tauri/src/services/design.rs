@@ -2,13 +2,14 @@ use crate::commands::design::{
     derive_framework_controls, parse_macro_params, reconcile_framework_params,
 };
 use crate::contracts::infer_macro_dialect_from_code;
-use crate::db;
-use crate::models::{
+use crate::contracts::{
     validate_design_output, validate_design_params, validate_model_manifest,
-    validate_model_runtime_bundle, validate_ui_spec, AgentOrigin, AppError, AppResult, AppState,
+    validate_model_runtime_bundle, validate_ui_spec, AgentOrigin, AppError, AppResult,
     ArtifactBundle, DesignOutput, DesignParams, InteractionMode, MacroDialect, Message,
-    MessageRole, MessageStatus, ModelManifest, PathResolver, PostProcessingSpec, UiSpec,
+    MessageRole, MessageStatus, ModelManifest, PostProcessingSpec, UiSpec,
 };
+use crate::db;
+use crate::models::{AppState, PathResolver};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -89,8 +90,8 @@ pub struct AddManualVersionRequest {
     pub title: String,
     pub version_name: String,
     pub macro_code: String,
-    pub source_language: Option<crate::models::SourceLanguage>,
-    pub geometry_backend: Option<crate::models::GeometryBackend>,
+    pub source_language: Option<crate::contracts::SourceLanguage>,
+    pub geometry_backend: Option<crate::contracts::GeometryBackend>,
     pub parameters: DesignParams,
     pub ui_spec: UiSpec,
     pub post_processing: Option<PostProcessingSpec>,
@@ -136,23 +137,25 @@ fn resolve_macro_contracts(
 
 fn resolve_manual_authoring_context(
     macro_dialect: MacroDialect,
-    source_language: Option<crate::models::SourceLanguage>,
-    geometry_backend: Option<crate::models::GeometryBackend>,
+    source_language: Option<crate::contracts::SourceLanguage>,
+    geometry_backend: Option<crate::contracts::GeometryBackend>,
 ) -> (
-    crate::models::EngineKind,
-    crate::models::SourceLanguage,
-    crate::models::GeometryBackend,
+    crate::contracts::EngineKind,
+    crate::contracts::SourceLanguage,
+    crate::contracts::GeometryBackend,
 ) {
     let resolved_source = source_language.unwrap_or(match macro_dialect {
-        MacroDialect::EckyIrV0 => crate::models::SourceLanguage::EckyIrV0,
-        MacroDialect::Build123d => crate::models::SourceLanguage::Build123d,
-        _ => crate::models::SourceLanguage::LegacyPython,
+        MacroDialect::EckyIrV0 => crate::contracts::SourceLanguage::EckyIrV0,
+        MacroDialect::Build123d => crate::contracts::SourceLanguage::Build123d,
+        _ => crate::contracts::SourceLanguage::LegacyPython,
     });
     let engine_kind = resolved_source.to_engine_kind();
     let resolved_backend = geometry_backend.unwrap_or(match resolved_source {
-        crate::models::SourceLanguage::EckyIrV0 => crate::models::GeometryBackend::EckyRust,
-        crate::models::SourceLanguage::Build123d => crate::models::GeometryBackend::Build123d,
-        crate::models::SourceLanguage::LegacyPython => crate::models::GeometryBackend::Freecad,
+        crate::contracts::SourceLanguage::EckyIrV0 => crate::contracts::GeometryBackend::EckyRust,
+        crate::contracts::SourceLanguage::Build123d => crate::contracts::GeometryBackend::Build123d,
+        crate::contracts::SourceLanguage::LegacyPython => {
+            crate::contracts::GeometryBackend::Freecad
+        }
     });
     (engine_kind, resolved_source, resolved_backend)
 }
@@ -180,7 +183,7 @@ pub async fn add_manual_version(
 
     let (ui_spec, parameters, macro_dialect) =
         resolve_macro_contracts(&macro_code, &parameters, &ui_spec)?;
-    let (ui_spec, parameters) = crate::models::reconcile_post_processing_controls(
+    let (ui_spec, parameters) = crate::contracts::reconcile_post_processing_controls(
         &ui_spec,
         &parameters,
         post_processing.as_ref(),
@@ -386,12 +389,15 @@ params = {
     fn resolve_manual_authoring_context_preserves_ecky_ir_build123d_combo() {
         let (engine_kind, source_language, geometry_backend) = resolve_manual_authoring_context(
             MacroDialect::EckyIrV0,
-            Some(crate::models::SourceLanguage::EckyIrV0),
-            Some(crate::models::GeometryBackend::Build123d),
+            Some(crate::contracts::SourceLanguage::EckyIrV0),
+            Some(crate::contracts::GeometryBackend::Build123d),
         );
 
-        assert_eq!(engine_kind, crate::models::EngineKind::EckyIrV0);
-        assert_eq!(source_language, crate::models::SourceLanguage::EckyIrV0);
-        assert_eq!(geometry_backend, crate::models::GeometryBackend::Build123d);
+        assert_eq!(engine_kind, crate::contracts::EngineKind::EckyIrV0);
+        assert_eq!(source_language, crate::contracts::SourceLanguage::EckyIrV0);
+        assert_eq!(
+            geometry_backend,
+            crate::contracts::GeometryBackend::Build123d
+        );
     }
 }

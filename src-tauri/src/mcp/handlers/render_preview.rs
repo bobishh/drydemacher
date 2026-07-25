@@ -6,13 +6,11 @@ use super::{
     store_session_render_preview_at_revision, try_record_agent_error, AgentContext,
     StoreSessionRenderPreviewRequest, TraceEvent,
 };
+use crate::contracts::{AppError, AppResult, DesignOutput, InteractionMode, MacroDialect, UiSpec};
 use crate::mcp::contracts::{
     MacroReplaceRequest, MacroReplaceResponse, ParamsPatchRequest, ParamsPatchResponse,
 };
-use crate::models::{
-    AppError, AppResult, AppState, DesignOutput, InteractionMode, MacroDialect, PathResolver,
-    UiSpec,
-};
+use crate::models::{AppState, PathResolver};
 use crate::services::design::{auto_heal_legacy_params, is_param_schema_mismatch};
 use crate::services::render;
 use std::time::Instant;
@@ -132,7 +130,7 @@ pub async fn handle_params_preview_render(
 
         let mut healed_ui_spec = base_design.ui_spec.clone();
         let mut healed_params = merged_params.clone();
-        if let Err(err) = crate::models::validate_design_params(&healed_params, &healed_ui_spec) {
+        if let Err(err) = crate::contracts::validate_design_params(&healed_params, &healed_ui_spec) {
             if base_design.macro_dialect == MacroDialect::Legacy && is_param_schema_mismatch(&err) {
                 if let Some((next_ui_spec, next_params, heal_report)) = auto_heal_legacy_params(
                     &base_design.macro_code,
@@ -327,34 +325,36 @@ pub async fn handle_params_preview_render(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MacroAuthoringContext {
-    pub(super) source_language: crate::models::SourceLanguage,
-    pub(super) geometry_backend: crate::models::GeometryBackend,
+    pub(super) source_language: crate::contracts::SourceLanguage,
+    pub(super) geometry_backend: crate::contracts::GeometryBackend,
 }
 
-pub(super) fn infer_macro_source_language(dialect: &MacroDialect) -> crate::models::SourceLanguage {
+pub(super) fn infer_macro_source_language(
+    dialect: &MacroDialect,
+) -> crate::contracts::SourceLanguage {
     match dialect {
-        MacroDialect::EckyIrV0 => crate::models::SourceLanguage::EckyIrV0,
-        MacroDialect::Build123d => crate::models::SourceLanguage::Build123d,
+        MacroDialect::EckyIrV0 => crate::contracts::SourceLanguage::EckyIrV0,
+        MacroDialect::Build123d => crate::contracts::SourceLanguage::Build123d,
         MacroDialect::Legacy | MacroDialect::CadFrameworkV1 => {
-            crate::models::SourceLanguage::LegacyPython
+            crate::contracts::SourceLanguage::LegacyPython
         }
     }
 }
 
 fn macro_dialect_for_source_language(
-    source_language: crate::models::SourceLanguage,
+    source_language: crate::contracts::SourceLanguage,
 ) -> MacroDialect {
     match source_language {
-        crate::models::SourceLanguage::EckyIrV0 => MacroDialect::EckyIrV0,
-        crate::models::SourceLanguage::Build123d => MacroDialect::Build123d,
-        crate::models::SourceLanguage::LegacyPython => MacroDialect::Legacy,
+        crate::contracts::SourceLanguage::EckyIrV0 => MacroDialect::EckyIrV0,
+        crate::contracts::SourceLanguage::Build123d => MacroDialect::Build123d,
+        crate::contracts::SourceLanguage::LegacyPython => MacroDialect::Legacy,
     }
 }
 
 pub(super) fn resolve_macro_replace_dialect(
     saved_target_dialect: &MacroDialect,
     first_version: bool,
-    configured_source_language: crate::models::SourceLanguage,
+    configured_source_language: crate::contracts::SourceLanguage,
 ) -> MacroDialect {
     if first_version {
         macro_dialect_for_source_language(configured_source_language)
@@ -378,7 +378,7 @@ fn log_macro_backend_resolution(
     phase: &'static str,
     base_context: &MacroAuthoringContext,
     macro_dialect: &MacroDialect,
-    requested_geometry_backend: Option<crate::models::GeometryBackend>,
+    requested_geometry_backend: Option<crate::contracts::GeometryBackend>,
     resolved_context: &MacroAuthoringContext,
     thread_id: Option<&str>,
     message_id: Option<&str>,
@@ -430,11 +430,11 @@ fn log_macro_backend_resolution(
 }
 
 pub(super) fn resolve_macro_authoring_context(
-    base_source_language: crate::models::SourceLanguage,
-    base_geometry_backend: crate::models::GeometryBackend,
+    base_source_language: crate::contracts::SourceLanguage,
+    base_geometry_backend: crate::contracts::GeometryBackend,
     macro_dialect: &MacroDialect,
-    requested_geometry_backend: Option<crate::models::GeometryBackend>,
-    config_default_backend: crate::models::GeometryBackend,
+    requested_geometry_backend: Option<crate::contracts::GeometryBackend>,
+    config_default_backend: crate::contracts::GeometryBackend,
 ) -> AppResult<MacroAuthoringContext> {
     let macro_source_language = infer_macro_source_language(macro_dialect);
     if macro_source_language != base_source_language {
@@ -446,7 +446,7 @@ pub(super) fn resolve_macro_authoring_context(
     }
 
     if let Some(requested) = requested_geometry_backend {
-        if base_source_language != crate::models::SourceLanguage::EckyIrV0
+        if base_source_language != crate::contracts::SourceLanguage::EckyIrV0
             && requested != base_geometry_backend
         {
             return Err(AppError::validation(format!(
@@ -464,7 +464,7 @@ pub(super) fn resolve_macro_authoring_context(
     // switching the config engine re-renders every Ecky model on it, no new
     // thread needed. Non-Ecky source (legacy python / build123d) is bound to
     // its own backend and cannot be switched by config.
-    let geometry_backend = if base_source_language == crate::models::SourceLanguage::EckyIrV0 {
+    let geometry_backend = if base_source_language == crate::contracts::SourceLanguage::EckyIrV0 {
         requested_geometry_backend.unwrap_or(config_default_backend)
     } else {
         base_geometry_backend
@@ -479,7 +479,7 @@ pub(super) fn resolve_macro_authoring_context(
 pub(super) fn first_version_authoring_context(
     state: &AppState,
     _macro_dialect: &MacroDialect,
-    requested_geometry_backend: Option<crate::models::GeometryBackend>,
+    requested_geometry_backend: Option<crate::contracts::GeometryBackend>,
 ) -> MacroAuthoringContext {
     // Config owns the source language and geometry backend for new threads.
     // The macro_dialect is only used for param parsing downstream, not for
@@ -565,7 +565,7 @@ pub async fn handle_macro_preview_render(
                 interaction_mode: InteractionMode::Design,
                 macro_code: String::new(),
                 macro_dialect: macro_dialect_for_source_language(configured.source_language),
-                engine_kind: crate::models::EngineKind::default(),
+                engine_kind: crate::contracts::EngineKind::default(),
                 source_language: configured.source_language,
                 geometry_backend: configured.geometry_backend,
                 ui_spec: UiSpec { fields: vec![] },
@@ -707,7 +707,7 @@ pub async fn handle_macro_preview_render(
                     MacroDialect::Legacy,
                 )
             };
-        if let Err(err) = crate::models::validate_design_params(&initial_params, &ui_spec) {
+        if let Err(err) = crate::contracts::validate_design_params(&initial_params, &ui_spec) {
             if macro_dialect == MacroDialect::Legacy && is_param_schema_mismatch(&err) {
                 if let Some((next_ui_spec, next_params, heal_report)) = auto_heal_legacy_params(
                     &req.macro_code,

@@ -6,12 +6,13 @@ use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 use crate::context::*;
-use crate::models::{
-    validate_design_output, AppError, AppErrorCode, AppResult, AppState, ArtifactBundle,
-    Attachment, AttachmentKind, DesignOutput, FinalizeStatus, GenerateDesignOptions,
-    GenerateOutput, IntentDecision, InteractionMode, MacroDialect, Message, MessageRole,
-    MessageStatus, ModelManifest, StructuralVerificationResult, UiSpec, UsageSummary,
+use crate::contracts::{
+    validate_design_output, AppError, AppErrorCode, AppResult, ArtifactBundle, Attachment,
+    AttachmentKind, DesignOutput, FinalizeStatus, GenerateDesignOptions, GenerateOutput,
+    IntentDecision, InteractionMode, MacroDialect, Message, MessageRole, MessageStatus,
+    ModelManifest, StructuralVerificationResult, UiSpec, UsageSummary,
 };
+use crate::models::AppState;
 use crate::services::design::{auto_heal_legacy_params, is_param_schema_mismatch};
 use crate::services::session::{build_runtime_snapshot, write_last_snapshot};
 use crate::{
@@ -25,27 +26,27 @@ use crate::{
 /// the app-specific runtime contract is enough. Ecky is proprietary and unknown to
 /// models, so a compact authoring guide is embedded.
 pub fn language_guide_text(
-    source_language: crate::models::SourceLanguage,
-    geometry_backend: crate::models::GeometryBackend,
+    source_language: crate::contracts::SourceLanguage,
+    geometry_backend: crate::contracts::GeometryBackend,
 ) -> String {
     match source_language {
-        crate::models::SourceLanguage::EckyIrV0 => format!(
+        crate::contracts::SourceLanguage::EckyIrV0 => format!(
             "Ecky is a proprietary in-app CAD language. It is NOT publicly documented; \
              this guide and the example below are the complete authoritative reference. \
              Do not invent forms, ops, or keywords beyond what is listed here.\n\n{}\n\
              Prefer the smallest model that satisfies the request, then add named structure.\n",
             crate::agent_prompt::agent_language_reference(geometry_backend)
         ),
-        crate::models::SourceLanguage::Build123d => build123d_python_guide_text(),
-        crate::models::SourceLanguage::LegacyPython => freecad_python_guide_text(),
+        crate::contracts::SourceLanguage::Build123d => build123d_python_guide_text(),
+        crate::contracts::SourceLanguage::LegacyPython => freecad_python_guide_text(),
     }
 }
 
 /// Full system prompt for API-mode design generation: base technical contract plus
 /// documentation for the target source language.
 pub fn design_system_prompt(
-    source_language: crate::models::SourceLanguage,
-    geometry_backend: crate::models::GeometryBackend,
+    source_language: crate::contracts::SourceLanguage,
+    geometry_backend: crate::contracts::GeometryBackend,
 ) -> String {
     format!(
         "{}\n\nTARGET LANGUAGE GUIDE (AUTHORITATIVE FOR `macro_code`)\n{}",
@@ -70,7 +71,7 @@ pub fn freecad_python_guide_text() -> String {
     .to_string()
 }
 
-pub fn ecky_ir_v0_guide_text(backend: crate::models::GeometryBackend) -> String {
+pub fn ecky_ir_v0_guide_text(backend: crate::contracts::GeometryBackend) -> String {
     crate::agent_prompt::agent_language_reference(backend)
 }
 
@@ -101,7 +102,7 @@ pub fn build123d_python_guide_text() -> String {
 
 #[allow(dead_code)]
 fn ecky_backend_guide_text(
-    backend: crate::models::GeometryBackend,
+    backend: crate::contracts::GeometryBackend,
     backend_label: &str,
     implicit_backend: bool,
 ) -> String {
@@ -111,7 +112,7 @@ fn ecky_backend_guide_text(
     } else {
         format!("Target geometryBackend: `{backend_label}`.\n")
     };
-    let backend_note = if matches!(backend, crate::models::GeometryBackend::EckyRust) {
+    let backend_note = if matches!(backend, crate::contracts::GeometryBackend::EckyRust) {
         "- `mesh`/`eckyRust` renders through EckyRust CAD VM. Do not promise STEP unless `ArtifactBundle.exportArtifacts` proves one exists.\n"
     } else {
         "- This is still `.ecky` source. Backend only selects lowerer/runtime behavior; never emit Python source for `.ecky` requests. Wall-pattern is mesh/eckyRust only; it rejects on this backend.\n"
@@ -298,18 +299,18 @@ Start primitive or sketch. Add params. Add named `build` stages. Add booleans. A
 }
 
 fn ecky_build123d_guide_text() -> String {
-    crate::agent_prompt::agent_language_reference(crate::models::GeometryBackend::Build123d)
+    crate::agent_prompt::agent_language_reference(crate::contracts::GeometryBackend::Build123d)
 }
 
 pub fn freecad_guide_text() -> String {
-    crate::agent_prompt::agent_language_reference(crate::models::GeometryBackend::Freecad)
+    crate::agent_prompt::agent_language_reference(crate::contracts::GeometryBackend::Freecad)
 }
 
 pub fn ecky_source_guide_text() -> String {
-    crate::agent_prompt::agent_language_reference(crate::models::GeometryBackend::EckyRust)
+    crate::agent_prompt::agent_language_reference(crate::contracts::GeometryBackend::EckyRust)
 }
 
-fn selected_engine(state: &State<'_, AppState>) -> AppResult<crate::models::Engine> {
+fn selected_engine(state: &State<'_, AppState>) -> AppResult<crate::contracts::Engine> {
     let config = state.config.lock().unwrap();
     let engine = config
         .engines
@@ -328,25 +329,25 @@ fn selected_engine(state: &State<'_, AppState>) -> AppResult<crate::models::Engi
     Ok(engine)
 }
 
-fn default_engine_kind(app_state: &AppState) -> crate::models::EngineKind {
+fn default_engine_kind(app_state: &AppState) -> crate::contracts::EngineKind {
     app_state.config.lock().unwrap().default_engine_kind
 }
 
-fn default_source_language(app_state: &AppState) -> crate::models::SourceLanguage {
+fn default_source_language(app_state: &AppState) -> crate::contracts::SourceLanguage {
     app_state.config.lock().unwrap().default_source_language
 }
 
-fn default_geometry_backend(app_state: &AppState) -> crate::models::GeometryBackend {
+fn default_geometry_backend(app_state: &AppState) -> crate::contracts::GeometryBackend {
     app_state.config.lock().unwrap().default_geometry_backend
 }
 
 async fn resolve_generation_engine_kind(
     app_state: &AppState,
     _thread_id: Option<&str>,
-    explicit: Option<crate::models::EngineKind>,
+    explicit: Option<crate::contracts::EngineKind>,
     working_design: Option<&DesignOutput>,
     last_output: Option<&DesignOutput>,
-) -> AppResult<crate::models::EngineKind> {
+) -> AppResult<crate::contracts::EngineKind> {
     if let Some(engine_kind) = explicit {
         return Ok(engine_kind);
     }
@@ -365,10 +366,10 @@ async fn resolve_generation_engine_kind(
 async fn resolve_generation_source_language(
     app_state: &AppState,
     _thread_id: Option<&str>,
-    explicit: Option<crate::models::SourceLanguage>,
+    explicit: Option<crate::contracts::SourceLanguage>,
     working_design: Option<&DesignOutput>,
     last_output: Option<&DesignOutput>,
-) -> AppResult<crate::models::SourceLanguage> {
+) -> AppResult<crate::contracts::SourceLanguage> {
     if let Some(source_language) = explicit {
         return Ok(source_language);
     }
@@ -387,10 +388,10 @@ async fn resolve_generation_source_language(
 async fn resolve_generation_geometry_backend(
     app_state: &AppState,
     _thread_id: Option<&str>,
-    explicit: Option<crate::models::GeometryBackend>,
+    explicit: Option<crate::contracts::GeometryBackend>,
     working_design: Option<&DesignOutput>,
     last_output: Option<&DesignOutput>,
-) -> AppResult<crate::models::GeometryBackend> {
+) -> AppResult<crate::contracts::GeometryBackend> {
     if let Some(geometry_backend) = explicit {
         return Ok(geometry_backend);
     }
@@ -728,7 +729,7 @@ pub async fn generate_design(
 
     if !question_mode {
         if framework_enabled {
-            if engine_kind == crate::models::EngineKind::EckyIrV0 {
+            if engine_kind == crate::contracts::EngineKind::EckyIrV0 {
                 output.data.macro_dialect = MacroDialect::EckyIrV0;
             } else if let Some(parsed) =
                 crate::commands::design::derive_framework_controls(&output.data.macro_code)?
@@ -743,9 +744,9 @@ pub async fn generate_design(
             }
         } else {
             output.data.macro_dialect =
-                if source_language == crate::models::SourceLanguage::EckyIrV0 {
+                if source_language == crate::contracts::SourceLanguage::EckyIrV0 {
                     MacroDialect::EckyIrV0
-                } else if source_language == crate::models::SourceLanguage::Build123d {
+                } else if source_language == crate::contracts::SourceLanguage::Build123d {
                     MacroDialect::Build123d
                 } else {
                     MacroDialect::Legacy
@@ -1169,10 +1170,11 @@ mod tests {
     };
     use crate::context::PromptContext;
     use crate::contracts::{Config, McpConfig};
-    use crate::models::{
-        AppState, DesignOutput, EngineKind, GeometryBackend, InteractionMode, MacroDialect,
-        SourceLanguage, UiSpec,
+    use crate::contracts::{
+        DesignOutput, EngineKind, GeometryBackend, InteractionMode, MacroDialect, SourceLanguage,
+        UiSpec,
     };
+    use crate::models::AppState;
     use std::path::PathBuf;
 
     fn test_db_path(name: &str) -> PathBuf {
@@ -1188,7 +1190,7 @@ mod tests {
             freecad_library_roots: Vec::new(),
             assets: Vec::new(),
             microwave: None,
-            voice: crate::models::VoiceConfig::default(),
+            voice: crate::contracts::VoiceConfig::default(),
             mcp: McpConfig::default(),
             has_seen_onboarding: true,
             connection_type: None,
@@ -1217,19 +1219,19 @@ mod tests {
                 macro_code: "import FreeCAD".to_string(),
                 macro_dialect: macro_dialect.clone(),
                 engine_kind: if macro_dialect == MacroDialect::EckyIrV0 {
-                    crate::models::EngineKind::EckyIrV0
+                    crate::contracts::EngineKind::EckyIrV0
                 } else {
-                    crate::models::EngineKind::Freecad
+                    crate::contracts::EngineKind::Freecad
                 },
                 geometry_backend: if macro_dialect == MacroDialect::EckyIrV0 {
-                    crate::models::GeometryBackend::EckyRust
+                    crate::contracts::GeometryBackend::EckyRust
                 } else {
-                    crate::models::GeometryBackend::Freecad
+                    crate::contracts::GeometryBackend::Freecad
                 },
                 source_language: if macro_dialect == MacroDialect::EckyIrV0 {
-                    crate::models::SourceLanguage::EckyIrV0
+                    crate::contracts::SourceLanguage::EckyIrV0
                 } else {
-                    crate::models::SourceLanguage::LegacyPython
+                    crate::contracts::SourceLanguage::LegacyPython
                 },
                 ui_spec: UiSpec { fields: Vec::new() },
                 initial_params: Default::default(),
@@ -1345,7 +1347,7 @@ mod tests {
         assert!(!build123d.contains("`neovius`"));
         assert!(!build123d.contains("`attractor-field`"));
 
-        let ecky = ecky_ir_v0_guide_text(crate::models::GeometryBackend::EckyRust);
+        let ecky = ecky_ir_v0_guide_text(crate::contracts::GeometryBackend::EckyRust);
         assert!(ecky.contains("Current fileExtension: `.ecky`."));
         assert!(ecky.contains("Current sourceLanguage: `ecky`."));
         assert!(ecky.contains("never from thread metadata"));
@@ -1399,7 +1401,7 @@ mod tests {
     fn guide_lists_only_manifest_cad_ops_for_backend_specific_surface() {
         let build123d = build123d_guide_text();
         let freecad = freecad_guide_text();
-        let mesh = ecky_ir_v0_guide_text(crate::models::GeometryBackend::EckyRust);
+        let mesh = ecky_ir_v0_guide_text(crate::contracts::GeometryBackend::EckyRust);
 
         for op in crate::ecky_language_surface::CAD_OPS_PORTABLE {
             assert!(

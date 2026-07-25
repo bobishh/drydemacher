@@ -6,14 +6,15 @@ use std::path::Path;
 
 use tauri::{AppHandle, State};
 
-use crate::db;
-use crate::freecad;
-use crate::models::{
-    AppError, AppResult, AppState, ArtifactBundle, BrepHiddenLineProjectionRequest,
+use crate::contracts::{
+    AppError, AppResult, ArtifactBundle, BrepHiddenLineProjectionRequest,
     BrepHiddenLineProjectionResponse, DesignOutput, DesignParams, ExportPartInput,
     FreecadLibraryImportRequest, FreecadLibraryItem, FreecadLibrarySearchRequest, InteractionMode,
     MacroDialect, ManifestBounds, ModelManifest, ModelSourceKind, ParamValue, UiField, UiSpec,
 };
+use crate::db;
+use crate::freecad;
+use crate::models::AppState;
 use crate::services::session::write_last_snapshot;
 
 const ECKY_IR_BOOK_RESOURCE_PATH: &str = "docs/ecky-ir-field-guide.epub";
@@ -149,9 +150,9 @@ fn build_imported_output(
         interaction_mode: InteractionMode::Design,
         macro_code: String::new(),
         macro_dialect: MacroDialect::Legacy,
-        engine_kind: crate::models::EngineKind::Freecad,
-        source_language: crate::models::SourceLanguage::LegacyPython,
-        geometry_backend: crate::models::GeometryBackend::Freecad,
+        engine_kind: crate::contracts::EngineKind::Freecad,
+        source_language: crate::contracts::SourceLanguage::LegacyPython,
+        geometry_backend: crate::contracts::GeometryBackend::Freecad,
         ui_spec,
         initial_params,
         post_processing: None,
@@ -321,35 +322,15 @@ pub(crate) fn export_multipart_stl_zip_impl(
                 ))
             })?;
         } else {
-            match read_binary_stl_triangles(Path::new(&part.path)) {
-                Ok(triangles) => {
-                    let (triangles, _) = localize_stl_triangles(triangles);
-                    write_binary_stl_triangles(&mut zip, &triangles).map_err(|err| {
-                        AppError::persistence(format!(
-                            "Failed to write localized '{}' into multipart STL archive: {}",
-                            export_part_label(part),
-                            err
-                        ))
-                    })?;
-                }
-                Err(_) => {
-                    let bytes = fs::read(&part.path).map_err(|err| {
-                        AppError::persistence(format!(
-                            "Failed to read export part '{}' at '{}': {}",
-                            export_part_label(part),
-                            part.path,
-                            err
-                        ))
-                    })?;
-                    zip.write_all(&bytes).map_err(|err| {
-                        AppError::persistence(format!(
-                            "Failed to write '{}' into multipart STL archive: {}",
-                            export_part_label(part),
-                            err
-                        ))
-                    })?;
-                }
-            }
+            let triangles = read_binary_stl_triangles(Path::new(&part.path))?;
+            let (triangles, _) = localize_stl_triangles(triangles);
+            write_binary_stl_triangles(&mut zip, &triangles).map_err(|err| {
+                AppError::persistence(format!(
+                    "Failed to write localized '{}' into multipart STL archive: {}",
+                    export_part_label(part),
+                    err
+                ))
+            })?;
         }
     }
 
@@ -469,7 +450,7 @@ fn read_binary_stl_triangles(path: &Path) -> AppResult<Vec<[[f32; 3]; 3]>> {
 
 fn transform_stl_triangles(
     triangles: Vec<[[f32; 3]; 3]>,
-    frame: &crate::models::PortFrame,
+    frame: &crate::contracts::PortFrame,
 ) -> Vec<[[f32; 3]; 3]> {
     triangles
         .into_iter()
@@ -503,7 +484,7 @@ fn localize_stl_triangles(mut triangles: Vec<[[f32; 3]; 3]>) -> (Vec<[[f32; 3]; 
     (triangles, min)
 }
 
-fn transform_stl_vertex(vertex: [f32; 3], frame: &crate::models::PortFrame) -> [f32; 3] {
+fn transform_stl_vertex(vertex: [f32; 3], frame: &crate::contracts::PortFrame) -> [f32; 3] {
     [
         (frame.origin[0]
             + frame.x_axis[0] * vertex[0] as f64
@@ -853,7 +834,7 @@ pub async fn render_model(
     macro_code: String,
     parameters: DesignParams,
     macro_dialect: Option<MacroDialect>,
-    geometry_backend: Option<crate::models::GeometryBackend>,
+    geometry_backend: Option<crate::contracts::GeometryBackend>,
     post_processing: Option<crate::contracts::PostProcessingSpec>,
     previous_manifest: Option<ModelManifest>,
     state: State<'_, AppState>,
@@ -969,19 +950,21 @@ pub async fn apply_imported_model(
     if let Some(message_id) = message_id.as_ref() {
         let db = state.db.lock().await;
         db::update_message_model_manifest(&db, message_id, &next_manifest).map_err(
-            |err: rusqlite::Error| crate::models::AppError::persistence(err.to_string()),
+            |err: rusqlite::Error| crate::contracts::AppError::persistence(err.to_string()),
         )?;
         db::update_message_artifact_bundle(&db, message_id, &next_bundle).map_err(
-            |err: rusqlite::Error| crate::models::AppError::persistence(err.to_string()),
+            |err: rusqlite::Error| crate::contracts::AppError::persistence(err.to_string()),
         )?;
 
         let existing_output = db::get_message_output_and_thread(&db, message_id)
-            .map_err(|err: rusqlite::Error| crate::models::AppError::persistence(err.to_string()))?
+            .map_err(|err: rusqlite::Error| {
+                crate::contracts::AppError::persistence(err.to_string())
+            })?
             .map(|(output, _)| output);
         let mut imported_output = build_imported_output(&next_manifest, existing_output.as_ref());
         imported_output.initial_params = parameters.clone();
         db::update_message_output(&db, message_id, &imported_output)
-            .map_err(|err| crate::models::AppError::persistence(err.to_string()))?;
+            .map_err(|err| crate::contracts::AppError::persistence(err.to_string()))?;
         persisted_output = Some(imported_output);
     }
 
@@ -1064,11 +1047,11 @@ pub async fn save_model_manifest(
     if let Some(message_id) = message_id.as_ref() {
         let db = state.db.lock().await;
         db::update_message_model_manifest(&db, message_id, &manifest).map_err(
-            |err: rusqlite::Error| crate::models::AppError::persistence(err.to_string()),
+            |err: rusqlite::Error| crate::contracts::AppError::persistence(err.to_string()),
         )?;
         if let Some(bundle) = refreshed_bundle.as_ref() {
             db::update_message_artifact_bundle(&db, message_id, bundle).map_err(
-                |err: rusqlite::Error| crate::models::AppError::persistence(err.to_string()),
+                |err: rusqlite::Error| crate::contracts::AppError::persistence(err.to_string()),
             )?;
         }
 
@@ -1080,12 +1063,12 @@ pub async fn save_model_manifest(
         ) {
             let existing_output = db::get_message_output_and_thread(&db, message_id)
                 .map_err(|err: rusqlite::Error| {
-                    crate::models::AppError::persistence(err.to_string())
+                    crate::contracts::AppError::persistence(err.to_string())
                 })?
                 .map(|(output, _)| output);
             let imported_output = build_imported_output(&manifest, existing_output.as_ref());
             db::update_message_output(&db, message_id, &imported_output)
-                .map_err(|err| crate::models::AppError::persistence(err.to_string()))?;
+                .map_err(|err| crate::contracts::AppError::persistence(err.to_string()))?;
             persisted_output = Some(imported_output);
         }
     }
@@ -1149,7 +1132,7 @@ pub async fn get_mess_stl_path(app: AppHandle) -> AppResult<String> {
 
     Ok(path
         .to_str()
-        .ok_or_else(|| crate::models::AppError::internal("Invalid mess STL path."))?
+        .ok_or_else(|| crate::contracts::AppError::internal("Invalid mess STL path."))?
         .to_string())
 }
 
@@ -1157,7 +1140,7 @@ pub async fn get_mess_stl_path(app: AppHandle) -> AppResult<String> {
 #[specta::specta]
 pub async fn export_file(source_path: String, target_path: String) -> AppResult<()> {
     std::fs::copy(&source_path, &target_path).map_err(|err| {
-        crate::models::AppError::persistence(format!("Failed to export file: {}", err))
+        crate::contracts::AppError::persistence(format!("Failed to export file: {}", err))
     })?;
     Ok(())
 }
@@ -1208,7 +1191,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
-    use crate::models::{
+    use crate::contracts::{
         Advisory, AdvisoryCondition, AdvisorySeverity, ControlPrimitive, ControlPrimitiveKind,
         ControlView, ControlViewScope, ControlViewSection, ControlViewSource, DocumentMetadata,
         EnrichmentStatus, ManifestEnrichmentState, ParameterGroup, PartBinding, PrimitiveBinding,
@@ -1263,9 +1246,9 @@ mod tests {
             source_digest: None,
             core_digest: None,
             ast_schema_version: None,
-            engine_kind: crate::models::EngineKind::Freecad,
-            geometry_backend: crate::models::GeometryBackend::Freecad,
-            source_language: crate::models::SourceLanguage::LegacyPython,
+            engine_kind: crate::contracts::EngineKind::Freecad,
+            geometry_backend: crate::contracts::GeometryBackend::Freecad,
+            source_language: crate::contracts::SourceLanguage::LegacyPython,
             document: DocumentMetadata {
                 document_name: "Imported Shell".to_string(),
                 document_label: "Imported Shell".to_string(),
@@ -1481,7 +1464,7 @@ mod tests {
                     object_name: Some("Ring".to_string()),
                     part_id: Some("part-ring".to_string()),
                     display_color: None,
-                    placement_frame: Some(crate::models::PortFrame {
+                    placement_frame: Some(crate::contracts::PortFrame {
                         origin: [12.0, 34.0, 56.0],
                         x_axis: [0.0, 1.0, 0.0],
                         y_axis: [-1.0, 0.0, 0.0],
@@ -1588,7 +1571,7 @@ mod tests {
                     object_name: Some("Ring".to_string()),
                     part_id: Some("part-ring".to_string()),
                     display_color: Some("#2F4F6FFF".to_string()),
-                    placement_frame: Some(crate::models::PortFrame {
+                    placement_frame: Some(crate::contracts::PortFrame {
                         origin: [12.0, 34.0, 56.0],
                         x_axis: [1.0, 0.0, 0.0],
                         y_axis: [0.0, 1.0, 0.0],
@@ -1896,6 +1879,55 @@ mod tests {
             "ascii-model".to_string(),
         )
         .unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("ascii"),
+            "ASCII STL must be rejected with a message naming ASCII, got: {err}"
+        );
+    }
+
+    #[test]
+    fn multipart_stl_zip_rejects_ascii_stl_instead_of_copying_raw_bytes() {
+        let root = temp_export_dir("multipart-zip-ascii-reject");
+        let body_path = root.join("body.stl");
+        let lid_path = root.join("lid.stl");
+        let zip_path = root.join("ascii.zip");
+        write_binary_stl_triangles_to_path(
+            &body_path,
+            &[[[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]]],
+        );
+        helper_write_ascii_stl(
+            &lid_path,
+            &[[
+                [-78.0, -48.0, 11.0],
+                [55.0, -48.0, 11.0],
+                [-78.0, 48.0, 11.0],
+            ]],
+        );
+
+        let err = export_multipart_stl_zip_impl(
+            &[
+                ExportPartInput {
+                    label: "body".to_string(),
+                    path: body_path.to_string_lossy().to_string(),
+                    object_name: Some("body".to_string()),
+                    part_id: Some("part-body".to_string()),
+                    display_color: None,
+                    placement_frame: None,
+                },
+                ExportPartInput {
+                    label: "lid".to_string(),
+                    path: lid_path.to_string_lossy().to_string(),
+                    object_name: Some("lid".to_string()),
+                    part_id: Some("part-lid".to_string()),
+                    display_color: None,
+                    placement_frame: None,
+                },
+            ],
+            zip_path.to_string_lossy().as_ref(),
+            "ascii-model".to_string(),
+        )
+        .unwrap_err();
+
         assert!(
             err.to_string().to_lowercase().contains("ascii"),
             "ASCII STL must be rejected with a message naming ASCII, got: {err}"

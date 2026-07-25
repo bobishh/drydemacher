@@ -8,8 +8,8 @@ use csgrs::mesh::polygon::Polygon as IrPolygon;
 use csgrs::mesh::Mesh;
 use csgrs::traits::CSG;
 
+use crate::contracts::{AppError, AppResult};
 use crate::ecky_deterministic;
-use crate::models::{AppError, AppResult};
 
 const MAX_SAFE_PATTERN_STL_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -115,11 +115,11 @@ pub fn apply_wall_pattern(
                         }))
                     {
                         for tri in result {
-                            tris.push(IrPolygon::new(tri.to_vec(), poly.metadata.clone()));
+                            tris.push(IrPolygon::new(tri.to_vec(), poly.metadata));
                         }
                     }
                 }
-                IrMesh::from_polygons(&tris, mesh.metadata.clone())
+                IrMesh::from_polygons(&tris, mesh.metadata)
             });
     let levels = recommended_subdivision_levels(&patterned, spec);
     ensure_pattern_budget(patterned.polygons.len(), levels)?;

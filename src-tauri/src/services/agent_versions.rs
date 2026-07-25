@@ -1,10 +1,10 @@
+use crate::contracts::{
+    AgentOrigin, AgentSession, AppError, AppResult, ArtifactBundle, DesignOutput, Message,
+    MessageRole, MessageStatus, ModelManifest, TargetLeaseInfo,
+};
 use crate::db;
 use crate::mcp::runtime;
-use crate::models::{
-    AgentOrigin, AgentSession, AppError, AppResult, AppState, ArtifactBundle, DesignOutput,
-    McpTargetRef, Message, MessageRole, MessageStatus, ModelManifest, PathResolver,
-    TargetLeaseInfo,
-};
+use crate::models::{AppState, McpTargetRef, PathResolver};
 use std::time::Instant;
 
 const AGENT_TARGET_LEASE_TTL_SECS: u64 = 45;
@@ -262,14 +262,14 @@ pub async fn save_or_update_agent_version_for_session(
         design_output.version_name = default_agent_version_name();
     }
     let validate_started = Instant::now();
-    let (next_ui_spec, next_params) = crate::models::reconcile_post_processing_controls(
+    let (next_ui_spec, next_params) = crate::contracts::reconcile_post_processing_controls(
         &design_output.ui_spec,
         &design_output.initial_params,
         design_output.post_processing.as_ref(),
     );
     design_output.ui_spec = next_ui_spec;
     design_output.initial_params = next_params;
-    crate::models::validate_design_output(&design_output)?;
+    crate::contracts::validate_design_output(&design_output)?;
     push_save_profile(
         state,
         &session_id,
@@ -509,7 +509,7 @@ mod tests {
         Config, DisplacementSpec, McpConfig, ParamValue, PostProcessingSpec, ProjectionType,
         UiField, UiSpec,
     };
-    use crate::models::{InteractionMode, MacroDialect};
+    use crate::contracts::{InteractionMode, MacroDialect};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
@@ -544,13 +544,13 @@ mod tests {
             freecad_library_roots: Vec::new(),
             assets: Vec::new(),
             microwave: None,
-            voice: crate::models::VoiceConfig::default(),
+            voice: crate::contracts::VoiceConfig::default(),
             mcp: McpConfig::default(),
             has_seen_onboarding: true,
             connection_type: None,
-            default_engine_kind: crate::models::EngineKind::Freecad,
-            default_source_language: crate::models::SourceLanguage::LegacyPython,
-            default_geometry_backend: crate::models::GeometryBackend::Freecad,
+            default_engine_kind: crate::contracts::EngineKind::Freecad,
+            default_source_language: crate::contracts::SourceLanguage::LegacyPython,
+            default_geometry_backend: crate::contracts::GeometryBackend::Freecad,
             max_generation_attempts: 3,
             max_verify_attempts: 0,
             projects_root: None,
@@ -565,9 +565,9 @@ mod tests {
             interaction_mode: InteractionMode::Design,
             macro_code: macro_code.to_string(),
             macro_dialect: MacroDialect::Legacy,
-            engine_kind: crate::models::EngineKind::Freecad,
-            source_language: crate::models::SourceLanguage::LegacyPython,
-            geometry_backend: crate::models::GeometryBackend::Freecad,
+            engine_kind: crate::contracts::EngineKind::Freecad,
+            source_language: crate::contracts::SourceLanguage::LegacyPython,
+            geometry_backend: crate::contracts::GeometryBackend::Freecad,
             ui_spec: UiSpec {
                 fields: vec![UiField::Number {
                     key: "width".to_string(),

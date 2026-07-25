@@ -1,8 +1,8 @@
-use crate::llm_context::{build_authoring_digest, format_authoring_digest_text};
-use crate::models::{
+use crate::contracts::{
     infer_macro_dialect_from_code, ArtifactBundle, DesignOutput, EngineKind, GeometryBackend,
     InteractionMode, Message, MessageRole, ModelManifest, SourceLanguage, ThreadReference, UiSpec,
 };
+use crate::llm_context::{build_authoring_digest, format_authoring_digest_text};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedAuthoringContext {
@@ -55,6 +55,31 @@ pub fn latest_artifact_bundle(messages: &[Message]) -> Option<ArtifactBundle> {
         .rev()
         .find(|m| m.role == MessageRole::Assistant && m.artifact_bundle.is_some())
         .and_then(|m| m.artifact_bundle.clone())
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LatestAssistantSnapshot {
+    pub output: Option<DesignOutput>,
+    pub model_manifest: Option<ModelManifest>,
+    pub artifact_bundle: Option<ArtifactBundle>,
+}
+
+pub fn latest_assistant_snapshot(messages: &[Message]) -> LatestAssistantSnapshot {
+    messages
+        .iter()
+        .rev()
+        .find(|message| {
+            message.role == MessageRole::Assistant
+                && (message.output.is_some()
+                    || message.model_manifest.is_some()
+                    || message.artifact_bundle.is_some())
+        })
+        .map(|message| LatestAssistantSnapshot {
+            output: message.output.clone(),
+            model_manifest: message.model_manifest.clone(),
+            artifact_bundle: message.artifact_bundle.clone(),
+        })
+        .unwrap_or_default()
 }
 
 pub fn build_design_digest(
@@ -361,9 +386,7 @@ pub fn assemble_context(
 ) -> PromptContext {
     if let Some(tid) = thread_id {
         let messages = crate::db::get_thread_messages_for_context(db, &tid).unwrap_or_default();
-        let last_o = latest_output(&messages);
-        let last_manifest = latest_manifest(&messages);
-        let last_artifact_bundle = latest_artifact_bundle(&messages);
+        let latest_snapshot = latest_assistant_snapshot(&messages);
         let summary = crate::db::get_thread_summary(db, &tid)
             .ok()
             .flatten()
@@ -384,9 +407,15 @@ pub fn assemble_context(
             .unwrap_or_default();
         let refs = crate::db::get_thread_references(db, &tid).unwrap_or_default();
 
-        let last_output = working_design.or(last_o);
-        let design_digest = build_design_digest(last_output.as_ref(), last_manifest.as_ref());
-        let artifact_digest = build_artifact_digest(last_artifact_bundle.as_ref());
+        let has_working_design = working_design.is_some();
+        let last_output = working_design.or(latest_snapshot.output);
+        let design_manifest = if has_working_design {
+            None
+        } else {
+            latest_snapshot.model_manifest.as_ref()
+        };
+        let design_digest = build_design_digest(last_output.as_ref(), design_manifest);
+        let artifact_digest = build_artifact_digest(latest_snapshot.artifact_bundle.as_ref());
 
         PromptContext {
             thread_id: tid,
@@ -402,10 +431,10 @@ pub fn assemble_context(
     } else {
         let fallback_output = parent_macro_code.map(|code| {
             let macro_dialect = infer_macro_dialect_from_code(&code);
-            let engine_kind = if macro_dialect == crate::models::MacroDialect::EckyIrV0 {
-                crate::models::EngineKind::EckyIrV0
+            let engine_kind = if macro_dialect == crate::contracts::MacroDialect::EckyIrV0 {
+                crate::contracts::EngineKind::EckyIrV0
             } else {
-                crate::models::EngineKind::Freecad
+                crate::contracts::EngineKind::Freecad
             };
             DesignOutput {
                 title: "Untitled Design".to_string(),
@@ -514,9 +543,10 @@ pub fn format_contextual_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{
-        ArtifactBundle, DesignOutput, EngineKind, ExportArtifact, GeometryBackend, Message,
-        MessageStatus, ModelSourceKind, ParamValue, SourceLanguage,
+    use crate::contracts::{
+        ArtifactBundle, DesignOutput, DocumentMetadata, EngineKind, EnrichmentStatus,
+        ExportArtifact, GeometryBackend, ManifestEnrichmentState, Message, MessageStatus,
+        ModelSourceKind, ParamValue, SourceLanguage,
     };
 
     fn mock_message(role: &str, content: &str, output: Option<DesignOutput>) -> Message {
@@ -545,9 +575,9 @@ mod tests {
             response: "Test response".to_string(),
             interaction_mode: InteractionMode::Design,
             macro_dialect: infer_macro_dialect_from_code("import FreeCAD"),
-            engine_kind: crate::models::EngineKind::Freecad,
-            source_language: crate::models::SourceLanguage::LegacyPython,
-            geometry_backend: crate::models::GeometryBackend::Freecad,
+            engine_kind: crate::contracts::EngineKind::Freecad,
+            source_language: crate::contracts::SourceLanguage::LegacyPython,
+            geometry_backend: crate::contracts::GeometryBackend::Freecad,
             macro_code: "import FreeCAD".to_string(),
             ui_spec: UiSpec::default(),
             initial_params: Default::default(),
@@ -579,6 +609,45 @@ mod tests {
             callout_anchors: Vec::new(),
             measurement_guides: Vec::new(),
             export_artifacts,
+        }
+    }
+
+    fn mock_manifest(model_id: &str) -> ModelManifest {
+        ModelManifest {
+            geometry_provenance: None,
+            schema_version: 1,
+            model_id: model_id.to_string(),
+            source_kind: ModelSourceKind::Generated,
+            source_digest: None,
+            core_digest: None,
+            ast_schema_version: None,
+            engine_kind: EngineKind::EckyIrV0,
+            source_language: SourceLanguage::EckyIrV0,
+            geometry_backend: GeometryBackend::EckyRust,
+            document: DocumentMetadata {
+                document_name: model_id.to_string(),
+                document_label: model_id.to_string(),
+                source_path: None,
+                object_count: 0,
+                warnings: Vec::new(),
+            },
+            parts: Vec::new(),
+            parameter_groups: Vec::new(),
+            control_primitives: Vec::new(),
+            control_relations: Vec::new(),
+            control_views: Vec::new(),
+            preview_views: Vec::new(),
+            advisories: Vec::new(),
+            selection_targets: Vec::new(),
+            measurement_annotations: Vec::new(),
+            tagged_anchors: Default::default(),
+            feature_graph: None,
+            correspondence_graph: None,
+            warnings: Vec::new(),
+            enrichment_state: ManifestEnrichmentState {
+                status: EnrichmentStatus::None,
+                proposals: Vec::new(),
+            },
         }
     }
 
@@ -799,6 +868,20 @@ mod tests {
     }
 
     #[test]
+    fn latest_assistant_snapshot_keeps_output_manifest_and_artifact_from_same_message() {
+        let mut first = mock_message("assistant", "first", Some(mock_design("First")));
+        first.model_manifest = Some(mock_manifest("model-first"));
+        first.artifact_bundle = Some(mock_artifact_bundle("model-first", Vec::new()));
+        let second = mock_message("assistant", "second", Some(mock_design("Second")));
+
+        let snapshot = latest_assistant_snapshot(&[first, second]);
+
+        assert_eq!(snapshot.output.unwrap().title, "Second");
+        assert!(snapshot.model_manifest.is_none());
+        assert!(snapshot.artifact_bundle.is_none());
+    }
+
+    #[test]
     fn build_artifact_digest_reports_step_truth_from_exports_only() {
         let no_step = build_artifact_digest(Some(&mock_artifact_bundle("mesh-only", Vec::new())));
         assert!(no_step.contains("hasStepExport: false"));
@@ -808,43 +891,47 @@ mod tests {
 
         let mut bundle =
             mock_artifact_bundle("cad-step", vec![step_export("/tmp/cad-step/model.step")]);
-        bundle.edge_targets.push(crate::models::ViewerEdgeTarget {
-            target_id: "body:edge:0:0-0-0_10-0-0".to_string(),
-            durable_target_id: None,
-            canonical_target_id: None,
-            alias_ids: Vec::new(),
-            part_id: "body".to_string(),
-            viewer_node_id: "body".to_string(),
-            label: "Body.Edge1".to_string(),
-            editable: true,
-            start: crate::models::ViewerEdgePoint {
-                x: 0.0,
-                y: 0.0,
-                z: 0.0,
-            },
-            end: crate::models::ViewerEdgePoint {
-                x: 10.0,
-                y: 0.0,
-                z: 0.0,
-            },
-        });
-        bundle.face_targets.push(crate::models::ViewerFaceTarget {
-            target_id: "body:face:0:5-5-5:100".to_string(),
-            durable_target_id: None,
-            canonical_target_id: None,
-            alias_ids: Vec::new(),
-            part_id: "body".to_string(),
-            viewer_node_id: "body".to_string(),
-            label: "Body.Face1".to_string(),
-            editable: true,
-            center: crate::models::ViewerEdgePoint {
-                x: 5.0,
-                y: 5.0,
-                z: 5.0,
-            },
-            normal: Some([0.0, 0.0, 1.0]),
-            area: Some(100.0),
-        });
+        bundle
+            .edge_targets
+            .push(crate::contracts::ViewerEdgeTarget {
+                target_id: "body:edge:0:0-0-0_10-0-0".to_string(),
+                durable_target_id: None,
+                canonical_target_id: None,
+                alias_ids: Vec::new(),
+                part_id: "body".to_string(),
+                viewer_node_id: "body".to_string(),
+                label: "Body.Edge1".to_string(),
+                editable: true,
+                start: crate::contracts::ViewerEdgePoint {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                end: crate::contracts::ViewerEdgePoint {
+                    x: 10.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            });
+        bundle
+            .face_targets
+            .push(crate::contracts::ViewerFaceTarget {
+                target_id: "body:face:0:5-5-5:100".to_string(),
+                durable_target_id: None,
+                canonical_target_id: None,
+                alias_ids: Vec::new(),
+                part_id: "body".to_string(),
+                viewer_node_id: "body".to_string(),
+                label: "Body.Face1".to_string(),
+                editable: true,
+                center: crate::contracts::ViewerEdgePoint {
+                    x: 5.0,
+                    y: 5.0,
+                    z: 5.0,
+                },
+                normal: Some([0.0, 0.0, 1.0]),
+                area: Some(100.0),
+            });
         let with_step = build_artifact_digest(Some(&bundle));
         assert!(with_step.contains("hasStepExport: true"));
         assert!(with_step.contains("stepExportPath: /tmp/cad-step/model.step"));

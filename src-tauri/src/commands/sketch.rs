@@ -1,7 +1,7 @@
 use tauri::{AppHandle, State};
 
-use crate::models::{
-    AppError, AppResult, AppState, ArtifactBundle, BrepHiddenLineProjectionRequest,
+use crate::contracts::{
+    AppError, AppResult, ArtifactBundle, BrepHiddenLineProjectionRequest,
     ClearSketchPreviewDraftRequest, ComponentPackage, DesignParams, GeometryBackend,
     LoadSketchPreviewDraftRequest, MacroDialect, RasterTraceRequest, RasterTraceResponse,
     SaveSketchPreviewDraftRequest, SketchAcceptedBrepComponentPackageRequest,
@@ -10,6 +10,7 @@ use crate::models::{
     SketchPreviewDraft, SketchPreviewHullRequest, SketchSuggestionRequest,
     SketchSuggestionResponse, SketchView,
 };
+use crate::models::AppState;
 use crate::sketch_draft_runtime;
 
 #[tauri::command]

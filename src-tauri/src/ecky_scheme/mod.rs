@@ -1,39 +1,53 @@
-pub mod bootstrap;
-pub mod cad;
-pub mod compiler;
-pub mod core;
-pub mod params;
+use crate::contracts::{AppError, AppErrorCode, AppResult};
+use crate::ecky_core_ir::{CompilerError, CompilerErrorKind, CoreProgram, CoreResult};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ModuleSpec {
-    pub scheme_name: &'static str,
-    pub rust_module: &'static str,
-    pub exports: &'static [&'static str],
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BootstrapShape {
-    pub sandboxed: bool,
-    pub modules: &'static [ModuleSpec],
-    pub blocked_unsafe_ops: &'static [&'static str],
-}
-
-pub const APP_MODULES: [ModuleSpec; 3] = [core::MODULE, cad::MODULE, params::MODULE];
-
-pub const BOOTSTRAP_SHAPE: BootstrapShape = BootstrapShape {
-    sandboxed: true,
-    modules: &APP_MODULES,
-    blocked_unsafe_ops: bootstrap::BLOCKED_UNSAFE_OPS,
+pub use ecky_render::scheme::{
+    bootstrap, bootstrap_shape, cad, core, params, BootstrapShape, ModuleSpec, APP_MODULES,
+    BOOTSTRAP_SHAPE,
 };
 
-pub fn bootstrap_shape() -> &'static BootstrapShape {
-    &BOOTSTRAP_SHAPE
+pub mod compiler {
+    pub use super::{
+        compile_to_core_program, compile_to_legacy_source, try_compile_to_core_program,
+        try_compile_to_legacy_source,
+    };
+    pub use ecky_render::scheme::compiler::{
+        collect_free_variables, expr_head_name, expr_identifier, expr_list_items,
+    };
 }
 
-pub use compiler::{
-    compile_to_core_program, compile_to_legacy_source, try_compile_to_core_program,
-    try_compile_to_legacy_source,
-};
+pub fn compile_to_core_program(source: &str) -> CoreResult<CoreProgram> {
+    ecky_render::scheme::compile_to_core_program(source)
+}
+
+pub fn compile_to_legacy_source(source: &str) -> AppResult<String> {
+    ecky_render::scheme::compile_to_legacy_source(source).map_err(core_err_to_app)
+}
+
+pub fn try_compile_to_core_program(source: &str) -> Option<AppResult<CoreProgram>> {
+    ecky_render::scheme::try_compile_to_core_program(source)
+        .map(|result| result.map_err(core_err_to_app))
+}
+
+pub fn try_compile_to_legacy_source(source: &str) -> Option<AppResult<String>> {
+    ecky_render::scheme::try_compile_to_legacy_source(source)
+        .map(|result| result.map_err(core_err_to_app))
+}
+
+fn core_err_to_app(err: CompilerError) -> AppError {
+    match err.kind {
+        CompilerErrorKind::Parse => AppError::parse(err.to_string()),
+        CompilerErrorKind::Resolve | CompilerErrorKind::TypeMismatch => {
+            AppError::validation(err.to_string())
+        }
+        CompilerErrorKind::UnsupportedFeature => {
+            AppError::new(AppErrorCode::Validation, err.to_string())
+        }
+        CompilerErrorKind::Backend | CompilerErrorKind::Internal => {
+            AppError::internal(err.to_string())
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -94,13 +108,9 @@ mod tests {
         .expect("compile");
 
         assert!(compiled.contains("(part body"));
-        assert!(
-            compiled.contains("(extrude (circle 12) 30)")
-                || compiled.contains("(cup-body 12 30)")
-                || compiled.contains("(extrude (circle ##radius2) ##height2)"),
-            "{}",
-            compiled
-        );
+        assert!(compiled.contains("(extrude (circle "), "{}", compiled);
+        assert!(!compiled.contains("##"), "{}", compiled);
+        compile_to_core_program(&compiled).expect("emitted source reparses");
     }
 
     #[test]

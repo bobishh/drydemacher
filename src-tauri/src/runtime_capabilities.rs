@@ -1,9 +1,10 @@
 use crate::build123d;
-use crate::freecad;
-use crate::models::{
-    AppError, AppResult, EngineKind, GeometryBackend, PathResolver, RuntimeAuthoringContext,
+use crate::contracts::{
+    AppError, AppResult, EngineKind, GeometryBackend, RuntimeAuthoringContext,
     RuntimeBackendCapability, RuntimeCapabilities, SourceLanguage,
 };
+use crate::freecad;
+use crate::models::PathResolver;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

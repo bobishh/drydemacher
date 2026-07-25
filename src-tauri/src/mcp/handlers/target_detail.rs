@@ -3,9 +3,10 @@ use super::{
     map_target_resolved_from, persist_agent_session, session_render_preview_for_request,
     try_record_agent_error, AgentContext,
 };
+use crate::contracts::{AppError, AppResult};
 use crate::db;
 use crate::mcp::contracts::{TargetDetailRequest, TargetDetailResponse, TargetDetailSection};
-use crate::models::{AppError, AppResult, AppState, PathResolver};
+use crate::models::{AppState, PathResolver};
 
 pub async fn handle_target_detail_get(
     state: &AppState,

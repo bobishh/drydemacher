@@ -1,8 +1,7 @@
+use crate::contracts::{AppError, AppResult, MessageRole, MessageStatus, Thread, ThreadStatus};
 use crate::db;
-use crate::models::{AppError, AppResult, MessageRole, MessageStatus, Thread, ThreadStatus};
 use crate::persist_thread_summary;
 use std::time::{SystemTime, UNIX_EPOCH};
-use uuid::Uuid;
 
 pub fn get_history(conn: &rusqlite::Connection) -> AppResult<Vec<Thread>> {
     db::get_all_threads(conn).map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))
@@ -67,7 +66,7 @@ pub fn get_thread(conn: &rusqlite::Connection, id: &str) -> AppResult<Thread> {
 pub fn get_thread_latest_version(
     conn: &rusqlite::Connection,
     id: &str,
-) -> AppResult<Option<crate::models::Message>> {
+) -> AppResult<Option<crate::contracts::Message>> {
     db::get_visible_thread_title(conn, id)
         .map_err(|err| AppError::persistence(err.to_string()))?
         .ok_or_else(|| AppError::not_found("Thread not found."))?;
@@ -78,7 +77,7 @@ pub fn get_thread_message_version(
     conn: &rusqlite::Connection,
     thread_id: &str,
     message_id: &str,
-) -> AppResult<Option<crate::models::Message>> {
+) -> AppResult<Option<crate::contracts::Message>> {
     db::get_visible_thread_title(conn, thread_id)
         .map_err(|err| AppError::persistence(err.to_string()))?
         .ok_or_else(|| AppError::not_found("Thread not found."))?;
@@ -92,7 +91,7 @@ pub fn get_thread_messages_page(
     before: Option<u64>,
     limit: Option<usize>,
     include_visual_payloads: bool,
-) -> AppResult<crate::models::ThreadMessagesPage> {
+) -> AppResult<crate::contracts::ThreadMessagesPage> {
     db::get_visible_thread_title(conn, id)
         .map_err(|err| AppError::persistence(err.to_string()))?
         .ok_or_else(|| AppError::not_found("Thread not found."))?;
@@ -116,66 +115,39 @@ pub fn finalize_thread(
         .unwrap()
         .as_secs();
 
-    let title = db::get_visible_thread_title(conn, thread_id)
+    db::get_visible_thread_title(conn, thread_id)
         .map_err(|err| AppError::persistence(err.to_string()))?
         .ok_or_else(|| AppError::not_found("Thread not found."))?;
-    let summary = db::get_thread_summary(conn, thread_id)
-        .map_err(|err| AppError::persistence(err.to_string()))?
-        .unwrap_or_default();
-    let genie_traits = db::get_thread_genie_traits(conn, thread_id)
-        .map_err(|err| AppError::persistence(err.to_string()))?;
     let messages = db::get_thread_messages(conn, thread_id)
         .map_err(|err| AppError::persistence(err.to_string()))?;
 
-    let selected_message = if let Some(message_id) = selected_message_id {
+    if let Some(message_id) = selected_message_id {
         messages
             .iter()
             .find(|message| message.id == message_id && is_renderable_version_message(message))
-            .cloned()
             .ok_or_else(|| {
                 AppError::validation("Selected final model is not a valid version in this thread.")
-            })?
+            })?;
     } else {
         messages
             .iter()
             .rev()
             .find(|message| is_renderable_version_message(message))
-            .cloned()
-            .ok_or_else(|| AppError::validation("Thread has no successful versions to finalize."))?
-    };
+            .ok_or_else(|| {
+                AppError::validation("Thread has no successful versions to finalize.")
+            })?;
+    }
 
-    let finalized_thread_id = Uuid::new_v4().to_string();
-    let finalized_message_id = Uuid::new_v4().to_string();
-
-    db::create_or_update_thread(
-        conn,
-        &finalized_thread_id,
-        &title,
-        now,
-        genie_traits.as_ref(),
-    )
-    .map_err(|err| AppError::persistence(err.to_string()))?;
-    db::update_thread_summary(conn, &finalized_thread_id, &summary)
+    let changed = db::finalize_thread(conn, thread_id, now as i64)
         .map_err(|err| AppError::persistence(err.to_string()))?;
-
-    let mut finalized_message = selected_message;
-    finalized_message.id = finalized_message_id;
-    finalized_message.timestamp = now;
-    db::add_message(conn, &finalized_thread_id, &finalized_message)
-        .map_err(|err| AppError::persistence(err.to_string()))?;
-
-    db::finalize_thread(conn, &finalized_thread_id, now as i64)
-        .map_err(|err| AppError::persistence(err.to_string()))?;
-    let deleted =
-        db::delete_thread(conn, thread_id).map_err(|err| AppError::persistence(err.to_string()))?;
-    if !deleted {
+    if !changed {
         return Err(AppError::not_found("Thread not found."));
     }
 
     Ok(())
 }
 
-fn is_renderable_version_message(message: &crate::models::Message) -> bool {
+fn is_renderable_version_message(message: &crate::contracts::Message) -> bool {
     message.role == MessageRole::Assistant
         && message.status == MessageStatus::Success
         && message.artifact_bundle.is_some()
@@ -237,10 +209,10 @@ pub fn restore_version(conn: &rusqlite::Connection, message_id: &str) -> AppResu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db;
-    use crate::models::{
+    use crate::contracts::{
         DesignOutput, GenieTraits, InteractionMode, MacroDialect, Message, UiSpec,
     };
+    use crate::db;
     use std::collections::BTreeMap;
 
     fn sample_output(version_name: &str) -> DesignOutput {
@@ -251,24 +223,24 @@ mod tests {
             interaction_mode: InteractionMode::Design,
             macro_code: "print('hi')".to_string(),
             macro_dialect: MacroDialect::CadFrameworkV1,
-            engine_kind: crate::models::EngineKind::Freecad,
-            source_language: crate::models::SourceLanguage::LegacyPython,
-            geometry_backend: crate::models::GeometryBackend::Freecad,
+            engine_kind: crate::contracts::EngineKind::Freecad,
+            source_language: crate::contracts::SourceLanguage::LegacyPython,
+            geometry_backend: crate::contracts::GeometryBackend::Freecad,
             ui_spec: UiSpec { fields: Vec::new() },
             initial_params: BTreeMap::new(),
             post_processing: None,
         }
     }
 
-    fn sample_artifact_bundle(model_id: &str) -> crate::models::ArtifactBundle {
-        crate::models::ArtifactBundle {
+    fn sample_artifact_bundle(model_id: &str) -> crate::contracts::ArtifactBundle {
+        crate::contracts::ArtifactBundle {
             geometry_provenance: None,
             schema_version: 1,
             model_id: model_id.to_string(),
-            source_kind: crate::models::ModelSourceKind::Generated,
-            engine_kind: crate::models::EngineKind::Freecad,
-            source_language: crate::models::SourceLanguage::LegacyPython,
-            geometry_backend: crate::models::GeometryBackend::Freecad,
+            source_kind: crate::contracts::ModelSourceKind::Generated,
+            engine_kind: crate::contracts::EngineKind::Freecad,
+            source_language: crate::contracts::SourceLanguage::LegacyPython,
+            geometry_backend: crate::contracts::GeometryBackend::Freecad,
             content_hash: format!("hash-{model_id}"),
             artifact_version: 1,
             fcstd_path: format!("/tmp/{model_id}.FCStd"),
@@ -304,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_thread_promotes_selected_version_to_inventory_and_hides_source_thread() {
+    fn finalize_thread_keeps_project_identity_and_full_history_in_completed() {
         let db_path = std::env::temp_dir().join(format!(
             "ecky-finalize-thread-{}.sqlite",
             uuid::Uuid::new_v4()
@@ -330,18 +302,16 @@ mod tests {
 
         finalize_thread(&conn, thread_id, Some(&older.id)).unwrap();
 
-        let active_threads = db::get_all_threads(&conn).unwrap();
-        assert!(active_threads.iter().all(|thread| thread.id != thread_id));
-
         let inventory_threads = db::get_inventory_threads(&conn).unwrap();
         assert_eq!(inventory_threads.len(), 1);
         let finalized = &inventory_threads[0];
+        assert_eq!(finalized.id, thread_id);
         assert_eq!(finalized.title, "Bulb Lamp Shade");
         assert_eq!(finalized.status, ThreadStatus::Finalized);
-        assert_eq!(finalized.version_count, 1);
+        assert_eq!(finalized.version_count, 2);
 
         let loaded = get_thread(&conn, &finalized.id).unwrap();
-        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.messages.len(), 2);
         assert_eq!(
             loaded.messages[0]
                 .output
@@ -357,7 +327,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(deleted_at.is_some());
+        assert!(deleted_at.is_none());
 
         let _ = std::fs::remove_file(db_path);
     }
@@ -588,6 +558,48 @@ mod tests {
             );
             message.image_data = Some(format!("data:image/png;base64,{}", index));
             message.attachment_images = vec![format!("/tmp/ref-{}.png", index)];
+            let bundle = message.artifact_bundle.as_mut().unwrap();
+            bundle
+                .edge_targets
+                .push(crate::contracts::ViewerEdgeTarget {
+                    target_id: format!("edge-{index}"),
+                    durable_target_id: None,
+                    canonical_target_id: None,
+                    alias_ids: Vec::new(),
+                    part_id: "body".to_string(),
+                    viewer_node_id: "body".to_string(),
+                    label: "Edge".to_string(),
+                    editable: false,
+                    start: crate::contracts::ViewerEdgePoint {
+                        x: 0.0,
+                        y: 0.0,
+                        z: 0.0,
+                    },
+                    end: crate::contracts::ViewerEdgePoint {
+                        x: 1.0,
+                        y: 0.0,
+                        z: 0.0,
+                    },
+                });
+            bundle
+                .face_targets
+                .push(crate::contracts::ViewerFaceTarget {
+                    target_id: format!("face-{index}"),
+                    durable_target_id: None,
+                    canonical_target_id: None,
+                    alias_ids: Vec::new(),
+                    part_id: "body".to_string(),
+                    viewer_node_id: "body".to_string(),
+                    label: "Face".to_string(),
+                    editable: false,
+                    center: crate::contracts::ViewerEdgePoint {
+                        x: 0.0,
+                        y: 0.0,
+                        z: 0.0,
+                    },
+                    normal: Some([0.0, 0.0, 1.0]),
+                    area: Some(1.0),
+                });
             db::add_message(&conn, "thread-page", &message).unwrap();
         }
 
@@ -611,6 +623,23 @@ mod tests {
             .messages
             .iter()
             .all(|message| message.attachment_images.is_empty()));
+        assert!(first_page.messages.iter().all(|message| {
+            message.artifact_bundle.as_ref().is_some_and(|bundle| {
+                bundle.edge_targets.is_empty() && bundle.face_targets.is_empty()
+            })
+        }));
+        assert!(first_page
+            .messages
+            .iter()
+            .all(|message| message.model_manifest.is_none()));
+
+        let full_page =
+            get_thread_messages_page(&conn, "thread-page", None, Some(2), true).unwrap();
+        assert!(full_page.messages.iter().all(|message| {
+            message.artifact_bundle.as_ref().is_some_and(|bundle| {
+                bundle.edge_targets.len() == 1 && bundle.face_targets.len() == 1
+            })
+        }));
 
         let second_page =
             get_thread_messages_page(&conn, "thread-page", first_page.next_before, Some(2), false)

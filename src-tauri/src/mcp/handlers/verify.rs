@@ -1,9 +1,10 @@
 use super::artifact_bundle_digest;
-use crate::mcp::contracts::{StructuralVerificationSummaryResponse, VerifyGeneratedModelResponse};
-use crate::models::{
-    AppError, AppErrorCode, AppResult, AppState, ArtifactBundle, ModelManifest, PathResolver,
-    RenderSnapshot, VerificationRecord,
+use crate::contracts::{
+    AppError, AppErrorCode, AppResult, ArtifactBundle, ModelManifest, RenderSnapshot,
+    VerificationRecord,
 };
+use crate::mcp::contracts::{StructuralVerificationSummaryResponse, VerifyGeneratedModelResponse};
+use crate::models::{AppState, PathResolver};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
@@ -88,7 +89,7 @@ async fn persist_verification_record(
     state: &AppState,
     preview_id: &str,
     snapshot: &RenderSnapshot,
-    result: &crate::models::StructuralVerificationResult,
+    result: &crate::contracts::StructuralVerificationResult,
 ) -> AppResult<()> {
     let record = VerificationRecord {
         verification_id: Uuid::new_v4().to_string(),
@@ -138,18 +139,18 @@ pub async fn handle_structural_verification_summary(
 
 fn core_param_value_to_param_value(
     value: &crate::ecky_core_ir::CoreParameterValue,
-) -> crate::models::ParamValue {
+) -> crate::contracts::ParamValue {
     match value {
         crate::ecky_core_ir::CoreParameterValue::Number(value) => {
-            crate::models::ParamValue::Number(*value)
+            crate::contracts::ParamValue::Number(*value)
         }
         crate::ecky_core_ir::CoreParameterValue::Boolean(value) => {
-            crate::models::ParamValue::Boolean(*value)
+            crate::contracts::ParamValue::Boolean(*value)
         }
         crate::ecky_core_ir::CoreParameterValue::Text(value)
         | crate::ecky_core_ir::CoreParameterValue::Choice(value)
         | crate::ecky_core_ir::CoreParameterValue::Image(value) => {
-            crate::models::ParamValue::String(value.clone())
+            crate::contracts::ParamValue::String(value.clone())
         }
     }
 }
@@ -158,7 +159,7 @@ async fn resolved_verify_diagnostic_params(
     state: &AppState,
     message_id: &str,
     bundle: &ArtifactBundle,
-) -> AppResult<Vec<crate::models::DiagnosticParamValue>> {
+) -> AppResult<Vec<crate::contracts::DiagnosticParamValue>> {
     let mut resolved = BTreeMap::new();
     let Some(source_path) = bundle
         .macro_path
@@ -168,19 +169,19 @@ async fn resolved_verify_diagnostic_params(
     else {
         return Ok(resolved
             .into_iter()
-            .map(|(key, value)| crate::models::DiagnosticParamValue { key, value })
+            .map(|(key, value)| crate::contracts::DiagnosticParamValue { key, value })
             .collect());
     };
     let Ok(source) = std::fs::read_to_string(source_path) else {
         return Ok(resolved
             .into_iter()
-            .map(|(key, value)| crate::models::DiagnosticParamValue { key, value })
+            .map(|(key, value)| crate::contracts::DiagnosticParamValue { key, value })
             .collect());
     };
     let Ok(program) = crate::ecky_scheme::compile_to_core_program(&source) else {
         return Ok(resolved
             .into_iter()
-            .map(|(key, value)| crate::models::DiagnosticParamValue { key, value })
+            .map(|(key, value)| crate::contracts::DiagnosticParamValue { key, value })
             .collect());
     };
 
@@ -194,14 +195,14 @@ async fn resolved_verify_diagnostic_params(
     let persisted_params = {
         let conn = state.db.lock().await;
         match crate::db::get_agent_draft_by_preview_id(&conn, message_id)
-            .map_err(|error| crate::models::AppError::persistence(error.to_string()))?
+            .map_err(|error| crate::contracts::AppError::persistence(error.to_string()))?
         {
             Some(draft) if draft.artifact_bundle.model_id == bundle.model_id => {
                 Some(draft.design_output.initial_params)
             }
             Some(draft) => {
-                return Err(crate::models::AppError::with_details(
-                    crate::models::AppErrorCode::Conflict,
+                return Err(crate::contracts::AppError::with_details(
+                    crate::contracts::AppErrorCode::Conflict,
                     "Verification preview does not match the requested artifact.",
                     format!(
                         "previewId={} previewModelId={} requestedModelId={}",
@@ -211,7 +212,7 @@ async fn resolved_verify_diagnostic_params(
                 .with_operation("verify_generated_model"));
             }
             None => crate::db::get_message_output_and_thread(&conn, message_id)
-                .map_err(|error| crate::models::AppError::persistence(error.to_string()))?
+                .map_err(|error| crate::contracts::AppError::persistence(error.to_string()))?
                 .map(|(output, _thread_id)| output.initial_params),
         }
     };
@@ -223,11 +224,11 @@ async fn resolved_verify_diagnostic_params(
 
     Ok(resolved
         .into_iter()
-        .map(|(key, value)| crate::models::DiagnosticParamValue { key, value })
+        .map(|(key, value)| crate::contracts::DiagnosticParamValue { key, value })
         .collect())
 }
 
-fn verify_check_op_name(check: &crate::models::AuthoredVerifyCheck) -> Option<String> {
+fn verify_check_op_name(check: &crate::contracts::AuthoredVerifyCheck) -> Option<String> {
     match (check.metric_source.as_deref(), check.metric_key.as_deref()) {
         (Some(source), Some(key)) => Some(format!("verify:{source}/{key}")),
         (Some(source), None) => Some(format!("verify:{source}")),
@@ -237,21 +238,21 @@ fn verify_check_op_name(check: &crate::models::AuthoredVerifyCheck) -> Option<St
 }
 
 async fn enrich_verify_result_with_diagnostic_context(
-    mut result: crate::models::StructuralVerificationResult,
+    mut result: crate::contracts::StructuralVerificationResult,
     state: &AppState,
     message_id: &str,
     bundle: &ArtifactBundle,
     manifest: &ModelManifest,
-) -> AppResult<crate::models::StructuralVerificationResult> {
+) -> AppResult<crate::contracts::StructuralVerificationResult> {
     let part_key = (manifest.parts.len() == 1).then(|| manifest.parts[0].part_id.clone());
     let resolved_params = resolved_verify_diagnostic_params(state, message_id, bundle).await?;
 
     let mut failing_contexts = Vec::new();
     for check in &mut result.authored_verify_checks {
-        if check.status == crate::models::AuthoredVerifyCheckStatus::Passed {
+        if check.status == crate::contracts::AuthoredVerifyCheckStatus::Passed {
             continue;
         }
-        let context = crate::models::DiagnosticContext {
+        let context = crate::contracts::DiagnosticContext {
             part_key: part_key.clone(),
             op_name: verify_check_op_name(check),
             start_line: None,

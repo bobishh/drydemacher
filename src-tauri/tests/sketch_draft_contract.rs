@@ -3,16 +3,16 @@ use ecky_cad_lib::component_package_runtime::{
     install_component_package_archive, read_component_package_manifest,
     resolve_installed_component_source, write_component_package_archive,
 };
-use ecky_cad_lib::models::{
+use ecky_cad_lib::contracts::{
     component_package_header, validate_component_package, ArtifactBundle, ComponentPort,
-    GeometryBackend, MacroDialect, ModelSourceKind, OperationKind, PathResolver, PortFrame,
-    PortTypeDefinition, SketchAcceptedBrepComponentPackageRequest,
-    SketchBrepCandidateAcceptRequest, SketchBrepCandidateRequest,
-    SketchBrepCandidateSourceStrategy, SketchDefinition, SketchDocument, SketchDraftOperationKind,
-    SketchDraftRequest, SketchPreviewHullRequest, SketchPrimitive, SketchPrimitiveKind,
-    SketchSuggestionRequest, SketchView, SourceLanguage, ViewerEdgePoint, ViewerEdgeTarget,
-    ViewerFaceTarget,
+    GeometryBackend, MacroDialect, ModelSourceKind, OperationKind, PortFrame, PortTypeDefinition,
+    SketchAcceptedBrepComponentPackageRequest, SketchBrepCandidateAcceptRequest,
+    SketchBrepCandidateRequest, SketchBrepCandidateSourceStrategy, SketchDefinition,
+    SketchDocument, SketchDraftOperationKind, SketchDraftRequest, SketchPreviewHullRequest,
+    SketchPrimitive, SketchPrimitiveKind, SketchSuggestionRequest, SketchView, SourceLanguage,
+    ViewerEdgePoint, ViewerEdgeTarget, ViewerFaceTarget,
 };
+use ecky_cad_lib::models::PathResolver;
 use ecky_cad_lib::sketch_draft_runtime::{
     accepted_brep_candidate_to_component_package, analyze_sketch_brep_candidates,
     generate_accepted_brep_candidate_source, generate_sketch_draft_preview,
@@ -861,12 +861,12 @@ fn accepted_brep_candidate_source_rejects_unknown_solution() {
 
 #[test]
 fn accepted_brep_step_gate_rejects_mesh_only_bundle() {
-    let bundle = ecky_cad_lib::models::ArtifactBundle {
+    let bundle = ecky_cad_lib::contracts::ArtifactBundle {
         geometry_provenance: None,
         schema_version: 1,
         model_id: "mesh-only".to_string(),
-        source_kind: ecky_cad_lib::models::ModelSourceKind::Generated,
-        engine_kind: ecky_cad_lib::models::EngineKind::EckyIrV0,
+        source_kind: ecky_cad_lib::contracts::ModelSourceKind::Generated,
+        engine_kind: ecky_cad_lib::contracts::EngineKind::EckyIrV0,
         source_language: SourceLanguage::EckyIrV0,
         geometry_backend: GeometryBackend::EckyRust,
         content_hash: "hash".to_string(),
@@ -900,7 +900,7 @@ fn accepted_step_bundle_with_edge_target(target_id: &str) -> ArtifactBundle {
         schema_version: 1,
         model_id: "accepted-step".to_string(),
         source_kind: ModelSourceKind::Generated,
-        engine_kind: ecky_cad_lib::models::EngineKind::EckyIrV0,
+        engine_kind: ecky_cad_lib::contracts::EngineKind::EckyIrV0,
         source_language: SourceLanguage::EckyIrV0,
         geometry_backend: GeometryBackend::EckyRust,
         content_hash: "hash".to_string(),
@@ -933,7 +933,7 @@ fn accepted_step_bundle_with_edge_target(target_id: &str) -> ArtifactBundle {
         face_targets: vec![],
         callout_anchors: vec![],
         measurement_guides: vec![],
-        export_artifacts: vec![ecky_cad_lib::models::ExportArtifact {
+        export_artifacts: vec![ecky_cad_lib::contracts::ExportArtifact {
             geometry_provenance: None,
             label: "STEP".to_string(),
             format: "step".to_string(),
@@ -952,7 +952,7 @@ fn accepted_step_bundle_with_face_target(target_id: &str) -> ArtifactBundle {
         schema_version: 1,
         model_id: "accepted-step".to_string(),
         source_kind: ModelSourceKind::Generated,
-        engine_kind: ecky_cad_lib::models::EngineKind::EckyIrV0,
+        engine_kind: ecky_cad_lib::contracts::EngineKind::EckyIrV0,
         source_language: SourceLanguage::EckyIrV0,
         geometry_backend: GeometryBackend::EckyRust,
         content_hash: "hash".to_string(),
@@ -982,7 +982,7 @@ fn accepted_step_bundle_with_face_target(target_id: &str) -> ArtifactBundle {
         }],
         callout_anchors: vec![],
         measurement_guides: vec![],
-        export_artifacts: vec![ecky_cad_lib::models::ExportArtifact {
+        export_artifacts: vec![ecky_cad_lib::contracts::ExportArtifact {
             geometry_provenance: None,
             label: "STEP".to_string(),
             format: "step".to_string(),
@@ -1031,7 +1031,7 @@ fn write_accepted_test_manifest(
         _ => "object",
     };
     let manifest = serde_json::json!({
-        "schemaVersion": ecky_cad_lib::models::MODEL_RUNTIME_SCHEMA_VERSION,
+        "schemaVersion": ecky_cad_lib::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
         "modelId": "accepted-step",
         "sourceKind": "generated",
         "engineKind": "eckyIrV0",
@@ -1115,7 +1115,7 @@ fn accepted_brep_component_package_requires_explicit_ports_and_exposes_header_po
                 params: vec![],
             }],
             params: Vec::new(),
-            ui_spec: ecky_cad_lib::models::UiSpec::default(),
+            ui_spec: ecky_cad_lib::contracts::UiSpec::default(),
             initial_params: Default::default(),
             ports: vec![ComponentPort {
                 port_id: "front_mount".to_string(),
@@ -1170,7 +1170,7 @@ fn accepted_brep_component_package_preserves_port_edge_target_refs() {
                 params: vec![],
             }],
             params: Vec::new(),
-            ui_spec: ecky_cad_lib::models::UiSpec::default(),
+            ui_spec: ecky_cad_lib::contracts::UiSpec::default(),
             initial_params: Default::default(),
             ports: vec![ComponentPort {
                 port_id: "mounting_edge".to_string(),
@@ -1219,7 +1219,7 @@ fn accepted_brep_component_package_preserves_port_face_target_refs() {
                 params: vec![],
             }],
             params: Vec::new(),
-            ui_spec: ecky_cad_lib::models::UiSpec::default(),
+            ui_spec: ecky_cad_lib::contracts::UiSpec::default(),
             initial_params: Default::default(),
             ports: vec![ComponentPort {
                 port_id: "mounting_face".to_string(),
@@ -1243,8 +1243,8 @@ fn accepted_brep_component_package_preserves_port_face_target_refs() {
 
 #[test]
 fn accepted_brep_component_package_preserves_explicit_ui_contract() {
-    let ui_spec = ecky_cad_lib::models::UiSpec {
-        fields: vec![ecky_cad_lib::models::UiField::Number {
+    let ui_spec = ecky_cad_lib::contracts::UiSpec {
+        fields: vec![ecky_cad_lib::contracts::UiField::Number {
             key: "diameter".to_string(),
             label: "Diameter".to_string(),
             min: Some(10.0),
@@ -1255,9 +1255,9 @@ fn accepted_brep_component_package_preserves_explicit_ui_contract() {
             frozen: false,
         }],
     };
-    let initial_params: ecky_cad_lib::models::DesignParams = [(
+    let initial_params: ecky_cad_lib::contracts::DesignParams = [(
         "diameter".to_string(),
-        ecky_cad_lib::models::ParamValue::Number(55.0),
+        ecky_cad_lib::contracts::ParamValue::Number(55.0),
     )]
     .into_iter()
     .collect();
@@ -1333,7 +1333,7 @@ fn accepted_brep_component_package_rejects_unknown_port_edge_target_ref() {
                 params: vec![],
             }],
             params: Vec::new(),
-            ui_spec: ecky_cad_lib::models::UiSpec::default(),
+            ui_spec: ecky_cad_lib::contracts::UiSpec::default(),
             initial_params: Default::default(),
             ports: vec![ComponentPort {
                 port_id: "mounting_edge".to_string(),
@@ -1371,7 +1371,7 @@ fn accepted_brep_component_package_rejects_missing_explicit_ports() {
             solution_id: "solution0".to_string(),
             port_types: vec![],
             params: Vec::new(),
-            ui_spec: ecky_cad_lib::models::UiSpec::default(),
+            ui_spec: ecky_cad_lib::contracts::UiSpec::default(),
             initial_params: Default::default(),
             ports: vec![],
         })
@@ -1398,8 +1398,8 @@ fn accepted_brep_component_package_project_copies_step_and_rewrites_absolute_sou
     let expected_edge_target_id = "OuterShell:edge:0-0-0_10-0-0";
     let mut bundle = accepted_step_bundle_with_edge_target(edge_target_id);
     bundle.export_artifacts[0].path = step_path.to_string_lossy().to_string();
-    let ui_spec = ecky_cad_lib::models::UiSpec {
-        fields: vec![ecky_cad_lib::models::UiField::Number {
+    let ui_spec = ecky_cad_lib::contracts::UiSpec {
+        fields: vec![ecky_cad_lib::contracts::UiField::Number {
             key: "diameter".to_string(),
             label: "Diameter".to_string(),
             min: Some(10.0),
@@ -1410,9 +1410,9 @@ fn accepted_brep_component_package_project_copies_step_and_rewrites_absolute_sou
             frozen: false,
         }],
     };
-    let initial_params: ecky_cad_lib::models::DesignParams = [(
+    let initial_params: ecky_cad_lib::contracts::DesignParams = [(
         "diameter".to_string(),
-        ecky_cad_lib::models::ParamValue::Number(55.0),
+        ecky_cad_lib::contracts::ParamValue::Number(55.0),
     )]
     .into_iter()
     .collect();
@@ -1531,7 +1531,7 @@ fn accepted_brep_component_package_project_installs_and_resolves_step_source() {
                 params: vec![],
             }],
             params: Vec::new(),
-            ui_spec: ecky_cad_lib::models::UiSpec::default(),
+            ui_spec: ecky_cad_lib::contracts::UiSpec::default(),
             initial_params: Default::default(),
             ports: vec![ComponentPort {
                 port_id: "mounting_edge".to_string(),

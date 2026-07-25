@@ -69,7 +69,8 @@ use tokio::time::sleep;
 use uuid::Uuid;
 
 use crate::context::*;
-use crate::models::{AppState, Attachment, GenieTraits, PathResolver, ThreadReference};
+use crate::contracts::{Attachment, GenieTraits, IntentDecision, ThreadReference};
+use crate::models::{AppState, PathResolver};
 
 use rand::Rng;
 
@@ -355,7 +356,7 @@ fn migrate_legacy_references(conn: &rusqlite::Connection) -> Result<(), String> 
         for message in thread
             .messages
             .iter()
-            .filter(|m| m.role == crate::models::MessageRole::User)
+            .filter(|m| m.role == crate::contracts::MessageRole::User)
         {
             persist_user_prompt_references(
                 conn,
@@ -415,10 +416,10 @@ pub(crate) fn is_explicit_question_only_request(prompt: &str) -> bool {
         .any(|marker| p.contains(marker))
 }
 
-pub(crate) fn fallback_intent(prompt: &str) -> models::IntentDecision {
+pub(crate) fn fallback_intent(prompt: &str) -> IntentDecision {
     let p = prompt.to_lowercase();
     if is_explicit_question_only_request(prompt) {
-        return models::IntentDecision {
+        return IntentDecision {
             intent_mode: "question".to_string(),
             confidence: 0.95,
             response: "Answering the question without generating geometry.".to_string(),
@@ -444,7 +445,7 @@ pub(crate) fn fallback_intent(prompt: &str) -> models::IntentDecision {
         || p.contains("diameter");
 
     if has_question_signal && !has_design_signal {
-        models::IntentDecision {
+        IntentDecision {
             intent_mode: "question".to_string(),
             confidence: 0.55,
             response: "Thinking not deep enough. This looks like a question.".to_string(),
@@ -452,7 +453,7 @@ pub(crate) fn fallback_intent(prompt: &str) -> models::IntentDecision {
             usage: None,
         }
     } else {
-        models::IntentDecision {
+        IntentDecision {
             intent_mode: "design".to_string(),
             confidence: 0.55,
             response: "This looks like a geometry change request.".to_string(),
@@ -511,8 +512,8 @@ pub fn run() {
     let context = tauri::generate_context!();
     let builder = crate::bindings::builder();
 
-    let default_config = crate::models::Config {
-        engines: vec![crate::models::Engine {
+    let default_config = crate::contracts::Config {
+        engines: vec![crate::contracts::Engine {
             id: "default-gemini".to_string(),
             name: "Google Gemini".to_string(),
             provider: "gemini".to_string(),
@@ -529,13 +530,13 @@ pub fn run() {
         freecad_library_roots: Vec::new(),
         assets: vec![],
         microwave: None,
-        voice: crate::models::VoiceConfig::default(),
-        mcp: crate::models::McpConfig::default(),
+        voice: crate::contracts::VoiceConfig::default(),
+        mcp: crate::contracts::McpConfig::default(),
         has_seen_onboarding: false,
         connection_type: None,
-        default_engine_kind: crate::models::EngineKind::Freecad,
-        default_source_language: crate::models::SourceLanguage::LegacyPython,
-        default_geometry_backend: crate::models::GeometryBackend::Freecad,
+        default_engine_kind: crate::contracts::EngineKind::Freecad,
+        default_source_language: crate::contracts::SourceLanguage::LegacyPython,
+        default_geometry_backend: crate::contracts::GeometryBackend::Freecad,
         max_generation_attempts: 3,
         max_verify_attempts: 2,
         projects_root: None,
@@ -572,7 +573,7 @@ pub fn run() {
                         has_explicit_max_verify_attempts_field =
                             has_explicit_max_verify_attempts(&raw);
                     }
-                    if let Ok(c) = serde_json::from_str::<crate::models::Config>(&data) {
+                    if let Ok(c) = serde_json::from_str::<crate::contracts::Config>(&data) {
                         config = c;
                     }
                 }
@@ -826,7 +827,7 @@ mod tests {
     #[test]
     fn generate_genie_traits_returns_current_profile() {
         let traits = generate_genie_traits();
-        assert_eq!(traits.version, crate::models::GENIE_TRAITS_VERSION);
+        assert_eq!(traits.version, crate::contracts::GENIE_TRAITS_VERSION);
         assert!(traits.seed > 0);
         assert!((10..=24).contains(&traits.vertex_count));
     }

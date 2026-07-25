@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::Path;
 
+use crate::contracts::{AppError, AppResult};
 use crate::ecky_cad_host::svg_profile::{SvgContourGeometry, SvgPathSegment};
-use crate::models::{AppError, AppResult};
 use fontdb::{Family, Query, Source, Stretch, Style, Weight};
 use rustybuzz::UnicodeBuffer;
 use ttf_parser::{Face, GlyphId, OutlineBuilder};

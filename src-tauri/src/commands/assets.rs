@@ -38,18 +38,19 @@ pub fn app_assets_dir(app: &dyn crate::models::PathResolver) -> std::path::PathB
 
 pub fn collect_image_assets(
     app: &dyn crate::models::PathResolver,
-) -> crate::models::AppResult<Vec<crate::models::Asset>> {
+) -> crate::contracts::AppResult<Vec<crate::contracts::Asset>> {
     let assets_dir = app_assets_dir(app);
     if !assets_dir.exists() {
         fs::create_dir_all(&assets_dir)
-            .map_err(|err| crate::models::AppError::persistence(err.to_string()))?;
+            .map_err(|err| crate::contracts::AppError::persistence(err.to_string()))?;
     }
 
     let mut assets = Vec::new();
     let entries = fs::read_dir(&assets_dir)
-        .map_err(|err| crate::models::AppError::persistence(err.to_string()))?;
+        .map_err(|err| crate::contracts::AppError::persistence(err.to_string()))?;
     for entry in entries {
-        let entry = entry.map_err(|err| crate::models::AppError::persistence(err.to_string()))?;
+        let entry =
+            entry.map_err(|err| crate::contracts::AppError::persistence(err.to_string()))?;
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -57,7 +58,7 @@ pub fn collect_image_assets(
         let Some(format) = image_format_for_path(&path) else {
             continue;
         };
-        assets.push(crate::models::Asset {
+        assets.push(crate::contracts::Asset {
             id: stable_asset_id_for_path(&path),
             name: asset_name_for_path(&path),
             path: path.to_string_lossy().to_string(),
@@ -70,8 +71,8 @@ pub fn collect_image_assets(
 
 pub fn sync_image_assets_into_config(
     app: &dyn crate::models::PathResolver,
-    config: &mut crate::models::Config,
-) -> crate::models::AppResult<bool> {
+    config: &mut crate::contracts::Config,
+) -> crate::contracts::AppResult<bool> {
     let scanned_assets = collect_image_assets(app)?;
     let mut changed = false;
 
@@ -101,11 +102,11 @@ pub async fn upload_asset(
     name: String,
     format: String,
     app: AppHandle,
-) -> crate::models::AppResult<crate::models::Asset> {
+) -> crate::contracts::AppResult<crate::contracts::Asset> {
     let assets_dir = app_assets_dir(&app);
     if !assets_dir.exists() {
         fs::create_dir_all(&assets_dir)
-            .map_err(|err| crate::models::AppError::persistence(err.to_string()))?;
+            .map_err(|err| crate::contracts::AppError::persistence(err.to_string()))?;
     }
 
     let id = Uuid::new_v4().to_string();
@@ -113,9 +114,9 @@ pub async fn upload_asset(
     let target_path = assets_dir.join(&file_name);
 
     fs::copy(&source_path, &target_path)
-        .map_err(|err| crate::models::AppError::persistence(err.to_string()))?;
+        .map_err(|err| crate::contracts::AppError::persistence(err.to_string()))?;
 
-    Ok(crate::models::Asset {
+    Ok(crate::contracts::Asset {
         id,
         name,
         path: target_path.to_string_lossy().to_string(),
@@ -129,11 +130,11 @@ pub async fn save_recorded_audio(
     base64_data: String,
     name: String,
     app: AppHandle,
-) -> crate::models::AppResult<crate::models::Asset> {
+) -> crate::contracts::AppResult<crate::contracts::Asset> {
     let assets_dir = app_assets_dir(&app);
     if !assets_dir.exists() {
         fs::create_dir_all(&assets_dir)
-            .map_err(|err| crate::models::AppError::persistence(err.to_string()))?;
+            .map_err(|err| crate::contracts::AppError::persistence(err.to_string()))?;
     }
 
     let id = Uuid::new_v4().to_string();
@@ -142,11 +143,11 @@ pub async fn save_recorded_audio(
 
     let bytes = general_purpose::STANDARD
         .decode(base64_data)
-        .map_err(|err| crate::models::AppError::validation(err.to_string()))?;
+        .map_err(|err| crate::contracts::AppError::validation(err.to_string()))?;
     fs::write(&target_path, bytes)
-        .map_err(|err| crate::models::AppError::persistence(err.to_string()))?;
+        .map_err(|err| crate::contracts::AppError::persistence(err.to_string()))?;
 
-    Ok(crate::models::Asset {
+    Ok(crate::contracts::Asset {
         id,
         name,
         path: target_path.to_string_lossy().to_string(),
@@ -157,8 +158,9 @@ pub async fn save_recorded_audio(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contracts::Asset;
     use crate::contracts::{Config, McpConfig};
-    use crate::models::{Asset, PathResolver};
+    use crate::models::PathResolver;
     use std::path::PathBuf;
 
     struct TestPathResolver {
@@ -207,13 +209,13 @@ mod tests {
             freecad_library_roots: Vec::new(),
             assets: Vec::new(),
             microwave: None,
-            voice: crate::models::VoiceConfig::default(),
+            voice: crate::contracts::VoiceConfig::default(),
             mcp: McpConfig::default(),
             has_seen_onboarding: false,
             connection_type: None,
-            default_engine_kind: crate::models::EngineKind::Freecad,
-            default_geometry_backend: crate::models::GeometryBackend::Freecad,
-            default_source_language: crate::models::SourceLanguage::LegacyPython,
+            default_engine_kind: crate::contracts::EngineKind::Freecad,
+            default_geometry_backend: crate::contracts::GeometryBackend::Freecad,
+            default_source_language: crate::contracts::SourceLanguage::LegacyPython,
             max_generation_attempts: 3,
             max_verify_attempts: 0,
             projects_root: None,

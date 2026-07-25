@@ -1,6 +1,8 @@
-use std::collections::BTreeMap;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
+use crate::contracts::{AppError, AppResult, DesignParams, ParamValue};
 use crate::contracts::{AuthoringError, AuthoringReason, ErrorFix};
 use crate::ecky_cad_host::svg_profile::{
     extract_svg_wire_soup_profile, parse_svg_profile, SvgFillRule, SvgFitMode,
@@ -12,7 +14,6 @@ use crate::ecky_core_ir::{
     CoreProgram, CoreReference, CoreSelectorPayload, CoreShapeBinding, CoreSurfaceOp, CoreSymbol,
     CoreTransformOp, CoreValueKind, NodeId,
 };
-use crate::models::{AppError, AppResult, DesignParams, ParamValue};
 
 // --- Authoring-error constructors (backend layer) -------------------------
 // The direct OCCT planner is the backend wall: every failure here means an op
@@ -237,12 +238,13 @@ pub fn plan_core_program_with_params(
     let normalized =
         super::direct_occt_normalize::normalize_core_program_for_direct_occt(program, parameters)?;
     let expanded = expand_core_program_for_direct_occt(&normalized, parameters)?;
-    plan_expanded_core_program(&expanded, parameters)
+    plan_expanded_core_program(&expanded, parameters, true)
 }
 
 fn plan_expanded_core_program(
     program: &CoreProgram,
     parameters: &DesignParams,
+    optimize_graph: bool,
 ) -> AppResult<OcctPlan> {
     crate::ecky_core_ir::verify_core_program(program).map_err(|err| {
         bk(
@@ -276,11 +278,16 @@ fn plan_expanded_core_program(
             let mut planner =
                 PartPlanner::new(&param_names, &scalar_env, max_node_id(&part.root) + 1);
             let root = planner.plan_node(&part.root)?;
+            let commands = if optimize_graph {
+                optimize_part_commands(root, planner.commands)?
+            } else {
+                planner.commands
+            };
             Ok(OcctPartPlan {
                 key: part.key.clone(),
                 label: part.label.clone(),
                 root,
-                commands: planner.commands,
+                commands,
             })
         })
         .collect::<AppResult<Vec<_>>>()?;
@@ -289,6 +296,171 @@ fn plan_expanded_core_program(
         parameters: occt_parameters,
         parts,
     })
+}
+
+#[cfg(test)]
+pub(crate) fn plan_core_program_unoptimized(program: &CoreProgram) -> AppResult<OcctPlan> {
+    let parameters = DesignParams::new();
+    let normalized =
+        super::direct_occt_normalize::normalize_core_program_for_direct_occt(program, &parameters)?;
+    let expanded = expand_core_program_for_direct_occt(&normalized, &parameters)?;
+    plan_expanded_core_program(&expanded, &parameters, false)
+}
+
+fn optimize_part_commands(
+    root: OcctSlot,
+    mut commands: Vec<OcctCommand>,
+) -> AppResult<Vec<OcctCommand>> {
+    let producers = command_producers(&commands)?;
+    validate_command_graph(root, &commands, &producers)?;
+
+    let original = commands.clone();
+    for command in &mut commands {
+        if command.op != OcctOp::Difference || command.args.len() < 2 {
+            continue;
+        }
+        let mut optimized = Vec::with_capacity(command.args.len());
+        optimized.push(command.args[0].clone());
+        for tool in &command.args[1..] {
+            flatten_difference_tool(tool, &original, &producers, &mut optimized);
+        }
+        command.args = optimized;
+    }
+
+    let optimized_producers = command_producers(&commands)?;
+    let mut reachable = BTreeSet::new();
+    collect_reachable_slots(root, &commands, &optimized_producers, &mut reachable)?;
+    commands.retain(|command| reachable.contains(&command.output));
+    Ok(commands)
+}
+
+fn command_producers(commands: &[OcctCommand]) -> AppResult<BTreeMap<OcctSlot, usize>> {
+    let mut producers = BTreeMap::new();
+    for (index, command) in commands.iter().enumerate() {
+        if producers.insert(command.output, index).is_some() {
+            return Err(AppError::validation(format!(
+                "Direct OCCT plan has duplicate producer for slot {}.",
+                command.output.0
+            )));
+        }
+    }
+    Ok(producers)
+}
+
+fn validate_command_graph(
+    root: OcctSlot,
+    commands: &[OcctCommand],
+    producers: &BTreeMap<OcctSlot, usize>,
+) -> AppResult<()> {
+    if !producers.contains_key(&root) {
+        return Err(AppError::validation(format!(
+            "Direct OCCT plan root references missing slot {}.",
+            root.0
+        )));
+    }
+
+    for (consumer_index, command) in commands.iter().enumerate() {
+        let mut dependencies = Vec::new();
+        collect_command_refs(command, &mut dependencies);
+        for dependency in dependencies {
+            let Some(producer_index) = producers.get(&dependency).copied() else {
+                return Err(AppError::validation(format!(
+                    "Direct OCCT command slot {} references missing slot {}.",
+                    command.output.0, dependency.0
+                )));
+            };
+            if producer_index >= consumer_index {
+                return Err(AppError::validation(format!(
+                    "Direct OCCT command slot {} has cyclic or forward dependency on slot {}.",
+                    command.output.0, dependency.0
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn flatten_difference_tool(
+    tool: &OcctArg,
+    commands: &[OcctCommand],
+    producers: &BTreeMap<OcctSlot, usize>,
+    output: &mut Vec<OcctArg>,
+) {
+    let OcctArg::Ref(slot) = tool else {
+        output.push(tool.clone());
+        return;
+    };
+    let Some(producer) = producers
+        .get(slot)
+        .and_then(|index| commands.get(*index))
+        .filter(|command| {
+            command.op == OcctOp::Union
+                && command.keywords.is_empty()
+                && command
+                    .args
+                    .iter()
+                    .all(|arg| matches!(arg, OcctArg::Ref(_)))
+        })
+    else {
+        output.push(tool.clone());
+        return;
+    };
+    for nested_tool in &producer.args {
+        flatten_difference_tool(nested_tool, commands, producers, output);
+    }
+}
+
+fn collect_reachable_slots(
+    slot: OcctSlot,
+    commands: &[OcctCommand],
+    producers: &BTreeMap<OcctSlot, usize>,
+    reachable: &mut BTreeSet<OcctSlot>,
+) -> AppResult<()> {
+    if !reachable.insert(slot) {
+        return Ok(());
+    }
+    let command = producers
+        .get(&slot)
+        .and_then(|index| commands.get(*index))
+        .ok_or_else(|| {
+            AppError::validation(format!(
+                "Direct OCCT reachability references missing slot {}.",
+                slot.0
+            ))
+        })?;
+    let mut dependencies = Vec::new();
+    collect_command_refs(command, &mut dependencies);
+    for dependency in dependencies {
+        collect_reachable_slots(dependency, commands, producers, reachable)?;
+    }
+    Ok(())
+}
+
+fn collect_command_refs(command: &OcctCommand, output: &mut Vec<OcctSlot>) {
+    for arg in &command.args {
+        collect_arg_refs(arg, output);
+    }
+    for keyword in &command.keywords {
+        collect_arg_refs(keyword.source_arg(), output);
+    }
+}
+
+fn collect_arg_refs(arg: &OcctArg, output: &mut Vec<OcctSlot>) {
+    match arg {
+        OcctArg::Ref(slot) => output.push(*slot),
+        OcctArg::List(items) => {
+            for item in items {
+                collect_arg_refs(item, output);
+            }
+        }
+        OcctArg::Number(_)
+        | OcctArg::Boolean(_)
+        | OcctArg::Text(_)
+        | OcctArg::Symbol(_)
+        | OcctArg::Point2(_)
+        | OcctArg::Point3(_)
+        | OcctArg::Param(_) => {}
+    }
 }
 
 fn expand_core_program_for_direct_occt(
@@ -1394,7 +1566,7 @@ fn expand_regular_polygon_node(
             &["3", "4", "5", "6", "8"],
         ));
     }
-    if !(radius > 0.0) {
+    if radius.partial_cmp(&0.0) != Some(Ordering::Greater) {
         return Err(bk_op(
             AuthoringReason::Type,
             "regular-polygon",
@@ -1459,14 +1631,16 @@ fn expand_trapezoid_node(
         node_env,
     )?;
 
-    if !(bottom > 0.0) || !(top > 0.0) {
+    if bottom.partial_cmp(&0.0) != Some(Ordering::Greater)
+        || top.partial_cmp(&0.0) != Some(Ordering::Greater)
+    {
         return Err(bk_op(
             AuthoringReason::Type,
             "trapezoid",
             "`trapezoid` bottom and top must be positive.",
         ));
     }
-    if !(height > 0.0) {
+    if height.partial_cmp(&0.0) != Some(Ordering::Greater) {
         return Err(bk_op(
             AuthoringReason::Type,
             "trapezoid",
@@ -1519,14 +1693,14 @@ fn expand_slot_center_to_center_node(
 
     let separation = crate::ecky_ir::eval_core_number_with_locals(&args[0], param_names, env)?;
     let width = crate::ecky_ir::eval_core_number_with_locals(&args[1], param_names, env)?;
-    if !(width > 0.0) {
+    if width.partial_cmp(&0.0) != Some(Ordering::Greater) {
         return Err(bk_op(
             AuthoringReason::Type,
             "slot-center-to-center",
             "`slot-center-to-center` width must be positive.",
         ));
     }
-    if !(separation >= 0.0) {
+    if matches!(separation.partial_cmp(&0.0), None | Some(Ordering::Less)) {
         return Err(bk_op(
             AuthoringReason::Type,
             "slot-center-to-center",
@@ -1574,7 +1748,7 @@ fn expand_slot_center_point_node(
     let px = crate::ecky_ir::eval_core_number_with_locals(&args[2], param_names, env)?;
     let py = crate::ecky_ir::eval_core_number_with_locals(&args[3], param_names, env)?;
     let width = crate::ecky_ir::eval_core_number_with_locals(&args[4], param_names, env)?;
-    if !(width > 0.0) {
+    if width.partial_cmp(&0.0) != Some(Ordering::Greater) {
         return Err(bk_op(
             AuthoringReason::Type,
             "slot-center-point",
@@ -3645,10 +3819,242 @@ mod tests {
         CoreLiteral, CoreNode, CoreNodeKind, CoreOperation, CorePart, CorePrimitive, CoreProgram,
         CoreSelectorPayload, CoreSurfaceOp, CoreValueKind, NodeId, PartId, ProgramId,
     };
+    use sha2::{Digest, Sha256};
     use std::io::Write;
 
     fn compile(source: &str) -> CoreProgram {
         crate::ecky_scheme::compile_to_core_program(source).expect("compile")
+    }
+
+    #[test]
+    fn flattens_nested_union_tools_into_one_difference() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (build
+                  (shape base (box 40 30 20))
+                  (shape cutter-a (translate -8 0 0 (cylinder 2 24)))
+                  (shape cutter-b (translate 0 0 0 (cylinder 2 24)))
+                  (shape cutter-c (translate 8 0 0 (cylinder 2 24)))
+                  (shape inner-cutters (union cutter-a cutter-b))
+                  (shape cutters (union inner-cutters cutter-c))
+                  (result (difference base cutters)))))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("plan");
+        let part = &plan.parts[0];
+        let difference = part
+            .commands
+            .iter()
+            .find(|command| command.op == OcctOp::Difference)
+            .expect("difference");
+        let refs = difference
+            .args
+            .iter()
+            .map(|arg| match arg {
+                OcctArg::Ref(slot) => *slot,
+                other => panic!("expected shape ref, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(refs.len(), 4, "base plus three direct cutter tools");
+        assert!(
+            part.commands
+                .iter()
+                .all(|command| command.op != OcctOp::Union),
+            "bypassed cutter unions must be dead"
+        );
+    }
+
+    #[test]
+    fn retains_flattened_union_when_topology_keyword_references_it() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (build
+                  (shape base (box 40 30 20))
+                  (shape cutter-a (translate -6 0 0 (cylinder 2 24)))
+                  (shape cutter-b (translate 6 0 0 (cylinder 2 24)))
+                  (shape cutters (union cutter-a cutter-b))
+                  (shape cut-body (difference base cutters))
+                  (result
+                    (fillet 0.5
+                      :edges "left+vertical"
+                      :created-by cutters
+                      cut-body)))))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("plan");
+        let part = &plan.parts[0];
+        let cutters = part
+            .commands
+            .iter()
+            .find(|command| command.op == OcctOp::Union)
+            .expect("topology-referenced union remains");
+        let difference = part
+            .commands
+            .iter()
+            .find(|command| command.op == OcctOp::Difference)
+            .expect("difference");
+        assert_eq!(difference.args.len(), 3);
+        let fillet = part
+            .commands
+            .iter()
+            .find(|command| command.op == OcctOp::Fillet)
+            .expect("fillet");
+        assert_eq!(
+            fillet
+                .keywords
+                .iter()
+                .find(|keyword| keyword.name == "created-by")
+                .expect("created-by")
+                .source_arg(),
+            &OcctArg::Ref(cutters.output)
+        );
+    }
+
+    #[test]
+    fn does_not_flatten_union_across_transform_boundary() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (build
+                  (shape base (box 40 30 20))
+                  (shape cutter-a (cylinder 2 24))
+                  (shape cutter-b (translate 8 0 0 cutter-a))
+                  (shape cutters (union cutter-a cutter-b))
+                  (shape moved-cutters (translate -4 0 0 cutters))
+                  (result (difference base moved-cutters)))))
+            "#,
+        );
+
+        let plan = plan_core_program(&program).expect("plan");
+        let part = &plan.parts[0];
+        let difference = part
+            .commands
+            .iter()
+            .find(|command| command.op == OcctOp::Difference)
+            .expect("difference");
+        assert_eq!(difference.args.len(), 2);
+        assert!(part
+            .commands
+            .iter()
+            .any(|command| command.op == OcctOp::Union));
+    }
+
+    #[test]
+    fn rejects_missing_command_dependency_before_runner_serialization() {
+        let error = optimize_part_commands(
+            OcctSlot(2),
+            vec![OcctCommand {
+                output: OcctSlot(2),
+                op: OcctOp::Translate,
+                args: vec![
+                    OcctArg::Number(1.0),
+                    OcctArg::Number(0.0),
+                    OcctArg::Number(0.0),
+                    OcctArg::Ref(OcctSlot(99)),
+                ],
+                keywords: Vec::new(),
+            }],
+        )
+        .expect_err("missing dependency");
+
+        assert!(error.to_string().contains("missing slot 99"), "{error}");
+    }
+
+    #[test]
+    fn rejects_cyclic_command_dependency_before_runner_serialization() {
+        let error = optimize_part_commands(
+            OcctSlot(1),
+            vec![
+                OcctCommand {
+                    output: OcctSlot(1),
+                    op: OcctOp::Translate,
+                    args: vec![
+                        OcctArg::Number(1.0),
+                        OcctArg::Number(0.0),
+                        OcctArg::Number(0.0),
+                        OcctArg::Ref(OcctSlot(2)),
+                    ],
+                    keywords: Vec::new(),
+                },
+                OcctCommand {
+                    output: OcctSlot(2),
+                    op: OcctOp::Translate,
+                    args: vec![
+                        OcctArg::Number(-1.0),
+                        OcctArg::Number(0.0),
+                        OcctArg::Number(0.0),
+                        OcctArg::Ref(OcctSlot(1)),
+                    ],
+                    keywords: Vec::new(),
+                },
+            ],
+        )
+        .expect_err("cycle");
+
+        assert!(
+            error.to_string().contains("cyclic or forward dependency"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn optimizes_real_toothbrush_holder_repeated_cut_graph() {
+        let source = include_str!("../../tests/fixtures/cad/perf/toothbrush_holder_versions.ecky");
+        let model_source = source
+            .split_once("(model")
+            .map(|(_, body)| format!("(model{}", body.trim_end()))
+            .expect("model source");
+        assert_eq!(
+            format!("{:x}", Sha256::digest(model_source.as_bytes())),
+            "81f7ded44df1dbd1d38588fe2db876e721130889acbc235e4faa5c3b3c7e033f"
+        );
+
+        let program = compile(source);
+        let baseline = plan_core_program_unoptimized(&program).expect("baseline plan");
+        let optimized = plan_core_program(&program).expect("optimized plan");
+        let baseline_part = &baseline.parts[0];
+        let optimized_part = &optimized.parts[0];
+        let baseline_union_count = baseline_part
+            .commands
+            .iter()
+            .filter(|command| command.op == OcctOp::Union)
+            .count();
+        let optimized_union_count = optimized_part
+            .commands
+            .iter()
+            .filter(|command| command.op == OcctOp::Union)
+            .count();
+        let optimized_tool_count = optimized_part
+            .commands
+            .iter()
+            .filter(|command| command.op == OcctOp::Difference)
+            .map(|command| command.args.len().saturating_sub(1))
+            .max()
+            .unwrap_or_default();
+
+        assert_eq!(baseline_part.root, optimized_part.root);
+        assert!(
+            optimized_part.commands.len() < baseline_part.commands.len(),
+            "optimized={} baseline={}",
+            optimized_part.commands.len(),
+            baseline_part.commands.len()
+        );
+        assert!(
+            optimized_union_count < baseline_union_count,
+            "optimized unions={optimized_union_count} baseline unions={baseline_union_count}"
+        );
+        assert!(
+            optimized_tool_count >= 40,
+            "expected repeated cutter tools, got {optimized_tool_count}"
+        );
     }
 
     #[test]
@@ -5129,7 +5535,20 @@ mod tests {
         assert_eq!(ops.first(), Some(&OcctOp::Box));
         assert_eq!(ops.last(), Some(&OcctOp::Difference));
         assert!(ops.iter().filter(|op| **op == OcctOp::Cylinder).count() >= 12);
-        assert!(ops.contains(&OcctOp::Union));
+        assert!(
+            !ops.contains(&OcctOp::Union),
+            "cutter-only union should flatten into the difference"
+        );
+        assert!(
+            plan.parts[0]
+                .commands
+                .last()
+                .expect("difference")
+                .args
+                .len()
+                >= 13,
+            "base plus mapped cutters should reach one n-ary difference"
+        );
     }
 
     #[test]

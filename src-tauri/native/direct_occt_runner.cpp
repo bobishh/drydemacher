@@ -1313,7 +1313,7 @@ struct PlaneArgs {
     std::array<double, 3> normal{0.0, 0.0, 1.0};
 };
 
-std::array<double, 3> require_point3_arg(const Arg& arg, const std::string& label);
+std::array<double, 3> require_point3_like_arg(const Arg& arg, const std::string& label);
 
 PlaneArgs plane_args(const Command& command) {
     if (!command.args.empty()) {
@@ -1325,15 +1325,15 @@ PlaneArgs plane_args(const Command& command) {
             throw EvalError("plane keywords expect arg values only");
         }
         if (keyword.name == "origin") {
-            args.origin = require_point3_arg(keyword.value, "plane :origin");
+            args.origin = require_point3_like_arg(keyword.value, "plane :origin");
             continue;
         }
         if (keyword.name == "x") {
-            args.x_axis = require_point3_arg(keyword.value, "plane :x");
+            args.x_axis = require_point3_like_arg(keyword.value, "plane :x");
             continue;
         }
         if (keyword.name == "normal") {
-            args.normal = require_point3_arg(keyword.value, "plane :normal");
+            args.normal = require_point3_like_arg(keyword.value, "plane :normal");
             continue;
         }
         throw EvalError("plane does not recognize `:" + keyword.name + "`");
@@ -1451,6 +1451,23 @@ std::array<double, 3> require_point3_arg(const Arg& arg, const std::string& labe
         throw EvalError(label + " expects point3 value");
     }
     return arg.point3_value;
+}
+
+std::array<double, 3> require_point3_like_arg(const Arg& arg, const std::string& label) {
+    if (arg.kind == Arg::Kind::Point3) {
+        return arg.point3_value;
+    }
+    if (arg.kind == Arg::Kind::List && arg.list_value.size() == 3) {
+        std::array<double, 3> point{};
+        for (std::size_t index = 0; index < point.size(); ++index) {
+            if (arg.list_value[index].kind != Arg::Kind::Number) {
+                throw EvalError(label + " expects point3 or three-number list value");
+            }
+            point[index] = arg.list_value[index].number_value;
+        }
+        return point;
+    }
+    throw EvalError(label + " expects point3 or three-number list value");
 }
 
 std::vector<std::array<double, 3>> require_point3_sequence(
@@ -2469,8 +2486,11 @@ TopoDS_Shape fuse_shapes(const TopoDS_Shape& lhs, const TopoDS_Shape& rhs) {
 }
 
 TopoDS_Shape fuse_shapes(const std::vector<TopoDS_Shape>& shapes) {
-    if (shapes.size() < 2) {
-        throw EvalError("Direct OCCT boolean `union` requires at least two operands");
+    if (shapes.empty()) {
+        throw EvalError("Direct OCCT boolean `union` requires at least one operand");
+    }
+    if (shapes.size() == 1) {
+        return shapes.front();
     }
     return checked_boolean_shapes<BRepAlgoAPI_Fuse>(
         {shapes.front()},
@@ -3781,6 +3801,25 @@ gp_Trsf make_location_frame(const gp_Trsf* base) {
     return gp_Trsf();
 }
 
+void apply_location_transform(
+    gp_Trsf& frame,
+    const std::array<double, 3>& offset,
+    const std::array<double, 3>& rotate_degrees
+) {
+    gp_Trsf offset_transform;
+    offset_transform.SetTranslation(gp_Vec(offset[0], offset[1], offset[2]));
+    frame.Multiply(offset_transform);
+    const std::array<gp_Dir, 3> axes = {gp_Dir(1, 0, 0), gp_Dir(0, 1, 0), gp_Dir(0, 0, 1)};
+    for (std::size_t index = 0; index < axes.size(); ++index) {
+        gp_Trsf rotation;
+        rotation.SetRotation(
+            gp_Ax1(gp_Pnt(0, 0, 0), axes[index]),
+            rotate_degrees[index] * M_PI / 180.0
+        );
+        frame.Multiply(rotation);
+    }
+}
+
 double path_frame_anchor_arg(const Arg& arg) {
     if (arg.kind == Arg::Kind::Number) {
         return std::min(1.0, std::max(0.0, arg.number_value));
@@ -4052,11 +4091,28 @@ SlotValue evaluate_command(
         }
         return lookup_frame(slots, arg.ref_value, op);
     };
+    auto get_ref_slot = [&](std::size_t index) -> const SlotValue& {
+        if (index >= command.args.size()) {
+            throw EvalError(op + " missing geometry reference");
+        }
+        const Arg& arg = command.args[index];
+        if (arg.kind != Arg::Kind::Ref) {
+            throw EvalError(op + " expects geometry reference");
+        }
+        auto input = slots.find(arg.ref_value);
+        if (input == slots.end()) {
+            throw EvalError(op + " references unknown slot");
+        }
+        if (input->second.kind == SlotValue::Kind::Frame) {
+            throw EvalError(op + " expects shape or Manifold geometry");
+        }
+        return input->second;
+    };
 
     if (!command.keywords.empty() && op != "box" && op != "sphere" && op != "cylinder" &&
         op != "cone" && op != "torus" && op != "wedge" && op != "profile" && op != "plane" &&
         op != "clip-box" && op != "fillet" && op != "chamfer" && op != "shell" && op != "bspline" &&
-        op != "sweep" && op != "draft" && op != "path-frame") {
+        op != "sweep" && op != "draft" && op != "path-frame" && op != "location") {
         throw EvalError(op + " keywords unsupported yet");
     }
 
@@ -4257,14 +4313,30 @@ SlotValue evaluate_command(
         return make_plane_frame(plane_args(command));
     }
     if (op == "location") {
-        if (command.args.empty()) {
-            return make_location_frame(nullptr);
+        if (command.args.size() > 1) {
+            throw EvalError(op + " expects zero or one frame reference");
         }
-        if (command.args.size() == 1) {
-            const gp_Trsf& frame = get_ref_frame(0);
-            return make_location_frame(&frame);
+        gp_Trsf frame = command.args.empty()
+            ? make_location_frame(nullptr)
+            : make_location_frame(&get_ref_frame(0));
+        std::array<double, 3> offset{0.0, 0.0, 0.0};
+        std::array<double, 3> rotate{0.0, 0.0, 0.0};
+        for (const Keyword& keyword : command.keywords) {
+            if (keyword.kind != Keyword::Kind::Arg) {
+                throw EvalError(op + " keywords expect arg values only");
+            }
+            if (keyword.name == "offset") {
+                offset = require_point3_like_arg(keyword.value, "location :offset");
+                continue;
+            }
+            if (keyword.name == "rotate") {
+                rotate = require_point3_like_arg(keyword.value, "location :rotate");
+                continue;
+            }
+            throw EvalError(op + " does not recognize `:" + keyword.name + "`");
         }
-        throw EvalError(op + " expects zero or one frame reference");
+        apply_location_transform(frame, offset, rotate);
+        return frame;
     }
     if (op == "path-frame") {
         PathFrameArgs args = path_frame_args(command);
@@ -4349,30 +4421,58 @@ SlotValue evaluate_command(
         return result;
     }
     if (op == "translate") {
-        return translate_shape(get_ref_shape(3), require_number_arg(command.args, 0, op),
-                               require_number_arg(command.args, 1, op),
-                               require_number_arg(command.args, 2, op));
+        const double x = require_number_arg(command.args, 0, op);
+        const double y = require_number_arg(command.args, 1, op);
+        const double z = require_number_arg(command.args, 2, op);
+        const SlotValue& input = get_ref_slot(3);
+        if (input.kind == SlotValue::Kind::Manifold) {
+            manifold::Manifold result = input.manifold.Translate({x, y, z});
+            require_manifold_status(result, op);
+            return SlotValue::manifold_value(result);
+        }
+        return translate_shape(input.shape, x, y, z);
     }
     if (op == "rotate") {
-        return rotate_shape(get_ref_shape(3), require_number_arg(command.args, 0, op),
-                            require_number_arg(command.args, 1, op),
-                            require_number_arg(command.args, 2, op));
+        const double x = require_number_arg(command.args, 0, op);
+        const double y = require_number_arg(command.args, 1, op);
+        const double z = require_number_arg(command.args, 2, op);
+        const SlotValue& input = get_ref_slot(3);
+        if (input.kind == SlotValue::Kind::Manifold) {
+            manifold::Manifold result = input.manifold.Rotate(x, y, z);
+            require_manifold_status(result, op);
+            return SlotValue::manifold_value(result);
+        }
+        return rotate_shape(input.shape, x, y, z);
     }
     if (op == "scale") {
+        double x = 1.0;
+        double y = 1.0;
+        double z = 1.0;
+        std::size_t input_index = 0;
         if (command.args.size() == 2) {
-            double factor = require_number_arg(command.args, 0, op);
-            return scale_shape(get_ref_shape(1), factor, factor, factor);
+            x = require_number_arg(command.args, 0, op);
+            y = x;
+            z = x;
+            input_index = 1;
+        } else if (command.args.size() == 3) {
+            x = require_number_arg(command.args, 0, op);
+            y = require_number_arg(command.args, 1, op);
+            input_index = 2;
+        } else if (command.args.size() == 4) {
+            x = require_number_arg(command.args, 0, op);
+            y = require_number_arg(command.args, 1, op);
+            z = require_number_arg(command.args, 2, op);
+            input_index = 3;
+        } else {
+            throw EvalError(op + " expects one to three factors and a shape");
         }
-        if (command.args.size() == 3) {
-            return scale_shape(get_ref_shape(2), require_number_arg(command.args, 0, op),
-                               require_number_arg(command.args, 1, op), 1.0);
+        const SlotValue& input = get_ref_slot(input_index);
+        if (input.kind == SlotValue::Kind::Manifold) {
+            manifold::Manifold result = input.manifold.Scale({x, y, z});
+            require_manifold_status(result, op);
+            return SlotValue::manifold_value(result);
         }
-        if (command.args.size() == 4) {
-            return scale_shape(get_ref_shape(3), require_number_arg(command.args, 0, op),
-                               require_number_arg(command.args, 1, op),
-                               require_number_arg(command.args, 2, op));
-        }
-        throw EvalError(op + " expects one to three factors and a shape");
+        return scale_shape(input.shape, x, y, z);
     }
     if (op == "mirror") {
         if (command.args.size() != 3 || command.args[0].kind == Arg::Kind::Number) {
@@ -4802,25 +4902,33 @@ int run(int argc, char** argv) {
         })) {
         throw EvalError("mixed BRep and Manifold part roots cannot share one export bundle");
     }
-    direct_occt_current_stage = "assemble-export-shape";
-    TopoDS_Shape export_shape = parts.size() == 1 ? parts.front().shape : compound_shapes([&]() {
-        std::vector<TopoDS_Shape> shapes;
-        shapes.reserve(parts.size());
-        for (const auto& part : parts) {
-            shapes.push_back(part.shape);
-        }
-        return shapes;
-    }());
 
     if (mesh_only) {
-        if (parts.size() != 1) {
-            throw EvalError("Manifold export currently requires exactly one part");
+        direct_occt_current_stage = "assemble-manifold-preview";
+        manifold::Manifold preview = parts.front().manifold;
+        if (parts.size() > 1) {
+            std::vector<manifold::Manifold> manifolds;
+            manifolds.reserve(parts.size());
+            for (const auto& part : parts) {
+                manifolds.push_back(part.manifold);
+            }
+            preview = manifold::Manifold::BatchBoolean(manifolds, manifold::OpType::Add);
+            require_manifold_status(preview, "multipart Manifold preview");
         }
         run_occt_export_stage("write-preview-stl", [&]() {
             StageExecutionTimer stage_timer("export");
-            write_manifold_stl_file(stl_path, parts.front().manifold);
+            write_manifold_stl_file(stl_path, preview);
         });
     } else {
+        direct_occt_current_stage = "assemble-export-shape";
+        TopoDS_Shape export_shape = parts.size() == 1 ? parts.front().shape : compound_shapes([&]() {
+            std::vector<TopoDS_Shape> shapes;
+            shapes.reserve(parts.size());
+            for (const auto& part : parts) {
+                shapes.push_back(part.shape);
+            }
+            return shapes;
+        }());
         run_occt_export_stage("write-step", [&]() {
             StageExecutionTimer stage_timer("export");
             write_step_file(step_path, export_shape);

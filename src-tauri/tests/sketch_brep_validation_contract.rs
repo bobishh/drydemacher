@@ -1,4 +1,4 @@
-use ecky_cad_lib::models::{
+use ecky_cad_lib::contracts::{
     BrepHiddenLineProjectionResponse, BrepHiddenLineProjectionView, BrepProjectedEdge2d,
     BrepProjectedLoop2d, BrepProjectedLoopRole, SketchDefinition, SketchDocument, SketchPrimitive,
     SketchPrimitiveKind, SketchPrimitiveTopology, SketchValidationSeverity, SketchView,

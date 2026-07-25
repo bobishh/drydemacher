@@ -1,9 +1,10 @@
 use super::{claim_owner_for_thread, AgentContext, THREAD_MESSAGE_CONTENT_MAX_CHARS};
+use crate::contracts::AppResult;
 use crate::mcp::contracts::{
     AgentIdentityOverride, AgentIdentityResponse, AgentIdentitySetRequest, ThreadGetRequest,
     ThreadGetResponse, ThreadMessageEntry, ThreadMessagesRequest, ThreadMessagesResponse,
 };
-use crate::models::{AppResult, AppState};
+use crate::models::AppState;
 use crate::services::history;
 
 fn compact_message_content(content: &str) -> String {

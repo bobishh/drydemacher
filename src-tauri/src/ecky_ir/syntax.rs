@@ -1,7 +1,7 @@
 use lexpr::parse::{KeywordSyntax, Options};
 use lexpr::Value;
 
-use crate::models::AppResult;
+use crate::contracts::AppResult;
 
 use super::shared::validation;
 

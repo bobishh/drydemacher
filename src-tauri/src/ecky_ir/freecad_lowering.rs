@@ -3,12 +3,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::contracts::AppResult;
+use crate::contracts::ParamValue;
 use crate::ecky_core_ir::{
     CoreArrayOp, CoreBooleanOp, CoreFrameOp, CoreLiteral, CoreMetaOp, CoreNode, CoreNodeKind,
     CoreOperation, CorePathOp, CorePrimitive, CoreProgram, CoreReference, CoreSelectorPayload,
     CoreSurfaceOp, CoreSymbol, CoreTransformOp, CoreValueKind,
 };
-use crate::models::ParamValue;
 
 use super::edge_ops::{
     edge_selector_spec_from_core_payload, face_selector_spec_from_core_payload,
@@ -988,13 +988,13 @@ impl FreecadLowerer {
         if let Ok(stringish) = self.lower_stringish_expr(value, scope) {
             return Ok(LoweredBinding::Stringish(stringish));
         }
-        if matches!(geom_err.code, crate::models::AppErrorCode::Validation) {
+        if matches!(geom_err.code, crate::contracts::AppErrorCode::Validation) {
             return Err(geom_err);
         }
-        if matches!(num_err.code, crate::models::AppErrorCode::Validation) {
+        if matches!(num_err.code, crate::contracts::AppErrorCode::Validation) {
             return Err(num_err);
         }
-        if matches!(bool_err.code, crate::models::AppErrorCode::Validation) {
+        if matches!(bool_err.code, crate::contracts::AppErrorCode::Validation) {
             return Err(bool_err);
         }
         Err(validation(format!(
@@ -1019,10 +1019,10 @@ impl FreecadLowerer {
         if let Ok(stringish) = self.lower_stringish_expr(value, scope) {
             return Ok(LoweredBinding::Stringish(stringish));
         }
-        if matches!(num_err.code, crate::models::AppErrorCode::Validation) {
+        if matches!(num_err.code, crate::contracts::AppErrorCode::Validation) {
             return Err(num_err);
         }
-        if matches!(bool_err.code, crate::models::AppErrorCode::Validation) {
+        if matches!(bool_err.code, crate::contracts::AppErrorCode::Validation) {
             return Err(bool_err);
         }
         Err(num_err)
@@ -4197,7 +4197,7 @@ struct BuildBinding {
 mod tests {
     use super::{lower_core_program_to_freecad, lower_to_freecad as lower_to_freecad_raw};
 
-    fn lower_to_freecad(source: &str) -> crate::models::AppResult<String> {
+    fn lower_to_freecad(source: &str) -> crate::contracts::AppResult<String> {
         let source = source.to_string();
         std::thread::Builder::new()
             .name("freecad-lowering-test".to_string())

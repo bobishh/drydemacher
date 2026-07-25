@@ -1,5 +1,9 @@
 use std::collections::BTreeMap;
 
+use crate::contracts::{
+    AppError, AppResult, ModelManifest, SelectionTarget, SelectionTargetKind, TaggedAnchorBinding,
+    TaggedAnchorKind,
+};
 use crate::contracts::{ViewerEdgePoint, ViewerEdgeTarget, ViewerFaceTarget};
 use crate::ecky_core_ir::{
     CoreKeywordArg, CoreKeywordValue, CoreNode, CoreNodeKind, CoreProgram, CoreSelectorPayload,
@@ -9,10 +13,6 @@ use crate::ecky_ir::edge_ops::{
     parse_core_edge_selector_payload, parse_core_face_selector_payload, parse_edge_selector_value,
     parse_face_selector_value, EdgeAxis, EdgeBound, EdgeSelector, EdgeSelectorClause, FaceAreaRank,
     FaceSelector, FaceSelectorClause,
-};
-use crate::models::{
-    AppError, AppResult, ModelManifest, SelectionTarget, SelectionTargetKind, TaggedAnchorBinding,
-    TaggedAnchorKind,
 };
 
 pub(crate) fn resolve_tagged_anchors(
@@ -1152,17 +1152,17 @@ fn format_portable_topology_number(value: f64) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
+    use crate::contracts::{
+        DocumentMetadata, EngineKind, EnrichmentStatus, GeometryBackend, ManifestEnrichmentState,
+        ModelManifest, ModelSourceKind, SourceLanguage, TaggedAnchorBinding, TaggedAnchorKind,
+    };
+    use crate::contracts::{SelectionTarget, SelectionTargetKind};
     use crate::contracts::{ViewerEdgePoint, ViewerEdgeTarget, ViewerFaceTarget};
     use crate::ecky_core_ir::{
         CoreKeywordValue, CoreNodeKind, CoreSelectorPayload, CoreSelectorTagDecl,
         CoreSelectorTagKind,
     };
     use crate::ecky_scheme::compile_to_core_program;
-    use crate::models::{
-        DocumentMetadata, EngineKind, EnrichmentStatus, GeometryBackend, ManifestEnrichmentState,
-        ModelManifest, ModelSourceKind, SourceLanguage, TaggedAnchorBinding, TaggedAnchorKind,
-    };
-    use crate::models::{SelectionTarget, SelectionTargetKind};
 
     use super::{
         durable_edge_target_id, durable_edge_target_id_for_stable_node_key, durable_face_target_id,

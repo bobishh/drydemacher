@@ -37,9 +37,7 @@ fn write_file(path: &Path, contents: &str) {
 }
 
 fn ecky_command() -> Command {
-    let bin = std::env::var("CARGO_BIN_EXE_ecky")
-        .expect("CARGO_BIN_EXE_ecky must be set by cargo during test runs");
-    Command::new(bin)
+    Command::new(env!("CARGO_BIN_EXE_ecky"))
 }
 
 fn output_text(stream: &[u8]) -> String {

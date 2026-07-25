@@ -1,13 +1,15 @@
+use crate::contracts::{
+    AppError, AppErrorCode, AppResult, ArtifactBundle, AuthoringTargetRef, Config,
+    FreecadLibraryImportRequest, FreecadLibrarySearchRequest, Message, MessageRole, MessageStatus,
+    ModelManifest, TargetLeaseInfo,
+};
 use crate::db;
 use crate::mcp::authoring::authoring_card_text;
 use crate::mcp::contracts::*;
 use crate::mcp::handlers;
 use crate::mcp::handlers::AgentContext;
 use crate::models::{
-    AppError, AppErrorCode, AppResult, AppState, ArtifactBundle, AuthoringTargetRef, Config,
-    FreecadLibraryImportRequest, FreecadLibrarySearchRequest, McpSessionState, McpTargetRef,
-    Message, MessageRole, MessageStatus, ModelManifest, PathResolver, TargetLeaseInfo,
-    ViewportScreenshotCapture,
+    AppState, McpSessionState, McpTargetRef, PathResolver, ViewportScreenshotCapture,
 };
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -73,9 +75,9 @@ struct EckyAstSetNumberCallRequest {
     path: String,
     expected_node_digest: String,
     value: f64,
-    parameters: Option<crate::models::DesignParams>,
-    post_processing: Option<crate::models::PostProcessingSpec>,
-    geometry_backend: Option<crate::models::GeometryBackend>,
+    parameters: Option<crate::contracts::DesignParams>,
+    post_processing: Option<crate::contracts::PostProcessingSpec>,
+    geometry_backend: Option<crate::contracts::GeometryBackend>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,9 +91,9 @@ struct EckyAstSetStringCallRequest {
     path: String,
     expected_node_digest: String,
     value: String,
-    parameters: Option<crate::models::DesignParams>,
-    post_processing: Option<crate::models::PostProcessingSpec>,
-    geometry_backend: Option<crate::models::GeometryBackend>,
+    parameters: Option<crate::contracts::DesignParams>,
+    post_processing: Option<crate::contracts::PostProcessingSpec>,
+    geometry_backend: Option<crate::contracts::GeometryBackend>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,9 +107,9 @@ struct EckyAstSetSelectCallRequest {
     path: String,
     expected_node_digest: String,
     value: serde_json::Value,
-    parameters: Option<crate::models::DesignParams>,
-    post_processing: Option<crate::models::PostProcessingSpec>,
-    geometry_backend: Option<crate::models::GeometryBackend>,
+    parameters: Option<crate::contracts::DesignParams>,
+    post_processing: Option<crate::contracts::PostProcessingSpec>,
+    geometry_backend: Option<crate::contracts::GeometryBackend>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,9 +123,9 @@ struct EckyAstReplaceCallRequest {
     path: String,
     expected_node_digest: String,
     replacement_source: String,
-    parameters: Option<crate::models::DesignParams>,
-    post_processing: Option<crate::models::PostProcessingSpec>,
-    geometry_backend: Option<crate::models::GeometryBackend>,
+    parameters: Option<crate::contracts::DesignParams>,
+    post_processing: Option<crate::contracts::PostProcessingSpec>,
+    geometry_backend: Option<crate::contracts::GeometryBackend>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,9 +140,9 @@ struct EckyAstInsertBindingCallRequest {
     expected_node_digest: String,
     binding_source: String,
     position: Option<String>,
-    parameters: Option<crate::models::DesignParams>,
-    post_processing: Option<crate::models::PostProcessingSpec>,
-    geometry_backend: Option<crate::models::GeometryBackend>,
+    parameters: Option<crate::contracts::DesignParams>,
+    post_processing: Option<crate::contracts::PostProcessingSpec>,
+    geometry_backend: Option<crate::contracts::GeometryBackend>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,9 +155,9 @@ struct EckyAstDeleteBindingCallRequest {
     source_digest: String,
     path: String,
     expected_node_digest: String,
-    parameters: Option<crate::models::DesignParams>,
-    post_processing: Option<crate::models::PostProcessingSpec>,
-    geometry_backend: Option<crate::models::GeometryBackend>,
+    parameters: Option<crate::contracts::DesignParams>,
+    post_processing: Option<crate::contracts::PostProcessingSpec>,
+    geometry_backend: Option<crate::contracts::GeometryBackend>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,9 +171,9 @@ struct EckyAstRenameBindingCallRequest {
     path: String,
     expected_node_digest: String,
     new_name: String,
-    parameters: Option<crate::models::DesignParams>,
-    post_processing: Option<crate::models::PostProcessingSpec>,
-    geometry_backend: Option<crate::models::GeometryBackend>,
+    parameters: Option<crate::contracts::DesignParams>,
+    post_processing: Option<crate::contracts::PostProcessingSpec>,
+    geometry_backend: Option<crate::contracts::GeometryBackend>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -206,8 +208,8 @@ struct ResolvedTargetRef {
     thread_id: String,
     message_id: String,
     model_id: Option<String>,
-    source_language: crate::models::SourceLanguage,
-    geometry_backend: crate::models::GeometryBackend,
+    source_language: crate::contracts::SourceLanguage,
+    geometry_backend: crate::contracts::GeometryBackend,
     preview_stl_path: Option<String>,
     viewer_assets: Vec<crate::contracts::ViewerAsset>,
     title: String,
@@ -759,11 +761,11 @@ async fn resolve_authoring_target_for_session(
                 .fields
                 .iter()
                 .fold((0, 0, 0, 0), |acc, field| match field {
-                    crate::models::UiField::Range { .. } => (acc.0 + 1, acc.1, acc.2, acc.3),
-                    crate::models::UiField::Number { .. } => (acc.0, acc.1 + 1, acc.2, acc.3),
-                    crate::models::UiField::Select { .. } => (acc.0, acc.1, acc.2 + 1, acc.3),
-                    crate::models::UiField::Checkbox { .. } => (acc.0, acc.1, acc.2, acc.3 + 1),
-                    crate::models::UiField::Image { .. } => acc,
+                    crate::contracts::UiField::Range { .. } => (acc.0 + 1, acc.1, acc.2, acc.3),
+                    crate::contracts::UiField::Number { .. } => (acc.0, acc.1 + 1, acc.2, acc.3),
+                    crate::contracts::UiField::Select { .. } => (acc.0, acc.1, acc.2 + 1, acc.3),
+                    crate::contracts::UiField::Checkbox { .. } => (acc.0, acc.1, acc.2, acc.3 + 1),
+                    crate::contracts::UiField::Image { .. } => acc,
                 });
             return Ok(ResolvedTargetRef {
                 thread_id: preview.thread_id,
@@ -925,11 +927,11 @@ async fn resolve_authoring_target_for_session(
         .fields
         .iter()
         .fold((0, 0, 0, 0), |acc, field| match field {
-            crate::models::UiField::Range { .. } => (acc.0 + 1, acc.1, acc.2, acc.3),
-            crate::models::UiField::Number { .. } => (acc.0, acc.1 + 1, acc.2, acc.3),
-            crate::models::UiField::Select { .. } => (acc.0, acc.1, acc.2 + 1, acc.3),
-            crate::models::UiField::Checkbox { .. } => (acc.0, acc.1, acc.2, acc.3 + 1),
-            crate::models::UiField::Image { .. } => acc,
+            crate::contracts::UiField::Range { .. } => (acc.0 + 1, acc.1, acc.2, acc.3),
+            crate::contracts::UiField::Number { .. } => (acc.0, acc.1 + 1, acc.2, acc.3),
+            crate::contracts::UiField::Select { .. } => (acc.0, acc.1, acc.2 + 1, acc.3),
+            crate::contracts::UiField::Checkbox { .. } => (acc.0, acc.1, acc.2, acc.3 + 1),
+            crate::contracts::UiField::Image { .. } => acc,
         });
     let model_id = target.model_id();
     let runtime_bundle = target.artifact_bundle.clone();
@@ -1286,7 +1288,7 @@ fn compact_macro_buffer_replace_and_preview_response_value(
 
 fn thread_list_entry(
     conn: &rusqlite::Connection,
-    thread: crate::models::Thread,
+    thread: crate::contracts::Thread,
 ) -> Result<ThreadListEntry, AppError> {
     let latest_pending_message_id = db::get_latest_pending_user_message_id(conn, &thread.id)
         .map_err(|e| AppError::persistence(e.to_string()))?;
@@ -1367,50 +1369,50 @@ fn selected_engine_label(state: &AppState) -> String {
 }
 
 fn workspace_source_hints(
-    source_language: crate::models::SourceLanguage,
-    geometry_backend: Option<crate::models::GeometryBackend>,
+    source_language: crate::contracts::SourceLanguage,
+    geometry_backend: Option<crate::contracts::GeometryBackend>,
 ) -> (&'static str, &'static str) {
     match source_language {
-        crate::models::SourceLanguage::EckyIrV0 => (".ecky", "ecky"),
-        crate::models::SourceLanguage::Build123d => (".py", "build123d"),
-        crate::models::SourceLanguage::LegacyPython => match geometry_backend {
-            Some(crate::models::GeometryBackend::Freecad) => (".FCMacro", "freecad"),
+        crate::contracts::SourceLanguage::EckyIrV0 => (".ecky", "ecky"),
+        crate::contracts::SourceLanguage::Build123d => (".py", "build123d"),
+        crate::contracts::SourceLanguage::LegacyPython => match geometry_backend {
+            Some(crate::contracts::GeometryBackend::Freecad) => (".FCMacro", "freecad"),
             _ => (".py", "freecad"),
         },
     }
 }
 
-fn backend_hint(geometry_backend: Option<crate::models::GeometryBackend>) -> &'static str {
+fn backend_hint(geometry_backend: Option<crate::contracts::GeometryBackend>) -> &'static str {
     match geometry_backend {
-        Some(crate::models::GeometryBackend::Build123d) => "build123d",
-        Some(crate::models::GeometryBackend::Freecad) => "freecad",
-        Some(crate::models::GeometryBackend::EckyRust) => "mesh",
+        Some(crate::contracts::GeometryBackend::Build123d) => "build123d",
+        Some(crate::contracts::GeometryBackend::Freecad) => "freecad",
+        Some(crate::contracts::GeometryBackend::EckyRust) => "mesh",
         None => "default",
     }
 }
 
 fn backend_guide_uri(
-    geometry_backend: Option<crate::models::GeometryBackend>,
+    geometry_backend: Option<crate::contracts::GeometryBackend>,
 ) -> Option<&'static str> {
     match geometry_backend {
-        Some(crate::models::GeometryBackend::Build123d) => Some("ecky://guides/build123d"),
-        Some(crate::models::GeometryBackend::Freecad) => Some("ecky://guides/freecad"),
-        Some(crate::models::GeometryBackend::EckyRust) => Some("ecky://guides/ecky-rust"),
+        Some(crate::contracts::GeometryBackend::Build123d) => Some("ecky://guides/build123d"),
+        Some(crate::contracts::GeometryBackend::Freecad) => Some("ecky://guides/freecad"),
+        Some(crate::contracts::GeometryBackend::EckyRust) => Some("ecky://guides/ecky-rust"),
         None => None,
     }
 }
 
 fn surface_manifest_uri(
-    geometry_backend: Option<crate::models::GeometryBackend>,
+    geometry_backend: Option<crate::contracts::GeometryBackend>,
 ) -> Option<&'static str> {
     match geometry_backend {
-        Some(crate::models::GeometryBackend::Build123d) => {
+        Some(crate::contracts::GeometryBackend::Build123d) => {
             Some("ecky://guides/surface-manifest/build123d")
         }
-        Some(crate::models::GeometryBackend::Freecad) => {
+        Some(crate::contracts::GeometryBackend::Freecad) => {
             Some("ecky://guides/surface-manifest/freecad")
         }
-        Some(crate::models::GeometryBackend::EckyRust) => {
+        Some(crate::contracts::GeometryBackend::EckyRust) => {
             Some("ecky://guides/surface-manifest/ecky-rust")
         }
         None => None,
@@ -1418,16 +1420,16 @@ fn surface_manifest_uri(
 }
 
 fn surface_reference_uri(
-    geometry_backend: Option<crate::models::GeometryBackend>,
+    geometry_backend: Option<crate::contracts::GeometryBackend>,
 ) -> Option<&'static str> {
     match geometry_backend {
-        Some(crate::models::GeometryBackend::Build123d) => {
+        Some(crate::contracts::GeometryBackend::Build123d) => {
             Some("ecky://guides/surface-reference/build123d")
         }
-        Some(crate::models::GeometryBackend::Freecad) => {
+        Some(crate::contracts::GeometryBackend::Freecad) => {
             Some("ecky://guides/surface-reference/freecad")
         }
-        Some(crate::models::GeometryBackend::EckyRust) => {
+        Some(crate::contracts::GeometryBackend::EckyRust) => {
             Some("ecky://guides/surface-reference/ecky-rust")
         }
         None => None,
@@ -1498,29 +1500,30 @@ fn workflow_guide_text(state: &AppState) -> String {
 
 fn workspace_overview_brief(
     state: &AppState,
-    source_language: Option<crate::models::SourceLanguage>,
-    geometry_backend: Option<crate::models::GeometryBackend>,
+    source_language: Option<crate::contracts::SourceLanguage>,
+    geometry_backend: Option<crate::contracts::GeometryBackend>,
 ) -> WorkspaceOverviewBrief {
     let resolved_lang =
         source_language.unwrap_or_else(|| state.config.lock().unwrap().default_source_language);
     let (lang_str, dialect_str) = match resolved_lang {
-        crate::models::SourceLanguage::EckyIrV0 => ("ecky".to_string(), "ecky".to_string()),
-        crate::models::SourceLanguage::Build123d => {
+        crate::contracts::SourceLanguage::EckyIrV0 => ("ecky".to_string(), "ecky".to_string()),
+        crate::contracts::SourceLanguage::Build123d => {
             ("build123d".to_string(), "build123d".to_string())
         }
-        crate::models::SourceLanguage::LegacyPython => {
+        crate::contracts::SourceLanguage::LegacyPython => {
             ("freecad".to_string(), "cadFrameworkV1".to_string())
         }
     };
     let (file_extension, source_hint) = workspace_source_hints(resolved_lang, geometry_backend);
     let backend = backend_hint(geometry_backend);
     let primary_guide_uri = match resolved_lang {
-        crate::models::SourceLanguage::EckyIrV0 => "ecky://guides/ecky-source",
-        crate::models::SourceLanguage::Build123d => "ecky://guides/build123d",
-        crate::models::SourceLanguage::LegacyPython => "ecky://guides/freecad",
+        crate::contracts::SourceLanguage::EckyIrV0 => ecky_source_uri_for_backend(geometry_backend),
+        crate::contracts::SourceLanguage::Build123d => "ecky://guides/build123d",
+        crate::contracts::SourceLanguage::LegacyPython => "ecky://guides/freecad",
     }
     .to_string();
-    let compatibility_manifest_uri = if resolved_lang == crate::models::SourceLanguage::EckyIrV0 {
+    let compatibility_manifest_uri = if resolved_lang == crate::contracts::SourceLanguage::EckyIrV0
+    {
         surface_manifest_uri(geometry_backend).map(str::to_string)
     } else {
         None
@@ -1548,9 +1551,9 @@ fn workspace_overview_brief(
         summary: format!(
             "Current authoring surface: {} source. fileExtension={}. geometryBackend={}. Read the primary guide only for normal authoring; use the compatibility manifest on demand for concrete backend op support.",
             match resolved_lang {
-                crate::models::SourceLanguage::EckyIrV0 => "ecky",
-                crate::models::SourceLanguage::Build123d => "build123d",
-                crate::models::SourceLanguage::LegacyPython => "freecad",
+                crate::contracts::SourceLanguage::EckyIrV0 => "ecky",
+                crate::contracts::SourceLanguage::Build123d => "build123d",
+                crate::contracts::SourceLanguage::LegacyPython => "freecad",
             },
             file_extension,
             backend,
@@ -1571,6 +1574,9 @@ fn workspace_overview_brief(
             "ecky://guides/technical-system-prompt".to_string(),
             "ecky://guides/modeling-guidelines".to_string(),
             "ecky://guides/ecky-source".to_string(),
+            "ecky://guides/ecky-source/build123d".to_string(),
+            "ecky://guides/ecky-source/freecad".to_string(),
+            "ecky://guides/ecky-source/ecky-rust".to_string(),
             "ecky://guides/freecad".to_string(),
             "ecky://guides/build123d".to_string(),
             "ecky://guides/ecky-rust".to_string(),
@@ -1692,6 +1698,24 @@ fn resource_definitions() -> Vec<Value> {
             "mimeType": "text/plain"
         }),
         json!({
+            "uri": "ecky://guides/ecky-source/build123d",
+            "name": "Ecky Source (.ecky, build123d)",
+            "description": "Canonical `.ecky` language guide with build123d backend support table.",
+            "mimeType": "text/plain"
+        }),
+        json!({
+            "uri": "ecky://guides/ecky-source/freecad",
+            "name": "Ecky Source (.ecky, FreeCAD)",
+            "description": "Canonical `.ecky` language guide with FreeCAD backend support table.",
+            "mimeType": "text/plain"
+        }),
+        json!({
+            "uri": "ecky://guides/ecky-source/ecky-rust",
+            "name": "Ecky Source (.ecky, mesh/eckyRust)",
+            "description": "Canonical `.ecky` language guide with mesh/eckyRust backend support table.",
+            "mimeType": "text/plain"
+        }),
+        json!({
             "uri": "ecky://guides/freecad",
             "name": "Ecky on FreeCAD",
             "description": "Backend guide for `.ecky` source when geometryBackend=freecad.",
@@ -1754,33 +1778,37 @@ struct ResourceContent {
     text: String,
 }
 
-fn surface_manifest_backend_for_uri(uri: &str) -> Option<crate::models::GeometryBackend> {
+fn surface_manifest_backend_for_uri(uri: &str) -> Option<crate::contracts::GeometryBackend> {
     match uri {
         "ecky://guides/surface-manifest/build123d" => {
-            Some(crate::models::GeometryBackend::Build123d)
+            Some(crate::contracts::GeometryBackend::Build123d)
         }
-        "ecky://guides/surface-manifest/freecad" => Some(crate::models::GeometryBackend::Freecad),
+        "ecky://guides/surface-manifest/freecad" => {
+            Some(crate::contracts::GeometryBackend::Freecad)
+        }
         "ecky://guides/surface-manifest/ecky-rust" => {
-            Some(crate::models::GeometryBackend::EckyRust)
+            Some(crate::contracts::GeometryBackend::EckyRust)
         }
         _ => None,
     }
 }
 
-fn surface_reference_backend_for_uri(uri: &str) -> Option<crate::models::GeometryBackend> {
+fn surface_reference_backend_for_uri(uri: &str) -> Option<crate::contracts::GeometryBackend> {
     match uri {
         "ecky://guides/surface-reference/build123d" => {
-            Some(crate::models::GeometryBackend::Build123d)
+            Some(crate::contracts::GeometryBackend::Build123d)
         }
-        "ecky://guides/surface-reference/freecad" => Some(crate::models::GeometryBackend::Freecad),
+        "ecky://guides/surface-reference/freecad" => {
+            Some(crate::contracts::GeometryBackend::Freecad)
+        }
         "ecky://guides/surface-reference/ecky-rust" => {
-            Some(crate::models::GeometryBackend::EckyRust)
+            Some(crate::contracts::GeometryBackend::EckyRust)
         }
         _ => None,
     }
 }
 
-fn surface_manifest_json(backend: crate::models::GeometryBackend) -> Value {
+fn surface_manifest_json(backend: crate::contracts::GeometryBackend) -> Value {
     let manifest = crate::ecky_language_surface::supported_surface_manifest(backend);
     json!({
         "backend": manifest.backend,
@@ -1797,18 +1825,36 @@ fn surface_manifest_json(backend: crate::models::GeometryBackend) -> Value {
     })
 }
 
-fn surface_reference_json(backend: crate::models::GeometryBackend) -> Value {
+fn surface_reference_json(backend: crate::contracts::GeometryBackend) -> Value {
     serde_json::to_value(crate::ecky_language_surface::supported_surface_reference(
         backend,
     ))
     .unwrap_or_else(|_| json!({ "backend": backend, "entries": [] }))
 }
 
-fn surface_reference_uri_for_backend(backend: crate::models::GeometryBackend) -> &'static str {
+fn surface_reference_uri_for_backend(backend: crate::contracts::GeometryBackend) -> &'static str {
     match backend {
-        crate::models::GeometryBackend::Build123d => "ecky://guides/surface-reference/build123d",
-        crate::models::GeometryBackend::Freecad => "ecky://guides/surface-reference/freecad",
-        crate::models::GeometryBackend::EckyRust => "ecky://guides/surface-reference/ecky-rust",
+        crate::contracts::GeometryBackend::Build123d => "ecky://guides/surface-reference/build123d",
+        crate::contracts::GeometryBackend::Freecad => "ecky://guides/surface-reference/freecad",
+        crate::contracts::GeometryBackend::EckyRust => "ecky://guides/surface-reference/ecky-rust",
+    }
+}
+
+fn ecky_source_uri_for_backend(backend: Option<crate::contracts::GeometryBackend>) -> &'static str {
+    match backend {
+        Some(crate::contracts::GeometryBackend::Build123d) => "ecky://guides/ecky-source/build123d",
+        Some(crate::contracts::GeometryBackend::Freecad) => "ecky://guides/ecky-source/freecad",
+        Some(crate::contracts::GeometryBackend::EckyRust) => "ecky://guides/ecky-source/ecky-rust",
+        None => "ecky://guides/ecky-source",
+    }
+}
+
+fn ecky_source_backend_for_uri(uri: &str) -> Option<crate::contracts::GeometryBackend> {
+    match uri {
+        "ecky://guides/ecky-source/build123d" => Some(crate::contracts::GeometryBackend::Build123d),
+        "ecky://guides/ecky-source/freecad" => Some(crate::contracts::GeometryBackend::Freecad),
+        "ecky://guides/ecky-source/ecky-rust" => Some(crate::contracts::GeometryBackend::EckyRust),
+        _ => None,
     }
 }
 
@@ -1819,8 +1865,11 @@ fn read_resource_text(state: &AppState, uri: &str) -> Option<String> {
             .lock()
             .ok()
             .map(|config| config.default_geometry_backend)
-            .unwrap_or(crate::models::GeometryBackend::EckyRust)
+            .unwrap_or(crate::contracts::GeometryBackend::EckyRust)
     };
+    if let Some(backend) = ecky_source_backend_for_uri(uri) {
+        return Some(crate::agent_prompt::agent_language_reference(backend));
+    }
     match uri {
         "ecky://guides/authoring-card" => Some(authoring_card_text().to_string()),
         "ecky://guides/technical-system-prompt" => Some(
@@ -1836,7 +1885,7 @@ fn read_resource_text(state: &AppState, uri: &str) -> Option<String> {
         "ecky://guides/build123d" => Some(crate::commands::generation::build123d_guide_text()),
         "ecky://guides/ecky-rust" | "ecky://guides/mesh" => {
             Some(crate::commands::generation::ecky_ir_v0_guide_text(
-                crate::models::GeometryBackend::EckyRust,
+                crate::contracts::GeometryBackend::EckyRust,
             ))
         }
         _ => None,
@@ -1880,22 +1929,21 @@ async fn mark_session_resource_read(state: &AppState, session_id: &str, uri: &st
 }
 
 fn required_authoring_guide_uris(
-    source_language: crate::models::SourceLanguage,
-    _geometry_backend: crate::models::GeometryBackend,
+    source_language: crate::contracts::SourceLanguage,
+    _geometry_backend: crate::contracts::GeometryBackend,
 ) -> Vec<&'static str> {
     match source_language {
-        crate::models::SourceLanguage::EckyIrV0 => vec!["ecky://guides/ecky-source"],
-        crate::models::SourceLanguage::Build123d | crate::models::SourceLanguage::LegacyPython => {
-            Vec::new()
-        }
+        crate::contracts::SourceLanguage::EckyIrV0 => vec!["ecky://guides/ecky-source"],
+        crate::contracts::SourceLanguage::Build123d
+        | crate::contracts::SourceLanguage::LegacyPython => Vec::new(),
     }
 }
 
 async fn missing_authoring_guide_uris(
     state: &AppState,
     session_id: &str,
-    source_language: crate::models::SourceLanguage,
-    geometry_backend: crate::models::GeometryBackend,
+    source_language: crate::contracts::SourceLanguage,
+    geometry_backend: crate::contracts::GeometryBackend,
 ) -> Vec<&'static str> {
     let required = required_authoring_guide_uris(source_language, geometry_backend);
     if required.is_empty() {
@@ -1924,8 +1972,8 @@ async fn session_bypasses_resource_read_guard(state: &AppState, session_id: &str
 async fn ensure_authoring_guides_read(
     state: &AppState,
     session_id: &str,
-    source_language: crate::models::SourceLanguage,
-    geometry_backend: crate::models::GeometryBackend,
+    source_language: crate::contracts::SourceLanguage,
+    geometry_backend: crate::contracts::GeometryBackend,
     tool_name: &str,
 ) -> AppResult<()> {
     if session_bypasses_resource_read_guard(state, session_id).await {
@@ -1962,14 +2010,14 @@ async fn ensure_target_authoring_guides_read(
 }
 
 fn effective_existing_authoring_context(
-    source_language: crate::models::SourceLanguage,
-    geometry_backend: crate::models::GeometryBackend,
-    requested_geometry_backend: Option<crate::models::GeometryBackend>,
+    source_language: crate::contracts::SourceLanguage,
+    geometry_backend: crate::contracts::GeometryBackend,
+    requested_geometry_backend: Option<crate::contracts::GeometryBackend>,
 ) -> (
-    crate::models::SourceLanguage,
-    crate::models::GeometryBackend,
+    crate::contracts::SourceLanguage,
+    crate::contracts::GeometryBackend,
 ) {
-    let geometry_backend = if source_language == crate::models::SourceLanguage::EckyIrV0 {
+    let geometry_backend = if source_language == crate::contracts::SourceLanguage::EckyIrV0 {
         requested_geometry_backend.unwrap_or(geometry_backend)
     } else {
         geometry_backend
@@ -1981,8 +2029,8 @@ fn first_version_macro_request_authoring_context(
     config: &Config,
     req: &MacroReplaceRequest,
 ) -> (
-    crate::models::SourceLanguage,
-    crate::models::GeometryBackend,
+    crate::contracts::SourceLanguage,
+    crate::contracts::GeometryBackend,
 ) {
     (
         config.default_source_language,
@@ -3348,7 +3396,7 @@ pub async fn serve_http_on_port(
     // Clear stale sessions from previous run.
     {
         let conn = state.db.lock().await;
-        let _ = conn.execute("DELETE FROM agent_sessions", []);
+        let _ = crate::db::delete_all_agent_sessions(&conn);
     }
     let router = Router::new()
         .route(
@@ -5824,7 +5872,7 @@ async fn persist_freecad_library_import_version(
     model_manifest: ModelManifest,
     current_thread_id: Option<&str>,
 ) -> AppResult<(Value, McpTargetRef)> {
-    crate::models::validate_model_runtime_bundle(&model_manifest, &artifact_bundle)?;
+    crate::contracts::validate_model_runtime_bundle(&model_manifest, &artifact_bundle)?;
 
     let label = model_manifest.document.document_label.trim();
     let document_name = model_manifest.document.document_name.trim();
@@ -5952,11 +6000,11 @@ fn ensure_mcp_tool_allowed_for_app_mode(config: &Config, tool_name: &str) -> App
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contracts::{Config, McpConfig};
-    use crate::models::{
+    use crate::contracts::{
         ArtifactBundle, DesignOutput, InteractionMode, MacroDialect, Message, MessageRole,
         MessageStatus, ModelManifest,
     };
+    use crate::contracts::{Config, McpConfig};
     use rusqlite::Connection;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -5988,13 +6036,13 @@ mod tests {
             freecad_library_roots: Vec::new(),
             assets: Vec::new(),
             microwave: None,
-            voice: crate::models::VoiceConfig::default(),
+            voice: crate::contracts::VoiceConfig::default(),
             mcp: McpConfig::default(),
             has_seen_onboarding: true,
             connection_type: None,
-            default_engine_kind: crate::models::EngineKind::Freecad,
-            default_source_language: crate::models::SourceLanguage::LegacyPython,
-            default_geometry_backend: crate::models::GeometryBackend::Freecad,
+            default_engine_kind: crate::contracts::EngineKind::Freecad,
+            default_source_language: crate::contracts::SourceLanguage::LegacyPython,
+            default_geometry_backend: crate::contracts::GeometryBackend::Freecad,
             max_generation_attempts: 3,
             max_verify_attempts: 0,
             projects_root: None,
@@ -6012,8 +6060,8 @@ mod tests {
     #[test]
     fn first_version_macro_context_uses_config_without_content_fallback() {
         let mut config = test_config();
-        config.default_source_language = crate::models::SourceLanguage::EckyIrV0;
-        config.default_geometry_backend = crate::models::GeometryBackend::Build123d;
+        config.default_source_language = crate::contracts::SourceLanguage::EckyIrV0;
+        config.default_geometry_backend = crate::contracts::GeometryBackend::Build123d;
         let request = MacroReplaceRequest {
             identity: AgentIdentityOverride::default(),
             thread_id: Some("thread-1".to_string()),
@@ -6029,8 +6077,8 @@ mod tests {
         assert_eq!(
             first_version_macro_request_authoring_context(&config, &request),
             (
-                crate::models::SourceLanguage::EckyIrV0,
-                crate::models::GeometryBackend::Build123d,
+                crate::contracts::SourceLanguage::EckyIrV0,
+                crate::contracts::GeometryBackend::Build123d,
             )
         );
     }
@@ -6058,13 +6106,13 @@ mod tests {
             freecad_library_roots: Vec::new(),
             assets: Vec::new(),
             microwave: None,
-            voice: crate::models::VoiceConfig::default(),
+            voice: crate::contracts::VoiceConfig::default(),
             mcp: McpConfig::default(),
             has_seen_onboarding: true,
             connection_type: Some("api_key".to_string()),
-            default_engine_kind: crate::models::EngineKind::Freecad,
-            default_source_language: crate::models::SourceLanguage::LegacyPython,
-            default_geometry_backend: crate::models::GeometryBackend::Freecad,
+            default_engine_kind: crate::contracts::EngineKind::Freecad,
+            default_source_language: crate::contracts::SourceLanguage::LegacyPython,
+            default_geometry_backend: crate::contracts::GeometryBackend::Freecad,
             max_generation_attempts: 3,
             max_verify_attempts: 0,
             projects_root: None,
@@ -6091,13 +6139,13 @@ mod tests {
                 freecad_library_roots: Vec::new(),
                 assets: Vec::new(),
                 microwave: None,
-                voice: crate::models::VoiceConfig::default(),
+                voice: crate::contracts::VoiceConfig::default(),
                 mcp: McpConfig::default(),
                 has_seen_onboarding: true,
                 connection_type: Some("mcp".to_string()),
-                default_engine_kind: crate::models::EngineKind::EckyIrV0,
-                default_source_language: crate::models::SourceLanguage::EckyIrV0,
-                default_geometry_backend: crate::models::GeometryBackend::Build123d,
+                default_engine_kind: crate::contracts::EngineKind::EckyIrV0,
+                default_source_language: crate::contracts::SourceLanguage::EckyIrV0,
+                default_geometry_backend: crate::contracts::GeometryBackend::Build123d,
                 max_generation_attempts: 3,
                 max_verify_attempts: 0,
                 projects_root: None,
@@ -6115,10 +6163,10 @@ mod tests {
             interaction_mode: InteractionMode::Design,
             macro_code: macro_code.to_string(),
             macro_dialect: MacroDialect::EckyIrV0,
-            engine_kind: crate::models::EngineKind::EckyIrV0,
-            source_language: crate::models::SourceLanguage::EckyIrV0,
-            geometry_backend: crate::models::GeometryBackend::EckyRust,
-            ui_spec: crate::models::UiSpec::default(),
+            engine_kind: crate::contracts::EngineKind::EckyIrV0,
+            source_language: crate::contracts::SourceLanguage::EckyIrV0,
+            geometry_backend: crate::contracts::GeometryBackend::EckyRust,
+            ui_spec: crate::contracts::UiSpec::default(),
             initial_params: std::collections::BTreeMap::new(),
             post_processing: None,
         }
@@ -6129,10 +6177,10 @@ mod tests {
             geometry_provenance: None,
             schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
-            source_kind: crate::models::ModelSourceKind::Generated,
-            engine_kind: crate::models::EngineKind::EckyIrV0,
-            geometry_backend: crate::models::GeometryBackend::EckyRust,
-            source_language: crate::models::SourceLanguage::EckyIrV0,
+            source_kind: crate::contracts::ModelSourceKind::Generated,
+            engine_kind: crate::contracts::EngineKind::EckyIrV0,
+            geometry_backend: crate::contracts::GeometryBackend::EckyRust,
+            source_language: crate::contracts::SourceLanguage::EckyIrV0,
             content_hash: format!("hash-{model_id}"),
             artifact_version: 1,
             fcstd_path: format!("/tmp/{model_id}.FCStd"),
@@ -6153,14 +6201,14 @@ mod tests {
             geometry_provenance: None,
             schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
-            source_kind: crate::models::ModelSourceKind::Generated,
+            source_kind: crate::contracts::ModelSourceKind::Generated,
             source_digest: None,
             core_digest: None,
             ast_schema_version: None,
-            engine_kind: crate::models::EngineKind::EckyIrV0,
-            geometry_backend: crate::models::GeometryBackend::EckyRust,
-            source_language: crate::models::SourceLanguage::EckyIrV0,
-            document: crate::models::DocumentMetadata {
+            engine_kind: crate::contracts::EngineKind::EckyIrV0,
+            geometry_backend: crate::contracts::GeometryBackend::EckyRust,
+            source_language: crate::contracts::SourceLanguage::EckyIrV0,
+            document: crate::contracts::DocumentMetadata {
                 document_name: "Doc".to_string(),
                 document_label: "Doc".to_string(),
                 source_path: None,
@@ -6180,8 +6228,8 @@ mod tests {
             feature_graph: None,
             correspondence_graph: None,
             warnings: Vec::new(),
-            enrichment_state: crate::models::ManifestEnrichmentState {
-                status: crate::models::EnrichmentStatus::None,
+            enrichment_state: crate::contracts::ManifestEnrichmentState {
+                status: crate::contracts::EnrichmentStatus::None,
                 proposals: Vec::new(),
             },
         }
@@ -7102,11 +7150,11 @@ mod tests {
             db::add_message(
                 &conn,
                 "thread-1",
-                &crate::models::Message {
+                &crate::contracts::Message {
                     id: "user-1".to_string(),
-                    role: crate::models::MessageRole::User,
+                    role: crate::contracts::MessageRole::User,
                     content: "make a thing".to_string(),
-                    status: crate::models::MessageStatus::Working,
+                    status: crate::contracts::MessageStatus::Working,
                     output: None,
                     usage: None,
                     artifact_bundle: None,
@@ -7400,7 +7448,7 @@ mod tests {
         let message = db::get_thread_message_version(&db, thread_id, message_id)
             .unwrap()
             .expect("message");
-        assert_eq!(message.role, crate::models::MessageRole::Assistant);
+        assert_eq!(message.role, crate::contracts::MessageRole::Assistant);
         assert!(message.artifact_bundle.is_some());
         assert!(message.model_manifest.is_some());
 
@@ -7513,8 +7561,8 @@ mod tests {
         let err = ensure_authoring_guides_read(
             &state,
             "session-1",
-            crate::models::SourceLanguage::EckyIrV0,
-            crate::models::GeometryBackend::Build123d,
+            crate::contracts::SourceLanguage::EckyIrV0,
+            crate::contracts::GeometryBackend::Build123d,
             "macro_preview_render",
         )
         .await
@@ -7534,8 +7582,8 @@ mod tests {
             .contains("ecky://guides/surface-reference/build123d"));
 
         for uri in required_authoring_guide_uris(
-            crate::models::SourceLanguage::EckyIrV0,
-            crate::models::GeometryBackend::Build123d,
+            crate::contracts::SourceLanguage::EckyIrV0,
+            crate::contracts::GeometryBackend::Build123d,
         ) {
             mark_session_resource_read(&state, "session-1", uri).await;
         }
@@ -7543,8 +7591,8 @@ mod tests {
         ensure_authoring_guides_read(
             &state,
             "session-1",
-            crate::models::SourceLanguage::EckyIrV0,
-            crate::models::GeometryBackend::Build123d,
+            crate::contracts::SourceLanguage::EckyIrV0,
+            crate::contracts::GeometryBackend::Build123d,
             "macro_preview_render",
         )
         .await
@@ -7560,8 +7608,8 @@ mod tests {
         ensure_authoring_guides_read(
             &state,
             "session-1",
-            crate::models::SourceLanguage::EckyIrV0,
-            crate::models::GeometryBackend::Freecad,
+            crate::contracts::SourceLanguage::EckyIrV0,
+            crate::contracts::GeometryBackend::Freecad,
             "macro_buffer_preview_render",
         )
         .await
@@ -7575,8 +7623,8 @@ mod tests {
         ensure_authoring_guides_read(
             &state,
             "session-1",
-            crate::models::SourceLanguage::LegacyPython,
-            crate::models::GeometryBackend::Freecad,
+            crate::contracts::SourceLanguage::LegacyPython,
+            crate::contracts::GeometryBackend::Freecad,
             "macro_preview_render",
         )
         .await
@@ -7594,8 +7642,8 @@ mod tests {
         ensure_authoring_guides_read(
             &state,
             "session-http",
-            crate::models::SourceLanguage::EckyIrV0,
-            crate::models::GeometryBackend::Build123d,
+            crate::contracts::SourceLanguage::EckyIrV0,
+            crate::contracts::GeometryBackend::Build123d,
             "macro_preview_render",
         )
         .await
@@ -7745,8 +7793,8 @@ mod tests {
         let workflow = workflow_guide_text(&state);
         let brief = workspace_overview_brief(
             &state,
-            Some(crate::models::SourceLanguage::EckyIrV0),
-            Some(crate::models::GeometryBackend::Build123d),
+            Some(crate::contracts::SourceLanguage::EckyIrV0),
+            Some(crate::contracts::GeometryBackend::Build123d),
         );
 
         assert!(workflow.contains("ecky://guides/ecky-source"));
@@ -7806,6 +7854,10 @@ mod tests {
         assert!(brief
             .resources
             .iter()
+            .any(|resource| resource == "ecky://guides/ecky-source/build123d"));
+        assert!(brief
+            .resources
+            .iter()
             .any(|resource| resource == "ecky://guides/authoring-card"));
         assert!(brief
             .resources
@@ -7820,14 +7872,17 @@ mod tests {
         }
         assert_eq!(brief.source_language, "ecky");
         assert_eq!(brief.geometry_backend, "build123d");
-        assert_eq!(brief.primary_guide_uri, "ecky://guides/ecky-source");
+        assert_eq!(
+            brief.primary_guide_uri,
+            "ecky://guides/ecky-source/build123d"
+        );
         assert_eq!(
             brief.compatibility_manifest_uri.as_deref(),
             Some("ecky://guides/surface-manifest/build123d")
         );
         assert_eq!(
             brief.must_read,
-            vec!["ecky://guides/ecky-source".to_string()]
+            vec!["ecky://guides/ecky-source/build123d".to_string()]
         );
         assert!(brief
             .read_when_needed
@@ -8022,6 +8077,10 @@ mod tests {
                 == Some("ecky://guides/ecky-source")));
         assert!(resource_definitions()
             .into_iter()
+            .any(|resource| resource.get("uri").and_then(Value::as_str)
+                == Some("ecky://guides/ecky-source/build123d")));
+        assert!(resource_definitions()
+            .into_iter()
             .any(|resource| resource.get("name").and_then(Value::as_str)
                 == Some("Ecky on build123d")));
         assert!(resource_definitions()
@@ -8047,6 +8106,25 @@ mod tests {
         assert_eq!(
             read_resource_text(&state, "ecky://guides/technical-system-prompt").as_deref(),
             Some(expected.as_str())
+        );
+    }
+
+    #[test]
+    fn backend_specific_ecky_source_resources_do_not_depend_on_config_default() {
+        let state = test_state();
+        state.config.lock().unwrap().default_geometry_backend =
+            crate::contracts::GeometryBackend::Freecad;
+
+        let build123d_guide = read_resource_text(&state, "ecky://guides/ecky-source/build123d")
+            .expect("build123d source guide");
+        let expected = crate::agent_prompt::agent_language_reference(
+            crate::contracts::GeometryBackend::Build123d,
+        );
+
+        assert_eq!(build123d_guide, expected);
+        assert_ne!(
+            build123d_guide,
+            read_resource_text(&state, "ecky://guides/ecky-source").expect("generic source guide")
         );
     }
 
@@ -8278,35 +8356,35 @@ mod tests {
         assert_eq!(response.result, Some(payload));
     }
 
-    fn compact_test_design(macro_code: &str) -> crate::models::DesignOutput {
-        crate::models::DesignOutput {
+    fn compact_test_design(macro_code: &str) -> crate::contracts::DesignOutput {
+        crate::contracts::DesignOutput {
             title: "Render".to_string(),
             version_name: "V-render".to_string(),
             response: "ok".to_string(),
-            interaction_mode: crate::models::InteractionMode::Design,
+            interaction_mode: crate::contracts::InteractionMode::Design,
             macro_code: macro_code.to_string(),
-            macro_dialect: crate::models::MacroDialect::Legacy,
-            engine_kind: crate::models::EngineKind::Freecad,
-            geometry_backend: crate::models::GeometryBackend::Freecad,
-            source_language: crate::models::SourceLanguage::LegacyPython,
-            ui_spec: crate::models::UiSpec::default(),
+            macro_dialect: crate::contracts::MacroDialect::Legacy,
+            engine_kind: crate::contracts::EngineKind::Freecad,
+            geometry_backend: crate::contracts::GeometryBackend::Freecad,
+            source_language: crate::contracts::SourceLanguage::LegacyPython,
+            ui_spec: crate::contracts::UiSpec::default(),
             initial_params: std::collections::BTreeMap::from([(
                 "diameter".to_string(),
-                crate::models::ParamValue::Number(42.0),
+                crate::contracts::ParamValue::Number(42.0),
             )]),
             post_processing: None,
         }
     }
 
-    fn compact_test_bundle(model_id: &str) -> crate::models::ArtifactBundle {
-        crate::models::ArtifactBundle {
+    fn compact_test_bundle(model_id: &str) -> crate::contracts::ArtifactBundle {
+        crate::contracts::ArtifactBundle {
             geometry_provenance: None,
             schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
-            source_kind: crate::models::ModelSourceKind::Generated,
-            engine_kind: crate::models::EngineKind::Freecad,
-            geometry_backend: crate::models::GeometryBackend::Freecad,
-            source_language: crate::models::SourceLanguage::LegacyPython,
+            source_kind: crate::contracts::ModelSourceKind::Generated,
+            engine_kind: crate::contracts::EngineKind::Freecad,
+            geometry_backend: crate::contracts::GeometryBackend::Freecad,
+            source_language: crate::contracts::SourceLanguage::LegacyPython,
             content_hash: format!("hash-{model_id}"),
             artifact_version: 1,
             fcstd_path: format!("/tmp/{model_id}.FCStd"),
@@ -8318,7 +8396,7 @@ mod tests {
             face_targets: Vec::new(),
             callout_anchors: Vec::new(),
             measurement_guides: Vec::new(),
-            export_artifacts: vec![crate::models::ExportArtifact {
+            export_artifacts: vec![crate::contracts::ExportArtifact {
                 geometry_provenance: None,
                 label: "STEP".to_string(),
                 format: "step".to_string(),
@@ -8328,19 +8406,19 @@ mod tests {
         }
     }
 
-    fn compact_test_manifest(model_id: &str) -> crate::models::ModelManifest {
-        crate::models::ModelManifest {
+    fn compact_test_manifest(model_id: &str) -> crate::contracts::ModelManifest {
+        crate::contracts::ModelManifest {
             geometry_provenance: None,
             schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
-            source_kind: crate::models::ModelSourceKind::Generated,
+            source_kind: crate::contracts::ModelSourceKind::Generated,
             source_digest: None,
             core_digest: None,
             ast_schema_version: None,
-            engine_kind: crate::models::EngineKind::Freecad,
-            geometry_backend: crate::models::GeometryBackend::Freecad,
-            source_language: crate::models::SourceLanguage::LegacyPython,
-            document: crate::models::DocumentMetadata {
+            engine_kind: crate::contracts::EngineKind::Freecad,
+            geometry_backend: crate::contracts::GeometryBackend::Freecad,
+            source_language: crate::contracts::SourceLanguage::LegacyPython,
+            document: crate::contracts::DocumentMetadata {
                 document_name: "Doc".to_string(),
                 document_label: "Doc".to_string(),
                 source_path: None,
@@ -8360,8 +8438,8 @@ mod tests {
             feature_graph: None,
             correspondence_graph: None,
             warnings: Vec::new(),
-            enrichment_state: crate::models::ManifestEnrichmentState {
-                status: crate::models::EnrichmentStatus::None,
+            enrichment_state: crate::contracts::ManifestEnrichmentState {
+                status: crate::contracts::EnrichmentStatus::None,
                 proposals: Vec::new(),
             },
         }
@@ -8466,8 +8544,8 @@ mod tests {
         };
         let manifest = compact_test_manifest("model-render");
         let mut design = compact_test_design("(model\n  (box 10 20 30))");
-        design.source_language = crate::models::SourceLanguage::EckyIrV0;
-        design.geometry_backend = crate::models::GeometryBackend::Build123d;
+        design.source_language = crate::contracts::SourceLanguage::EckyIrV0;
+        design.geometry_backend = crate::contracts::GeometryBackend::Build123d;
 
         let response = MacroReplaceResponse {
             thread_id: "thread-1".to_string(),
@@ -8512,8 +8590,8 @@ mod tests {
             thread_id: "thread-1".to_string(),
             message_id: "message-1".to_string(),
             model_id: Some("model-1".to_string()),
-            source_language: crate::models::SourceLanguage::LegacyPython,
-            geometry_backend: crate::models::GeometryBackend::EckyRust,
+            source_language: crate::contracts::SourceLanguage::LegacyPython,
+            geometry_backend: crate::contracts::GeometryBackend::EckyRust,
             preview_stl_path: Some("/tmp/model.stl".to_string()),
             viewer_assets: vec![],
             title: "Widget".to_string(),

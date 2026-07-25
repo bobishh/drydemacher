@@ -5,17 +5,18 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::ecky_core_ir::{CorePreviewViewDecl, CoreSelectorTagDecl};
-use crate::ecky_scheme::compiler::try_compile_to_core_program;
-use crate::models::{
+use crate::contracts::{
     validate_model_manifest, AppError, AppResult, ArtifactBundle, BrepHiddenLineProjectionRequest,
     BrepHiddenLineProjectionResponse, BrepHiddenLineProjectionView, BrepHiddenLineWarning,
     DesignParams, DocumentMetadata, EnrichmentProposal, EnrichmentStatus, ExportArtifact,
     ManifestBounds, ManifestEnrichmentState, ModelManifest, ModelSourceKind, ParameterGroup,
-    PartBinding, PathResolver, PortFrame, PreviewView, PreviewViewOffset, SelectionTarget,
-    SelectionTargetKind, SketchView, ViewerAsset, ViewerAssetFormat, ViewerEdgePoint,
-    ViewerEdgeTarget, ViewerFaceTarget, MODEL_RUNTIME_SCHEMA_VERSION,
+    PartBinding, PortFrame, PreviewView, PreviewViewOffset, SelectionTarget, SelectionTargetKind,
+    SketchView, ViewerAsset, ViewerAssetFormat, ViewerEdgePoint, ViewerEdgeTarget,
+    ViewerFaceTarget, MODEL_RUNTIME_SCHEMA_VERSION,
 };
+use crate::ecky_core_ir::{CorePreviewViewDecl, CoreSelectorTagDecl};
+use crate::ecky_scheme::compiler::try_compile_to_core_program;
+use crate::models::PathResolver;
 use crate::topology_target_ids::{
     durable_edge_target_id, durable_edge_target_id_for_stable_node_key, durable_face_target_id,
     durable_face_target_id_for_stable_node_key, preferred_public_topology_target_id,
@@ -189,7 +190,7 @@ pub fn render_model(
         parameters,
         configured_freecad_cmd,
         app,
-        crate::models::SourceLanguage::LegacyPython,
+        crate::contracts::SourceLanguage::LegacyPython,
     )
 }
 
@@ -199,7 +200,7 @@ pub fn render_model_with_sources(
     parameters: &DesignParams,
     configured_freecad_cmd: Option<&str>,
     app: &dyn PathResolver,
-    source_language: crate::models::SourceLanguage,
+    source_language: crate::contracts::SourceLanguage,
 ) -> AppResult<ArtifactBundle> {
     render_model_with_sources_and_font_path(
         executable_source,
@@ -219,7 +220,7 @@ pub fn render_model_with_sources_and_font_path(
     configured_freecad_cmd: Option<&str>,
     configured_cad_text_font_path: Option<&str>,
     app: &dyn PathResolver,
-    source_language: crate::models::SourceLanguage,
+    source_language: crate::contracts::SourceLanguage,
 ) -> AppResult<ArtifactBundle> {
     let params_json =
         serde_json::to_string(parameters).map_err(|err| AppError::validation(err.to_string()))?;
@@ -244,11 +245,11 @@ pub fn render_model_with_sources_and_font_path(
 
     let macro_path = bundle_dir.join(crate::source_flavor::authored_source_file_name(
         source_language,
-        crate::models::GeometryBackend::Freecad,
+        crate::contracts::GeometryBackend::Freecad,
     ));
     let runner_macro_path = if authored_source.is_some() {
         bundle_dir.join(crate::source_flavor::lowered_source_file_name(
-            crate::models::GeometryBackend::Freecad,
+            crate::contracts::GeometryBackend::Freecad,
         ))
     } else {
         macro_path.clone()
@@ -380,7 +381,7 @@ pub fn import_fcstd(
                 .ok_or_else(|| AppError::internal("Invalid FCStd source path."))?
                 .to_string(),
         ),
-        crate::models::SourceLanguage::LegacyPython,
+        crate::contracts::SourceLanguage::LegacyPython,
     )?;
     write_manifest(&manifest_path, &manifest)?;
 
@@ -396,7 +397,7 @@ pub fn import_fcstd(
         &step_path,
         &manifest,
         &report,
-        crate::models::SourceLanguage::LegacyPython,
+        crate::contracts::SourceLanguage::LegacyPython,
     )?;
     write_bundle(&bundle_dir, &bundle)?;
     Ok(bundle)
@@ -468,7 +469,7 @@ pub fn import_step(
                 .ok_or_else(|| AppError::internal("Invalid STEP source path."))?
                 .to_string(),
         ),
-        crate::models::SourceLanguage::LegacyPython,
+        crate::contracts::SourceLanguage::LegacyPython,
     )?;
     write_manifest(&manifest_path, &manifest)?;
 
@@ -484,7 +485,7 @@ pub fn import_step(
         &step_path,
         &manifest,
         &report,
-        crate::models::SourceLanguage::LegacyPython,
+        crate::contracts::SourceLanguage::LegacyPython,
     )?;
     write_bundle(&bundle_dir, &bundle)?;
     Ok(bundle)
@@ -569,7 +570,7 @@ pub fn assemble_step_parts(
         &report,
         &HashMap::new(),
         Some(path_to_string(&step_path)?),
-        crate::models::SourceLanguage::LegacyPython,
+        crate::contracts::SourceLanguage::LegacyPython,
     )?;
     write_manifest(&manifest_path, &manifest)?;
 
@@ -585,7 +586,7 @@ pub fn assemble_step_parts(
         &step_path,
         &manifest,
         &report,
-        crate::models::SourceLanguage::LegacyPython,
+        crate::contracts::SourceLanguage::LegacyPython,
     )?;
     write_bundle(&bundle_dir, &bundle)?;
     Ok((bundle, manifest))
@@ -660,7 +661,7 @@ pub fn apply_imported_model(
         &step_path,
         &next_manifest,
         &report,
-        crate::models::SourceLanguage::LegacyPython,
+        crate::contracts::SourceLanguage::LegacyPython,
     )?;
     write_bundle(&bundle_dir, &next_bundle)?;
     Ok((next_bundle, next_manifest))
@@ -884,7 +885,7 @@ fn build_bundle(
     step_path: &Path,
     manifest: &ModelManifest,
     report: &RunnerReport,
-    source_language: crate::models::SourceLanguage,
+    source_language: crate::contracts::SourceLanguage,
 ) -> AppResult<ArtifactBundle> {
     let bundle_dir = manifest_path
         .parent()
@@ -896,7 +897,7 @@ fn build_bundle(
         source_kind,
         engine_kind: source_language.to_engine_kind(),
         source_language,
-        geometry_backend: crate::models::GeometryBackend::Freecad,
+        geometry_backend: crate::contracts::GeometryBackend::Freecad,
         content_hash: content_hash.to_string(),
         artifact_version,
         fcstd_path: path_to_string(fcstd_path)?,
@@ -1189,9 +1190,9 @@ struct AuthoredPartTopologyIds {
 
 fn authored_part_topology_ids(
     source: &str,
-    source_language: crate::models::SourceLanguage,
+    source_language: crate::contracts::SourceLanguage,
 ) -> AppResult<AuthoredPartTopologyIds> {
-    if source_language != crate::models::SourceLanguage::EckyIrV0 {
+    if source_language != crate::contracts::SourceLanguage::EckyIrV0 {
         return Ok(AuthoredPartTopologyIds::default());
     }
     let Some(compiled) = try_compile_to_core_program(source) else {
@@ -1416,7 +1417,7 @@ fn build_manifest(
     report: &RunnerReport,
     part_root_node_ids: &HashMap<String, u64>,
     source_path: Option<String>,
-    source_language: crate::models::SourceLanguage,
+    source_language: crate::contracts::SourceLanguage,
 ) -> AppResult<ModelManifest> {
     let part_stable_node_keys = HashMap::new();
     build_manifest_with_stable_node_keys(
@@ -1443,7 +1444,7 @@ fn build_manifest_with_stable_node_keys(
     selector_tags: &[CoreSelectorTagDecl],
     preview_view_decls: &[CorePreviewViewDecl],
     source_path: Option<String>,
-    source_language: crate::models::SourceLanguage,
+    source_language: crate::contracts::SourceLanguage,
 ) -> AppResult<ModelManifest> {
     let mut parts = Vec::new();
     let mut selection_targets = Vec::new();
@@ -1660,7 +1661,7 @@ fn build_manifest_with_stable_node_keys(
         ast_schema_version: None,
         engine_kind: source_language.to_engine_kind(),
         source_language,
-        geometry_backend: crate::models::GeometryBackend::Freecad,
+        geometry_backend: crate::contracts::GeometryBackend::Freecad,
         document: DocumentMetadata {
             document_name: if report.document_name.trim().is_empty() {
                 "EckyCAD".to_string()
@@ -2058,8 +2059,8 @@ fn bundle_from_manifest(
 ) -> AppResult<ArtifactBundle> {
     if bundle.model_id != manifest.model_id
         || bundle.source_kind != manifest.source_kind
-        || bundle.geometry_backend != crate::models::GeometryBackend::Freecad
-        || manifest.geometry_backend != crate::models::GeometryBackend::Freecad
+        || bundle.geometry_backend != crate::contracts::GeometryBackend::Freecad
+        || manifest.geometry_backend != crate::contracts::GeometryBackend::Freecad
     {
         return Err(AppError::validation(
             "Cached FreeCAD bundle does not match the model manifest.",
@@ -2077,7 +2078,7 @@ fn bundle_from_manifest(
     bundle.viewer_assets = viewer_assets_from_manifest(bundle_dir, manifest)?;
     bundle.edge_targets = reconcile_edge_targets_with_manifest(bundle.edge_targets, manifest);
     bundle.face_targets = reconcile_face_targets_with_manifest(bundle.face_targets, manifest);
-    crate::models::validate_model_runtime_bundle(manifest, &bundle)?;
+    crate::contracts::validate_model_runtime_bundle(manifest, &bundle)?;
     Ok(bundle)
 }
 
@@ -2257,7 +2258,7 @@ fn validate_hidden_line_artifact(bundle: &ArtifactBundle) -> AppResult<HiddenLin
     }
 
     Err(AppError::with_details(
-        crate::models::AppErrorCode::Validation,
+        crate::contracts::AppErrorCode::Validation,
         "Exact BRep hidden-line requires a FreeCAD/OCCT FCStd or STEP artifact.",
         format!(
             "geometryBackend={}; fcstdPath={}; stepPath=",
@@ -2478,7 +2479,7 @@ fn run_command(mut command: Command) -> AppResult<()> {
 
     if !output.status.success() {
         return Err(AppError::with_details(
-            crate::models::AppErrorCode::Render,
+            crate::contracts::AppErrorCode::Render,
             "FreeCAD runner failed.",
             format!(
                 "stdout:\n{}\n\nstderr:\n{}",
@@ -2896,7 +2897,7 @@ impl From<RunnerBounds> for ManifestBounds {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::validate_model_runtime_bundle;
+    use crate::contracts::validate_model_runtime_bundle;
     use proptest::prelude::*;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2996,9 +2997,9 @@ mod tests {
             source_digest: None,
             core_digest: None,
             ast_schema_version: None,
-            engine_kind: crate::models::EngineKind::Freecad,
-            source_language: crate::models::SourceLanguage::LegacyPython,
-            geometry_backend: crate::models::GeometryBackend::Freecad,
+            engine_kind: crate::contracts::EngineKind::Freecad,
+            source_language: crate::contracts::SourceLanguage::LegacyPython,
+            geometry_backend: crate::contracts::GeometryBackend::Freecad,
             document: DocumentMetadata {
                 document_name: "Doc".to_string(),
                 document_label: "Doc".to_string(),
@@ -3045,9 +3046,9 @@ mod tests {
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind,
-            engine_kind: crate::models::EngineKind::Freecad,
-            source_language: crate::models::SourceLanguage::LegacyPython,
-            geometry_backend: crate::models::GeometryBackend::Freecad,
+            engine_kind: crate::contracts::EngineKind::Freecad,
+            source_language: crate::contracts::SourceLanguage::LegacyPython,
+            geometry_backend: crate::contracts::GeometryBackend::Freecad,
             content_hash: "hash".to_string(),
             artifact_version: 1,
             fcstd_path: "/tmp/stale.FCStd".to_string(),
@@ -3094,7 +3095,7 @@ mod tests {
             &step_path,
             &manifest,
             &report,
-            crate::models::SourceLanguage::LegacyPython,
+            crate::contracts::SourceLanguage::LegacyPython,
         )
         .expect("bundle");
 
@@ -3150,7 +3151,7 @@ mod tests {
             &report,
             &HashMap::new(),
             None,
-            crate::models::SourceLanguage::LegacyPython,
+            crate::contracts::SourceLanguage::LegacyPython,
         )
         .expect("manifest");
 
@@ -3166,11 +3167,11 @@ mod tests {
             &step_path,
             &manifest,
             &report,
-            crate::models::SourceLanguage::LegacyPython,
+            crate::contracts::SourceLanguage::LegacyPython,
         )
         .expect("bundle");
 
-        crate::models::validate_model_runtime_bundle(&manifest, &bundle)
+        crate::contracts::validate_model_runtime_bundle(&manifest, &bundle)
             .expect("edge target bundle should validate");
         assert_eq!(bundle.edge_targets.len(), 1);
         assert_eq!(
@@ -3239,7 +3240,7 @@ mod tests {
             &report,
             &HashMap::new(),
             None,
-            crate::models::SourceLanguage::LegacyPython,
+            crate::contracts::SourceLanguage::LegacyPython,
         )
         .expect("manifest");
 
@@ -3255,11 +3256,11 @@ mod tests {
             &step_path,
             &manifest,
             &report,
-            crate::models::SourceLanguage::LegacyPython,
+            crate::contracts::SourceLanguage::LegacyPython,
         )
         .expect("bundle");
 
-        crate::models::validate_model_runtime_bundle(&manifest, &bundle)
+        crate::contracts::validate_model_runtime_bundle(&manifest, &bundle)
             .expect("face target bundle should validate");
         assert_eq!(bundle.face_targets.len(), 1);
         assert_eq!(
@@ -3286,12 +3287,12 @@ mod tests {
     #[test]
     fn hidden_line_validation_rejects_mesh_bundle_with_raw_backend_context() {
         let mut bundle = sample_bundle("mesh-preview", ModelSourceKind::Generated);
-        bundle.geometry_backend = crate::models::GeometryBackend::EckyRust;
+        bundle.geometry_backend = crate::contracts::GeometryBackend::EckyRust;
         bundle.fcstd_path = String::new();
 
         let err = validate_hidden_line_artifact(&bundle).expect_err("mesh bundle should fail");
 
-        assert_eq!(err.code, crate::models::AppErrorCode::Validation);
+        assert_eq!(err.code, crate::contracts::AppErrorCode::Validation);
         assert_eq!(
             err.message,
             "Exact BRep hidden-line requires a FreeCAD/OCCT FCStd or STEP artifact."
@@ -3322,7 +3323,7 @@ mod tests {
         let step_path = resolver.root.join("model.step");
         fs::write(&step_path, b"ISO-10303-21;").expect("write step");
         let mut bundle = sample_bundle("direct-occt-preview", ModelSourceKind::Generated);
-        bundle.geometry_backend = crate::models::GeometryBackend::EckyRust;
+        bundle.geometry_backend = crate::contracts::GeometryBackend::EckyRust;
         bundle.fcstd_path = String::new();
         bundle.export_artifacts = vec![ExportArtifact {
             geometry_provenance: None,
@@ -3383,7 +3384,7 @@ mod tests {
         assert_eq!(report.views[0].loops.len(), 1);
         assert_eq!(
             report.views[0].loops[0].role,
-            crate::models::BrepProjectedLoopRole::Outer
+            crate::contracts::BrepProjectedLoopRole::Outer
         );
     }
 
@@ -3439,7 +3440,7 @@ mod tests {
             &report,
             &HashMap::new(),
             None,
-            crate::models::SourceLanguage::LegacyPython,
+            crate::contracts::SourceLanguage::LegacyPython,
         )
         .expect("manifest should build");
 
@@ -3500,7 +3501,7 @@ mod tests {
             &report,
             &HashMap::new(),
             None,
-            crate::models::SourceLanguage::LegacyPython,
+            crate::contracts::SourceLanguage::LegacyPython,
         )
         .expect("manifest should build");
 
@@ -3565,7 +3566,7 @@ mod tests {
             &report,
             &HashMap::new(),
             None,
-            crate::models::SourceLanguage::LegacyPython,
+            crate::contracts::SourceLanguage::LegacyPython,
         )
         .expect("manifest should build");
 
@@ -3647,7 +3648,7 @@ mod tests {
             &report,
             &HashMap::new(),
             None,
-            crate::models::SourceLanguage::LegacyPython,
+            crate::contracts::SourceLanguage::LegacyPython,
         )
         .expect("manifest should build");
 
@@ -3733,7 +3734,7 @@ mod tests {
             &report,
             &part_root_node_ids,
             Some("/tmp/source.ecky".to_string()),
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect("manifest should build");
 
@@ -3803,7 +3804,7 @@ mod tests {
             }],
             &[],
             Some("/tmp/source.ecky".to_string()),
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect("manifest");
 
@@ -3885,7 +3886,7 @@ mod tests {
             }],
             &[],
             Some("/tmp/source.ecky".to_string()),
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect("manifest");
 
@@ -3959,7 +3960,7 @@ mod tests {
             &[],
             &[],
             Some("/tmp/source.ecky".to_string()),
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect("manifest should build");
 
@@ -3989,10 +3990,10 @@ mod tests {
         let base_source = "(model (part body (box 10 20 30)))";
         let shifted_source = "(model (part spacer (box 1 1 1)) (part body (box 10 20 30)))";
         let base_ids =
-            authored_part_topology_ids(base_source, crate::models::SourceLanguage::EckyIrV0)
+            authored_part_topology_ids(base_source, crate::contracts::SourceLanguage::EckyIrV0)
                 .expect("base ids");
         let shifted_ids =
-            authored_part_topology_ids(shifted_source, crate::models::SourceLanguage::EckyIrV0)
+            authored_part_topology_ids(shifted_source, crate::contracts::SourceLanguage::EckyIrV0)
                 .expect("shifted ids");
 
         assert_ne!(
@@ -4041,7 +4042,7 @@ mod tests {
             &report,
             &HashMap::new(),
             None,
-            crate::models::SourceLanguage::LegacyPython,
+            crate::contracts::SourceLanguage::LegacyPython,
         )
         .expect("manifest should build");
 
@@ -4116,7 +4117,7 @@ mod tests {
             &report,
             &HashMap::new(),
             None,
-            crate::models::SourceLanguage::LegacyPython,
+            crate::contracts::SourceLanguage::LegacyPython,
         )
         .expect("manifest should build");
 
@@ -4175,7 +4176,7 @@ mod tests {
             &report,
             &HashMap::new(),
             None,
-            crate::models::SourceLanguage::LegacyPython,
+            crate::contracts::SourceLanguage::LegacyPython,
         )
         .expect("manifest should build");
 
@@ -4233,7 +4234,7 @@ mod tests {
             &report,
             &HashMap::new(),
             Some("/tmp/model.FCStd".to_string()),
-            crate::models::SourceLanguage::LegacyPython,
+            crate::contracts::SourceLanguage::LegacyPython,
         )
         .expect("manifest should build");
 
@@ -4282,7 +4283,7 @@ mod tests {
             &report,
             &HashMap::new(),
             Some("/tmp/model.step".to_string()),
-            crate::models::SourceLanguage::LegacyPython,
+            crate::contracts::SourceLanguage::LegacyPython,
         )
         .expect("manifest should build");
 
@@ -4306,7 +4307,7 @@ mod tests {
             &fixture_generated_report(),
             &HashMap::new(),
             None,
-            crate::models::SourceLanguage::LegacyPython,
+            crate::contracts::SourceLanguage::LegacyPython,
         )
         .expect("generated fixture manifest should build");
 
@@ -4374,7 +4375,7 @@ mod tests {
             &base_report,
             &HashMap::new(),
             Some("/tmp/imported.FCStd".to_string()),
-            crate::models::SourceLanguage::LegacyPython,
+            crate::contracts::SourceLanguage::LegacyPython,
         )
         .expect("imported fixture manifest should build");
 
@@ -4427,7 +4428,7 @@ mod tests {
             &fixture_generated_report(),
             &HashMap::new(),
             None,
-            crate::models::SourceLanguage::LegacyPython,
+            crate::contracts::SourceLanguage::LegacyPython,
         )
         .expect("generated fixture manifest should build");
         manifest.parts[1].editable = false;
@@ -4774,8 +4775,8 @@ mod tests {
 
         let mut manifest = sample_manifest(model_id, ModelSourceKind::Generated, &asset_path);
         manifest.schema_version = MODEL_RUNTIME_SCHEMA_VERSION + 3;
-        manifest.engine_kind = crate::models::EngineKind::Build123d;
-        manifest.source_language = crate::models::SourceLanguage::EckyIrV0;
+        manifest.engine_kind = crate::contracts::EngineKind::Build123d;
+        manifest.source_language = crate::contracts::SourceLanguage::EckyIrV0;
         write_manifest(&bundle_dir.join(MANIFEST_FILE_NAME), &manifest).expect("manifest");
 
         let bundle = sample_bundle(model_id, ModelSourceKind::Generated);
@@ -4855,17 +4856,17 @@ mod tests {
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
             &resolver,
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect("render");
 
         assert_eq!(
             bundle.source_language,
-            crate::models::SourceLanguage::EckyIrV0
+            crate::contracts::SourceLanguage::EckyIrV0
         );
         assert_eq!(
             bundle.geometry_backend,
-            crate::models::GeometryBackend::Freecad
+            crate::contracts::GeometryBackend::Freecad
         );
         assert!(bundle.fcstd_path.ends_with("model.FCStd"));
         assert!(bundle.preview_stl_path.ends_with("preview.stl"));
@@ -4892,17 +4893,17 @@ mod tests {
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
             &resolver,
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect("render");
 
         assert_eq!(
             bundle.source_language,
-            crate::models::SourceLanguage::EckyIrV0
+            crate::contracts::SourceLanguage::EckyIrV0
         );
         assert_eq!(
             bundle.geometry_backend,
-            crate::models::GeometryBackend::Freecad
+            crate::contracts::GeometryBackend::Freecad
         );
         assert!(bundle
             .macro_path
@@ -4935,13 +4936,13 @@ mod tests {
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
             &resolver,
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect("render");
 
         assert_eq!(
             bundle.geometry_backend,
-            crate::models::GeometryBackend::Freecad
+            crate::contracts::GeometryBackend::Freecad
         );
         assert!(bundle
             .macro_path
@@ -4972,13 +4973,13 @@ mod tests {
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
             &resolver,
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect("render");
 
         assert_eq!(
             bundle.geometry_backend,
-            crate::models::GeometryBackend::Freecad
+            crate::contracts::GeometryBackend::Freecad
         );
         assert!(bundle
             .macro_path
@@ -5009,13 +5010,13 @@ mod tests {
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
             &resolver,
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect("render");
 
         assert_eq!(
             bundle.geometry_backend,
-            crate::models::GeometryBackend::Freecad
+            crate::contracts::GeometryBackend::Freecad
         );
         assert!(bundle
             .macro_path
@@ -5047,7 +5048,7 @@ mod tests {
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
             &resolver,
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect("render");
 
@@ -5082,13 +5083,13 @@ mod tests {
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
             &resolver,
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect("render");
 
         assert_eq!(
             bundle.geometry_backend,
-            crate::models::GeometryBackend::Freecad
+            crate::contracts::GeometryBackend::Freecad
         );
         assert!(bundle
             .macro_path
@@ -5133,13 +5134,13 @@ mod tests {
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
             &resolver,
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect("render");
 
         assert_eq!(
             bundle.geometry_backend,
-            crate::models::GeometryBackend::Freecad
+            crate::contracts::GeometryBackend::Freecad
         );
         assert!(bundle
             .macro_path
@@ -5174,13 +5175,13 @@ mod tests {
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
             &resolver,
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect("render");
 
         assert_eq!(
             bundle.geometry_backend,
-            crate::models::GeometryBackend::Freecad
+            crate::contracts::GeometryBackend::Freecad
         );
         assert!(bundle
             .macro_path
@@ -5215,13 +5216,13 @@ mod tests {
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
             &resolver,
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect("render");
 
         assert_eq!(
             bundle.geometry_backend,
-            crate::models::GeometryBackend::Freecad
+            crate::contracts::GeometryBackend::Freecad
         );
         assert!(bundle
             .macro_path
@@ -5262,13 +5263,13 @@ mod tests {
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
             &resolver,
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect("render");
 
         assert_eq!(
             bundle.geometry_backend,
-            crate::models::GeometryBackend::Freecad
+            crate::contracts::GeometryBackend::Freecad
         );
         assert!(bundle
             .macro_path
@@ -5303,7 +5304,7 @@ mod tests {
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
             &resolver,
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect_err("parallel up should fail");
 
@@ -5334,7 +5335,7 @@ mod tests {
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
             &resolver,
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect_err("parallel plane axes should fail");
 
@@ -5371,13 +5372,13 @@ mod tests {
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
             &resolver,
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect("render");
 
         assert_eq!(
             bundle.geometry_backend,
-            crate::models::GeometryBackend::Freecad
+            crate::contracts::GeometryBackend::Freecad
         );
         assert!(bundle
             .macro_path
@@ -5407,7 +5408,7 @@ mod tests {
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
             &resolver,
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect("render base box");
         let base_manifest: ModelManifest = serde_json::from_str(
@@ -5442,7 +5443,7 @@ mod tests {
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
             &resolver,
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect("render exact edge selector");
 
@@ -5475,7 +5476,7 @@ mod tests {
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
             &resolver,
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect("render base box");
         let base_manifest: ModelManifest = serde_json::from_str(
@@ -5510,7 +5511,7 @@ mod tests {
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
             &resolver,
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect("render exact face selector");
 
@@ -5555,7 +5556,7 @@ mod tests {
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
             &resolver,
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect("render coarse face selector");
 
@@ -5600,7 +5601,7 @@ mod tests {
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
             &resolver,
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect("render richer face selector");
 
@@ -5632,17 +5633,17 @@ mod tests {
             &DesignParams::new(),
             Some(freecad_cmd.to_string_lossy().as_ref()),
             &resolver,
-            crate::models::SourceLanguage::EckyIrV0,
+            crate::contracts::SourceLanguage::EckyIrV0,
         )
         .expect("render");
 
         assert_eq!(
             bundle.source_language,
-            crate::models::SourceLanguage::EckyIrV0
+            crate::contracts::SourceLanguage::EckyIrV0
         );
         assert_eq!(
             bundle.geometry_backend,
-            crate::models::GeometryBackend::Freecad
+            crate::contracts::GeometryBackend::Freecad
         );
         assert!(bundle
             .macro_path

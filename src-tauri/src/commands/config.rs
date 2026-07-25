@@ -6,7 +6,8 @@ use std::{
 };
 use tauri::{AppHandle, Manager, State};
 
-use crate::models::{AppResult, AppState, Config};
+use crate::contracts::{AppResult, Config};
+use crate::models::AppState;
 
 fn open_path_in_system_editor(path: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
@@ -50,9 +51,9 @@ pub async fn save_config(
     let config_path = config_dir.join("config.json");
 
     let data = serde_json::to_string_pretty(&config)
-        .map_err(|err| crate::models::AppError::persistence(err.to_string()))?;
+        .map_err(|err| crate::contracts::AppError::persistence(err.to_string()))?;
     fs::write(config_path, data)
-        .map_err(|err| crate::models::AppError::persistence(err.to_string()))?;
+        .map_err(|err| crate::contracts::AppError::persistence(err.to_string()))?;
 
     {
         let mut state_config = state.config.lock().unwrap();
@@ -70,7 +71,7 @@ pub async fn save_config(
 pub async fn list_agent_models(cmd: String) -> AppResult<crate::contracts::AgentModelList> {
     crate::llm::list_agent_models(&cmd)
         .await
-        .map_err(crate::models::AppError::provider)
+        .map_err(crate::contracts::AppError::provider)
 }
 
 #[tauri::command]
@@ -82,7 +83,7 @@ pub async fn list_models(
 ) -> AppResult<Vec<String>> {
     crate::llm::list_models(&provider, &api_key, &base_url)
         .await
-        .map_err(crate::models::AppError::provider)
+        .map_err(crate::contracts::AppError::provider)
 }
 
 #[tauri::command]
@@ -143,7 +144,7 @@ fn resolve_ecky_mcp_skill_dir() -> AppResult<PathBuf> {
         .into_iter()
         .find(|candidate| is_ecky_mcp_skill_dir(candidate))
         .ok_or_else(|| {
-            crate::models::AppError::validation(
+            crate::contracts::AppError::validation(
                 "Ecky MCP skill is not installed. Install it under CODEX_HOME/skills/ecky-mcp or ~/.codex-personal/skills/ecky-mcp.",
             )
         })
@@ -158,12 +159,12 @@ fn is_ecky_mcp_skill_dir(path: &Path) -> bool {
 
 fn export_ecky_mcp_skill_zip_impl(skill_dir: &Path, target_path: &Path) -> AppResult<()> {
     if target_path.as_os_str().is_empty() {
-        return Err(crate::models::AppError::validation(
+        return Err(crate::contracts::AppError::validation(
             "Export path is required for Ecky MCP skill zip.",
         ));
     }
     if !is_ecky_mcp_skill_dir(skill_dir) {
-        return Err(crate::models::AppError::validation(format!(
+        return Err(crate::contracts::AppError::validation(format!(
             "Ecky MCP skill directory is invalid: {}",
             skill_dir.display()
         )));
@@ -173,7 +174,7 @@ fn export_ecky_mcp_skill_zip_impl(skill_dir: &Path, target_path: &Path) -> AppRe
         .filter(|parent| !parent.as_os_str().is_empty())
     {
         fs::create_dir_all(parent).map_err(|err| {
-            crate::models::AppError::persistence(format!(
+            crate::contracts::AppError::persistence(format!(
                 "Failed to create export directory '{}': {}",
                 parent.display(),
                 err
@@ -182,7 +183,7 @@ fn export_ecky_mcp_skill_zip_impl(skill_dir: &Path, target_path: &Path) -> AppRe
     }
 
     let file = fs::File::create(target_path).map_err(|err| {
-        crate::models::AppError::persistence(format!(
+        crate::contracts::AppError::persistence(format!(
             "Failed to create Ecky MCP skill zip '{}': {}",
             target_path.display(),
             err
@@ -198,7 +199,7 @@ fn export_ecky_mcp_skill_zip_impl(skill_dir: &Path, target_path: &Path) -> AppRe
 
     for path in collect_skill_files(skill_dir)? {
         let rel = path.strip_prefix(skill_dir).map_err(|err| {
-            crate::models::AppError::persistence(format!(
+            crate::contracts::AppError::persistence(format!(
                 "Failed to resolve skill archive path '{}': {}",
                 path.display(),
                 err
@@ -207,13 +208,13 @@ fn export_ecky_mcp_skill_zip_impl(skill_dir: &Path, target_path: &Path) -> AppRe
         let archive_name = Path::new(skill_root_name).join(rel);
         let archive_name = archive_name.to_string_lossy().replace('\\', "/");
         zip.start_file(&archive_name, options).map_err(|err| {
-            crate::models::AppError::persistence(format!(
+            crate::contracts::AppError::persistence(format!(
                 "Failed to write skill archive entry '{}': {}",
                 archive_name, err
             ))
         })?;
         let mut source = fs::File::open(&path).map_err(|err| {
-            crate::models::AppError::persistence(format!(
+            crate::contracts::AppError::persistence(format!(
                 "Failed to open skill file '{}': {}",
                 path.display(),
                 err
@@ -221,14 +222,14 @@ fn export_ecky_mcp_skill_zip_impl(skill_dir: &Path, target_path: &Path) -> AppRe
         })?;
         let mut bytes = Vec::new();
         source.read_to_end(&mut bytes).map_err(|err| {
-            crate::models::AppError::persistence(format!(
+            crate::contracts::AppError::persistence(format!(
                 "Failed to read skill file '{}': {}",
                 path.display(),
                 err
             ))
         })?;
         zip.write_all(&bytes).map_err(|err| {
-            crate::models::AppError::persistence(format!(
+            crate::contracts::AppError::persistence(format!(
                 "Failed to write skill file '{}': {}",
                 archive_name, err
             ))
@@ -236,7 +237,7 @@ fn export_ecky_mcp_skill_zip_impl(skill_dir: &Path, target_path: &Path) -> AppRe
     }
 
     zip.finish().map_err(|err| {
-        crate::models::AppError::persistence(format!(
+        crate::contracts::AppError::persistence(format!(
             "Failed to finalize Ecky MCP skill zip '{}': {}",
             target_path.display(),
             err
@@ -254,7 +255,7 @@ fn collect_skill_files(skill_dir: &Path) -> AppResult<Vec<PathBuf>> {
 
 fn collect_skill_files_inner(dir: &Path, files: &mut Vec<PathBuf>) -> AppResult<()> {
     let entries = fs::read_dir(dir).map_err(|err| {
-        crate::models::AppError::persistence(format!(
+        crate::contracts::AppError::persistence(format!(
             "Failed to read skill directory '{}': {}",
             dir.display(),
             err
@@ -262,7 +263,7 @@ fn collect_skill_files_inner(dir: &Path, files: &mut Vec<PathBuf>) -> AppResult<
     })?;
     for entry in entries {
         let entry = entry.map_err(|err| {
-            crate::models::AppError::persistence(format!(
+            crate::contracts::AppError::persistence(format!(
                 "Failed to read skill directory entry '{}': {}",
                 dir.display(),
                 err
@@ -277,7 +278,7 @@ fn collect_skill_files_inner(dir: &Path, files: &mut Vec<PathBuf>) -> AppResult<
             continue;
         }
         let metadata = entry.metadata().map_err(|err| {
-            crate::models::AppError::persistence(format!(
+            crate::contracts::AppError::persistence(format!(
                 "Failed to inspect skill path '{}': {}",
                 path.display(),
                 err
@@ -403,7 +404,7 @@ pub async fn open_project_in_editor(
 
     let file = dir.join(project_mirror::PROJECT_SOURCE_FILE_NAME);
     open_path_in_system_editor(&file).map_err(|err| {
-        crate::models::AppError::internal(format!(
+        crate::contracts::AppError::internal(format!(
             "Failed to open '{}' in the system editor: {}",
             file.display(),
             err

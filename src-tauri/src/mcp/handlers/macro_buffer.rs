@@ -2,13 +2,14 @@ use super::{
     artifact_bundle_digest, handle_macro_preview_render, persist_agent_session,
     session_render_preview_for_request, try_record_agent_error, AgentContext,
 };
+use crate::contracts::{AppError, AppResult, MacroDialect};
 use crate::mcp::contracts::{
     AgentIdentityOverride, MacroBufferApplyPatchRequest, MacroBufferEditResponse,
     MacroBufferGetRequest, MacroBufferGetResponse, MacroBufferLine, MacroBufferRenderRequest,
     MacroBufferReplaceAndRenderRequest, MacroBufferReplaceAndRenderResponse,
     MacroBufferReplacement, MacroReplaceRequest, MacroReplaceResponse, TargetResolvedFrom,
 };
-use crate::models::{AppError, AppResult, AppState, MacroDialect, PathResolver};
+use crate::models::{AppState, PathResolver};
 use std::collections::HashMap;
 use std::sync::{Mutex as StdMutex, OnceLock};
 
@@ -18,8 +19,8 @@ struct SessionMacroBuffer {
     message_id: String,
     macro_code: String,
     macro_dialect: MacroDialect,
-    post_processing: Option<crate::models::PostProcessingSpec>,
-    geometry_backend: crate::models::GeometryBackend,
+    post_processing: Option<crate::contracts::PostProcessingSpec>,
+    geometry_backend: crate::contracts::GeometryBackend,
 }
 
 static MACRO_BUFFERS: OnceLock<StdMutex<HashMap<String, SessionMacroBuffer>>> = OnceLock::new();

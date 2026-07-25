@@ -1,4 +1,5 @@
-use crate::models::{AppError, AppResult, AppState, Message, Thread, ThreadMessagesPage};
+use crate::contracts::{AppError, AppResult, Message, Thread, ThreadMessagesPage};
+use crate::models::AppState;
 use crate::services::history as history_service;
 use tauri::State;
 
@@ -143,7 +144,7 @@ pub async fn restore_version(message_id: String, state: State<'_, AppState>) -> 
 #[specta::specta]
 pub async fn get_deleted_messages(
     state: State<'_, AppState>,
-) -> AppResult<Vec<crate::models::DeletedMessage>> {
+) -> AppResult<Vec<crate::contracts::DeletedMessage>> {
     if let Some(read_conn) = state.db_read.as_ref() {
         let conn = read_conn.lock().await;
         crate::db::get_deleted_messages(&conn)
@@ -152,6 +153,58 @@ pub async fn get_deleted_messages(
         let conn = state.db.lock().await;
         crate::db::get_deleted_messages(&conn)
             .map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_deleted_threads_page(
+    before: Option<String>,
+    limit: Option<usize>,
+    state: State<'_, AppState>,
+) -> AppResult<crate::contracts::DeletedThreadsPage> {
+    let load = |conn: &rusqlite::Connection| {
+        crate::db::get_deleted_threads_page(conn, before.as_deref(), limit.unwrap_or(24))
+            .map_err(|err| AppError::persistence(err.to_string()))
+    };
+    if let Some(read_conn) = state.db_read.as_ref() {
+        let conn = read_conn.lock().await;
+        load(&conn)
+    } else {
+        let conn = state.db.lock().await;
+        load(&conn)
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_deleted_thread_preview(
+    id: String,
+    state: State<'_, AppState>,
+) -> AppResult<Option<String>> {
+    let load = |conn: &rusqlite::Connection| {
+        crate::db::get_deleted_thread_preview(conn, &id)
+            .map_err(|err| AppError::persistence(err.to_string()))
+    };
+    if let Some(read_conn) = state.db_read.as_ref() {
+        let conn = read_conn.lock().await;
+        load(&conn)
+    } else {
+        let conn = state.db.lock().await;
+        load(&conn)
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn restore_deleted_thread(id: String, state: State<'_, AppState>) -> AppResult<()> {
+    let conn = state.db.lock().await;
+    let changed = crate::db::restore_deleted_thread(&conn, &id)
+        .map_err(|err| AppError::persistence(err.to_string()))?;
+    if changed {
+        Ok(())
+    } else {
+        Err(AppError::not_found("Deleted project not found."))
     }
 }
 
@@ -205,7 +258,7 @@ pub async fn get_inventory(state: State<'_, AppState>) -> AppResult<Vec<Thread>>
 pub async fn get_thread_window_layout(
     thread_id: String,
     state: State<'_, AppState>,
-) -> AppResult<Option<crate::models::ThreadWindowLayout>> {
+) -> AppResult<Option<crate::contracts::ThreadWindowLayout>> {
     if let Some(read_conn) = state.db_read.as_ref() {
         let conn = read_conn.lock().await;
         crate::db::get_thread_window_layout(&conn, &thread_id)
@@ -221,7 +274,7 @@ pub async fn get_thread_window_layout(
 #[specta::specta]
 pub async fn save_thread_window_layout(
     thread_id: String,
-    layout: crate::models::ThreadWindowLayout,
+    layout: crate::contracts::ThreadWindowLayout,
     state: State<'_, AppState>,
 ) -> AppResult<()> {
     let conn = state.db.lock().await;

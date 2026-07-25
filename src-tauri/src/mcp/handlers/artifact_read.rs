@@ -1,9 +1,10 @@
 use super::{artifact_bundle_digest, persist_agent_session, AgentContext};
+use crate::contracts::{AppError, AppResult};
 use crate::mcp::contracts::{
     ArtifactFeatureGraphGetRequest, ArtifactFeatureGraphGetResponse, ArtifactManifestRequest,
     ArtifactManifestResponse,
 };
-use crate::models::{AppError, AppResult, AppState, PathResolver};
+use crate::models::{AppState, PathResolver};
 
 pub async fn handle_artifact_manifest_get(
     state: &AppState,
@@ -55,7 +56,7 @@ pub async fn handle_artifact_manifest_get(
         }
     };
 
-    crate::models::validate_model_runtime_bundle(&model_manifest, &artifact_bundle)?;
+    crate::contracts::validate_model_runtime_bundle(&model_manifest, &artifact_bundle)?;
     let digest = artifact_bundle_digest(&artifact_bundle);
 
     Ok(ArtifactManifestResponse {
@@ -124,7 +125,7 @@ pub async fn handle_artifact_feature_graph_get(
             requested_model_id
         )));
     }
-    crate::models::validate_model_runtime_bundle(&model_manifest, &artifact_bundle)?;
+    crate::contracts::validate_model_runtime_bundle(&model_manifest, &artifact_bundle)?;
 
     Ok(ArtifactFeatureGraphGetResponse {
         thread_id: target.thread_id,

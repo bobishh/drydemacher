@@ -1,5 +1,6 @@
+use crate::contracts::{AuthoringTargetRef, LastDesignSnapshot};
 use crate::db;
-use crate::models::{AuthoringTargetRef, LastDesignSnapshot, PathResolver};
+use crate::models::PathResolver;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -132,11 +133,11 @@ fn resolve_saved_pointer(
 }
 
 pub fn build_runtime_snapshot(
-    design: Option<crate::models::DesignOutput>,
+    design: Option<crate::contracts::DesignOutput>,
     thread_id: Option<String>,
     message_id: Option<String>,
-    artifact_bundle: Option<crate::models::ArtifactBundle>,
-    model_manifest: Option<crate::models::ModelManifest>,
+    artifact_bundle: Option<crate::contracts::ArtifactBundle>,
+    model_manifest: Option<crate::contracts::ModelManifest>,
     selected_part_id: Option<String>,
 ) -> LastDesignSnapshot {
     LastDesignSnapshot {
@@ -153,7 +154,7 @@ pub fn build_runtime_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{
+    use crate::contracts::{
         AgentDraft, ArtifactBundle, AuthoringTargetRef, DesignOutput, EngineKind, GeometryBackend,
         InteractionMode, MacroDialect, ModelManifest, SourceLanguage, UiSpec,
     };

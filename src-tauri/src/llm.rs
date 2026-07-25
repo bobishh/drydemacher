@@ -1,4 +1,4 @@
-use crate::models::{DesignOutput, Engine, UsageSegment, UsageSummary};
+use crate::contracts::{DesignOutput, Engine, UsageSegment, UsageSummary};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::json;

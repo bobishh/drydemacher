@@ -1,10 +1,11 @@
+use crate::contracts::{
+    AgentDraft, AgentSession, AppError, AppResult, ArtifactBundle, DesignOutput, ModelManifest,
+    SourceLanguage,
+};
 use crate::db;
 use crate::mcp::contracts::*;
 use crate::mcp::runtime;
-use crate::models::{
-    AgentDraft, AgentSession, AppError, AppResult, AppState, ArtifactBundle, DesignOutput,
-    ModelManifest, PathResolver, SourceLanguage,
-};
+use crate::models::{AppState, PathResolver};
 use crate::services::agent_dialogue;
 use crate::services::agent_versions::{
     save_or_update_agent_version_for_session, SaveOrUpdateAgentVersionRequest,
@@ -16,9 +17,9 @@ use tauri::Emitter;
 use uuid::Uuid;
 
 #[cfg(test)]
-use crate::models::{ControlPrimitive, ControlView, ControlViewSource, ModelSourceKind};
+use crate::contracts::{ControlPrimitive, ControlView, ControlViewSource, ModelSourceKind};
 #[cfg(test)]
-use crate::models::{InteractionMode, MacroDialect, UiSpec};
+use crate::contracts::{InteractionMode, MacroDialect, UiSpec};
 #[cfg(test)]
 use crate::services::history;
 
@@ -54,9 +55,10 @@ pub use component::{
 };
 #[cfg(test)]
 use ecky_ast::{
-    bounded_ecky_ast_source_slice, core_node_child_paths, core_node_digest,
-    edit_digest_for_ecky_path, find_core_ast_node_in_program, replace_ecky_ast_source,
-    ECKY_AST_SOURCE_MAX_BYTES,
+    assert_source_ref_resolves_current_source, bounded_ecky_ast_source_slice,
+    core_node_child_paths, core_node_digest, edit_digest_for_ecky_path,
+    find_core_ast_node_in_program, replace_ecky_ast_source, source_span_for_ecky_path,
+    stable_node_key_for_program_path, ECKY_AST_SOURCE_MAX_BYTES,
 };
 use ecky_ast::{build_shape_graph_packet, collect_ecky_constraint_authoring_lints};
 pub use ecky_ast::{
@@ -257,7 +259,9 @@ pub(super) fn push_unique_strings(target: &mut Vec<String>, values: &[String]) {
     }
 }
 
-pub(super) fn selection_target_match_ids(target: &crate::models::SelectionTarget) -> Vec<String> {
+pub(super) fn selection_target_match_ids(
+    target: &crate::contracts::SelectionTarget,
+) -> Vec<String> {
     let mut ids = Vec::new();
     if let Some(target_id) = target.target_id.as_deref() {
         ids.push(target_id.to_string());
@@ -272,7 +276,7 @@ pub(super) fn selection_target_match_ids(target: &crate::models::SelectionTarget
     ids
 }
 
-fn is_specific_selection_binding(target: &crate::models::SelectionTarget) -> bool {
+fn is_specific_selection_binding(target: &crate::contracts::SelectionTarget) -> bool {
     !target.primitive_ids.is_empty()
         || !target.view_ids.is_empty()
         || target.parameter_keys.len() <= 2
@@ -303,13 +307,13 @@ pub(super) fn carry_forward_semantic_manifest(
     let previous_correspondence_graph = previous.correspondence_graph.clone();
     merged.feature_graph = previous_feature_graph;
     merged.correspondence_graph = previous_correspondence_graph;
-    if previous.enrichment_state.status != crate::models::EnrichmentStatus::None
+    if previous.enrichment_state.status != crate::contracts::EnrichmentStatus::None
         || !previous.enrichment_state.proposals.is_empty()
     {
         merged.enrichment_state = previous.enrichment_state.clone();
     }
 
-    let mut previous_targets: HashMap<String, &crate::models::SelectionTarget> = HashMap::new();
+    let mut previous_targets: HashMap<String, &crate::contracts::SelectionTarget> = HashMap::new();
     for target in &previous.selection_targets {
         for id in selection_target_match_ids(target) {
             previous_targets.entry(id).or_insert(target);
@@ -330,13 +334,13 @@ pub(super) fn carry_forward_semantic_manifest(
         }
     }
 
-    if crate::models::validate_model_runtime_bundle(&merged, artifact_bundle).is_ok() {
+    if crate::contracts::validate_model_runtime_bundle(&merged, artifact_bundle).is_ok() {
         return merged;
     }
 
     merged.feature_graph = None;
     merged.correspondence_graph = None;
-    if crate::models::validate_model_runtime_bundle(&merged, artifact_bundle).is_ok() {
+    if crate::contracts::validate_model_runtime_bundle(&merged, artifact_bundle).is_ok() {
         merged.warnings.push(
             "Feature graph was not carried forward because rendered topology no longer validates old feature bindings."
                 .to_string(),
@@ -345,7 +349,7 @@ pub(super) fn carry_forward_semantic_manifest(
     }
 
     merged.measurement_annotations.clear();
-    if crate::models::validate_model_runtime_bundle(&merged, artifact_bundle).is_ok() {
+    if crate::contracts::validate_model_runtime_bundle(&merged, artifact_bundle).is_ok() {
         merged.warnings.push(
             "Measurement annotations were not carried forward because rendered topology no longer validates old measurement bindings."
                 .to_string(),
@@ -1142,17 +1146,17 @@ pub struct SessionRenderPreview {
     pub design_output: DesignOutput,
     pub artifact_bundle: ArtifactBundle,
     pub model_manifest: ModelManifest,
-    pub draft_feedback: Option<crate::models::AgentDraftFeedback>,
+    pub draft_feedback: Option<crate::contracts::AgentDraftFeedback>,
     pub updated_at: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DraftFeedbackSeed {
-    pub status: crate::models::AgentDraftFeedbackStatus,
+    pub status: crate::contracts::AgentDraftFeedbackStatus,
     pub summary: String,
-    pub items: Vec<crate::models::AgentDraftFeedbackItem>,
-    pub authoring_lints: Vec<crate::models::AgentDraftFeedbackAuthoringLint>,
-    pub source: crate::models::AgentDraftFeedbackSource,
+    pub items: Vec<crate::contracts::AgentDraftFeedbackItem>,
+    pub authoring_lints: Vec<crate::contracts::AgentDraftFeedbackAuthoringLint>,
+    pub source: crate::contracts::AgentDraftFeedbackSource,
 }
 
 type RenderPreviewKey = (String, String);
@@ -1259,15 +1263,15 @@ pub(super) fn draft_feedback_from_structural_verification(
     result: &crate::contracts::StructuralVerificationResult,
 ) -> DraftFeedbackSeed {
     let status = if result.passed {
-        crate::models::AgentDraftFeedbackStatus::Passed
+        crate::contracts::AgentDraftFeedbackStatus::Passed
     } else if matches!(
         result.verifier_status,
         crate::contracts::VerifierStatus::SkippedUnavailable
             | crate::contracts::VerifierStatus::SkippedBackendUnavailable
     ) {
-        crate::models::AgentDraftFeedbackStatus::Warning
+        crate::contracts::AgentDraftFeedbackStatus::Warning
     } else {
-        crate::models::AgentDraftFeedbackStatus::Failed
+        crate::contracts::AgentDraftFeedbackStatus::Failed
     };
     let summary = if result.passed {
         result.summary.trim().to_string()
@@ -1288,7 +1292,7 @@ pub(super) fn draft_feedback_from_structural_verification(
         .issues
         .iter()
         .take(3)
-        .map(|issue| crate::models::AgentDraftFeedbackItem {
+        .map(|issue| crate::contracts::AgentDraftFeedbackItem {
             code: issue.code.clone(),
             message: issue.message.clone(),
         })
@@ -1298,15 +1302,15 @@ pub(super) fn draft_feedback_from_structural_verification(
         summary,
         items,
         authoring_lints: Vec::new(),
-        source: crate::models::AgentDraftFeedbackSource::StructuralVerification,
+        source: crate::contracts::AgentDraftFeedbackSource::StructuralVerification,
     }
 }
 
 fn hydrate_draft_feedback(
     preview: &SessionRenderPreview,
     seed: Option<DraftFeedbackSeed>,
-) -> Option<crate::models::AgentDraftFeedback> {
-    seed.map(|seed| crate::models::AgentDraftFeedback {
+) -> Option<crate::contracts::AgentDraftFeedback> {
+    seed.map(|seed| crate::contracts::AgentDraftFeedback {
         session_id: preview.session_id.clone(),
         thread_id: preview.thread_id.clone(),
         preview_id: preview.preview_id.clone(),
@@ -1320,7 +1324,7 @@ fn hydrate_draft_feedback(
 
 fn draft_feedback_authoring_lints_for_design_output(
     design_output: &DesignOutput,
-) -> Vec<crate::models::AgentDraftFeedbackAuthoringLint> {
+) -> Vec<crate::contracts::AgentDraftFeedbackAuthoringLint> {
     if design_output.source_language != SourceLanguage::EckyIrV0 {
         return Vec::new();
     }
@@ -1329,7 +1333,7 @@ fn draft_feedback_authoring_lints_for_design_output(
     };
     collect_ecky_constraint_authoring_lints(&design_output.macro_code, &program)
         .into_iter()
-        .map(|lint| crate::models::AgentDraftFeedbackAuthoringLint {
+        .map(|lint| crate::contracts::AgentDraftFeedbackAuthoringLint {
             kind: lint.kind,
             part_key: lint.part_key,
             param_key: lint.param_key,
@@ -1484,8 +1488,8 @@ async fn store_session_render_preview_unchecked(
     let thread_id_for_log = req.thread_id.clone();
     let base_message_id_for_log = req.base_message_id.clone();
     let model_id_for_log = req.artifact_bundle.model_id.clone();
-    crate::models::validate_design_output(&req.design_output)?;
-    crate::models::validate_model_runtime_bundle(&req.model_manifest, &req.artifact_bundle)?;
+    crate::contracts::validate_design_output(&req.design_output)?;
+    crate::contracts::validate_model_runtime_bundle(&req.model_manifest, &req.artifact_bundle)?;
     push_mcp_profile(
         state,
         ctx,
@@ -1655,12 +1659,12 @@ pub(super) fn artifact_bundle_digest(bundle: &ArtifactBundle) -> ArtifactBundleD
     let faceted_step = step_export_path.is_some()
         && matches!(
             geometry_representation.as_ref(),
-            Some(crate::models::GeometryRepresentation::FacetedPolyBrep)
+            Some(crate::contracts::GeometryRepresentation::FacetedPolyBrep)
         );
     let analytic_step = step_export_path.is_some()
         && matches!(
             geometry_representation.as_ref(),
-            Some(crate::models::GeometryRepresentation::AnalyticBrep)
+            Some(crate::contracts::GeometryRepresentation::AnalyticBrep)
         );
     let source_mesh_digests = bundle
         .geometry_provenance

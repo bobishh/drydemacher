@@ -11,12 +11,10 @@
 //! automatically and cannot drift. Both MCP (`ecky://guides/technical-system-prompt`)
 //! and API mode call `agent_language_reference` so their language rules are identical.
 
+use crate::contracts::GeometryBackend;
 use crate::ecky_language_surface::supported_surface_reference;
-use crate::models::GeometryBackend;
 
-const CANONICAL_BOOK_SOURCE: &str = include_str!("../../public/docs/ecky-ir.md");
-const AGENT_REFERENCE_START: &str = "<!-- ECKY_AGENT_REFERENCE_START -->";
-const AGENT_REFERENCE_END: &str = "<!-- ECKY_AGENT_REFERENCE_END -->";
+const CANONICAL_AGENT_REFERENCE: &str = include_str!("../../public/docs/ecky-agent-reference.md");
 
 /// Upper bound for the assembled prompt. ~8K tokens ≈ 32K chars (see the change's
 /// design.md). Overflow is a signal to tighten the body, not to raise the limit.
@@ -58,14 +56,10 @@ pub fn agent_language_reference(backend: GeometryBackend) -> String {
     )
 }
 
-/// Agent-facing language body embedded in the canonical human book source.
-/// Human renderers remove this marked projection; API and MCP prompts consume it verbatim.
+/// Agent-facing language body projected separately from the canonical corpus.
+/// Human tutorial/reference routes never need to strip prompt-only policy.
 pub fn canonical_agent_reference() -> &'static str {
-    CANONICAL_BOOK_SOURCE
-        .split_once(AGENT_REFERENCE_START)
-        .and_then(|(_, tail)| tail.split_once(AGENT_REFERENCE_END))
-        .map(|(body, _)| body.trim())
-        .expect("public/docs/ecky-ir.md must contain one agent-reference projection")
+    CANONICAL_AGENT_REFERENCE.trim()
 }
 
 /// Op catalogue as documentation-by-example: one worked `.ecky` snippet per form

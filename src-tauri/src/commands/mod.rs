@@ -1,4 +1,5 @@
 pub mod assets;
+pub mod catalog;
 pub mod component_package;
 pub mod config;
 pub mod design;

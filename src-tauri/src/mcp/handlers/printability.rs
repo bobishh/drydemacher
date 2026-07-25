@@ -5,15 +5,16 @@ use super::{
     store_session_render_preview_at_revision, try_record_agent_error, AgentContext,
     StoreSessionRenderPreviewRequest,
 };
+use crate::contracts::{
+    AppError, AppResult, ArtifactBundle, DesignOutput, FeatureNode, MacroDialect, ModelManifest,
+    SourceRef,
+};
 use crate::mcp::contracts::{
     PrintabilityAnalyzeResponse, PrintabilityTransformRecipesGetResponse,
     SemanticTransformArtifactGuard, SemanticTransformPreviewRequest,
     SemanticTransformPreviewResponse,
 };
-use crate::models::{
-    AppError, AppResult, AppState, ArtifactBundle, DesignOutput, FeatureNode, MacroDialect,
-    ModelManifest, PathResolver, SourceRef,
-};
+use crate::models::{AppState, PathResolver};
 use crate::services::render;
 
 fn printability_manifest_source_anchor(manifest: &ModelManifest) -> Option<String> {
@@ -292,7 +293,7 @@ pub async fn handle_semantic_transform_preview(
         let design_output = target.design_output;
         let (bundle, manifest) =
             crate::model_runtime::read_runtime_bundle(app, &requested_model_id)?;
-        crate::models::validate_model_runtime_bundle(&manifest, &bundle)?;
+        crate::contracts::validate_model_runtime_bundle(&manifest, &bundle)?;
         validate_semantic_transform_artifact_guard(&req.expected_artifact, &bundle)?;
         validate_semantic_transform_ecky_source(&design_output, &bundle, &manifest)?;
 
@@ -407,8 +408,8 @@ pub async fn handle_semantic_transform_preview(
         );
         preview_design.macro_code = next_source;
         preview_design.macro_dialect = MacroDialect::EckyIrV0;
-        preview_design.engine_kind = crate::models::EngineKind::EckyIrV0;
-        preview_design.source_language = crate::models::SourceLanguage::EckyIrV0;
+        preview_design.engine_kind = crate::contracts::EngineKind::EckyIrV0;
+        preview_design.source_language = crate::contracts::SourceLanguage::EckyIrV0;
         preview_design.geometry_backend = artifact_bundle.geometry_backend;
 
         let sv = crate::services::structural_verification::verify_structure(
@@ -494,9 +495,9 @@ fn validate_semantic_transform_ecky_source(
     bundle: &ArtifactBundle,
     manifest: &ModelManifest,
 ) -> AppResult<()> {
-    if design_output.source_language != crate::models::SourceLanguage::EckyIrV0
-        || bundle.source_language != crate::models::SourceLanguage::EckyIrV0
-        || manifest.source_language != crate::models::SourceLanguage::EckyIrV0
+    if design_output.source_language != crate::contracts::SourceLanguage::EckyIrV0
+        || bundle.source_language != crate::contracts::SourceLanguage::EckyIrV0
+        || manifest.source_language != crate::contracts::SourceLanguage::EckyIrV0
     {
         return Err(AppError::validation(
             "semantic_transform_preview supports sourceLanguage=ecky .ecky source only.",

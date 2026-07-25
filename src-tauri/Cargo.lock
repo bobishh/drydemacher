@@ -1072,6 +1072,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ecky-render"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "steel-core",
+]
+
+[[package]]
 name = "ecky_cad"
 version = "0.0.1"
 dependencies = [
@@ -1080,6 +1091,7 @@ dependencies = [
  "chrono",
  "cocoa",
  "csgrs",
+ "ecky-render",
  "fontdb",
  "geo",
  "image",

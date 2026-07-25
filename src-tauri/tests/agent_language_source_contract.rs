@@ -1,20 +1,15 @@
 use ecky_cad_lib::agent_prompt::agent_language_reference;
 use ecky_cad_lib::commands::generation::design_system_prompt;
+use ecky_cad_lib::contracts::{GeometryBackend, SourceLanguage};
 use ecky_cad_lib::ecky_language_surface::supported_surface_reference;
-use ecky_cad_lib::models::{GeometryBackend, SourceLanguage};
 use std::fs;
 use std::path::PathBuf;
 
-const BOOK_SOURCE: &str = include_str!("../../public/docs/ecky-ir.md");
-const AGENT_REFERENCE_START: &str = "<!-- ECKY_AGENT_REFERENCE_START -->";
-const AGENT_REFERENCE_END: &str = "<!-- ECKY_AGENT_REFERENCE_END -->";
+const HUMAN_REFERENCE: &str = include_str!("../../public/docs/ecky-ir.md");
+const AGENT_REFERENCE: &str = include_str!("../../public/docs/ecky-agent-reference.md");
 
 fn canonical_agent_reference() -> &'static str {
-    BOOK_SOURCE
-        .split_once(AGENT_REFERENCE_START)
-        .and_then(|(_, tail)| tail.split_once(AGENT_REFERENCE_END))
-        .map(|(body, _)| body.trim())
-        .expect("canonical book must contain one agent-reference projection")
+    AGENT_REFERENCE.trim()
 }
 
 #[test]
@@ -74,7 +69,7 @@ fn committed_prompt_artifacts_are_fresh() {
 }
 
 #[test]
-fn canonical_book_operation_index_covers_the_surface_registry() {
+fn human_reference_operation_index_covers_the_surface_registry() {
     for backend in [
         GeometryBackend::EckyRust,
         GeometryBackend::Build123d,
@@ -83,8 +78,8 @@ fn canonical_book_operation_index_covers_the_surface_registry() {
         for entry in supported_surface_reference(backend).entries {
             let row_key = format!("| `{}` |", entry.name);
             assert!(
-                BOOK_SOURCE.contains(&row_key),
-                "canonical book operation index missing `{}`",
+                HUMAN_REFERENCE.contains(&row_key),
+                "human reference operation index missing `{}`",
                 entry.name
             );
         }

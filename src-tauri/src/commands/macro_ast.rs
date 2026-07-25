@@ -11,8 +11,8 @@ use specta::Type;
 use steel_core::parser::ast::ExprKind;
 use steel_core::parser::parser::Parser;
 
+use crate::contracts::{AppError, AppResult};
 use crate::ecky_scheme::compiler::{expr_head_name, expr_identifier, expr_list_items};
-use crate::models::{AppError, AppResult};
 
 #[derive(Debug, Clone, Serialize, Type)]
 #[serde(rename_all = "camelCase")]

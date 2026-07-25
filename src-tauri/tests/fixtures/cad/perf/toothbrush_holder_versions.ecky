@@ -1,0 +1,241 @@
+;; Provenance: Ecky thread 263d98ea-36b9-4ae2-af62-20107bb86a05
+;; Version message: 75d87892-0cfd-42ad-a54f-8239610358e1
+;; Source digest: sha256:81f7ded44df1dbd1d38588fe2db876e721130889acbc235e4faa5c3b3c7e033f
+(model
+  (params
+    (number width 36.0 :min 20.0 :max 60.0 :label "Width")
+    (number depth 25.0 :min 15.0 :max 50.0 :label "Depth")
+    (number wall_thickness 2.6 :min 1.5 :max 5.0 :label "Wall Thickness")
+    (number height 85.0 :min 40.0 :max 150.0 :label "Height")
+    (number wall_offset 12.0 :min 0.0 :max 20.0 :label "Wall Offset")
+    (number pattern_angle_offset -8.0 :min -24.0 :max 24.0 :label "Angle Offset")
+    (number front_spade_gap 32.0 :min 20.0 :max 40.0 :label "Front Spade Gap")
+    (number side_spade_gap 10.0 :min 6.0 :max 16.0 :label "Side Spade Gap")
+    (number pattern_z_start 2.0 :min -12.0 :max 12.0 :label "Pattern Z Start")
+  )
+
+  (part "ToothbrushHolder"
+    (let* (
+      (w width)
+      (d depth)
+      (wa wall_thickness)
+      (h height)
+      (wall_off wall_offset)
+      (angle_off pattern_angle_offset)
+      (front_gap front_spade_gap)
+      (side_gap side_spade_gap)
+      (pattern_z pattern_z_start)
+      (r (/ w 2.0))
+      (safe_top 8.0)
+      (safe_bottom 11.0)
+      (embed 0.35)
+
+      ;; Base D/U-shaped cup: rounded front plus straight side legs.
+      ;; Flat rear/connector face is left clean for wall mounting.
+      (out_b (box w d h :align '(center max center)))
+      (out_c (cylinder r h :align '(center center center)))
+      (body_outer (union out_b out_c))
+
+      (in_b (box (- w (* 2.0 wa)) (- d wa) (+ h 10.0) :align '(center max center)))
+      (in_c (cylinder (- r wa) (+ h 10.0) :align '(center center center)))
+      (shell (difference body_outer (union in_b in_c)))
+
+      ;; Spade-shaped through-wall cutouts.
+      ;; Front cutters start inside the positive-Y round wall, then extrude outward through it.
+      ;; Side cutters still overrun both straight side walls.
+      (relief_depth 2.0)
+      (seam_relief_depth 4.5)
+      (tile_depth (+ wa (* 2.0 relief_depth)))
+      (seam_tile_depth (+ wa (* 2.0 seam_relief_depth)))
+      (front_cutter_y (- r wa relief_depth))
+      (front_profile
+        (polygon (
+          (0.0 4.7)
+          (-3.05 1.5)
+          (-3.25 -0.8)
+          (-2.15 -1.95)
+          (-1.15 -2.15)
+          (-0.55 -3.35)
+          (-1.15 -5.35)
+          (1.15 -5.35)
+          (0.55 -3.35)
+          (1.0 -2.1)
+          (2.15 -1.95)
+          (3.25 -0.8)
+          (3.05 1.5)
+        )))
+      (side_profile
+        (polygon (
+          (4.7 0.0)
+          (1.5 3.05)
+          (-0.8 3.25)
+          (-1.95 2.15)
+          (-2.15 1.15)
+          (-3.35 0.55)
+          (-5.35 1.15)
+          (-5.35 -1.15)
+          (-3.35 -0.55)
+          (-2.1 -1.0)
+          (-1.95 -2.15)
+          (-0.8 -3.25)
+          (1.5 -3.05)
+        )))
+      ;; Right wall profile stays mirrored so both side spades remain upright after opposite extrusion rotations.
+      (right_profile
+        (polygon (
+          (-4.7 0.0)
+          (-1.5 3.05)
+          (0.8 3.25)
+          (1.95 2.15)
+          (2.15 1.15)
+          (3.35 0.55)
+          (5.35 1.15)
+          (5.35 -1.15)
+          (3.35 -0.55)
+          (2.1 -1.0)
+          (1.95 -2.15)
+          (0.8 -3.25)
+          (-1.5 -3.05)
+        )))
+      (front_spade
+        (place (location (plane :origin '(0.0 0.0 0.0)) :rotate '(-90.0 0.0 180.0))
+          (extrude front_profile tile_depth)))
+      (left_spade
+        (place (location (plane :origin '(0.0 0.0 0.0)) :rotate '(0.0 90.0 180.0))
+          (extrude side_profile tile_depth)))
+      (left_spade_seam
+        (place (location (plane :origin '(0.0 0.0 0.0)) :rotate '(0.0 90.0 180.0))
+          (extrude side_profile seam_tile_depth)))
+      (right_spade
+        (place (location (plane :origin '(0.0 0.0 0.0)) :rotate '(0.0 -90.0 180.0))
+          (extrude right_profile tile_depth)))
+      (right_spade_seam
+        (place (location (plane :origin '(0.0 0.0 0.0)) :rotate '(0.0 -90.0 180.0))
+          (extrude right_profile seam_tile_depth)))
+
+      (front_even_rows 3)
+      (front_odd_rows 3)
+      (front_even_cols 5)
+      (front_odd_cols 4)
+      (front_even_angle_start (+ -48.0 angle_off))
+      (front_odd_angle_start (+ -32.0 angle_off))
+      (front_angle_gap front_gap)
+      (front_z_start (+ (- (/ h 2.0)) safe_bottom pattern_z))
+      (front_z_gap 13.0)
+      (front_even_spades
+        (repeat-union row front_even_rows
+          (repeat-union col front_even_cols
+            (let* (
+              (angle (+ front_even_angle_start (* col front_angle_gap)))
+              (zpos (+ front_z_start (* row (* 2.0 front_z_gap))))
+            )
+              (place (location (plane :origin '(0.0 0.0 0.0)) :rotate (list 0.0 0.0 angle))
+                (place (location (plane :origin (list 0.0 front_cutter_y zpos)))
+                  front_spade))))))
+      (front_odd_spades
+        (repeat-union row front_odd_rows
+          (repeat-union col front_odd_cols
+            (let* (
+              (angle (+ front_odd_angle_start (* col front_angle_gap)))
+              (zpos (+ front_z_start front_z_gap (* row (* 2.0 front_z_gap))))
+            )
+              (place (location (plane :origin '(0.0 0.0 0.0)) :rotate (list 0.0 0.0 angle))
+                (place (location (plane :origin (list 0.0 front_cutter_y zpos)))
+                  front_spade))))))
+      (front_spades (union front_even_spades front_odd_spades))
+
+      (side_even_cols 2)
+      (side_odd_cols 3)
+      (side_even_y_start (+ (- 0.0 d) wall_off))
+      (side_odd_y_start (+ (- 0.0 d) wall_off -5.0))
+      (side_y_gap side_gap)
+      (side_z_start (+ (- (/ h 2.0)) safe_bottom pattern_z))
+      (side_z_gap 13.0)
+      (left_even_inner_spades
+        (repeat-union row front_even_rows
+          (repeat-union col (- side_even_cols 1)
+            (let* (
+              (ypos (+ side_even_y_start (* col side_y_gap)))
+              (zpos (+ side_z_start (* row (* 2.0 side_z_gap))))
+            )
+              (place (location (plane :origin (list (- 0.0 r relief_depth) ypos zpos)))
+                left_spade)))))
+      (left_even_seam_spades
+        (repeat-union row front_even_rows
+          (let* (
+            (ypos (+ side_even_y_start (* (- side_even_cols 1) side_y_gap)))
+            (zpos (+ side_z_start (* row (* 2.0 side_z_gap))))
+          )
+            (place (location (plane :origin (list (- 0.0 r seam_relief_depth) ypos zpos)))
+              left_spade_seam))))
+      (left_odd_inner_spades
+        (repeat-union row front_odd_rows
+          (repeat-union col (- side_odd_cols 1)
+            (let* (
+              (ypos (+ side_odd_y_start (* col side_y_gap)))
+              (zpos (+ side_z_start side_z_gap (* row (* 2.0 side_z_gap))))
+            )
+              (place (location (plane :origin (list (- 0.0 r relief_depth) ypos zpos)))
+                left_spade)))))
+      (left_odd_seam_spades
+        (repeat-union row front_odd_rows
+          (let* (
+            (ypos (+ side_odd_y_start (* (- side_odd_cols 1) side_y_gap)))
+            (zpos (+ side_z_start side_z_gap (* row (* 2.0 side_z_gap))))
+          )
+            (place (location (plane :origin (list (- 0.0 r seam_relief_depth) ypos zpos)))
+              left_spade_seam))))
+      (left_spades (union left_even_inner_spades left_even_seam_spades left_odd_inner_spades left_odd_seam_spades))
+      (right_even_inner_spades
+        (repeat-union row front_even_rows
+          (repeat-union col (- side_even_cols 1)
+            (let* (
+              (ypos (+ side_even_y_start (* col side_y_gap)))
+              (zpos (+ side_z_start (* row (* 2.0 side_z_gap))))
+            )
+              (place (location (plane :origin (list (+ r relief_depth) ypos zpos)))
+                right_spade)))))
+      (right_even_seam_spades
+        (repeat-union row front_even_rows
+          (let* (
+            (ypos (+ side_even_y_start (* (- side_even_cols 1) side_y_gap)))
+            (zpos (+ side_z_start (* row (* 2.0 side_z_gap))))
+          )
+            (place (location (plane :origin (list (+ r seam_relief_depth) ypos zpos)))
+              right_spade_seam))))
+      (right_odd_inner_spades
+        (repeat-union row front_odd_rows
+          (repeat-union col (- side_odd_cols 1)
+            (let* (
+              (ypos (+ side_odd_y_start (* col side_y_gap)))
+              (zpos (+ side_z_start side_z_gap (* row (* 2.0 side_z_gap))))
+            )
+              (place (location (plane :origin (list (+ r relief_depth) ypos zpos)))
+                right_spade)))))
+      (right_odd_seam_spades
+        (repeat-union row front_odd_rows
+          (let* (
+            (ypos (+ side_odd_y_start (* (- side_odd_cols 1) side_y_gap)))
+            (zpos (+ side_z_start side_z_gap (* row (* 2.0 side_z_gap))))
+          )
+            (place (location (plane :origin (list (+ r seam_relief_depth) ypos zpos)))
+              right_spade_seam))))
+      (right_spades (union right_even_inner_spades right_even_seam_spades right_odd_inner_spades right_odd_seam_spades))
+      (spade_holes (union front_spades left_spades right_spades))
+
+      ;; Solid bottom with central drain.
+      (bottom
+        (place (location (plane :origin (list 0.0 0.0 (- 0.0 (/ h 2.0)))))
+          (difference
+            (union
+              (box w d wa :align '(center max min))
+              (cylinder r wa :align '(center center min)))
+            (cylinder 5.0 (+ wa 2.0) :align '(center center min)))))
+
+      ;; Final model: subtract spade cutters from the shell so they are holes.
+      (final (difference (union shell bottom) spade_holes))
+    )
+      (place (location (plane :origin '(0.0 0.0 0.0))) final)
+    )
+  )
+)

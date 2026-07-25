@@ -35,6 +35,8 @@ mod agent;
 pub use agent::*;
 mod mcp;
 pub use mcp::*;
+mod animal_cap;
+pub use animal_cap::*;
 
 pub type DesignParams = BTreeMap<String, ParamValue>;
 pub const GENIE_TRAITS_VERSION: u8 = 2;
@@ -1500,6 +1502,26 @@ pub struct DeletedMessage {
     #[serde(default, alias = "attachment_images")]
     pub attachment_images: Vec<String>,
     pub deleted_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletedThreadSummary {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub summary: String,
+    pub updated_at: u64,
+    pub deleted_at: u64,
+    pub version_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletedThreadsPage {
+    pub items: Vec<DeletedThreadSummary>,
+    pub next_before: Option<String>,
+    pub has_more: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]

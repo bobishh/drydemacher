@@ -361,17 +361,17 @@ fn operation_is_mesh_only(op: &CoreOperation) -> bool {
 /// - Chamfer / fillet: edge operations that need real topology.
 /// - Shell / offset: require face/surface data.
 fn operation_requires_brep(op: &CoreOperation) -> bool {
-    match op {
-        CoreOperation::Boolean(_) => true,
-        CoreOperation::Surface(
-            CoreSurfaceOp::Chamfer
-            | CoreSurfaceOp::Fillet
-            | CoreSurfaceOp::Shell
-            | CoreSurfaceOp::Offset
-            | CoreSurfaceOp::OffsetRounded,
-        ) => true,
-        _ => false,
-    }
+    matches!(
+        op,
+        CoreOperation::Boolean(_)
+            | CoreOperation::Surface(
+                CoreSurfaceOp::Chamfer
+                    | CoreSurfaceOp::Fillet
+                    | CoreSurfaceOp::Shell
+                    | CoreSurfaceOp::Offset
+                    | CoreSurfaceOp::OffsetRounded,
+            )
+    )
 }
 
 #[derive(Clone, Default)]
@@ -611,9 +611,7 @@ fn collect_mesh_origin_surface_op_admission_issues<'a>(
         }
         CoreNodeKind::List(items) | CoreNodeKind::Group(items) => {
             for item in items {
-                collect_mesh_origin_surface_op_admission_issues(
-                    item, bindings, part_index, issues,
-                );
+                collect_mesh_origin_surface_op_admission_issues(item, bindings, part_index, issues);
             }
         }
     }
@@ -1087,8 +1085,7 @@ fn slice_mesh_phase_root(
                 .iter()
                 .rposition(|b| node_contains_any(&b.value, boundary_ids))
             {
-                let kept_bindings: Vec<_> =
-                    bindings[..=last_boundary_idx].iter().cloned().collect();
+                let kept_bindings: Vec<_> = bindings[..=last_boundary_idx].to_vec();
                 let binding_name = kept_bindings[last_boundary_idx].name.clone();
                 let binding_id = kept_bindings[last_boundary_idx].value.id;
                 return Some(CoreNode::new(
@@ -1101,7 +1098,7 @@ fn slice_mesh_phase_root(
                             CoreValueKind::Solid,
                         )),
                     },
-                    root.value_kind.clone(),
+                    root.value_kind,
                 ));
             }
             let sliced_result = slice_mesh_phase_root(result, boundary_ids)?;
@@ -1111,7 +1108,7 @@ fn slice_mesh_phase_root(
                     bindings: bindings.clone(),
                     result: Box::new(sliced_result),
                 },
-                root.value_kind.clone(),
+                root.value_kind,
             ))
         }
         CoreNodeKind::Let { bindings, body } => {
@@ -1119,8 +1116,7 @@ fn slice_mesh_phase_root(
                 .iter()
                 .rposition(|b| node_contains_any(&b.value, boundary_ids))
             {
-                let kept_bindings: Vec<_> =
-                    bindings[..=last_boundary_idx].iter().cloned().collect();
+                let kept_bindings: Vec<_> = bindings[..=last_boundary_idx].to_vec();
                 let binding_name = kept_bindings[last_boundary_idx].name.clone();
                 let binding_id = kept_bindings[last_boundary_idx].value.id;
                 return Some(CoreNode::new(
@@ -1133,7 +1129,7 @@ fn slice_mesh_phase_root(
                             CoreValueKind::Solid,
                         )),
                     },
-                    root.value_kind.clone(),
+                    root.value_kind,
                 ));
             }
             let sliced_body = slice_mesh_phase_root(body, boundary_ids)?;
@@ -1143,7 +1139,7 @@ fn slice_mesh_phase_root(
                     bindings: bindings.clone(),
                     body: Box::new(sliced_body),
                 },
-                root.value_kind.clone(),
+                root.value_kind,
             ))
         }
         _ => {
@@ -1401,7 +1397,7 @@ fn node_contains_any(node: &CoreNode, ids: &std::collections::HashSet<NodeId>) -
 }
 
 /// Find a node by ID anywhere in the tree.
-fn find_node<'a>(node: &'a CoreNode, target: NodeId) -> Option<&'a CoreNode> {
+fn find_node(node: &CoreNode, target: NodeId) -> Option<&CoreNode> {
     if node.id == target {
         return Some(node);
     }
@@ -2200,10 +2196,10 @@ mod tests {
             }
         }
 
-        let patterned_id = binding_node_id(&program.parts[0].root, "patterned")
-            .expect("patterned binding");
-        let finished_id = binding_node_id(&program.parts[0].root, "finished")
-            .expect("finished binding");
+        let patterned_id =
+            binding_node_id(&program.parts[0].root, "patterned").expect("patterned binding");
+        let finished_id =
+            binding_node_id(&program.parts[0].root, "finished").expect("finished binding");
         assert!(
             partitions[0].mesh_output_node_ids.contains(&patterned_id),
             "mesh output must stop at mesh-origin node before chamfer: {:?}",
@@ -2346,7 +2342,9 @@ mod tests {
                     || has_surface_op(else_branch, expected)
             }
             CoreNodeKind::Map { sources, body, .. } => {
-                sources.iter().any(|source| has_surface_op(source, expected))
+                sources
+                    .iter()
+                    .any(|source| has_surface_op(source, expected))
                     || has_surface_op(body, expected)
             }
             CoreNodeKind::Apply { args, list, .. } => {

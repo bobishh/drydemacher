@@ -2,9 +2,10 @@ use super::{
     handle_commit_preview_version, handle_macro_preview_render, handle_verify_generated_model,
     now_secs, AgentContext,
 };
+use crate::contracts::{AppError, AppResult};
 use crate::db;
 use crate::mcp::contracts::{AgentIdentityOverride, MacroReplaceRequest, VersionSaveRequest};
-use crate::models::{AppError, AppResult, AppState, PathResolver};
+use crate::models::{AppState, PathResolver};
 use std::collections::HashMap;
 
 // --- Filesystem project mirror tools (filesystem-project-mirror T2) ---

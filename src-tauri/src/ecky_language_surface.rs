@@ -1,4 +1,4 @@
-use crate::models::GeometryBackend;
+use crate::contracts::GeometryBackend;
 use serde::Serialize;
 
 pub const MODEL_CLAUSES: &[&str] = &["params", "part", "meta"];

@@ -6,8 +6,8 @@ use csgrs::float_types::parry3d::na::{Matrix3, Vector3};
 use tauri::{AppHandle, State};
 
 use crate::component_package_runtime;
-use crate::models::{
-    validate_component_package, AppError, AppResult, AppState, ArtifactBundle,
+use crate::contracts::{
+    validate_component_package, AppError, AppResult, ArtifactBundle,
     ArtifactBundleComponentPackageRequest, AssemblyDefinition, AssemblyMate, AssemblyOperation,
     AssemblyOutputMode, ComponentDefinition, ComponentInterfaceValue, ComponentPackage,
     ComponentPackageHeader, ComponentPort, DesignParams, ExportPartInput, GeometryBackend,
@@ -15,9 +15,10 @@ use crate::models::{
     InstalledAssemblyControls, InstalledAssemblyMateResult, InstalledAssemblyOperationResult,
     InstalledAssemblyOutputRuntime, InstalledAssemblyRuntime, InstalledAssemblySource,
     InstalledComponentControls, InstalledComponentPackage, InstalledComponentRuntime,
-    InstalledComponentSource, MacroDialect, ModelManifest, OperationKind, PathResolver, PortFrame,
-    PortReference, SourceLanguage,
+    InstalledComponentSource, MacroDialect, ModelManifest, OperationKind, PortFrame, PortReference,
+    SourceLanguage,
 };
+use crate::models::{AppState, PathResolver};
 use crate::topology_target_ids::{is_stable_topology_target_id, portable_topology_target_id};
 
 const FRAME_EPSILON: f64 = 1.0e-6;
@@ -209,11 +210,11 @@ fn write_artifact_bundle_component_package_project_impl(
     }
 
     let package = ComponentPackage {
-        schema_version: crate::models::COMPONENT_PACKAGE_SCHEMA_VERSION,
+        schema_version: crate::contracts::COMPONENT_PACKAGE_SCHEMA_VERSION,
         package_id: request.package_id,
         version: request.version,
         display_name: request.display_name,
-        visibility: crate::models::PackageVisibility::Source,
+        visibility: crate::contracts::PackageVisibility::Source,
         tags: request.tags,
         port_types: request.port_types,
         mate_types: Vec::new(),
@@ -369,7 +370,7 @@ fn normalize_packaged_component_ports_with_portability(
             continue;
         }
         match target.kind {
-            crate::models::SelectionTargetKind::Edge => {
+            crate::contracts::SelectionTargetKind::Edge => {
                 for edge_target in &artifact_bundle.edge_targets {
                     if portable_topology_target_id(&edge_target.target_id)
                         .is_some_and(|portable| manifest_portable_ids.contains(&portable))
@@ -379,7 +380,7 @@ fn normalize_packaged_component_ports_with_portability(
                     }
                 }
             }
-            crate::models::SelectionTargetKind::Face => {
+            crate::contracts::SelectionTargetKind::Face => {
                 for face_target in &artifact_bundle.face_targets {
                     if portable_topology_target_id(&face_target.target_id)
                         .is_some_and(|portable| manifest_portable_ids.contains(&portable))
@@ -436,7 +437,7 @@ fn should_normalize_packaged_topology_ids(
 }
 
 fn preferred_packaged_target_id(
-    target: &crate::models::SelectionTarget,
+    target: &crate::contracts::SelectionTarget,
     prefer_portable_ids: bool,
 ) -> Option<String> {
     let stable_alias = || {
@@ -582,12 +583,12 @@ fn resolve_packaged_component_contract(
 ) -> AppResult<component_package_runtime::DerivedComponentSourceContract> {
     let mut derived = component_package_runtime::DerivedComponentSourceContract {
         params: Vec::new(),
-        ui_spec: crate::models::UiSpec::default(),
+        ui_spec: crate::contracts::UiSpec::default(),
         initial_params: DesignParams::new(),
     };
     if !request.ui_spec.fields.is_empty() || !request.initial_params.is_empty() {
-        crate::models::validate_ui_spec(&request.ui_spec)?;
-        crate::models::validate_design_params(&request.initial_params, &request.ui_spec)?;
+        crate::contracts::validate_ui_spec(&request.ui_spec)?;
+        crate::contracts::validate_design_params(&request.initial_params, &request.ui_spec)?;
         derived.ui_spec = request.ui_spec.clone();
         derived.initial_params = request.initial_params.clone();
         derived.params = component_package_runtime::component_params_from_ui_contract(
@@ -941,7 +942,7 @@ pub async fn render_installed_component_assembly_common(
             .unwrap_or_default();
         let parameters =
             merge_component_render_parameters(&component.installed_source.component, &overrides);
-        components.push(crate::models::InstalledAssemblyComponentRuntime {
+        components.push(crate::contracts::InstalledAssemblyComponentRuntime {
             instance_id: component.instance_id.clone(),
             component_id: component.component_id.clone(),
             parameters: parameters.clone(),
@@ -1137,7 +1138,7 @@ fn ensure_assembly_runtime_can_export_placed_parts(
     match assembly_runtime.assembly.output.mode {
         AssemblyOutputMode::SeparateParts | AssemblyOutputMode::JoinedAssembly => {}
         _ => {
-            return Err(crate::models::AppError::validation(format!(
+            return Err(crate::contracts::AppError::validation(format!(
                 "Installed assembly '{}@{}:{}' output mode '{:?}' is not supported for placed {} export.",
                 assembly_runtime.package_id,
                 assembly_runtime.version,
@@ -1161,7 +1162,7 @@ fn ensure_assembly_runtime_can_export_placed_parts(
                 assembly_runtime.assembly.assembly_id
             )
         });
-    Err(crate::models::AppError::validation(format!(
+    Err(crate::contracts::AppError::validation(format!(
         "Installed assembly '{}@{}:{}' cannot export placed {}: {}",
         assembly_runtime.package_id,
         assembly_runtime.version,
@@ -1186,7 +1187,7 @@ fn build_installed_assembly_export_parts(
         if component.runtime.artifact_bundle.viewer_assets.is_empty() {
             let preview_path = component.runtime.artifact_bundle.preview_stl_path.trim();
             if preview_path.is_empty() {
-                return Err(crate::models::AppError::validation(format!(
+                return Err(crate::contracts::AppError::validation(format!(
                     "Installed assembly '{}@{}:{}' component instance '{}' has no exportable viewer assets or preview STL.",
                     assembly_runtime.package_id,
                     assembly_runtime.version,
@@ -1225,7 +1226,7 @@ async fn render_installed_assembly_output_runtime(
     app: &dyn PathResolver,
     state: &AppState,
     assembly_source: &InstalledAssemblySource,
-    components: &[crate::models::InstalledAssemblyComponentRuntime],
+    components: &[crate::contracts::InstalledAssemblyComponentRuntime],
     mates_solved: bool,
 ) -> AppResult<Option<InstalledAssemblyOutputRuntime>> {
     let output_plan = plan_installed_assembly_output(&assembly_source.assembly);
@@ -1323,7 +1324,7 @@ fn derive_pure_fuse_group_map(assembly: &AssemblyDefinition) -> Option<BTreeMap<
     let mut parent = HashMap::<String, String>::new();
 
     for operation in &assembly.operations {
-        if operation.kind != crate::models::OperationKind::Fuse
+        if operation.kind != crate::contracts::OperationKind::Fuse
             || !operation.port_refs.is_empty()
             || !operation.params.is_empty()
         {
@@ -1687,7 +1688,7 @@ fn evaluate_installed_assembly_operations(
 
 fn build_installed_assembly_output_step_inputs(
     assembly_source: &InstalledAssemblySource,
-    components: &[crate::models::InstalledAssemblyComponentRuntime],
+    components: &[crate::contracts::InstalledAssemblyComponentRuntime],
     output_plan: &AssemblyOutputPlan,
 ) -> AppResult<Vec<crate::freecad::AssemblyStepPartInput>> {
     let mut parts = Vec::new();
@@ -1705,7 +1706,7 @@ fn build_installed_assembly_output_step_inputs(
             })
             .map(|artifact| artifact.path.clone())
             .ok_or_else(|| {
-                crate::models::AppError::validation(format!(
+                crate::contracts::AppError::validation(format!(
                     "Installed assembly '{}@{}:{}' component instance '{}' has no primary STEP export for joined assembly output.",
                     assembly_source.package_id,
                     assembly_source.version,
@@ -1721,7 +1722,7 @@ fn build_installed_assembly_output_step_inputs(
             }
         });
         if placement_frame.is_none() {
-            return Err(crate::models::AppError::validation(format!(
+            return Err(crate::contracts::AppError::validation(format!(
                 "Installed assembly '{}@{}:{}' component instance '{}' is missing placement frame for joined assembly output.",
                 assembly_source.package_id,
                 assembly_source.version,
@@ -2215,8 +2216,8 @@ fn build_installed_assembly_controls(
 
 pub(crate) fn validate_rendered_component_port_targets(
     installed_source: &InstalledComponentSource,
-    artifact_bundle: &crate::models::ArtifactBundle,
-    model_manifest: &crate::models::ModelManifest,
+    artifact_bundle: &crate::contracts::ArtifactBundle,
+    model_manifest: &crate::contracts::ModelManifest,
 ) -> AppResult<()> {
     let runtime_target_ids = model_manifest
         .selection_targets
@@ -2265,7 +2266,7 @@ pub(crate) fn validate_rendered_component_port_targets(
                     .map(|portable| runtime_portable_topology_target_ids.contains(&portable))
                     .unwrap_or(false);
             if !literal_match && !portable_match {
-                return Err(crate::models::AppError::validation(format!(
+                return Err(crate::contracts::AppError::validation(format!(
                     "Installed component '{}@{}:{}' port '{}' targetId '{}' was not found in rendered runtime topology.",
                     installed_source.package_id,
                     installed_source.version,
@@ -2282,9 +2283,9 @@ pub(crate) fn validate_rendered_component_port_targets(
 
 fn populate_component_feature_graph_ports(
     installed_source: &InstalledComponentSource,
-    _artifact_bundle: &crate::models::ArtifactBundle,
-    model_manifest: &crate::models::ModelManifest,
-) -> AppResult<crate::models::ModelManifest> {
+    _artifact_bundle: &crate::contracts::ArtifactBundle,
+    model_manifest: &crate::contracts::ModelManifest,
+) -> AppResult<crate::contracts::ModelManifest> {
     let mut manifest = model_manifest.clone();
     let Some(feature_graph) = manifest.feature_graph.as_mut() else {
         return Ok(manifest);
@@ -2319,7 +2320,7 @@ fn populate_component_feature_graph_ports(
 
         let targets_fully_resolved = !component_port.target_ids.is_empty()
             && resolved_target_ids.len() == component_port.target_ids.len();
-        let feature_port = crate::models::FeaturePort {
+        let feature_port = crate::contracts::FeaturePort {
             port_id: component_port.port_id.clone(),
             type_id: component_port.type_id.clone(),
             target_ids: resolved_target_ids,
@@ -2349,7 +2350,7 @@ fn populate_component_feature_graph_ports(
 
 fn component_feature_port_target_id_map(
     installed_source: &InstalledComponentSource,
-    model_manifest: &crate::models::ModelManifest,
+    model_manifest: &crate::contracts::ModelManifest,
 ) -> HashMap<String, String> {
     let is_step_source = Path::new(installed_source.source_path.trim())
         .extension()
@@ -2406,8 +2407,8 @@ fn component_feature_port_target_id_map(
 }
 
 fn component_feature_port_target_kind_map(
-    model_manifest: &crate::models::ModelManifest,
-) -> HashMap<String, crate::models::SelectionTargetKind> {
+    model_manifest: &crate::contracts::ModelManifest,
+) -> HashMap<String, crate::contracts::SelectionTargetKind> {
     model_manifest
         .selection_targets
         .iter()
@@ -2427,7 +2428,7 @@ fn component_feature_port_target_kind_map(
 fn component_feature_port_target_role(
     source_target_ids: &[String],
     target_id_map: &HashMap<String, String>,
-    target_kind_map: &HashMap<String, crate::models::SelectionTargetKind>,
+    target_kind_map: &HashMap<String, crate::contracts::SelectionTargetKind>,
 ) -> Option<String> {
     let mut role = None;
     for source_target_id in source_target_ids {
@@ -2441,21 +2442,22 @@ fn component_feature_port_target_role(
     role.map(str::to_string)
 }
 
-fn selection_target_kind_role(kind: &crate::models::SelectionTargetKind) -> Option<&'static str> {
+fn selection_target_kind_role(
+    kind: &crate::contracts::SelectionTargetKind,
+) -> Option<&'static str> {
     match kind {
-        crate::models::SelectionTargetKind::Object => Some("object"),
-        crate::models::SelectionTargetKind::Edge => Some("edge"),
-        crate::models::SelectionTargetKind::Face => Some("face"),
-        crate::models::SelectionTargetKind::Part | crate::models::SelectionTargetKind::Group => {
-            None
-        }
+        crate::contracts::SelectionTargetKind::Object => Some("object"),
+        crate::contracts::SelectionTargetKind::Edge => Some("edge"),
+        crate::contracts::SelectionTargetKind::Face => Some("face"),
+        crate::contracts::SelectionTargetKind::Part
+        | crate::contracts::SelectionTargetKind::Group => None,
     }
 }
 
 fn component_feature_port_source_ref(
     installed_source: &InstalledComponentSource,
     component_port: &ComponentPort,
-) -> crate::models::SourceRef {
+) -> crate::contracts::SourceRef {
     let base = installed_source
         .component
         .source_ref
@@ -2472,7 +2474,7 @@ fn component_feature_port_source_ref(
             )
         });
 
-    crate::models::SourceRef {
+    crate::contracts::SourceRef {
         source_id: Some(format!(
             "{}@{}:{}",
             installed_source.package_id,
@@ -2493,7 +2495,7 @@ fn component_feature_port_source_ref(
 mod tests {
     use super::*;
 
-    use crate::models::{
+    use crate::contracts::{
         ArtifactBundle, AssemblyComponentRef, AssemblyMate, AssemblyOutput, AssemblyOutputMode,
         ComponentDefinition, ComponentFusionZone, ComponentInterfaceValue, ComponentKeepoutVolume,
         ComponentParam, ComponentParamKind, ComponentPort, EngineKind, GeometryBackend,
@@ -2524,7 +2526,7 @@ mod tests {
 
     fn sample_manifest_value(alias_ids: &[&str]) -> serde_json::Value {
         serde_json::json!({
-            "schemaVersion": crate::models::MODEL_RUNTIME_SCHEMA_VERSION,
+            "schemaVersion": crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             "modelId": "generated-abc123",
             "sourceKind": "generated",
             "engineKind": "freecad",
@@ -2577,16 +2579,16 @@ mod tests {
         })
     }
 
-    fn sample_manifest(alias_ids: &[&str]) -> crate::models::ModelManifest {
+    fn sample_manifest(alias_ids: &[&str]) -> crate::contracts::ModelManifest {
         serde_json::from_value(sample_manifest_value(alias_ids)).expect("sample manifest")
     }
 
     fn sample_artifact_bundle(manifest_path: &str) -> ArtifactBundle {
         ArtifactBundle {
             geometry_provenance: None,
-            schema_version: crate::models::MODEL_RUNTIME_SCHEMA_VERSION,
+            schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: "generated-abc123".to_string(),
-            source_kind: crate::models::ModelSourceKind::Generated,
+            source_kind: crate::contracts::ModelSourceKind::Generated,
             engine_kind: EngineKind::Freecad,
             source_language: SourceLanguage::LegacyPython,
             geometry_backend: GeometryBackend::Freecad,
@@ -2694,7 +2696,7 @@ mod tests {
                 kind: ComponentParamKind::Number,
                 unit: Some("mm".to_string()),
             }],
-            ui_spec: crate::models::UiSpec::default(),
+            ui_spec: crate::contracts::UiSpec::default(),
             initial_params,
             ports: vec![test_port(port_id, frame)],
         }
@@ -3003,9 +3005,9 @@ mod tests {
     fn plan_installed_assembly_output_supports_full_instance_pure_fuse() {
         let mut source = test_assembly_source(Some(PortFrame::identity()));
         source.assembly.output.mode = AssemblyOutputMode::FusedSolid;
-        source.assembly.operations = vec![crate::models::AssemblyOperation {
+        source.assembly.operations = vec![crate::contracts::AssemblyOperation {
             operation_id: "fuse-all".to_string(),
-            kind: crate::models::OperationKind::Fuse,
+            kind: crate::contracts::OperationKind::Fuse,
             target_instance_ids: vec!["rail".to_string(), "cage".to_string()],
             port_refs: Vec::new(),
             params: Default::default(),
@@ -3036,9 +3038,9 @@ mod tests {
             "free_slot",
             Some(PortFrame::identity()),
         ));
-        source.assembly.operations = vec![crate::models::AssemblyOperation {
+        source.assembly.operations = vec![crate::contracts::AssemblyOperation {
             operation_id: "fuse-holder".to_string(),
-            kind: crate::models::OperationKind::Fuse,
+            kind: crate::contracts::OperationKind::Fuse,
             target_instance_ids: vec!["rail".to_string(), "cage".to_string()],
             port_refs: Vec::new(),
             params: Default::default(),
@@ -3060,9 +3062,9 @@ mod tests {
     fn plan_installed_assembly_output_rejects_partial_fuse_targets() {
         let mut source = test_assembly_source(Some(PortFrame::identity()));
         source.assembly.output.mode = AssemblyOutputMode::FusedSolid;
-        source.assembly.operations = vec![crate::models::AssemblyOperation {
+        source.assembly.operations = vec![crate::contracts::AssemblyOperation {
             operation_id: "fuse-one".to_string(),
-            kind: crate::models::OperationKind::Fuse,
+            kind: crate::contracts::OperationKind::Fuse,
             target_instance_ids: vec!["rail".to_string()],
             port_refs: Vec::new(),
             params: Default::default(),
@@ -3083,9 +3085,9 @@ mod tests {
         let mut source = test_assembly_source(Some(PortFrame::identity()));
         source.assembly.output.mode = AssemblyOutputMode::JoinedAssembly;
         source.assembly.mates.clear();
-        source.assembly.operations = vec![crate::models::AssemblyOperation {
+        source.assembly.operations = vec![crate::contracts::AssemblyOperation {
             operation_id: "cut-slot".to_string(),
-            kind: crate::models::OperationKind::Cut,
+            kind: crate::contracts::OperationKind::Cut,
             target_instance_ids: vec!["rail".to_string(), "cage".to_string()],
             port_refs: Vec::new(),
             params: Default::default(),
@@ -3120,17 +3122,17 @@ mod tests {
     fn installed_assembly_operation_preflight_requires_fuse_capable_zone() {
         let mut source = test_assembly_source(Some(PortFrame::identity()));
         source.assembly.output.mode = AssemblyOutputMode::JoinedAssembly;
-        source.assembly.operations = vec![crate::models::AssemblyOperation {
+        source.assembly.operations = vec![crate::contracts::AssemblyOperation {
             operation_id: "fuse-holder".to_string(),
-            kind: crate::models::OperationKind::Fuse,
+            kind: crate::contracts::OperationKind::Fuse,
             target_instance_ids: vec!["rail".to_string(), "cage".to_string()],
             port_refs: Vec::new(),
             params: Default::default(),
         }];
         source.components[0].installed_source.component.fusion_zones[0].allowed_ops =
-            vec![crate::models::OperationKind::Fuse];
+            vec![crate::contracts::OperationKind::Fuse];
         source.components[1].installed_source.component.fusion_zones[0].allowed_ops =
-            vec![crate::models::OperationKind::Blend];
+            vec![crate::contracts::OperationKind::Blend];
 
         let warning = installed_assembly_operation_preflight_warning(
             &source,
@@ -3150,17 +3152,17 @@ mod tests {
     fn installed_assembly_operation_fusion_zone_ids_map_targets() {
         let mut source = test_assembly_source(Some(PortFrame::identity()));
         source.assembly.output.mode = AssemblyOutputMode::JoinedAssembly;
-        source.assembly.operations = vec![crate::models::AssemblyOperation {
+        source.assembly.operations = vec![crate::contracts::AssemblyOperation {
             operation_id: "fuse-holder".to_string(),
-            kind: crate::models::OperationKind::Fuse,
+            kind: crate::contracts::OperationKind::Fuse,
             target_instance_ids: vec!["rail".to_string(), "cage".to_string()],
             port_refs: Vec::new(),
             params: Default::default(),
         }];
         source.components[0].installed_source.component.fusion_zones[0].allowed_ops =
-            vec![crate::models::OperationKind::Fuse];
+            vec![crate::contracts::OperationKind::Fuse];
         source.components[1].installed_source.component.fusion_zones[0].allowed_ops =
-            vec![crate::models::OperationKind::Fuse];
+            vec![crate::contracts::OperationKind::Fuse];
 
         let zone_ids = installed_assembly_operation_fusion_zone_ids_by_instance(
             &source,
@@ -3291,14 +3293,14 @@ mod tests {
             ComponentInterfaceValue::Number(0.3),
         )]);
         let mut manifest = sample_manifest(&[]);
-        manifest.feature_graph = Some(crate::models::FeatureGraph {
-            nodes: vec![crate::models::FeatureNode {
+        manifest.feature_graph = Some(crate::contracts::FeatureGraph {
+            nodes: vec![crate::contracts::FeatureNode {
                 feature_id: "part:part-shell".to_string(),
                 kind: "part".to_string(),
                 label: "Shell".to_string(),
                 source_ref: None,
                 dependency_ids: Vec::new(),
-                output_refs: vec![crate::models::FeatureOutputRef {
+                output_refs: vec![crate::contracts::FeatureOutputRef {
                     feature_id: "part:part-shell".to_string(),
                     output_id: "selectionTargets".to_string(),
                     target_ids: vec!["target-shell".to_string()],
@@ -3314,7 +3316,7 @@ mod tests {
         )
         .expect("populate ports");
 
-        crate::models::validate_model_manifest(&populated).expect("valid manifest");
+        crate::contracts::validate_model_manifest(&populated).expect("valid manifest");
         let port = &populated
             .feature_graph
             .as_ref()
@@ -3363,15 +3365,15 @@ mod tests {
         manifest.selection_targets[0].target_id = Some("runtime-face-id".to_string());
         manifest.selection_targets[0].canonical_target_id =
             Some("part:face:0:0-0-1:10".to_string());
-        manifest.selection_targets[0].kind = crate::models::SelectionTargetKind::Face;
-        manifest.feature_graph = Some(crate::models::FeatureGraph {
-            nodes: vec![crate::models::FeatureNode {
+        manifest.selection_targets[0].kind = crate::contracts::SelectionTargetKind::Face;
+        manifest.feature_graph = Some(crate::contracts::FeatureGraph {
+            nodes: vec![crate::contracts::FeatureNode {
                 feature_id: "part:part-shell".to_string(),
                 kind: "part".to_string(),
                 label: "Shell".to_string(),
                 source_ref: None,
                 dependency_ids: Vec::new(),
-                output_refs: vec![crate::models::FeatureOutputRef {
+                output_refs: vec![crate::contracts::FeatureOutputRef {
                     feature_id: "part:part-shell".to_string(),
                     output_id: "selectionTargets".to_string(),
                     target_ids: vec!["runtime-face-id".to_string()],
@@ -3387,7 +3389,7 @@ mod tests {
         )
         .expect("populate ports");
 
-        crate::models::validate_model_manifest(&populated).expect("valid manifest");
+        crate::contracts::validate_model_manifest(&populated).expect("valid manifest");
         let port = &populated
             .feature_graph
             .as_ref()
@@ -3430,19 +3432,19 @@ mod tests {
         let mut manifest = sample_manifest(&[]);
         let mut edge_target = manifest.selection_targets[0].clone();
         edge_target.target_id = Some("target-edge".to_string());
-        edge_target.kind = crate::models::SelectionTargetKind::Edge;
+        edge_target.kind = crate::contracts::SelectionTargetKind::Edge;
         let mut face_target = manifest.selection_targets[0].clone();
         face_target.target_id = Some("target-face".to_string());
-        face_target.kind = crate::models::SelectionTargetKind::Face;
+        face_target.kind = crate::contracts::SelectionTargetKind::Face;
         manifest.selection_targets = vec![edge_target, face_target];
-        manifest.feature_graph = Some(crate::models::FeatureGraph {
-            nodes: vec![crate::models::FeatureNode {
+        manifest.feature_graph = Some(crate::contracts::FeatureGraph {
+            nodes: vec![crate::contracts::FeatureNode {
                 feature_id: "part:part-shell".to_string(),
                 kind: "part".to_string(),
                 label: "Shell".to_string(),
                 source_ref: None,
                 dependency_ids: Vec::new(),
-                output_refs: vec![crate::models::FeatureOutputRef {
+                output_refs: vec![crate::contracts::FeatureOutputRef {
                     feature_id: "part:part-shell".to_string(),
                     output_id: "selectionTargets".to_string(),
                     target_ids: vec!["target-edge".to_string(), "target-face".to_string()],
@@ -3458,7 +3460,7 @@ mod tests {
         )
         .expect("populate ports");
 
-        crate::models::validate_model_manifest(&populated).expect("valid manifest");
+        crate::contracts::validate_model_manifest(&populated).expect("valid manifest");
         let port = &populated
             .feature_graph
             .as_ref()
@@ -3486,7 +3488,7 @@ mod tests {
             source_path: "/tmp/pkg/component.ecky".to_string(),
         };
         let mut manifest = sample_manifest(&[]);
-        manifest.parts.push(crate::models::PartBinding {
+        manifest.parts.push(crate::contracts::PartBinding {
             part_id: "part-lid".to_string(),
             freecad_object_name: "Lid".to_string(),
             label: "Lid".to_string(),
@@ -3500,9 +3502,9 @@ mod tests {
             volume: None,
             area: None,
         });
-        manifest.feature_graph = Some(crate::models::FeatureGraph {
+        manifest.feature_graph = Some(crate::contracts::FeatureGraph {
             nodes: vec![
-                crate::models::FeatureNode {
+                crate::contracts::FeatureNode {
                     feature_id: "part:part-shell".to_string(),
                     kind: "part".to_string(),
                     label: "Shell".to_string(),
@@ -3511,7 +3513,7 @@ mod tests {
                     output_refs: Vec::new(),
                     ports: Vec::new(),
                 },
-                crate::models::FeatureNode {
+                crate::contracts::FeatureNode {
                     feature_id: "part:part-lid".to_string(),
                     kind: "part".to_string(),
                     label: "Lid".to_string(),
@@ -3693,13 +3695,13 @@ mod tests {
         let expected_edge_target_id = build123d_manifest
             .selection_targets
             .iter()
-            .find(|target| target.kind == crate::models::SelectionTargetKind::Edge)
+            .find(|target| target.kind == crate::contracts::SelectionTargetKind::Edge)
             .and_then(|target| target.target_id.clone())
             .expect("edge target");
         let expected_face_target_id = build123d_manifest
             .selection_targets
             .iter()
-            .find(|target| target.kind == crate::models::SelectionTargetKind::Face)
+            .find(|target| target.kind == crate::contracts::SelectionTargetKind::Face)
             .and_then(|target| target.target_id.clone())
             .expect("face target");
         let project_dir = root.join("pkg");
@@ -3727,7 +3729,7 @@ mod tests {
                     params: Vec::new(),
                 }],
                 params: Vec::new(),
-                ui_spec: crate::models::UiSpec::default(),
+                ui_spec: crate::contracts::UiSpec::default(),
                 initial_params: DesignParams::new(),
                 ports: vec![ComponentPort {
                     port_id: "anchor".to_string(),

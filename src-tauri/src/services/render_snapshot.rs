@@ -1,4 +1,4 @@
-use crate::models::{
+use crate::contracts::{
     AppError, AppResult, ArtifactBundle, DesignOutput, DesignParams, ModelManifest, RenderSnapshot,
 };
 use serde::Serialize;
@@ -17,9 +17,9 @@ struct SnapshotIdentity<'a> {
     source_digest: &'a str,
     parameter_digest: &'a str,
     post_processing_digest: &'a str,
-    engine_kind: &'a crate::models::EngineKind,
-    source_language: &'a crate::models::SourceLanguage,
-    geometry_backend: &'a crate::models::GeometryBackend,
+    engine_kind: &'a crate::contracts::EngineKind,
+    source_language: &'a crate::contracts::SourceLanguage,
+    geometry_backend: &'a crate::contracts::GeometryBackend,
     artifact_content_hash: &'a str,
     artifact_digest: &'a str,
     manifest_digest: &'a str,
@@ -89,9 +89,9 @@ pub fn build_render_snapshot(input: RenderSnapshotInput<'_>) -> AppResult<Render
         parameter_digest,
         post_processing: input.design.post_processing.clone(),
         post_processing_digest,
-        engine_kind: input.design.engine_kind.clone(),
-        source_language: input.design.source_language.clone(),
-        geometry_backend: input.design.geometry_backend.clone(),
+        engine_kind: input.design.engine_kind,
+        source_language: input.design.source_language,
+        geometry_backend: input.design.geometry_backend,
         artifact_bundle: input.artifact_bundle.clone(),
         artifact_digest,
         model_manifest: input.model_manifest.clone(),
@@ -104,13 +104,13 @@ pub fn validate_render_snapshot(snapshot: &RenderSnapshot) -> AppResult<()> {
         title: String::new(),
         version_name: String::new(),
         response: String::new(),
-        interaction_mode: crate::models::InteractionMode::Design,
+        interaction_mode: crate::contracts::InteractionMode::Design,
         macro_code: snapshot.source.clone(),
-        macro_dialect: crate::models::MacroDialect::Legacy,
-        engine_kind: snapshot.engine_kind.clone(),
-        source_language: snapshot.source_language.clone(),
-        geometry_backend: snapshot.geometry_backend.clone(),
-        ui_spec: crate::models::UiSpec::default(),
+        macro_dialect: crate::contracts::MacroDialect::Legacy,
+        engine_kind: snapshot.engine_kind,
+        source_language: snapshot.source_language,
+        geometry_backend: snapshot.geometry_backend,
+        ui_spec: crate::contracts::UiSpec::default(),
         initial_params: snapshot.effective_params.clone(),
         post_processing: snapshot.post_processing.clone(),
     };
@@ -172,7 +172,7 @@ fn validate_render_compatibility(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{
+    use crate::contracts::{
         DocumentMetadata, EngineKind, EnrichmentStatus, GeometryBackend, InteractionMode,
         MacroDialect, ManifestEnrichmentState, ModelSourceKind, ParamValue, SourceLanguage, UiSpec,
         VerificationRecord, VerifierStatus,

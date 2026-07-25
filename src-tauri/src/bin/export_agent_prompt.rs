@@ -3,8 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use ecky_cad_lib::agent_prompt::agent_language_reference;
+use ecky_cad_lib::contracts::GeometryBackend;
 use ecky_cad_lib::ecky_language_surface::supported_surface_reference;
-use ecky_cad_lib::models::GeometryBackend;
 
 const OP_INDEX_START: &str = "<!-- ECKY_GENERATED_OP_INDEX_START -->";
 const OP_INDEX_END: &str = "<!-- ECKY_GENERATED_OP_INDEX_END -->";
@@ -39,8 +39,8 @@ fn write_prompt(path: &Path, backend: GeometryBackend) {
 
 fn write_book_operation_index() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-    let book_path = root.join("public/docs/ecky-ir.md");
-    let source = fs::read_to_string(&book_path).expect("read canonical book");
+    let book_path = root.join("docs/books/ecky-ir/ecky-ir-corpus.md");
+    let source = fs::read_to_string(&book_path).expect("read canonical Ecky corpus");
     let mut availability: BTreeMap<String, BTreeSet<&'static str>> = BTreeMap::new();
 
     for (label, backend) in [
@@ -61,19 +61,13 @@ fn write_book_operation_index() {
         ));
     }
 
-    let (_, after_start) = source
+    let (prefix, after_start) = source
         .split_once(OP_INDEX_START)
-        .expect("canonical book operation-index start marker");
+        .expect("canonical corpus operation-index start marker");
     let (_, suffix) = after_start
         .split_once(OP_INDEX_END)
-        .expect("canonical book operation-index end marker");
-    let updated = format!(
-        "{}{}\n{}{}",
-        source.split_once(OP_INDEX_START).unwrap().0,
-        OP_INDEX_START,
-        table,
-        format!("{OP_INDEX_END}{suffix}")
-    );
+        .expect("canonical corpus operation-index end marker");
+    let updated = format!("{prefix}{OP_INDEX_START}\n{table}{OP_INDEX_END}{suffix}");
 
     fs::write(&book_path, updated).expect("write canonical book operation index");
     eprintln!("Updated {}", book_path.display());

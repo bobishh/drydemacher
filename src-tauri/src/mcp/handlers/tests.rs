@@ -83,13 +83,13 @@ fn test_config() -> Config {
         freecad_library_roots: Vec::new(),
         assets: Vec::new(),
         microwave: None,
-        voice: crate::models::VoiceConfig::default(),
+        voice: crate::contracts::VoiceConfig::default(),
         mcp: McpConfig::default(),
         has_seen_onboarding: true,
         connection_type: None,
-        default_engine_kind: crate::models::EngineKind::Freecad,
-        default_geometry_backend: crate::models::GeometryBackend::Freecad,
-        default_source_language: crate::models::SourceLanguage::LegacyPython,
+        default_engine_kind: crate::contracts::EngineKind::Freecad,
+        default_geometry_backend: crate::contracts::GeometryBackend::Freecad,
+        default_source_language: crate::contracts::SourceLanguage::LegacyPython,
         max_generation_attempts: 3,
         max_verify_attempts: 0,
         projects_root: None,
@@ -139,30 +139,30 @@ fn test_ctx_other() -> AgentContext {
 fn infer_macro_source_language_maps_dialect_to_authoring_language() {
     assert_eq!(
         infer_macro_source_language(&MacroDialect::Legacy),
-        crate::models::SourceLanguage::LegacyPython
+        crate::contracts::SourceLanguage::LegacyPython
     );
     assert_eq!(
         infer_macro_source_language(&MacroDialect::CadFrameworkV1),
-        crate::models::SourceLanguage::LegacyPython
+        crate::contracts::SourceLanguage::LegacyPython
     );
     assert_eq!(
         infer_macro_source_language(&MacroDialect::EckyIrV0),
-        crate::models::SourceLanguage::EckyIrV0
+        crate::contracts::SourceLanguage::EckyIrV0
     );
     assert_eq!(
         infer_macro_source_language(&MacroDialect::Build123d),
-        crate::models::SourceLanguage::Build123d
+        crate::contracts::SourceLanguage::Build123d
     );
 }
 
 #[test]
 fn macro_replacement_authoring_context_rejects_source_language_change() {
     let err = resolve_macro_authoring_context(
-        crate::models::SourceLanguage::LegacyPython,
-        crate::models::GeometryBackend::Freecad,
+        crate::contracts::SourceLanguage::LegacyPython,
+        crate::contracts::GeometryBackend::Freecad,
         &MacroDialect::EckyIrV0,
         None,
-        crate::models::GeometryBackend::EckyRust,
+        crate::contracts::GeometryBackend::EckyRust,
     )
     .expect_err("ecky macro should not replace legacy python model source");
 
@@ -174,8 +174,8 @@ fn macro_replacement_authoring_context_rejects_source_language_change() {
 fn first_version_authoring_context_uses_config_defaults_for_new_thread() {
     let conn = crate::db::init_db(&test_db_path("mcp-first-version-config")).expect("db");
     let mut config = test_config();
-    config.default_source_language = crate::models::SourceLanguage::EckyIrV0;
-    config.default_geometry_backend = crate::models::GeometryBackend::EckyRust;
+    config.default_source_language = crate::contracts::SourceLanguage::EckyIrV0;
+    config.default_geometry_backend = crate::contracts::GeometryBackend::EckyRust;
     let state = AppState::new(config, None, conn);
 
     // A new thread has no versions — the first render must use the config's
@@ -184,26 +184,26 @@ fn first_version_authoring_context_uses_config_defaults_for_new_thread() {
     let base = first_version_authoring_context(&state, &MacroDialect::EckyIrV0, None);
     assert_eq!(
         base.source_language,
-        crate::models::SourceLanguage::EckyIrV0
+        crate::contracts::SourceLanguage::EckyIrV0
     );
     assert_eq!(
         base.geometry_backend,
-        crate::models::GeometryBackend::EckyRust
+        crate::contracts::GeometryBackend::EckyRust
     );
 
     // Explicit per-render request still wins.
     let base_explicit = first_version_authoring_context(
         &state,
         &MacroDialect::EckyIrV0,
-        Some(crate::models::GeometryBackend::Freecad),
+        Some(crate::contracts::GeometryBackend::Freecad),
     );
     assert_eq!(
         base_explicit.source_language,
-        crate::models::SourceLanguage::EckyIrV0
+        crate::contracts::SourceLanguage::EckyIrV0
     );
     assert_eq!(
         base_explicit.geometry_backend,
-        crate::models::GeometryBackend::Freecad
+        crate::contracts::GeometryBackend::Freecad
     );
 }
 
@@ -212,18 +212,18 @@ fn first_version_authoring_context_rejects_raw_freecad_by_policy() {
     let conn = crate::db::init_db(&test_db_path("mcp-first-version-policy")).expect("db");
     let mut config = test_config();
     // Simulate a user who has switched to Ecky native — the modern default.
-    config.default_source_language = crate::models::SourceLanguage::EckyIrV0;
-    config.default_geometry_backend = crate::models::GeometryBackend::EckyRust;
+    config.default_source_language = crate::contracts::SourceLanguage::EckyIrV0;
+    config.default_geometry_backend = crate::contracts::GeometryBackend::EckyRust;
     let state = AppState::new(config, None, conn);
     let base = first_version_authoring_context(&state, &MacroDialect::Legacy, None);
 
     assert_eq!(
         base.source_language,
-        crate::models::SourceLanguage::EckyIrV0
+        crate::contracts::SourceLanguage::EckyIrV0
     );
     assert_eq!(
         base.geometry_backend,
-        crate::models::GeometryBackend::EckyRust
+        crate::contracts::GeometryBackend::EckyRust
     );
 
     let err = resolve_macro_authoring_context(
@@ -231,7 +231,7 @@ fn first_version_authoring_context_rejects_raw_freecad_by_policy() {
         base.geometry_backend,
         &MacroDialect::Legacy,
         None,
-        crate::models::GeometryBackend::EckyRust,
+        crate::contracts::GeometryBackend::EckyRust,
     )
     .expect_err("raw FreeCAD macro must not bootstrap a new MCP version");
 
@@ -244,7 +244,7 @@ fn macro_replace_dialect_uses_saved_target_config_without_content_fallback() {
     let resolved = resolve_macro_replace_dialect(
         &MacroDialect::EckyIrV0,
         false,
-        crate::models::SourceLanguage::LegacyPython,
+        crate::contracts::SourceLanguage::LegacyPython,
     );
 
     assert_eq!(resolved, MacroDialect::EckyIrV0);
@@ -255,7 +255,7 @@ fn first_macro_replace_dialect_uses_global_config_without_content_fallback() {
     let resolved = resolve_macro_replace_dialect(
         &MacroDialect::Legacy,
         true,
-        crate::models::SourceLanguage::EckyIrV0,
+        crate::contracts::SourceLanguage::EckyIrV0,
     );
 
     assert_eq!(resolved, MacroDialect::EckyIrV0);
@@ -264,11 +264,11 @@ fn first_macro_replace_dialect_uses_global_config_without_content_fallback() {
 #[test]
 fn macro_replacement_authoring_context_rejects_non_ecky_backend_override() {
     let err = resolve_macro_authoring_context(
-        crate::models::SourceLanguage::Build123d,
-        crate::models::GeometryBackend::Build123d,
+        crate::contracts::SourceLanguage::Build123d,
+        crate::contracts::GeometryBackend::Build123d,
         &MacroDialect::Build123d,
-        Some(crate::models::GeometryBackend::Freecad),
-        crate::models::GeometryBackend::EckyRust,
+        Some(crate::contracts::GeometryBackend::Freecad),
+        crate::contracts::GeometryBackend::EckyRust,
     )
     .expect_err("non-ecky model must follow version backend setting");
 
@@ -279,21 +279,21 @@ fn macro_replacement_authoring_context_rejects_non_ecky_backend_override() {
 #[test]
 fn macro_replacement_authoring_context_allows_ecky_backend_override() {
     let context = resolve_macro_authoring_context(
-        crate::models::SourceLanguage::EckyIrV0,
-        crate::models::GeometryBackend::EckyRust,
+        crate::contracts::SourceLanguage::EckyIrV0,
+        crate::contracts::GeometryBackend::EckyRust,
         &MacroDialect::EckyIrV0,
-        Some(crate::models::GeometryBackend::Build123d),
-        crate::models::GeometryBackend::EckyRust,
+        Some(crate::contracts::GeometryBackend::Build123d),
+        crate::contracts::GeometryBackend::EckyRust,
     )
     .expect("ecky source should allow geometry backend override");
 
     assert_eq!(
         context.source_language,
-        crate::models::SourceLanguage::EckyIrV0
+        crate::contracts::SourceLanguage::EckyIrV0
     );
     assert_eq!(
         context.geometry_backend,
-        crate::models::GeometryBackend::Build123d
+        crate::contracts::GeometryBackend::Build123d
     );
 }
 
@@ -303,16 +303,16 @@ fn ecky_geometry_backend_follows_global_config_over_version() {
     // the global config engine wins, so switching config re-renders it on
     // native without forking a new thread.
     let context = resolve_macro_authoring_context(
-        crate::models::SourceLanguage::EckyIrV0,
-        crate::models::GeometryBackend::Build123d, // version's stored backend
+        crate::contracts::SourceLanguage::EckyIrV0,
+        crate::contracts::GeometryBackend::Build123d, // version's stored backend
         &MacroDialect::EckyIrV0,
-        None,                                     // no explicit override
-        crate::models::GeometryBackend::EckyRust, // config default
+        None,                                        // no explicit override
+        crate::contracts::GeometryBackend::EckyRust, // config default
     )
     .expect("ecky source resolves a backend");
     assert_eq!(
         context.geometry_backend,
-        crate::models::GeometryBackend::EckyRust,
+        crate::contracts::GeometryBackend::EckyRust,
         "global config must override the version's stored backend for Ecky source"
     );
 }
@@ -321,16 +321,16 @@ fn ecky_geometry_backend_follows_global_config_over_version() {
 fn non_ecky_backend_stays_pinned_to_version_ignoring_config() {
     // Legacy python is bound to FreeCAD; the config engine must not switch it.
     let context = resolve_macro_authoring_context(
-        crate::models::SourceLanguage::LegacyPython,
-        crate::models::GeometryBackend::Freecad,
+        crate::contracts::SourceLanguage::LegacyPython,
+        crate::contracts::GeometryBackend::Freecad,
         &MacroDialect::Legacy,
         None,
-        crate::models::GeometryBackend::EckyRust, // config default ignored here
+        crate::contracts::GeometryBackend::EckyRust, // config default ignored here
     )
     .expect("legacy python resolves its own backend");
     assert_eq!(
         context.geometry_backend,
-        crate::models::GeometryBackend::Freecad
+        crate::contracts::GeometryBackend::Freecad
     );
 }
 
@@ -381,9 +381,9 @@ fn sample_design(title: &str, version_name: &str, macro_code: &str) -> DesignOut
         interaction_mode: InteractionMode::Design,
         macro_code: macro_code.to_string(),
         macro_dialect: MacroDialect::Legacy,
-        engine_kind: crate::models::EngineKind::Freecad,
-        geometry_backend: crate::models::GeometryBackend::Freecad,
-        source_language: crate::models::SourceLanguage::LegacyPython,
+        engine_kind: crate::contracts::EngineKind::Freecad,
+        geometry_backend: crate::contracts::GeometryBackend::Freecad,
+        source_language: crate::contracts::SourceLanguage::LegacyPython,
         ui_spec: sample_ui_spec(),
         initial_params: sample_params(),
         post_processing: Some(crate::contracts::PostProcessingSpec {
@@ -399,9 +399,9 @@ fn sample_bundle(model_id: &str, preview_name: &str) -> ArtifactBundle {
         schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind: ModelSourceKind::Generated,
-        engine_kind: crate::models::EngineKind::Freecad,
-        geometry_backend: crate::models::GeometryBackend::Freecad,
-        source_language: crate::models::SourceLanguage::LegacyPython,
+        engine_kind: crate::contracts::EngineKind::Freecad,
+        geometry_backend: crate::contracts::GeometryBackend::Freecad,
+        source_language: crate::contracts::SourceLanguage::LegacyPython,
         content_hash: format!("hash-{}", model_id),
         artifact_version: 1,
         fcstd_path: format!("/tmp/{}.FCStd", model_id),
@@ -426,9 +426,9 @@ fn sample_manifest(model_id: &str) -> ModelManifest {
         source_digest: None,
         core_digest: None,
         ast_schema_version: None,
-        engine_kind: crate::models::EngineKind::Freecad,
-        geometry_backend: crate::models::GeometryBackend::Freecad,
-        source_language: crate::models::SourceLanguage::LegacyPython,
+        engine_kind: crate::contracts::EngineKind::Freecad,
+        geometry_backend: crate::contracts::GeometryBackend::Freecad,
+        source_language: crate::contracts::SourceLanguage::LegacyPython,
         document: DocumentMetadata {
             document_name: "Doc".to_string(),
             document_label: "Doc".to_string(),
@@ -436,7 +436,7 @@ fn sample_manifest(model_id: &str) -> ModelManifest {
             object_count: 1,
             warnings: Vec::new(),
         },
-        parts: vec![crate::models::PartBinding {
+        parts: vec![crate::contracts::PartBinding {
             part_id: "body".to_string(),
             freecad_object_name: "Body".to_string(),
             label: "Body".to_string(),
@@ -509,7 +509,7 @@ fn sample_manifest(model_id: &str) -> ModelManifest {
         preview_views: Vec::new(),
         advisories: Vec::new(),
         selection_targets: vec![
-            crate::models::SelectionTarget {
+            crate::contracts::SelectionTarget {
                 target_id: Some("body:edge:0:0-0-0_10-0-0".to_string()),
                 durable_target_id: None,
                 canonical_target_id: None,
@@ -517,13 +517,13 @@ fn sample_manifest(model_id: &str) -> ModelManifest {
                 part_id: "body".to_string(),
                 viewer_node_id: "body".to_string(),
                 label: "Body.Edge1".to_string(),
-                kind: crate::models::SelectionTargetKind::Edge,
+                kind: crate::contracts::SelectionTargetKind::Edge,
                 editable: true,
                 parameter_keys: Vec::new(),
                 primitive_ids: Vec::new(),
                 view_ids: Vec::new(),
             },
-            crate::models::SelectionTarget {
+            crate::contracts::SelectionTarget {
                 target_id: Some("body:face:0:5-5-5:100".to_string()),
                 durable_target_id: None,
                 canonical_target_id: None,
@@ -531,7 +531,7 @@ fn sample_manifest(model_id: &str) -> ModelManifest {
                 part_id: "body".to_string(),
                 viewer_node_id: "body".to_string(),
                 label: "Body.Face1".to_string(),
-                kind: crate::models::SelectionTargetKind::Face,
+                kind: crate::contracts::SelectionTargetKind::Face,
                 editable: true,
                 parameter_keys: Vec::new(),
                 primitive_ids: Vec::new(),
@@ -568,32 +568,34 @@ async fn seed_ecky_verify_target(
 
     let mut design = sample_design("Verify Target", "V-verify", source);
     design.macro_dialect = MacroDialect::EckyIrV0;
-    design.engine_kind = crate::models::EngineKind::EckyIrV0;
-    design.geometry_backend = crate::models::GeometryBackend::EckyRust;
-    design.source_language = crate::models::SourceLanguage::EckyIrV0;
+    design.engine_kind = crate::contracts::EngineKind::EckyIrV0;
+    design.geometry_backend = crate::contracts::GeometryBackend::EckyRust;
+    design.source_language = crate::contracts::SourceLanguage::EckyIrV0;
     design.post_processing = None;
 
     let mut bundle = sample_bundle(model_id, preview_name);
-    bundle.engine_kind = crate::models::EngineKind::EckyIrV0;
-    bundle.geometry_backend = crate::models::GeometryBackend::EckyRust;
-    bundle.source_language = crate::models::SourceLanguage::EckyIrV0;
+    bundle.engine_kind = crate::contracts::EngineKind::EckyIrV0;
+    bundle.geometry_backend = crate::contracts::GeometryBackend::EckyRust;
+    bundle.source_language = crate::contracts::SourceLanguage::EckyIrV0;
     bundle.content_hash = format!("verify-{model_id}");
     bundle.macro_path = Some(source_path.display().to_string());
     bundle.preview_stl_path = preview_stl_path.display().to_string();
     if include_step_export {
-        bundle.export_artifacts.push(crate::models::ExportArtifact {
-            geometry_provenance: None,
-            label: "STEP".to_string(),
-            format: "step".to_string(),
-            path: format!("/tmp/{model_id}.step"),
-            role: "cad-exchange".to_string(),
-        });
+        bundle
+            .export_artifacts
+            .push(crate::contracts::ExportArtifact {
+                geometry_provenance: None,
+                label: "STEP".to_string(),
+                format: "step".to_string(),
+                path: format!("/tmp/{model_id}.step"),
+                role: "cad-exchange".to_string(),
+            });
     }
 
     let mut manifest = sample_manifest(model_id);
-    manifest.engine_kind = crate::models::EngineKind::EckyIrV0;
-    manifest.geometry_backend = crate::models::GeometryBackend::EckyRust;
-    manifest.source_language = crate::models::SourceLanguage::EckyIrV0;
+    manifest.engine_kind = crate::contracts::EngineKind::EckyIrV0;
+    manifest.geometry_backend = crate::contracts::GeometryBackend::EckyRust;
+    manifest.source_language = crate::contracts::SourceLanguage::EckyIrV0;
     manifest.source_digest = Some(crate::mcp::macro_buffer::source_digest(source));
 
     crate::model_runtime::write_runtime_bundle(&resolver, model_id, &bundle, &manifest)
@@ -629,43 +631,47 @@ fn carry_forward_semantic_manifest_keeps_controls_and_face_bindings() {
     next.selection_targets[1].primitive_ids.clear();
     next.selection_targets[1].view_ids.clear();
     let mut bundle = sample_bundle("model-next", "next.stl");
-    bundle.edge_targets.push(crate::models::ViewerEdgeTarget {
-        target_id: "body:edge:0:0-0-0_10-0-0".to_string(),
-        durable_target_id: None,
-        canonical_target_id: None,
-        alias_ids: Vec::new(),
-        part_id: "body".to_string(),
-        viewer_node_id: "body".to_string(),
-        label: "Body.Edge1".to_string(),
-        editable: true,
-        start: crate::models::ViewerEdgePoint {
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
-        },
-        end: crate::models::ViewerEdgePoint {
-            x: 10.0,
-            y: 0.0,
-            z: 0.0,
-        },
-    });
-    bundle.face_targets.push(crate::models::ViewerFaceTarget {
-        target_id: "body:face:0:5-5-5:100".to_string(),
-        durable_target_id: None,
-        canonical_target_id: None,
-        alias_ids: Vec::new(),
-        part_id: "body".to_string(),
-        viewer_node_id: "body".to_string(),
-        label: "Body.Face1".to_string(),
-        editable: true,
-        center: crate::models::ViewerEdgePoint {
-            x: 5.0,
-            y: 5.0,
-            z: 5.0,
-        },
-        normal: Some([0.0, 0.0, 1.0]),
-        area: Some(100.0),
-    });
+    bundle
+        .edge_targets
+        .push(crate::contracts::ViewerEdgeTarget {
+            target_id: "body:edge:0:0-0-0_10-0-0".to_string(),
+            durable_target_id: None,
+            canonical_target_id: None,
+            alias_ids: Vec::new(),
+            part_id: "body".to_string(),
+            viewer_node_id: "body".to_string(),
+            label: "Body.Edge1".to_string(),
+            editable: true,
+            start: crate::contracts::ViewerEdgePoint {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            end: crate::contracts::ViewerEdgePoint {
+                x: 10.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        });
+    bundle
+        .face_targets
+        .push(crate::contracts::ViewerFaceTarget {
+            target_id: "body:face:0:5-5-5:100".to_string(),
+            durable_target_id: None,
+            canonical_target_id: None,
+            alias_ids: Vec::new(),
+            part_id: "body".to_string(),
+            viewer_node_id: "body".to_string(),
+            label: "Body.Face1".to_string(),
+            editable: true,
+            center: crate::contracts::ViewerEdgePoint {
+                x: 5.0,
+                y: 5.0,
+                z: 5.0,
+            },
+            normal: Some([0.0, 0.0, 1.0]),
+            area: Some(100.0),
+        });
 
     let merged = carry_forward_semantic_manifest(Some(&previous), next, &bundle);
 
@@ -698,43 +704,47 @@ fn carry_forward_semantic_manifest_ignores_broad_target_bindings() {
     let mut next = sample_manifest("model-next");
     next.selection_targets[1].parameter_keys.clear();
     let mut bundle = sample_bundle("model-next", "next.stl");
-    bundle.edge_targets.push(crate::models::ViewerEdgeTarget {
-        target_id: "body:edge:0:0-0-0_10-0-0".to_string(),
-        durable_target_id: None,
-        canonical_target_id: None,
-        alias_ids: Vec::new(),
-        part_id: "body".to_string(),
-        viewer_node_id: "body".to_string(),
-        label: "Body.Edge1".to_string(),
-        editable: true,
-        start: crate::models::ViewerEdgePoint {
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
-        },
-        end: crate::models::ViewerEdgePoint {
-            x: 10.0,
-            y: 0.0,
-            z: 0.0,
-        },
-    });
-    bundle.face_targets.push(crate::models::ViewerFaceTarget {
-        target_id: "body:face:0:5-5-5:100".to_string(),
-        durable_target_id: None,
-        canonical_target_id: None,
-        alias_ids: Vec::new(),
-        part_id: "body".to_string(),
-        viewer_node_id: "body".to_string(),
-        label: "Body.Face1".to_string(),
-        editable: true,
-        center: crate::models::ViewerEdgePoint {
-            x: 5.0,
-            y: 5.0,
-            z: 5.0,
-        },
-        normal: Some([0.0, 0.0, 1.0]),
-        area: Some(100.0),
-    });
+    bundle
+        .edge_targets
+        .push(crate::contracts::ViewerEdgeTarget {
+            target_id: "body:edge:0:0-0-0_10-0-0".to_string(),
+            durable_target_id: None,
+            canonical_target_id: None,
+            alias_ids: Vec::new(),
+            part_id: "body".to_string(),
+            viewer_node_id: "body".to_string(),
+            label: "Body.Edge1".to_string(),
+            editable: true,
+            start: crate::contracts::ViewerEdgePoint {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            end: crate::contracts::ViewerEdgePoint {
+                x: 10.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        });
+    bundle
+        .face_targets
+        .push(crate::contracts::ViewerFaceTarget {
+            target_id: "body:face:0:5-5-5:100".to_string(),
+            durable_target_id: None,
+            canonical_target_id: None,
+            alias_ids: Vec::new(),
+            part_id: "body".to_string(),
+            viewer_node_id: "body".to_string(),
+            label: "Body.Face1".to_string(),
+            editable: true,
+            center: crate::contracts::ViewerEdgePoint {
+                x: 5.0,
+                y: 5.0,
+                z: 5.0,
+            },
+            normal: Some([0.0, 0.0, 1.0]),
+            area: Some(100.0),
+        });
 
     let merged = carry_forward_semantic_manifest(Some(&previous), next, &bundle);
 
@@ -757,7 +767,7 @@ async fn seed_target_with_macro(
     let mut base_bundle = sample_bundle("model-base", "base.stl");
     base_bundle
         .export_artifacts
-        .push(crate::models::ExportArtifact {
+        .push(crate::contracts::ExportArtifact {
             geometry_provenance: None,
             label: "STEP".to_string(),
             format: "step".to_string(),
@@ -766,7 +776,7 @@ async fn seed_target_with_macro(
         });
     base_bundle
         .edge_targets
-        .push(crate::models::ViewerEdgeTarget {
+        .push(crate::contracts::ViewerEdgeTarget {
             target_id: "body:edge:0:0-0-0_10-0-0".to_string(),
             durable_target_id: None,
             canonical_target_id: None,
@@ -775,12 +785,12 @@ async fn seed_target_with_macro(
             viewer_node_id: "body".to_string(),
             label: "Body.Edge1".to_string(),
             editable: true,
-            start: crate::models::ViewerEdgePoint {
+            start: crate::contracts::ViewerEdgePoint {
                 x: 0.0,
                 y: 0.0,
                 z: 0.0,
             },
-            end: crate::models::ViewerEdgePoint {
+            end: crate::contracts::ViewerEdgePoint {
                 x: 10.0,
                 y: 0.0,
                 z: 0.0,
@@ -788,7 +798,7 @@ async fn seed_target_with_macro(
         });
     base_bundle
         .face_targets
-        .push(crate::models::ViewerFaceTarget {
+        .push(crate::contracts::ViewerFaceTarget {
             target_id: "body:face:0:5-5-5:100".to_string(),
             durable_target_id: None,
             canonical_target_id: None,
@@ -797,7 +807,7 @@ async fn seed_target_with_macro(
             viewer_node_id: "body".to_string(),
             label: "Body.Face1".to_string(),
             editable: true,
-            center: crate::models::ViewerEdgePoint {
+            center: crate::contracts::ViewerEdgePoint {
                 x: 5.0,
                 y: 5.0,
                 z: 5.0,
@@ -809,9 +819,9 @@ async fn seed_target_with_macro(
     let mut base_design = sample_design(title, version_name, macro_code);
     if macro_code.trim_start().starts_with("(model") {
         base_design.macro_dialect = MacroDialect::EckyIrV0;
-        base_design.engine_kind = crate::models::EngineKind::EckyIrV0;
-        base_design.geometry_backend = crate::models::GeometryBackend::EckyRust;
-        base_design.source_language = crate::models::SourceLanguage::EckyIrV0;
+        base_design.engine_kind = crate::contracts::EngineKind::EckyIrV0;
+        base_design.geometry_backend = crate::contracts::GeometryBackend::EckyRust;
+        base_design.source_language = crate::contracts::SourceLanguage::EckyIrV0;
     }
 
     {
@@ -874,7 +884,7 @@ async fn health_check_includes_runtime_capabilities() {
             .runtime_capabilities
             .recommended_authoring_context
             .geometry_backend,
-        crate::models::GeometryBackend::Build123d
+        crate::contracts::GeometryBackend::Build123d
     );
 }
 
@@ -1070,7 +1080,7 @@ async fn request_user_prompt_target_does_not_fall_back_to_current_snapshot() {
     let (state, _resolver) = seed_target().await;
     {
         let mut snapshot = state.last_snapshot.lock().unwrap();
-        *snapshot = Some(crate::models::LastDesignSnapshot {
+        *snapshot = Some(crate::contracts::LastDesignSnapshot {
             design: None,
             thread_id: Some("thread-1".to_string()),
             message_id: Some("msg-1".to_string()),
@@ -1312,7 +1322,7 @@ async fn passive_session_log_in_allows_no_thread_target_without_snapshot_fallbac
     let (state, _resolver) = seed_target().await;
     {
         let mut snapshot = state.last_snapshot.lock().unwrap();
-        *snapshot = Some(crate::models::LastDesignSnapshot {
+        *snapshot = Some(crate::contracts::LastDesignSnapshot {
             design: None,
             thread_id: Some("thread-1".to_string()),
             message_id: Some("msg-1".to_string()),
@@ -1382,7 +1392,7 @@ async fn managed_session_log_in_keeps_runtime_thread_without_snapshot_message_fa
         .expect("wake should capture the thread-only target");
     {
         let mut snapshot = state.last_snapshot.lock().unwrap();
-        *snapshot = Some(crate::models::LastDesignSnapshot {
+        *snapshot = Some(crate::contracts::LastDesignSnapshot {
             design: None,
             thread_id: Some("thread-1".to_string()),
             message_id: Some("msg-1".to_string()),
@@ -1929,43 +1939,47 @@ async fn target_get_returns_artifact_digest_for_export_truth() {
 #[test]
 fn artifact_bundle_digest_reports_topology_target_counts() {
     let mut bundle = sample_bundle("model-topology", "topology.stl");
-    bundle.edge_targets.push(crate::models::ViewerEdgeTarget {
-        target_id: "body:edge:0:0-0-0_10-0-0".to_string(),
-        durable_target_id: None,
-        canonical_target_id: None,
-        alias_ids: Vec::new(),
-        part_id: "body".to_string(),
-        viewer_node_id: "body".to_string(),
-        label: "Body.Edge1".to_string(),
-        editable: true,
-        start: crate::models::ViewerEdgePoint {
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
-        },
-        end: crate::models::ViewerEdgePoint {
-            x: 10.0,
-            y: 0.0,
-            z: 0.0,
-        },
-    });
-    bundle.face_targets.push(crate::models::ViewerFaceTarget {
-        target_id: "body:face:0:5-5-5:100".to_string(),
-        durable_target_id: None,
-        canonical_target_id: None,
-        alias_ids: Vec::new(),
-        part_id: "body".to_string(),
-        viewer_node_id: "body".to_string(),
-        label: "Body.Face1".to_string(),
-        editable: true,
-        center: crate::models::ViewerEdgePoint {
-            x: 5.0,
-            y: 5.0,
-            z: 5.0,
-        },
-        normal: Some([0.0, 0.0, 1.0]),
-        area: Some(100.0),
-    });
+    bundle
+        .edge_targets
+        .push(crate::contracts::ViewerEdgeTarget {
+            target_id: "body:edge:0:0-0-0_10-0-0".to_string(),
+            durable_target_id: None,
+            canonical_target_id: None,
+            alias_ids: Vec::new(),
+            part_id: "body".to_string(),
+            viewer_node_id: "body".to_string(),
+            label: "Body.Edge1".to_string(),
+            editable: true,
+            start: crate::contracts::ViewerEdgePoint {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            end: crate::contracts::ViewerEdgePoint {
+                x: 10.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        });
+    bundle
+        .face_targets
+        .push(crate::contracts::ViewerFaceTarget {
+            target_id: "body:face:0:5-5-5:100".to_string(),
+            durable_target_id: None,
+            canonical_target_id: None,
+            alias_ids: Vec::new(),
+            part_id: "body".to_string(),
+            viewer_node_id: "body".to_string(),
+            label: "Body.Face1".to_string(),
+            editable: true,
+            center: crate::contracts::ViewerEdgePoint {
+                x: 5.0,
+                y: 5.0,
+                z: 5.0,
+            },
+            normal: Some([0.0, 0.0, 1.0]),
+            area: Some(100.0),
+        });
 
     let digest = artifact_bundle_digest(&bundle);
 
@@ -1976,26 +1990,28 @@ fn artifact_bundle_digest_reports_topology_target_counts() {
 #[test]
 fn artifact_bundle_digest_marks_polyhedral_step_faceted_not_analytic() {
     let mut bundle = sample_bundle("model-faceted-step", "faceted.stl");
-    let provenance = crate::models::GeometryProvenance {
-        representation: crate::models::GeometryRepresentation::FacetedPolyBrep,
+    let provenance = crate::contracts::GeometryProvenance {
+        representation: crate::contracts::GeometryRepresentation::FacetedPolyBrep,
         source_mesh_digests: vec!["sha256:mesh-source".to_string()],
         closed: Some(true),
         boundary_or_non_manifold_edge_count: Some(0),
     };
     bundle.geometry_provenance = Some(provenance.clone());
-    bundle.export_artifacts.push(crate::models::ExportArtifact {
-        geometry_provenance: Some(provenance),
-        label: "STEP (faceted poly-BRep)".to_string(),
-        format: "step".to_string(),
-        path: "/tmp/model-faceted-step.step".to_string(),
-        role: "cad-exchange".to_string(),
-    });
+    bundle
+        .export_artifacts
+        .push(crate::contracts::ExportArtifact {
+            geometry_provenance: Some(provenance),
+            label: "STEP (faceted poly-BRep)".to_string(),
+            format: "step".to_string(),
+            path: "/tmp/model-faceted-step.step".to_string(),
+            role: "cad-exchange".to_string(),
+        });
 
     let digest = artifact_bundle_digest(&bundle);
 
     assert_eq!(
         digest.geometry_representation,
-        Some(crate::models::GeometryRepresentation::FacetedPolyBrep)
+        Some(crate::contracts::GeometryRepresentation::FacetedPolyBrep)
     );
     assert!(digest.faceted_step);
     assert!(!digest.analytic_step);
@@ -2005,26 +2021,28 @@ fn artifact_bundle_digest_marks_polyhedral_step_faceted_not_analytic() {
 #[test]
 fn artifact_bundle_digest_marks_direct_occt_step_analytic() {
     let mut bundle = sample_bundle("model-analytic-step", "analytic.stl");
-    let provenance = crate::models::GeometryProvenance {
-        representation: crate::models::GeometryRepresentation::AnalyticBrep,
+    let provenance = crate::contracts::GeometryProvenance {
+        representation: crate::contracts::GeometryRepresentation::AnalyticBrep,
         source_mesh_digests: Vec::new(),
         closed: None,
         boundary_or_non_manifold_edge_count: None,
     };
     bundle.geometry_provenance = Some(provenance.clone());
-    bundle.export_artifacts.push(crate::models::ExportArtifact {
-        geometry_provenance: Some(provenance),
-        label: "STEP".to_string(),
-        format: "step".to_string(),
-        path: "/tmp/model-analytic-step.step".to_string(),
-        role: "cad-exchange".to_string(),
-    });
+    bundle
+        .export_artifacts
+        .push(crate::contracts::ExportArtifact {
+            geometry_provenance: Some(provenance),
+            label: "STEP".to_string(),
+            format: "step".to_string(),
+            path: "/tmp/model-analytic-step.step".to_string(),
+            role: "cad-exchange".to_string(),
+        });
 
     let digest = artifact_bundle_digest(&bundle);
 
     assert_eq!(
         digest.geometry_representation,
-        Some(crate::models::GeometryRepresentation::AnalyticBrep)
+        Some(crate::contracts::GeometryRepresentation::AnalyticBrep)
     );
     assert!(digest.analytic_step);
     assert!(!digest.faceted_step);
@@ -2034,13 +2052,15 @@ fn artifact_bundle_digest_marks_direct_occt_step_analytic() {
 #[test]
 fn render_mutation_responses_include_artifact_digest_for_export_truth() {
     let mut bundle = sample_bundle("model-render", "render.stl");
-    bundle.export_artifacts.push(crate::models::ExportArtifact {
-        geometry_provenance: None,
-        label: "STEP".to_string(),
-        format: "step".to_string(),
-        path: "/tmp/model-render.step".to_string(),
-        role: "cad-exchange".to_string(),
-    });
+    bundle
+        .export_artifacts
+        .push(crate::contracts::ExportArtifact {
+            geometry_provenance: None,
+            label: "STEP".to_string(),
+            format: "step".to_string(),
+            path: "/tmp/model-render.step".to_string(),
+            role: "cad-exchange".to_string(),
+        });
     let digest = artifact_bundle_digest(&bundle);
     let manifest = sample_manifest("model-render");
     let design = sample_design("Render", "V-render", "render_macro()");
@@ -2559,22 +2579,22 @@ async fn given_target_path_when_ecky_dependency_get_then_returns_feature_and_par
     .await;
 
     let mut manifest = sample_manifest("model-base");
-    manifest.source_language = crate::models::SourceLanguage::EckyIrV0;
-    manifest.geometry_backend = crate::models::GeometryBackend::EckyRust;
+    manifest.source_language = crate::contracts::SourceLanguage::EckyIrV0;
+    manifest.geometry_backend = crate::contracts::GeometryBackend::EckyRust;
     manifest.selection_targets[1].parameter_keys = vec!["lens_bore_d".to_string()];
-    manifest.feature_graph = Some(crate::models::FeatureGraph {
-        nodes: vec![crate::models::FeatureNode {
+    manifest.feature_graph = Some(crate::contracts::FeatureGraph {
+        nodes: vec![crate::contracts::FeatureNode {
             feature_id: "lens_bore".to_string(),
             kind: "bore".to_string(),
             label: "Lens Bore".to_string(),
-            source_ref: Some(crate::models::SourceRef {
+            source_ref: Some(crate::contracts::SourceRef {
                 source_id: Some("source-main".to_string()),
                 path: Some("/parts/body/root".to_string()),
                 start_byte: None,
                 end_byte: None,
             }),
             dependency_ids: Vec::new(),
-            output_refs: vec![crate::models::FeatureOutputRef {
+            output_refs: vec![crate::contracts::FeatureOutputRef {
                 feature_id: "lens_bore".to_string(),
                 output_id: "carrier-bore".to_string(),
                 target_ids: vec!["body:face:0:5-5-5:100".to_string()],
@@ -2635,19 +2655,19 @@ async fn given_single_target_with_one_feature_and_params_when_selector_resolve_t
     manifest.selection_targets[1].primitive_ids = vec!["primitive-face-1".to_string()];
     manifest.selection_targets[1].durable_target_id = Some("durable-face-1".to_string());
     manifest.selection_targets[1].canonical_target_id = Some("canonical-face-1".to_string());
-    manifest.feature_graph = Some(crate::models::FeatureGraph {
-        nodes: vec![crate::models::FeatureNode {
+    manifest.feature_graph = Some(crate::contracts::FeatureGraph {
+        nodes: vec![crate::contracts::FeatureNode {
             feature_id: "lens_bore".to_string(),
             kind: "bore".to_string(),
             label: "Lens Bore".to_string(),
-            source_ref: Some(crate::models::SourceRef {
+            source_ref: Some(crate::contracts::SourceRef {
                 source_id: Some("source-main".to_string()),
                 path: Some("/parts/body/root".to_string()),
                 start_byte: None,
                 end_byte: None,
             }),
             dependency_ids: Vec::new(),
-            output_refs: vec![crate::models::FeatureOutputRef {
+            output_refs: vec![crate::contracts::FeatureOutputRef {
                 feature_id: "lens_bore".to_string(),
                 output_id: "carrier-bore".to_string(),
                 target_ids: vec!["body:face:0:5-5-5:100".to_string()],
@@ -3093,6 +3113,46 @@ async fn given_single_anonymous_delta_when_ecky_constraints_validate_then_no_aut
 }
 
 #[tokio::test]
+async fn given_single_fit_critical_anonymous_delta_when_ecky_constraints_validate_then_authoring_lint_requires_named_fit(
+) {
+    let (state, resolver) = seed_target_with_macro(
+        "Fit delta lint",
+        "V-fit-delta-lint",
+        "(model (params (number slot_width 40)) (part holder (box (+ slot_width 0.25) 8 3)))",
+    )
+    .await;
+
+    let response = handle_ecky_constraints_validate(
+        &state,
+        &resolver,
+        EckyConstraintsValidateRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some("thread-1".to_string()),
+            message_id: Some("msg-1".to_string()),
+            parameters: None,
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("constraint validation");
+
+    let value = serde_json::to_value(response).expect("response json");
+    let lints = value["authoringLints"]
+        .as_array()
+        .expect("authoring lints array");
+    assert!(lints.iter().any(|lint| {
+        lint["kind"] == "fitCriticalAnonymousDelta"
+            && lint["paramKey"] == "slot_width"
+            && lint["delta"] == 0.25
+            && lint["occurrenceCount"] == 1
+            && lint["suggestedParamKey"] == "slot_margin_x"
+            && lint["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("verify constraint"))
+    }));
+}
+
+#[tokio::test]
 async fn given_repeated_anonymous_delta_when_preview_stored_then_draft_feedback_payload_includes_authoring_lints(
 ) {
     let (state, resolver) = seed_target_with_macro(
@@ -3109,9 +3169,9 @@ async fn given_repeated_anonymous_delta_when_preview_stored_then_draft_feedback_
             "(model (params (number holder_w 40)) (part holder (box (+ holder_w 12) (+ holder_w 12) 3)))",
         );
     design_output.macro_dialect = MacroDialect::EckyIrV0;
-    design_output.engine_kind = crate::models::EngineKind::EckyIrV0;
-    design_output.geometry_backend = crate::models::GeometryBackend::EckyRust;
-    design_output.source_language = crate::models::SourceLanguage::EckyIrV0;
+    design_output.engine_kind = crate::contracts::EngineKind::EckyIrV0;
+    design_output.geometry_backend = crate::contracts::GeometryBackend::EckyRust;
+    design_output.source_language = crate::contracts::SourceLanguage::EckyIrV0;
 
     let preview = store_session_render_preview(
         &state,
@@ -3124,11 +3184,11 @@ async fn given_repeated_anonymous_delta_when_preview_stored_then_draft_feedback_
             artifact_bundle: sample_bundle("model-feedback-lint", "feedback-lint.stl"),
             model_manifest: sample_manifest("model-feedback-lint"),
             draft_feedback: Some(DraftFeedbackSeed {
-                status: crate::models::AgentDraftFeedbackStatus::Warning,
+                status: crate::contracts::AgentDraftFeedbackStatus::Warning,
                 summary: "Draft warnings.".to_string(),
                 items: Vec::new(),
                 authoring_lints: Vec::new(),
-                source: crate::models::AgentDraftFeedbackSource::StructuralVerification,
+                source: crate::contracts::AgentDraftFeedbackSource::StructuralVerification,
             }),
         },
     )
@@ -3176,9 +3236,9 @@ async fn given_no_repeated_anonymous_delta_when_preview_stored_then_draft_feedba
         "(model (params (number holder_w 40)) (part holder (box (+ holder_w 12) 8 3)))",
     );
     design_output.macro_dialect = MacroDialect::EckyIrV0;
-    design_output.engine_kind = crate::models::EngineKind::EckyIrV0;
-    design_output.geometry_backend = crate::models::GeometryBackend::EckyRust;
-    design_output.source_language = crate::models::SourceLanguage::EckyIrV0;
+    design_output.engine_kind = crate::contracts::EngineKind::EckyIrV0;
+    design_output.geometry_backend = crate::contracts::GeometryBackend::EckyRust;
+    design_output.source_language = crate::contracts::SourceLanguage::EckyIrV0;
 
     let preview = store_session_render_preview(
         &state,
@@ -3191,11 +3251,11 @@ async fn given_no_repeated_anonymous_delta_when_preview_stored_then_draft_feedba
             artifact_bundle: sample_bundle("model-feedback-no-lint", "feedback-no-lint.stl"),
             model_manifest: sample_manifest("model-feedback-no-lint"),
             draft_feedback: Some(DraftFeedbackSeed {
-                status: crate::models::AgentDraftFeedbackStatus::Passed,
+                status: crate::contracts::AgentDraftFeedbackStatus::Passed,
                 summary: "Draft passed.".to_string(),
                 items: Vec::new(),
                 authoring_lints: Vec::new(),
-                source: crate::models::AgentDraftFeedbackSource::StructuralVerification,
+                source: crate::contracts::AgentDraftFeedbackSource::StructuralVerification,
             }),
         },
     )
@@ -3530,6 +3590,63 @@ fn ecky_ast_replace_source_rewrites_spanned_node_with_digest_guards() {
 fn source_edit_digest(source: &str, path: &str) -> String {
     let program = crate::ecky_scheme::compile_to_core_program(source).expect("compile");
     edit_digest_for_ecky_path(&program, source, path).expect("path digest")
+}
+
+fn stable_key_for_source_path(source: &str, path: &str) -> String {
+    let program = crate::ecky_scheme::compile_to_core_program(source).expect("compile");
+    stable_node_key_for_program_path(source, &program, path).expect("stable key")
+}
+
+#[test]
+fn source_ref_resolves_only_when_byte_range_matches_current_source_path() {
+    let source = "(model (part body (box 1 2 3)))";
+    let path = "/parts/body/root";
+    let (start, end) = source_span_for_ecky_path(source, path).expect("source span");
+    let source_ref = crate::contracts::SourceRef {
+        source_id: Some("main".to_string()),
+        path: Some(path.to_string()),
+        start_byte: Some(start as u32),
+        end_byte: Some(end as u32),
+    };
+
+    assert_source_ref_resolves_current_source(source, &source_ref).expect("current source ref");
+
+    let edited_source = "(model (part body (translate [10 0 0] (box 1 2 3))))";
+    let err = assert_source_ref_resolves_current_source(edited_source, &source_ref)
+        .expect_err("stale sourceRef must reject");
+
+    assert!(
+        err.to_string().contains("stale"),
+        "unexpected sourceRef error: {err}"
+    );
+}
+
+#[test]
+fn ast_patch_preserves_unrelated_stable_keys() {
+    let source = "(model (part body (box 1 2 3)) (part lid (box 4 5 6)))";
+    let body_path = "/parts/body/root";
+    let lid_path = "/parts/lid/root";
+    let body_key_before = stable_key_for_source_path(source, body_path);
+    let lid_key_before = stable_key_for_source_path(source, lid_path);
+    let source_digest = crate::mcp::macro_buffer::source_digest(source);
+    let node_digest = source_edit_digest(source, body_path);
+
+    let next = replace_ecky_ast_source(
+        source,
+        &source_digest,
+        body_path,
+        &node_digest,
+        &EckyAstEditOperation::Replace,
+        Some("(box 10 2 3)"),
+        None,
+    )
+    .expect("replace body root");
+
+    assert_ne!(
+        stable_key_for_source_path(&next, body_path),
+        body_key_before
+    );
+    assert_eq!(stable_key_for_source_path(&next, lid_path), lid_key_before);
 }
 
 #[test]
@@ -4325,7 +4442,7 @@ async fn given_film_coupon_fixture_when_film_gap_patch_validate_then_patch_previ
     assert!(preview.macro_code.contains("(number film_gap 0.45"));
     assert_eq!(
         preview.artifact_bundle.source_language,
-        crate::models::SourceLanguage::EckyIrV0
+        crate::contracts::SourceLanguage::EckyIrV0
     );
     assert!(!preview.artifact_bundle.preview_stl_path.trim().is_empty());
 }
@@ -4706,7 +4823,7 @@ async fn macro_preview_uses_saved_ecky_dialect_when_request_omits_it() {
     );
     assert_eq!(
         preview.artifact_bundle.source_language,
-        crate::models::SourceLanguage::EckyIrV0
+        crate::contracts::SourceLanguage::EckyIrV0
     );
 }
 
@@ -4796,7 +4913,7 @@ async fn bounded_polyhedron_mcp_inspect_validate_preview_verify_commit_smoke() {
             .geometry_provenance
             .as_ref()
             .map(|value| &value.representation),
-        Some(&crate::models::GeometryRepresentation::MeshNative)
+        Some(&crate::contracts::GeometryRepresentation::MeshNative)
     );
 
     let verification = handle_verify_generated_model(
@@ -5114,7 +5231,7 @@ async fn given_render_lowering_failures_when_macro_preview_render_then_mcp_error
                 ParamValue::Number(0.3),
             )])),
             post_processing: None,
-            geometry_backend: Some(crate::models::GeometryBackend::Build123d),
+            geometry_backend: Some(crate::contracts::GeometryBackend::Build123d),
         },
         &test_ctx(),
     )
@@ -5158,7 +5275,7 @@ async fn given_render_lowering_failures_when_macro_preview_render_then_mcp_error
             ui_spec: None,
             parameters: None,
             post_processing: None,
-            geometry_backend: Some(crate::models::GeometryBackend::Build123d),
+            geometry_backend: Some(crate::contracts::GeometryBackend::Build123d),
         },
         &test_ctx(),
     )
@@ -5642,7 +5759,7 @@ async fn artifact_manifest_get_rejects_bundle_manifest_mismatch() {
     let mut bad_bundle = sample_bundle("model-bad", "bad.stl");
     bad_bundle
         .export_artifacts
-        .push(crate::models::ExportArtifact {
+        .push(crate::contracts::ExportArtifact {
             geometry_provenance: None,
             label: "STEP".to_string(),
             format: "step".to_string(),
@@ -5698,23 +5815,25 @@ async fn artifact_feature_graph_get_reads_runtime_manifest_and_returns_backfille
     let (state, resolver) = seed_target().await;
     let model_id = "generated-feature-graph";
     let mut bundle = sample_bundle(model_id, "feature-graph.stl");
-    bundle.export_artifacts.push(crate::models::ExportArtifact {
-        geometry_provenance: None,
-        label: "STEP".to_string(),
-        format: "step".to_string(),
-        path: "/tmp/generated-feature-graph.step".to_string(),
-        role: "cad-exchange".to_string(),
-    });
+    bundle
+        .export_artifacts
+        .push(crate::contracts::ExportArtifact {
+            geometry_provenance: None,
+            label: "STEP".to_string(),
+            format: "step".to_string(),
+            path: "/tmp/generated-feature-graph.step".to_string(),
+            role: "cad-exchange".to_string(),
+        });
     let mut runtime_manifest = sample_manifest(model_id);
-    runtime_manifest.correspondence_graph = Some(crate::models::CorrespondenceGraph {
-        edges: vec![crate::models::CorrespondenceEdge {
+    runtime_manifest.correspondence_graph = Some(crate::contracts::CorrespondenceGraph {
+        edges: vec![crate::contracts::CorrespondenceEdge {
             edge_id: "edge-1".to_string(),
-            source: crate::models::FeatureOutputRef {
+            source: crate::contracts::FeatureOutputRef {
                 feature_id: "part:body".to_string(),
                 output_id: "selectionTargets".to_string(),
                 target_ids: vec!["body:face:0:5-5-5:100".to_string()],
             },
-            target: crate::models::FeatureOutputRef {
+            target: crate::contracts::FeatureOutputRef {
                 feature_id: "part:body".to_string(),
                 output_id: "selectionTargets".to_string(),
                 target_ids: vec!["body:face:0:5-5-5:100".to_string()],
@@ -5809,32 +5928,32 @@ async fn artifact_feature_graph_get_preserves_feature_ports() {
     let model_id = "generated-feature-ports";
     let bundle = sample_bundle(model_id, "feature-ports.stl");
     let mut runtime_manifest = sample_manifest(model_id);
-    runtime_manifest.feature_graph = Some(crate::models::FeatureGraph {
-        nodes: vec![crate::models::FeatureNode {
+    runtime_manifest.feature_graph = Some(crate::contracts::FeatureGraph {
+        nodes: vec![crate::contracts::FeatureNode {
             feature_id: "part:body".to_string(),
             kind: "part".to_string(),
             label: "Body".to_string(),
-            source_ref: Some(crate::models::SourceRef {
+            source_ref: Some(crate::contracts::SourceRef {
                 source_id: Some("source-main".to_string()),
                 path: Some("/parts/body/root".to_string()),
                 start_byte: Some(0),
                 end_byte: Some(42),
             }),
             dependency_ids: Vec::new(),
-            output_refs: vec![crate::models::FeatureOutputRef {
+            output_refs: vec![crate::contracts::FeatureOutputRef {
                 feature_id: "part:body".to_string(),
                 output_id: "selectionTargets".to_string(),
                 target_ids: vec!["body:face:0:5-5-5:100".to_string()],
             }],
-            ports: vec![crate::models::FeaturePort {
+            ports: vec![crate::contracts::FeaturePort {
                 port_id: "mount-face".to_string(),
                 type_id: "mechanical.mount".to_string(),
                 target_ids: vec!["body:face:0:5-5-5:100".to_string()],
-                frame: Some(crate::models::PortFrame::identity()),
+                frame: Some(crate::contracts::PortFrame::identity()),
                 interfaces: vec!["m3-clearance".to_string()],
                 params: std::collections::BTreeMap::from([(
                     "clearanceMm".to_string(),
-                    crate::models::ComponentInterfaceValue::Number(0.3),
+                    crate::contracts::ComponentInterfaceValue::Number(0.3),
                 )]),
                 source_ref: None,
                 confidence: Some(0.85),
@@ -5930,74 +6049,74 @@ async fn artifact_feature_graph_get_film_adapter_fixture_exposes_expected_kinds_
     );
     let edge_target_id = rendered_target_ids[0].clone();
     let face_target_id = rendered_target_ids[1].clone();
-    manifest.feature_graph = Some(crate::models::FeatureGraph {
+    manifest.feature_graph = Some(crate::contracts::FeatureGraph {
         nodes: vec![
-            crate::models::FeatureNode {
+            crate::contracts::FeatureNode {
                 feature_id: "film_path".to_string(),
                 kind: "film_path".to_string(),
                 label: "Film Path".to_string(),
-                source_ref: Some(crate::models::SourceRef {
+                source_ref: Some(crate::contracts::SourceRef {
                     source_id: Some("source-film-path".to_string()),
                     path: Some("/parts/body/film_path".to_string()),
                     start_byte: Some(10),
                     end_byte: Some(40),
                 }),
                 dependency_ids: Vec::new(),
-                output_refs: vec![crate::models::FeatureOutputRef {
+                output_refs: vec![crate::contracts::FeatureOutputRef {
                     feature_id: "film_path".to_string(),
                     output_id: "film-path-solid".to_string(),
                     target_ids: vec![edge_target_id.clone()],
                 }],
                 ports: Vec::new(),
             },
-            crate::models::FeatureNode {
+            crate::contracts::FeatureNode {
                 feature_id: "insert_clamp".to_string(),
                 kind: "insert_clamp".to_string(),
                 label: "Insert Clamp".to_string(),
-                source_ref: Some(crate::models::SourceRef {
+                source_ref: Some(crate::contracts::SourceRef {
                     source_id: Some("source-insert-clamp".to_string()),
                     path: Some("/parts/body/insert_clamp".to_string()),
                     start_byte: Some(50),
                     end_byte: Some(80),
                 }),
                 dependency_ids: vec!["film_path".to_string()],
-                output_refs: vec![crate::models::FeatureOutputRef {
+                output_refs: vec![crate::contracts::FeatureOutputRef {
                     feature_id: "insert_clamp".to_string(),
                     output_id: "insert-clamp-solid".to_string(),
                     target_ids: vec![face_target_id.clone()],
                 }],
                 ports: Vec::new(),
             },
-            crate::models::FeatureNode {
+            crate::contracts::FeatureNode {
                 feature_id: "helicoid_thread".to_string(),
                 kind: "helicoid_thread".to_string(),
                 label: "Helicoid Thread".to_string(),
-                source_ref: Some(crate::models::SourceRef {
+                source_ref: Some(crate::contracts::SourceRef {
                     source_id: Some("source-helicoid-thread".to_string()),
                     path: Some("/parts/body/helicoid_thread".to_string()),
                     start_byte: Some(90),
                     end_byte: Some(130),
                 }),
                 dependency_ids: vec!["insert_clamp".to_string()],
-                output_refs: vec![crate::models::FeatureOutputRef {
+                output_refs: vec![crate::contracts::FeatureOutputRef {
                     feature_id: "helicoid_thread".to_string(),
                     output_id: "helicoid-thread-solid".to_string(),
                     target_ids: vec![face_target_id.clone()],
                 }],
                 ports: Vec::new(),
             },
-            crate::models::FeatureNode {
+            crate::contracts::FeatureNode {
                 feature_id: "lens_bore".to_string(),
                 kind: "lens_bore".to_string(),
                 label: "Lens Bore".to_string(),
-                source_ref: Some(crate::models::SourceRef {
+                source_ref: Some(crate::contracts::SourceRef {
                     source_id: Some("source-lens-bore".to_string()),
                     path: Some("/parts/body/lens_bore".to_string()),
                     start_byte: Some(140),
                     end_byte: Some(170),
                 }),
                 dependency_ids: vec!["helicoid_thread".to_string()],
-                output_refs: vec![crate::models::FeatureOutputRef {
+                output_refs: vec![crate::contracts::FeatureOutputRef {
                     feature_id: "lens_bore".to_string(),
                     output_id: "lens-bore-solid".to_string(),
                     target_ids: vec![edge_target_id.clone()],
@@ -6135,13 +6254,15 @@ async fn structural_verification_summary_includes_artifact_digest() {
     let (state, resolver) = seed_target().await;
     let model_id = "generated-verify";
     let mut bundle = sample_bundle(model_id, "verify.stl");
-    bundle.export_artifacts.push(crate::models::ExportArtifact {
-        geometry_provenance: None,
-        label: "STEP".to_string(),
-        format: "step".to_string(),
-        path: "/tmp/generated-verify.step".to_string(),
-        role: "cad-exchange".to_string(),
-    });
+    bundle
+        .export_artifacts
+        .push(crate::contracts::ExportArtifact {
+            geometry_provenance: None,
+            label: "STEP".to_string(),
+            format: "step".to_string(),
+            path: "/tmp/generated-verify.step".to_string(),
+            role: "cad-exchange".to_string(),
+        });
     let manifest = sample_manifest(model_id);
     crate::model_runtime::write_runtime_bundle(&resolver, model_id, &bundle, &manifest)
         .expect("runtime bundle");
@@ -6269,12 +6390,12 @@ async fn verify_generated_model_uses_matching_draft_preview_params() {
         seed_ecky_verify_target(source, model_id, "draft-verify-params.stl", false).await;
     let mut design = sample_design("Draft verify", "V-draft", source);
     design.macro_dialect = MacroDialect::EckyIrV0;
-    design.engine_kind = crate::models::EngineKind::EckyIrV0;
-    design.geometry_backend = crate::models::GeometryBackend::EckyRust;
-    design.source_language = crate::models::SourceLanguage::EckyIrV0;
+    design.engine_kind = crate::contracts::EngineKind::EckyIrV0;
+    design.geometry_backend = crate::contracts::GeometryBackend::EckyRust;
+    design.source_language = crate::contracts::SourceLanguage::EckyIrV0;
     design.post_processing = None;
     design.initial_params = BTreeMap::from([("clearance".to_string(), ParamValue::Number(25.0))]);
-    let draft = crate::models::AgentDraft {
+    let draft = crate::contracts::AgentDraft {
         preview_id: "preview-draft-verify-params".to_string(),
         session_id: test_ctx().session_id,
         thread_id: "thread-1".to_string(),
@@ -6398,13 +6519,15 @@ async fn printability_analyze_reads_preview_stl_and_includes_artifact_digest() {
     write_closed_tetra_binary_stl(&preview_stl_path);
     let mut bundle = sample_bundle(model_id, "printability-preview.stl");
     bundle.preview_stl_path = preview_stl_path.display().to_string();
-    bundle.export_artifacts.push(crate::models::ExportArtifact {
-        geometry_provenance: None,
-        label: "STEP".to_string(),
-        format: "step".to_string(),
-        path: "/tmp/generated-printability.step".to_string(),
-        role: "cad-exchange".to_string(),
-    });
+    bundle
+        .export_artifacts
+        .push(crate::contracts::ExportArtifact {
+            geometry_provenance: None,
+            label: "STEP".to_string(),
+            format: "step".to_string(),
+            path: "/tmp/generated-printability.step".to_string(),
+            role: "cad-exchange".to_string(),
+        });
     let manifest = sample_manifest(model_id);
     crate::model_runtime::write_runtime_bundle(&resolver, model_id, &bundle, &manifest)
         .expect("runtime bundle");
@@ -6453,19 +6576,19 @@ async fn printability_analyze_anchors_suggestions_when_feature_graph_has_one_cle
     let mut bundle = sample_bundle(model_id, "printability-anchor-preview.stl");
     bundle.preview_stl_path = preview_stl_path.display().to_string();
     let mut manifest = sample_manifest(model_id);
-    manifest.feature_graph = Some(crate::models::FeatureGraph {
-        nodes: vec![crate::models::FeatureNode {
+    manifest.feature_graph = Some(crate::contracts::FeatureGraph {
+        nodes: vec![crate::contracts::FeatureNode {
             feature_id: "feature-ledge".to_string(),
             kind: "extrude".to_string(),
             label: "Ledge".to_string(),
-            source_ref: Some(crate::models::SourceRef {
+            source_ref: Some(crate::contracts::SourceRef {
                 source_id: Some("source-main".to_string()),
                 path: Some("/parts/body/ledge".to_string()),
                 start_byte: Some(12),
                 end_byte: Some(42),
             }),
             dependency_ids: Vec::new(),
-            output_refs: vec![crate::models::FeatureOutputRef {
+            output_refs: vec![crate::contracts::FeatureOutputRef {
                 feature_id: "feature-ledge".to_string(),
                 output_id: "solid".to_string(),
                 target_ids: vec!["body:face:0:5-5-5:100".to_string()],
@@ -6547,28 +6670,30 @@ async fn printability_helicoid_fixture_analysis_and_recipes_include_risk_suggest
 
     let mut bundle =
         crate::model_runtime::read_artifact_bundle(&resolver, model_id).expect("runtime bundle");
-    bundle.face_targets.push(crate::models::ViewerFaceTarget {
-        target_id: "body:stable-node-key:body.helicoid:face:0:5-5-5:100".to_string(),
-        durable_target_id: None,
-        canonical_target_id: None,
-        alias_ids: Vec::new(),
-        part_id: "body".to_string(),
-        viewer_node_id: "body".to_string(),
-        label: "Body.HelicoidFace".to_string(),
-        editable: true,
-        center: crate::models::ViewerEdgePoint {
-            x: 5.0,
-            y: 5.0,
-            z: 5.0,
-        },
-        normal: Some([0.0, 0.0, 1.0]),
-        area: Some(100.0),
-    });
+    bundle
+        .face_targets
+        .push(crate::contracts::ViewerFaceTarget {
+            target_id: "body:stable-node-key:body.helicoid:face:0:5-5-5:100".to_string(),
+            durable_target_id: None,
+            canonical_target_id: None,
+            alias_ids: Vec::new(),
+            part_id: "body".to_string(),
+            viewer_node_id: "body".to_string(),
+            label: "Body.HelicoidFace".to_string(),
+            editable: true,
+            center: crate::contracts::ViewerEdgePoint {
+                x: 5.0,
+                y: 5.0,
+                z: 5.0,
+            },
+            normal: Some([0.0, 0.0, 1.0]),
+            area: Some(100.0),
+        });
     let mut manifest =
         crate::model_runtime::read_model_manifest(&resolver, model_id).expect("runtime manifest");
     manifest
         .selection_targets
-        .push(crate::models::SelectionTarget {
+        .push(crate::contracts::SelectionTarget {
             target_id: Some("body:stable-node-key:body.helicoid:face:0:5-5-5:100".to_string()),
             durable_target_id: None,
             canonical_target_id: None,
@@ -6576,25 +6701,25 @@ async fn printability_helicoid_fixture_analysis_and_recipes_include_risk_suggest
             part_id: "body".to_string(),
             viewer_node_id: "body".to_string(),
             label: "Body.HelicoidFace".to_string(),
-            kind: crate::models::SelectionTargetKind::Face,
+            kind: crate::contracts::SelectionTargetKind::Face,
             editable: true,
             parameter_keys: Vec::new(),
             primitive_ids: Vec::new(),
             view_ids: Vec::new(),
         });
-    manifest.feature_graph = Some(crate::models::FeatureGraph {
-        nodes: vec![crate::models::FeatureNode {
+    manifest.feature_graph = Some(crate::contracts::FeatureGraph {
+        nodes: vec![crate::contracts::FeatureNode {
             feature_id: "feature-helicoid-thread".to_string(),
             kind: "helical-ridge".to_string(),
             label: "Helicoid Thread".to_string(),
-            source_ref: Some(crate::models::SourceRef {
+            source_ref: Some(crate::contracts::SourceRef {
                 source_id: Some("source-main".to_string()),
                 path: Some("/parts/body/helicoid".to_string()),
                 start_byte: Some(320),
                 end_byte: Some(420),
             }),
             dependency_ids: Vec::new(),
-            output_refs: vec![crate::models::FeatureOutputRef {
+            output_refs: vec![crate::contracts::FeatureOutputRef {
                 feature_id: "feature-helicoid-thread".to_string(),
                 output_id: "solid".to_string(),
                 target_ids: vec!["body:stable-node-key:body.helicoid:face:0:5-5-5:100".to_string()],
@@ -6677,9 +6802,9 @@ async fn printability_analyze_preserves_empty_anchor_when_feature_graph_is_ambig
     let mut bundle = sample_bundle(model_id, "printability-ambiguous-anchor-preview.stl");
     bundle.preview_stl_path = preview_stl_path.display().to_string();
     let mut manifest = sample_manifest(model_id);
-    manifest.feature_graph = Some(crate::models::FeatureGraph {
+    manifest.feature_graph = Some(crate::contracts::FeatureGraph {
         nodes: vec![
-            crate::models::FeatureNode {
+            crate::contracts::FeatureNode {
                 feature_id: "feature-left".to_string(),
                 kind: "part".to_string(),
                 label: "Left".to_string(),
@@ -6688,7 +6813,7 @@ async fn printability_analyze_preserves_empty_anchor_when_feature_graph_is_ambig
                 output_refs: Vec::new(),
                 ports: Vec::new(),
             },
-            crate::models::FeatureNode {
+            crate::contracts::FeatureNode {
                 feature_id: "feature-right".to_string(),
                 kind: "part".to_string(),
                 label: "Right".to_string(),
@@ -6730,14 +6855,14 @@ async fn printability_transform_recipes_get_returns_digest_guarded_overhang_reci
     let mut bundle = sample_bundle(model_id, "printability-recipes-preview.stl");
     bundle.preview_stl_path = preview_stl_path.display().to_string();
     let mut manifest = sample_manifest(model_id);
-    manifest.feature_graph = Some(crate::models::FeatureGraph {
-        nodes: vec![crate::models::FeatureNode {
+    manifest.feature_graph = Some(crate::contracts::FeatureGraph {
+        nodes: vec![crate::contracts::FeatureNode {
             feature_id: "feature-ledge".to_string(),
             kind: "extrude".to_string(),
             label: "Ledge".to_string(),
             source_ref: None,
             dependency_ids: Vec::new(),
-            output_refs: vec![crate::models::FeatureOutputRef {
+            output_refs: vec![crate::contracts::FeatureOutputRef {
                 feature_id: "feature-ledge".to_string(),
                 output_id: "solid".to_string(),
                 target_ids: vec!["body:face:0:5-5-5:100".to_string()],
@@ -6891,23 +7016,23 @@ async fn seed_ecky_printability_target(
 
     let mut design = sample_design("Ecky Pot", "V-ecky", source);
     design.macro_dialect = MacroDialect::EckyIrV0;
-    design.engine_kind = crate::models::EngineKind::EckyIrV0;
-    design.geometry_backend = crate::models::GeometryBackend::EckyRust;
-    design.source_language = crate::models::SourceLanguage::EckyIrV0;
+    design.engine_kind = crate::contracts::EngineKind::EckyIrV0;
+    design.geometry_backend = crate::contracts::GeometryBackend::EckyRust;
+    design.source_language = crate::contracts::SourceLanguage::EckyIrV0;
     design.post_processing = None;
 
     let mut bundle = sample_bundle(model_id, preview_name);
-    bundle.engine_kind = crate::models::EngineKind::EckyIrV0;
-    bundle.geometry_backend = crate::models::GeometryBackend::EckyRust;
-    bundle.source_language = crate::models::SourceLanguage::EckyIrV0;
+    bundle.engine_kind = crate::contracts::EngineKind::EckyIrV0;
+    bundle.geometry_backend = crate::contracts::GeometryBackend::EckyRust;
+    bundle.source_language = crate::contracts::SourceLanguage::EckyIrV0;
     bundle.content_hash = format!("content-{model_id}");
     bundle.macro_path = Some(source_path.display().to_string());
     bundle.preview_stl_path = preview_stl_path.display().to_string();
 
     let mut manifest = sample_manifest(model_id);
-    manifest.engine_kind = crate::models::EngineKind::EckyIrV0;
-    manifest.geometry_backend = crate::models::GeometryBackend::EckyRust;
-    manifest.source_language = crate::models::SourceLanguage::EckyIrV0;
+    manifest.engine_kind = crate::contracts::EngineKind::EckyIrV0;
+    manifest.geometry_backend = crate::contracts::GeometryBackend::EckyRust;
+    manifest.source_language = crate::contracts::SourceLanguage::EckyIrV0;
     manifest.source_digest = Some(crate::mcp::macro_buffer::source_digest(source));
 
     crate::model_runtime::write_runtime_bundle(&resolver, model_id, &bundle, &manifest)
@@ -7211,7 +7336,7 @@ async fn given_durable_preview_feedback_when_latest_draft_requested_then_respons
             .as_ref()
             .expect("preview feedback")
             .status,
-        crate::models::AgentDraftFeedbackStatus::Passed
+        crate::contracts::AgentDraftFeedbackStatus::Passed
     );
 
     clear_session_render_preview(&ctx.session_id);
@@ -7570,14 +7695,14 @@ async fn given_unverified_preview_after_session_memory_clears_when_commit_runs_t
             artifact_bundle: sample_bundle("model-durable-preview", "durable-preview.stl"),
             model_manifest: sample_manifest("model-durable-preview"),
             draft_feedback: Some(DraftFeedbackSeed {
-                status: crate::models::AgentDraftFeedbackStatus::Failed,
+                status: crate::contracts::AgentDraftFeedbackStatus::Failed,
                 summary: "Draft failed structural verification.".to_string(),
-                items: vec![crate::models::AgentDraftFeedbackItem {
+                items: vec![crate::contracts::AgentDraftFeedbackItem {
                     code: "non_manifold".to_string(),
                     message: "Mesh contains a non-manifold edge.".to_string(),
                 }],
                 authoring_lints: Vec::new(),
-                source: crate::models::AgentDraftFeedbackSource::StructuralVerification,
+                source: crate::contracts::AgentDraftFeedbackSource::StructuralVerification,
             }),
         },
     )
@@ -7899,8 +8024,8 @@ async fn superseded_actor_completion_does_not_mark_agent_session_failed() {
         &error,
     );
 
-    let sessions =
-        db::get_sessions_by_ids(&conn, &[ctx.session_id.clone()]).expect("agent session lookup");
+    let sessions = db::get_sessions_by_ids(&conn, std::slice::from_ref(&ctx.session_id))
+        .expect("agent session lookup");
     assert!(
         sessions.is_empty(),
         "superseded work is not a session error"

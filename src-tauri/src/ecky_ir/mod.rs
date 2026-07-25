@@ -7,6 +7,7 @@ mod heightfield;
 pub mod mesh_asset;
 pub(crate) mod mesh_literal;
 mod mesh_ops;
+pub(crate) use mesh_ops::read_stl_mesh;
 mod model;
 pub mod op_suggest;
 pub mod poly_partition;
@@ -15,11 +16,11 @@ mod shared;
 mod sketch;
 mod syntax;
 
+use crate::contracts::ArtifactBundle;
+use crate::contracts::ModelManifest;
 use crate::contracts::{AppResult, DesignParams, ParsedParamsResult};
 use crate::ecky_core_ir::{CoreNode, CoreNodeKind, CoreOperation, CoreProgram, CoreSurfaceOp};
 use crate::ecky_scheme::try_compile_to_core_program;
-use crate::models::ArtifactBundle;
-use crate::models::ModelManifest;
 use crate::PathResolver;
 
 pub fn source_uses_ecky_rust_only_cad_ops(source: &str) -> bool {
@@ -128,14 +129,14 @@ pub fn render_core_program(
 pub(crate) fn build_core_program_param_env_for_eval(
     program: &CoreProgram,
     parameters: &DesignParams,
-) -> AppResult<std::collections::BTreeMap<String, crate::models::ParamValue>> {
+) -> AppResult<std::collections::BTreeMap<String, crate::contracts::ParamValue>> {
     runtime::build_core_program_param_env_for_eval(program, parameters)
 }
 
 pub(crate) fn eval_core_number_with_locals(
     node: &CoreNode,
     param_names: &std::collections::BTreeMap<u64, String>,
-    env: &std::collections::BTreeMap<String, crate::models::ParamValue>,
+    env: &std::collections::BTreeMap<String, crate::contracts::ParamValue>,
 ) -> AppResult<f64> {
     runtime::eval_core_number_with_locals(node, param_names, env)
 }
@@ -143,7 +144,7 @@ pub(crate) fn eval_core_number_with_locals(
 pub(crate) fn eval_core_bool_with_locals(
     node: &CoreNode,
     param_names: &std::collections::BTreeMap<u64, String>,
-    env: &std::collections::BTreeMap<String, crate::models::ParamValue>,
+    env: &std::collections::BTreeMap<String, crate::contracts::ParamValue>,
 ) -> AppResult<bool> {
     runtime::eval_core_bool_with_locals(node, param_names, env)
 }
@@ -151,7 +152,7 @@ pub(crate) fn eval_core_bool_with_locals(
 pub(crate) fn eval_core_stringish_with_locals(
     node: &CoreNode,
     param_names: &std::collections::BTreeMap<u64, String>,
-    env: &std::collections::BTreeMap<String, crate::models::ParamValue>,
+    env: &std::collections::BTreeMap<String, crate::contracts::ParamValue>,
 ) -> AppResult<String> {
     runtime::eval_core_stringish_with_locals(node, param_names, env)
 }
@@ -341,7 +342,7 @@ fn is_direct_occt_required_core_op(op: &CoreOperation) -> bool {
 use std::path::{Path, PathBuf};
 
 #[cfg(test)]
-use crate::models::{EngineKind, ParamValue};
+use crate::contracts::{EngineKind, ParamValue};
 
 #[cfg(test)]
 use self::runtime::{mesh_area, mesh_volume};

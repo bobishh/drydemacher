@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
+use crate::contracts::{AppResult, ParamValue};
 use crate::ecky_deterministic;
-use crate::models::{AppResult, ParamValue};
 
 use super::model::{expr_head_symbol, expr_list_items, inline_let_expr, IrExpr, IrSelectorExpr};
 use super::shared::{unsupported, validation};

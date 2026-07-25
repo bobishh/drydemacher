@@ -3,15 +3,16 @@ use super::{
     map_target_resolved_from, persist_agent_session, session_render_preview_for_request,
     try_record_agent_error, AgentContext,
 };
+use crate::contracts::{
+    AppError, AppResult, ArtifactBundle, DesignOutput, ModelManifest, SourceLanguage,
+    WorkspaceSceneLens, WorkspaceSceneRepresentation, WorkspaceSceneRepresentationKind,
+    WorkspaceSceneRepresentationStatus, WorkspaceSceneTopology,
+};
 use crate::mcp::contracts::{
     TargetGetRequest, TargetGetResponse, TargetMacroRequest, TargetMacroResponse,
     TargetMetaRequest, TargetMetaResponse, TargetResolvedFrom,
 };
-use crate::models::{
-    AppError, AppResult, AppState, ArtifactBundle, DesignOutput, ModelManifest, PathResolver,
-    SourceLanguage, WorkspaceSceneLens, WorkspaceSceneRepresentation,
-    WorkspaceSceneRepresentationKind, WorkspaceSceneRepresentationStatus, WorkspaceSceneTopology,
-};
+use crate::models::{AppState, PathResolver};
 
 pub async fn handle_target_get(
     state: &AppState,
@@ -102,7 +103,7 @@ fn build_agent_scene_packet(
     artifact_bundle: Option<&ArtifactBundle>,
     model_manifest: Option<&ModelManifest>,
     has_draft: bool,
-) -> crate::models::AgentScenePacket {
+) -> crate::contracts::AgentScenePacket {
     let has_source = !design_output.macro_code.trim().is_empty();
     let exact_committed = artifact_bundle.is_some() && model_manifest.is_some();
     let sketch_status = if has_source {
@@ -145,7 +146,7 @@ fn build_agent_scene_packet(
         allowed_patch_targets.push("commitPreviewVersion".to_string());
     }
 
-    crate::models::AgentScenePacket {
+    crate::contracts::AgentScenePacket {
         schema_version: 1,
         active_lens,
         representations: vec![
@@ -196,11 +197,11 @@ fn build_target_meta_response(
         .fields
         .iter()
         .fold((0, 0, 0, 0), |acc, field| match field {
-            crate::models::UiField::Range { .. } => (acc.0 + 1, acc.1, acc.2, acc.3),
-            crate::models::UiField::Number { .. } => (acc.0, acc.1 + 1, acc.2, acc.3),
-            crate::models::UiField::Select { .. } => (acc.0, acc.1, acc.2 + 1, acc.3),
-            crate::models::UiField::Checkbox { .. } => (acc.0, acc.1, acc.2, acc.3 + 1),
-            crate::models::UiField::Image { .. } => acc,
+            crate::contracts::UiField::Range { .. } => (acc.0 + 1, acc.1, acc.2, acc.3),
+            crate::contracts::UiField::Number { .. } => (acc.0, acc.1 + 1, acc.2, acc.3),
+            crate::contracts::UiField::Select { .. } => (acc.0, acc.1, acc.2 + 1, acc.3),
+            crate::contracts::UiField::Checkbox { .. } => (acc.0, acc.1, acc.2, acc.3 + 1),
+            crate::contracts::UiField::Image { .. } => acc,
         });
 
     let export_formats = target
@@ -364,11 +365,11 @@ pub async fn handle_target_meta_get(
             .fields
             .iter()
             .fold((0, 0, 0, 0), |acc, field| match field {
-                crate::models::UiField::Range { .. } => (acc.0 + 1, acc.1, acc.2, acc.3),
-                crate::models::UiField::Number { .. } => (acc.0, acc.1 + 1, acc.2, acc.3),
-                crate::models::UiField::Select { .. } => (acc.0, acc.1, acc.2 + 1, acc.3),
-                crate::models::UiField::Checkbox { .. } => (acc.0, acc.1, acc.2, acc.3 + 1),
-                crate::models::UiField::Image { .. } => acc,
+                crate::contracts::UiField::Range { .. } => (acc.0 + 1, acc.1, acc.2, acc.3),
+                crate::contracts::UiField::Number { .. } => (acc.0, acc.1 + 1, acc.2, acc.3),
+                crate::contracts::UiField::Select { .. } => (acc.0, acc.1, acc.2 + 1, acc.3),
+                crate::contracts::UiField::Checkbox { .. } => (acc.0, acc.1, acc.2, acc.3 + 1),
+                crate::contracts::UiField::Image { .. } => acc,
             });
         let export_formats = artifact_bundle
             .as_ref()

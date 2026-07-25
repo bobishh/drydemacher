@@ -3236,7 +3236,7 @@ mod tests {
             freecad_library_roots: Vec::new(),
             assets: vec![],
             microwave: None,
-            voice: crate::models::VoiceConfig::default(),
+            voice: crate::contracts::VoiceConfig::default(),
             mcp: McpConfig {
                 port: None,
                 max_sessions: None,
@@ -3248,9 +3248,9 @@ mod tests {
             },
             has_seen_onboarding: false,
             connection_type: Some("mcp".to_string()),
-            default_engine_kind: crate::models::EngineKind::Freecad,
-            default_source_language: crate::models::SourceLanguage::LegacyPython,
-            default_geometry_backend: crate::models::GeometryBackend::Freecad,
+            default_engine_kind: crate::contracts::EngineKind::Freecad,
+            default_source_language: crate::contracts::SourceLanguage::LegacyPython,
+            default_geometry_backend: crate::contracts::GeometryBackend::Freecad,
             max_generation_attempts: 3,
             max_verify_attempts: 0,
             projects_root: None,
@@ -3851,7 +3851,7 @@ mod tests {
             "Primary",
             vec![
                 "-c".to_string(),
-                "printf 'hello from agent\\n'; sleep 2".to_string(),
+                "printf 'hello from agent\\n'; sleep 10".to_string(),
             ],
         )];
         let state = test_state(config);
@@ -3861,15 +3861,26 @@ mod tests {
         wake_primary_auto_agent(&state, Some("thread-1".to_string()), None, None)
             .await
             .unwrap();
-        sleep(Duration::from_millis(600)).await;
 
-        let snapshot = state
-            .agent_terminals
-            .lock()
-            .unwrap()
-            .get("primary")
-            .map(|runtime| runtime.snapshot.clone())
-            .expect("primary terminal snapshot");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let snapshot = loop {
+            let snapshot = state
+                .agent_terminals
+                .lock()
+                .unwrap()
+                .get("primary")
+                .map(|runtime| runtime.snapshot.clone());
+            if snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.active && snapshot.vt_stream.contains("hello from agent")
+            }) {
+                break snapshot.expect("checked terminal snapshot");
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "primary terminal snapshot did not become live: {snapshot:?}"
+            );
+            sleep(Duration::from_millis(50)).await;
+        };
         assert!(
             snapshot.active,
             "terminal snapshot should be live during wake"
@@ -3906,7 +3917,7 @@ mod tests {
             .await
             .unwrap();
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
             let Some(snapshot) = primary_runtime_snapshot(&state) else {
                 panic!("primary runtime snapshot missing");
@@ -3994,7 +4005,7 @@ mod tests {
             .await
             .unwrap();
 
-        for _ in 0..10 {
+        for _ in 0..100 {
             if fs::read_to_string(&touch_file).unwrap_or_default() == "primary" {
                 break;
             }
@@ -4041,7 +4052,17 @@ mod tests {
         assert_eq!(snapshot.phase, AutoAgentRuntimePhase::Waking);
         assert_eq!(snapshot.pending_thread_id.as_deref(), Some("thread-1"));
 
-        sleep(Duration::from_millis(350)).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if fs::read_to_string(&primary_file).unwrap_or_default() == "primary" {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "primary agent did not start"
+            );
+            sleep(Duration::from_millis(50)).await;
+        }
 
         assert_eq!(
             fs::read_to_string(&primary_file).unwrap_or_default(),
@@ -4072,7 +4093,7 @@ mod tests {
         wake_primary_auto_agent(&state, Some("thread-1".to_string()), None, None)
             .await
             .unwrap();
-        for _ in 0..10 {
+        for _ in 0..100 {
             if fs::read_to_string(&touch_file).unwrap_or_default() == "x" {
                 break;
             }

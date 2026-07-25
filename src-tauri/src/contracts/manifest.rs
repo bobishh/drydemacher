@@ -526,6 +526,12 @@ pub struct ModelManifest {
     pub geometry_provenance: Option<super::GeometryProvenance>,
 }
 
+impl ModelManifest {
+    pub fn validate(&self) -> AppResult<()> {
+        validate_model_manifest_inner(self)
+    }
+}
+
 fn default_model_runtime_schema_version() -> u32 {
     MODEL_RUNTIME_SCHEMA_VERSION
 }
@@ -606,6 +612,10 @@ fn validate_feature_source_ref_path(
 }
 
 pub fn validate_model_manifest(manifest: &ModelManifest) -> AppResult<()> {
+    manifest.validate()
+}
+
+fn validate_model_manifest_inner(manifest: &ModelManifest) -> AppResult<()> {
     if manifest.schema_version == 0 {
         return Err(AppError::validation(
             "model manifest schemaVersion must be greater than 0.",

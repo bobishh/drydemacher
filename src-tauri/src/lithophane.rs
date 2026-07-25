@@ -1,9 +1,9 @@
+use crate::contracts::{AppError, AppResult};
 use crate::contracts::{
     ExportArtifact, LithophaneAttachment, LithophaneAttachmentSource, LithophaneColorMode,
     LithophanePlacement, LithophaneRelief, LithophaneSide, ManifestBounds, OverflowMode,
     ProjectionType,
 };
-use crate::models::{AppError, AppResult};
 use image::{GrayImage, RgbImage};
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -1261,7 +1261,7 @@ pub fn apply_lithophane_attachments(
 
 pub fn resolve_image_path(
     attachment: &LithophaneAttachment,
-    parameters: &crate::models::DesignParams,
+    parameters: &crate::contracts::DesignParams,
 ) -> Option<String> {
     match &attachment.source {
         LithophaneAttachmentSource::File { image_path } => {
@@ -1275,7 +1275,7 @@ pub fn resolve_image_path(
         LithophaneAttachmentSource::Param { image_param } => {
             let value = parameters.get(image_param)?;
             match value {
-                crate::models::ParamValue::String(path) if !path.trim().is_empty() => {
+                crate::contracts::ParamValue::String(path) if !path.trim().is_empty() => {
                     Some(path.trim().to_string())
                 }
                 _ => None,

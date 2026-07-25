@@ -1,7 +1,6 @@
+use crate::contracts::{AppError, AppResult, ArtifactBundle, DesignOutput, ModelManifest};
 use crate::db;
-use crate::models::{
-    AppError, AppResult, ArtifactBundle, DesignOutput, ModelManifest, PathResolver,
-};
+use crate::models::PathResolver;
 use crate::services::session::read_last_snapshot;
 
 pub struct ResolvedTarget {
@@ -138,10 +137,10 @@ pub fn resolve_editable_target(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contracts::{ParamValue, UiSpec};
-    use crate::models::{
+    use crate::contracts::{
         AppErrorCode, InteractionMode, MacroDialect, Message, MessageRole, MessageStatus,
     };
+    use crate::contracts::{ParamValue, UiSpec};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
     use uuid::Uuid;
@@ -176,9 +175,9 @@ mod tests {
             interaction_mode: InteractionMode::Design,
             macro_code: "build()".to_string(),
             macro_dialect: MacroDialect::Legacy,
-            engine_kind: crate::models::EngineKind::Freecad,
-            source_language: crate::models::SourceLanguage::LegacyPython,
-            geometry_backend: crate::models::GeometryBackend::Freecad,
+            engine_kind: crate::contracts::EngineKind::Freecad,
+            source_language: crate::contracts::SourceLanguage::LegacyPython,
+            geometry_backend: crate::contracts::GeometryBackend::Freecad,
             ui_spec: UiSpec { fields: Vec::new() },
             initial_params: BTreeMap::from([("diameter".to_string(), ParamValue::Number(130.0))]),
             post_processing: None,

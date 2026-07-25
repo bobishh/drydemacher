@@ -12,8 +12,9 @@ use super::direct_occt_executor::export_core_program_step_stl_with_params_runner
 use super::direct_occt_sdk::{
     bundled_build123d_runtime_root_from_repo, inspect_build123d_ocp_runtime, NativeExportOutcome,
 };
+use crate::contracts::DesignParams;
 use crate::ecky_core_ir::CoreProgram;
-use crate::models::{DesignParams, PathResolver};
+use crate::models::PathResolver;
 
 pub(crate) struct TestResolver;
 
@@ -266,7 +267,7 @@ pub(crate) fn assert_native_matches_reference(
                 Some(macro_source),
                 params,
                 &TestResolver,
-                crate::models::SourceLanguage::EckyIrV0,
+                crate::contracts::SourceLanguage::EckyIrV0,
             )
             .unwrap_or_else(|err| panic!("[{label}] build123d reference render failed: {err:?}"))
         }
@@ -293,7 +294,7 @@ pub(crate) fn assert_native_matches_reference(
                         None,
                         None,
                         &TestResolver,
-                        crate::models::SourceLanguage::EckyIrV0,
+                        crate::contracts::SourceLanguage::EckyIrV0,
                     )
                     .unwrap_or_else(|err| {
                         panic!("[{label_owned}] FreeCAD reference render failed: {err:?}")

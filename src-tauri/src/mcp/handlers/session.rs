@@ -7,10 +7,11 @@ use super::{
     resolve_explicit_session_target, resolve_prompt_thread_context,
     resolve_request_user_prompt_target, session_target_ref, AgentContext, TraceEvent,
 };
+use crate::contracts::{AppError, AppResult};
 use crate::db;
 use crate::mcp::contracts::*;
 use crate::mcp::runtime;
-use crate::models::{AppError, AppResult, AppState};
+use crate::models::AppState;
 use crate::services::{agent_dialogue, history};
 use tauri::Emitter;
 use tokio::sync::oneshot;
@@ -167,11 +168,11 @@ pub async fn handle_request_user_prompt(
         agent_dialogue::add_dialogue_message(
             state,
             &target.thread_id,
-            &crate::models::Message {
+            &crate::contracts::Message {
                 id: Uuid::new_v4().to_string(),
-                role: crate::models::MessageRole::Assistant,
+                role: crate::contracts::MessageRole::Assistant,
                 content: prompt_content.clone(),
-                status: crate::models::MessageStatus::Success,
+                status: crate::contracts::MessageStatus::Success,
                 output: None,
                 usage: None,
                 artifact_bundle: None,
@@ -404,7 +405,7 @@ pub async fn handle_mark_as_read(
         .into_iter()
         .find(|message| message.id == req.message_id)
         .ok_or_else(|| AppError::not_found(format!("Message {} not found.", req.message_id)))?;
-    if message.role != crate::models::MessageRole::User {
+    if message.role != crate::contracts::MessageRole::User {
         return Err(AppError::validation(format!(
             "Only user thread messages can be marked as read. {} is {:?}.",
             req.message_id, message.role
@@ -415,8 +416,8 @@ pub async fn handle_mark_as_read(
             .map_err(|err| AppError::persistence(err.to_string()))?
             .into_iter()
             .filter(|candidate| {
-                candidate.role == crate::models::MessageRole::User
-                    && candidate.status == crate::models::MessageStatus::Pending
+                candidate.role == crate::contracts::MessageRole::User
+                    && candidate.status == crate::contracts::MessageStatus::Pending
             })
             .map(|candidate| candidate.id)
             .collect::<Vec<_>>();
@@ -431,7 +432,7 @@ pub async fn handle_mark_as_read(
             &conn,
             message_id,
             db::MessageStatusUpdate {
-                status: &crate::models::MessageStatus::Working,
+                status: &crate::contracts::MessageStatus::Working,
                 output: None,
                 usage: None,
                 artifact_bundle: None,
@@ -539,14 +540,14 @@ pub async fn handle_session_reply_save(
     agent_dialogue::add_dialogue_message(
         state,
         &target.thread_id,
-        &crate::models::Message {
+        &crate::contracts::Message {
             id: message_id.clone(),
-            role: crate::models::MessageRole::Assistant,
+            role: crate::contracts::MessageRole::Assistant,
             content: body.to_string(),
             status: if req.fatal {
-                crate::models::MessageStatus::Error
+                crate::contracts::MessageStatus::Error
             } else {
-                crate::models::MessageStatus::Success
+                crate::contracts::MessageStatus::Success
             },
             output: None,
             usage: None,
@@ -575,7 +576,7 @@ pub async fn handle_session_reply_save(
                 &conn,
                 working_message_id,
                 db::MessageStatusUpdate {
-                    status: &crate::models::MessageStatus::Success,
+                    status: &crate::contracts::MessageStatus::Success,
                     output: None,
                     usage: None,
                     artifact_bundle: None,
@@ -728,11 +729,11 @@ pub async fn handle_concept_preview_save(
     agent_dialogue::add_dialogue_message(
         state,
         &target.thread_id,
-        &crate::models::Message {
+        &crate::contracts::Message {
             id: message_id.clone(),
-            role: crate::models::MessageRole::Assistant,
+            role: crate::contracts::MessageRole::Assistant,
             content: caption.clone(),
-            status: crate::models::MessageStatus::Success,
+            status: crate::contracts::MessageStatus::Success,
             output: None,
             usage: None,
             artifact_bundle: None,
@@ -743,7 +744,7 @@ pub async fn handle_concept_preview_save(
                 timestamp,
             )),
             image_data: Some(image_data.to_string()),
-            visual_kind: Some(crate::models::MessageVisualKind::ConceptPreview),
+            visual_kind: Some(crate::contracts::MessageVisualKind::ConceptPreview),
             attachment_images: Vec::new(),
             timestamp,
         },
@@ -979,7 +980,7 @@ pub async fn handle_session_activity_clear(
 
 fn build_thread_list_entry(
     conn: &rusqlite::Connection,
-    thread: crate::models::Thread,
+    thread: crate::contracts::Thread,
 ) -> AppResult<ThreadListEntry> {
     let latest_pending_message_id = db::get_latest_pending_user_message_id(conn, &thread.id)
         .map_err(|err| AppError::persistence(err.to_string()))?;

@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use ecky_cad_lib::contracts::DesignParams;
 use ecky_cad_lib::ecky_cad_host::direct_occt_executor;
 use ecky_cad_lib::ecky_cad_host::direct_occt_sdk;
-use ecky_cad_lib::ecky_scheme::try_compile_to_core_program;
-use ecky_cad_lib::models::{DesignParams, PathResolver};
+use ecky_cad_lib::ecky_cad_host::source_compiler::NativeSourceCompiler;
+use ecky_cad_lib::models::PathResolver;
+use ecky_render::SourceCompiler;
 
 fn main() -> ExitCode {
     match run() {
@@ -20,10 +22,9 @@ fn run() -> Result<(), String> {
     let args = parse_args()?;
     let source = std::fs::read_to_string(&args.input)
         .map_err(|err| format!("Failed to read `{}`: {err}", args.input.display()))?;
-    let program = match try_compile_to_core_program(&source) {
-        Some(result) => result.map_err(|err| err.to_string())?,
-        None => return Err("Source is not compileable `.ecky` model syntax.".to_string()),
-    };
+    let program = NativeSourceCompiler
+        .compile(&source)
+        .map_err(|err| err.to_string())?;
     let params: DesignParams = if let Some(params_path) = args.params {
         let raw = std::fs::read_to_string(&params_path)
             .map_err(|err| format!("Failed to read `{}`: {err}", params_path.display()))?;
