@@ -1,4 +1,8 @@
-## Real Model Patterns: Procedural Cuts and Arrayed Frames
+## Level 04: Procedural Workshop
+
+**Mission:** Build generated cutters and path-driven attachments from data.
+
+**Clear condition:** One parameter change regenerates the pattern; final geometry still exports as a valid solid.
 
 These fixtures combine generated cutter lists, deterministic fields, path frames, arrays, and parameter-driven cavities. Focus on how each model separates generation math from final boolean intent.
 

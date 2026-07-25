@@ -34,11 +34,11 @@ export function buildDocsSiteHtml(doc: DocsDocument, options: DocsSiteOptions): 
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>${escapeHtml(doc.title)}</title>
-    <meta name="description" content="The Ecky IR Field Guide: prompt-driven CAD language reference, from first solid to complete multi-part models." />
+    <meta name="description" content="Ecky language syntax, signatures, selectors, backend support, and verification grammar." />
     <meta name="robots" content="index, follow" />
     <meta property="og:type" content="article" />
     <meta property="og:title" content="${escapeHtml(doc.title)}" />
-    <meta property="og:description" content="Prompt-driven CAD language reference, from first solid to complete multi-part models." />
+    <meta property="og:description" content="Ecky language syntax, signatures, selectors, backend support, and verification grammar." />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -59,7 +59,7 @@ export function buildDocsSiteHtml(doc: DocsDocument, options: DocsSiteOptions): 
     </header>
 
     <div class="docs-hero">
-      <p class="docs-hero__kicker">ECKY LANGUAGE / FIELD GUIDE</p>
+      <p class="docs-hero__kicker">ECKY LANGUAGE / REFERENCE</p>
       <h1>${escapeHtml(doc.title)}</h1>
       <div class="docs-hero__summary">${doc.summaryHtml}</div>
     </div>
@@ -339,6 +339,23 @@ function renderStylesheet(): string {
     color: #c8d8c8;
   }
   .docs-main__body pre code { background: none; color: inherit; padding: 0; }
+  .docs-main__body table {
+    width: 100%;
+    margin: 1rem 0 1.4rem;
+    border-collapse: collapse;
+    font-size: 0.82rem;
+  }
+  .docs-main__body th,
+  .docs-main__body td {
+    border: 1px solid var(--border);
+    padding: 0.55rem 0.7rem;
+    text-align: left;
+    vertical-align: top;
+  }
+  .docs-main__body th {
+    color: var(--secondary);
+    background: rgba(200, 166, 32, 0.08);
+  }
   .docs-main__body figure { margin: 1.2rem 0 1.6rem; }
   .docs-main__body figure img {
     display: block;

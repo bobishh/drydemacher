@@ -14,12 +14,14 @@ import path from 'node:path';
 
 import { parseDocsDocument } from '../src/lib/docs/eckyIrGuide';
 import { buildDocsSiteHtml } from '../src/lib/docs/eckyIrDocsSite';
+import { syncEckyIrContent } from './ecky_ir_content';
 
 const root = process.cwd();
 const docsSourcePath = path.join(root, 'public', 'docs', 'ecky-ir.md');
 const outputDir = path.join(root, 'target', 'book', 'dist', 'docs-site');
 const outputPath = path.join(outputDir, 'index.html');
 
+syncEckyIrContent(root);
 const docsMarkdown = fs.readFileSync(docsSourcePath, 'utf8');
 const doc = parseDocsDocument(docsMarkdown, { assetBasePath: '/docs' });
 

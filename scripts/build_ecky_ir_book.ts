@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { buildEckyIrBook } from '../src/lib/docs/eckyIrBook';
+import { syncEckyIrContent } from './ecky_ir_content';
 import { syncSplitBook } from './ecky_ir_source';
 
 const root = process.cwd();
@@ -11,13 +12,14 @@ const outputDir = path.join(bookTargetDir, 'dist', 'books');
 const htmlPath = path.join(outputDir, 'ecky-ir-field-guide.html');
 const epubPath = path.join(outputDir, 'ecky-ir-field-guide.epub');
 const epubWorkDir = path.join(outputDir, 'ecky-ir-field-guide-epub');
-const docsSourcePath = path.join(root, 'public', 'docs', 'ecky-ir.md');
+const docsSourcePath = path.join(root, 'public', 'tutorials', 'ecky-campaign.md');
 // The app serves the reader markdown, the EPUB download, and chapter images
 // from `public/docs` (Vite static root). Publish the freshly built artifacts
 // there so a single `build:book` keeps both the in-app reader and the EPUB
 // download current — no manual second copy.
 const publicDocsDir = path.join(root, 'public', 'docs');
 
+syncEckyIrContent(root);
 syncSplitBook(root);
 const docsMarkdown = fs.readFileSync(docsSourcePath, 'utf8');
 
@@ -94,7 +96,7 @@ function bookContentXhtml(book: ReturnType<typeof buildEckyIrBook>): string {
       <h1>${escapeXml(book.title)}</h1>
       <div class="summary">
         ${book.summaryHtml}
-        <p>This edition packages the canonical Ecky IR language reference as a single EPUB.</p>
+        <p>This edition packages the Ecky modeling campaign as a single EPUB.</p>
       </div>
     </section>
     ${chapters}
@@ -273,9 +275,8 @@ figcaption {
 
 // Publish the built artifacts into the Vite static root so the in-app reader
 // (markdown + images) and the EPUB download both serve fresh content from one
-// build. The reader markdown itself is the source (`public/docs/ecky-ir.md`)
-// and is left untouched; only the generated EPUB/HTML and chapter images are
-// copied here.
+// build. Campaign Markdown is published separately under `public/tutorials`;
+// only generated EPUB/HTML and chapter images are copied here.
 function publishToPublicDocs(book: ReturnType<typeof buildEckyIrBook>) {
   fs.mkdirSync(publicDocsDir, { recursive: true });
   fs.copyFileSync(epubPath, path.join(publicDocsDir, 'ecky-ir-field-guide.epub'));

@@ -3,7 +3,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 
-import { isDocsRoute, parseDocsDocument, renderMarkdownFragment, resolveSection } from './eckyIrGuide';
+import {
+  docsSourcePath,
+  isDocsRoute,
+  parseDocsDocument,
+  renderMarkdownFragment,
+  resolveSection,
+} from './eckyIrGuide';
 
 function docsFixture(): string {
   const fixturePath = path.join(
@@ -15,6 +21,13 @@ function docsFixture(): string {
   return fs.readFileSync(fixturePath, 'utf8');
 }
 
+function campaignFixture(): string {
+  return fs.readFileSync(
+    path.join(process.cwd(), 'public', 'tutorials', 'ecky-campaign.md'),
+    'utf8',
+  );
+}
+
 test('isDocsRoute matches docs and learn guide paths only', () => {
   assert.equal(isDocsRoute('/docs/ecky-ir'), true);
   assert.equal(isDocsRoute('/ecky-ir/'), true);
@@ -23,19 +36,37 @@ test('isDocsRoute matches docs and learn guide paths only', () => {
   assert.equal(isDocsRoute('/docs/direct-occt'), false);
 });
 
+test('docsSourcePath separates campaign routes from dry reference routes', () => {
+  assert.equal(docsSourcePath('/learn/ecky-ir'), '/tutorials/ecky-campaign.md');
+  assert.equal(docsSourcePath('/learn/ecky-ir/level-04'), '/tutorials/ecky-campaign.md');
+  assert.equal(docsSourcePath('/docs/ecky-ir'), '/docs/ecky-ir.md');
+  assert.equal(docsSourcePath('/docs/ecky-ir/union'), '/docs/ecky-ir.md');
+  assert.equal(docsSourcePath('/ecky-ir'), '/tutorials/ecky-campaign.md');
+  assert.equal(docsSourcePath('/'), '/tutorials/ecky-campaign.md');
+});
+
 test('parseDocsDocument reads markdown corpus into title and sections', () => {
   const parsed = parseDocsDocument(docsFixture());
 
-  assert.equal(parsed.title, 'Ecky IR Field Guide');
-  assert.ok(parsed.summaryHtml.includes('working models'));
-  assert.equal(parsed.sections[0]?.title, 'How Ecky Thinks');
-  assert.equal(parsed.sections[1]?.title, 'First Solid: Ball on a Base');
-  assert.equal(parsed.sections[2]?.title, 'Sketch to Solid: Plate from a Profile');
-  assert.ok(parsed.sections.some((section) => section.title === 'Mesh and Image Geometry: Polygons in 3D'));
-  assert.ok(parsed.sections.some((section) => section.title === 'Final Model: Integrated Film Adapter Open Helicoid v9'));
-  assert.ok(parsed.sections.some((section) => section.title === 'Appendix: Language Reference'));
+  assert.equal(parsed.title, 'Ecky Language Reference');
+  assert.ok(parsed.summaryHtml.includes('Dry syntax'));
+  assert.equal(parsed.sections[0]?.title, 'Operation Index');
   assert.ok(parsed.sections.some((section) => section.title === 'Language Overview'));
   assert.ok(parsed.sections.some((section) => section.title === 'Verify Clauses'));
+  assert.ok(parsed.sections.some((section) => section.title === 'Primitive Signatures'));
+  assert.ok(!parsed.sections.some((section) => section.title.startsWith('Level ')));
+});
+
+test('parseDocsDocument reads tutorial campaign as six ordered levels', () => {
+  const parsed = parseDocsDocument(campaignFixture());
+
+  assert.equal(parsed.title, 'Ecky Campaign');
+  assert.equal(parsed.sections.length, 6);
+  assert.equal(parsed.sections[0]?.title, 'Level 01: Marker');
+  assert.equal(parsed.sections[4]?.title, 'Level 05: Perforated Toothbrush Holder');
+  assert.equal(parsed.sections[5]?.title, 'Level 06: Film Adapter');
+  assert.ok(parsed.sections.every((section) => section.bodyHtml.includes('<strong>Mission:</strong>')));
+  assert.ok(parsed.sections.every((section) => section.bodyHtml.includes('<strong>Clear condition:</strong>')));
 });
 
 test('parseDocsDocument reads section status and extracts snippets', () => {
@@ -43,10 +74,7 @@ test('parseDocsDocument reads section status and extracts snippets', () => {
   const constraintDojo = resolveSection(parsed.sections, 'constraint-dojo');
   const forms = resolveSection(parsed.sections, 'forms-and-structure');
   const params = resolveSection(parsed.sections, 'params-and-controls');
-  const repetition = resolveSection(parsed.sections, 'repetition-ribs-slots-and-patterns');
   const verify = resolveSection(parsed.sections, 'verify-clauses');
-  const verificationChapter = resolveSection(parsed.sections, 'verification-state-what-must-stay-true');
-  const selectors = resolveSection(parsed.sections, 'round-chamfer-shell-select-edges-and-faces');
 
   assert.equal(constraintDojo?.status, 'ready');
   assert.ok(constraintDojo?.bodyHtml.includes('fit/tolerance checklist'));
@@ -64,26 +92,15 @@ test('parseDocsDocument reads section status and extracts snippets', () => {
   assert.match(forms?.bodyHtml ?? '', /planned top-level clause for authored export\/manufacturing policy/i);
   assert.match(forms?.bodyHtml ?? '', /preview transforms never affect STL or STEP artifacts/i);
   assert.match(forms?.bodyHtml ?? '', /artifact manifests, and package output modes outside <code>\.ecky<\/code> source/i);
-  assert.match(params?.bodyHtml ?? '', /generation should emit suffixed literals like mm\/cm\/in\/deg\/rad/i);
-  assert.match(params?.bodyHtml ?? '', /emit suffixed literals for lengths and angles/i);
-  assert.match(params?.bodyHtml ?? '', /bare numbers only for counts, ratios, and unitless math/i);
-  assert.match(repetition?.bodyHtml ?? '', /model-level <code>let\*<\/code>/i);
-  assert.match(repetition?.bodyHtml ?? '', /helper <code>define<\/code>/i);
-  assert.match(repetition?.bodyHtml ?? '', /<code>define-component<\/code>/i);
-  assert.match(repetition?.bodyHtml ?? '', /<code>divider-depth<\/code> owns the offset calculation/i);
+  assert.match(params?.bodyHtml ?? '', /Humans may use bare numbers/i);
+  assert.match(params?.bodyHtml ?? '', /Agent-generated physical dimensions should use suffixed literals/i);
+  assert.match(
+    params?.bodyHtml ?? '',
+    /Bare numbers remain appropriate for counts, ratios, segments, and unitless math/i,
+  );
   assert.match(verify?.snippet ?? '', /\(verify/);
   assert.match(verify?.snippet ?? '', /clearance min-distance/i);
   assert.match(verify?.bodyHtml ?? '', /clearance min-distance/i);
-  assert.match(verificationChapter?.bodyHtml ?? '', /stores measurable requirements/i);
-  assert.match(verificationChapter?.bodyHtml ?? '', /reports the measured delta/i);
-  assert.match(verificationChapter?.bodyHtml ?? '', /verify_generated_model/i);
-  assert.match(verificationChapter?.bodyHtml ?? '', /Re-render and run verification again/i);
-  assert.match(selectors?.bodyHtml ?? '', /Tag any fit-critical selector\./);
-  assert.match(selectors?.bodyHtml ?? '', /:created-by pocket/);
-  assert.match(
-    selectors?.bodyHtml ?? '',
-    /limits face candidates to the cavity created from <code>pocket<\/code>/,
-  );
 });
 
 test('renderMarkdownFragment renders block images as figures', () => {
@@ -100,4 +117,16 @@ test('renderMarkdownFragment omits hidden render-source comments', () => {
   assert.match(html, /before/);
   assert.match(html, /after/);
   assert.doesNotMatch(html, /render-source/);
+});
+
+test('renderMarkdownFragment renders generated operation tables as semantic tables', () => {
+  const html = renderMarkdownFragment(
+    '| Form | Available backends |\n| --- | --- |\n| `box` | ecky-rust, build123d |',
+  );
+
+  assert.match(html, /<table>/);
+  assert.match(html, /<th>Form<\/th>/);
+  assert.match(html, /<th>Available backends<\/th>/);
+  assert.match(html, /<td><code>box<\/code><\/td>/);
+  assert.match(html, /<td>ecky-rust, build123d<\/td>/);
 });

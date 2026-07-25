@@ -1,0 +1,58 @@
+;; Worked project, stage 3: prove one custom wall cutter before repeating it.
+(model
+  (params
+    (number width 36.0 :min 20.0 :max 60.0 :label "Width")
+    (number depth 25.0 :min 15.0 :max 50.0 :label "Depth")
+    (number wall_thickness 2.6 :min 1.5 :max 5.0 :label "Wall thickness")
+    (number height 85.0 :min 40.0 :max 150.0 :label "Height")
+    (number drain_radius 5.0 :min 2.0 :max 8.0 :label "Drain radius"))
+  (part toothbrush_holder
+    (let* ((radius (/ width 2.0))
+           (inner_width (- width (* 2.0 wall_thickness)))
+           (inner_depth (- depth wall_thickness))
+           (inner_radius (- radius wall_thickness))
+           (outer
+             (union
+               (box width depth height :align '(center max center))
+               (cylinder radius height :align '(center center center))))
+           (cavity
+             (union
+               (box inner_width inner_depth (+ height 10.0)
+                 :align '(center max center))
+               (cylinder inner_radius (+ height 10.0)
+                 :align '(center center center))))
+           (shell (difference outer cavity))
+           (bottom_blank
+             (translate 0 0 (- (/ height 2.0))
+               (union
+                 (box width depth wall_thickness :align '(center max min))
+                 (cylinder radius wall_thickness :align '(center center min)))))
+           (drain
+             (translate 0 0 (- (/ height 2.0) 1.0)
+               (cylinder drain_radius (+ wall_thickness 2.0)
+                 :align '(center center min))))
+           (body (union shell (difference bottom_blank drain)))
+           (cutter_depth (+ wall_thickness 4.0))
+           (front_cutter_y (- radius wall_thickness 2.0))
+           (spade_profile
+             (polygon
+               ((0.0 4.7)
+                (-3.05 1.5)
+                (-3.25 -0.8)
+                (-2.15 -1.95)
+                (-0.55 -3.35)
+                (-1.15 -5.35)
+                (1.15 -5.35)
+                (0.55 -3.35)
+                (2.15 -1.95)
+                (3.25 -0.8)
+                (3.05 1.5))))
+           (spade
+             (place
+               (location
+                 (plane :origin '(0.0 0.0 0.0))
+                 :rotate '(-90.0 0.0 180.0))
+               (extrude spade_profile cutter_depth)))
+           (front_cutter
+             (translate 0.0 front_cutter_y 0.0 spade)))
+      (difference body front_cutter))))
