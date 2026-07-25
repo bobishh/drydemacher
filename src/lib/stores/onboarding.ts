@@ -53,7 +53,7 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
   },
   {
     id: 'projects',
-    text: "This is the Projects window. Your active threads, archived work, and trash live here, so you can return to old ideas or branch new ones.",
+    text: "This is the Projects window. Active, completed, and deleted projects live here. Reusable components and parts live in Library.",
     highlightTarget: 'projects',
     windowIdToOpen: 'projects',
   },

@@ -18,6 +18,9 @@ export function buildFailedDraftSeed(
   failedDesign: DesignOutput,
   workingDraft: ManualDraftSeedInput,
 ): DesignOutput {
+  const failedUiSpec = failedDesign.uiSpec;
+  const failedParams = failedDesign.initialParams;
+
   return {
     ...failedDesign,
     title: failedDesign.title || workingDraft.title || 'Manual Edit',
@@ -26,8 +29,14 @@ export function buildFailedDraftSeed(
     engineKind: failedDesign.engineKind ?? workingDraft.engineKind,
     sourceLanguage: failedDesign.sourceLanguage ?? workingDraft.sourceLanguage,
     geometryBackend: failedDesign.geometryBackend ?? workingDraft.geometryBackend,
-    uiSpec: failedDesign.uiSpec ?? workingDraft.uiSpec,
-    initialParams: failedDesign.initialParams ?? workingDraft.params,
+    uiSpec:
+      failedUiSpec?.fields.length
+        ? failedUiSpec
+        : workingDraft.uiSpec,
+    initialParams:
+      failedParams && Object.keys(failedParams).length > 0
+        ? failedParams
+        : workingDraft.params,
     postProcessing: failedDesign.postProcessing ?? workingDraft.postProcessing ?? null,
   };
 }

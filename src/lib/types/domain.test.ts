@@ -90,7 +90,7 @@ test("normalizeMessage heals ecky ir output backend from build123d runtime bundl
   assert.equal(message.output?.sourceLanguage, "ecky");
 });
 
-test("normalizeMessage preserves structural verification authored checks from persisted history payloads", () => {
+test("normalizeMessage preserves structural verification authored checks from camelCase payloads", () => {
   const message = normalizeMessage({
     id: "m-verify",
     role: "assistant",
@@ -100,18 +100,18 @@ test("normalizeMessage preserves structural verification authored checks from pe
     output: null,
     artifactBundle: null,
     modelManifest: null,
-    structural_verification: {
+    structuralVerification: {
       passed: false,
       summary: "Authored verify failed.",
       issues: [],
-      authored_verify_checks: [
+      authoredVerifyChecks: [
         {
           tag: "rib_clearance",
           status: "failed",
           message: "Gap below minimum.",
-          stable_node_id: "part:rib",
-          metric_source: "clearance",
-          metric_key: "min-distance",
+          stableNodeId: "part:rib",
+          metricSource: "clearance",
+          metricKey: "min-distance",
           comparator: ">=",
           expected: { kind: "number", value: 0.3 },
           actual: { kind: "number", value: 0.12 },
@@ -146,6 +146,44 @@ test("normalizeMessage preserves structural verification authored checks from pe
     expected: { kind: "number", value: 0.3 },
     actual: { kind: "number", value: 0.12 },
   });
+});
+
+test("normalizeMessage does not translate snake_case transport fields in the frontend", () => {
+  const message = normalizeMessage({
+    id: "m-snake",
+    role: "assistant",
+    content: "",
+    status: "success",
+    timestamp: 0,
+    structural_verification: {
+      passed: false,
+      summary: "snake payload",
+      issues: [],
+    },
+    model_manifest: {
+      modelId: "snake-model",
+      schemaVersion: 1,
+      sourceKind: "generated",
+      engineKind: "ecky",
+      sourceLanguage: "ecky",
+      geometryBackend: "mesh",
+      document: { title: "snake" },
+      parts: [],
+      parameterGroups: [],
+      controlPrimitives: [],
+      controlRelations: [],
+      controlViews: [],
+      previewViews: [],
+      advisories: [],
+      selectionTargets: [],
+      taggedAnchors: {},
+      warnings: [],
+      enrichmentState: { status: "none", proposals: [] },
+    },
+  } as any);
+
+  assert.equal(message.structuralVerification, null);
+  assert.equal(message.modelManifest, null);
 });
 
 test("normalizeArtifactBundle preserves topology target alias ids", () => {

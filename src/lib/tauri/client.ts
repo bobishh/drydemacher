@@ -1,4 +1,12 @@
-import { commands, type AppError, type AppLogEntry, type Result, type ThreadAgentState, type ThreadWindowLayout } from './contracts';
+import {
+  commands,
+  type AppError,
+  type AppLogEntry,
+  type DeletedThreadsPage,
+  type Result,
+  type ThreadAgentState,
+  type ThreadWindowLayout,
+} from './contracts';
 import {
   normalizeArtifactBundle,
   normalizeAttachment,
@@ -50,6 +58,7 @@ import {
 } from '../types/domain';
 import { resolveSketchPreviewDraftScopeId } from '../sketchPreviewDraftStore';
 import type {
+  AnimalCapCatalog,
   ComponentPackage,
   ComponentPackageHeader,
   BrepHiddenLineProjectionRequest,
@@ -323,6 +332,21 @@ export async function getDeletedMessages(): Promise<DeletedMessage[]> {
   );
 }
 
+export async function getDeletedThreadsPage(
+  before: string | null = null,
+  limit = 24,
+): Promise<DeletedThreadsPage> {
+  return invokeCommand(commands.getDeletedThreadsPage(before, limit));
+}
+
+export async function getDeletedThreadPreview(id: string): Promise<string | null> {
+  return invokeCommand(commands.getDeletedThreadPreview(id));
+}
+
+export async function restoreDeletedThread(id: string): Promise<void> {
+  await invokeCommand(commands.restoreDeletedThread(id));
+}
+
 export async function hideDeletedMessage(messageId: string): Promise<void> {
   await invokeCommand(commands.hideDeletedMessage(messageId));
 }
@@ -554,6 +578,10 @@ export async function installComponentPackageArchive(
 
 export async function listInstalledComponentPackageHeaders(): Promise<ComponentPackageHeader[]> {
   return invokeCommand(commands.listInstalledComponentPackageHeaders());
+}
+
+export async function getAnimalCapCatalog(): Promise<AnimalCapCatalog> {
+  return invokeCommand(commands.getAnimalCapCatalog());
 }
 
 export async function suggestSketchFeatures(

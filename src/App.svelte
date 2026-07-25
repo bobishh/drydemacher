@@ -21,12 +21,14 @@
   import Modal from './lib/Modal.svelte';
   import Window from './lib/Window.svelte';
   import ProjectSwitcher from './lib/ProjectSwitcher.svelte';
+  import LibraryPanel from './lib/LibraryPanel.svelte';
   import {
     windowStore,
     windowLayoutRemembered,
     loadLayoutForThread,
     showWindow,
     toggleWindow,
+    fitVisibleWindowsToViewport,
     closeWindow as closeWindowStore,
     hardFlush as hardFlushWindowLayout,
     teardown as teardownWindowStore,
@@ -572,7 +574,6 @@
   const status = $derived($session.status);
   const error = $derived($session.error);
   const stlUrl = $derived($session.stlUrl);
-  const runtimeRevision = $derived($session.runtimeRevision);
   const activeArtifactBundle = $derived($session.artifactBundle);
   const sessionModelManifest = $derived($session.modelManifest);
   let selectedContextTargetId = $state<string | null>(null);
@@ -766,7 +767,6 @@
       activeVersionId: $activeVersionId ?? null,
       activeVersionMessage,
       cameraStateByTarget,
-      runtimeRevision,
       stlUrl,
       toAssetUrl,
     }),
@@ -949,6 +949,7 @@
   const terminalWindowState = $derived($windowStore.terminal);
   const codeWindowState = $derived($windowStore.code);
   const projectsWindowState = $derived($windowStore.projects);
+  const libraryWindowState = $derived($windowStore.library);
   const paramsWindowState = $derived($windowStore.params);
   const dialogueWindowState = $derived($windowStore.dialogue);
   const docsWindowState = $derived($windowStore.docs);
@@ -957,6 +958,7 @@
   let mountedWindows = $state<Record<WindowId, boolean>>({
     code: false,
     projects: false,
+    library: false,
     params: false,
     dialogue: false,
     docs: false,
@@ -965,9 +967,30 @@
     sketch: false,
     activity: false,
   });
+  let windowFitAnimationFrame: number | null = null;
+
+  function handleViewportResize() {
+    if (windowFitAnimationFrame !== null) {
+      cancelAnimationFrame(windowFitAnimationFrame);
+    }
+    windowFitAnimationFrame = requestAnimationFrame(() => {
+      windowFitAnimationFrame = null;
+      fitVisibleWindowsToViewport({
+        width: window.innerWidth,
+        height: window.innerHeight,
+      });
+    });
+  }
+
+  onDestroy(() => {
+    if (windowFitAnimationFrame !== null) {
+      cancelAnimationFrame(windowFitAnimationFrame);
+    }
+  });
+
   $effect(() => {
     const s = $windowStore;
-    for (const id of ['code', 'projects', 'params', 'dialogue', 'docs', 'settings', 'terminal', 'activity', 'sketch'] as WindowId[]) {
+    for (const id of ['code', 'projects', 'library', 'params', 'dialogue', 'docs', 'settings', 'terminal', 'activity', 'sketch'] as WindowId[]) {
       if (s[id].visible) {
         mountedWindows[id] = true;
       }
@@ -3342,7 +3365,7 @@
 
 </script>
 
-<svelte:window onbeforeunload={hardFlushWindowLayout} />
+<svelte:window onbeforeunload={hardFlushWindowLayout} onresize={handleViewportResize} />
 
 <div class="app-page" role="application">
   {#if $onboarding.isActive}
@@ -3439,6 +3462,21 @@
             <path d="M4 7h6l2 2h8v10H4V7Z" />
             <path d="M4 11h16" />
             <path d="M7 15h10" />
+          </svg>
+        </button>
+        <button
+          class="dock-btn"
+          class:dock-btn--active={$windowStore.library.visible}
+          data-dock-label="LIBRARY"
+          onclick={() => toggleWindow('library')}
+          aria-label="LIBRARY"
+          title="Reusable component library"
+        >
+          <svg class="dock-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M5 5h6v14H5V5Z" />
+            <path d="M13 5h6v14h-6V5Z" />
+            <path d="M8 8v8" />
+            <path d="M16 8v8" />
           </svg>
         </button>
         <button
@@ -3788,10 +3826,28 @@
     >
       <ProjectSwitcher
         onImportFcstd={handleImportFcstd}
-        onImportFreecadLibraryPart={handleImportFreecadLibraryPart}
         onOpenNewProjectChooser={() => showNewProjectChooser = true}
         freecadUnavailableReason={freecadUnavailableReason}
       />
+    </Window>
+  {/if}
+
+  {#if libraryWindowState.visible}
+    <Window
+      windowId="library"
+      x={libraryWindowState.x}
+      y={libraryWindowState.y}
+      width={libraryWindowState.width}
+      height={libraryWindowState.height}
+      z={libraryWindowState.z}
+      minWidth={320}
+      minHeight={320}
+      title="Library"
+      focused={libraryWindowState.active}
+      hidden={!libraryWindowState.visible}
+      onclose={() => closeWindowStore('library')}
+    >
+      <LibraryPanel onImportFreecadLibraryPart={handleImportFreecadLibraryPart} />
     </Window>
   {/if}
 

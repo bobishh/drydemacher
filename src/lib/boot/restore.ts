@@ -477,7 +477,6 @@ async function loadRestoredThreadPage(threadId: string) {
         error: formatBackendError(e),
       },
     }));
-    session.setError(`Thread Messages Error: ${formatBackendError(e)}`);
   } finally {
     if (get(activeThreadId) === threadId) {
       activeThreadMessagesLoading.set(false);

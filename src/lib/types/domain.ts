@@ -338,9 +338,9 @@ export type ManifestEnrichmentState = Contract.ManifestEnrichmentState;
 export type ModelManifest = Contract.ModelManifest;
 
 export type AuthoringTargetRef =
-  | { kind: 'savedVersion'; threadId: string; messageId: string }
-  | { kind: 'draft'; threadId: string; previewId: string; sessionId: string }
-  | { kind: 'latestSaved'; threadId: string };
+  | { kind: "savedVersion"; threadId: string; messageId: string }
+  | { kind: "draft"; threadId: string; previewId: string; sessionId: string }
+  | { kind: "latestSaved"; threadId: string };
 
 export interface LastDesignSnapshot {
   design: DesignOutput | null;
@@ -402,27 +402,21 @@ function normalizeAuthoredVerifyCheck(
     stableNodeId:
       typeof raw.stableNodeId === "string"
         ? raw.stableNodeId
-        : typeof raw.stable_node_id === "string"
-          ? raw.stable_node_id
-          : raw.stableNodeId === null || raw.stable_node_id === null
-            ? null
-            : null,
+        : raw.stableNodeId === null
+          ? null
+          : null,
     metricSource:
       typeof raw.metricSource === "string"
         ? raw.metricSource
-        : typeof raw.metric_source === "string"
-          ? raw.metric_source
-          : raw.metricSource === null || raw.metric_source === null
-            ? null
-            : null,
+        : raw.metricSource === null
+          ? null
+          : null,
     metricKey:
       typeof raw.metricKey === "string"
         ? raw.metricKey
-        : typeof raw.metric_key === "string"
-          ? raw.metric_key
-          : raw.metricKey === null || raw.metric_key === null
-            ? null
-            : null,
+        : raw.metricKey === null
+          ? null
+          : null,
     comparator:
       typeof raw.comparator === "string"
         ? raw.comparator
@@ -434,7 +428,9 @@ function normalizeAuthoredVerifyCheck(
   };
 }
 
-function normalizeAuthoredVerifyValue(value: unknown): AuthoredVerifyValue | null {
+function normalizeAuthoredVerifyValue(
+  value: unknown,
+): AuthoredVerifyValue | null {
   if (!value || typeof value !== "object") return null;
   const raw = value as Record<string, unknown>;
   if (raw.kind === "number" && typeof raw.value === "number") {
@@ -459,11 +455,7 @@ export function normalizeStructuralVerificationResult(
   if (!result || typeof result !== "object") return null;
   const raw = result as Record<string, unknown>;
   const authoredVerifyChecks = (
-    Array.isArray(raw.authoredVerifyChecks)
-      ? raw.authoredVerifyChecks
-      : Array.isArray(raw.authored_verify_checks)
-        ? raw.authored_verify_checks
-        : []
+    Array.isArray(raw.authoredVerifyChecks) ? raw.authoredVerifyChecks : []
   )
     .map((check) =>
       normalizeAuthoredVerifyCheck(check as Record<string, unknown>),
@@ -512,7 +504,7 @@ function isBuild123dCompat(value: unknown): boolean {
 }
 
 function isEckyCompat(value: unknown): boolean {
-  return value === "ecky" || value === "eckyIrV0" || value === "ecky_ir_v0";
+  return value === "ecky" || value === "eckyIrV0";
 }
 
 function normalizeEngineKindValue(value: unknown): EngineKind | undefined {
@@ -524,7 +516,6 @@ function normalizeEngineKindValue(value: unknown): EngineKind | undefined {
       return "build123d";
     case "ecky":
     case "eckyIrV0":
-    case "ecky_ir_v0":
       return "ecky";
     default:
       return undefined;
@@ -542,7 +533,6 @@ function normalizeMacroDialectValue(value: unknown): MacroDialect | undefined {
       return "build123d";
     case "ecky":
     case "eckyIrV0":
-    case "ecky_ir_v0":
       return "ecky";
     default:
       return undefined;
@@ -555,11 +545,9 @@ function normalizeSourceLanguageValue(
 ): SourceLanguage | undefined {
   switch (value) {
     case "legacyPython":
-    case "legacy_python":
       return "legacyPython";
     case "ecky":
     case "eckyIrV0":
-    case "ecky_ir_v0":
       if (engineKind === "build123d" || engineKind === "build123D")
         return "build123d";
       if (engineKind === "freecad") return "legacyPython";
@@ -590,7 +578,6 @@ function normalizeGeometryBackendValue(
       return "build123d";
     case "mesh":
     case "eckyRust":
-    case "ecky_rust":
       return "mesh";
     default:
       if (engineKind === "build123d" || engineKind === "build123D")
@@ -628,19 +615,13 @@ function normalizeLithophaneAttachmentSource(
   if (kind === "file") {
     return {
       kind: "file",
-      imagePath:
-        (source as { imagePath?: string }).imagePath ??
-        (source as { image_path?: string }).image_path ??
-        "",
+      imagePath: (source as { imagePath?: string }).imagePath ?? "",
     };
   }
   if (kind === "param") {
     return {
       kind: "param",
-      imageParam:
-        (source as { imageParam?: string }).imageParam ??
-        (source as { image_param?: string }).image_param ??
-        "",
+      imageParam: (source as { imageParam?: string }).imageParam ?? "",
     };
   }
   return null;
@@ -666,10 +647,7 @@ function normalizeLithophaneAttachment(
     id: (attachment as { id?: string }).id ?? inferredId,
     enabled: (attachment as { enabled?: boolean }).enabled ?? true,
     source,
-    targetPartId:
-      (attachment as { targetPartId?: string }).targetPartId ??
-      (attachment as { target_part_id?: string }).target_part_id ??
-      "",
+    targetPartId: (attachment as { targetPartId?: string }).targetPartId ?? "",
     placement: {
       mode: placement?.mode ?? "partSidePatch",
       side: placement?.side ?? "front",
@@ -745,7 +723,6 @@ export function normalizePostProcessing(
         lithophaneAttachments?: LithophaneAttachment[] | null;
       }
     ).lithophaneAttachments ??
-      (legacy.lithophane_attachments as LithophaneAttachment[] | undefined) ??
       []) ||
     [];
   const attachments = rawAttachments
@@ -876,12 +853,8 @@ export function normalizeUiField(
         min: optionalNumber(raw.min as number | null | undefined),
         max: optionalNumber(raw.max as number | null | undefined),
         step: optionalNumber(raw.step as number | null | undefined),
-        minFrom: optionalString(
-          (raw.minFrom ?? raw.min_from) as string | null | undefined,
-        ),
-        maxFrom: optionalString(
-          (raw.maxFrom ?? raw.max_from) as string | null | undefined,
-        ),
+        minFrom: optionalString(raw.minFrom as string | null | undefined),
+        maxFrom: optionalString(raw.maxFrom as string | null | undefined),
         frozen,
       };
     case "number":
@@ -892,12 +865,8 @@ export function normalizeUiField(
         min: optionalNumber(raw.min as number | null | undefined),
         max: optionalNumber(raw.max as number | null | undefined),
         step: optionalNumber(raw.step as number | null | undefined),
-        minFrom: optionalString(
-          (raw.minFrom ?? raw.min_from) as string | null | undefined,
-        ),
-        maxFrom: optionalString(
-          (raw.maxFrom ?? raw.max_from) as string | null | undefined,
-        ),
+        minFrom: optionalString(raw.minFrom as string | null | undefined),
+        maxFrom: optionalString(raw.maxFrom as string | null | undefined),
         frozen,
       };
     case "select":
@@ -945,64 +914,32 @@ export function normalizeUiSpec(
 export function normalizeDesignOutput(
   output: Contract.DesignOutput | DesignOutput | null | undefined,
 ): DesignOutput {
-  const legacy = (output ?? {}) as Partial<Contract.DesignOutput> &
-    Record<string, unknown>;
+  const raw = (output ?? {}) as Partial<Contract.DesignOutput>;
   return {
-    title:
-      ((output?.title ?? legacy.title) as string | undefined) ??
-      "Untitled Design",
-    versionName:
-      output?.versionName ??
-      (legacy.version_name as string | undefined) ??
-      "V1",
-    response:
-      ((output?.response ?? legacy.response) as string | undefined) ?? "",
-    interactionMode:
-      output?.interactionMode ??
-      (legacy.interaction_mode as InteractionMode | undefined) ??
-      "design",
-    macroCode:
-      output?.macroCode ?? (legacy.macro_code as string | undefined) ?? "",
-    macroDialect:
-      normalizeMacroDialectValue(
-        output?.macroDialect ??
-          (legacy.macro_dialect as MacroDialect | undefined),
-      ) ?? "legacy",
-    engineKind:
-      normalizeEngineKindValue(
-        output?.engineKind ?? (legacy.engine_kind as EngineKind | undefined),
-      ) ?? "freecad",
+    title: raw.title ?? "Untitled Design",
+    versionName: raw.versionName ?? "V1",
+    response: raw.response ?? "",
+    interactionMode: raw.interactionMode ?? "design",
+    macroCode: raw.macroCode ?? "",
+    macroDialect: normalizeMacroDialectValue(raw.macroDialect) ?? "legacy",
+    engineKind: normalizeEngineKindValue(raw.engineKind) ?? "freecad",
     sourceLanguage:
-      normalizeSourceLanguageValue(
-        output?.sourceLanguage ??
-          (legacy.source_language as SourceLanguage | undefined),
-        output?.engineKind ?? legacy.engine_kind,
-      ) ??
-      (isEckyCompat(output?.engineKind ?? legacy.engine_kind)
+      normalizeSourceLanguageValue(raw.sourceLanguage, raw.engineKind) ??
+      (isEckyCompat(raw.engineKind)
         ? "ecky"
-        : isBuild123dCompat(output?.engineKind ?? legacy.engine_kind)
+        : isBuild123dCompat(raw.engineKind)
           ? "build123d"
           : "legacyPython"),
     geometryBackend:
-      normalizeGeometryBackendValue(
-        output?.geometryBackend ??
-          (legacy.geometry_backend as GeometryBackend | undefined),
-        output?.engineKind ?? legacy.engine_kind,
-      ) ??
-      (isEckyCompat(output?.engineKind ?? legacy.engine_kind)
+      normalizeGeometryBackendValue(raw.geometryBackend, raw.engineKind) ??
+      (isEckyCompat(raw.engineKind)
         ? "mesh"
-        : isBuild123dCompat(output?.engineKind ?? legacy.engine_kind)
+        : isBuild123dCompat(raw.engineKind)
           ? "build123d"
           : "freecad"),
-    uiSpec: normalizeUiSpec(output?.uiSpec ?? legacy.ui_spec),
-    initialParams: normalizeDesignParams(
-      output?.initialParams ?? legacy.initial_params,
-    ),
-    postProcessing: normalizePostProcessing(
-      output?.postProcessing ??
-        (legacy.post_processing as PostProcessingSpec | undefined) ??
-        null,
-    ),
+    uiSpec: normalizeUiSpec(raw.uiSpec),
+    initialParams: normalizeDesignParams(raw.initialParams),
+    postProcessing: normalizePostProcessing(raw.postProcessing ?? null),
   };
 }
 
@@ -1028,19 +965,12 @@ function healIrGeometryBackend(
 }
 
 export function normalizeMessage(message: Contract.Message | Message): Message {
-  const legacy = message as Contract.Message & Record<string, unknown>;
-  const artifactBundle =
-    message.artifactBundle || legacy.artifact_bundle
-      ? normalizeArtifactBundle(
-          (message.artifactBundle ?? legacy.artifact_bundle) as ArtifactBundle,
-        )
-      : null;
-  const modelManifest =
-    message.modelManifest || legacy.model_manifest
-      ? normalizeModelManifest(
-          (message.modelManifest ?? legacy.model_manifest) as ModelManifest,
-        )
-      : null;
+  const artifactBundle = message.artifactBundle
+    ? normalizeArtifactBundle(message.artifactBundle as ArtifactBundle)
+    : null;
+  const modelManifest = message.modelManifest
+    ? normalizeModelManifest(message.modelManifest as ModelManifest)
+    : null;
   const output = healIrGeometryBackend(
     message.output ? normalizeDesignOutput(message.output) : null,
     artifactBundle,
@@ -1054,28 +984,16 @@ export function normalizeMessage(message: Contract.Message | Message): Message {
     output,
     usage: normalizeUsageSummary(message.usage),
     structuralVerification: normalizeStructuralVerificationResult(
-      (message as Message).structuralVerification ??
-        (legacy.structural_verification as
-          | StructuralVerificationResult
-          | undefined) ??
-        null,
+      (message as Message).structuralVerification ?? null,
     ),
     artifactBundle,
     modelManifest,
-    agentOrigin:
-      message.agentOrigin ??
-      (legacy.agent_origin as AgentOrigin | undefined) ??
-      null,
+    agentOrigin: message.agentOrigin ?? null,
     imageData: message.imageData ?? null,
-    visualKind:
-      message.visualKind ??
-      (legacy.visual_kind as MessageVisualKind | undefined) ??
-      null,
+    visualKind: message.visualKind ?? null,
     attachmentImages: Array.isArray(message.attachmentImages)
       ? [...message.attachmentImages]
-      : Array.isArray(legacy.attachment_images)
-        ? [...(legacy.attachment_images as string[])]
-        : [],
+      : [],
     timestamp: message.timestamp,
   };
 }
@@ -1181,11 +1099,7 @@ export function normalizeGenieTraits(
 }
 
 export function normalizeThread(thread: Contract.Thread | Thread): Thread {
-  const legacy = thread as Contract.Thread & Record<string, unknown>;
-  const genieTraits =
-    thread.genieTraits ??
-    (legacy.genie_traits as GenieTraits | undefined) ??
-    null;
+  const genieTraits = thread.genieTraits ?? null;
   return {
     id: thread.id,
     title: thread.title,
@@ -1193,34 +1107,21 @@ export function normalizeThread(thread: Contract.Thread | Thread): Thread {
     messages: Array.isArray(thread.messages)
       ? thread.messages.map(normalizeMessage)
       : [],
-    updatedAt:
-      thread.updatedAt ?? (legacy.updated_at as number | undefined) ?? 0,
-    versionCount:
-      thread.versionCount ?? (legacy.version_count as number | undefined) ?? 0,
-    pendingCount:
-      thread.pendingCount ?? (legacy.pending_count as number | undefined) ?? 0,
-    queuedCount:
-      thread.queuedCount ?? (legacy.queued_count as number | undefined) ?? 0,
-    errorCount:
-      thread.errorCount ?? (legacy.error_count as number | undefined) ?? 0,
+    updatedAt: thread.updatedAt ?? 0,
+    versionCount: thread.versionCount ?? 0,
+    pendingCount: thread.pendingCount ?? 0,
+    queuedCount: thread.queuedCount ?? 0,
+    errorCount: thread.errorCount ?? 0,
     genieTraits: genieTraits ? normalizeGenieTraits(genieTraits) : null,
-    status:
-      thread.status ??
-      (legacy.thread_status as ThreadStatus | undefined) ??
-      "active",
-    finalizedAt:
-      thread.finalizedAt ?? (legacy.finalized_at as number | undefined) ?? null,
-    pendingConfirm:
-      thread.pendingConfirm ??
-      (legacy.pending_confirm as string | undefined) ??
-      null,
+    status: thread.status ?? "active",
+    finalizedAt: thread.finalizedAt ?? null,
+    pendingConfirm: thread.pendingConfirm ?? null,
   };
 }
 
 export function normalizeDeletedMessage(
   message: Contract.DeletedMessage | DeletedMessage,
 ): DeletedMessage {
-  const legacy = message as Contract.DeletedMessage & Record<string, unknown>;
   return {
     id: message.id,
     threadId: message.threadId,
@@ -1229,34 +1130,19 @@ export function normalizeDeletedMessage(
     content: message.content,
     output: message.output ? normalizeDesignOutput(message.output) : null,
     usage: normalizeUsageSummary(message.usage),
-    artifactBundle:
-      message.artifactBundle || legacy.artifact_bundle
-        ? normalizeArtifactBundle(
-            (message.artifactBundle ??
-              legacy.artifact_bundle) as ArtifactBundle,
-          )
-        : null,
-    modelManifest:
-      message.modelManifest || legacy.model_manifest
-        ? normalizeModelManifest(
-            (message.modelManifest ?? legacy.model_manifest) as ModelManifest,
-          )
-        : null,
-    agentOrigin:
-      message.agentOrigin ??
-      (legacy.agent_origin as AgentOrigin | undefined) ??
-      null,
+    artifactBundle: message.artifactBundle
+      ? normalizeArtifactBundle(message.artifactBundle as ArtifactBundle)
+      : null,
+    modelManifest: message.modelManifest
+      ? normalizeModelManifest(message.modelManifest as ModelManifest)
+      : null,
+    agentOrigin: message.agentOrigin ?? null,
     timestamp: message.timestamp,
     imageData: message.imageData ?? null,
-    visualKind:
-      message.visualKind ??
-      (legacy.visual_kind as MessageVisualKind | undefined) ??
-      null,
+    visualKind: message.visualKind ?? null,
     attachmentImages: Array.isArray(message.attachmentImages)
       ? [...message.attachmentImages]
-      : Array.isArray(legacy.attachment_images)
-        ? [...(legacy.attachment_images as string[])]
-        : [],
+      : [],
     deletedAt: message.deletedAt,
   };
 }
@@ -1264,31 +1150,22 @@ export function normalizeDeletedMessage(
 export function normalizeConfig(
   config: Contract.Config | AppConfig,
 ): AppConfig {
-  const legacy = config as Contract.Config & Record<string, unknown>;
-  const rawVoice =
-    (config as AppConfig).voice ?? (legacy.voice as VoiceConfig | undefined);
+  const rawVoice = (config as AppConfig).voice;
   const sttLanguageCode =
     `${rawVoice?.sttLanguageCode ?? "en-US"}`.trim() || "en-US";
   return {
     engines: Array.isArray(config.engines) ? [...config.engines] : [],
-    selectedEngineId:
-      config.selectedEngineId ??
-      (legacy.selected_engine_id as string | undefined) ??
-      "",
+    selectedEngineId: config.selectedEngineId ?? "",
     freecadCmd: typeof config.freecadCmd === "string" ? config.freecadCmd : "",
     cadTextFontPath:
       typeof (config as AppConfig).cadTextFontPath === "string"
         ? (config as AppConfig).cadTextFontPath
-        : typeof legacy.cad_text_font_path === "string"
-          ? legacy.cad_text_font_path
-          : "",
+        : "",
     freecadLibraryRoots: Array.isArray(
       (config as AppConfig).freecadLibraryRoots,
     )
       ? [...(config as AppConfig).freecadLibraryRoots]
-      : Array.isArray((legacy as any).freecad_library_roots)
-        ? [...((legacy as any).freecad_library_roots as string[])]
-        : [],
+      : [],
     assets: Array.isArray(config.assets) ? [...config.assets] : [],
     microwave: config.microwave
       ? {
@@ -1336,62 +1213,38 @@ export function normalizeConfig(
           eckyAstAuthoring: false,
           autoAgents: [],
         },
-    hasSeenOnboarding: Boolean(
-      config.hasSeenOnboarding ?? legacy.has_seen_onboarding,
-    ),
+    hasSeenOnboarding: Boolean(config.hasSeenOnboarding),
     connectionType: (config as AppConfig).connectionType ?? null,
     defaultEngineKind:
-      normalizeEngineKindValue(
-        (config as AppConfig).defaultEngineKind ??
-          (legacy.default_engine_kind as EngineKind | undefined),
-      ) ?? "freecad",
+      normalizeEngineKindValue((config as AppConfig).defaultEngineKind) ??
+      "freecad",
     defaultSourceLanguage:
       normalizeSourceLanguageValue(
-        (config as AppConfig).defaultSourceLanguage ??
-          (legacy.default_source_language as SourceLanguage | undefined),
-        (config as AppConfig).defaultEngineKind ?? legacy.default_engine_kind,
+        (config as AppConfig).defaultSourceLanguage,
+        (config as AppConfig).defaultEngineKind,
       ) ??
-      (isEckyCompat(
-        (config as AppConfig).defaultEngineKind ?? legacy.default_engine_kind,
-      )
+      (isEckyCompat((config as AppConfig).defaultEngineKind)
         ? "ecky"
-        : isBuild123dCompat(
-              (config as AppConfig).defaultEngineKind ??
-                legacy.default_engine_kind,
-            )
+        : isBuild123dCompat((config as AppConfig).defaultEngineKind)
           ? "build123d"
           : "legacyPython"),
     defaultGeometryBackend:
       normalizeGeometryBackendValue(
-        (config as AppConfig).defaultGeometryBackend ??
-          (legacy.default_geometry_backend as GeometryBackend | undefined),
-        (config as AppConfig).defaultEngineKind ?? legacy.default_engine_kind,
+        (config as AppConfig).defaultGeometryBackend,
+        (config as AppConfig).defaultEngineKind,
       ) ??
-      (isEckyCompat(
-        (config as AppConfig).defaultEngineKind ?? legacy.default_engine_kind,
-      )
+      (isEckyCompat((config as AppConfig).defaultEngineKind)
         ? "mesh"
-        : isBuild123dCompat(
-              (config as AppConfig).defaultEngineKind ??
-                legacy.default_engine_kind,
-            )
+        : isBuild123dCompat((config as AppConfig).defaultEngineKind)
           ? "build123d"
           : "freecad"),
     maxGenerationAttempts: Math.max(
       1,
-      Number(
-        (config as AppConfig).maxGenerationAttempts ??
-          (legacy as any).max_generation_attempts ??
-          3,
-      ) || 3,
+      Number((config as AppConfig).maxGenerationAttempts ?? 3) || 3,
     ),
     maxVerifyAttempts: Math.max(
       0,
-      Number(
-        (config as AppConfig).maxVerifyAttempts ??
-          (legacy as any).max_verify_attempts ??
-          0,
-      ) || 0,
+      Number((config as AppConfig).maxVerifyAttempts ?? 2) || 2,
     ),
   };
 }
@@ -1414,20 +1267,13 @@ export function normalizeLastDesignSnapshot(
       targetRef: null,
     };
   }
-  const legacy = snapshot as Partial<Contract.LastDesignSnapshot> &
-    Record<string, unknown>;
-  const artifactBundle =
-    legacy.artifactBundle || legacy.artifact_bundle
-      ? normalizeArtifactBundle(
-          (legacy.artifactBundle ?? legacy.artifact_bundle) as ArtifactBundle,
-        )
-      : null;
-  const modelManifest =
-    legacy.modelManifest || legacy.model_manifest
-      ? normalizeModelManifest(
-          (legacy.modelManifest ?? legacy.model_manifest) as ModelManifest,
-        )
-      : null;
+  const legacy = snapshot as Partial<Contract.LastDesignSnapshot>;
+  const artifactBundle = legacy.artifactBundle
+    ? normalizeArtifactBundle(legacy.artifactBundle as ArtifactBundle)
+    : null;
+  const modelManifest = legacy.modelManifest
+    ? normalizeModelManifest(legacy.modelManifest as ModelManifest)
+    : null;
   if (!legacy.design && !artifactBundle && !modelManifest) {
     return null;
   }
@@ -1439,24 +1285,14 @@ export function normalizeLastDesignSnapshot(
       artifactBundle,
       modelManifest,
     ),
-    threadId:
-      (legacy.threadId as string | null | undefined) ??
-      (legacy.thread_id as string | null | undefined) ??
-      null,
-    messageId:
-      (legacy.messageId as string | null | undefined) ??
-      (legacy.message_id as string | null | undefined) ??
-      null,
+    threadId: (legacy.threadId as string | null | undefined) ?? null,
+    messageId: (legacy.messageId as string | null | undefined) ?? null,
     artifactBundle,
     modelManifest,
     selectedPartId:
-      (legacy.selectedPartId as string | null | undefined) ??
-      (legacy.selected_part_id as string | null | undefined) ??
-      null,
+      (legacy.selectedPartId as string | null | undefined) ?? null,
     targetRef:
-      (legacy.targetRef as AuthoringTargetRef | null | undefined) ??
-      (legacy.target_ref as AuthoringTargetRef | null | undefined) ??
-      null,
+      (legacy.targetRef as AuthoringTargetRef | null | undefined) ?? null,
   };
 }
 
@@ -1551,7 +1387,9 @@ export function normalizeModelManifest(
             (view.viewId?.startsWith("view-manual-") ? "manual" : "generated"),
         }))
       : [],
-    previewViews: Array.isArray((manifest as Contract.ModelManifest).previewViews)
+    previewViews: Array.isArray(
+      (manifest as Contract.ModelManifest).previewViews,
+    )
       ? [...((manifest as Contract.ModelManifest).previewViews || [])]
       : [],
     advisories: Array.isArray(manifest.advisories)
@@ -1583,25 +1421,27 @@ export function normalizeModelManifest(
     taggedAnchors:
       manifest.taggedAnchors && typeof manifest.taggedAnchors === "object"
         ? Object.fromEntries(
-            Object.entries(manifest.taggedAnchors).flatMap(([tagName, anchor]) => {
-              if (!anchor) return [];
-              const normalizedAnchor: Contract.TaggedAnchorBinding = {
-                ...anchor,
-                targetIds: Array.isArray(anchor.targetIds)
-                  ? [...anchor.targetIds]
-                  : [],
-                durableTargetIds: Array.isArray(anchor.durableTargetIds)
-                  ? [...anchor.durableTargetIds]
-                  : [],
-                canonicalTargetIds: Array.isArray(anchor.canonicalTargetIds)
-                  ? [...anchor.canonicalTargetIds]
-                  : [],
-                aliasIds: Array.isArray(anchor.aliasIds)
-                  ? [...anchor.aliasIds]
-                  : [],
-              };
-              return [[tagName, normalizedAnchor] as const];
-            }),
+            Object.entries(manifest.taggedAnchors).flatMap(
+              ([tagName, anchor]) => {
+                if (!anchor) return [];
+                const normalizedAnchor: Contract.TaggedAnchorBinding = {
+                  ...anchor,
+                  targetIds: Array.isArray(anchor.targetIds)
+                    ? [...anchor.targetIds]
+                    : [],
+                  durableTargetIds: Array.isArray(anchor.durableTargetIds)
+                    ? [...anchor.durableTargetIds]
+                    : [],
+                  canonicalTargetIds: Array.isArray(anchor.canonicalTargetIds)
+                    ? [...anchor.canonicalTargetIds]
+                    : [],
+                  aliasIds: Array.isArray(anchor.aliasIds)
+                    ? [...anchor.aliasIds]
+                    : [],
+                };
+                return [[tagName, normalizedAnchor] as const];
+              },
+            ),
           )
         : {},
     warnings: Array.isArray(manifest.warnings) ? [...manifest.warnings] : [],

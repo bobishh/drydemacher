@@ -8,6 +8,7 @@ import {
   _mergeDbLayout,
   _resetWindowStoreForTest,
   bringToFront,
+  fitVisibleWindowsToViewport,
   showWindow,
   windowRegistry,
   windowStore,
@@ -82,6 +83,40 @@ test('docs window is registered and can be opened', () => {
   assert.equal(state.docs.visible, true);
   assert.equal(state.docs.minimized, false);
   assert.ok(state.docs.width >= windowRegistry.docs.minSize.width);
+
+  _resetWindowStoreForTest();
+});
+
+test('library window is registered independently from projects', () => {
+  _resetWindowStoreForTest();
+
+  assert.ok(ALL_WINDOW_IDS.includes('library'));
+  assert.equal(windowRegistry.library.title, 'Library');
+
+  showWindow('library');
+  const state = get(windowStore);
+  assert.equal(state.library.visible, true);
+  assert.equal(state.projects.visible, false);
+
+  _resetWindowStoreForTest();
+});
+
+test('fitVisibleWindowsToViewport reclamps an already-open window after viewport resize', () => {
+  _resetWindowStoreForTest();
+  showWindow('projects');
+
+  fitVisibleWindowsToViewport({ width: 320, height: 700 });
+
+  const projects = get(windowStore).projects;
+  assert.deepEqual(
+    {
+      x: projects.x,
+      y: projects.y,
+      width: projects.width,
+      height: projects.height,
+    },
+    { x: 0, y: 80, width: 320, height: 500 },
+  );
 
   _resetWindowStoreForTest();
 });

@@ -647,7 +647,6 @@ export async function loadFromHistory(thread: Thread) {
         isLoading: false,
         error: formatBackendError(e),
       });
-      session.setError(`Thread Messages Error: ${formatBackendError(e)}`);
     }
   } finally {
     if (isCurrentThreadLoad(switchToken, targetThreadId)) {
@@ -938,7 +937,7 @@ export async function finalizeThread(id: string) {
       await clearLastSessionSnapshot();
     }
     await refreshHistory();
-    session.setStatus('Selected model promoted to inventory.');
+    session.setStatus('Project completed.');
   } catch (e) {
     session.setError(`Finalize Error: ${formatBackendError(e)}`);
   }
@@ -948,7 +947,7 @@ export async function reopenThread(id: string) {
   try {
     await reopenThreadCommand(id);
     await refreshHistory();
-    session.setStatus('Thread reopened from inventory.');
+    session.setStatus('Project reopened.');
   } catch (e) {
     session.setError(`Reopen Error: ${formatBackendError(e)}`);
   }
@@ -958,10 +957,10 @@ export async function openInventoryThread(id: string): Promise<boolean> {
   try {
     const thread = await getThread(id);
     await loadFromHistory(thread);
-    session.setStatus('Opened final model from inventory.');
+    session.setStatus('Viewing completed project.');
     return true;
   } catch (e) {
-    session.setError(`Open Inventory Model Error: ${formatBackendError(e)}`);
+    session.setError(`Open Completed Project Error: ${formatBackendError(e)}`);
     return false;
   }
 }
