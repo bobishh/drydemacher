@@ -166,7 +166,7 @@ test('deriveViewportState changes viewer model key across projects for the same 
   assert.notEqual(first.currentViewportTargetKey, second.currentViewportTargetKey);
 });
 
-test('deriveViewportState changes viewer model key when same artifact is regenerated', () => {
+test('deriveViewportState keeps viewer model key stable when identical artifact is rehydrated', () => {
   const first = deriveViewportState({
     activeThreadId: 'thread-1',
     activeVersionId: 'msg-1',
@@ -175,7 +175,6 @@ test('deriveViewportState changes viewer model key when same artifact is regener
     activeThreadMessages: [conceptMessage('msg-1')],
     stlUrl: 'file:///tmp/model.stl',
     cameraStateByTarget: {},
-    runtimeRevision: 1,
     toAssetUrl: (path) => `asset:${path ?? ''}`,
   });
   const second = deriveViewportState({
@@ -186,9 +185,8 @@ test('deriveViewportState changes viewer model key when same artifact is regener
     activeThreadMessages: [conceptMessage('msg-1')],
     stlUrl: 'file:///tmp/model.stl',
     cameraStateByTarget: {},
-    runtimeRevision: 2,
     toAssetUrl: (path) => `asset:${path ?? ''}`,
   });
 
-  assert.notEqual(first.currentViewerModelKey, second.currentViewerModelKey);
+  assert.equal(first.currentViewerModelKey, second.currentViewerModelKey);
 });

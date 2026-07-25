@@ -8,6 +8,7 @@ import { fitRectToViewport } from '../windowGeometry';
 export type WindowId =
   | 'code'
   | 'projects'
+  | 'library'
   | 'params'
   | 'dialogue'
   | 'docs'
@@ -34,6 +35,12 @@ export const windowRegistry: Record<WindowId, WindowRegistryEntry> = {
     title: 'Projects',
     defaultRect: { x: 80, y: 80, width: 420, height: 500 },
     minSize: { width: 320, height: 300 },
+    mountPolicy: 'lazy',
+  },
+  library: {
+    title: 'Library',
+    defaultRect: { x: 520, y: 80, width: 620, height: 560 },
+    minSize: { width: 320, height: 320 },
     mountPolicy: 'lazy',
   },
   params: {
@@ -102,6 +109,7 @@ type ThreadWindowCacheEntry = {
 const ALL_WINDOW_IDS: WindowId[] = [
   'code',
   'projects',
+  'library',
   'params',
   'dialogue',
   'docs',
@@ -409,6 +417,26 @@ export function updateRect(id: WindowId, rect: { x: number; y: number; width: nu
   const clamped = clampRect(rect, reg.minSize);
   next[id] = { ...next[id], ...clamped };
   commitState(next);
+}
+
+export function fitVisibleWindowsToViewport(viewport: { width: number; height: number }) {
+  const next = cloneState(currentState());
+  let changed = false;
+  for (const id of ALL_WINDOW_IDS) {
+    if (!next[id].visible) continue;
+    const clamped = clampRect(next[id], windowRegistry[id].minSize, viewport);
+    if (
+      clamped.x === next[id].x &&
+      clamped.y === next[id].y &&
+      clamped.width === next[id].width &&
+      clamped.height === next[id].height
+    ) {
+      continue;
+    }
+    next[id] = { ...next[id], ...clamped };
+    changed = true;
+  }
+  if (changed) commitState(next);
 }
 
 export async function setThreadWindowLayoutRemembered(rememberLayout: boolean) {

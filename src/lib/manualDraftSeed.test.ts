@@ -65,7 +65,9 @@ test('buildFailedDraftSeed preserves explicit failed-design metadata over workin
       macroCode: 'print("retry")',
       sourceLanguage: 'build123d',
       geometryBackend: 'build123d',
-      uiSpec: { fields: [] },
+      uiSpec: {
+        fields: [{ type: 'number', key: 'height', label: 'Height', frozen: false }],
+      },
       initialParams: { width: 4 },
       postProcessing: null,
     }),
@@ -76,5 +78,8 @@ test('buildFailedDraftSeed preserves explicit failed-design metadata over workin
   assert.equal(seeded.versionName, 'V-retry');
   assert.equal(seeded.sourceLanguage, 'build123d');
   assert.equal(seeded.geometryBackend, 'build123d');
+  assert.deepEqual(seeded.uiSpec, {
+    fields: [{ type: 'number', key: 'height', label: 'Height', frozen: false }],
+  });
   assert.deepEqual(seeded.initialParams, { width: 4 });
 });

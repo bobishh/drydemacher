@@ -1004,7 +1004,7 @@
             bind:value={config.maxVerifyAttempts}
           />
           <div class="field-help">
-            VLM screenshot verification rounds after render. 0 = disabled (structural check always runs). Default: 2.
+            VLM screenshot verification rounds after render. 0 = disabled; structural verification still runs. Default: 2.
           </div>
         </div>
 

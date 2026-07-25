@@ -74,6 +74,14 @@ async openProjectInEditor(threadId: string | null, messageId: string | null) : P
     else return { status: "error", error: e  as any };
 }
 },
+async getAnimalCapCatalog() : Promise<Result<AnimalCapCatalog, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_animal_cap_catalog") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async readComponentPackageManifest(projectDir: string) : Promise<Result<ComponentPackage, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("read_component_package_manifest", { projectDir }) };
@@ -301,6 +309,30 @@ async restoreVersion(messageId: string) : Promise<Result<null, AppError>> {
 async getDeletedMessages() : Promise<Result<DeletedMessage[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_deleted_messages") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getDeletedThreadsPage(before: string | null, limit: number | null) : Promise<Result<DeletedThreadsPage, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_deleted_threads_page", { before, limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getDeletedThreadPreview(id: string) : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_deleted_thread_preview", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async restoreDeletedThread(id: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("restore_deleted_thread", { id }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -934,6 +966,17 @@ vtStream?: string;
  * as a full snapshot replacement.
  */
 vtDelta?: string | null; attentionRequired: boolean; busy?: boolean; activityLabel?: string | null; activityStartedAt?: number | null; attentionKind?: string | null; summary?: string | null; active: boolean; updatedAt: number }
+export type AnimalCapArtifact = { verificationStatus: AnimalCapVerificationStatus; verifiedPartCount: number; verifiedComponentCount: number; verifiedNonManifoldEdgeCount: number; verifiedTriangleCount: number; modelId: string; threadId: string; messageId: string; sourcePath: string; stlPath: string; previewPath: string; sourceSha256: string; stlSha256: string }
+export type AnimalCapAxis = "x" | "y" | "z"
+export type AnimalCapBoreProfile = { prestaMajorDiameterMm: number; threadDepthMm: number; baseThreadClearanceMm: number; freeBoreClearanceMm: number; threadStartMm: number; threadLengthMm: number; innerConeStartMm: number; blindDepthMm: number; entryLeadMm: number; entryFlareMm: number }
+export type AnimalCapCatalog = { schemaVersion: number; boreProfiles: Partial<{ [key in string]: AnimalCapBoreProfile }>; entries: AnimalCapCatalogEntry[] }
+export type AnimalCapCatalogEntry = { id: string; displayName: string; species: string; state: AnimalCapState; surfaces: AnimalCapSurfaces; source: AnimalCapSource; sourceBounds: AnimalCapSourceBounds; recipe?: AnimalCapRecipe | null; artifact?: AnimalCapArtifact | null }
+export type AnimalCapRecipe = { boreProfileId: string; boreAxis: AnimalCapAxis; boreMouthSourceCoordinate: number; boreAxisHeightMm: number; uniformScale: number; floorOffsetSourceCoordinate: number }
+export type AnimalCapSource = { author: string; pageUrl: string; downloadUrl: string; archiveMember: string; license: string; licenseUrl: string; sourceFormat: string; sourceSha256?: string | null; sourceMeshPath?: string | null; ingestedStlPath?: string | null; ingestedStlSha256?: string | null }
+export type AnimalCapSourceBounds = { min: [number, number, number]; max: [number, number, number]; size: [number, number, number] }
+export type AnimalCapState = "candidate" | "published"
+export type AnimalCapSurfaces = { engine: boolean; landing: boolean }
+export type AnimalCapVerificationStatus = "passed"
 export type AppError = { code: AppErrorCode; message: string; details?: string | null; stableNodeKey?: string | null; startLine?: number | null; endLine?: number | null; operation?: string | null; diagnosticContext?: DiagnosticContext | null; layer?: ErrorLayer | null; fix?: ErrorFix | null }
 export type AppErrorCode = "validation" | "notFound" | "conflict" | "provider" | "persistence" | "render" | "parse" | "internal"
 export type AppLogEntry = { tsMs: number; message: string }
@@ -1012,6 +1055,8 @@ export type ControlViewSource = "generated" | "inherited" | "llm" | "manual"
 export type CorrespondenceEdge = { edgeId: string; source: FeatureOutputRef; target: FeatureOutputRef; relation: string; sourceRef?: SourceRef | null }
 export type CorrespondenceGraph = { edges: CorrespondenceEdge[] }
 export type DeletedMessage = { id: string; threadId: string; threadTitle: string; role: MessageRole; content: string; output?: DesignOutput | null; usage?: UsageSummary | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; structuralVerification?: StructuralVerificationResult | null; agentOrigin?: AgentOrigin | null; timestamp: number; imageData?: string | null; visualKind?: MessageVisualKind | null; attachmentImages?: string[]; deletedAt: number }
+export type DeletedThreadSummary = { id: string; title: string; summary?: string; updatedAt: number; deletedAt: number; versionCount: number }
+export type DeletedThreadsPage = { items: DeletedThreadSummary[]; nextBefore: string | null; hasMore: boolean }
 export type DesignOutput = { title?: string; versionName?: string; response?: string; interactionMode?: InteractionMode; macroCode: string; macroDialect?: MacroDialect; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; postProcessing?: PostProcessingSpec | null }
 export type DiagnosticContext = { partKey?: string | null; opName?: string | null; startLine?: number | null; endLine?: number | null; resolvedParams: DiagnosticParamValue[] }
 export type DiagnosticParamValue = { key: string; value: ParamValue }
