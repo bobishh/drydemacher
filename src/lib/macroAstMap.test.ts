@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildMacroAstMapProjection, findOwningPartId, spliceMacroSource } from './macroAstMap';
+import {
+  buildMacroAstMapProjection,
+  buildMacroAstSearchIndex,
+  findOwningPartId,
+  searchMacroAstMap,
+  spliceMacroSource,
+} from './macroAstMap';
 
 test('buildMacroAstMapProjection projects a stable source-backed tree', () => {
   const input = {
@@ -264,4 +270,55 @@ test('findOwningPartId locates the part node that owns a param fieldKey', () => 
   assert.equal(findOwningPartId(projection.root, 'depth_mm'), 'part:part-b');
   assert.equal(findOwningPartId(projection.root, 'width_mm'), 'part:part-a');
   assert.equal(findOwningPartId(projection.root, 'missing_key'), null);
+});
+
+test('map search indexes param names, visible labels, stable node ids, and owning region labels', () => {
+  const projection = buildMacroAstMapProjection({
+    modelManifest: {
+      parts: [{ partId: 'housing', label: 'Housing Shell', parameterKeys: ['wall_thickness_mm'] }],
+    } as any,
+    uiSpec: {
+      fields: [
+        {
+          type: 'number',
+          key: 'wall_thickness_mm',
+          label: 'Wall Thickness',
+          frozen: false,
+        },
+      ],
+    } as any,
+    parameters: { wall_thickness_mm: 2.4 },
+  });
+  const index = buildMacroAstSearchIndex(projection);
+  const expectedNodeId = 'part:housing/param:wall_thickness_mm';
+
+  for (const query of [
+    'wall_thickness_mm',
+    'Wall Thickness',
+    expectedNodeId,
+    'Housing Shell',
+  ]) {
+    const result = searchMacroAstMap(index, query).find((entry) => entry.nodeId === expectedNodeId);
+    assert.ok(result, `expected param result for ${query}`);
+    assert.equal(result.ownerNodeId, 'part:housing');
+    assert.equal(result.ownerLabel, 'Housing Shell');
+  }
+});
+
+test('map search returns no results for blank and unmatched queries without mutating index', () => {
+  const projection = buildMacroAstMapProjection({
+    modelManifest: {
+      parts: [{ partId: 'body', label: 'Body', parameterKeys: ['width_mm'] }],
+    } as any,
+    uiSpec: {
+      fields: [{ type: 'number', key: 'width_mm', label: 'Width', frozen: false }],
+    } as any,
+    parameters: { width_mm: 10 },
+  });
+  const index = buildMacroAstSearchIndex(projection);
+  const snapshot = structuredClone(index);
+
+  assert.deepEqual(searchMacroAstMap(index, ''), []);
+  assert.deepEqual(searchMacroAstMap(index, 'no_such_fastener_zzz'), []);
+  assert.deepEqual(index, snapshot);
 });

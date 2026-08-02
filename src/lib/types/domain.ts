@@ -272,6 +272,8 @@ export interface AppConfig {
   selectedEngineId: string;
   freecadCmd: string;
   cadTextFontPath: string;
+  /** Filesystem root for exported project folders (blank = default <app_data>/projects). */
+  projectsRoot: string;
   freecadLibraryRoots: string[];
   assets: AssetConfig[];
   microwave: MicrowaveConfig | null;
@@ -513,7 +515,7 @@ function normalizeEngineKindValue(value: unknown): EngineKind | undefined {
       return "freecad";
     case "build123d":
     case "build123D":
-      return "build123d";
+      return "ecky";
     case "ecky":
     case "eckyIrV0":
       return "ecky";
@@ -530,7 +532,7 @@ function normalizeMacroDialectValue(value: unknown): MacroDialect | undefined {
       return "cadFrameworkV1";
     case "build123d":
     case "build123D":
-      return "build123d";
+      return "ecky";
     case "ecky":
     case "eckyIrV0":
       return "ecky";
@@ -548,16 +550,13 @@ function normalizeSourceLanguageValue(
       return "legacyPython";
     case "ecky":
     case "eckyIrV0":
-      if (engineKind === "build123d" || engineKind === "build123D")
-        return "build123d";
       if (engineKind === "freecad") return "legacyPython";
       return "ecky";
     case "build123d":
     case "build123D":
-      return "build123d";
+      return "ecky";
     default:
-      if (engineKind === "build123d" || engineKind === "build123D")
-        return "build123d";
+      if (engineKind === "build123d" || engineKind === "build123D") return "ecky";
       if (isEckyCompat(engineKind)) {
         return "ecky";
       }
@@ -575,13 +574,12 @@ function normalizeGeometryBackendValue(
       return "freecad";
     case "build123d":
     case "build123D":
-      return "build123d";
+      return "mesh";
     case "mesh":
     case "eckyRust":
       return "mesh";
     default:
-      if (engineKind === "build123d" || engineKind === "build123D")
-        return "build123d";
+      if (engineKind === "build123d" || engineKind === "build123D") return "mesh";
       if (isEckyCompat(engineKind)) {
         return "mesh";
       }
@@ -928,14 +926,14 @@ export function normalizeDesignOutput(
       (isEckyCompat(raw.engineKind)
         ? "ecky"
         : isBuild123dCompat(raw.engineKind)
-          ? "build123d"
+          ? "ecky"
           : "legacyPython"),
     geometryBackend:
       normalizeGeometryBackendValue(raw.geometryBackend, raw.engineKind) ??
       (isEckyCompat(raw.engineKind)
         ? "mesh"
         : isBuild123dCompat(raw.engineKind)
-          ? "build123d"
+          ? "mesh"
           : "freecad"),
     uiSpec: normalizeUiSpec(raw.uiSpec),
     initialParams: normalizeDesignParams(raw.initialParams),
@@ -954,11 +952,11 @@ function healIrGeometryBackend(
     output &&
     output.sourceLanguage === "ecky" &&
     runtimeGeometryBackend === "build123d" &&
-    output.geometryBackend !== "build123d"
+    output.geometryBackend !== "mesh"
   ) {
     return {
       ...output,
-      geometryBackend: "build123d",
+      geometryBackend: "mesh",
     };
   }
   return output;
@@ -1047,7 +1045,7 @@ export function normalizeRuntimeCapabilities(
       raw.freecad as Partial<Contract.RuntimeBackendCapability>,
       "Unavailable",
     ),
-    build123d: normalizeCapability(rawBuild123d, "Unavailable"),
+    build123d: normalizeCapability(rawBuild123d, "Removed; use Ecky Native"),
     directOcct: normalizeCapability(
       raw.directOcct as Partial<Contract.RuntimeBackendCapability>,
       "Unavailable",
@@ -1161,6 +1159,10 @@ export function normalizeConfig(
       typeof (config as AppConfig).cadTextFontPath === "string"
         ? (config as AppConfig).cadTextFontPath
         : "",
+    projectsRoot:
+      typeof (config as AppConfig).projectsRoot === "string"
+        ? (config as AppConfig).projectsRoot
+        : "",
     freecadLibraryRoots: Array.isArray(
       (config as AppConfig).freecadLibraryRoots,
     )
@@ -1226,7 +1228,7 @@ export function normalizeConfig(
       (isEckyCompat((config as AppConfig).defaultEngineKind)
         ? "ecky"
         : isBuild123dCompat((config as AppConfig).defaultEngineKind)
-          ? "build123d"
+          ? "ecky"
           : "legacyPython"),
     defaultGeometryBackend:
       normalizeGeometryBackendValue(
@@ -1236,7 +1238,7 @@ export function normalizeConfig(
       (isEckyCompat((config as AppConfig).defaultEngineKind)
         ? "mesh"
         : isBuild123dCompat((config as AppConfig).defaultEngineKind)
-          ? "build123d"
+          ? "mesh"
           : "freecad"),
     maxGenerationAttempts: Math.max(
       1,
@@ -1314,6 +1316,11 @@ export function normalizeArtifactBundle(
 ): ArtifactBundle {
   return {
     ...bundle,
+    engineKind: normalizeEngineKindValue(bundle.engineKind) ?? "freecad",
+    sourceLanguage:
+      normalizeSourceLanguageValue(bundle.sourceLanguage, bundle.engineKind) ?? "legacyPython",
+    geometryBackend:
+      normalizeGeometryBackendValue(bundle.geometryBackend, bundle.engineKind) ?? "freecad",
     viewerAssets: Array.isArray(bundle.viewerAssets)
       ? [...bundle.viewerAssets]
       : [],
@@ -1360,6 +1367,11 @@ export function normalizeModelManifest(
 ): ModelManifest {
   return {
     ...manifest,
+    engineKind: normalizeEngineKindValue(manifest.engineKind) ?? "freecad",
+    sourceLanguage:
+      normalizeSourceLanguageValue(manifest.sourceLanguage, manifest.engineKind) ?? "legacyPython",
+    geometryBackend:
+      normalizeGeometryBackendValue(manifest.geometryBackend, manifest.engineKind) ?? "freecad",
     parts: Array.isArray(manifest.parts) ? [...manifest.parts] : [],
     parameterGroups: Array.isArray(manifest.parameterGroups)
       ? [...manifest.parameterGroups]
@@ -1538,19 +1550,20 @@ export function toContractUiSpec(uiSpec: UiSpec): Contract.UiSpec {
 export function toContractDesignOutput(
   output: DesignOutput,
 ): Contract.DesignOutput {
+  const normalized = normalizeDesignOutput(output);
   return {
-    title: output.title,
-    versionName: output.versionName,
-    response: output.response,
-    interactionMode: output.interactionMode,
-    macroCode: output.macroCode,
-    macroDialect: output.macroDialect ?? "legacy",
-    engineKind: output.engineKind,
-    sourceLanguage: output.sourceLanguage,
-    geometryBackend: output.geometryBackend,
-    uiSpec: toContractUiSpec(output.uiSpec),
-    initialParams: output.initialParams,
-    postProcessing: output.postProcessing ?? null,
+    title: normalized.title,
+    versionName: normalized.versionName,
+    response: normalized.response,
+    interactionMode: normalized.interactionMode,
+    macroCode: normalized.macroCode,
+    macroDialect: normalized.macroDialect ?? "legacy",
+    engineKind: normalized.engineKind,
+    sourceLanguage: normalized.sourceLanguage,
+    geometryBackend: normalized.geometryBackend,
+    uiSpec: toContractUiSpec(normalized.uiSpec),
+    initialParams: normalized.initialParams,
+    postProcessing: normalized.postProcessing ?? null,
   };
 }
 

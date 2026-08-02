@@ -1,0 +1,17 @@
+(model
+  ;; Native point generators feed deterministic sample counts into a compact
+  ;; coupon. Geometry stays boring so the checkpoint isolates list execution.
+  (part point_helper_sampler
+    (let* (
+      (jittered (jitter2 10 20 2 7))
+      (grid (jittered-grid 3 4 8 8 1.5 7))
+      (polar (polar-points 16 12))
+      (wave (wave-loop 18 12 8 2 3 7))
+      (super-point (superellipse-point (deg->rad 45) 12 8 4))
+      (cells (voronoi-cells 3 4 8 8 1.5 7))
+      (rossler (rossler-points 24 0.03 6))
+      (logistic (logistic-bifurcation-points 8 4 12 10))
+      (x (+ 8 (* 0.01 (+ (length jittered) (length grid) (length polar) (length wave)))))
+      (y (+ 8 (* 0.01 (+ (length super-point) (length cells)))))
+      (z (+ 4 (* 0.01 (+ (length rossler) (length logistic)))))
+      (box x y z))))

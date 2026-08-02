@@ -1,0 +1,19 @@
+(model
+  (params
+    (number phone_width 71.5 :label "phone width" :min 60 :max 90 :step 0.1)
+    (number phone_length 146.7 :label "phone length" :min 130 :max 180 :step 0.1)
+    (number phone_thickness 7.8 :label "phone thickness" :min 5 :max 12 :step 0.1)
+    (number phone_corner_radius 12 :label "phone corner radius" :min 6 :max 18 :step 0.5)
+    (number pocket_clearance 0.2 :label "pocket clearance per side" :min 0 :max 0.6 :step 0.05)
+    (number wall_thickness 2.4 :label "case wall thickness" :min 1.8 :max 4 :step 0.1))
+  (part tpu_case_envelope
+    (build
+      (shape pocket_w (+ phone_width (* 2 pocket_clearance)))
+      (shape pocket_l (+ phone_length (* 2 pocket_clearance)))
+      (shape pocket_r (+ phone_corner_radius pocket_clearance))
+      (shape outer_w (+ pocket_w (* 2 wall_thickness)))
+      (shape outer_l (+ pocket_l (* 2 wall_thickness)))
+      (shape outer_r (+ pocket_r wall_thickness))
+      (shape outer (extrude (rounded-rect outer_w outer_l outer_r) (+ phone_thickness wall_thickness)))
+      (shape pocket (translate 0 0 wall_thickness (extrude (rounded-rect pocket_w pocket_l pocket_r) (+ phone_thickness 1))))
+      (result (difference outer pocket)))))

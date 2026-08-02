@@ -1,4 +1,4 @@
-export type CodeModalCommitState = 'idle' | 'applying' | 'committing';
+export type CodeModalCommitState = 'idle' | 'applying' | 'committing' | 'translating';
 
 export function seedCodeModalDraftField(
   value: string | null | undefined,

@@ -3,7 +3,28 @@ import test from 'node:test';
 
 import { get, writable } from 'svelte/store';
 
-import { createOnboardingStore } from './onboarding';
+import { createOnboardingStore, shouldAutoStartOnboarding } from './onboarding';
+
+test('persisted completed or skipped onboarding never restarts after config reload', () => {
+  assert.equal(shouldAutoStartOnboarding({
+    configLoaded: true,
+    isBooting: false,
+    hasSeenOnboarding: true,
+    isActive: false,
+    isSuppressed: false,
+  }), false);
+});
+
+test('fresh config starts onboarding only after canonical config has loaded', () => {
+  const fresh = {
+    isBooting: false,
+    hasSeenOnboarding: false,
+    isActive: false,
+    isSuppressed: false,
+  };
+  assert.equal(shouldAutoStartOnboarding({ ...fresh, configLoaded: false }), false);
+  assert.equal(shouldAutoStartOnboarding({ ...fresh, configLoaded: true }), true);
+});
 
 test('onboarding store advances through floating-window targets and finishes cleanly', async () => {
   const configStore = writable({ hasSeenOnboarding: false });

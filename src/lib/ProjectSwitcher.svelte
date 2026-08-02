@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { convertFileSrc } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
   import {
     activeThreadLoadingId,
@@ -11,7 +10,6 @@
     loadInventory,
     openInventoryThread,
     refreshHistory,
-    rememberLatestThreadVersion,
     renameThread,
     reopenThread,
   } from './stores/history';
@@ -23,31 +21,46 @@
     formatBackendError,
     getDeletedThreadPreview,
     getDeletedThreadsPage,
-    getThreadLatestVersion,
-    getThreadMessagesPage,
+    getThreadPreview,
     restoreDeletedThread,
   } from './tauri/client';
   import type { DeletedThreadSummary } from './tauri/contracts';
-  import type { Message, Thread } from './types/domain';
-  import { selectThreadPreviewImage, type ProjectPreviewImage } from './projectPreview';
+  import type { Thread } from './types/domain';
+  import { selectThreadPreviewImage } from './projectPreview';
+  import PreviewFrame from './PreviewFrame.svelte';
+  import { toPreviewSrc } from './previewSource';
   import ManualImportModal from './ManualImportModal.svelte';
   import Modal from './Modal.svelte';
+  import type { CampaignRun } from './projects/campaignRunClient';
+  import { campaignRunProjectDriver } from './projects/projectDriverRegistry';
 
   let {
     onImportFcstd,
     onOpenNewProjectChooser,
     freecadUnavailableReason = null,
+    campaignRuns = [],
+    activeCampaignRunId = null,
+    onStartCampaign,
+    onOpenCampaignRun,
+    onDeleteCampaignRun,
   }: {
     onImportFcstd?: (sourcePath: string) => void;
     onOpenNewProjectChooser?: () => void;
     freecadUnavailableReason?: string | null;
+    campaignRuns?: CampaignRun[];
+    activeCampaignRunId?: string | null;
+    onStartCampaign?: () => void;
+    onOpenCampaignRun?: (run: CampaignRun) => void;
+    onDeleteCampaignRun?: (run: CampaignRun) => void;
   } = $props();
 
+  type ProjectTypeTab = 'designs' | 'campaigns';
   type Tab = 'active' | 'completed' | 'trash';
 
   const TRASH_PAGE_SIZE = 24;
-  const queuedPreviewThreadIds = new Set<string>();
+  const CAMPAIGN_PREVIEW_SRC = '/docs/assets/corner-bracket.png';
 
+  let projectTypeTab = $state<ProjectTypeTab>('designs');
   let activeTab = $state<Tab>('active');
   let searchQuery = $state('');
   let isLoading = $state(false);
@@ -62,19 +75,16 @@
   let trashHasMore = $state(false);
   let trashLoadMoreBusy = $state(false);
 
-  let latestVersions = $state<Record<string, Message | null>>({});
-  let previewImages = $state<Record<string, ProjectPreviewImage | null>>({});
-  let previewFetchVersionIds = $state<Record<string, string | null>>({});
-  let previewPumpActive = false;
+  let previewImages = $state<Record<string, string | null>>({});
 
   let showNewChooser = $state(false);
   let showImport = $state(false);
   let projectToDelete = $state<Thread | null>(null);
+  let campaignRunToDelete = $state<CampaignRun | null>(null);
   let editingProjectId = $state<string | null>(null);
   let editingTitle = $state('');
   let renameBusy = $state(false);
   let pendingActionId = $state<string | null>(null);
-  let openActionsProjectId = $state<string | null>(null);
 
   onMount(() => {
     const onPreviewUpdated = (event: Event) => {
@@ -85,66 +95,72 @@
       }>).detail;
       if (!detail?.threadId || !detail.imageData) return;
 
-      if (detail.messageId) {
-        previewImages = {
-          ...previewImages,
-          [detail.threadId]: {
-            messageId: detail.messageId,
-            imageData: detail.imageData,
-          },
-        };
-        previewFetchVersionIds = {
-          ...previewFetchVersionIds,
-          [detail.threadId]: detail.messageId,
-        };
-      }
-
-      const latest = latestVersions[detail.threadId];
-      if (latest && latest.id === detail.messageId) {
-        latestVersions = {
-          ...latestVersions,
-          [detail.threadId]: { ...latest, imageData: detail.imageData },
-        };
-      }
+      previewImages = {
+        ...previewImages,
+        [detail.threadId]: detail.imageData,
+      };
     };
 
     window.addEventListener('ecky:version-preview-updated', onPreviewUpdated);
     return () => window.removeEventListener('ecky:version-preview-updated', onPreviewUpdated);
   });
 
-  function previewSrc(raw: string | null | undefined): string | null {
-    const value = raw?.trim();
-    if (!value) return null;
-    if (/^(data:image\/|blob:|https?:|asset:|tauri:)/i.test(value)) return value;
-    try {
-      return convertFileSrc(value);
-    } catch {
-      return value;
-    }
-  }
-
   function threadPreviewImage(thread: Thread): string | null {
-    return previewSrc(
+    const previewImage = previewImages[thread.id];
+    return toPreviewSrc(
       selectThreadPreviewImage(
         thread,
-        latestVersions[thread.id],
-        previewImages[thread.id],
+        null,
+        previewImage === undefined
+          ? undefined
+          : { messageId: thread.id, imageData: previewImage },
       ),
     );
   }
 
-  function newestPreviewImage(messages: Message[]): ProjectPreviewImage | null {
-    for (const message of [...messages].reverse()) {
-      if (
-        message.role === 'assistant' &&
-        message.status === 'success' &&
-        message.artifactBundle &&
-        message.imageData?.trim()
-      ) {
-        return { messageId: message.id, imageData: message.imageData };
+  function projectPreviewCard(node: HTMLElement, project: Thread) {
+    let currentProject = project;
+
+    const fetch = async () => {
+      const threadId = currentProject.id;
+      if (previewImages[threadId] !== undefined || threadPreviewImage(currentProject)) return;
+
+      previewImages = { ...previewImages, [threadId]: null };
+      try {
+        const imageData = await getThreadPreview(threadId);
+        if (previewImages[threadId]) return;
+        previewImages = { ...previewImages, [threadId]: imageData };
+      } catch (error) {
+        console.error(`Failed to fetch project preview for ${threadId}:`, formatBackendError(error));
       }
+    };
+
+    if (typeof IntersectionObserver === 'undefined') {
+      void fetch();
+      return {
+        update(nextProject: Thread) {
+          currentProject = nextProject;
+          void fetch();
+        },
+      };
     }
-    return null;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) void fetch();
+      },
+      { root: node.closest('.scrollable'), rootMargin: '240px 0px' },
+    );
+    observer.observe(node);
+
+    return {
+      update(nextProject: Thread) {
+        currentProject = nextProject;
+      },
+      destroy() {
+        observer.disconnect();
+      },
+    };
   }
 
   async function loadActiveTab() {
@@ -180,99 +196,6 @@
     void loadActiveTab();
   });
 
-  async function fetchLatestVersion(threadId: string) {
-    let version = latestVersions[threadId];
-    if (version === undefined) {
-      try {
-        version = await getThreadLatestVersion(threadId);
-        latestVersions = { ...latestVersions, [threadId]: version };
-        if (version) rememberLatestThreadVersion(threadId, version);
-        if (version?.imageData) {
-          previewImages = {
-            ...previewImages,
-            [threadId]: { messageId: version.id, imageData: version.imageData },
-          };
-          previewFetchVersionIds = {
-            ...previewFetchVersionIds,
-            [threadId]: version.id,
-          };
-          return;
-        }
-      } catch (error) {
-        console.error(`Failed to fetch latest version for ${threadId}:`, error);
-        latestVersions = { ...latestVersions, [threadId]: null };
-      }
-    }
-
-    const latestMessageId = version?.id ?? null;
-    if (
-      previewImages[threadId] !== undefined &&
-      previewFetchVersionIds[threadId] === latestMessageId
-    ) {
-      return;
-    }
-
-    try {
-      let before: number | null = null;
-      let preview: ProjectPreviewImage | null = null;
-      let hasMore = true;
-      while (!preview && hasMore) {
-        const page = await getThreadMessagesPage(threadId, before, 24, true);
-        preview = newestPreviewImage(page.messages);
-        before = page.nextBefore;
-        hasMore = page.hasMore && before !== null;
-      }
-      if ((latestVersions[threadId]?.id ?? null) !== latestMessageId) return;
-      previewImages = { ...previewImages, [threadId]: preview };
-      previewFetchVersionIds = {
-        ...previewFetchVersionIds,
-        [threadId]: latestMessageId,
-      };
-    } catch (error) {
-      console.error(`Failed to fetch preview history for ${threadId}:`, error);
-      previewImages = { ...previewImages, [threadId]: null };
-      previewFetchVersionIds = {
-        ...previewFetchVersionIds,
-        [threadId]: latestMessageId,
-      };
-    }
-  }
-
-  function queuePreviewFetch(threadId: string) {
-    if (
-      latestVersions[threadId] !== undefined &&
-      previewImages[threadId] !== undefined &&
-      previewFetchVersionIds[threadId] === (latestVersions[threadId]?.id ?? null)
-    ) {
-      return;
-    }
-    if (queuedPreviewThreadIds.has(threadId)) return;
-    queuedPreviewThreadIds.add(threadId);
-    if (previewPumpActive) return;
-
-    previewPumpActive = true;
-    queueMicrotask(async () => {
-      try {
-        while (queuedPreviewThreadIds.size > 0) {
-          const threadId = queuedPreviewThreadIds.values().next().value;
-          if (!threadId) break;
-          queuedPreviewThreadIds.delete(threadId);
-          await fetchLatestVersion(threadId);
-        }
-      } finally {
-        previewPumpActive = false;
-      }
-    });
-  }
-
-  async function warmProjectPreviews(projects: Thread[]) {
-    for (const project of projects) {
-      if ((project.versionCount ?? 0) <= 0) continue;
-      queuePreviewFetch(project.id);
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-  }
-
   const activeProjects = $derived(
     $history.filter(
       (project: Thread) =>
@@ -282,6 +205,9 @@
           Boolean(project.summary?.toLowerCase().includes(searchQuery.toLowerCase()))
         ),
     ),
+  );
+  const visibleCampaignRuns = $derived(
+    campaignRuns.filter((run) => run.title.toLowerCase().includes(searchQuery.toLowerCase())),
   );
   const visibleCompletedProjects = $derived(
     completedProjects.filter(
@@ -297,14 +223,6 @@
         Boolean(project.summary?.toLowerCase().includes(searchQuery.toLowerCase())),
     ),
   );
-
-  $effect(() => {
-    if (activeTab === 'active') {
-      void warmProjectPreviews(activeProjects);
-    } else if (activeTab === 'completed') {
-      void warmProjectPreviews(visibleCompletedProjects);
-    }
-  });
 
   function trashPreviewCard(node: HTMLElement, project: DeletedThreadSummary) {
     let currentProject = project;
@@ -384,7 +302,6 @@
   }
 
   async function completeProject(id: string) {
-    openActionsProjectId = null;
     pendingActionId = id;
     try {
       await finalizeThread(id);
@@ -396,7 +313,6 @@
   }
 
   async function reopenProject(id: string) {
-    openActionsProjectId = null;
     pendingActionId = id;
     try {
       await reopenThread(id);
@@ -445,6 +361,18 @@
       trashLoaded = false;
     } finally {
       projectToDelete = null;
+      pendingActionId = null;
+    }
+  }
+
+  async function confirmDeleteCampaignRun() {
+    if (!campaignRunToDelete || !onDeleteCampaignRun) return;
+    const run = campaignRunToDelete;
+    pendingActionId = run.id;
+    try {
+      await onDeleteCampaignRun(run);
+    } finally {
+      campaignRunToDelete = null;
       pendingActionId = null;
     }
   }
@@ -498,24 +426,75 @@
 
 <div class="project-switcher">
   <header class="switcher-header">
-    <nav class="tabs" aria-label="Project lifecycle">
-      <button class:active={activeTab === 'active'} onclick={() => activeTab = 'active'}>ACTIVE</button>
-      <button class:active={activeTab === 'completed'} onclick={() => activeTab = 'completed'}>COMPLETED</button>
-      <button class:active={activeTab === 'trash'} onclick={() => activeTab = 'trash'}>TRASH</button>
+    <nav class="tabs" aria-label="Project type">
+      <button class:active={projectTypeTab === 'designs'} onclick={() => projectTypeTab = 'designs'}>DESIGNS</button>
+      <button class:active={projectTypeTab === 'campaigns'} onclick={() => projectTypeTab = 'campaigns'}>CAMPAIGNS</button>
     </nav>
+    {#if projectTypeTab === 'designs'}
+      <nav class="tabs tabs--lifecycle" aria-label="Design lifecycle">
+        <button class:active={activeTab === 'active'} onclick={() => activeTab = 'active'}>ACTIVE</button>
+        <button class:active={activeTab === 'completed'} onclick={() => activeTab = 'completed'}>COMPLETED</button>
+        <button class:active={activeTab === 'trash'} onclick={() => activeTab = 'trash'}>TRASH</button>
+      </nav>
+    {/if}
     <div class="header-actions">
       <input class="search-input" type="search" placeholder="Search..." bind:value={searchQuery} />
-      <button
-        class="new-btn"
-        onclick={() => onOpenNewProjectChooser ? onOpenNewProjectChooser() : showNewChooser = true}
-      >
-        + NEW
-      </button>
+      {#if projectTypeTab === 'designs'}
+        <button
+          class="new-btn"
+          onclick={() => onOpenNewProjectChooser ? onOpenNewProjectChooser() : showNewChooser = true}
+        >
+          + NEW
+        </button>
+      {/if}
     </div>
   </header>
 
   <main class="switcher-content scrollable">
-    {#if isLoading}
+    {#if projectTypeTab === 'campaigns'}
+      <div class="project-grid">
+        <article class="project-card campaign-definition-card" data-campaign-definition="ecky-ir">
+          <PreviewFrame src={CAMPAIGN_PREVIEW_SRC} alt="Ecky IR campaign preview" />
+          <div class="card-body">
+            <div class="card-header"><h3>Ecky IR</h3></div>
+            <p class="summary">Six linked build missions. Start at the bracket; finish with the film scanner.</p>
+            <div class="card-footer">
+              <span>6 missions</span>
+              <button class="card-open-action" onclick={onStartCampaign}>START</button>
+            </div>
+          </div>
+        </article>
+        {#each visibleCampaignRuns as run (run.id)}
+          {@const card = campaignRunProjectDriver.card(run)}
+          <article
+            class="project-card"
+            class:active={activeCampaignRunId === run.id}
+            data-project-kind="campaign"
+            data-project-id={run.id}
+          >
+            <PreviewFrame src={CAMPAIGN_PREVIEW_SRC} alt={`${run.title} preview`} />
+            <div class="card-body">
+              <div class="card-header">
+                <h3>{run.title}</h3>
+                <span>{formatDate(run.updatedAt)}</span>
+              </div>
+              <p class="summary">{card.progress}</p>
+              <div class="card-footer">
+                <span>{run.currentStepId ? 'In progress' : 'Not started'}</span>
+                <div class="actions">
+                  <button class="card-open-action" onclick={() => onOpenCampaignRun?.(run)}>RESUME</button>
+                </div>
+              </div>
+              {#if onDeleteCampaignRun}
+                <div class="card-management-actions">
+                  <button class="danger" onclick={() => campaignRunToDelete = run}>DELETE</button>
+                </div>
+              {/if}
+            </div>
+          </article>
+        {/each}
+      </div>
+    {:else if isLoading}
       <div class="loading-state">
         {activeTab === 'completed' ? 'LOADING COMPLETED...' : 'LOADING TRASH...'}
       </div>
@@ -541,14 +520,9 @@
               class="project-card"
               class:active={$activeThreadId === project.id}
               data-project-id={project.id}
+              use:projectPreviewCard={project}
             >
-              <div class="card-thumb">
-                {#if threadPreviewImage(project)}
-                  <img src={threadPreviewImage(project) ?? ''} alt={`${project.title} preview`} />
-                {:else}
-                  <div class="no-thumb">NO PREVIEW</div>
-                {/if}
-              </div>
+              <PreviewFrame src={threadPreviewImage(project)} alt={`${project.title} preview`} />
               <div class="card-body">
                 <div class="card-header">
                   {#if editingProjectId === project.id}
@@ -571,23 +545,14 @@
                 <div class="card-footer">
                   <span>{project.versionCount || 0} versions</span>
                   <div class="actions">
-                    <button onclick={() => selectProject(project)}>OPEN</button>
-                    <button
-                      aria-label="MORE ACTIONS"
-                      aria-expanded={openActionsProjectId === project.id}
-                      onclick={() => openActionsProjectId = openActionsProjectId === project.id ? null : project.id}
-                    >
-                      •••
-                    </button>
+                    <button class="card-open-action" onclick={() => selectProject(project)}>OPEN</button>
                   </div>
                 </div>
-                {#if openActionsProjectId === project.id}
-                  <div class="card-action-menu">
-                    <button onclick={() => completeProject(project.id)}>COMPLETE</button>
-                    <button onclick={() => { openActionsProjectId = null; startRename(project); }}>RENAME</button>
-                    <button class="danger" onclick={() => { openActionsProjectId = null; projectToDelete = project; }}>DELETE</button>
-                  </div>
-                {/if}
+                <div class="card-management-actions">
+                  <button onclick={() => completeProject(project.id)}>COMPLETE</button>
+                  <button onclick={() => startRename(project)}>RENAME</button>
+                  <button class="danger" onclick={() => projectToDelete = project}>DELETE</button>
+                </div>
               </div>
             </article>
           {/each}
@@ -598,14 +563,12 @@
             </div>
           {/if}
           {#each visibleCompletedProjects as project (project.id)}
-            <article class="project-card" data-project-id={project.id}>
-              <div class="card-thumb">
-                {#if threadPreviewImage(project)}
-                  <img src={threadPreviewImage(project) ?? ''} alt={`${project.title} preview`} />
-                {:else}
-                  <div class="no-thumb">NO PREVIEW</div>
-                {/if}
-              </div>
+            <article
+              class="project-card"
+              data-project-id={project.id}
+              use:projectPreviewCard={project}
+            >
+              <PreviewFrame src={threadPreviewImage(project)} alt={`${project.title} preview`} />
               <div class="card-body">
                 <div class="card-header">
                   <h3>{project.title}</h3>
@@ -617,21 +580,10 @@
                 <div class="card-footer">
                   <span>{project.versionCount || 0} versions</span>
                   <div class="actions">
-                    <button onclick={() => selectProject(project)}>VIEW</button>
-                    <button
-                      aria-label="MORE ACTIONS"
-                      aria-expanded={openActionsProjectId === project.id}
-                      onclick={() => openActionsProjectId = openActionsProjectId === project.id ? null : project.id}
-                    >
-                      •••
-                    </button>
-                  </div>
-                </div>
-                {#if openActionsProjectId === project.id}
-                  <div class="card-action-menu">
+                    <button class="card-open-action" onclick={() => selectProject(project)}>VIEW</button>
                     <button onclick={() => reopenProject(project.id)}>REOPEN</button>
                   </div>
-                {/if}
+                </div>
               </div>
             </article>
           {/each}
@@ -647,16 +599,7 @@
               data-project-id={project.id}
               use:trashPreviewCard={project}
             >
-              <div class="card-thumb">
-                {#if previewSrc(deletedProjectPreviews[project.id])}
-                  <img
-                    src={previewSrc(deletedProjectPreviews[project.id]) ?? ''}
-                    alt={`${project.title} preview`}
-                  />
-                {:else}
-                  <div class="no-thumb">NO PREVIEW</div>
-                {/if}
-              </div>
+              <PreviewFrame src={toPreviewSrc(deletedProjectPreviews[project.id])} alt={`${project.title} preview`} />
               <div class="card-body">
                 <div class="card-header">
                   <h3>{project.title}</h3>
@@ -731,6 +674,18 @@
           >
             MOVE TO TRASH
           </button>
+        </div>
+      </div>
+    </Modal>
+  {/if}
+
+  {#if campaignRunToDelete}
+    <Modal title="Delete Campaign Run" onclose={() => campaignRunToDelete = null}>
+      <div class="confirm-delete">
+        <p>Delete <strong>{campaignRunToDelete.title}</strong> and its saved progress?</p>
+        <div class="confirm-actions">
+          <button onclick={() => campaignRunToDelete = null}>CANCEL</button>
+          <button class="danger" onclick={() => void confirmDeleteCampaignRun()} disabled={pendingActionId === campaignRunToDelete.id}>DELETE</button>
         </div>
       </div>
     </Modal>
@@ -851,28 +806,6 @@
     box-shadow: inset 0 0 0 1px var(--primary);
   }
 
-  .card-thumb {
-    display: grid;
-    height: 120px;
-    place-items: center;
-    border-bottom: 1px solid var(--bg-300);
-    background: #000;
-    overflow: hidden;
-  }
-
-  .card-thumb img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    opacity: 0.78;
-  }
-
-  .no-thumb {
-    color: var(--bg-400);
-    font-size: 0.58rem;
-    letter-spacing: 0.1em;
-  }
-
   .card-body {
     display: flex;
     flex: 1;
@@ -936,13 +869,34 @@
     margin-top: auto;
   }
 
-  .card-action-menu {
+  .card-management-actions {
     display: flex;
     justify-content: flex-end;
     gap: 5px;
     padding-top: 8px;
     border-top: 1px solid var(--bg-300);
     overflow: hidden;
+  }
+
+  .card-management-actions button {
+    padding: 4px 7px;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 0.58rem;
+  }
+
+  .card-open-action {
+    min-width: 74px;
+    padding: 7px 14px;
+    border-color: var(--primary);
+    background: var(--primary);
+    color: var(--bg-100);
+  }
+
+  .card-open-action:hover:not(:disabled) {
+    border-color: var(--secondary);
+    background: var(--secondary);
+    color: var(--bg-100);
   }
 
   .rename-input {
@@ -1036,8 +990,7 @@
       grid-template-columns: 82px minmax(0, 1fr);
     }
 
-    .card-thumb {
-      height: auto;
+    :global(.preview-frame) {
       min-height: 104px;
       border-right: 1px solid var(--bg-300);
       border-bottom: 0;

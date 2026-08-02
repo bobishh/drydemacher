@@ -1,123 +1,33 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { exportDocsBookEpub } from './tauri/client';
+  import referenceMarkdown from '../../public/docs/ecky-ir.md?raw';
   import {
-    docsSourcePath,
     parseDocsDocument,
     resolveSection,
-    type DocsDocument,
     type DocsSection,
   } from './docs/eckyIrGuide';
-  import {
-    ECKY_IR_EPUB_FILENAME,
-    ECKY_IR_EPUB_PATH,
-    hasTauriInvokeBridge,
-    saveBookEpubNative,
-    triggerBrowserDownload,
-  } from './docs/downloadBook';
 
   let {
     showHead = true,
-    onOpenSnippet,
+    onOpenSnippet: _onOpenSnippet,
   }: {
     showHead?: boolean;
+    /** Compatibility only. Reference docs never launch source into a project. */
     onOpenSnippet?: ((snippet: string, title: string) => void) | undefined;
   } = $props();
 
-  let documentData = $state<DocsDocument | null>(null);
-  let activeSlug = $state<string | null>(null);
-  let activeSection = $derived(resolveSection(documentData?.sections ?? [], activeSlug));
-  let loading = $state(true);
-  let error = $state('');
-  let copyState = $state<'idle' | 'copied' | 'failed'>('idle');
-  let epubState = $state<'idle' | 'saving' | 'saved' | 'failed'>('idle');
-  let epubError = $state('');
-  let campaignMode = $state(true);
-
-  onMount(() => {
-    void loadDocs();
+  $effect(() => {
+    // Compatibility prop accepted while App's shell migrates to DocsHub.
+    void _onOpenSnippet;
   });
 
-  async function loadDocs() {
-    loading = true;
-    error = '';
-
-    try {
-      const sourcePath = docsSourcePath(window.location.pathname);
-      campaignMode = sourcePath.startsWith('/tutorials/');
-      const response = await fetch(sourcePath, { cache: 'no-store' });
-      if (!response.ok) {
-        throw new Error(`Docs request failed: ${response.status}`);
-      }
-
-      const markdown = await response.text();
-      const parsed = parseDocsDocument(markdown, { assetBasePath: '/docs' });
-      documentData = parsed;
-      activeSlug = window.location.hash.replace(/^#/, '') || parsed.sections[0]?.slug || null;
-    } catch (nextError) {
-      error = nextError instanceof Error ? nextError.message : String(nextError);
-    } finally {
-      loading = false;
-    }
-  }
+  // The desktop reference is bundled from the exact Markdown used by the site.
+  // It deliberately has no route-dependent campaign fallback or project actions.
+  const documentData = parseDocsDocument(referenceMarkdown, { assetBasePath: '/docs' });
+  let activeSlug = $state<string | null>(documentData.sections[0]?.slug ?? null);
+  let activeSection = $derived(resolveSection(documentData.sections, activeSlug));
 
   function selectSection(section: DocsSection) {
     activeSlug = section.slug;
-    history.replaceState(null, '', `${window.location.pathname}#${section.slug}`);
-  }
-
-  async function copySnippet() {
-    if (!activeSection?.snippet) return;
-
-    try {
-      await navigator.clipboard.writeText(activeSection.snippet);
-      copyState = 'copied';
-    } catch {
-      copyState = 'failed';
-    }
-
-    setTimeout(() => {
-      copyState = 'idle';
-    }, 1500);
-  }
-
-  function downloadSnippet() {
-    if (!activeSection?.snippet) return;
-    const blob = new Blob([activeSection.snippet], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = `${activeSection.slug}.ecky`;
-    anchor.click();
-    URL.revokeObjectURL(url);
-  }
-
-  function openSnippetInCode() {
-    if (!activeSection?.snippet) return;
-    onOpenSnippet?.(activeSection.snippet, activeSection.title);
-  }
-
-  async function downloadEpub() {
-    epubState = 'saving';
-    epubError = '';
-
-    try {
-      if (!hasTauriInvokeBridge()) {
-        triggerBrowserDownload(document, ECKY_IR_EPUB_PATH, ECKY_IR_EPUB_FILENAME);
-        epubState = 'saved';
-        return;
-      }
-
-      const [{ save }] = await Promise.all([import('@tauri-apps/plugin-dialog')]);
-      const result = await saveBookEpubNative({
-        saveDialog: save,
-        exportNativeFile: exportDocsBookEpub,
-      });
-      epubState = result === 'saved' ? 'saved' : 'idle';
-    } catch (nextError) {
-      epubError = nextError instanceof Error ? nextError.message : String(nextError);
-      epubState = 'failed';
-    }
   }
 </script>
 
@@ -128,33 +38,14 @@
 </svelte:head>
 
 <div class="docs-shell">
-  {#if loading}
-    <div class="docs-state">Loading docs...</div>
-  {:else if error}
-    <div class="docs-state docs-state--error">{error}</div>
-  {:else if documentData && activeSection}
+  {#if activeSection}
     <header class="docs-header">
-      <div class="docs-header__kicker">
-        {campaignMode ? 'Ecky language / campaign' : 'Ecky language / reference'}
-      </div>
+      <div class="docs-header__kicker">Ecky language / reference</div>
       <h1>{documentData.title}</h1>
-      <div class="docs-header__summary">
-        {@html documentData.summaryHtml}
-      </div>
-      {#if campaignMode}
-        <div class="docs-actions docs-actions--header">
-          <button type="button" class="docs-action docs-action--primary" onclick={() => void downloadEpub()}>
-            {epubState === 'saving' ? 'SAVING EPUB...' : 'DOWNLOAD CAMPAIGN'}
-          </button>
-        </div>
-      {/if}
-      {#if epubError}
-        <div class="docs-inline-error">{epubError}</div>
-      {/if}
     </header>
 
     <div class="docs-layout">
-      <aside class="docs-sidebar">
+        <aside class="docs-sidebar">
         <div class="docs-sidebar__title">Index</div>
         <div class="docs-sidebar__list" role="tablist" aria-label="Docs sections">
           {#each documentData.sections as section}
@@ -171,35 +62,20 @@
             </button>
           {/each}
         </div>
-      </aside>
+        </aside>
 
-      <article class="docs-article">
-        <div class="docs-article__meta">
+        <article class="docs-article">
+          <div class="docs-article__meta">
           {#if activeSection.status === 'pending'}
             <span class="docs-status docs-status--pending">Pending</span>
           {/if}
-          {#if activeSection.snippet}
-            <div class="docs-actions">
-              {#if onOpenSnippet}
-                <button type="button" class="docs-action docs-action--primary" onclick={openSnippetInCode}>
-                  OPEN IN CODE
-                </button>
-              {/if}
-              <button type="button" class="docs-action" onclick={() => void copySnippet()}>
-                {copyState === 'copied' ? 'COPIED' : copyState === 'failed' ? 'COPY FAILED' : 'COPY'}
-              </button>
-              <button type="button" class="docs-action" onclick={downloadSnippet}>
-                DOWNLOAD .ECKY
-              </button>
-            </div>
-          {/if}
-        </div>
+          </div>
 
-        <h2>{activeSection.title}</h2>
-        <div class="docs-article__body">
-          {@html activeSection.bodyHtml}
-        </div>
-      </article>
+          <h2>{activeSection.title}</h2>
+          <div class="docs-article__body">
+            {@html activeSection.bodyHtml}
+          </div>
+        </article>
     </div>
   {/if}
 </div>
@@ -220,8 +96,7 @@
 
   .docs-header,
   .docs-sidebar,
-  .docs-article,
-  .docs-state {
+  .docs-article {
     border: 1px solid var(--bg-300);
     background:
       linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
@@ -248,21 +123,6 @@
     margin: 8px 0 0;
     font-size: clamp(28px, 3vw, 42px);
     line-height: 1;
-  }
-
-  .docs-header__summary :global(p) {
-    margin: 10px 0 0;
-    color: var(--text-dim);
-    line-height: 1.6;
-    max-width: 90ch;
-  }
-
-  .docs-inline-error {
-    margin-top: 10px;
-    color: #f2a3a3;
-    font-size: 12px;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
   }
 
   .docs-layout {
@@ -331,17 +191,6 @@
     margin-bottom: 14px;
   }
 
-  .docs-actions {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-
-  .docs-actions--header {
-    margin-top: 14px;
-  }
-
-  .docs-action,
   .docs-status {
     border: 1px solid color-mix(in srgb, var(--secondary) 45%, var(--bg-300));
     background: rgba(17, 21, 36, 0.92);
@@ -353,11 +202,6 @@
     text-transform: uppercase;
   }
 
-  .docs-action {
-    cursor: pointer;
-  }
-
-  .docs-action--primary,
   .docs-status--pending {
     background: linear-gradient(180deg, rgba(108, 80, 8, 0.92), rgba(62, 43, 3, 0.95));
     color: #f6eed4;
@@ -420,24 +264,14 @@
     background: rgba(108, 80, 8, 0.24);
   }
 
-  .docs-state {
-    display: grid;
-    place-items: center;
-    padding: 24px;
-    min-height: 220px;
-  }
-
-  .docs-state--error {
-    color: #ff9d9d;
-  }
-
   @media (max-width: 980px) {
     .docs-layout {
       grid-template-columns: 1fr;
+      grid-template-rows: minmax(0, 200px) minmax(0, 1fr);
     }
 
     .docs-sidebar {
-      max-height: 220px;
+      min-height: 0;
     }
   }
 </style>

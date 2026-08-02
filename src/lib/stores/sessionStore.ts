@@ -1,6 +1,9 @@
 import { writable, get } from 'svelte/store';
 import { requestQueue } from './requestQueue';
 import type { ArtifactBundle, ModelManifest } from '../types/domain';
+import type { AppError } from '../tauri/contracts';
+
+export type SessionError = string | AppError;
 
 export type SessionPhase = 
   | 'booting'
@@ -16,7 +19,7 @@ function createSessionStore() {
   const { subscribe, set, update } = writable({
     phase: 'booting' as SessionPhase,
     status: 'System ready.',
-    error: null as string | null,
+    error: null as SessionError | null,
     stlUrl: null as string | null,
     runtimeRevision: 0,
     artifactBundle: null as ArtifactBundle | null,
@@ -35,7 +38,7 @@ function createSessionStore() {
     update,
     setPhase: (p: SessionPhase) => update(s => ({ ...s, phase: p })),
     setStatus: (msg: string) => update(s => ({ ...s, status: msg })),
-    setError: (err: string | null) => update(s => ({ ...s, error: err })),
+    setError: (err: SessionError | null) => update(s => ({ ...s, error: err })),
     setStlUrl: (url: string | null) =>
       update(s => ({
         ...s,
@@ -72,7 +75,7 @@ export const session = createSessionStore();
 // Convenience accessors (backward compat for App.svelte)
 export const phase = { subscribe: (fn: (value: SessionPhase) => void) => session.subscribe(s => fn(s.phase)), set: session.setPhase };
 export const status = { subscribe: (fn: (value: string) => void) => session.subscribe(s => fn(s.status)), set: session.setStatus };
-export const error = { subscribe: (fn: (value: string | null) => void) => session.subscribe(s => fn(s.error)), set: session.setError };
+export const error = { subscribe: (fn: (value: SessionError | null) => void) => session.subscribe(s => fn(s.error)), set: session.setError };
 export const stlUrl = { subscribe: (fn: (value: string | null) => void) => session.subscribe(s => fn(s.stlUrl)), set: session.setStlUrl };
 export const artifactBundle = { subscribe: (fn: (value: ArtifactBundle | null) => void) => session.subscribe(s => fn(s.artifactBundle)) };
 export const modelManifest = { subscribe: (fn: (value: ModelManifest | null) => void) => session.subscribe(s => fn(s.modelManifest)) };

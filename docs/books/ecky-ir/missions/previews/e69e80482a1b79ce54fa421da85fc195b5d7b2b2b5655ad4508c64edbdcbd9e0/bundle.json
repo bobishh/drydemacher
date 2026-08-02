@@ -1,0 +1,464 @@
+{
+  "schemaVersion": 2,
+  "modelId": "generated-direct-occt-987f9a02b0d0",
+  "sourceKind": "generated",
+  "engineKind": "ecky",
+  "sourceLanguage": "ecky",
+  "geometryBackend": "mesh",
+  "contentHash": "987f9a02b0d05df8e4b11b14361011a6917b428c26f8bd3cb43cca2bed66b885",
+  "artifactVersion": 1,
+  "fcstdPath": "",
+  "manifestPath": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-987f9a02b0d0/manifest.json",
+  "macroPath": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-987f9a02b0d0/source.ecky",
+  "previewStlPath": "preview.stl",
+  "viewerAssets": [
+    {
+      "partId": "supportless_rail",
+      "nodeId": "supportless_rail",
+      "objectName": "supportless_rail",
+      "label": "Supportless Rail",
+      "path": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-987f9a02b0d0/preview.stl",
+      "format": "stl"
+    }
+  ],
+  "edgeTargets": [
+    {
+      "targetId": "supportless_rail:edge:-6-0.5-0_-6-0.5-85",
+      "durableTargetId": "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:edge:-6-0.5-0_-6-0.5-85",
+      "canonicalTargetId": "supportless_rail:edge:0:-6-0.5-0_-6-0.5-85",
+      "aliasIds": [
+        "supportless_rail:edge:0:-6-0.5-0_-6-0.5-85",
+        "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:edge:-6-0.5-0_-6-0.5-85"
+      ],
+      "partId": "supportless_rail",
+      "viewerNodeId": "supportless_rail",
+      "label": "Supportless Rail.Edge1",
+      "editable": false,
+      "start": {
+        "x": -6.0,
+        "y": 0.5,
+        "z": 0.0
+      },
+      "end": {
+        "x": -6.0,
+        "y": 0.5,
+        "z": 85.0
+      }
+    },
+    {
+      "targetId": "supportless_rail:edge:6-0.5-0_6-0.5-85",
+      "durableTargetId": "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:edge:6-0.5-0_6-0.5-85",
+      "canonicalTargetId": "supportless_rail:edge:1:6-0.5-0_6-0.5-85",
+      "aliasIds": [
+        "supportless_rail:edge:1:6-0.5-0_6-0.5-85",
+        "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:edge:6-0.5-0_6-0.5-85"
+      ],
+      "partId": "supportless_rail",
+      "viewerNodeId": "supportless_rail",
+      "label": "Supportless Rail.Edge2",
+      "editable": false,
+      "start": {
+        "x": 6.0,
+        "y": 0.5,
+        "z": 0.0
+      },
+      "end": {
+        "x": 6.0,
+        "y": 0.5,
+        "z": 85.0
+      }
+    },
+    {
+      "targetId": "supportless_rail:edge:-6-0.5-0_6-0.5-0",
+      "durableTargetId": "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:edge:-6-0.5-0_6-0.5-0",
+      "canonicalTargetId": "supportless_rail:edge:2:-6-0.5-0_6-0.5-0",
+      "aliasIds": [
+        "supportless_rail:edge:2:-6-0.5-0_6-0.5-0",
+        "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:edge:-6-0.5-0_6-0.5-0"
+      ],
+      "partId": "supportless_rail",
+      "viewerNodeId": "supportless_rail",
+      "label": "Supportless Rail.Edge3",
+      "editable": false,
+      "start": {
+        "x": -6.0,
+        "y": 0.5,
+        "z": 0.0
+      },
+      "end": {
+        "x": 6.0,
+        "y": 0.5,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "supportless_rail:edge:-6-0.5-85_6-0.5-85",
+      "durableTargetId": "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:edge:-6-0.5-85_6-0.5-85",
+      "canonicalTargetId": "supportless_rail:edge:3:-6-0.5-85_6-0.5-85",
+      "aliasIds": [
+        "supportless_rail:edge:3:-6-0.5-85_6-0.5-85",
+        "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:edge:-6-0.5-85_6-0.5-85"
+      ],
+      "partId": "supportless_rail",
+      "viewerNodeId": "supportless_rail",
+      "label": "Supportless Rail.Edge4",
+      "editable": false,
+      "start": {
+        "x": -6.0,
+        "y": 0.5,
+        "z": 85.0
+      },
+      "end": {
+        "x": 6.0,
+        "y": 0.5,
+        "z": 85.0
+      }
+    },
+    {
+      "targetId": "supportless_rail:edge:10.5-4.5-0_10.5-4.5-85",
+      "durableTargetId": "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:edge:10.5-4.5-0_10.5-4.5-85",
+      "canonicalTargetId": "supportless_rail:edge:4:10.5-4.5-0_10.5-4.5-85",
+      "aliasIds": [
+        "supportless_rail:edge:4:10.5-4.5-0_10.5-4.5-85",
+        "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:edge:10.5-4.5-0_10.5-4.5-85"
+      ],
+      "partId": "supportless_rail",
+      "viewerNodeId": "supportless_rail",
+      "label": "Supportless Rail.Edge5",
+      "editable": false,
+      "start": {
+        "x": 10.5,
+        "y": 4.5,
+        "z": 0.0
+      },
+      "end": {
+        "x": 10.5,
+        "y": 4.5,
+        "z": 85.0
+      }
+    },
+    {
+      "targetId": "supportless_rail:edge:10.5-4.5-0_6-0.5-0",
+      "durableTargetId": "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:edge:10.5-4.5-0_6-0.5-0",
+      "canonicalTargetId": "supportless_rail:edge:5:10.5-4.5-0_6-0.5-0",
+      "aliasIds": [
+        "supportless_rail:edge:5:10.5-4.5-0_6-0.5-0",
+        "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:edge:10.5-4.5-0_6-0.5-0"
+      ],
+      "partId": "supportless_rail",
+      "viewerNodeId": "supportless_rail",
+      "label": "Supportless Rail.Edge6",
+      "editable": false,
+      "start": {
+        "x": 6.0,
+        "y": 0.5,
+        "z": 0.0
+      },
+      "end": {
+        "x": 10.5,
+        "y": 4.5,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "supportless_rail:edge:10.5-4.5-85_6-0.5-85",
+      "durableTargetId": "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:edge:10.5-4.5-85_6-0.5-85",
+      "canonicalTargetId": "supportless_rail:edge:6:10.5-4.5-85_6-0.5-85",
+      "aliasIds": [
+        "supportless_rail:edge:6:10.5-4.5-85_6-0.5-85",
+        "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:edge:10.5-4.5-85_6-0.5-85"
+      ],
+      "partId": "supportless_rail",
+      "viewerNodeId": "supportless_rail",
+      "label": "Supportless Rail.Edge7",
+      "editable": false,
+      "start": {
+        "x": 6.0,
+        "y": 0.5,
+        "z": 85.0
+      },
+      "end": {
+        "x": 10.5,
+        "y": 4.5,
+        "z": 85.0
+      }
+    },
+    {
+      "targetId": "supportless_rail:edge:-10.5-4.5-0_-10.5-4.5-85",
+      "durableTargetId": "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:edge:-10.5-4.5-0_-10.5-4.5-85",
+      "canonicalTargetId": "supportless_rail:edge:7:-10.5-4.5-0_-10.5-4.5-85",
+      "aliasIds": [
+        "supportless_rail:edge:7:-10.5-4.5-0_-10.5-4.5-85",
+        "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:edge:-10.5-4.5-0_-10.5-4.5-85"
+      ],
+      "partId": "supportless_rail",
+      "viewerNodeId": "supportless_rail",
+      "label": "Supportless Rail.Edge8",
+      "editable": false,
+      "start": {
+        "x": -10.5,
+        "y": 4.5,
+        "z": 0.0
+      },
+      "end": {
+        "x": -10.5,
+        "y": 4.5,
+        "z": 85.0
+      }
+    },
+    {
+      "targetId": "supportless_rail:edge:-10.5-4.5-0_10.5-4.5-0",
+      "durableTargetId": "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:edge:-10.5-4.5-0_10.5-4.5-0",
+      "canonicalTargetId": "supportless_rail:edge:8:-10.5-4.5-0_10.5-4.5-0",
+      "aliasIds": [
+        "supportless_rail:edge:8:-10.5-4.5-0_10.5-4.5-0",
+        "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:edge:-10.5-4.5-0_10.5-4.5-0"
+      ],
+      "partId": "supportless_rail",
+      "viewerNodeId": "supportless_rail",
+      "label": "Supportless Rail.Edge9",
+      "editable": false,
+      "start": {
+        "x": 10.5,
+        "y": 4.5,
+        "z": 0.0
+      },
+      "end": {
+        "x": -10.5,
+        "y": 4.5,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "supportless_rail:edge:-10.5-4.5-85_10.5-4.5-85",
+      "durableTargetId": "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:edge:-10.5-4.5-85_10.5-4.5-85",
+      "canonicalTargetId": "supportless_rail:edge:9:-10.5-4.5-85_10.5-4.5-85",
+      "aliasIds": [
+        "supportless_rail:edge:9:-10.5-4.5-85_10.5-4.5-85",
+        "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:edge:-10.5-4.5-85_10.5-4.5-85"
+      ],
+      "partId": "supportless_rail",
+      "viewerNodeId": "supportless_rail",
+      "label": "Supportless Rail.Edge10",
+      "editable": false,
+      "start": {
+        "x": 10.5,
+        "y": 4.5,
+        "z": 85.0
+      },
+      "end": {
+        "x": -10.5,
+        "y": 4.5,
+        "z": 85.0
+      }
+    },
+    {
+      "targetId": "supportless_rail:edge:-10.5-4.5-0_-6-0.5-0",
+      "durableTargetId": "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:edge:-10.5-4.5-0_-6-0.5-0",
+      "canonicalTargetId": "supportless_rail:edge:10:-10.5-4.5-0_-6-0.5-0",
+      "aliasIds": [
+        "supportless_rail:edge:10:-10.5-4.5-0_-6-0.5-0",
+        "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:edge:-10.5-4.5-0_-6-0.5-0"
+      ],
+      "partId": "supportless_rail",
+      "viewerNodeId": "supportless_rail",
+      "label": "Supportless Rail.Edge11",
+      "editable": false,
+      "start": {
+        "x": -10.5,
+        "y": 4.5,
+        "z": 0.0
+      },
+      "end": {
+        "x": -6.0,
+        "y": 0.49999999999999967,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "supportless_rail:edge:-10.5-4.5-85_-6-0.5-85",
+      "durableTargetId": "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:edge:-10.5-4.5-85_-6-0.5-85",
+      "canonicalTargetId": "supportless_rail:edge:11:-10.5-4.5-85_-6-0.5-85",
+      "aliasIds": [
+        "supportless_rail:edge:11:-10.5-4.5-85_-6-0.5-85",
+        "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:edge:-10.5-4.5-85_-6-0.5-85"
+      ],
+      "partId": "supportless_rail",
+      "viewerNodeId": "supportless_rail",
+      "label": "Supportless Rail.Edge12",
+      "editable": false,
+      "start": {
+        "x": -10.5,
+        "y": 4.5,
+        "z": 85.0
+      },
+      "end": {
+        "x": -6.0,
+        "y": 0.49999999999999967,
+        "z": 85.0
+      }
+    }
+  ],
+  "faceTargets": [
+    {
+      "targetId": "supportless_rail:face:0-0.5-42.5:1020",
+      "durableTargetId": "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:face:0-0.5-42.5:1020",
+      "canonicalTargetId": "supportless_rail:face:0:0-0.5-42.5:1020",
+      "aliasIds": [
+        "supportless_rail:face:0:0-0.5-42.5:1020",
+        "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:face:0-0.5-42.5:1020"
+      ],
+      "partId": "supportless_rail",
+      "viewerNodeId": "supportless_rail",
+      "label": "Supportless Rail.Face1",
+      "editable": false,
+      "center": {
+        "x": 1.5612511283791264e-16,
+        "y": 0.5,
+        "z": 42.5
+      },
+      "normal": [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      "area": 1020.0
+    },
+    {
+      "targetId": "supportless_rail:face:8.25-2.5-42.5:511.768",
+      "durableTargetId": "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:face:8.25-2.5-42.5:511.768",
+      "canonicalTargetId": "supportless_rail:face:1:8.25-2.5-42.5:511.768",
+      "aliasIds": [
+        "supportless_rail:face:1:8.25-2.5-42.5:511.768",
+        "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:face:8.25-2.5-42.5:511.768"
+      ],
+      "partId": "supportless_rail",
+      "viewerNodeId": "supportless_rail",
+      "label": "Supportless Rail.Face2",
+      "editable": false,
+      "center": {
+        "x": 8.25,
+        "y": 2.500000000000001,
+        "z": 42.5
+      },
+      "normal": [
+        -0.6643638388299199,
+        0.7474093186836598,
+        0.0
+      ],
+      "area": 511.76776959867266
+    },
+    {
+      "targetId": "supportless_rail:face:0-4.5-42.5:1785",
+      "durableTargetId": "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:face:0-4.5-42.5:1785",
+      "canonicalTargetId": "supportless_rail:face:2:0-4.5-42.5:1785",
+      "aliasIds": [
+        "supportless_rail:face:2:0-4.5-42.5:1785",
+        "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:face:0-4.5-42.5:1785"
+      ],
+      "partId": "supportless_rail",
+      "viewerNodeId": "supportless_rail",
+      "label": "Supportless Rail.Face3",
+      "editable": false,
+      "center": {
+        "x": 7.632783294297952e-17,
+        "y": 4.5,
+        "z": 42.5
+      },
+      "normal": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "area": 1784.9999999999998
+    },
+    {
+      "targetId": "supportless_rail:face:-8.25-2.5-42.5:511.768",
+      "durableTargetId": "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:face:-8.25-2.5-42.5:511.768",
+      "canonicalTargetId": "supportless_rail:face:3:-8.25-2.5-42.5:511.768",
+      "aliasIds": [
+        "supportless_rail:face:3:-8.25-2.5-42.5:511.768",
+        "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:face:-8.25-2.5-42.5:511.768"
+      ],
+      "partId": "supportless_rail",
+      "viewerNodeId": "supportless_rail",
+      "label": "Supportless Rail.Face4",
+      "editable": false,
+      "center": {
+        "x": -8.25,
+        "y": 2.499999999999999,
+        "z": 42.5
+      },
+      "normal": [
+        0.6643638388299199,
+        0.7474093186836598,
+        0.0
+      ],
+      "area": 511.76776959867266
+    },
+    {
+      "targetId": "supportless_rail:face:0-2.682-0:66",
+      "durableTargetId": "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:face:0-2.682-0:66",
+      "canonicalTargetId": "supportless_rail:face:4:0-2.682-0:66",
+      "aliasIds": [
+        "supportless_rail:face:4:0-2.682-0:66",
+        "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:face:0-2.682-0:66"
+      ],
+      "partId": "supportless_rail",
+      "viewerNodeId": "supportless_rail",
+      "label": "Supportless Rail.Face5",
+      "editable": false,
+      "center": {
+        "x": 4.306319610667275e-16,
+        "y": 2.681818181818182,
+        "z": 0.0
+      },
+      "normal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "area": 65.99999999999999
+    },
+    {
+      "targetId": "supportless_rail:face:0-2.682-85:66",
+      "durableTargetId": "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:face:0-2.682-85:66",
+      "canonicalTargetId": "supportless_rail:face:5:0-2.682-85:66",
+      "aliasIds": [
+        "supportless_rail:face:5:0-2.682-85:66",
+        "supportless_rail:stable-node-key:sha256:3de40fcd703f5b3e30f54bde6be581b1eb9ca6b556b09250acb0e0fd6f4e36d9:face:0-2.682-85:66"
+      ],
+      "partId": "supportless_rail",
+      "viewerNodeId": "supportless_rail",
+      "label": "Supportless Rail.Face6",
+      "editable": false,
+      "center": {
+        "x": 4.306319610667275e-16,
+        "y": 2.681818181818182,
+        "z": 85.0
+      },
+      "normal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "area": 65.99999999999999
+    }
+  ],
+  "calloutAnchors": [],
+  "measurementGuides": [],
+  "exportArtifacts": [
+    {
+      "label": "STEP",
+      "format": "step",
+      "path": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-987f9a02b0d0/model.step",
+      "role": "primary",
+      "geometryProvenance": {
+        "representation": "analyticBrep"
+      }
+    }
+  ],
+  "geometryProvenance": {
+    "representation": "analyticBrep"
+  }
+}

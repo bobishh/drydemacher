@@ -1,0 +1,21 @@
+(model
+  (params
+    (number diameter 180 :label "propeller diameter" :min 120 :max 260 :step 1)
+    (number blade_count 3 :label "blade count" :min 2 :max 6 :step 1)
+    (number pitch 18 :label "blade pitch" :min 4 :max 35 :step 1)
+    (number twist 12 :label "blade twist" :min 0 :max 28 :step 1)
+    (number hub_radius 16 :label "hub radius" :min 10 :max 28 :step 1)
+    (number hub_height 10 :label "hub height" :min 6 :max 18 :step 1))
+  (part propeller_study
+    (build
+      (shape blade_length (- (/ diameter 2) hub_radius))
+      (shape root_station (rounded-rect (+ 20 (/ pitch 3)) (+ 4 (/ twist 12)) 1.5))
+      (shape tip_station (rounded-rect (+ 10 (/ pitch 6)) (+ 2 (/ twist 18)) 1))
+      (shape airfoil_station_loft
+        (loft blade_length root_station tip_station))
+      (shape blades
+        (repeat-union blade_index blade_count
+          (rotate 0 0 (* blade_index (/ 360 blade_count))
+            (translate hub_radius 0 0 airfoil_station_loft))))
+      (shape hub (cylinder hub_radius hub_height))
+      (result (union hub blades)))))

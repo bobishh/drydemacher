@@ -1,0 +1,19 @@
+(model
+  (params
+    (number span 64 :label "Bracket span" :min 40 :max 120 :step 2)
+    (number foot_depth 36 :label "Foot depth" :min 20 :max 70 :step 2)
+    (number stock 6 :label "Stock thickness" :min 3 :max 12 :step 0.5)
+    (number slot_width 6 :label "Slot width" :min 4 :max 10 :step 0.5))
+  (part slotted_bracket
+    (let* ((flange_height 40)
+           (foot (box span foot_depth stock))
+           (flange (translate 0 (- (/ foot_depth 2) (/ stock 2)) (/ flange_height 2)
+                     (box span stock flange_height)))
+           (bracket (union foot flange))
+           (foot_slot (extrude (slot-overall 18 slot_width) (+ stock 2)))
+           (flange_slot (rotate 90 0 0
+                          (extrude (slot-center-to-center 14 slot_width) (+ stock 2))))
+           (foot_slots (linear-array 2 (- span 28) 0 0 foot_slot))
+           (flange_slots (translate (- (/ span 2) 14) (- (/ foot_depth 2)) 20
+                                  (linear-array 2 28 0 0 flange_slot))))
+      (difference bracket foot_slots flange_slots))))

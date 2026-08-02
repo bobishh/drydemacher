@@ -1,0 +1,29 @@
+(model
+  (params
+    (number diameter 180 :label "propeller diameter" :min 120 :max 260 :step 1)
+    (number blade_count 3 :label "blade count" :min 2 :max 6 :step 1)
+    (number pitch 18 :label "blade pitch" :min 4 :max 35 :step 1)
+    (number twist 12 :label "blade twist" :min 0 :max 28 :step 1)
+    (number hub_radius 16 :label "hub radius" :min 10 :max 28 :step 1)
+    (number hub_height 10 :label "hub height" :min 6 :max 18 :step 1)
+    (number shaft_radius 5 :label "shaft radius" :min 2 :max 10 :step 0.1)
+    (number hub_clearance 0.2 :label "hub bore clearance" :min 0 :max 0.6 :step 0.05)
+    (select hub_type "press_fit" :label "hub type" :options (("Press fit" "press_fit") ("Split bolt" "split_bolt"))))
+  (part propeller_study
+    (build
+      (shape blade_length (- (/ diameter 2) hub_radius))
+      (shape root_station (rounded-rect (+ 20 (/ pitch 3)) (+ 4 (/ twist 12)) 1.5))
+      (shape tip_station (rounded-rect (+ 10 (/ pitch 6)) (+ 2 (/ twist 18)) 1))
+      (shape airfoil_station_loft
+        (loft blade_length root_station tip_station))
+      (shape blades
+        (repeat-union blade_index blade_count
+          (rotate 0 0 (* blade_index (/ 360 blade_count))
+            (translate hub_radius 0 0 airfoil_station_loft))))
+      (shape hub_bore_radius (+ shaft_radius hub_clearance))
+      ;; STARTER: define split_bolt_hub from named split_gap and bolt_bore_radius,
+      ;; then select it when hub_type is "split_bolt".
+      (shape press_fit_hub
+        (difference (cylinder hub_radius hub_height)
+          (cylinder hub_bore_radius (+ hub_height 0.2))))
+      (result (union press_fit_hub blades)))))

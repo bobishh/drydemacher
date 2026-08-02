@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "id": "06-film-scanner",
+  "title": "Film Scanner Rail Subassembly",
+  "checkpoints": [
+    {
+      "id": "worked-heightfield-target",
+      "role": "worked",
+      "source": "00-worked-heightfield-target.ecky",
+      "summary": "Heightfield focus-target study using a staged image; separate from the printable rail subassembly.",
+      "render": { "yaw": 0, "pitch": -0.7, "size": 260 }
+    },
+    {
+      "id": "worked-fit-profile",
+      "role": "worked",
+      "source": "01-worked-fit-profile.ecky",
+      "summary": "Multipart rail and channel study with named clearance; parts remain at true export coordinates.",
+      "render": { "yaw": 0.64, "pitch": -0.5, "size": 300 }
+    },
+    {
+      "id": "starter-film-format",
+      "role": "starter",
+      "source": "02-starter-film-format.ecky",
+      "summary": "Complete film-format-derived insert dimensions while keeping the rail fit relation named.",
+      "render": { "yaw": 0.64, "pitch": -0.5, "size": 300 }
+    },
+    {
+      "id": "solution-scanner-subassembly",
+      "role": "solution",
+      "source": "03-solution-scanner-subassembly.ecky",
+      "summary": "Three printable scanner subassembly parts at true export coordinates; exploded display is deferred to render/UI metadata, not source geometry.",
+      "render": { "yaw": 0.64, "pitch": -0.5, "size": 300 }
+    },
+    {
+      "id": "calibration-helicoid-patterns",
+      "role": "worked",
+      "source": "04-calibration-helicoid-patterns.ecky",
+      "summary": "A focus-carrier coupon makes helicoid clearance and repeated calibration stops explicit.",
+      "render": { "yaw": 0.64, "pitch": -0.5, "size": 300 }
+    }
+  ]
+}

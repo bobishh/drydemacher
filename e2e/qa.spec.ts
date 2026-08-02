@@ -469,8 +469,8 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
         if (cmd === 'get_mess_stl_path') return '/mock/mess.stl';
         if (cmd === 'plugin:dialog|open') return '/mock/imported.FCStd';
         if (cmd === 'plugin:dialog|save') return '/mock/exported.step';
-        if (cmd === 'plugin:dialog|message') {
-          return (mockOptions.forkConfirmResult ?? true) ? 'OK' : 'Cancel';
+        if (cmd === 'plugin:dialog|confirm') {
+          return mockOptions.forkConfirmResult ?? true;
         }
         if (cmd === 'export_file') return null;
         
@@ -982,7 +982,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await expect
       .poll(async () => {
         const calls = await page.evaluate(() => (window as any).__MOCK_CALLS__);
-        return calls.filter((entry: { cmd: string }) => entry.cmd === 'plugin:dialog|message').length;
+        return calls.filter((entry: { cmd: string }) => entry.cmd === 'plugin:dialog|confirm').length;
       })
       .toBe(1);
     await expect
@@ -1019,7 +1019,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await expect
       .poll(async () => {
         const calls = await page.evaluate(() => (window as any).__MOCK_CALLS__);
-        return calls.filter((entry: { cmd: string }) => entry.cmd === 'plugin:dialog|message').length;
+        return calls.filter((entry: { cmd: string }) => entry.cmd === 'plugin:dialog|confirm').length;
       })
       .toBe(1);
     await expect
@@ -1144,7 +1144,6 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await page.locator('button:has-text("PROCESS")').evaluate((button) => {
       (button as HTMLButtonElement).click();
     });
-    await expect(page.getByRole('button', { name: /EXPORT/i })).toBeVisible();
     await page.getByRole('button', { name: /EXPORT/i }).click();
 
     const stepButton = page.locator('.export-chooser__action', { hasText: 'STEP' });
@@ -1167,7 +1166,6 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await page.locator('button:has-text("PROCESS")').evaluate((button) => {
       (button as HTMLButtonElement).click();
     });
-    await expect(page.getByRole('button', { name: /EXPORT/i })).toBeVisible();
     await page.getByRole('button', { name: /EXPORT/i }).click();
 
     const stepButton = page.locator('.export-chooser__action', { hasText: 'STEP' });
@@ -1190,7 +1188,6 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await page.locator('button:has-text("PROCESS")').evaluate((button) => {
       (button as HTMLButtonElement).click();
     });
-    await expect(page.getByRole('button', { name: /EXPORT/i })).toBeVisible();
     await page.getByRole('button', { name: /EXPORT/i }).click();
 
     const stepButton = page.locator('.export-chooser__action', { hasText: 'STEP' });

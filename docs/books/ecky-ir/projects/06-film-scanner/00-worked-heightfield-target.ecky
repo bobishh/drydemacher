@@ -1,0 +1,12 @@
+(model
+  (params
+    (number target_width 70 :label "focus target width" :min 40 :max 120 :step 1)
+    (number target_depth 50 :label "focus target depth" :min 30 :max 90 :step 1)
+    (number relief_height 2 :label "focus target relief" :min 0.5 :max 4 :step 0.1))
+  (part focus_calibration_target
+    (heightfield "docs/books/ecky-ir/assets/11-complex-film-adapter-01.png"
+      :width target_width
+      :depth target_depth
+      :relief-height relief_height
+      :base-thickness 1.2
+      :invert #f)))

@@ -1,0 +1,15 @@
+;; Canonical Corner Bracket — Level 01 render source of truth.
+;;
+;; This is the committed geometry the Level 01 BRIEF render is generated from.
+;; It is the same overlap+union relation the mission teaches: a horizontal foot
+;; (box 40 8 6) and a vertical flange (box 8 40 6), both centered at the origin,
+;; fused by one (union). The 8x8x6 corner where the two boxes cross is the
+;; shared volume the union merges into one connected L-bracket.
+;;
+;; Render pipeline: native Ecky (direct-occt) -> STL -> Three/WebGL -> PNG.
+;; Never OpenSCAD. The published PNG is bound to this file by content hash.
+(model
+  (part bracket
+    (union
+      (box 40 8 6)
+      (box 8 40 6))))

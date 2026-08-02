@@ -1,0 +1,12 @@
+(model
+  (params
+    (number frame_dia 30 :label "frame diameter" :min 20 :max 50 :step 1)
+    (number clip_t 3 :label "clip thickness" :min 2 :max 6 :step 0.5))
+  (part frame_clamp
+    (let* ((frame_r (/ frame_dia 2))
+           (outer_r (+ frame_r clip_t)))
+      (build
+        (shape outer (cylinder outer_r 24 :align '(center center center)))
+        (shape bore (cylinder frame_r 28 :align '(center center center)))
+        (shape opening (box (* frame_dia 0.75) (* outer_r 2) 28 :align '(center max center)))
+        (result (difference outer bore opening))))))

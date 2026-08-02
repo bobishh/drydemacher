@@ -4,6 +4,8 @@ test('Given static docs entry When page opens Then file-backed index and article
   await page.goto('/ecky-ir/index.html');
 
   await expect(page.getByRole('heading', { name: 'Ecky Language Reference' })).toBeVisible();
+  await expect(page.locator('.docs-header__summary')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'OPEN IN CODE' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Operation Index' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Verify Clauses' })).toBeVisible();
   await expect(page.getByTestId('workbench-bottom-dock')).toHaveCount(0);

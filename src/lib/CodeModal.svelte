@@ -2,6 +2,7 @@
   import Window from './Window.svelte';
   import CodePanel from './CodePanel.svelte';
   import MacroDiffPanel from './MacroDiffPanel.svelte';
+  import CodeSourceActions from './components/CodeSourceActions.svelte';
   import {
     seedCodeModalDraftField,
     shouldReseedCodeModalDraftFields,
@@ -30,6 +31,27 @@
     return match ? parseInt(match[1], 10) : null;
   }
 
+  function authoringErrorDetails(error: unknown): { layer: string; fix: string } | null {
+    const authored = error as {
+      layer?: 'surface' | 'coreIr' | 'backend' | null;
+      fix?: { hint?: string | null; suggestions?: string[] | null } | null;
+    } | null;
+    const layer =
+      authored?.layer === 'surface'
+        ? 'SURFACE'
+        : authored?.layer === 'coreIr'
+          ? 'CORE IR'
+          : authored?.layer === 'backend'
+            ? 'BACKEND'
+            : '';
+    const hint = `${authored?.fix?.hint ?? ''}`.trim();
+    const suggestions = (authored?.fix?.suggestions ?? []).map((value) => `${value}`.trim()).filter(Boolean);
+    const fix = hint && suggestions.length
+      ? `${hint} Try: ${suggestions.join(', ')}`
+      : hint || (suggestions.length ? `Try: ${suggestions.join(', ')}` : '');
+    return layer || fix ? { layer, fix } : null;
+  }
+
   type CodeModalCommitPayload = {
     code: string;
     title: string;
@@ -47,12 +69,15 @@
     draftScopeKey = '',
     defaultTitle = '',
     defaultVersionName = '',
+    sourceThreadId = null,
+    sourceMessageId = null,
     z = 0,
     hidden = false,
     focused = true,
     onclose,
     onApply,
     onCommit,
+    onTranslateToEcky,
   }: {
     code?: string;
     mode?: CodeModalMode;
@@ -62,12 +87,15 @@
     draftScopeKey?: string;
     defaultTitle?: string;
     defaultVersionName?: string;
+    sourceThreadId?: string | null;
+    sourceMessageId?: string | null;
     z?: number;
     hidden?: boolean;
     focused?: boolean;
     onclose: () => void;
     onApply?: (code: string) => Promise<unknown> | unknown;
     onCommit?: (payload: CodeModalCommitPayload) => Promise<void> | void;
+    onTranslateToEcky?: (source: string) => Promise<string>;
   } = $props();
 
   let x = $state(60);
@@ -77,8 +105,9 @@
 
   let copyState = $state<'idle' | 'copied'>('idle');
   let verifyState = $state<'idle' | 'inserted' | 'exists'>('idle');
-  let commitState = $state<'idle' | 'applying' | 'committing'>('idle');
+  let commitState = $state<'idle' | 'applying' | 'committing' | 'translating'>('idle');
   let commitError = $state('');
+  let commitAuthoringError = $state<{ layer: string; fix: string } | null>(null);
   let errorLine = $state<number | null>(null);
   let draftTitle = $state('');
   let draftVersionName = $state('');
@@ -97,6 +126,7 @@
     draftVersionName = seedCodeModalDraftField(defaultVersionName, 'V-manual');
     seededDraftScopeKey = effectiveDraftScopeKey;
     commitError = '';
+    commitAuthoringError = null;
     errorLine = null;
     verifyState = 'idle';
   });
@@ -117,12 +147,14 @@
     if (!onApply || commitState !== 'idle') return;
     commitState = 'applying';
     commitError = '';
+    commitAuthoringError = null;
     errorLine = null;
     try {
       await onApply(code);
     } catch (e: unknown) {
       console.error('Failed to apply code:', e);
       commitError = formatBackendError(e);
+      commitAuthoringError = authoringErrorDetails(e);
       errorLine = parseErrorLine(e);
     } finally {
       commitState = 'idle';
@@ -141,12 +173,37 @@
     if (!onCommit || commitState !== 'idle') return;
     commitState = 'committing';
     commitError = '';
+    commitAuthoringError = null;
     errorLine = null;
     try {
       await onCommit(commitPayload());
     } catch (e: unknown) {
       console.error('Failed to commit code:', e);
       commitError = formatBackendError(e);
+      commitAuthoringError = authoringErrorDetails(e);
+      errorLine = parseErrorLine(e);
+    } finally {
+      commitState = 'idle';
+    }
+  }
+
+  async function handleTranslateToEcky() {
+    if (!onTranslateToEcky || commitState !== 'idle' || !code.trim()) return;
+    commitState = 'translating';
+    commitError = '';
+    commitAuthoringError = null;
+    errorLine = null;
+    try {
+      const translated = await onTranslateToEcky(code);
+      if (!looksLikeEckyModelSource(translated)) {
+        throw new Error('Transpile completed without a valid Ecky `(model ...)` source.');
+      }
+      code = translated;
+      verifyState = 'idle';
+    } catch (e: unknown) {
+      console.error('Failed to translate CAD source:', e);
+      commitError = formatBackendError(e);
+      commitAuthoringError = authoringErrorDetails(e);
       errorLine = parseErrorLine(e);
     } finally {
       commitState = 'idle';
@@ -249,6 +306,9 @@
         <button class="btn btn-secondary" onclick={copyCode}>
           {copyState === 'copied' ? 'COPIED!' : 'COPY CODE'}
         </button>
+        {#if canMutateVersion && sourceThreadId}
+          <CodeSourceActions threadId={sourceThreadId} messageId={sourceMessageId} />
+        {/if}
         {#if canMutateVersion && looksLikeEckyModelSource(code)}
           <button
             class="btn btn-secondary"
@@ -265,8 +325,30 @@
             {/if}
           </button>
         {/if}
+        {#if canMutateVersion && code.trim() && !looksLikeEckyModelSource(code)}
+          <button
+            class="btn btn-primary"
+            onclick={handleTranslateToEcky}
+            disabled={!onTranslateToEcky || commitState !== 'idle'}
+            title="Send this foreign CAD source through the normal Ecky authoring and verification pipeline"
+          >
+            {commitState === 'translating' ? 'TRANSLATING...' : 'TRANSLATE TO ECKY'}
+          </button>
+        {/if}
         {#if commitError}
-          <div class="commit-error" title={commitError}>{commitError}</div>
+          <div class="commit-error" title={commitError}>
+            <span>{commitError}</span>
+            {#if commitAuthoringError?.layer || commitAuthoringError?.fix}
+              <span class="commit-error-details">
+                {#if commitAuthoringError?.layer}
+                  <span class="commit-error-layer">{commitAuthoringError.layer}</span>
+                {/if}
+                {#if commitAuthoringError?.fix}
+                  <span>{commitAuthoringError.fix}</span>
+                {/if}
+              </span>
+            {/if}
+          </div>
         {/if}
       </div>
     </div>
@@ -280,6 +362,7 @@
     background: var(--bg);
     display: flex;
     flex-direction: column;
+    overflow: hidden;
   }
 
   .code-modal-topbar {
@@ -297,6 +380,7 @@
   .code-editor-area {
     flex: 1;
     min-height: 0;
+    overflow: hidden;
   }
 
   .code-modal-footer {
@@ -307,6 +391,7 @@
     justify-content: space-between;
     align-items: center;
     gap: 12px;
+    overflow: hidden;
   }
 
   .footer-left {
@@ -324,9 +409,26 @@
     color: var(--text);
     font-size: 0.72rem;
     line-height: 1.35;
-    white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .commit-error-details {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 5px;
+    color: var(--text-dim);
+  }
+
+  .commit-error-layer {
+    border: 1px solid color-mix(in srgb, var(--secondary) 68%, var(--bg-300));
+    color: var(--secondary);
+    padding: 1px 5px;
+    font-size: 0.58rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
   }
 
   .commit-actions {

@@ -4,8 +4,6 @@ type EngineLabelMessage = Pick<Message, 'output' | 'artifactBundle' | 'modelMani
 
 function backendLabel(backend: string | undefined): string | null {
   switch (backend) {
-    case 'build123d':
-      return 'build123d';
     case 'freecad':
       return 'freecad';
     case 'mesh':
@@ -19,7 +17,6 @@ function authoringFileExtension(
   sourceLanguage: string | undefined,
   _geometryBackend: string | undefined,
 ): string {
-  if (sourceLanguage === 'build123d') return '.py';
   if (sourceLanguage === 'legacyPython') return '.FCMacro';
   return '.ecky';
 }
@@ -57,11 +54,16 @@ export function modelEngineLabel(message: EngineLabelMessage): string {
   const backendValue = backend as string | undefined;
   const engineValue = engine as string | undefined;
 
-  if (sourceValue === 'build123d') return 'build123d (.py)';
+  if (
+    sourceValue === 'build123d' ||
+    backendValue === 'build123d' ||
+    engineValue === 'build123d'
+  ) {
+    return 'Ecky Native (.ecky)';
+  }
   if (sourceValue === 'ecky') {
     return formatEckyBackendLabel(backendValue);
   }
-  if (engineValue === 'build123d' || backendValue === 'build123d') return formatEckyBackendLabel('build123d');
   if (engineValue === 'ecky') return formatEckyBackendLabel(backendValue);
   if (backendValue === 'freecad') return formatEckyBackendLabel('freecad');
   return 'FreeCAD';

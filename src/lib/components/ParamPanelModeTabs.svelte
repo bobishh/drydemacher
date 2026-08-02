@@ -109,7 +109,7 @@
       onclick={onOpenInEditor}
       title="Open model.ecky in your editor; saved edits come back as new versions"
     >
-      FILE ↗
+      OPEN FILE
     </button>
   {/if}
 </div>

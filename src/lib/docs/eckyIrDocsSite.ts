@@ -1,129 +1,208 @@
-/**
- * Build the Ecky IR Field Guide as a standalone, server-rendered HTML page.
- *
- * Unlike the Svelte landing (which needs Three.js for the mascot), the docs are
- * static text + code + images. A build-time HTML render is strictly better:
- * fast for users, crawlable for SEO, and zero JS payload for the core reading
- * experience. The raw markdown is served separately at /docs/ecky-ir.md for
- * agents/LLMs.
- *
- * The parser (parseDocsDocument) and this template share the same source —
- * no drift from the in-app reader.
- */
-import type { DocsDocument, DocsSection } from './eckyIrGuide';
+import {
+  docsHeadingSlug,
+  resolveSection,
+  type DocsDocument,
+  type DocsSection,
+} from './eckyIrGuide';
 
 export type DocsSiteOptions = {
-  /** Path to the raw markdown source, served for agents/LLMs. */
+  basePath: string;
   rawMarkdownPath: string;
-  /** Path to the EPUB download. */
   epubPath: string;
 };
 
-/**
- * Render the full docs site as one self-contained HTML document.
- * Single-page: a sticky sidebar TOC + all sections on one scroll surface,
- * with anchor links and scroll-spy active highlighting.
- */
-export function buildDocsSiteHtml(doc: DocsDocument, options: DocsSiteOptions): string {
-  const tocItems = doc.sections.map(renderTocItem).join('');
-  const sectionsHtml = doc.sections.map(renderSection).join('');
+export function buildDocsSitePages(
+  doc: DocsDocument,
+  options: DocsSiteOptions,
+): Map<string, string> {
+  const pages = new Map<string, string>();
+  doc.sections.forEach((section, index) => {
+    const outputPath = index === 0 ? 'index.html' : `${section.slug}/index.html`;
+    pages.set(outputPath, buildDocsSiteHtml(doc, options, section.slug));
+  });
+  return pages;
+}
+
+export function buildDocsSiteHtml(
+  doc: DocsDocument,
+  options: DocsSiteOptions,
+  activeSlug?: string,
+): string {
+  const active = resolveSection(doc.sections, activeSlug);
+  if (!active) throw new Error('Docs reference has no sections');
+
+  const activeIndex = doc.sections.findIndex((section) => section.slug === active.slug);
+  const previous = activeIndex > 0 ? doc.sections[activeIndex - 1] : null;
+  const next = activeIndex < doc.sections.length - 1 ? doc.sections[activeIndex + 1] : null;
+  const referenceRoutes = buildReferenceRoutes(doc.sections, options);
+  const bodyHtml = rewriteReferenceLinks(active.bodyHtml, referenceRoutes);
 
   return `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>${escapeHtml(doc.title)}</title>
-    <meta name="description" content="Ecky language syntax, signatures, selectors, backend support, and verification grammar." />
+    <title>${escapeHtml(active.title)} · ${escapeHtml(doc.title)}</title>
+    <meta name="description" content="Ecky language forms, signatures, selectors, and verification grammar." />
     <meta name="robots" content="index, follow" />
-    <meta property="og:type" content="article" />
-    <meta property="og:title" content="${escapeHtml(doc.title)}" />
-    <meta property="og:description" content="Ecky language syntax, signatures, selectors, backend support, and verification grammar." />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
     <style>${renderStylesheet()}</style>
+    <script src="${escapeHtml(normalizeBasePath(options.basePath))}/docs.js" defer></script>
   </head>
   <body>
     <header class="docs-header">
       <div class="docs-header__inner">
+        <button class="docs-menu" type="button" aria-controls="docs-toc" aria-expanded="false">☰ Contents</button>
         <a class="docs-header__home" href="/">← Ecky CAD</a>
         <span class="docs-header__sep">/</span>
-        <span class="docs-header__title">${escapeHtml(doc.title)}</span>
-        <div class="docs-header__actions">
-          <a class="docs-action" href="${escapeHtml(options.rawMarkdownPath)}" type="text/markdown">Raw .md</a>
+        <a class="docs-header__title" href="${sectionRoute(doc.sections[0], doc.sections, options)}">${escapeHtml(doc.title)}</a>
+        <nav class="docs-header__actions" aria-label="Documentation">
+          <a class="docs-action" href="${normalizeBasePath(options.basePath)}/chapters/">Chapters</a>
+          <a class="docs-action" href="${normalizeBasePath(options.basePath)}/">Reference</a>
+          <a class="docs-action docs-action--raw" href="${escapeHtml(options.rawMarkdownPath)}" type="text/markdown">Raw .md</a>
           <a class="docs-action docs-action--primary" href="${escapeHtml(options.epubPath)}">EPUB ↓</a>
-        </div>
+        </nav>
       </div>
     </header>
 
-    <div class="docs-hero">
-      <p class="docs-hero__kicker">ECKY LANGUAGE / REFERENCE</p>
-      <h1>${escapeHtml(doc.title)}</h1>
-      <div class="docs-hero__summary">${doc.summaryHtml}</div>
-    </div>
+    <div class="docs-shell">
+      <button class="docs-backdrop" type="button" aria-label="Close contents" tabindex="-1"></button>
+      <div class="docs-layout">
+        <nav class="docs-toc" id="docs-toc" aria-label="Reference contents">
+          <div class="docs-toc__head">
+            <span>${escapeHtml(doc.title)}</span>
+            <button class="docs-toc__close" type="button" aria-label="Close contents">×</button>
+          </div>
+          <div class="docs-toc__list">${doc.sections
+            .map((section) => renderTocItem(section, active, doc.sections, options))
+            .join('')}</div>
+        </nav>
 
-    <div class="docs-layout">
-      <nav class="docs-toc" aria-label="Field guide contents">
-        <div class="docs-toc__title">Contents</div>
-        <div class="docs-toc__list">${tocItems}</div>
-      </nav>
-      <main class="docs-main">${sectionsHtml}</main>
+        <main class="docs-main">
+          ${activeIndex === 0 ? `<div class="docs-summary">${doc.summaryHtml}</div>` : ''}
+          <section class="docs-main__section" id="${active.slug}">
+            <p class="docs-main__eyebrow">REFERENCE / ${String(activeIndex + 1).padStart(2, '0')}</p>
+            <h1 class="docs-main__heading">${escapeHtml(active.title)}${renderStatus(active)}</h1>
+            <div class="docs-main__body">${bodyHtml}</div>
+          </section>
+          ${renderPager(previous, next, doc.sections, options)}
+        </main>
+      </div>
     </div>
 
     <footer class="docs-footer">
       <span>${escapeHtml(doc.title)}</span>
-      <span class="docs-footer__dim">Ecky CAD — prompt-driven CAD</span>
-      <a href="/">ecky-cad.com</a>
+      <a href="${escapeHtml(options.rawMarkdownPath)}">Raw Markdown</a>
     </footer>
-
-    <script>
-      // Scroll-spy: highlight the active TOC entry as you scroll.
-      (function () {
-        var links = document.querySelectorAll('.docs-toc__link');
-        var sections = Array.from(document.querySelectorAll('.docs-main__section'));
-        if (!('IntersectionObserver' in window) || sections.length === 0) return;
-        var observer = new IntersectionObserver(function (entries) {
-          entries.forEach(function (entry) {
-            if (!entry.isIntersecting) return;
-            var id = entry.target.getAttribute('id');
-            links.forEach(function (link) {
-              link.classList.toggle('docs-toc__link--active', link.getAttribute('href') === '#' + id);
-            });
-          });
-        }, { rootMargin: '-96px 0px -70% 0px', threshold: 0 });
-        sections.forEach(function (section) { observer.observe(section); });
-      })();
-    </script>
   </body>
 </html>`;
 }
 
-function renderTocItem(section: DocsSection): string {
-  const statusBadge = section.status === 'pending'
-    ? '<span class="docs-toc__status docs-toc__status--pending">pending</span>'
-    : '';
-  return `<a class="docs-toc__link" href="#${section.slug}">
+export function buildDocsClientScript(): string {
+  return `(function () {
+  var root = document.documentElement;
+  var shell = document.querySelector('.docs-shell');
+  var menu = document.querySelector('.docs-menu');
+  var close = document.querySelector('.docs-toc__close');
+  var backdrop = document.querySelector('.docs-backdrop');
+  if (!shell || !menu) return;
+
+  function setOpen(open) {
+    shell.classList.toggle('docs-shell--nav-open', open);
+    root.classList.toggle('docs-nav-open', open);
+    menu.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+
+  menu.addEventListener('click', function () {
+    setOpen(menu.getAttribute('aria-expanded') !== 'true');
+  });
+  if (close) close.addEventListener('click', function () { setOpen(false); });
+  if (backdrop) backdrop.addEventListener('click', function () { setOpen(false); });
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape') setOpen(false);
+  });
+
+  if (window.location.pathname === '/docs/' && window.location.hash) {
+    var slug = window.location.hash.slice(1);
+    var legacyTarget = document.querySelector('[data-section-slug="' + slug + '"]');
+    if (legacyTarget && legacyTarget.getAttribute('href')) {
+      window.location.replace(legacyTarget.getAttribute('href'));
+    }
+  }
+})();`;
+}
+
+function renderTocItem(
+  section: DocsSection,
+  active: DocsSection,
+  sections: DocsSection[],
+  options: DocsSiteOptions,
+): string {
+  const current = section.slug === active.slug ? ' aria-current="page"' : '';
+  return `<a class="docs-toc__link" data-section-slug="${section.slug}" href="${sectionRoute(section, sections, options)}"${current}>
     <span class="docs-toc__label">${escapeHtml(section.title)}</span>
-    ${statusBadge}
+    ${section.status === 'pending' ? '<span class="docs-status">pending</span>' : ''}
   </a>`;
 }
 
-function renderSection(section: DocsSection): string {
-  const statusBadge = section.status === 'pending'
-    ? '<span class="docs-section__status docs-section__status--pending">Pending</span>'
-    : '';
-  return `<section class="docs-main__section" id="${section.slug}">
-    <h2 class="docs-main__heading">${escapeHtml(section.title)}${statusBadge}</h2>
-    <div class="docs-main__body">${section.bodyHtml}</div>
-  </section>`;
+function renderStatus(section: DocsSection): string {
+  return section.status === 'pending' ? '<span class="docs-status">Pending</span>' : '';
 }
 
-/**
- * Midnight Tactical theme — same tokens as the landing and app.
- * Square borders, mono font, dark palette, green/bronze accents.
- */
+function renderPager(
+  previous: DocsSection | null,
+  next: DocsSection | null,
+  sections: DocsSection[],
+  options: DocsSiteOptions,
+): string {
+  const previousLink = previous
+    ? `<a class="docs-pager__link docs-pager__link--previous" href="${sectionRoute(previous, sections, options)}"><span>Previous</span><strong>← ${escapeHtml(previous.title)}</strong></a>`
+    : '<span></span>';
+  const nextLink = next
+    ? `<a class="docs-pager__link docs-pager__link--next" href="${sectionRoute(next, sections, options)}"><span>Next</span><strong>${escapeHtml(next.title)} →</strong></a>`
+    : '<span></span>';
+  return `<nav class="docs-pager" aria-label="Section navigation">${previousLink}${nextLink}</nav>`;
+}
+
+function buildReferenceRoutes(
+  sections: DocsSection[],
+  options: DocsSiteOptions,
+): Map<string, string> {
+  const routes = new Map<string, string>();
+  for (const section of sections) {
+    const route = sectionRoute(section, sections, options);
+    const headings = section.bodyMarkdown.matchAll(/^#{3,4}\s+(.+)$/gm);
+    for (const heading of headings) {
+      const slug = docsHeadingSlug(heading[1] ?? '');
+      if (slug) routes.set(slug, `${route}#${slug}`);
+    }
+  }
+  return routes;
+}
+
+function rewriteReferenceLinks(html: string, routes: Map<string, string>): string {
+  return html.replace(/href="#([a-z0-9_-]+)"/g, (match, slug: string) => {
+    const route = routes.get(slug);
+    return route ? `href="${route}"` : match;
+  });
+}
+
+function sectionRoute(
+  section: DocsSection,
+  sections: DocsSection[],
+  options: DocsSiteOptions,
+): string {
+  const base = normalizeBasePath(options.basePath);
+  return section.slug === sections[0]?.slug ? `${base}/` : `${base}/${section.slug}/`;
+}
+
+function normalizeBasePath(basePath: string): string {
+  return `/${basePath.replace(/^\/+|\/+$/g, '')}`;
+}
+
 function renderStylesheet(): string {
   return `
   :root {
@@ -131,271 +210,324 @@ function renderStylesheet(): string {
     --bg-100: #16213e;
     --bg-200: #111524;
     --bg-300: #2a2a4a;
-    --bg-400: #34345e;
     --text: #e0e0e0;
     --text-dim: #8a8aa8;
     --primary: #4a8c5c;
-    --primary-dim: #2c5f3c;
     --secondary: #c8a620;
-    --secondary-dim: #8a7215;
     --border: #2a2a4a;
     --border-bright: #3a3a5a;
+    --header-h: 58px;
     --font-mono: 'Fira Code', 'SF Mono', 'Cascadia Code', ui-monospace, monospace;
     --font-display: 'Space Grotesk', 'Fira Code', sans-serif;
   }
 
   * { box-sizing: border-box; border-radius: 0; margin: 0; }
-
-  html { scroll-behavior: smooth; scroll-padding-top: 96px; }
-
+  html { scroll-behavior: smooth; scroll-padding-top: 84px; }
   body {
+    min-height: 100vh;
+    overflow-x: hidden;
     background: var(--bg);
     color: var(--text);
-    font-family: var(--font-mono);
-    font-size: 15px;
-    line-height: 1.7;
+    font: 15px/1.7 var(--font-mono);
     background-image:
-      linear-gradient(rgba(74, 140, 92, 0.03) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(74, 140, 92, 0.03) 1px, transparent 1px);
+      linear-gradient(rgba(74, 140, 92, 0.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(74, 140, 92, 0.025) 1px, transparent 1px);
     background-size: 24px 24px;
     -webkit-font-smoothing: antialiased;
   }
-
   a { color: var(--primary); text-decoration: none; }
   a:hover { text-decoration: underline; }
-
   code {
-    font-family: var(--font-mono);
-    color: var(--secondary);
-    background: rgba(200, 166, 32, 0.10);
     padding: 0.08em 0.32em;
+    background: rgba(200, 166, 32, 0.10);
+    color: var(--secondary);
+    font-family: var(--font-mono);
   }
 
-  /* ── Header bar ── */
   .docs-header {
     position: sticky;
     top: 0;
     z-index: 50;
+    height: var(--header-h);
+    overflow: hidden;
     border-bottom: 1px solid var(--border);
-    background: rgba(26, 26, 46, 0.90);
+    background: rgba(26, 26, 46, 0.96);
     backdrop-filter: blur(12px);
   }
   .docs-header__inner {
-    max-width: 1240px;
+    width: min(1280px, 100%);
+    height: 100%;
     margin: 0 auto;
+    padding: 0 1.25rem;
     display: flex;
     align-items: center;
     gap: 0.6rem;
-    padding: 0.8rem 1.4rem;
-    font-size: 0.82rem;
+    overflow: hidden;
+    font-size: 0.8rem;
   }
-  .docs-header__home { color: var(--text-dim); }
-  .docs-header__home:hover { color: var(--text); text-decoration: none; }
-  .docs-header__sep { color: var(--bg-400); }
-  .docs-header__title { color: var(--text); font-family: var(--font-display); font-weight: 600; }
+  .docs-header__home { color: var(--text-dim); white-space: nowrap; }
+  .docs-header__sep { color: var(--bg-300); }
+  .docs-header__title {
+    overflow: hidden;
+    color: var(--text);
+    font-family: var(--font-display);
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .docs-header__actions { margin-left: auto; display: flex; gap: 0.5rem; }
   .docs-action {
+    padding: 0.3rem 0.6rem;
+    border: 1px solid var(--border-bright);
+    color: var(--text);
+    font-size: 0.68rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .docs-action--primary { border-color: var(--primary); color: var(--primary); }
+  .docs-menu {
+    display: none;
     border: 1px solid var(--border-bright);
     background: var(--bg-100);
     color: var(--text);
-    padding: 0.38rem 0.72rem;
-    font-size: 0.72rem;
-    letter-spacing: 0.04em;
+    padding: 0.35rem 0.55rem;
+    font: 600 0.72rem var(--font-mono);
     text-transform: uppercase;
-    transition: border-color 0.15s, background 0.15s;
-  }
-  .docs-action:hover { border-color: var(--text-dim); text-decoration: none; }
-  .docs-action--primary {
-    border-color: var(--primary);
-    background: rgba(74, 140, 92, 0.16);
-    color: var(--primary);
   }
 
-  /* ── Hero ── */
-  .docs-hero {
-    max-width: 760px;
-    margin: 0 auto;
-    padding: 3.4rem 1.4rem 2.4rem;
-    text-align: center;
-  }
-  .docs-hero__kicker {
-    font-size: 0.68rem;
-    letter-spacing: 0.14em;
-    color: var(--secondary);
-    margin-bottom: 0.8rem;
-  }
-  .docs-hero h1 {
-    font-family: var(--font-display);
-    font-size: clamp(1.9rem, 5vw, 2.8rem);
-    font-weight: 700;
-    letter-spacing: -0.03em;
-    line-height: 1.05;
-    margin-bottom: 1rem;
-  }
-  .docs-hero__summary { color: var(--text-dim); font-size: 0.96rem; }
-  .docs-hero__summary p { margin-bottom: 0.5rem; }
-
-  /* ── Layout ── */
+  .docs-shell, .docs-layout { overflow: hidden; }
   .docs-layout {
-    max-width: 1240px;
+    width: min(1180px, 100%);
+    min-height: calc(100vh - var(--header-h));
     margin: 0 auto;
+    padding: 0 1.25rem 4rem;
     display: grid;
-    grid-template-columns: 280px minmax(0, 1fr);
-    gap: 2rem;
-    padding: 0 1.4rem 4rem;
+    grid-template-columns: 260px minmax(0, 760px);
+    gap: 3rem;
   }
-
-  /* ── TOC sidebar ── */
   .docs-toc {
     position: sticky;
-    top: 96px;
+    top: calc(var(--header-h) + 24px);
     align-self: start;
-    max-height: calc(100vh - 112px);
+    max-height: calc(100vh - var(--header-h) - 48px);
     overflow-y: auto;
-    padding-right: 0.5rem;
+    padding: 1.4rem 0.5rem 1.4rem 0;
   }
-  .docs-toc__title {
-    font-size: 0.68rem;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--secondary);
-    margin-bottom: 0.8rem;
-    padding-bottom: 0.6rem;
+  .docs-toc__head {
+    padding: 0 0.6rem 0.7rem;
     border-bottom: 1px solid var(--border);
+    color: var(--secondary);
+    font: 600 0.7rem var(--font-display);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
   }
+  .docs-toc__close { display: none; }
+  .docs-toc__list { padding-top: 0.6rem; }
   .docs-toc__link {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
-    gap: 0.6rem;
-    padding: 0.42rem 0.6rem;
+    gap: 0.5rem;
+    padding: 0.48rem 0.65rem;
     border-left: 2px solid transparent;
     color: var(--text-dim);
-    font-size: 0.82rem;
-    line-height: 1.35;
-    transition: color 0.12s, border-color 0.12s, background 0.12s;
+    font-size: 0.8rem;
+    line-height: 1.3;
   }
-  .docs-toc__link:hover { color: var(--text); text-decoration: none; background: rgba(255,255,255,0.03); }
-  .docs-toc__link--active {
-    color: var(--primary);
+  .docs-toc__link:hover { background: rgba(255,255,255,0.03); color: var(--text); text-decoration: none; }
+  .docs-toc__link[aria-current="page"] {
     border-left-color: var(--primary);
-    background: rgba(74, 140, 92, 0.08);
+    background: rgba(74, 140, 92, 0.09);
+    color: var(--primary);
   }
-  .docs-toc__label { flex: 1; }
-  .docs-toc__status, .docs-section__status {
-    flex-shrink: 0;
-    font-size: 0.6rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    border: 1px solid var(--secondary-dim);
+  .docs-status {
+    margin-left: 0.65rem;
+    padding: 0.08rem 0.3rem;
+    border: 1px solid #8a7215;
     color: var(--secondary);
-    padding: 0.08rem 0.32rem;
+    font: 500 0.58rem var(--font-mono);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
   }
+  .docs-backdrop { display: none; }
 
-  /* ── Main content ── */
-  .docs-main { min-width: 0; max-width: 760px; }
-  .docs-main__section {
-    padding: 1.6rem 0 2.4rem;
-    border-bottom: 1px solid var(--border);
+  .docs-main {
+    min-width: 0;
+    max-width: 760px;
+    overflow: hidden;
+    padding: 3rem 0 1rem;
+  }
+  .docs-summary {
+    margin-bottom: 2rem;
+    padding: 1rem 1.1rem;
+    overflow: hidden;
+    border-left: 2px solid var(--secondary);
+    background: rgba(200, 166, 32, 0.06);
+    color: var(--text-dim);
+    font-size: 0.88rem;
+  }
+  .docs-summary p + p { margin-top: 0.55rem; }
+  .docs-main__section { overflow: hidden; }
+  .docs-main__eyebrow {
+    margin-bottom: 0.5rem;
+    color: var(--secondary);
+    font-size: 0.66rem;
+    letter-spacing: 0.12em;
   }
   .docs-main__heading {
-    display: flex;
-    align-items: baseline;
-    gap: 0.8rem;
-    font-family: var(--font-display);
-    font-size: clamp(1.4rem, 3vw, 1.8rem);
-    font-weight: 700;
-    letter-spacing: -0.02em;
-    margin-bottom: 1.2rem;
-    padding-bottom: 0.6rem;
+    margin-bottom: 1.7rem;
+    padding-bottom: 0.8rem;
     border-bottom: 1px solid var(--border-bright);
+    font: 700 clamp(1.75rem, 5vw, 2.45rem)/1.1 var(--font-display);
+    letter-spacing: -0.03em;
   }
-  .docs-main__body { color: var(--text); }
-  .docs-main__body p { margin-bottom: 1rem; color: var(--text); }
+  .docs-main__body p { margin-bottom: 1rem; }
   .docs-main__body ul { margin: 0 0 1.2rem; padding-left: 1.4rem; }
-  .docs-main__body li { margin-bottom: 0.4rem; color: var(--text); }
+  .docs-main__body li { margin-bottom: 0.4rem; }
+  .docs-main__body h3, .docs-main__body h4 { scroll-margin-top: 82px; }
   .docs-main__body h3 {
-    margin: 1.8rem 0 0.8rem;
-    font-family: var(--font-display);
-    font-size: 1.05rem;
+    margin: 2rem 0 0.8rem;
     color: var(--primary);
-    letter-spacing: 0.02em;
+    font: 600 1.08rem var(--font-display);
   }
   .docs-main__body h4 {
-    margin: 1.4rem 0 0.6rem;
-    font-family: var(--font-display);
-    font-size: 0.95rem;
+    margin: 1.5rem 0 0.65rem;
     color: var(--secondary);
-    letter-spacing: 0.02em;
+    font: 600 0.95rem var(--font-display);
   }
   .docs-main__body pre {
+    max-width: 100%;
     overflow-x: auto;
     margin: 1rem 0 1.4rem;
-    padding: 1rem 1.2rem;
+    padding: 1rem 1.1rem;
     border: 1px solid var(--border);
     background: var(--bg-200);
-    line-height: 1.55;
-    font-size: 0.84rem;
     color: #c8d8c8;
+    font-size: 0.83rem;
+    line-height: 1.55;
   }
-  .docs-main__body pre code { background: none; color: inherit; padding: 0; }
+  .docs-main__body pre code { padding: 0; background: none; color: inherit; }
   .docs-main__body table {
     width: 100%;
     margin: 1rem 0 1.4rem;
     border-collapse: collapse;
     font-size: 0.82rem;
   }
-  .docs-main__body th,
-  .docs-main__body td {
+  .docs-main__body th, .docs-main__body td {
+    padding: 0.52rem 0.68rem;
     border: 1px solid var(--border);
-    padding: 0.55rem 0.7rem;
     text-align: left;
     vertical-align: top;
   }
-  .docs-main__body th {
-    color: var(--secondary);
-    background: rgba(200, 166, 32, 0.08);
+  .docs-main__body th { background: rgba(200, 166, 32, 0.08); color: var(--secondary); }
+  .docs-main__body tbody tr:hover { background: rgba(74, 140, 92, 0.05); }
+  .docs-main__body figure { margin: 1.2rem 0 1.6rem; overflow: hidden; }
+  .docs-main__body figure img { display: block; width: 100%; height: auto; border: 1px solid var(--border); }
+  .docs-main__body figcaption { margin-top: 0.5rem; color: var(--text-dim); font-size: 0.8rem; }
+
+  .docs-pager {
+    margin-top: 3rem;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 0.8rem;
+    overflow: hidden;
+    border-top: 1px solid var(--border);
+    padding-top: 1rem;
   }
-  .docs-main__body figure { margin: 1.2rem 0 1.6rem; }
-  .docs-main__body figure img {
-    display: block;
-    width: 100%;
-    height: auto;
+  .docs-pager__link {
+    min-width: 0;
+    padding: 0.8rem;
+    overflow: hidden;
     border: 1px solid var(--border);
     background: var(--bg-100);
   }
-  .docs-main__body figcaption { margin-top: 0.5rem; font-size: 0.8rem; color: var(--text-dim); }
+  .docs-pager__link:hover { border-color: var(--primary); text-decoration: none; }
+  .docs-pager__link span { display: block; color: var(--text-dim); font-size: 0.65rem; text-transform: uppercase; }
+  .docs-pager__link strong { display: block; overflow: hidden; color: var(--text); font-size: 0.78rem; text-overflow: ellipsis; white-space: nowrap; }
+  .docs-pager__link--next { text-align: right; }
 
-  /* ── Footer ── */
   .docs-footer {
-    border-top: 1px solid var(--border);
-    padding: 1.6rem 1.4rem;
-  }
-  .docs-footer {
-    max-width: 1240px;
+    max-width: 1180px;
     margin: 0 auto;
+    padding: 1.4rem 1.25rem;
     display: flex;
     justify-content: space-between;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    font-size: 0.76rem;
+    overflow: hidden;
+    border-top: 1px solid var(--border);
     color: var(--text-dim);
+    font-size: 0.72rem;
   }
-  .docs-footer__dim { color: var(--text-dim); }
 
-  /* ── Responsive ── */
   @media (max-width: 860px) {
-    .docs-layout { grid-template-columns: 1fr; gap: 0; }
+    html.docs-nav-open,
+    html.docs-nav-open body { overflow: hidden; overscroll-behavior: none; }
+    .docs-header__inner { padding: 0 0.7rem; gap: 0.45rem; }
+    .docs-menu { display: inline-flex; }
+    .docs-header__home, .docs-header__sep { display: none; }
+    .docs-header__title { font-size: 0.78rem; }
+    .docs-action { padding: 0.28rem 0.42rem; font-size: 0.62rem; }
+    .docs-action--primary, .docs-action--raw { display: none; }
+    .docs-shell,
+    .docs-layout,
+    .docs-main,
+    .docs-main__section { overflow: visible; }
+    .docs-layout { display: block; min-height: 0; padding: 0 1rem 3rem; }
+    .docs-main { max-width: none; padding-top: 1.8rem; }
+    .docs-summary { margin-bottom: 1.4rem; }
+
     .docs-toc {
-      position: static;
-      max-height: none;
-      margin-bottom: 1.6rem;
-      padding: 1rem;
-      border: 1px solid var(--border);
+      position: fixed;
+      z-index: 80;
+      top: var(--header-h);
+      bottom: 0;
+      left: 0;
+      width: min(330px, 88vw);
+      height: calc(100vh - var(--header-h));
+      height: calc(100dvh - var(--header-h));
+      max-height: calc(100vh - var(--header-h));
+      max-height: calc(100dvh - var(--header-h));
+      padding: 0;
+      overflow-y: auto;
+      overscroll-behavior-y: contain;
+      touch-action: pan-y;
+      -webkit-overflow-scrolling: touch;
+      border-right: 1px solid var(--border-bright);
+      background: var(--bg-100);
+      transform: translateX(-102%);
+      visibility: hidden;
+      transition: transform 0.16s ease, visibility 0.16s;
+    }
+    .docs-shell--nav-open .docs-toc { transform: translateX(0); visibility: visible; }
+    .docs-toc__head {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      padding: 0.8rem 0.9rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
       background: var(--bg-100);
     }
-    .docs-toc__list { max-height: 240px; overflow-y: auto; }
+    .docs-toc__close {
+      display: block;
+      border: 0;
+      background: transparent;
+      color: var(--text);
+      font: 1.4rem/1 var(--font-mono);
+    }
+    .docs-toc__list { padding: 0.5rem 0.6rem 1.5rem; }
+    .docs-toc__link { min-height: 44px; align-items: center; padding: 0.7rem 0.75rem; }
+    .docs-backdrop {
+      position: fixed;
+      z-index: 70;
+      inset: var(--header-h) 0 0;
+      width: 100%;
+      border: 0;
+      background: rgba(8, 9, 18, 0.68);
+    }
+    .docs-shell--nav-open .docs-backdrop { display: block; }
+    .docs-pager { grid-template-columns: 1fr; }
   }
   `;
 }

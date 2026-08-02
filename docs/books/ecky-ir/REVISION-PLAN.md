@@ -10,10 +10,13 @@ that does not compile, (c) has a numbering footgun, and (d) reads dry.
 
 ## Single-source rule
 
-`public/docs/ecky-ir.md` is canonical for language prose and examples. The app
-reader, web docs, EPUB/HTML, and agent-reference projection consume it. The
-files under `docs/books/ecky-ir/chapters/` are generated split views used by
-the example renderer and parity tooling; never edit them directly.
+`docs/books/ecky-ir/ecky-ir-corpus.md` is canonical for campaign lessons,
+human language reference, and bounded agent reference. Projection scripts
+publish `public/tutorials/ecky-campaign.md`, `public/docs/ecky-ir.md`, and
+`public/docs/ecky-agent-reference.md`. The paged HTML site remains shell,
+routing, and Markdown rendering only. Files under
+`docs/books/ecky-ir/chapters/` are generated split views; never edit generated
+projections directly.
 
 `npm run build:book` synchronizes the split views. `npm run check:book-source`
 fails when any generated chapter drifts. The operation catalogue remains
@@ -28,11 +31,9 @@ the API/MCP prompt builder.
   ch05 (good).
 - `:created-by <shape>` — **implemented, native-only by design**. The native
   OCCT planner resolves it into an originating-slot reference (green test
-  `plans_created_by_keyword_into_direct_occt_slot_reference`). The build123d and
-  freecad interop backends deliberately reject it (explicit arms + pinning
-  tests) — they have no slot-provenance index. `ecky check` errors on it only
-  because the CLI lowers through build123d, not native. ch05 teaches it without
-  this native-only caveat.
+  `plans_created_by_keyword_into_direct_occt_slot_reference`). FreeCAD interop
+  rejects it because it has no slot-provenance index. The CLI validates Ecky
+  source directly; the removed build123d runtime no longer participates.
 - `define-component` — implemented; only a cameo in ch07.
 - component library MCP (`component_extract`/`search`/`get`) — implemented,
   **0 book coverage**.
@@ -47,10 +48,9 @@ the API/MCP prompt builder.
 ## Known follow-up (discovered, not a book-content task)
 
 - **Book image assets are committed snapshots.**
-  The old build123d-only example renderer was removed from `scripts/`; it was
-  not wired into package scripts or CI and could not handle native-only examples
-  such as `:created-by`. Future image regeneration should use a current
-  render-path command that understands backend-specific examples.
+  `npm run build:mission-assets` regenerates current mission images through the
+  native OCCT preview path. The removed Python/build123d renderer is not part of
+  docs generation.
 
 ## Tasks
 
@@ -58,10 +58,10 @@ the API/MCP prompt builder.
 
 - [x] A1. `:created-by` in `05-round-shell-select.md`: KEEP the example (it
   works), but frame it as a **native-only** provenance selector. Add a callout:
-  it resolves on the native OCCT backend (the default); the build123d/freecad
-  interop backends reject it because they lack a slot-provenance index. Do NOT
-  remove it and do NOT weaken the interop backends to accept it — native-only
-  is the intended design. (Confirmed by the green native planner test.)
+  it resolves on the native OCCT backend (the default); FreeCAD interop rejects
+  it because it lacks a slot-provenance index. Do NOT remove it and do NOT
+  weaken interop to accept it — native-only is the intended design. (Confirmed
+  by the green native planner test.)
 - [x] A2. CLOSED — not a bug. Re-verified `ecky check` returns exit 1 on error
   and exit 0 on success across multiple failure paths. The earlier exit-0
   observation did not reproduce; nothing to file. (Examples can be CI-validated
@@ -114,9 +114,8 @@ the API/MCP prompt builder.
   filename). Verified: built HTML references `11-...png` (no `10-` left), asset
   present in EPUB OEBPS, book test green, and the chapters/ glob now sorts
   correctly (`10-real` → `10a-projects` → `11-complex`), killing the footgun.
-  Note: did NOT run a full image re-render — the old renderer lowered every
-  example through build123d, which would fail on ch05's native-only
-  `:created-by`; the byte-identical artifact rename is sufficient and safe.
+  Historical note: this rename originally reused the byte-identical artifact.
+  Current mission assets are regenerated through native OCCT.
   Original spec:
   Renumber the two ch10s: `10-real-model-patterns.md` stays **10**,
   `10-complex-film-adapter.md` becomes **11** (it is literally "the final

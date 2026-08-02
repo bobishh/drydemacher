@@ -1,0 +1,2186 @@
+{
+  "schemaVersion": 2,
+  "modelId": "generated-direct-occt-7aae4338a990",
+  "sourceKind": "generated",
+  "engineKind": "ecky",
+  "sourceLanguage": "ecky",
+  "geometryBackend": "mesh",
+  "contentHash": "7aae4338a99009053f9e9a6322a2a7475a3530ff8b0b48a8c6f65afc8481c116",
+  "artifactVersion": 1,
+  "fcstdPath": "",
+  "manifestPath": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-7aae4338a990/manifest.json",
+  "macroPath": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-7aae4338a990/source.ecky",
+  "previewStlPath": "preview.stl",
+  "viewerAssets": [
+    {
+      "partId": "configurable_bracket",
+      "nodeId": "configurable_bracket",
+      "objectName": "configurable_bracket",
+      "label": "Configurable Bracket",
+      "path": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-7aae4338a990/preview.stl",
+      "format": "stl"
+    }
+  ],
+  "edgeTargets": [
+    {
+      "targetId": "configurable_bracket:edge:-32--18-0_-32--18-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32--18-0_-32--18-6",
+      "canonicalTargetId": "configurable_bracket:edge:0:-32--18-0_-32--18-6",
+      "aliasIds": [
+        "configurable_bracket:edge:0:-32--18-0_-32--18-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32--18-0_-32--18-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge1",
+      "editable": false,
+      "start": {
+        "x": -32.0,
+        "y": -18.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": -32.0,
+        "y": -18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-32--18-6_-32-18-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32--18-6_-32-18-6",
+      "canonicalTargetId": "configurable_bracket:edge:1:-32--18-6_-32-18-6",
+      "aliasIds": [
+        "configurable_bracket:edge:1:-32--18-6_-32-18-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32--18-6_-32-18-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge2",
+      "editable": false,
+      "start": {
+        "x": -32.0,
+        "y": -18.0,
+        "z": 6.0
+      },
+      "end": {
+        "x": -32.0,
+        "y": 18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-32-18-0_-32-18-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32-18-0_-32-18-6",
+      "canonicalTargetId": "configurable_bracket:edge:2:-32-18-0_-32-18-6",
+      "aliasIds": [
+        "configurable_bracket:edge:2:-32-18-0_-32-18-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32-18-0_-32-18-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge3",
+      "editable": false,
+      "start": {
+        "x": -32.0,
+        "y": 18.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": -32.0,
+        "y": 18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-32--18-0_-32-18-0",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32--18-0_-32-18-0",
+      "canonicalTargetId": "configurable_bracket:edge:3:-32--18-0_-32-18-0",
+      "aliasIds": [
+        "configurable_bracket:edge:3:-32--18-0_-32-18-0",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32--18-0_-32-18-0"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge4",
+      "editable": false,
+      "start": {
+        "x": -32.0,
+        "y": -18.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": -32.0,
+        "y": 18.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-32--18-0_32--18-0",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32--18-0_32--18-0",
+      "canonicalTargetId": "configurable_bracket:edge:4:-32--18-0_32--18-0",
+      "aliasIds": [
+        "configurable_bracket:edge:4:-32--18-0_32--18-0",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32--18-0_32--18-0"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge5",
+      "editable": false,
+      "start": {
+        "x": -32.0,
+        "y": -18.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": -18.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:32--18-0_32--18-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:32--18-0_32--18-6",
+      "canonicalTargetId": "configurable_bracket:edge:5:32--18-0_32--18-6",
+      "aliasIds": [
+        "configurable_bracket:edge:5:32--18-0_32--18-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:32--18-0_32--18-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge6",
+      "editable": false,
+      "start": {
+        "x": 32.0,
+        "y": -18.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": -18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-32--18-6_32--18-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32--18-6_32--18-6",
+      "canonicalTargetId": "configurable_bracket:edge:6:-32--18-6_32--18-6",
+      "aliasIds": [
+        "configurable_bracket:edge:6:-32--18-6_32--18-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32--18-6_32--18-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge7",
+      "editable": false,
+      "start": {
+        "x": -32.0,
+        "y": -18.0,
+        "z": 6.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": -18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-11-18-6_-32-18-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-11-18-6_-32-18-6",
+      "canonicalTargetId": "configurable_bracket:edge:7:-11-18-6_-32-18-6",
+      "aliasIds": [
+        "configurable_bracket:edge:7:-11-18-6_-32-18-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-11-18-6_-32-18-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge8",
+      "editable": false,
+      "start": {
+        "x": -32.0,
+        "y": 18.0,
+        "z": 6.0
+      },
+      "end": {
+        "x": -11.0,
+        "y": 18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-11-18-6_-11-5.5-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-11-18-6_-11-5.5-6",
+      "canonicalTargetId": "configurable_bracket:edge:8:-11-18-6_-11-5.5-6",
+      "aliasIds": [
+        "configurable_bracket:edge:8:-11-18-6_-11-5.5-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-11-18-6_-11-5.5-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge9",
+      "editable": false,
+      "start": {
+        "x": -10.999999999999998,
+        "y": 5.5,
+        "z": 6.0
+      },
+      "end": {
+        "x": -10.999999999999996,
+        "y": 18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-11-5.5-6_11-5.5-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-11-5.5-6_11-5.5-6",
+      "canonicalTargetId": "configurable_bracket:edge:9:-11-5.5-6_11-5.5-6",
+      "aliasIds": [
+        "configurable_bracket:edge:9:-11-5.5-6_11-5.5-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-11-5.5-6_11-5.5-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge10",
+      "editable": false,
+      "start": {
+        "x": -11.000000000000002,
+        "y": 5.500000000000002,
+        "z": 6.0
+      },
+      "end": {
+        "x": 11.0,
+        "y": 5.500000000000002,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:32--18-6_32--2.8-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:32--18-6_32--2.8-6",
+      "canonicalTargetId": "configurable_bracket:edge:10:32--18-6_32--2.8-6",
+      "aliasIds": [
+        "configurable_bracket:edge:10:32--18-6_32--2.8-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:32--18-6_32--2.8-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge11",
+      "editable": false,
+      "start": {
+        "x": 32.0,
+        "y": -18.0,
+        "z": 6.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": -2.8000000000000007,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:11-18-6_11-5.5-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:11-18-6_11-5.5-6",
+      "canonicalTargetId": "configurable_bracket:edge:11:11-18-6_11-5.5-6",
+      "aliasIds": [
+        "configurable_bracket:edge:11:11-18-6_11-5.5-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:11-18-6_11-5.5-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge12",
+      "editable": false,
+      "start": {
+        "x": 11.000000000000004,
+        "y": 5.5,
+        "z": 6.0
+      },
+      "end": {
+        "x": 11.000000000000004,
+        "y": 18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:29.8--2.8-6_32--2.8-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:29.8--2.8-6_32--2.8-6",
+      "canonicalTargetId": "configurable_bracket:edge:12:29.8--2.8-6_32--2.8-6",
+      "aliasIds": [
+        "configurable_bracket:edge:12:29.8--2.8-6_32--2.8-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:29.8--2.8-6_32--2.8-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge13",
+      "editable": false,
+      "start": {
+        "x": 32.0,
+        "y": -2.8000000000000003,
+        "z": 6.0
+      },
+      "end": {
+        "x": 29.799999999999997,
+        "y": -2.8000000000000003,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:11-18-6_32-18-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:11-18-6_32-18-6",
+      "canonicalTargetId": "configurable_bracket:edge:13:11-18-6_32-18-6",
+      "aliasIds": [
+        "configurable_bracket:edge:13:11-18-6_32-18-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:11-18-6_32-18-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge14",
+      "editable": false,
+      "start": {
+        "x": 11.0,
+        "y": 18.0,
+        "z": 6.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": 18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:29.8--2.8-6_29.8-2.8-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:29.8--2.8-6_29.8-2.8-6",
+      "canonicalTargetId": "configurable_bracket:edge:14:29.8--2.8-6_29.8-2.8-6",
+      "aliasIds": [
+        "configurable_bracket:edge:14:29.8--2.8-6_29.8-2.8-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:29.8--2.8-6_29.8-2.8-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge15",
+      "editable": false,
+      "start": {
+        "x": 29.8,
+        "y": -2.8000000000000003,
+        "z": 6.0
+      },
+      "end": {
+        "x": 29.8,
+        "y": 2.8000000000000003,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:32-18-6_32-2.8-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:32-18-6_32-2.8-6",
+      "canonicalTargetId": "configurable_bracket:edge:15:32-18-6_32-2.8-6",
+      "aliasIds": [
+        "configurable_bracket:edge:15:32-18-6_32-2.8-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:32-18-6_32-2.8-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge16",
+      "editable": false,
+      "start": {
+        "x": 32.0,
+        "y": 2.8000000000000007,
+        "z": 6.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": 18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:29.8-2.8-6_32-2.8-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:29.8-2.8-6_32-2.8-6",
+      "canonicalTargetId": "configurable_bracket:edge:16:29.8-2.8-6_32-2.8-6",
+      "aliasIds": [
+        "configurable_bracket:edge:16:29.8-2.8-6_32-2.8-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:29.8-2.8-6_32-2.8-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge17",
+      "editable": false,
+      "start": {
+        "x": 29.8,
+        "y": 2.8000000000000003,
+        "z": 6.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": 2.8000000000000003,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:16.5--3.5-6_16.5-3.5-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:16.5--3.5-6_16.5-3.5-6",
+      "canonicalTargetId": "configurable_bracket:edge:17:16.5--3.5-6_16.5-3.5-6",
+      "aliasIds": [
+        "configurable_bracket:edge:17:16.5--3.5-6_16.5-3.5-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:16.5--3.5-6_16.5-3.5-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge18",
+      "editable": false,
+      "start": {
+        "x": 16.5,
+        "y": 3.5,
+        "z": 6.0
+      },
+      "end": {
+        "x": 16.5,
+        "y": -3.5,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-16.5-3.5-6_16.5-3.5-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-16.5-3.5-6_16.5-3.5-6",
+      "canonicalTargetId": "configurable_bracket:edge:18:-16.5-3.5-6_16.5-3.5-6",
+      "aliasIds": [
+        "configurable_bracket:edge:18:-16.5-3.5-6_16.5-3.5-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-16.5-3.5-6_16.5-3.5-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge19",
+      "editable": false,
+      "start": {
+        "x": -16.5,
+        "y": 3.5,
+        "z": 6.0
+      },
+      "end": {
+        "x": 16.5,
+        "y": 3.5,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-16.5--3.5-6_-16.5-3.5-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-16.5--3.5-6_-16.5-3.5-6",
+      "canonicalTargetId": "configurable_bracket:edge:19:-16.5--3.5-6_-16.5-3.5-6",
+      "aliasIds": [
+        "configurable_bracket:edge:19:-16.5--3.5-6_-16.5-3.5-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-16.5--3.5-6_-16.5-3.5-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge20",
+      "editable": false,
+      "start": {
+        "x": -16.5,
+        "y": -3.5,
+        "z": 6.0
+      },
+      "end": {
+        "x": -16.5,
+        "y": 3.5,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-16.5--3.5-6_16.5--3.5-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-16.5--3.5-6_16.5--3.5-6",
+      "canonicalTargetId": "configurable_bracket:edge:20:-16.5--3.5-6_16.5--3.5-6",
+      "aliasIds": [
+        "configurable_bracket:edge:20:-16.5--3.5-6_16.5--3.5-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-16.5--3.5-6_16.5--3.5-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge21",
+      "editable": false,
+      "start": {
+        "x": 16.5,
+        "y": -3.5,
+        "z": 6.0
+      },
+      "end": {
+        "x": -16.5,
+        "y": -3.5,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:32-18-0_32-18-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:32-18-0_32-18-6",
+      "canonicalTargetId": "configurable_bracket:edge:21:32-18-0_32-18-6",
+      "aliasIds": [
+        "configurable_bracket:edge:21:32-18-0_32-18-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:32-18-0_32-18-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge22",
+      "editable": false,
+      "start": {
+        "x": 32.0,
+        "y": 18.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": 18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:11-18-6_13-18-3",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:11-18-6_13-18-3",
+      "canonicalTargetId": "configurable_bracket:edge:22:11-18-6_13-18-3",
+      "aliasIds": [
+        "configurable_bracket:edge:22:11-18-6_13-18-3",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:11-18-6_13-18-3"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge23",
+      "editable": false,
+      "start": {
+        "x": 11.000000000000004,
+        "y": 18.0,
+        "z": 5.999999999999998
+      },
+      "end": {
+        "x": 13.000000000000004,
+        "y": 18.0,
+        "z": 3.0000000000000013
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-13-18-3_13-18-3",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-13-18-3_13-18-3",
+      "canonicalTargetId": "configurable_bracket:edge:23:-13-18-3_13-18-3",
+      "aliasIds": [
+        "configurable_bracket:edge:23:-13-18-3_13-18-3",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-13-18-3_13-18-3"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge24",
+      "editable": false,
+      "start": {
+        "x": -13.0,
+        "y": 18.0,
+        "z": 3.0
+      },
+      "end": {
+        "x": 13.0,
+        "y": 18.0,
+        "z": 3.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-11-18-6_-13-18-3",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-11-18-6_-13-18-3",
+      "canonicalTargetId": "configurable_bracket:edge:24:-11-18-6_-13-18-3",
+      "aliasIds": [
+        "configurable_bracket:edge:24:-11-18-6_-13-18-3",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-11-18-6_-13-18-3"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge25",
+      "editable": false,
+      "start": {
+        "x": -10.999999999999998,
+        "y": 18.0,
+        "z": 6.0
+      },
+      "end": {
+        "x": -12.999999999999998,
+        "y": 18.0,
+        "z": 2.9999999999999987
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-32-18-0_32-18-0",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32-18-0_32-18-0",
+      "canonicalTargetId": "configurable_bracket:edge:25:-32-18-0_32-18-0",
+      "aliasIds": [
+        "configurable_bracket:edge:25:-32-18-0_32-18-0",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32-18-0_32-18-0"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge26",
+      "editable": false,
+      "start": {
+        "x": -32.0,
+        "y": 18.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": 18.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:32-18-0_32-2.8-0",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:32-18-0_32-2.8-0",
+      "canonicalTargetId": "configurable_bracket:edge:26:32-18-0_32-2.8-0",
+      "aliasIds": [
+        "configurable_bracket:edge:26:32-18-0_32-2.8-0",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:32-18-0_32-2.8-0"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge27",
+      "editable": false,
+      "start": {
+        "x": 32.0,
+        "y": 2.8000000000000007,
+        "z": 0.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": 18.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:29.8-2.8-0_32-2.8-0",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:29.8-2.8-0_32-2.8-0",
+      "canonicalTargetId": "configurable_bracket:edge:27:29.8-2.8-0_32-2.8-0",
+      "aliasIds": [
+        "configurable_bracket:edge:27:29.8-2.8-0_32-2.8-0",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:29.8-2.8-0_32-2.8-0"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge28",
+      "editable": false,
+      "start": {
+        "x": 32.0,
+        "y": 2.8,
+        "z": 0.0
+      },
+      "end": {
+        "x": 29.800000000000004,
+        "y": 2.8,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:29.8--2.8-0_29.8-2.8-0",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:29.8--2.8-0_29.8-2.8-0",
+      "canonicalTargetId": "configurable_bracket:edge:28:29.8--2.8-0_29.8-2.8-0",
+      "aliasIds": [
+        "configurable_bracket:edge:28:29.8--2.8-0_29.8-2.8-0",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:29.8--2.8-0_29.8-2.8-0"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge29",
+      "editable": false,
+      "start": {
+        "x": 29.8,
+        "y": 2.8000000000000003,
+        "z": 0.0
+      },
+      "end": {
+        "x": 29.8,
+        "y": -2.8000000000000003,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:32--18-0_32--2.8-0",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:32--18-0_32--2.8-0",
+      "canonicalTargetId": "configurable_bracket:edge:29:32--18-0_32--2.8-0",
+      "aliasIds": [
+        "configurable_bracket:edge:29:32--18-0_32--2.8-0",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:32--18-0_32--2.8-0"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge30",
+      "editable": false,
+      "start": {
+        "x": 32.0,
+        "y": -18.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": -2.8000000000000007,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:29.8--2.8-0_32--2.8-0",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:29.8--2.8-0_32--2.8-0",
+      "canonicalTargetId": "configurable_bracket:edge:30:29.8--2.8-0_32--2.8-0",
+      "aliasIds": [
+        "configurable_bracket:edge:30:29.8--2.8-0_32--2.8-0",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:29.8--2.8-0_32--2.8-0"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge31",
+      "editable": false,
+      "start": {
+        "x": 29.8,
+        "y": -2.8,
+        "z": 0.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": -2.8,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:16.5--3.5-0_16.5-3.5-0",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:16.5--3.5-0_16.5-3.5-0",
+      "canonicalTargetId": "configurable_bracket:edge:31:16.5--3.5-0_16.5-3.5-0",
+      "aliasIds": [
+        "configurable_bracket:edge:31:16.5--3.5-0_16.5-3.5-0",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:16.5--3.5-0_16.5-3.5-0"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge32",
+      "editable": false,
+      "start": {
+        "x": 16.5,
+        "y": 3.5,
+        "z": 0.0
+      },
+      "end": {
+        "x": 16.5,
+        "y": -3.5,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-16.5-3.5-0_16.5-3.5-0",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-16.5-3.5-0_16.5-3.5-0",
+      "canonicalTargetId": "configurable_bracket:edge:32:-16.5-3.5-0_16.5-3.5-0",
+      "aliasIds": [
+        "configurable_bracket:edge:32:-16.5-3.5-0_16.5-3.5-0",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-16.5-3.5-0_16.5-3.5-0"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge33",
+      "editable": false,
+      "start": {
+        "x": -16.5,
+        "y": 3.5,
+        "z": 0.0
+      },
+      "end": {
+        "x": 16.5,
+        "y": 3.5,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-16.5--3.5-0_-16.5-3.5-0",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-16.5--3.5-0_-16.5-3.5-0",
+      "canonicalTargetId": "configurable_bracket:edge:33:-16.5--3.5-0_-16.5-3.5-0",
+      "aliasIds": [
+        "configurable_bracket:edge:33:-16.5--3.5-0_-16.5-3.5-0",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-16.5--3.5-0_-16.5-3.5-0"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge34",
+      "editable": false,
+      "start": {
+        "x": -16.5,
+        "y": -3.5,
+        "z": 0.0
+      },
+      "end": {
+        "x": -16.5,
+        "y": 3.5,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-16.5--3.5-0_16.5--3.5-0",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-16.5--3.5-0_16.5--3.5-0",
+      "canonicalTargetId": "configurable_bracket:edge:34:-16.5--3.5-0_16.5--3.5-0",
+      "aliasIds": [
+        "configurable_bracket:edge:34:-16.5--3.5-0_16.5--3.5-0",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-16.5--3.5-0_16.5--3.5-0"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge35",
+      "editable": false,
+      "start": {
+        "x": 16.5,
+        "y": -3.5,
+        "z": 0.0
+      },
+      "end": {
+        "x": -16.5,
+        "y": -3.5,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:32--2.8-0_32--2.8-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:32--2.8-0_32--2.8-6",
+      "canonicalTargetId": "configurable_bracket:edge:35:32--2.8-0_32--2.8-6",
+      "aliasIds": [
+        "configurable_bracket:edge:35:32--2.8-0_32--2.8-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:32--2.8-0_32--2.8-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge36",
+      "editable": false,
+      "start": {
+        "x": 32.0,
+        "y": -2.8000000000000003,
+        "z": 0.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": -2.8000000000000003,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-13-18-3_-13-26-3",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-13-18-3_-13-26-3",
+      "canonicalTargetId": "configurable_bracket:edge:36:-13-18-3_-13-26-3",
+      "aliasIds": [
+        "configurable_bracket:edge:36:-13-18-3_-13-26-3",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-13-18-3_-13-26-3"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge37",
+      "editable": false,
+      "start": {
+        "x": -13.0,
+        "y": 26.0,
+        "z": 2.9999999999999987
+      },
+      "end": {
+        "x": -13.0,
+        "y": 18.0,
+        "z": 2.9999999999999996
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-11-5.5-6_-9-7-9",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-11-5.5-6_-9-7-9",
+      "canonicalTargetId": "configurable_bracket:edge:37:-11-5.5-6_-9-7-9",
+      "aliasIds": [
+        "configurable_bracket:edge:37:-11-5.5-6_-9-7-9",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-11-5.5-6_-9-7-9"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge38",
+      "editable": false,
+      "start": {
+        "x": -11.000000000000002,
+        "y": 5.5,
+        "z": 6.0
+      },
+      "end": {
+        "x": -9.0,
+        "y": 7.000000000000001,
+        "z": 9.000000000000002
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-9-23-9_-9-7-9",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-9-23-9_-9-7-9",
+      "canonicalTargetId": "configurable_bracket:edge:38:-9-23-9_-9-7-9",
+      "aliasIds": [
+        "configurable_bracket:edge:38:-9-23-9_-9-7-9",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-9-23-9_-9-7-9"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge39",
+      "editable": false,
+      "start": {
+        "x": -9.0,
+        "y": 23.0,
+        "z": 9.0
+      },
+      "end": {
+        "x": -9.0,
+        "y": 7.0,
+        "z": 9.000000000000002
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-13-26-3_-9-23-9",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-13-26-3_-9-23-9",
+      "canonicalTargetId": "configurable_bracket:edge:39:-13-26-3_-9-23-9",
+      "aliasIds": [
+        "configurable_bracket:edge:39:-13-26-3_-9-23-9",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-13-26-3_-9-23-9"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge40",
+      "editable": false,
+      "start": {
+        "x": -13.0,
+        "y": 26.0,
+        "z": 2.9999999999999987
+      },
+      "end": {
+        "x": -9.0,
+        "y": 23.0,
+        "z": 9.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-9-7-9_9-7-9",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-9-7-9_9-7-9",
+      "canonicalTargetId": "configurable_bracket:edge:40:-9-7-9_9-7-9",
+      "aliasIds": [
+        "configurable_bracket:edge:40:-9-7-9_9-7-9",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-9-7-9_9-7-9"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge41",
+      "editable": false,
+      "start": {
+        "x": -9.0,
+        "y": 7.0,
+        "z": 9.0
+      },
+      "end": {
+        "x": 9.0,
+        "y": 7.0,
+        "z": 9.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:11-5.5-6_9-7-9",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:11-5.5-6_9-7-9",
+      "canonicalTargetId": "configurable_bracket:edge:41:11-5.5-6_9-7-9",
+      "aliasIds": [
+        "configurable_bracket:edge:41:11-5.5-6_9-7-9",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:11-5.5-6_9-7-9"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge42",
+      "editable": false,
+      "start": {
+        "x": 11.000000000000002,
+        "y": 5.5,
+        "z": 6.0
+      },
+      "end": {
+        "x": 9.0,
+        "y": 7.000000000000001,
+        "z": 9.000000000000002
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:13-18-3_13-26-3",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:13-18-3_13-26-3",
+      "canonicalTargetId": "configurable_bracket:edge:42:13-18-3_13-26-3",
+      "aliasIds": [
+        "configurable_bracket:edge:42:13-18-3_13-26-3",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:13-18-3_13-26-3"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge43",
+      "editable": false,
+      "start": {
+        "x": 13.0,
+        "y": 26.0,
+        "z": 2.9999999999999987
+      },
+      "end": {
+        "x": 13.0,
+        "y": 18.0,
+        "z": 2.9999999999999996
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:9-23-9_9-7-9",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:9-23-9_9-7-9",
+      "canonicalTargetId": "configurable_bracket:edge:43:9-23-9_9-7-9",
+      "aliasIds": [
+        "configurable_bracket:edge:43:9-23-9_9-7-9",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:9-23-9_9-7-9"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge44",
+      "editable": false,
+      "start": {
+        "x": 9.0,
+        "y": 23.0,
+        "z": 9.0
+      },
+      "end": {
+        "x": 9.0,
+        "y": 7.0,
+        "z": 9.000000000000002
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:13-26-3_9-23-9",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:13-26-3_9-23-9",
+      "canonicalTargetId": "configurable_bracket:edge:44:13-26-3_9-23-9",
+      "aliasIds": [
+        "configurable_bracket:edge:44:13-26-3_9-23-9",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:13-26-3_9-23-9"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge45",
+      "editable": false,
+      "start": {
+        "x": 13.0,
+        "y": 26.0,
+        "z": 2.9999999999999987
+      },
+      "end": {
+        "x": 9.0,
+        "y": 23.0,
+        "z": 9.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:29.8--2.8-0_29.8--2.8-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:29.8--2.8-0_29.8--2.8-6",
+      "canonicalTargetId": "configurable_bracket:edge:45:29.8--2.8-0_29.8--2.8-6",
+      "aliasIds": [
+        "configurable_bracket:edge:45:29.8--2.8-0_29.8--2.8-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:29.8--2.8-0_29.8--2.8-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge46",
+      "editable": false,
+      "start": {
+        "x": 29.8,
+        "y": -2.8,
+        "z": 0.0
+      },
+      "end": {
+        "x": 29.8,
+        "y": -2.8,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:29.8-2.8-0_29.8-2.8-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:29.8-2.8-0_29.8-2.8-6",
+      "canonicalTargetId": "configurable_bracket:edge:46:29.8-2.8-0_29.8-2.8-6",
+      "aliasIds": [
+        "configurable_bracket:edge:46:29.8-2.8-0_29.8-2.8-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:29.8-2.8-0_29.8-2.8-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge47",
+      "editable": false,
+      "start": {
+        "x": 29.8,
+        "y": 2.8,
+        "z": 0.0
+      },
+      "end": {
+        "x": 29.8,
+        "y": 2.8,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:32-2.8-0_32-2.8-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:32-2.8-0_32-2.8-6",
+      "canonicalTargetId": "configurable_bracket:edge:47:32-2.8-0_32-2.8-6",
+      "aliasIds": [
+        "configurable_bracket:edge:47:32-2.8-0_32-2.8-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:32-2.8-0_32-2.8-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge48",
+      "editable": false,
+      "start": {
+        "x": 32.0,
+        "y": 2.8000000000000003,
+        "z": 6.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": 2.8000000000000003,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:16.5-3.5-0_16.5-3.5-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:16.5-3.5-0_16.5-3.5-6",
+      "canonicalTargetId": "configurable_bracket:edge:48:16.5-3.5-0_16.5-3.5-6",
+      "aliasIds": [
+        "configurable_bracket:edge:48:16.5-3.5-0_16.5-3.5-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:16.5-3.5-0_16.5-3.5-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge49",
+      "editable": false,
+      "start": {
+        "x": 16.5,
+        "y": 3.5,
+        "z": 0.0
+      },
+      "end": {
+        "x": 16.5,
+        "y": 3.5,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:16.5--3.5-0_16.5--3.5-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:16.5--3.5-0_16.5--3.5-6",
+      "canonicalTargetId": "configurable_bracket:edge:49:16.5--3.5-0_16.5--3.5-6",
+      "aliasIds": [
+        "configurable_bracket:edge:49:16.5--3.5-0_16.5--3.5-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:16.5--3.5-0_16.5--3.5-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge50",
+      "editable": false,
+      "start": {
+        "x": 16.5,
+        "y": -3.5,
+        "z": 0.0
+      },
+      "end": {
+        "x": 16.5,
+        "y": -3.5,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-16.5-3.5-0_-16.5-3.5-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-16.5-3.5-0_-16.5-3.5-6",
+      "canonicalTargetId": "configurable_bracket:edge:50:-16.5-3.5-0_-16.5-3.5-6",
+      "aliasIds": [
+        "configurable_bracket:edge:50:-16.5-3.5-0_-16.5-3.5-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-16.5-3.5-0_-16.5-3.5-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge51",
+      "editable": false,
+      "start": {
+        "x": -16.5,
+        "y": 3.5,
+        "z": 0.0
+      },
+      "end": {
+        "x": -16.5,
+        "y": 3.5,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-16.5--3.5-0_-16.5--3.5-6",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-16.5--3.5-0_-16.5--3.5-6",
+      "canonicalTargetId": "configurable_bracket:edge:51:-16.5--3.5-0_-16.5--3.5-6",
+      "aliasIds": [
+        "configurable_bracket:edge:51:-16.5--3.5-0_-16.5--3.5-6",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-16.5--3.5-0_-16.5--3.5-6"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge52",
+      "editable": false,
+      "start": {
+        "x": -16.5,
+        "y": -3.5,
+        "z": 0.0
+      },
+      "end": {
+        "x": -16.5,
+        "y": -3.5,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-13-26-3_13-26-3",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-13-26-3_13-26-3",
+      "canonicalTargetId": "configurable_bracket:edge:52:-13-26-3_13-26-3",
+      "aliasIds": [
+        "configurable_bracket:edge:52:-13-26-3_13-26-3",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-13-26-3_13-26-3"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge53",
+      "editable": false,
+      "start": {
+        "x": -13.0,
+        "y": 26.0,
+        "z": 2.9999999999999987
+      },
+      "end": {
+        "x": 13.0,
+        "y": 26.0,
+        "z": 2.9999999999999987
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-9-23-9_9-23-9",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-9-23-9_9-23-9",
+      "canonicalTargetId": "configurable_bracket:edge:53:-9-23-9_9-23-9",
+      "aliasIds": [
+        "configurable_bracket:edge:53:-9-23-9_9-23-9",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-9-23-9_9-23-9"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge54",
+      "editable": false,
+      "start": {
+        "x": -9.0,
+        "y": 23.0,
+        "z": 9.0
+      },
+      "end": {
+        "x": 9.0,
+        "y": 23.0,
+        "z": 9.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-32-12-20_-32-12-60",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32-12-20_-32-12-60",
+      "canonicalTargetId": "configurable_bracket:edge:54:-32-12-20_-32-12-60",
+      "aliasIds": [
+        "configurable_bracket:edge:54:-32-12-20_-32-12-60",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32-12-20_-32-12-60"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge55",
+      "editable": false,
+      "start": {
+        "x": -32.0,
+        "y": 12.0,
+        "z": 20.0
+      },
+      "end": {
+        "x": -32.0,
+        "y": 12.0,
+        "z": 60.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-32-12-60_-32-18-60",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32-12-60_-32-18-60",
+      "canonicalTargetId": "configurable_bracket:edge:55:-32-12-60_-32-18-60",
+      "aliasIds": [
+        "configurable_bracket:edge:55:-32-12-60_-32-18-60",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32-12-60_-32-18-60"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge56",
+      "editable": false,
+      "start": {
+        "x": -32.0,
+        "y": 12.0,
+        "z": 60.0
+      },
+      "end": {
+        "x": -32.0,
+        "y": 18.0,
+        "z": 60.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-32-18-20_-32-18-60",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32-18-20_-32-18-60",
+      "canonicalTargetId": "configurable_bracket:edge:56:-32-18-20_-32-18-60",
+      "aliasIds": [
+        "configurable_bracket:edge:56:-32-18-20_-32-18-60",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32-18-20_-32-18-60"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge57",
+      "editable": false,
+      "start": {
+        "x": -32.0,
+        "y": 18.0,
+        "z": 20.0
+      },
+      "end": {
+        "x": -32.0,
+        "y": 18.0,
+        "z": 60.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-32-12-20_-32-18-20",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32-12-20_-32-18-20",
+      "canonicalTargetId": "configurable_bracket:edge:57:-32-12-20_-32-18-20",
+      "aliasIds": [
+        "configurable_bracket:edge:57:-32-12-20_-32-18-20",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32-12-20_-32-18-20"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge58",
+      "editable": false,
+      "start": {
+        "x": -32.0,
+        "y": 12.0,
+        "z": 20.0
+      },
+      "end": {
+        "x": -32.0,
+        "y": 18.0,
+        "z": 20.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:32-12-20_32-12-60",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:32-12-20_32-12-60",
+      "canonicalTargetId": "configurable_bracket:edge:58:32-12-20_32-12-60",
+      "aliasIds": [
+        "configurable_bracket:edge:58:32-12-20_32-12-60",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:32-12-20_32-12-60"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge59",
+      "editable": false,
+      "start": {
+        "x": 32.0,
+        "y": 12.0,
+        "z": 20.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": 12.0,
+        "z": 60.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:32-12-60_32-18-60",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:32-12-60_32-18-60",
+      "canonicalTargetId": "configurable_bracket:edge:59:32-12-60_32-18-60",
+      "aliasIds": [
+        "configurable_bracket:edge:59:32-12-60_32-18-60",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:32-12-60_32-18-60"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge60",
+      "editable": false,
+      "start": {
+        "x": 32.0,
+        "y": 12.0,
+        "z": 60.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": 18.0,
+        "z": 60.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:32-18-20_32-18-60",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:32-18-20_32-18-60",
+      "canonicalTargetId": "configurable_bracket:edge:60:32-18-20_32-18-60",
+      "aliasIds": [
+        "configurable_bracket:edge:60:32-18-20_32-18-60",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:32-18-20_32-18-60"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge61",
+      "editable": false,
+      "start": {
+        "x": 32.0,
+        "y": 18.0,
+        "z": 20.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": 18.0,
+        "z": 60.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:32-12-20_32-18-20",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:32-12-20_32-18-20",
+      "canonicalTargetId": "configurable_bracket:edge:61:32-12-20_32-18-20",
+      "aliasIds": [
+        "configurable_bracket:edge:61:32-12-20_32-18-20",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:32-12-20_32-18-20"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge62",
+      "editable": false,
+      "start": {
+        "x": 32.0,
+        "y": 12.0,
+        "z": 20.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": 18.0,
+        "z": 20.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-32-12-20_32-12-20",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32-12-20_32-12-20",
+      "canonicalTargetId": "configurable_bracket:edge:62:-32-12-20_32-12-20",
+      "aliasIds": [
+        "configurable_bracket:edge:62:-32-12-20_32-12-20",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32-12-20_32-12-20"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge63",
+      "editable": false,
+      "start": {
+        "x": -32.0,
+        "y": 12.0,
+        "z": 20.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": 12.0,
+        "z": 20.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-32-12-60_32-12-60",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32-12-60_32-12-60",
+      "canonicalTargetId": "configurable_bracket:edge:63:-32-12-60_32-12-60",
+      "aliasIds": [
+        "configurable_bracket:edge:63:-32-12-60_32-12-60",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32-12-60_32-12-60"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge64",
+      "editable": false,
+      "start": {
+        "x": -32.0,
+        "y": 12.0,
+        "z": 60.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": 12.0,
+        "z": 60.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-32-18-20_32-18-20",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32-18-20_32-18-20",
+      "canonicalTargetId": "configurable_bracket:edge:64:-32-18-20_32-18-20",
+      "aliasIds": [
+        "configurable_bracket:edge:64:-32-18-20_32-18-20",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32-18-20_32-18-20"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge65",
+      "editable": false,
+      "start": {
+        "x": -32.0,
+        "y": 18.0,
+        "z": 20.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": 18.0,
+        "z": 20.0
+      }
+    },
+    {
+      "targetId": "configurable_bracket:edge:-32-18-60_32-18-60",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32-18-60_32-18-60",
+      "canonicalTargetId": "configurable_bracket:edge:65:-32-18-60_32-18-60",
+      "aliasIds": [
+        "configurable_bracket:edge:65:-32-18-60_32-18-60",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:edge:-32-18-60_32-18-60"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Edge66",
+      "editable": false,
+      "start": {
+        "x": -32.0,
+        "y": 18.0,
+        "z": 60.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": 18.0,
+        "z": 60.0
+      }
+    }
+  ],
+  "faceTargets": [
+    {
+      "targetId": "configurable_bracket:face:-32-0-3:216",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:-32-0-3:216",
+      "canonicalTargetId": "configurable_bracket:face:0:-32-0-3:216",
+      "aliasIds": [
+        "configurable_bracket:face:0:-32-0-3:216",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:-32-0-3:216"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face1",
+      "editable": false,
+      "center": {
+        "x": -32.0,
+        "y": 5.181040781584063e-16,
+        "z": 3.0
+      },
+      "normal": [
+        1.0,
+        0.0,
+        -0.0
+      ],
+      "area": 216.0
+    },
+    {
+      "targetId": "configurable_bracket:face:0--18-3:384",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:0--18-3:384",
+      "canonicalTargetId": "configurable_bracket:face:1:0--18-3:384",
+      "aliasIds": [
+        "configurable_bracket:face:1:0--18-3:384",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:0--18-3:384"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face2",
+      "editable": false,
+      "center": {
+        "x": 2.96059473233375e-16,
+        "y": -18.0,
+        "z": 3.0
+      },
+      "normal": [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      "area": 384.0
+    },
+    {
+      "targetId": "configurable_bracket:face:-0.423--1.863-6:1734.88",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:-0.423--1.863-6:1734.88",
+      "canonicalTargetId": "configurable_bracket:face:2:-0.423--1.863-6:1734.88",
+      "aliasIds": [
+        "configurable_bracket:face:2:-0.423--1.863-6:1734.88",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:-0.423--1.863-6:1734.88"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face3",
+      "editable": false,
+      "center": {
+        "x": -0.4225314903460884,
+        "y": -1.8625202710515223,
+        "z": 6.000000000000001
+      },
+      "normal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "area": 1734.8804467914529
+    },
+    {
+      "targetId": "configurable_bracket:face:0-18-2.663:312",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:0-18-2.663:312",
+      "canonicalTargetId": "configurable_bracket:face:3:0-18-2.663:312",
+      "aliasIds": [
+        "configurable_bracket:face:3:0-18-2.663:312",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:0-18-2.663:312"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face4",
+      "editable": false,
+      "center": {
+        "x": 0.0,
+        "y": 18.0,
+        "z": 2.6634615384615383
+      },
+      "normal": [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      "area": 312.0
+    },
+    {
+      "targetId": "configurable_bracket:face:-0.365-0-0:2009.88",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:-0.365-0-0:2009.88",
+      "canonicalTargetId": "configurable_bracket:face:4:-0.365-0-0:2009.88",
+      "aliasIds": [
+        "configurable_bracket:face:4:-0.365-0-0:2009.88",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:-0.365-0-0:2009.88"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face5",
+      "editable": false,
+      "center": {
+        "x": -0.3647190169570979,
+        "y": -3.4786171847462013e-16,
+        "z": 0.0
+      },
+      "normal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "area": 2009.880446791453
+    },
+    {
+      "targetId": "configurable_bracket:face:32--10.4-3:91.2",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:32--10.4-3:91.2",
+      "canonicalTargetId": "configurable_bracket:face:5:32--10.4-3:91.2",
+      "aliasIds": [
+        "configurable_bracket:face:5:32--10.4-3:91.2",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:32--10.4-3:91.2"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face6",
+      "editable": false,
+      "center": {
+        "x": 32.0,
+        "y": -10.4,
+        "z": 3.0
+      },
+      "normal": [
+        1.0,
+        0.0,
+        -0.0
+      ],
+      "area": 91.19999999999999
+    },
+    {
+      "targetId": "configurable_bracket:face:-10.616-16.944-6.576:89.237",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:-10.616-16.944-6.576:89.237",
+      "canonicalTargetId": "configurable_bracket:face:6:-10.616-16.944-6.576:89.237",
+      "aliasIds": [
+        "configurable_bracket:face:6:-10.616-16.944-6.576:89.237",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:-10.616-16.944-6.576:89.237"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face7",
+      "editable": false,
+      "center": {
+        "x": -10.616161616161616,
+        "y": 16.944444444444443,
+        "z": 6.575757575757577
+      },
+      "normal": [
+        0.8320502943378437,
+        -6.158409296133417e-17,
+        -0.5547001962252291
+      ],
+      "area": 89.23739406773373
+    },
+    {
+      "targetId": "configurable_bracket:face:0-6.225-7.45:67.082",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:0-6.225-7.45:67.082",
+      "canonicalTargetId": "configurable_bracket:face:7:0-6.225-7.45:67.082",
+      "aliasIds": [
+        "configurable_bracket:face:7:0-6.225-7.45:67.082",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:0-6.225-7.45:67.082"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face8",
+      "editable": false,
+      "center": {
+        "x": -2.0164122389583682e-16,
+        "y": 6.225000000000001,
+        "z": 7.450000000000002
+      },
+      "normal": [
+        0.0,
+        -0.894427190999916,
+        0.4472135954999581
+      ],
+      "area": 67.08203932499367
+    },
+    {
+      "targetId": "configurable_bracket:face:10.616-16.944-6.576:89.237",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:10.616-16.944-6.576:89.237",
+      "canonicalTargetId": "configurable_bracket:face:8:10.616-16.944-6.576:89.237",
+      "aliasIds": [
+        "configurable_bracket:face:8:10.616-16.944-6.576:89.237",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:10.616-16.944-6.576:89.237"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face9",
+      "editable": false,
+      "center": {
+        "x": 10.616161616161616,
+        "y": 16.944444444444443,
+        "z": 6.575757575757576
+      },
+      "normal": [
+        0.8320502943378437,
+        6.158409296133417e-17,
+        0.5547001962252291
+      ],
+      "area": 89.23739406773377
+    },
+    {
+      "targetId": "configurable_bracket:face:30.9--2.8-3:13.2",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:30.9--2.8-3:13.2",
+      "canonicalTargetId": "configurable_bracket:face:9:30.9--2.8-3:13.2",
+      "aliasIds": [
+        "configurable_bracket:face:9:30.9--2.8-3:13.2",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:30.9--2.8-3:13.2"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face10",
+      "editable": false,
+      "center": {
+        "x": 30.9,
+        "y": -2.8,
+        "z": 3.0
+      },
+      "normal": [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      "area": 13.199999999999996
+    },
+    {
+      "targetId": "configurable_bracket:face:28.017-0-3:52.779",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:28.017-0-3:52.779",
+      "canonicalTargetId": "configurable_bracket:face:10:28.017-0-3:52.779",
+      "aliasIds": [
+        "configurable_bracket:face:10:28.017-0-3:52.779",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:28.017-0-3:52.779"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face11",
+      "editable": false,
+      "center": {
+        "x": 28.017464637370775,
+        "y": -3.9991571562250995e-17,
+        "z": 2.9999999999999996
+      },
+      "normal": [
+        1.0,
+        3.3929633581931485e-17,
+        -0.0
+      ],
+      "area": 52.77875658030853
+    },
+    {
+      "targetId": "configurable_bracket:face:32-10.4-3:91.2",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:32-10.4-3:91.2",
+      "canonicalTargetId": "configurable_bracket:face:11:32-10.4-3:91.2",
+      "aliasIds": [
+        "configurable_bracket:face:11:32-10.4-3:91.2",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:32-10.4-3:91.2"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face12",
+      "editable": false,
+      "center": {
+        "x": 32.0,
+        "y": 10.4,
+        "z": 3.0
+      },
+      "normal": [
+        1.0,
+        0.0,
+        -0.0
+      ],
+      "area": 91.19999999999999
+    },
+    {
+      "targetId": "configurable_bracket:face:30.9-2.8-3:13.2",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:30.9-2.8-3:13.2",
+      "canonicalTargetId": "configurable_bracket:face:12:30.9-2.8-3:13.2",
+      "aliasIds": [
+        "configurable_bracket:face:12:30.9-2.8-3:13.2",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:30.9-2.8-3:13.2"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face13",
+      "editable": false,
+      "center": {
+        "x": 30.9,
+        "y": 2.8,
+        "z": 3.0
+      },
+      "normal": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "area": 13.199999999999996
+    },
+    {
+      "targetId": "configurable_bracket:face:18.728-0-3:65.973",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:18.728-0-3:65.973",
+      "canonicalTargetId": "configurable_bracket:face:13:18.728-0-3:65.973",
+      "aliasIds": [
+        "configurable_bracket:face:13:18.728-0-3:65.973",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:18.728-0-3:65.973"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face14",
+      "editable": false,
+      "center": {
+        "x": 18.728169203286537,
+        "y": -1.6244446264325671e-16,
+        "z": 3.0
+      },
+      "normal": [
+        -1.0,
+        6.123233995736766e-17,
+        0.0
+      ],
+      "area": 65.97344572538566
+    },
+    {
+      "targetId": "configurable_bracket:face:0-3.5-3:198",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:0-3.5-3:198",
+      "canonicalTargetId": "configurable_bracket:face:14:0-3.5-3:198",
+      "aliasIds": [
+        "configurable_bracket:face:14:0-3.5-3:198",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:0-3.5-3:198"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face15",
+      "editable": false,
+      "center": {
+        "x": 4.857225732735061e-17,
+        "y": 3.5,
+        "z": 3.0
+      },
+      "normal": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "area": 198.0
+    },
+    {
+      "targetId": "configurable_bracket:face:-18.728-0-3:65.973",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:-18.728-0-3:65.973",
+      "canonicalTargetId": "configurable_bracket:face:15:-18.728-0-3:65.973",
+      "aliasIds": [
+        "configurable_bracket:face:15:-18.728-0-3:65.973",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:-18.728-0-3:65.973"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face16",
+      "editable": false,
+      "center": {
+        "x": -18.728169203286537,
+        "y": 1.6244446264325671e-16,
+        "z": 3.0
+      },
+      "normal": [
+        1.0,
+        -6.123233995736766e-17,
+        -0.0
+      ],
+      "area": 65.97344572538566
+    },
+    {
+      "targetId": "configurable_bracket:face:0--3.5-3:198",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:0--3.5-3:198",
+      "canonicalTargetId": "configurable_bracket:face:16:0--3.5-3:198",
+      "aliasIds": [
+        "configurable_bracket:face:16:0--3.5-3:198",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:0--3.5-3:198"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face17",
+      "editable": false,
+      "center": {
+        "x": -4.857225732735061e-17,
+        "y": -3.5,
+        "z": 3.0
+      },
+      "normal": [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      "area": 198.0
+    },
+    {
+      "targetId": "configurable_bracket:face:0-22-3:208",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:0-22-3:208",
+      "canonicalTargetId": "configurable_bracket:face:17:0-22-3:208",
+      "aliasIds": [
+        "configurable_bracket:face:17:0-22-3:208",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:0-22-3:208"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face18",
+      "editable": false,
+      "center": {
+        "x": 0.0,
+        "y": 22.0,
+        "z": 2.999999999999999
+      },
+      "normal": [
+        -0.0,
+        1.1102230246251563e-16,
+        1.0
+      ],
+      "area": 208.0
+    },
+    {
+      "targetId": "configurable_bracket:face:0-15-9:288",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:0-15-9:288",
+      "canonicalTargetId": "configurable_bracket:face:18:0-15-9:288",
+      "aliasIds": [
+        "configurable_bracket:face:18:0-15-9:288",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:0-15-9:288"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face19",
+      "editable": false,
+      "center": {
+        "x": -3.3306690738754696e-16,
+        "y": 15.0,
+        "z": 9.0
+      },
+      "normal": [
+        -0.0,
+        1.1102230246251563e-16,
+        1.0
+      ],
+      "area": 288.0
+    },
+    {
+      "targetId": "configurable_bracket:face:0-24.591-5.818:147.58",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:0-24.591-5.818:147.58",
+      "canonicalTargetId": "configurable_bracket:face:19:0-24.591-5.818:147.58",
+      "aliasIds": [
+        "configurable_bracket:face:19:0-24.591-5.818:147.58",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:0-24.591-5.818:147.58"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face20",
+      "editable": false,
+      "center": {
+        "x": -1.92584467645849e-16,
+        "y": 24.59090909090909,
+        "z": 5.818181818181818
+      },
+      "normal": [
+        -0.0,
+        -0.894427190999916,
+        -0.4472135954999578
+      ],
+      "area": 147.58048651498618
+    },
+    {
+      "targetId": "configurable_bracket:face:-32-15-40:240",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:-32-15-40:240",
+      "canonicalTargetId": "configurable_bracket:face:20:-32-15-40:240",
+      "aliasIds": [
+        "configurable_bracket:face:20:-32-15-40:240",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:-32-15-40:240"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face21",
+      "editable": false,
+      "center": {
+        "x": -32.0,
+        "y": 15.0,
+        "z": 40.0
+      },
+      "normal": [
+        1.0,
+        0.0,
+        -0.0
+      ],
+      "area": 239.99999999999991
+    },
+    {
+      "targetId": "configurable_bracket:face:32-15-40:240",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:32-15-40:240",
+      "canonicalTargetId": "configurable_bracket:face:21:32-15-40:240",
+      "aliasIds": [
+        "configurable_bracket:face:21:32-15-40:240",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:32-15-40:240"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face22",
+      "editable": false,
+      "center": {
+        "x": 32.0,
+        "y": 15.0,
+        "z": 40.0
+      },
+      "normal": [
+        1.0,
+        0.0,
+        -0.0
+      ],
+      "area": 239.99999999999991
+    },
+    {
+      "targetId": "configurable_bracket:face:0-12-40:2560",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:0-12-40:2560",
+      "canonicalTargetId": "configurable_bracket:face:22:0-12-40:2560",
+      "aliasIds": [
+        "configurable_bracket:face:22:0-12-40:2560",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:0-12-40:2560"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face23",
+      "editable": false,
+      "center": {
+        "x": -5.329070518200752e-16,
+        "y": 12.0,
+        "z": 40.0
+      },
+      "normal": [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      "area": 2559.9999999999995
+    },
+    {
+      "targetId": "configurable_bracket:face:0-18-40:2560",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:0-18-40:2560",
+      "canonicalTargetId": "configurable_bracket:face:23:0-18-40:2560",
+      "aliasIds": [
+        "configurable_bracket:face:23:0-18-40:2560",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:0-18-40:2560"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face24",
+      "editable": false,
+      "center": {
+        "x": -5.329070518200752e-16,
+        "y": 18.0,
+        "z": 40.0
+      },
+      "normal": [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      "area": 2559.9999999999995
+    },
+    {
+      "targetId": "configurable_bracket:face:0-15-20:384",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:0-15-20:384",
+      "canonicalTargetId": "configurable_bracket:face:24:0-15-20:384",
+      "aliasIds": [
+        "configurable_bracket:face:24:0-15-20:384",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:0-15-20:384"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face25",
+      "editable": false,
+      "center": {
+        "x": 7.771561172376096e-16,
+        "y": 15.0,
+        "z": 20.0
+      },
+      "normal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "area": 384.0
+    },
+    {
+      "targetId": "configurable_bracket:face:0-15-60:384",
+      "durableTargetId": "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:0-15-60:384",
+      "canonicalTargetId": "configurable_bracket:face:25:0-15-60:384",
+      "aliasIds": [
+        "configurable_bracket:face:25:0-15-60:384",
+        "configurable_bracket:stable-node-key:sha256:3ff7db103b49ee076e1611ab1316161d7df0b09815413369f15217dc83ef8fa5:face:0-15-60:384"
+      ],
+      "partId": "configurable_bracket",
+      "viewerNodeId": "configurable_bracket",
+      "label": "Configurable Bracket.Face26",
+      "editable": false,
+      "center": {
+        "x": 7.771561172376096e-16,
+        "y": 15.0,
+        "z": 60.0
+      },
+      "normal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "area": 384.0
+    }
+  ],
+  "calloutAnchors": [],
+  "measurementGuides": [],
+  "exportArtifacts": [
+    {
+      "label": "STEP",
+      "format": "step",
+      "path": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-7aae4338a990/model.step",
+      "role": "primary",
+      "geometryProvenance": {
+        "representation": "analyticBrep"
+      }
+    }
+  ],
+  "geometryProvenance": {
+    "representation": "analyticBrep"
+  }
+}

@@ -12,6 +12,7 @@ export const config = writable<AppConfig>({
   selectedEngineId: '',
   freecadCmd: '',
   cadTextFontPath: '',
+  projectsRoot: '',
   freecadLibraryRoots: [],
   assets: [],
   microwave: {
@@ -33,12 +34,15 @@ export const config = writable<AppConfig>({
   },
   hasSeenOnboarding: false,
   connectionType: null,
-  defaultEngineKind: 'freecad',
-  defaultSourceLanguage: 'legacyPython',
-  defaultGeometryBackend: 'freecad',
+  defaultEngineKind: 'ecky',
+  defaultSourceLanguage: 'ecky',
+  defaultGeometryBackend: 'mesh',
   maxGenerationAttempts: 3,
   maxVerifyAttempts: 2,
 });
+// The app must not infer first-run state from the in-memory defaults while the
+// canonical config is still loading (notably during a Vite/HMR remount).
+export const configLoaded = writable(false);
 export const availableModels = writable<string[]>([]);
 export const isLoadingModels = writable<boolean>(false);
 export const runtimeCapabilities = writable<RuntimeCapabilities | null>(null);

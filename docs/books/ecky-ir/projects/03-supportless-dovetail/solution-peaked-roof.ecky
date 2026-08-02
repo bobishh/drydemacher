@@ -1,0 +1,32 @@
+(model
+  (params
+    (number rail_width 16 :label "Rail base width" :min 10 :max 24 :step 0.5)
+    (number rail_height 8 :label "Rail height" :min 5 :max 14 :step 0.5)
+    (number rail_length 48 :label "Coupon length" :min 30 :max 80 :step 1)
+    (number fit_clearance 0.3 :label "Fit clearance" :min 0.1 :max 0.8 :step 0.05)
+    (number lead_in 1.5 :label "Entry lead-in" :min 0 :max 3 :step 0.25)
+    :relations ((> rail_width fit_clearance)
+                (> rail_height fit_clearance)))
+  (part papa
+    (let* ((rail_half (/ rail_width 2))
+           (rail_profile
+             (polygon (( (- rail_half) 0)
+                       (rail_half 0)
+                       ((* 0.6 rail_half) rail_height)
+                       ((* -0.6 rail_half) rail_height)))))
+      (translate -18 0 0 (extrude rail_profile rail_length))))
+  (part mama
+    (let* ((female_width (+ rail_width (* 2 fit_clearance)))
+           (female_height (+ rail_height fit_clearance))
+           (female_half (/ female_width 2))
+           (roof_rise female_half)
+           (female_profile
+             (polygon (( (- female_half) 0)
+                       (female_half 0)
+                       (female_half female_height)
+                       (0 (+ female_height roof_rise))
+                       ((- female_half) female_height))))
+           (channel (extrude female_profile rail_length))
+           (coupon_width (+ female_width (* 2 lead_in)))
+           (coupon (translate 18 0 0 (box coupon_width 18 rail_length))))
+      (difference coupon channel))))

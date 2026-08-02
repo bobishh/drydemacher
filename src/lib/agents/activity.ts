@@ -24,6 +24,13 @@ export type GenieBubblePresentation = {
   compact: boolean;
   badge: string | null;
   contextLabel: string | null;
+  layer: string | null;
+  fix: string | null;
+};
+
+type SessionAuthoringError = {
+  layer?: 'surface' | 'coreIr' | 'backend' | null;
+  fix?: { hint?: string | null; suggestions?: string[] | null } | null;
 };
 
 const PREVIEW_VALIDATION_RE =
@@ -59,8 +66,24 @@ function previewBadgeFor(input: {
   return null;
 }
 
+function formatAuthoringLayer(layer: SessionAuthoringError['layer']): string | null {
+  if (layer === 'surface') return 'SURFACE';
+  if (layer === 'coreIr') return 'CORE IR';
+  if (layer === 'backend') return 'BACKEND';
+  return null;
+}
+
+function formatAuthoringFix(fix: SessionAuthoringError['fix']): string | null {
+  const hint = normalizeBubbleText(fix?.hint);
+  const suggestions = (fix?.suggestions ?? []).map(normalizeBubbleText).filter(Boolean);
+  if (hint && suggestions.length) return `${hint} Try: ${suggestions.join(', ')}`;
+  if (hint) return hint;
+  return suggestions.length ? `Try: ${suggestions.join(', ')}` : null;
+}
+
 export function resolveGenieBubblePresentation(input: {
   sessionError?: string | null;
+  sessionAuthoringError?: SessionAuthoringError | null;
   onboardingText?: string | null;
   viewportScreenshotMessage?: string | null;
   confirmMessage?: string | null;
@@ -136,6 +159,8 @@ export function resolveGenieBubblePresentation(input: {
       compact: false,
       badge: null,
       contextLabel: null,
+      layer: null,
+      fix: null,
     };
   }
 
@@ -145,6 +170,7 @@ export function resolveGenieBubblePresentation(input: {
     hasPreviewArtifact: Boolean(input.hasPreviewArtifact),
   });
   const compact = Boolean(badge);
+  const authoringError = source === 'sessionError' ? input.sessionAuthoringError : null;
 
   return {
     text: compact ? compactThreadActivitySummary(normalized, 104) : normalized,
@@ -152,6 +178,8 @@ export function resolveGenieBubblePresentation(input: {
     compact,
     badge,
     contextLabel: compact ? normalizeBubbleText(input.previewArtifactName) || null : null,
+    layer: formatAuthoringLayer(authoringError?.layer),
+    fix: formatAuthoringFix(authoringError?.fix),
   };
 }
 

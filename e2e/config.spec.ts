@@ -1,6 +1,117 @@
 import { test, expect } from '@playwright/test';
 
 test.describe('Configuration Panel', () => {
+  test('Given persisted MCP config When settings opens Then models load only after engine connection changes', async ({ page }) => {
+    await page.addInitScript(() => {
+      const modelListCalls: unknown[] = [];
+      const config = {
+        engines: [{
+          id: 'nim',
+          name: 'NVIDIA NIM',
+          provider: 'openai',
+          apiKey: 'nvapi-original',
+          model: 'meta/llama-3.1-70b-instruct',
+          lightModel: '',
+          baseUrl: 'https://integrate.api.nvidia.com/v1',
+          enabled: true,
+          visionOverrides: {},
+        }],
+        selectedEngineId: 'nim',
+        freecadCmd: '',
+        cadTextFontPath: '',
+        freecadLibraryRoots: [],
+        assets: [],
+        microwave: { humId: null, dingId: null, muted: true },
+        voice: { sttLanguageCode: 'en-US' },
+        mcp: {
+          port: null,
+          maxSessions: null,
+          mode: 'passive',
+          primaryAgentId: null,
+          promptTimeoutSecs: 1800,
+          eckyAstAuthoring: false,
+          autoAgents: [],
+        },
+        hasSeenOnboarding: true,
+        connectionType: 'mcp',
+        defaultEngineKind: 'ecky',
+        defaultSourceLanguage: 'ecky',
+        defaultGeometryBackend: 'mesh',
+        maxGenerationAttempts: 3,
+        maxVerifyAttempts: 2,
+      };
+
+      (window as any).__MODEL_LIST_CALLS__ = modelListCalls;
+      window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
+      window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+        if (cmd === 'get_config') return structuredClone(config);
+        if (cmd === 'save_config') return null;
+        if (cmd === 'list_models') {
+          modelListCalls.push(structuredClone(args));
+          if ((window as any).__MODEL_LIST_FAILURE__) {
+            throw new Error('OpenAI Models Error: raw provider failure body');
+          }
+          return ['meta/llama-3.1-70b-instruct'];
+        }
+        if (cmd === 'get_runtime_capabilities') {
+          return {
+            freecad: { available: false, detail: 'missing', path: null },
+            build123d: { available: false, detail: 'missing', path: null },
+            mesh: { available: true, detail: 'bundled', path: null },
+            recommendedAuthoringContext: {
+              engineKind: 'ecky',
+              sourceLanguage: 'ecky',
+              geometryBackend: 'mesh',
+            },
+          };
+        }
+        if (cmd === 'get_history') return [];
+        if (cmd === 'get_last_design') return null;
+        if (cmd === 'get_active_agent_sessions') return [];
+        if (cmd === 'get_agent_terminal_snapshots') return [];
+        if (cmd === 'get_thread_agent_state') {
+          return {
+            threadId: args?.threadId ?? null,
+            connectionState: 'disconnected',
+            sessions: [],
+            primaryAgentLabel: null,
+            statusText: '',
+          };
+        }
+        if (cmd === 'get_mess_stl_path') return '/mock/mess.stl';
+        if (cmd === 'get_design_system_prompt') return 'mock prompt';
+        return null;
+      };
+    });
+
+    await page.goto('/');
+    await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible();
+    await expect.poll(() => page.evaluate(() => (window as any).__MODEL_LIST_CALLS__.length)).toBe(0);
+
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await expect(page.locator('[data-window-id="settings"]')).toBeVisible();
+    await expect.poll(() => page.evaluate(() => (window as any).__MODEL_LIST_CALLS__.length)).toBe(0);
+
+    await page.getByRole('button', { name: 'API KEY' }).click();
+    await page.locator('.engine-card').click();
+    const apiKey = page.locator('#e-key');
+    await apiKey.focus();
+    await apiKey.blur();
+    await expect.poll(() => page.evaluate(() => (window as any).__MODEL_LIST_CALLS__.length)).toBe(0);
+
+    await apiKey.fill('nvapi-changed');
+    await apiKey.blur();
+    await expect.poll(() => page.evaluate(() => (window as any).__MODEL_LIST_CALLS__.length)).toBe(1);
+
+    await page.evaluate(() => {
+      (window as any).__MODEL_LIST_FAILURE__ = true;
+    });
+    const baseUrl = page.locator('#e-baseurl');
+    await baseUrl.fill('https://integrate.api.nvidia.com/v2');
+    await baseUrl.blur();
+    await expect(page.locator('.status-msg')).toContainText('raw provider failure body');
+  });
+
   test('Given workbench When settings toggles Then config window opens and closes', async ({ page }) => {
     await page.goto('/');
 

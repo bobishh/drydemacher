@@ -278,7 +278,6 @@ function toAssetUrl(path: string | null | undefined): string {
 }
 
 function workingCopyBackendLabel(design: Pick<DesignOutput, 'geometryBackend' | 'sourceLanguage' | 'macroDialect'>): string {
-  if (design.geometryBackend === 'build123d' || design.sourceLanguage === 'build123d') return 'build123d';
   if (design.macroDialect === 'ecky' || design.sourceLanguage === 'ecky') {
     return 'Ecky';
   }
@@ -887,7 +886,11 @@ export async function handleParamChange(
         severity: 'error',
         raw: e,
       });
-      session.setError(`Render Error: ${formatBackendError(e)}`);
+      session.setError(
+        e && typeof e === 'object' && 'code' in e && 'message' in e
+          ? (e as import('../tauri/contracts').AppError)
+          : `Render Error: ${formatBackendError(e)}`,
+      );
     }
     return false;
   } finally {
@@ -925,14 +928,16 @@ function buildManualDesign(input: {
     interactionMode: "design",
     macroCode: input.macroCode,
     macroDialect:
-      input.bundle.sourceLanguage === 'build123d'
-        ? 'build123d'
-        : input.bundle.engineKind === 'ecky'
-          ? 'ecky'
-          : input.workingMacroDialect ?? 'legacy',
-    sourceLanguage: input.bundle.sourceLanguage || (input.bundle.engineKind === 'ecky' ? 'ecky' : 'legacyPython'),
-    geometryBackend: input.bundle.geometryBackend || (input.bundle.engineKind === 'ecky' ? 'mesh' : 'freecad'),
-    engineKind: input.bundle.engineKind,
+      input.bundle.engineKind === 'ecky'
+        ? 'ecky'
+        : input.workingMacroDialect ?? 'legacy',
+    sourceLanguage: input.bundle.sourceLanguage === 'build123d'
+      ? 'ecky'
+      : input.bundle.sourceLanguage || (input.bundle.engineKind === 'ecky' ? 'ecky' : 'legacyPython'),
+    geometryBackend: input.bundle.geometryBackend === 'build123d'
+      ? 'mesh'
+      : input.bundle.geometryBackend || (input.bundle.engineKind === 'ecky' ? 'mesh' : 'freecad'),
+    engineKind: input.bundle.engineKind === 'build123d' ? 'ecky' : input.bundle.engineKind,
     uiSpec: input.uiSpec,
     initialParams: input.params,
     postProcessing: input.postProcessing ?? null,
@@ -1178,14 +1183,16 @@ export async function commitManualVersion(
       interactionMode: "design",
       macroCode: editedCode,
       macroDialect:
-        bundle.sourceLanguage === 'build123d'
-          ? 'build123d'
-          : bundle.engineKind === 'ecky'
-            ? 'ecky'
-            : wc.macroDialect ?? 'legacy',
-      sourceLanguage: bundle.sourceLanguage || (bundle.engineKind === 'ecky' ? 'ecky' : 'legacyPython'),
-      geometryBackend: bundle.geometryBackend || (bundle.engineKind === 'ecky' ? 'mesh' : 'freecad'),
-      engineKind: bundle.engineKind,
+        bundle.engineKind === 'ecky'
+          ? 'ecky'
+          : wc.macroDialect ?? 'legacy',
+      sourceLanguage: bundle.sourceLanguage === 'build123d'
+        ? 'ecky'
+        : bundle.sourceLanguage || (bundle.engineKind === 'ecky' ? 'ecky' : 'legacyPython'),
+      geometryBackend: bundle.geometryBackend === 'build123d'
+        ? 'mesh'
+        : bundle.geometryBackend || (bundle.engineKind === 'ecky' ? 'mesh' : 'freecad'),
+      engineKind: bundle.engineKind === 'build123d' ? 'ecky' : bundle.engineKind,
       uiSpec: nextUiSpec,
       initialParams: nextParams,
       postProcessing: wc.postProcessing ?? null,

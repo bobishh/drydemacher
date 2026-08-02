@@ -9,6 +9,11 @@ Return one complete `(model ...)` program. Use millimetres for length and degree
 
 - Put reusable pure `(define ...)` helpers and `define-component` declarations before `(model ...)`.
 - Put `params`, `verify`, `part`, and `meta` clauses directly inside `model`.
+- `component_get` is vendor mode: paste its closed `define-component` source;
+  it creates no package dependency.
+- `(import-component "package.id" :version "1.2.0" :component "component-id"
+  :as alias)` is live mode. Use literal exact coordinates and the committed
+  exact dependency lock; never use ranges, `latest`, or implicit upgrades.
 - Never put `define` inside `model`. Use `let*` inside a part when later values depend on earlier values or parameters.
 - Give every part a stable key. Use `build`, named `shape` stages, and one `result` when a part needs intermediate geometry.
 - Keep `ui_spec`, `initial_params`, and source parameter keys aligned. Use `number`, `select`, `toggle`, or `image`; never invent parameter forms.
@@ -34,6 +39,9 @@ Return one complete `(model ...)` program. Use millimetres for length and degree
 - Name every fit-critical dimension or relation: wall thickness, clearance, bore radius, pitch, seat height, and mating axis. Do not hide physical fit in anonymous offsets.
 - Prefer selectors based on physical meaning or stable tags. Boolean operations rebuild topology, so raw face or edge indices are not stable design intent.
 - Backend support is authoritative. If a diagnostic rejects an operation on the active backend, change the operation or backend; do not retry unchanged source.
+- STEP-backed live components require locked analytic provenance and native
+  Direct OCCT import. Never route them through FreeCAD, STL, `solidify`, hidden
+  repair, or implicit fusion.
 
 ## Verification
 

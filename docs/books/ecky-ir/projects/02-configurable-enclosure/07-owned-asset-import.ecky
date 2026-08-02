@@ -1,0 +1,4 @@
+(model
+  ;; Imported assets must be ours and remain an explicit reference, never hidden source geometry.
+  (part imported_cable_gland_reference
+    (import-stl "docs/books/ecky-ir/assets/bicycle-bottle-mount.stl")))

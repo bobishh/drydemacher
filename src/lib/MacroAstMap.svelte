@@ -7,7 +7,14 @@
   } from './tauri/client';
   import MacroSourcePane from './MacroSourcePane.svelte';
   import ParamPanelControlField from './components/ParamPanelControlField.svelte';
-  import { buildMacroAstMapProjection, findOwningPartId, spliceMacroSource } from './macroAstMap';
+  import {
+    buildMacroAstMapProjection,
+    buildMacroAstSearchIndex,
+    findOwningPartId,
+    searchMacroAstMap,
+    spliceMacroSource,
+    type MacroAstSearchEntry,
+  } from './macroAstMap';
   import { buildMacroAstSceneLayout, PART_COLLAPSE_THRESHOLD } from './macroAstSceneLayout';
   import type { DesignParams, ModelManifest, ParamValue, ResolvedUiField, UiSpec } from './types/domain';
 
@@ -42,6 +49,7 @@
     uiSpec = null,
     parameters = {},
     fields = [],
+    searchQuery = '',
     highlightedParamKey = null,
     liveApply = false,
     focusNodeId = null,
@@ -56,6 +64,7 @@
     uiSpec?: UiSpec | null;
     parameters?: DesignParams;
     fields?: ResolvedUiField[];
+    searchQuery?: string;
     highlightedParamKey?: string | null;
     liveApply?: boolean;
     focusNodeId?: string | null;
@@ -83,6 +92,8 @@
   let macroSourceNodes = $state<Awaited<ReturnType<typeof macroAstSourceMap>> | null>(null);
   let macroSourcePane = $state<MacroSourcePaneState | null>(null);
   let macroSourcePaneDirty = $state(false);
+  let searchSelectedNodeId = $state<string | null>(null);
+  let searchOwnerNodeId = $state<string | null>(null);
   /** Dense-part expansion state: session-only, no persistence (design D5). */
   let expandedParts = $state(new Set<string>());
 
@@ -115,6 +126,9 @@
     }),
   );
   const macroFieldByKey = $derived.by(() => new Map(fields.map((field) => [field.key, field])));
+  const macroSearchIndex = $derived.by(() => buildMacroAstSearchIndex(macroAstMap));
+  const macroSearchResults = $derived.by(() => searchMacroAstMap(macroSearchIndex, searchQuery, 8));
+  const hasMacroSearchQuery = $derived(Boolean(searchQuery.trim()));
   const macroScene = $derived.by(() =>
     buildMacroAstSceneLayout(macroAstMap, { width: macroSceneWidth, expandedPartIds: expandedParts }),
   );
@@ -474,6 +488,32 @@
     });
   }
 
+  function selectMacroSearchResult(result: MacroAstSearchEntry) {
+    searchSelectedNodeId = result.nodeId;
+    searchOwnerNodeId = result.ownerNodeId;
+
+    const frameResult = () => {
+      const target = macroScene.nodes.find((node) => node.id === result.nodeId);
+      const owner = macroScene.nodes.find((node) => node.id === result.ownerNodeId) ?? target;
+      if (!owner) return;
+      macroCameraFocusNode(owner, () => {
+        if (result.fieldKey) focusSceneFieldControl(result.fieldKey);
+      });
+    };
+
+    const owningPart = macroAstMap.root.children.find((node) => node.id === result.ownerNodeId);
+    if (
+      owningPart &&
+      (owningPart.children?.length ?? 0) > PART_COLLAPSE_THRESHOLD &&
+      !expandedParts.has(owningPart.id)
+    ) {
+      expandMacroPart(owningPart.id);
+      requestAnimationFrame(() => requestAnimationFrame(frameResult));
+      return;
+    }
+    frameResult();
+  }
+
   function focusDiagnosticMacroNode(error: unknown) {
     const diagnostic = getAppErrorDiagnosticContext(error);
     if (diagnostic?.partKey) {
@@ -691,6 +731,30 @@
     </div>
   </div>
 
+  {#if hasMacroSearchQuery}
+    {#if macroSearchResults.length > 0}
+      <div class="macro-ast-search-results" role="listbox" aria-label="Map search results">
+        {#each macroSearchResults as result (result.nodeId)}
+          <button
+            type="button"
+            class="macro-ast-search-result"
+            class:macro-ast-search-result-selected={result.nodeId === searchSelectedNodeId}
+            role="option"
+            aria-selected={result.nodeId === searchSelectedNodeId}
+            onclick={() => selectMacroSearchResult(result)}
+          >
+            <span class="macro-ast-search-result__label">{result.label}</span>
+            <span class="macro-ast-search-result__owner">{result.ownerLabel}</span>
+          </button>
+        {/each}
+      </div>
+    {:else}
+      <div class="macro-ast-search-empty" role="status" aria-label="Map search status">
+        NO MAP MATCHES
+      </div>
+    {/if}
+  {/if}
+
   <div class="macro-ast-split" class:macro-ast-split-open={Boolean(macroSourcePane)}>
     <div
       bind:this={macroSceneViewportElement}
@@ -708,6 +772,9 @@
     >
       <div
         class="macro-ast-camera"
+        data-camera-x={macroCamera.x}
+        data-camera-y={macroCamera.y}
+        data-camera-k={macroCamera.k}
         style={`width:${macroScene.width}px; height:${macroScene.height}px; transform: translate(${macroCamera.x}px, ${macroCamera.y}px) scale(${macroCamera.k});`}
       >
         <svg
@@ -732,9 +799,13 @@
               class:macro-ast-node-port={sceneNode.kind === 'port'}
               class:macro-ast-node-param={sceneNode.kind === 'param'}
               class:macro-ast-node-verify={sceneNode.kind === 'verify'}
+              class:macro-ast-node-search-selected={sceneNode.id === searchSelectedNodeId}
+              class:macro-ast-node-search-owner={sceneNode.id === searchOwnerNodeId}
               data-node-id={sceneNode.id}
               data-node-kind={sceneNode.kind}
               data-syntax-variant={sceneNode.syntaxVariant}
+              data-search-selected={sceneNode.id === searchSelectedNodeId ? 'true' : undefined}
+              data-search-owner={sceneNode.id === searchOwnerNodeId ? 'true' : undefined}
               role="button"
               tabindex="0"
               onclick={() => activateMacroNode(sceneNode)}
@@ -917,6 +988,73 @@
     text-transform: uppercase;
   }
 
+  .macro-ast-search-results {
+    display: flex;
+    gap: 6px;
+    max-height: 76px;
+    min-width: 0;
+    padding: 6px;
+    overflow: auto;
+    border: 1px solid color-mix(in srgb, var(--secondary) 42%, var(--bg-300));
+    background: color-mix(in srgb, var(--bg-100) 92%, var(--secondary) 8%);
+  }
+
+  .macro-ast-search-result {
+    display: grid;
+    grid-template-columns: minmax(96px, auto) minmax(72px, auto);
+    gap: 8px;
+    min-width: 0;
+    padding: 5px 7px;
+    overflow: hidden;
+    border: 1px solid var(--bg-300);
+    border-radius: 0;
+    background: color-mix(in srgb, var(--bg-200) 88%, var(--secondary) 12%);
+    color: var(--text);
+    font-family: var(--font-mono);
+    cursor: pointer;
+  }
+
+  .macro-ast-search-result:hover,
+  .macro-ast-search-result:focus-visible,
+  .macro-ast-search-result-selected {
+    border-color: var(--primary);
+    outline: none;
+    box-shadow: inset 0 -2px var(--primary);
+  }
+
+  .macro-ast-search-result__label,
+  .macro-ast-search-result__owner {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .macro-ast-search-result__label {
+    color: var(--primary);
+    font-size: 0.62rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+  }
+
+  .macro-ast-search-result__owner {
+    color: var(--text-dim);
+    font-size: 0.56rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .macro-ast-search-empty {
+    padding: 7px 9px;
+    overflow: hidden;
+    border: 1px dashed color-mix(in srgb, var(--secondary) 45%, var(--bg-300));
+    background: color-mix(in srgb, var(--bg-100) 94%, var(--secondary) 6%);
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+  }
+
   .macro-ast-map-viewport {
     position: relative;
     overflow: hidden;
@@ -1086,6 +1224,46 @@
     box-shadow:
       inset 0 0 0 1px color-mix(in srgb, var(--primary) 18%, transparent),
       0 0 14px color-mix(in srgb, var(--macro-variant-accent) 22%, transparent);
+  }
+
+  .macro-ast-node-search-owner {
+    border-color: var(--secondary);
+    box-shadow:
+      inset 0 0 0 1px color-mix(in srgb, var(--secondary) 65%, transparent),
+      0 0 18px color-mix(in srgb, var(--secondary) 30%, transparent);
+  }
+
+  .macro-ast-node-search-selected {
+    border-color: var(--primary);
+  }
+
+  .macro-ast-node-search-selected .macro-ast-node__shape {
+    animation: macro-search-pulse 760ms ease-out 1;
+  }
+
+  .macro-ast-node-search-selected .macro-ast-node__shape path {
+    stroke: var(--primary);
+    stroke-width: 2;
+  }
+
+  .macro-ast-node-search-selected .macro-ast-node__overlay {
+    outline: 1px solid color-mix(in srgb, var(--primary) 70%, transparent);
+    outline-offset: 1px;
+  }
+
+  @keyframes -global-macro-search-pulse {
+    0% {
+      opacity: 0.55;
+      filter: drop-shadow(0 0 2px color-mix(in srgb, var(--primary) 20%, transparent));
+    }
+    45% {
+      opacity: 1;
+      filter: drop-shadow(0 0 18px color-mix(in srgb, var(--primary) 70%, transparent));
+    }
+    100% {
+      opacity: 0.88;
+      filter: drop-shadow(0 0 10px color-mix(in srgb, var(--primary) 28%, transparent));
+    }
   }
 
   .macro-ast-node__shape {

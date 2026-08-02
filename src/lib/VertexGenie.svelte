@@ -30,6 +30,8 @@
     compact = false,
     badge = null,
     contextLabel = null,
+    errorLayer = null,
+    errorFix = null,
     question = '',
     onDismiss = null,
     onBubbleClick = null,
@@ -49,6 +51,8 @@
     compact?: boolean;
     badge?: string | null;
     contextLabel?: string | null;
+    errorLayer?: string | null;
+    errorFix?: string | null;
     question?: string;
     onDismiss?: (() => void) | null;
     onBubbleClick?: (() => void) | null;
@@ -720,6 +724,16 @@
         </div>
       {/if}
       <div class="bubble-text">{cleanBubble}</div>
+      {#if errorLayer || errorFix}
+        <div class="authoring-error-details" data-testid="authoring-error-details">
+          {#if errorLayer}
+            <span class="authoring-error-layer">{errorLayer}</span>
+          {/if}
+          {#if errorFix}
+            <span class="authoring-error-fix">{errorFix}</span>
+          {/if}
+        </div>
+      {/if}
       {#if actions?.length}
         <div class="bubble-actions">
           {#each actions as action}
@@ -912,6 +926,33 @@
     -webkit-user-select: text !important;
     user-select: text !important;
     max-width: 100%;
+  }
+
+  .authoring-error-details {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    margin-top: 9px;
+    overflow: hidden;
+  }
+
+  .authoring-error-layer {
+    border: 1px solid color-mix(in srgb, var(--secondary) 68%, var(--bg-300));
+    color: var(--secondary);
+    background: color-mix(in srgb, var(--bg) 76%, transparent);
+    padding: 2px 6px;
+    font-size: 0.56rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    white-space: nowrap;
+  }
+
+  .authoring-error-fix {
+    color: var(--text-dim);
+    font-size: 0.68rem;
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   .bubble-header {

@@ -1,0 +1,33 @@
+(model
+  (params
+    (number case_w 72 :label "case width" :min 50 :max 120 :step 2)
+    (number case_d 48 :label "case depth" :min 34 :max 90 :step 2)
+    (number wall_t 3 :label "wall thickness" :min 2 :max 6 :step 0.5)
+    (number body_h 24 :label "body height" :min 16 :max 50 :step 2)
+    (number lid_t 3 :label "lid thickness" :min 2 :max 6 :step 0.5)
+    (number bolt_d 4.2 :label "external bolt bore" :min 3 :max 6 :step 0.1)
+    (select joint_type "snap" :label "joint type" :options (("Snap" "snap") ("Bolted" "bolted")))
+    (toggle countersink #t :label "recess bolt heads"))
+  ;; Starter is valid snap geometry. Replace each FIX block with the matching
+  ;; complete-solid `if` from the worked coupon, then use joint_type.
+  (part body
+    (let* ((joint_z (- body_h wall_t))
+           (corner_x (- (/ case_w 2) (* 2 wall_t)))
+           (corner_y (- (/ case_d 2) (* 2 wall_t))))
+      (union
+        (difference
+          (box case_w case_d body_h)
+          (translate 0 0 wall_t
+            (box (- case_w (* 2 wall_t)) (- case_d (* 2 wall_t)) body_h)))
+        ;; FIX: use (if (= joint_type "snap") snap-solid bolt-solid) here.
+        (union
+          (translate corner_x 0 joint_z (box wall_t 12 8))
+          (translate (- corner_x) 0 joint_z (box wall_t 12 8))))))
+  (part lid
+    (let* ((corner_x (- (/ case_w 2) (* 2 wall_t))))
+      (difference
+        (translate 0 0 (+ body_h (/ lid_t 2)) (box case_w case_d lid_t))
+        ;; FIX: use (if (= joint_type "snap") snap-cut bolted-cut) here.
+        (union
+          (translate corner_x 0 (- body_h wall_t) (box (+ wall_t 1) 14 (+ lid_t 2)))
+          (translate (- corner_x) 0 (- body_h wall_t) (box (+ wall_t 1) 14 (+ lid_t 2))))))))

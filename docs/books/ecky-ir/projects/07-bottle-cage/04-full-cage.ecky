@@ -1,0 +1,47 @@
+(model
+  (params
+    (number bottle_diameter 74.0 :min 60.0 :max 90.0 :label "Bottle Diameter")
+    (number wall_thickness 4.0 :min 2.0 :max 6.0 :label "Wall Thickness")
+    (number frame_dia 30.0 :min 20.0 :max 50.0 :label "Frame Diameter")
+    (number clip_thick 3.0 :min 2.0 :max 6.0 :label "Clip Thickness")
+    (number dovetail_clearance 0.2 :min 0.05 :max 0.5 :step 0.05 :label "Joint Clearance"))
+
+  (define-component bottle-cage-mount-base
+    ((number bottle_diameter 74.0 :min 60.0 :max 90.0 :label "Bottle Diameter")
+     (number frame_dia 30.0 :min 20.0 :max 50.0 :label "Frame Diameter")
+     (number clip_thick 3.0 :min 2.0 :max 6.0 :label "Clip Thickness"))
+    (let* ((dia bottle_diameter) (rail_len 75.0) (base_w 12.0) (top_w 16.0) (h_jt 4.5) (rail_embed 0.5) (half_base (/ base_w 2.0)) (half_top (/ top_w 2.0)) (plate_w 24.0) (plate_h 6.0) (plate_len 85.0) (plate_base (box plate_w plate_h plate_len :align '(center max center))) (f_dia frame_dia) (c_th clip_thick) (f_r (/ f_dia 2.0)) (c_out_r (+ f_r c_th)) (f_cy (- (- plate_h) f_r)) (c_shell_out (place (location (plane :origin (list 0.0 f_cy 0.0))) (cylinder c_out_r plate_len :align '(center center center)))) (c_shell_in (place (location (plane :origin (list 0.0 f_cy 0.0))) (cylinder f_r (+ plate_len 10.0) :align '(center center center)))) (c_body (difference c_shell_out c_shell_in)) (open_w (* f_dia 0.75)) (open_cut (place (location (plane :origin (list 0.0 f_cy 0.0))) (box open_w (* c_out_r 2.0) (+ plate_len 10.0) :align '(center max center)))) (c_snapper (difference c_body open_cut)) (mount_body (union plate_base c_snapper)) (rail_poly (polygon (list (list (- half_base) (- rail_embed)) (list half_base (- rail_embed)) (list half_top h_jt) (list (- half_top) h_jt)))) (rail_male (place (location (plane :origin (list 0.0 0.0 -5.0))) (extrude rail_poly rail_len))) (rail_roof_z 32.5) (rail_roof_cut_top (+ rail_len 20.0)) (roof_cutter_poly (polygon (list (list 0.0 rail_roof_z) (list 20.0 (- rail_roof_z 20.0)) (list 20.0 rail_roof_cut_top) (list -20.0 rail_roof_cut_top) (list -20.0 (- rail_roof_z 20.0))))) (roof_cutter (place (location (plane) :rotate '(90.0 0.0 0.0)) (place (location (plane :origin '(0 0 -100))) (extrude roof_cutter_poly 200.0)))) (rail_roofed (difference rail_male roof_cutter)) (mount_base_final (union mount_body rail_roofed))) (place (location (plane :origin '(45.0 0.0 0.0))) mount_base_final)))
+
+  (define-component bottle-cage
+    ((number bottle_diameter 74.0 :min 60.0 :max 90.0 :label "Bottle Diameter")
+     (number wall_thickness 4.0 :min 2.0 :max 6.0 :label "Wall Thickness")
+     (number dovetail_clearance 0.2 :min 0.05 :max 0.5 :step 0.05 :label "Joint Clearance"))
+    (let* ((dia bottle_diameter) (wall wall_thickness) (clr dovetail_clearance) (in_r (+ (/ dia 2.0) 0.5)) (out_r (+ in_r wall)) (height 130.0) (base_w 12.0) (top_w 16.0) (h_jt 4.5) (c_out (cylinder out_r height :align '(center center center))) (c_in (cylinder in_r (+ height 10.0) :align '(center center center))) (cage_shell (difference c_out c_in)) (front_cut (place (location (plane :origin (list 0.0 (+ (* out_r 0.65) 50.0) 0.0))) (box (+ (* out_r 2.0) 10.0) 100.0 (+ height 10.0) :align '(center center center)))) (cage_cut1 (difference cage_shell front_cut)) (ledge_z (- (/ height 2.0))) (ledge_base (place (location (plane :origin (list 0.0 0.0 ledge_z))) (cylinder out_r 4.0 :align '(center center min)))) (ledge_hole (place (location (plane :origin (list 0.0 0.0 ledge_z))) (cylinder (- in_r 10.0) 10.0 :align '(center center min)))) (ledge_front_cut (place (location (plane :origin (list 0.0 (+ (* out_r 0.65) 50.0) ledge_z))) (box (+ (* out_r 2.0) 10.0) 100.0 10.0 :align '(center center min)))) (ledge (difference ledge_base ledge_hole ledge_front_cut)) (cage_with_ledge (union cage_cut1 ledge)) (spine_w 26.0) (spine_th 8.0) (spine_y (+ (- out_r) 2.0)) (spine (place (location (plane :origin (list 0.0 spine_y 0.0))) (box spine_w spine_th height :align '(center max center)))) (cage_with_spine (union cage_with_ledge spine)) (slot_w_b (+ base_w clr)) (slot_w_t (+ top_w clr)) (slot_h_jt (+ h_jt clr)) (slot_half_b (/ slot_w_b 2.0)) (slot_half_t (/ slot_w_t 2.0)) (slot_poly (polygon (list (list (- slot_half_b) 0.0) (list slot_half_b 0.0) (list slot_half_t slot_h_jt) (list (- slot_half_t) slot_h_jt)))) (slot_y (- spine_y spine_th)) (slot_z (- ledge_z 5.0)) (slot_length 102.5) (slot_cutter_base (place (location (plane :origin (list 0.0 slot_y slot_z))) (extrude slot_poly slot_length))) (slot_roof_z 32.5) (slot_roof_cutter_poly (polygon (list (list 0.0 slot_roof_z) (list 20.0 (- slot_roof_z 20.0)) (list 20.0 (+ slot_roof_z 20.0)) (list -20.0 (+ slot_roof_z 20.0)) (list -20.0 (- slot_roof_z 20.0))))) (slot_roof_cutter (place (location (plane) :rotate '(90.0 0.0 0.0)) (place (location (plane :origin '(0 0 -100))) (extrude slot_roof_cutter_poly 200.0)))) (slot_cutter (difference slot_cutter_base slot_roof_cutter)) (cage_final (difference cage_with_spine slot_cutter)) (side_diamond (polygon (list (list 12.0 0.0) (list 0.0 6.0) (list -12.0 0.0) (list 0.0 -6.0)))) (md_1_0 (place (location (plane :origin (list 0.0 -25.0 -45.0)) :rotate '(0.0 90.0 0.0)) (place (location (plane :origin '(0 0 -50))) (extrude side_diamond 100.0)))) (md_1_1 (place (location (plane :origin (list 0.0 -5.0 -45.0)) :rotate '(0.0 90.0 0.0)) (place (location (plane :origin '(0 0 -50))) (extrude side_diamond 100.0)))) (md_1_2 (place (location (plane :origin (list 0.0 15.0 -45.0)) :rotate '(0.0 90.0 0.0)) (place (location (plane :origin '(0 0 -50))) (extrude side_diamond 100.0)))) (md0_0 (place (location (plane :origin (list 0.0 -15.0 -30.0)) :rotate '(0.0 90.0 0.0)) (place (location (plane :origin '(0 0 -50))) (extrude side_diamond 100.0)))) (md0_1 (place (location (plane :origin (list 0.0 5.0 -30.0)) :rotate '(0.0 90.0 0.0)) (place (location (plane :origin '(0 0 -50))) (extrude side_diamond 100.0)))) (md1_0 (place (location (plane :origin (list 0.0 -25.0 -15.0)) :rotate '(0.0 90.0 0.0)) (place (location (plane :origin '(0 0 -50))) (extrude side_diamond 100.0)))) (md1_1 (place (location (plane :origin (list 0.0 -5.0 -15.0)) :rotate '(0.0 90.0 0.0)) (place (location (plane :origin '(0 0 -50))) (extrude side_diamond 100.0)))) (md1_2 (place (location (plane :origin (list 0.0 15.0 -15.0)) :rotate '(0.0 90.0 0.0)) (place (location (plane :origin '(0 0 -50))) (extrude side_diamond 100.0)))) (md2_0 (place (location (plane :origin (list 0.0 -15.0 0.0)) :rotate '(0.0 90.0 0.0)) (place (location (plane :origin '(0 0 -50))) (extrude side_diamond 100.0)))) (md2_1 (place (location (plane :origin (list 0.0 5.0 0.0)) :rotate '(0.0 90.0 0.0)) (place (location (plane :origin '(0 0 -50))) (extrude side_diamond 100.0)))) (md3_0 (place (location (plane :origin (list 0.0 -25.0 15.0)) :rotate '(0.0 90.0 0.0)) (place (location (plane :origin '(0 0 -50))) (extrude side_diamond 100.0)))) (md3_1 (place (location (plane :origin (list 0.0 -5.0 15.0)) :rotate '(0.0 90.0 0.0)) (place (location (plane :origin '(0 0 -50))) (extrude side_diamond 100.0)))) (md3_2 (place (location (plane :origin (list 0.0 15.0 15.0)) :rotate '(0.0 90.0 0.0)) (place (location (plane :origin '(0 0 -50))) (extrude side_diamond 100.0)))) (md4_0 (place (location (plane :origin (list 0.0 -15.0 30.0)) :rotate '(0.0 90.0 0.0)) (place (location (plane :origin '(0 0 -50))) (extrude side_diamond 100.0)))) (md4_1 (place (location (plane :origin (list 0.0 5.0 30.0)) :rotate '(0.0 90.0 0.0)) (place (location (plane :origin '(0 0 -50))) (extrude side_diamond 100.0)))) (md5_0 (place (location (plane :origin (list 0.0 -25.0 45.0)) :rotate '(0.0 90.0 0.0)) (place (location (plane :origin '(0 0 -50))) (extrude side_diamond 100.0)))) (md5_1 (place (location (plane :origin (list 0.0 -5.0 45.0)) :rotate '(0.0 90.0 0.0)) (place (location (plane :origin '(0 0 -50))) (extrude side_diamond 100.0)))) (md5_2 (place (location (plane :origin (list 0.0 15.0 45.0)) :rotate '(0.0 90.0 0.0)) (place (location (plane :origin '(0 0 -50))) (extrude side_diamond 100.0)))) (cage_holed (difference cage_final md_1_0 md_1_1 md_1_2 md0_0 md0_1 md1_0 md1_1 md1_2 md2_0 md2_1 md3_0 md3_1 md3_2 md4_0 md4_1 md5_0 md5_1 md5_2))) (place (location (plane :origin '(-25.0 0.0 0.0))) cage_holed)))
+
+  (verify
+    (tag preview_exists)
+    (metric check (manifest has-preview-stl))
+    (expect check (= true)))
+
+  (verify
+    (tag both_components_present)
+    (metric count (manifest part-count))
+    (expect count (= 2)))
+
+  (verify
+    (tag step_exists)
+    (metric check (manifest has-step))
+    (expect check (= true)))
+
+  (part "MountBase"
+    (bottle-cage-mount-base
+      :bottle_diameter bottle_diameter
+      :frame_dia frame_dia
+      :clip_thick clip_thick))
+
+  (part "BottleCage"
+    (bottle-cage
+      :bottle_diameter bottle_diameter
+      :wall_thickness wall_thickness
+      :dovetail_clearance dovetail_clearance))
+)

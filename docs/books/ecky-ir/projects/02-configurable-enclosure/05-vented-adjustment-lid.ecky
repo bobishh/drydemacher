@@ -1,0 +1,18 @@
+(model
+  (params
+    (number lid_w 72 :label "Lid width" :min 50 :max 120 :step 2)
+    (number lid_d 48 :label "Lid depth" :min 34 :max 90 :step 2)
+    (number lid_t 3 :label "Lid thickness" :min 2 :max 6 :step 0.5))
+  (part vented_adjustment_lid
+    (let* ((lid (extrude (rounded-rect lid_w lid_d 4) lid_t))
+           (ellipse_vent (extrude (ellipse 11 5) (+ lid_t 2)))
+           (hex_vent (extrude (regular-polygon 6 5) (+ lid_t 2)))
+           (straight_adjustment
+             (extrude (slot-center-point -16 -12 -2 -12 5) (+ lid_t 2)))
+           (curved_adjustment
+             (extrude (slot-arc 14 20 150 5) (+ lid_t 2)))
+           (vents (union ellipse_vent
+                         (translate 18 0 0 hex_vent)
+                         straight_adjustment
+                         (translate 0 10 0 curved_adjustment))))
+      (difference lid vents))))

@@ -1,0 +1,17 @@
+(model
+  (params
+    (number case_length 116 :label "Case length" :min 90 :max 150 :step 1)
+    (number case_width 72 :label "Case width" :min 50 :max 100 :step 1)
+    (number case_height 20 :label "Case height" :min 12 :max 36 :step 1)
+    (number wall 3 :label "Wall" :min 1.6 :max 5 :step 0.2)
+    (number floor 1.8 :label "Floor" :min 1 :max 4 :step 0.2)
+    :relations ((> case_length case_width) (> case_width wall)))
+  (part shell_blank
+    (let* (
+      (outer (extrude (rounded-rect case_length case_width 6) case_height))
+      (inner_length (- case_length (* 2 wall)))
+      (inner_width (- case_width (* 2 wall)))
+      (cavity (translate 0 0 floor
+                (extrude (rounded-rect inner_length inner_width 3)
+                         (+ (- case_height floor) 1))))
+      (difference outer cavity))))

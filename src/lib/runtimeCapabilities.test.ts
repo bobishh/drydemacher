@@ -15,6 +15,7 @@ function sampleConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     selectedEngineId: '',
     freecadCmd: '',
     cadTextFontPath: '',
+    projectsRoot: '',
     freecadLibraryRoots: [],
     assets: [],
     microwave: null,
@@ -57,7 +58,7 @@ function sampleCapabilities(overrides: Partial<RuntimeCapabilities> = {}): Runti
   };
 }
 
-test('authoringContextFromConfig mirrors persisted defaults', () => {
+test('authoringContextFromConfig migrates persisted build123d defaults to native', () => {
   assert.deepEqual(
     authoringContextFromConfig(
       sampleConfig({
@@ -67,9 +68,9 @@ test('authoringContextFromConfig mirrors persisted defaults', () => {
       }),
     ),
     {
-      engineKind: 'build123d',
-      sourceLanguage: 'build123d',
-      geometryBackend: 'build123d',
+      engineKind: 'ecky',
+      sourceLanguage: 'ecky',
+      geometryBackend: 'mesh',
     },
   );
 });
@@ -117,7 +118,7 @@ test('resolveActiveAuthoringContext prefers selected version artifact metadata o
   assert.deepEqual(context, {
     engineKind: 'ecky',
     sourceLanguage: 'ecky',
-    geometryBackend: 'build123d',
+    geometryBackend: 'mesh',
   });
 });
 
@@ -142,13 +143,13 @@ test('resolveActiveAuthoringContext falls back to session runtime before config 
   });
 
   assert.deepEqual(context, {
-    engineKind: 'build123d',
-    sourceLanguage: 'build123d',
-    geometryBackend: 'build123d',
+    engineKind: 'ecky',
+    sourceLanguage: 'ecky',
+    geometryBackend: 'mesh',
   });
 });
 
-test('repairDefaultAuthoringContext keeps valid persisted default', () => {
+test('repairDefaultAuthoringContext migrates removed build123d default', () => {
   const config = sampleConfig({
     defaultEngineKind: 'ecky',
     defaultSourceLanguage: 'ecky',
@@ -158,8 +159,8 @@ test('repairDefaultAuthoringContext keeps valid persisted default', () => {
 
   const result = repairDefaultAuthoringContext(config, capabilities);
 
-  assert.equal(result.repaired, false);
-  assert.equal(result.config.defaultGeometryBackend, 'build123d');
+  assert.equal(result.repaired, true);
+  assert.equal(result.config.defaultGeometryBackend, 'mesh');
 });
 
 test('repairDefaultAuthoringContext never selects direct OCCT while internal only', () => {

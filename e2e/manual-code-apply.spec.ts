@@ -12,7 +12,7 @@ declare global {
     __manualCodeApplyMockConfig?: {
       stallHistoryAfterCommit?: boolean;
       stallSaveLastDesign?: boolean;
-      renderModelError?: string;
+      renderModelError?: string | Record<string, unknown>;
       sourceLanguage?: 'legacyPython' | 'ecky';
       macroCode?: string;
     };
@@ -153,7 +153,8 @@ function manualCodeApplyMockScript() {
       };
       window.__manualCodeApplyMock?.renderModelCalls.push(payload);
       if (window.__manualCodeApplyMockConfig?.renderModelError) {
-        throw new Error(window.__manualCodeApplyMockConfig.renderModelError);
+        const error = window.__manualCodeApplyMockConfig.renderModelError;
+        throw typeof error === 'string' ? new Error(error) : error;
       }
       const renderIndex = window.__manualCodeApplyMock?.renderModelCalls.length ?? 1;
       return {
@@ -879,5 +880,36 @@ endsolid mock
 
     await expect(page.getByText(/MACRO INSPECTOR:/i)).toBeVisible();
     await expect(page.locator('.cm-content').first()).toContainText('print("base bracket")');
+  });
+
+  test('Given a Core IR authoring error When generation render fails Then Ecky keeps raw text with layer and fix', async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      window.__manualCodeApplyMockConfig = {
+        sourceLanguage: 'ecky',
+        renderModelError: {
+          code: 'validation',
+          message: 'Unknown operation `spher`.',
+          layer: 'coreIr',
+          fix: {
+            hint: 'Use a supported Core IR operation.',
+            suggestions: ['sphere'],
+          },
+        },
+      };
+    });
+    await page.addInitScript(manualCodeApplyMockScript);
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+
+    await page.fill('textarea.prompt-input', 'make a broken sphere');
+    await page.locator('textarea.prompt-input').press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+
+    const bubble = page.getByTestId('genie-session-bubble');
+    await expect(bubble).toContainText('Unknown operation `spher`.');
+    await expect(bubble.getByTestId('authoring-error-details')).toContainText('CORE IR');
+    await expect(bubble.getByTestId('authoring-error-details')).toContainText('Use a supported Core IR operation. Try: sphere');
   });
 });

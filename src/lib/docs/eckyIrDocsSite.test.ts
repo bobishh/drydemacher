@@ -4,7 +4,12 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { parseDocsDocument, type DocsDocument } from './eckyIrGuide';
-import { buildDocsSiteHtml, type DocsSiteOptions } from './eckyIrDocsSite';
+import {
+  buildDocsClientScript,
+  buildDocsSiteHtml,
+  buildDocsSitePages,
+  type DocsSiteOptions,
+} from './eckyIrDocsSite';
 
 function docsFixture(): string {
   return fs.readFileSync(
@@ -16,21 +21,24 @@ function docsFixture(): string {
 function buildSite(): string {
   const doc = parseDocsDocument(docsFixture(), { assetBasePath: '/docs' });
   const options: DocsSiteOptions = {
+    basePath: '/docs',
     rawMarkdownPath: '/docs/ecky-ir.md',
     epubPath: '/docs/ecky-ir-field-guide.epub',
   };
-  return buildDocsSiteHtml(doc, options);
+  return buildDocsSiteHtml(doc, options, 'operation-index');
 }
 
-test('Given parsed docs When site html built Then every section title appears as a TOC anchor link', () => {
+test('Given parsed docs When one page built Then every section title appears as a route link', () => {
   const html = buildSite();
   const doc = parseDocsDocument(docsFixture());
 
   for (const section of doc.sections) {
-    const anchor = `href="#${section.slug}"`;
+    const route = section.slug === 'operation-index'
+      ? 'href="/docs/"'
+      : `href="/docs/${section.slug}/"`;
     assert.ok(
-      html.includes(anchor),
-      `TOC missing anchor for section "${section.title}" (slug ${section.slug})`,
+      html.includes(route),
+      `TOC missing route for section "${section.title}" (slug ${section.slug})`,
     );
     assert.ok(
       html.includes(section.title),
@@ -39,12 +47,63 @@ test('Given parsed docs When site html built Then every section title appears as
   }
 });
 
-test('Given parsed docs When site html built Then section bodies render in the page', () => {
-  const html = buildSite();
+test('Given parsed docs When one section page built Then only that section body renders', () => {
+  const doc = parseDocsDocument(docsFixture(), { assetBasePath: '/docs' });
+  const html = buildDocsSiteHtml(doc, {
+    basePath: '/docs',
+    rawMarkdownPath: '/docs/ecky-ir.md',
+    epubPath: '/docs/ecky-ir-field-guide.epub',
+  }, 'primitive-signatures');
 
   assert.ok(html.includes('Primitive Signatures'), 'missing primitive reference');
   assert.ok(/<pre><code/.test(html), 'no code blocks rendered');
+  assert.ok(!html.includes('<h2 class="docs-main__heading">Language Overview</h2>'));
   assert.ok(!/<img src=/.test(html), 'dry reference should not contain tutorial renders');
+});
+
+test('Given linked operation markdown When site page built Then links resolve to signature routes', () => {
+  const html = buildSite();
+
+  assert.match(html, /href="\/docs\/primitive-signatures\/#box"/);
+  assert.doesNotMatch(html, /Available backends|build123d|ecky-rust|freecad/);
+});
+
+test('Given parsed docs When all pages built Then one static html file exists per section', () => {
+  const doc = parseDocsDocument(docsFixture(), { assetBasePath: '/docs' });
+  const pages = buildDocsSitePages(doc, {
+    basePath: '/docs',
+    rawMarkdownPath: '/docs/ecky-ir.md',
+    epubPath: '/docs/ecky-ir-field-guide.epub',
+  });
+
+  assert.equal(pages.size, doc.sections.length);
+  assert.ok(pages.has('index.html'));
+  assert.ok(pages.has('verify-clauses/index.html'));
+  assert.ok(pages.has('primitive-signatures/index.html'));
+});
+
+test('Given a section page When built Then previous and next navigation is rendered', () => {
+  const doc = parseDocsDocument(docsFixture(), { assetBasePath: '/docs' });
+  const html = buildDocsSiteHtml(doc, {
+    basePath: '/docs',
+    rawMarkdownPath: '/docs/ecky-ir.md',
+    epubPath: '/docs/ecky-ir-field-guide.epub',
+  }, 'language-overview');
+
+  assert.match(html, /aria-label="Section navigation"/);
+  assert.match(html, /href="\/docs\/"[^>]*>[\s\S]*Operation Index/);
+  assert.match(html, /href="\/docs\/forms-and-structure\/"[^>]*>[\s\S]*Forms and Structure/);
+});
+
+test('Given mobile docs shell When built Then accessible drawer controls and external script exist', () => {
+  const html = buildSite();
+  const script = buildDocsClientScript();
+
+  assert.match(html, /button[^>]+class="docs-menu"[^>]+aria-expanded="false"/);
+  assert.match(html, /nav class="docs-toc"[^>]+aria-label="Reference contents"/);
+  assert.match(html, /script src="\/docs\/docs\.js" defer/);
+  assert.match(script, /aria-expanded/);
+  assert.match(script, /Escape/);
 });
 
 test('Given parsed docs When site html built Then agent markdown and epub download links present', () => {

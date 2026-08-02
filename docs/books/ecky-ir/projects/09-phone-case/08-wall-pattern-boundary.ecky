@@ -1,0 +1,7 @@
+(model
+  ;; Native mesh pattern study. `ecky check` validates the source; native
+  ;; preview owns the mesh-only wall-pattern boundary.
+  (part cellular_back_panel
+    (wall-pattern
+      (:mode cellular :depth 0.7 :uFreq 7 :vFreq 7 :seed 12)
+      (shell 1.2 (cylinder 15 34 40)))))

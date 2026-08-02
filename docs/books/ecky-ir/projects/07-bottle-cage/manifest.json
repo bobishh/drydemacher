@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "07-bottle-cage",
+  "title": "Frame-Mounted Bottle Cage",
+  "checkpoints": [
+    {"id":"frame-clamp","role":"worked","source":"01-frame-clamp.ecky","summary":"A frame clamp starts from measured tube diameter and named clip thickness.","render":{"yaw":0.5,"pitch":-0.42,"size":720}},
+    {"id":"supportless-rail","role":"starter","source":"02-supportless-rail.ecky","summary":"Repair the male rail roof before mating it to the cage-side slot.","render":{"yaw":0.5,"pitch":-0.42,"size":720}},
+    {"id":"full-cage","role":"solution","source":"04-full-cage.ecky","summary":"Complete teaching source: clamp, supportless rail, shell/spine, clearance-expanded female slot, and generated staggered lightening cutters.","render":{"yaw":0.5,"pitch":-0.42,"size":720}},
+    {"id":"frame-guided-accessory-mount","role":"worked","source":"03-frame-guided-accessory-mount.ecky","summary":"A cage-side accessory mount follows a curved rail and uses frames, arrays, and clipped fan stops.","render":{"yaw":0.5,"pitch":-0.42,"size":720}}
+  ]
+}

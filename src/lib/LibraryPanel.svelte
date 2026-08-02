@@ -1,29 +1,27 @@
 <script lang="ts">
-  import { convertFileSrc } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
-  import { openInventoryThread } from './stores/history';
   import {
     formatBackendError,
-    getAnimalCapCatalog,
+    copyInlineComponentImport,
     getConfig,
     installComponentPackageArchive,
     listInstalledComponentPackageHeaders,
     saveConfig,
     searchFreecadLibrary,
   } from './tauri/client';
-  import type {
-    AnimalCapCatalogEntry,
-    ComponentPackageHeader,
-    FreecadLibraryItem,
-  } from './tauri/contracts';
+  import type { ComponentHeader, ComponentPackageHeader, FreecadLibraryItem } from './tauri/contracts';
 
   let {
     onImportFreecadLibraryPart,
+    authoredSource = '',
+    onApplyComponentImport,
   }: {
     onImportFreecadLibraryPart?: (item: FreecadLibraryItem) => Promise<void> | void;
+    authoredSource?: string;
+    onApplyComponentImport?: (source: string, label: string) => Promise<void> | void;
   } = $props();
 
-  type LibraryTab = 'components' | 'freecad' | 'catalog';
+  type LibraryTab = 'components' | 'freecad';
 
   let activeTab = $state<LibraryTab>('components');
   let searchQuery = $state('');
@@ -33,6 +31,8 @@
   let packageHeaders = $state<ComponentPackageHeader[]>([]);
   let packagesLoaded = $state(false);
   let packageImportBusy = $state(false);
+  let importingComponentId = $state<string | null>(null);
+  let expandedPackageId = $state<string | null>(null);
 
   let freecadLibraryRoots = $state<string[]>([]);
   let freecadLibraryResults = $state<FreecadLibraryItem[]>([]);
@@ -41,14 +41,10 @@
   let freecadLibraryFolderBusy = $state(false);
   let importingFreecadLibraryItemId = $state<string | null>(null);
 
-  let animalCapEntries = $state<AnimalCapCatalogEntry[]>([]);
-  let catalogLoaded = $state(false);
-
   async function loadActiveTab() {
     if (
       (activeTab === 'components' && packagesLoaded) ||
-      (activeTab === 'freecad' && freecadLoaded) ||
-      (activeTab === 'catalog' && catalogLoaded)
+      (activeTab === 'freecad' && freecadLoaded)
     ) {
       return;
     }
@@ -63,10 +59,6 @@
         const config = await getConfig();
         freecadLibraryRoots = config.freecadLibraryRoots ?? [];
         freecadLoaded = true;
-      } else {
-        const catalog = await getAnimalCapCatalog();
-        animalCapEntries = catalog?.entries ?? [];
-        catalogLoaded = true;
       }
     } catch (error) {
       loadError = formatBackendError(error);
@@ -101,28 +93,6 @@
     ),
   );
 
-  const filteredCatalog = $derived(
-    animalCapEntries.filter((entry) =>
-      [
-        entry.displayName,
-        entry.species,
-        entry.source.author,
-        entry.source.license,
-      ].join(' ').toLowerCase().includes(searchQuery.toLowerCase()),
-    ),
-  );
-
-  function previewSrc(raw: string | null | undefined): string | null {
-    const value = raw?.trim();
-    if (!value) return null;
-    if (/^(data:image\/|blob:|https?:|asset:|tauri:)/i.test(value)) return value;
-    try {
-      return convertFileSrc(value);
-    } catch {
-      return value;
-    }
-  }
-
   function packageStats(pkg: ComponentPackageHeader) {
     const count = (value: number, singular: string, plural = `${singular}s`) =>
       `${value} ${value === 1 ? singular : plural}`;
@@ -131,6 +101,26 @@
       count(pkg.portTypes?.length ?? 0, 'port type'),
       count(pkg.assemblies?.length ?? 0, 'assembly', 'assemblies'),
     ].join(' / ');
+  }
+
+  async function importComponent(pkg: ComponentPackageHeader, component: ComponentHeader) {
+    if (importingComponentId || !onApplyComponentImport) return;
+    const importId = `${pkg.packageId}@${pkg.version}:${component.componentId}`;
+    importingComponentId = importId;
+    loadError = null;
+    try {
+      const imported = await copyInlineComponentImport({
+        packageId: pkg.packageId,
+        version: pkg.version,
+        componentId: component.componentId,
+        authoredSource,
+      });
+      await onApplyComponentImport(imported.authoredSource, component.displayName);
+    } catch (error) {
+      loadError = formatBackendError(error);
+    } finally {
+      importingComponentId = null;
+    }
   }
 
   async function handleImportPackageArchive() {
@@ -206,7 +196,6 @@
     loadError = null;
     if (activeTab === 'components') packagesLoaded = false;
     if (activeTab === 'freecad') freecadLoaded = false;
-    if (activeTab === 'catalog') catalogLoaded = false;
     void loadActiveTab();
   }
 </script>
@@ -219,9 +208,6 @@
       </button>
       <button class:active={activeTab === 'freecad'} onclick={() => activeTab = 'freecad'}>
         FREECAD PARTS
-      </button>
-      <button class:active={activeTab === 'catalog'} onclick={() => activeTab = 'catalog'}>
-        CATALOG
       </button>
     </nav>
     <div class="library-tools">
@@ -260,6 +246,32 @@
               </div>
               <p>{pkg.packageId} / {pkg.version}</p>
               <div class="card-stats">{packageStats(pkg)}</div>
+              {#if pkg.components?.length}
+                <button
+                  class="component-toggle"
+                  aria-expanded={expandedPackageId === `${pkg.packageId}@${pkg.version}`}
+                  onclick={() => expandedPackageId = expandedPackageId === `${pkg.packageId}@${pkg.version}` ? null : `${pkg.packageId}@${pkg.version}`}
+                >
+                  COMPONENTS
+                </button>
+              {/if}
+              {#if expandedPackageId === `${pkg.packageId}@${pkg.version}`}
+                <div class="component-list" aria-label={`${pkg.displayName} components`}>
+                  {#each pkg.components as component (component.componentId)}
+                    {@const importId = `${pkg.packageId}@${pkg.version}:${component.componentId}`}
+                    <div class="component-row">
+                      <span>{component.displayName}</span>
+                      <button
+                        aria-label={`${importingComponentId === importId ? 'IMPORTING' : 'IMPORT'} ${component.displayName}`}
+                        onclick={() => importComponent(pkg, component)}
+                        disabled={Boolean(importingComponentId)}
+                      >
+                        {importingComponentId === importId ? 'IMPORTING...' : 'IMPORT'}
+                      </button>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
               {#if pkg.tags?.length}
                 <div class="tag-list">
                   {#each pkg.tags as tag}
@@ -298,33 +310,6 @@
               >
                 {importingFreecadLibraryItemId === item.id ? 'IMPORTING...' : 'IMPORT'}
               </button>
-            </article>
-          {/each}
-        </div>
-      {/if}
-    {:else}
-      {#if filteredCatalog.length === 0}
-        <div class="state">NO CATALOG ITEMS</div>
-      {:else}
-        <div class="library-grid">
-          {#each filteredCatalog as entry (entry.id)}
-            <article class="library-card catalog-card">
-              {#if previewSrc(entry.artifact?.previewPath)}
-                <img src={previewSrc(entry.artifact?.previewPath) ?? ''} alt={`${entry.displayName} preview`} />
-              {/if}
-              <div class="catalog-copy">
-                <div class="card-title">
-                  <h3>{entry.displayName}</h3>
-                  <span>{entry.artifact?.verificationStatus === 'passed' ? 'VERIFIED' : 'CANDIDATE'}</span>
-                </div>
-                <p>{entry.species} · {entry.source.license}</p>
-                {#if entry.recipe?.boreProfileId}
-                  <div class="card-stats">{entry.recipe.boreProfileId}</div>
-                {/if}
-                {#if entry.artifact?.threadId}
-                  <button onclick={() => openInventoryThread(entry.artifact?.threadId ?? '')}>VIEW MODEL</button>
-                {/if}
-              </div>
             </article>
           {/each}
         </div>
@@ -431,6 +416,32 @@
     padding: 12px;
   }
 
+  .component-list {
+    display: grid;
+    gap: 0.35rem;
+    margin-top: 0.65rem;
+  }
+
+  .component-toggle {
+    margin-top: 0.65rem;
+  }
+
+  .component-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    border: 1px solid color-mix(in srgb, var(--primary) 36%, transparent);
+    padding: 0.35rem;
+    overflow: hidden;
+  }
+
+  .component-row span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .card-title,
   .source-config,
   .result-row {
@@ -491,25 +502,6 @@
   .result-row {
     align-items: center;
     padding: 10px 12px;
-  }
-
-  .catalog-card {
-    padding: 0;
-  }
-
-  .catalog-card img {
-    width: 100%;
-    height: 140px;
-    object-fit: cover;
-    background: #000;
-  }
-
-  .catalog-copy {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 12px;
-    overflow: hidden;
   }
 
   .state {

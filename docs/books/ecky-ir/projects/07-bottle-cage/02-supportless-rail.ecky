@@ -1,0 +1,18 @@
+(model
+  (params
+    (number rail_length 85 :label "rail length" :min 60 :max 110 :step 1)
+    (number rail_base_w 12 :label "rail base width" :min 8 :max 18 :step 0.5)
+    (number rail_h 4.5 :label "rail height" :min 3 :max 8 :step 0.5))
+  (part supportless_rail
+    (let* ((rail_top_w (+ rail_base_w (* 2 rail_h))))
+      (build
+        (shape profile
+          (polygon (((- (/ rail_base_w 2)) 0.5)
+                    ((/ rail_base_w 2) 0.5)
+                    ((/ rail_top_w 2) rail_h)
+                    ((- (/ rail_top_w 2)) rail_h))))
+        (shape rail (extrude profile rail_length))
+        (shape roof_profile
+          (polygon ((0 32.5) (20 12.5) (20 115) (-20 115) (-20 12.5))))
+        (shape roof (rotate 90 0 0 (extrude roof_profile 200)))
+        (result (difference rail roof))))))

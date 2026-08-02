@@ -1,0 +1,13 @@
+(model
+  (params
+    (number span 64 :label "bracket span" :min 40 :max 120 :step 2)
+    (number foot_d 36 :label "foot depth" :min 20 :max 70 :step 2)
+    (number stock_t 6 :label "stock thickness" :min 3 :max 12 :step 0.5))
+  (part bracket
+    (let* ((flange_h 40)
+           (overlap stock_t))
+      (build
+        ;; This compiles, but both plates are coplanar. It cannot brace a corner.
+        (shape foot (box span foot_d stock_t))
+        (shape flange (box span flange_h stock_t))
+        (result (union foot flange))))))

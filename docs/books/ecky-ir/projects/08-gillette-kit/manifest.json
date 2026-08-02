@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "id": "08-gillette-kit",
+  "title": "Gillette Travel Kit",
+  "checkpoints": [
+    {
+      "id": "shell-blank",
+      "role": "worked",
+      "source": "shell-blank.ecky",
+      "summary": "A hollow rounded travel-case blank with an explicit floor and wall thickness.",
+      "render": { "yaw": 35, "pitch": 24, "size": 220 }
+    },
+    {
+      "id": "handle-snap",
+      "role": "worked",
+      "source": "handle-snap.ecky",
+      "summary": "A handle cradle whose bore is derived from handle diameter and snap clearance.",
+      "render": { "yaw": 38, "pitch": 22, "size": 180 }
+    },
+    {
+      "id": "dovetail-lid",
+      "role": "worked",
+      "source": "dovetail-lid.ecky",
+      "summary": "A lid with repeated male rails and a body with matching clearance-derived grooves.",
+      "render": { "yaw": 32, "pitch": 26, "size": 220 }
+    },
+    {
+      "id": "blade-cover-detents",
+      "role": "starter",
+      "source": "blade-cover-detents.ecky",
+      "summary": "A blade cover and box with paired detent pockets and engagement control.",
+      "render": { "yaw": 40, "pitch": 28, "size": 170 }
+    },
+    {
+      "id": "gillette-kit-final",
+      "role": "solution",
+      "source": "../../../../../sites/landing/src/models/gillette-travel-kit.ecky",
+      "summary": "Exact landing-model source: shell, snap clips, sliding dovetail lid, blade box, and detented cover.",
+      "render": { "yaw": 35, "pitch": 24, "size": 260 }
+    },
+    {
+      "id": "surface-finish-caddy",
+      "role": "worked",
+      "source": "05-surface-finish-caddy.ecky",
+      "summary": "A kit caddy coupon demonstrates surfaced, offset, tapered, twisted, mirrored, and finished solids.",
+      "render": { "yaw": 35, "pitch": 24, "size": 260 }
+    }
+  ]
+}

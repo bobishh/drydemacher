@@ -8,6 +8,7 @@ import {
   activeThreadIdStore as activeThreadId,
   activeVersionId,
   config,
+  configLoaded,
   availableModels,
   isLoadingModels,
   runtimeCapabilities,
@@ -28,6 +29,7 @@ import {
 import { activeThreadMessagesLoading, loadVersion, threadMessagePageState } from '../stores/history';
 import { isRenderableVersionTimelineMessage } from '../threadTimeline';
 import type { LastDesignSnapshot, Message, Thread, ThreadMessagesPage } from '../types/domain';
+import { BOOT_LOAD_VERSION_OPTIONS } from './loadVersionOptions';
 
 const BOOT_RESTORE_TIMEOUT_MS = 6000;
 const BOOT_VERSION_LOOKUP_TIMEOUT_MS = 4000;
@@ -53,6 +55,7 @@ function hasTauriInvokeBridge(): boolean {
 export async function boot() {
   session.setPhase('booting');
   session.setStatus('Restoring environment...');
+  configLoaded.set(false);
 
   const bootWatchdog = typeof window !== 'undefined'
     ? window.setTimeout(() => {
@@ -72,8 +75,9 @@ export async function boot() {
   try {
     // 1. Load Config (Idempotent)
     const loadedConfig = await loadConfig();
+    configLoaded.set(true);
 
-    // 2. Probe runtime capabilities in the background. Cold FreeCAD/build123d probes
+    // 2. Probe runtime capabilities in the background. Cold FreeCAD/native probes
     // can be slow; cached model restore should not wait on them.
     const capabilitiesRefresh = refreshRuntimeCapabilities(loadedConfig);
 
@@ -184,17 +188,17 @@ async function loadConfig() {
   }
 
   if (!loadedConfig.defaultEngineKind) {
-    loadedConfig.defaultEngineKind = 'freecad';
+    loadedConfig.defaultEngineKind = 'ecky';
     needsSave = true;
   }
 
   if (!loadedConfig.defaultSourceLanguage) {
-    loadedConfig.defaultSourceLanguage = 'legacyPython';
+    loadedConfig.defaultSourceLanguage = 'ecky';
     needsSave = true;
   }
 
   if (!loadedConfig.defaultGeometryBackend) {
-    loadedConfig.defaultGeometryBackend = 'freecad';
+    loadedConfig.defaultGeometryBackend = 'mesh';
     needsSave = true;
   }
 
@@ -246,12 +250,6 @@ async function loadConfig() {
 
   config.set(loadedConfig);
   
-  if (loadedConfig.selectedEngineId) {
-    fetchModels().catch((e) => {
-      console.warn('[Boot] Deferred model fetch failed:', e);
-    });
-  }
-
   // Only write if we actually repaired/normalized something
   if (needsSave) {
     await persistConfig(loadedConfig);
@@ -302,7 +300,7 @@ export async function fetchModels() {
   } catch (e) {
     console.error("[Config] Failed to fetch models:", e);
     availableModels.set([]);
-    session.setError(`Engine Error: ${formatBackendError(e)}`); 
+    throw e;
   } finally {
     isLoadingModels.set(false);
   }
@@ -358,7 +356,7 @@ async function restoreLastDesign() {
 
     upsertRestoredMessage(last.threadId, targetMessage);
     await withBootTimeout(
-      loadVersion(targetMessage, last.threadId, { rebuildMissingRuntime: true }),
+      loadVersion(targetMessage, last.threadId, BOOT_LOAD_VERSION_OPTIONS),
       BOOT_MODEL_LOAD_TIMEOUT_MS,
       'Last design runtime load timed out',
     ).catch((e) => {

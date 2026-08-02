@@ -1,0 +1,12 @@
+(model
+  (params
+    (number case_w 72 :label "Case width" :min 50 :max 120 :step 2)
+    (number case_d 48 :label "Case depth" :min 34 :max 90 :step 2)
+    (number boss_height 12 :label "Boss height" :min 8 :max 20 :step 1))
+  (part threaded_body
+    (let* ((body (box case_w case_d 16))
+           (boss (translate 0 0 16 (cylinder 8 boss_height 64)))
+           (tap (translate 0 0 15 (tapped-hole :iso "M6" :length (+ boss_height 2)))))
+      (difference (union body boss) tap)))
+  (part threaded_fastener
+    (translate 26 0 0 (thread :iso "M6" :length 18))))

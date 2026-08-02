@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { BOOT_LOAD_VERSION_OPTIONS } from './loadVersionOptions';
 import type { ArtifactBundle, Message, ModelManifest } from '../types/domain';
 
 function sampleBundle(modelId: string): ArtifactBundle {
@@ -136,4 +137,8 @@ test('mergeRestoredThreadMessages keeps restored active version when first page 
   assert.equal(merged[0].id, 'msg-cached');
   assert.equal(merged[0].artifactBundle?.modelId, 'cached-model');
   assert.equal(merged[1].id, 'msg-older');
+});
+
+test('given missing cached runtime when boot restores last design then version load does not rebuild preview', () => {
+  assert.equal(BOOT_LOAD_VERSION_OPTIONS.rebuildMissingRuntime, false);
 });

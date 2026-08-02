@@ -1,0 +1,1288 @@
+{
+  "schemaVersion": 2,
+  "modelId": "generated-direct-occt-79104a29759f",
+  "sourceKind": "generated",
+  "engineKind": "ecky",
+  "sourceLanguage": "ecky",
+  "geometryBackend": "mesh",
+  "contentHash": "79104a29759ff948a7e759530322322c081ad6fb054ac3e7a714c18db4f4c20f",
+  "artifactVersion": 1,
+  "fcstdPath": "",
+  "manifestPath": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-79104a29759f/manifest.json",
+  "macroPath": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-79104a29759f/source.ecky",
+  "previewStlPath": "preview.stl",
+  "viewerAssets": [
+    {
+      "partId": "male_joint",
+      "nodeId": "male_joint",
+      "objectName": "male_joint",
+      "label": "Male Joint",
+      "path": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-79104a29759f/parts/male_joint.stl",
+      "format": "stl"
+    },
+    {
+      "partId": "female_joint",
+      "nodeId": "female_joint",
+      "objectName": "female_joint",
+      "label": "Female Joint",
+      "path": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-79104a29759f/parts/female_joint.stl",
+      "format": "stl"
+    }
+  ],
+  "edgeTargets": [
+    {
+      "targetId": "male_joint:edge:-4--10-0_-4--10-4",
+      "durableTargetId": "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:edge:-4--10-0_-4--10-4",
+      "canonicalTargetId": "male_joint:edge:0:-4--10-0_-4--10-4",
+      "aliasIds": [
+        "male_joint:edge:0:-4--10-0_-4--10-4",
+        "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:edge:-4--10-0_-4--10-4"
+      ],
+      "partId": "male_joint",
+      "viewerNodeId": "male_joint",
+      "label": "Male Joint.Edge1",
+      "editable": false,
+      "start": {
+        "x": -4.0,
+        "y": -10.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": -4.0,
+        "y": -10.0,
+        "z": 4.0
+      }
+    },
+    {
+      "targetId": "male_joint:edge:-4--10-4_-4-10-4",
+      "durableTargetId": "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:edge:-4--10-4_-4-10-4",
+      "canonicalTargetId": "male_joint:edge:1:-4--10-4_-4-10-4",
+      "aliasIds": [
+        "male_joint:edge:1:-4--10-4_-4-10-4",
+        "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:edge:-4--10-4_-4-10-4"
+      ],
+      "partId": "male_joint",
+      "viewerNodeId": "male_joint",
+      "label": "Male Joint.Edge2",
+      "editable": false,
+      "start": {
+        "x": -4.0,
+        "y": -10.0,
+        "z": 4.0
+      },
+      "end": {
+        "x": -4.0,
+        "y": 10.0,
+        "z": 4.0
+      }
+    },
+    {
+      "targetId": "male_joint:edge:-4-10-0_-4-10-4",
+      "durableTargetId": "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:edge:-4-10-0_-4-10-4",
+      "canonicalTargetId": "male_joint:edge:2:-4-10-0_-4-10-4",
+      "aliasIds": [
+        "male_joint:edge:2:-4-10-0_-4-10-4",
+        "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:edge:-4-10-0_-4-10-4"
+      ],
+      "partId": "male_joint",
+      "viewerNodeId": "male_joint",
+      "label": "Male Joint.Edge3",
+      "editable": false,
+      "start": {
+        "x": -4.0,
+        "y": 10.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": -4.0,
+        "y": 10.0,
+        "z": 4.0
+      }
+    },
+    {
+      "targetId": "male_joint:edge:-4--10-0_-4-10-0",
+      "durableTargetId": "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:edge:-4--10-0_-4-10-0",
+      "canonicalTargetId": "male_joint:edge:3:-4--10-0_-4-10-0",
+      "aliasIds": [
+        "male_joint:edge:3:-4--10-0_-4-10-0",
+        "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:edge:-4--10-0_-4-10-0"
+      ],
+      "partId": "male_joint",
+      "viewerNodeId": "male_joint",
+      "label": "Male Joint.Edge4",
+      "editable": false,
+      "start": {
+        "x": -4.0,
+        "y": -10.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": -4.0,
+        "y": 10.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "male_joint:edge:4--10-0_4--10-4",
+      "durableTargetId": "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:edge:4--10-0_4--10-4",
+      "canonicalTargetId": "male_joint:edge:4:4--10-0_4--10-4",
+      "aliasIds": [
+        "male_joint:edge:4:4--10-0_4--10-4",
+        "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:edge:4--10-0_4--10-4"
+      ],
+      "partId": "male_joint",
+      "viewerNodeId": "male_joint",
+      "label": "Male Joint.Edge5",
+      "editable": false,
+      "start": {
+        "x": 4.0,
+        "y": -10.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 4.0,
+        "y": -10.0,
+        "z": 4.0
+      }
+    },
+    {
+      "targetId": "male_joint:edge:4--10-4_4-10-4",
+      "durableTargetId": "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:edge:4--10-4_4-10-4",
+      "canonicalTargetId": "male_joint:edge:5:4--10-4_4-10-4",
+      "aliasIds": [
+        "male_joint:edge:5:4--10-4_4-10-4",
+        "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:edge:4--10-4_4-10-4"
+      ],
+      "partId": "male_joint",
+      "viewerNodeId": "male_joint",
+      "label": "Male Joint.Edge6",
+      "editable": false,
+      "start": {
+        "x": 4.0,
+        "y": -10.0,
+        "z": 4.0
+      },
+      "end": {
+        "x": 4.0,
+        "y": 10.0,
+        "z": 4.0
+      }
+    },
+    {
+      "targetId": "male_joint:edge:4-10-0_4-10-4",
+      "durableTargetId": "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:edge:4-10-0_4-10-4",
+      "canonicalTargetId": "male_joint:edge:6:4-10-0_4-10-4",
+      "aliasIds": [
+        "male_joint:edge:6:4-10-0_4-10-4",
+        "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:edge:4-10-0_4-10-4"
+      ],
+      "partId": "male_joint",
+      "viewerNodeId": "male_joint",
+      "label": "Male Joint.Edge7",
+      "editable": false,
+      "start": {
+        "x": 4.0,
+        "y": 10.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 4.0,
+        "y": 10.0,
+        "z": 4.0
+      }
+    },
+    {
+      "targetId": "male_joint:edge:4--10-0_4-10-0",
+      "durableTargetId": "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:edge:4--10-0_4-10-0",
+      "canonicalTargetId": "male_joint:edge:7:4--10-0_4-10-0",
+      "aliasIds": [
+        "male_joint:edge:7:4--10-0_4-10-0",
+        "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:edge:4--10-0_4-10-0"
+      ],
+      "partId": "male_joint",
+      "viewerNodeId": "male_joint",
+      "label": "Male Joint.Edge8",
+      "editable": false,
+      "start": {
+        "x": 4.0,
+        "y": -10.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 4.0,
+        "y": 10.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "male_joint:edge:-4--10-0_4--10-0",
+      "durableTargetId": "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:edge:-4--10-0_4--10-0",
+      "canonicalTargetId": "male_joint:edge:8:-4--10-0_4--10-0",
+      "aliasIds": [
+        "male_joint:edge:8:-4--10-0_4--10-0",
+        "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:edge:-4--10-0_4--10-0"
+      ],
+      "partId": "male_joint",
+      "viewerNodeId": "male_joint",
+      "label": "Male Joint.Edge9",
+      "editable": false,
+      "start": {
+        "x": -4.0,
+        "y": -10.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 4.0,
+        "y": -10.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "male_joint:edge:-4--10-4_4--10-4",
+      "durableTargetId": "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:edge:-4--10-4_4--10-4",
+      "canonicalTargetId": "male_joint:edge:9:-4--10-4_4--10-4",
+      "aliasIds": [
+        "male_joint:edge:9:-4--10-4_4--10-4",
+        "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:edge:-4--10-4_4--10-4"
+      ],
+      "partId": "male_joint",
+      "viewerNodeId": "male_joint",
+      "label": "Male Joint.Edge10",
+      "editable": false,
+      "start": {
+        "x": -4.0,
+        "y": -10.0,
+        "z": 4.0
+      },
+      "end": {
+        "x": 4.0,
+        "y": -10.0,
+        "z": 4.0
+      }
+    },
+    {
+      "targetId": "male_joint:edge:-4-10-0_4-10-0",
+      "durableTargetId": "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:edge:-4-10-0_4-10-0",
+      "canonicalTargetId": "male_joint:edge:10:-4-10-0_4-10-0",
+      "aliasIds": [
+        "male_joint:edge:10:-4-10-0_4-10-0",
+        "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:edge:-4-10-0_4-10-0"
+      ],
+      "partId": "male_joint",
+      "viewerNodeId": "male_joint",
+      "label": "Male Joint.Edge11",
+      "editable": false,
+      "start": {
+        "x": -4.0,
+        "y": 10.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 4.0,
+        "y": 10.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "male_joint:edge:-4-10-4_4-10-4",
+      "durableTargetId": "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:edge:-4-10-4_4-10-4",
+      "canonicalTargetId": "male_joint:edge:11:-4-10-4_4-10-4",
+      "aliasIds": [
+        "male_joint:edge:11:-4-10-4_4-10-4",
+        "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:edge:-4-10-4_4-10-4"
+      ],
+      "partId": "male_joint",
+      "viewerNodeId": "male_joint",
+      "label": "Male Joint.Edge12",
+      "editable": false,
+      "start": {
+        "x": -4.0,
+        "y": 10.0,
+        "z": 4.0
+      },
+      "end": {
+        "x": 4.0,
+        "y": 10.0,
+        "z": 4.0
+      }
+    },
+    {
+      "targetId": "female_joint:edge:13--12-0_13--12-8",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:13--12-0_13--12-8",
+      "canonicalTargetId": "female_joint:edge:0:13--12-0_13--12-8",
+      "aliasIds": [
+        "female_joint:edge:0:13--12-0_13--12-8",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:13--12-0_13--12-8"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Edge1",
+      "editable": false,
+      "start": {
+        "x": 13.0,
+        "y": -12.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 13.0,
+        "y": -12.0,
+        "z": 8.0
+      }
+    },
+    {
+      "targetId": "female_joint:edge:13--12-8_13-12-8",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:13--12-8_13-12-8",
+      "canonicalTargetId": "female_joint:edge:1:13--12-8_13-12-8",
+      "aliasIds": [
+        "female_joint:edge:1:13--12-8_13-12-8",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:13--12-8_13-12-8"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Edge2",
+      "editable": false,
+      "start": {
+        "x": 13.0,
+        "y": -12.0,
+        "z": 8.0
+      },
+      "end": {
+        "x": 13.0,
+        "y": 12.0,
+        "z": 8.0
+      }
+    },
+    {
+      "targetId": "female_joint:edge:13-12-0_13-12-8",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:13-12-0_13-12-8",
+      "canonicalTargetId": "female_joint:edge:2:13-12-0_13-12-8",
+      "aliasIds": [
+        "female_joint:edge:2:13-12-0_13-12-8",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:13-12-0_13-12-8"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Edge3",
+      "editable": false,
+      "start": {
+        "x": 13.0,
+        "y": 12.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 13.0,
+        "y": 12.0,
+        "z": 8.0
+      }
+    },
+    {
+      "targetId": "female_joint:edge:13--12-0_13-12-0",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:13--12-0_13-12-0",
+      "canonicalTargetId": "female_joint:edge:3:13--12-0_13-12-0",
+      "aliasIds": [
+        "female_joint:edge:3:13--12-0_13-12-0",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:13--12-0_13-12-0"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Edge4",
+      "editable": false,
+      "start": {
+        "x": 13.0,
+        "y": -12.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 13.0,
+        "y": 12.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "female_joint:edge:13--12-0_27--12-0",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:13--12-0_27--12-0",
+      "canonicalTargetId": "female_joint:edge:4:13--12-0_27--12-0",
+      "aliasIds": [
+        "female_joint:edge:4:13--12-0_27--12-0",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:13--12-0_27--12-0"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Edge5",
+      "editable": false,
+      "start": {
+        "x": 13.0,
+        "y": -12.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 27.0,
+        "y": -12.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "female_joint:edge:27--12-0_27--12-8",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:27--12-0_27--12-8",
+      "canonicalTargetId": "female_joint:edge:5:27--12-0_27--12-8",
+      "aliasIds": [
+        "female_joint:edge:5:27--12-0_27--12-8",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:27--12-0_27--12-8"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Edge6",
+      "editable": false,
+      "start": {
+        "x": 27.0,
+        "y": -12.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 27.0,
+        "y": -12.0,
+        "z": 8.0
+      }
+    },
+    {
+      "targetId": "female_joint:edge:13--12-8_27--12-8",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:13--12-8_27--12-8",
+      "canonicalTargetId": "female_joint:edge:6:13--12-8_27--12-8",
+      "aliasIds": [
+        "female_joint:edge:6:13--12-8_27--12-8",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:13--12-8_27--12-8"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Edge7",
+      "editable": false,
+      "start": {
+        "x": 13.0,
+        "y": -12.0,
+        "z": 8.0
+      },
+      "end": {
+        "x": 27.0,
+        "y": -12.0,
+        "z": 8.0
+      }
+    },
+    {
+      "targetId": "female_joint:edge:13-12-8_27-12-8",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:13-12-8_27-12-8",
+      "canonicalTargetId": "female_joint:edge:7:13-12-8_27-12-8",
+      "aliasIds": [
+        "female_joint:edge:7:13-12-8_27-12-8",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:13-12-8_27-12-8"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Edge8",
+      "editable": false,
+      "start": {
+        "x": 13.0,
+        "y": 12.0,
+        "z": 8.0
+      },
+      "end": {
+        "x": 27.0,
+        "y": 12.0,
+        "z": 8.0
+      }
+    },
+    {
+      "targetId": "female_joint:edge:27--12-8_27-12-8",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:27--12-8_27-12-8",
+      "canonicalTargetId": "female_joint:edge:8:27--12-8_27-12-8",
+      "aliasIds": [
+        "female_joint:edge:8:27--12-8_27-12-8",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:27--12-8_27-12-8"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Edge9",
+      "editable": false,
+      "start": {
+        "x": 27.0,
+        "y": -12.0,
+        "z": 8.0
+      },
+      "end": {
+        "x": 27.0,
+        "y": 12.0,
+        "z": 8.0
+      }
+    },
+    {
+      "targetId": "female_joint:edge:13-12-0_27-12-0",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:13-12-0_27-12-0",
+      "canonicalTargetId": "female_joint:edge:9:13-12-0_27-12-0",
+      "aliasIds": [
+        "female_joint:edge:9:13-12-0_27-12-0",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:13-12-0_27-12-0"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Edge10",
+      "editable": false,
+      "start": {
+        "x": 13.0,
+        "y": 12.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 27.0,
+        "y": 12.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "female_joint:edge:27-12-0_27-12-8",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:27-12-0_27-12-8",
+      "canonicalTargetId": "female_joint:edge:10:27-12-0_27-12-8",
+      "aliasIds": [
+        "female_joint:edge:10:27-12-0_27-12-8",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:27-12-0_27-12-8"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Edge11",
+      "editable": false,
+      "start": {
+        "x": 27.0,
+        "y": 12.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 27.0,
+        "y": 12.0,
+        "z": 8.0
+      }
+    },
+    {
+      "targetId": "female_joint:edge:27--12-0_27-12-0",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:27--12-0_27-12-0",
+      "canonicalTargetId": "female_joint:edge:11:27--12-0_27-12-0",
+      "aliasIds": [
+        "female_joint:edge:11:27--12-0_27-12-0",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:27--12-0_27-12-0"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Edge12",
+      "editable": false,
+      "start": {
+        "x": 27.0,
+        "y": -12.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 27.0,
+        "y": 12.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "female_joint:edge:15.7--10.3-0_24.3--10.3-0",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:15.7--10.3-0_24.3--10.3-0",
+      "canonicalTargetId": "female_joint:edge:12:15.7--10.3-0_24.3--10.3-0",
+      "aliasIds": [
+        "female_joint:edge:12:15.7--10.3-0_24.3--10.3-0",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:15.7--10.3-0_24.3--10.3-0"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Edge13",
+      "editable": false,
+      "start": {
+        "x": 15.7,
+        "y": -10.3,
+        "z": 0.0
+      },
+      "end": {
+        "x": 24.299999999999997,
+        "y": -10.3,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "female_joint:edge:24.3--10.3-0_24.3-10.3-0",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:24.3--10.3-0_24.3-10.3-0",
+      "canonicalTargetId": "female_joint:edge:13:24.3--10.3-0_24.3-10.3-0",
+      "aliasIds": [
+        "female_joint:edge:13:24.3--10.3-0_24.3-10.3-0",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:24.3--10.3-0_24.3-10.3-0"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Edge14",
+      "editable": false,
+      "start": {
+        "x": 24.3,
+        "y": -10.3,
+        "z": 0.0
+      },
+      "end": {
+        "x": 24.3,
+        "y": 10.3,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "female_joint:edge:15.7-10.3-0_24.3-10.3-0",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:15.7-10.3-0_24.3-10.3-0",
+      "canonicalTargetId": "female_joint:edge:14:15.7-10.3-0_24.3-10.3-0",
+      "aliasIds": [
+        "female_joint:edge:14:15.7-10.3-0_24.3-10.3-0",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:15.7-10.3-0_24.3-10.3-0"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Edge15",
+      "editable": false,
+      "start": {
+        "x": 15.7,
+        "y": 10.3,
+        "z": 0.0
+      },
+      "end": {
+        "x": 24.299999999999997,
+        "y": 10.3,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "female_joint:edge:15.7--10.3-0_15.7-10.3-0",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:15.7--10.3-0_15.7-10.3-0",
+      "canonicalTargetId": "female_joint:edge:15:15.7--10.3-0_15.7-10.3-0",
+      "aliasIds": [
+        "female_joint:edge:15:15.7--10.3-0_15.7-10.3-0",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:15.7--10.3-0_15.7-10.3-0"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Edge16",
+      "editable": false,
+      "start": {
+        "x": 15.7,
+        "y": -10.3,
+        "z": 0.0
+      },
+      "end": {
+        "x": 15.7,
+        "y": 10.3,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "female_joint:edge:24.3--10.3-0_24.3--10.3-5",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:24.3--10.3-0_24.3--10.3-5",
+      "canonicalTargetId": "female_joint:edge:16:24.3--10.3-0_24.3--10.3-5",
+      "aliasIds": [
+        "female_joint:edge:16:24.3--10.3-0_24.3--10.3-5",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:24.3--10.3-0_24.3--10.3-5"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Edge17",
+      "editable": false,
+      "start": {
+        "x": 24.3,
+        "y": -10.3,
+        "z": 0.0
+      },
+      "end": {
+        "x": 24.3,
+        "y": -10.3,
+        "z": 5.0
+      }
+    },
+    {
+      "targetId": "female_joint:edge:15.7--10.3-5_24.3--10.3-5",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:15.7--10.3-5_24.3--10.3-5",
+      "canonicalTargetId": "female_joint:edge:17:15.7--10.3-5_24.3--10.3-5",
+      "aliasIds": [
+        "female_joint:edge:17:15.7--10.3-5_24.3--10.3-5",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:15.7--10.3-5_24.3--10.3-5"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Edge18",
+      "editable": false,
+      "start": {
+        "x": 15.7,
+        "y": -10.3,
+        "z": 5.0
+      },
+      "end": {
+        "x": 24.299999999999997,
+        "y": -10.3,
+        "z": 5.0
+      }
+    },
+    {
+      "targetId": "female_joint:edge:15.7--10.3-0_15.7--10.3-5",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:15.7--10.3-0_15.7--10.3-5",
+      "canonicalTargetId": "female_joint:edge:18:15.7--10.3-0_15.7--10.3-5",
+      "aliasIds": [
+        "female_joint:edge:18:15.7--10.3-0_15.7--10.3-5",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:15.7--10.3-0_15.7--10.3-5"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Edge19",
+      "editable": false,
+      "start": {
+        "x": 15.7,
+        "y": -10.3,
+        "z": 0.0
+      },
+      "end": {
+        "x": 15.7,
+        "y": -10.3,
+        "z": 5.0
+      }
+    },
+    {
+      "targetId": "female_joint:edge:24.3--10.3-5_24.3-10.3-5",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:24.3--10.3-5_24.3-10.3-5",
+      "canonicalTargetId": "female_joint:edge:19:24.3--10.3-5_24.3-10.3-5",
+      "aliasIds": [
+        "female_joint:edge:19:24.3--10.3-5_24.3-10.3-5",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:24.3--10.3-5_24.3-10.3-5"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Edge20",
+      "editable": false,
+      "start": {
+        "x": 24.3,
+        "y": -10.3,
+        "z": 5.0
+      },
+      "end": {
+        "x": 24.3,
+        "y": 10.3,
+        "z": 5.0
+      }
+    },
+    {
+      "targetId": "female_joint:edge:24.3-10.3-0_24.3-10.3-5",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:24.3-10.3-0_24.3-10.3-5",
+      "canonicalTargetId": "female_joint:edge:20:24.3-10.3-0_24.3-10.3-5",
+      "aliasIds": [
+        "female_joint:edge:20:24.3-10.3-0_24.3-10.3-5",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:24.3-10.3-0_24.3-10.3-5"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Edge21",
+      "editable": false,
+      "start": {
+        "x": 24.3,
+        "y": 10.3,
+        "z": 0.0
+      },
+      "end": {
+        "x": 24.3,
+        "y": 10.3,
+        "z": 5.0
+      }
+    },
+    {
+      "targetId": "female_joint:edge:15.7-10.3-5_24.3-10.3-5",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:15.7-10.3-5_24.3-10.3-5",
+      "canonicalTargetId": "female_joint:edge:21:15.7-10.3-5_24.3-10.3-5",
+      "aliasIds": [
+        "female_joint:edge:21:15.7-10.3-5_24.3-10.3-5",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:15.7-10.3-5_24.3-10.3-5"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Edge22",
+      "editable": false,
+      "start": {
+        "x": 15.7,
+        "y": 10.3,
+        "z": 5.0
+      },
+      "end": {
+        "x": 24.299999999999997,
+        "y": 10.3,
+        "z": 5.0
+      }
+    },
+    {
+      "targetId": "female_joint:edge:15.7-10.3-0_15.7-10.3-5",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:15.7-10.3-0_15.7-10.3-5",
+      "canonicalTargetId": "female_joint:edge:22:15.7-10.3-0_15.7-10.3-5",
+      "aliasIds": [
+        "female_joint:edge:22:15.7-10.3-0_15.7-10.3-5",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:15.7-10.3-0_15.7-10.3-5"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Edge23",
+      "editable": false,
+      "start": {
+        "x": 15.7,
+        "y": 10.3,
+        "z": 0.0
+      },
+      "end": {
+        "x": 15.7,
+        "y": 10.3,
+        "z": 5.0
+      }
+    },
+    {
+      "targetId": "female_joint:edge:15.7--10.3-5_15.7-10.3-5",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:15.7--10.3-5_15.7-10.3-5",
+      "canonicalTargetId": "female_joint:edge:23:15.7--10.3-5_15.7-10.3-5",
+      "aliasIds": [
+        "female_joint:edge:23:15.7--10.3-5_15.7-10.3-5",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:edge:15.7--10.3-5_15.7-10.3-5"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Edge24",
+      "editable": false,
+      "start": {
+        "x": 15.7,
+        "y": -10.3,
+        "z": 5.0
+      },
+      "end": {
+        "x": 15.7,
+        "y": 10.3,
+        "z": 5.0
+      }
+    }
+  ],
+  "faceTargets": [
+    {
+      "targetId": "male_joint:face:-4-0-2:80",
+      "durableTargetId": "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:face:-4-0-2:80",
+      "canonicalTargetId": "male_joint:face:0:-4-0-2:80",
+      "aliasIds": [
+        "male_joint:face:0:-4-0-2:80",
+        "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:face:-4-0-2:80"
+      ],
+      "partId": "male_joint",
+      "viewerNodeId": "male_joint",
+      "label": "Male Joint.Face1",
+      "editable": false,
+      "center": {
+        "x": -4.0,
+        "y": -3.8857805861880484e-16,
+        "z": 2.0
+      },
+      "normal": [
+        1.0,
+        0.0,
+        -0.0
+      ],
+      "area": 80.0
+    },
+    {
+      "targetId": "male_joint:face:4-0-2:80",
+      "durableTargetId": "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:face:4-0-2:80",
+      "canonicalTargetId": "male_joint:face:1:4-0-2:80",
+      "aliasIds": [
+        "male_joint:face:1:4-0-2:80",
+        "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:face:4-0-2:80"
+      ],
+      "partId": "male_joint",
+      "viewerNodeId": "male_joint",
+      "label": "Male Joint.Face2",
+      "editable": false,
+      "center": {
+        "x": 4.0,
+        "y": -3.8857805861880484e-16,
+        "z": 2.0
+      },
+      "normal": [
+        1.0,
+        0.0,
+        -0.0
+      ],
+      "area": 80.0
+    },
+    {
+      "targetId": "male_joint:face:0--10-2:32",
+      "durableTargetId": "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:face:0--10-2:32",
+      "canonicalTargetId": "male_joint:face:2:0--10-2:32",
+      "aliasIds": [
+        "male_joint:face:2:0--10-2:32",
+        "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:face:0--10-2:32"
+      ],
+      "partId": "male_joint",
+      "viewerNodeId": "male_joint",
+      "label": "Male Joint.Face3",
+      "editable": false,
+      "center": {
+        "x": 8.326672684688674e-17,
+        "y": -10.0,
+        "z": 2.0
+      },
+      "normal": [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      "area": 32.0
+    },
+    {
+      "targetId": "male_joint:face:0-10-2:32",
+      "durableTargetId": "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:face:0-10-2:32",
+      "canonicalTargetId": "male_joint:face:3:0-10-2:32",
+      "aliasIds": [
+        "male_joint:face:3:0-10-2:32",
+        "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:face:0-10-2:32"
+      ],
+      "partId": "male_joint",
+      "viewerNodeId": "male_joint",
+      "label": "Male Joint.Face4",
+      "editable": false,
+      "center": {
+        "x": 8.326672684688674e-17,
+        "y": 10.0,
+        "z": 2.0
+      },
+      "normal": [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      "area": 32.0
+    },
+    {
+      "targetId": "male_joint:face:0-0-0:160",
+      "durableTargetId": "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:face:0-0-0:160",
+      "canonicalTargetId": "male_joint:face:4:0-0-0:160",
+      "aliasIds": [
+        "male_joint:face:4:0-0-0:160",
+        "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:face:0-0-0:160"
+      ],
+      "partId": "male_joint",
+      "viewerNodeId": "male_joint",
+      "label": "Male Joint.Face5",
+      "editable": false,
+      "center": {
+        "x": 9.71445146547012e-17,
+        "y": -2.775557561562891e-16,
+        "z": 0.0
+      },
+      "normal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "area": 160.0
+    },
+    {
+      "targetId": "male_joint:face:0-0-4:160",
+      "durableTargetId": "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:face:0-0-4:160",
+      "canonicalTargetId": "male_joint:face:5:0-0-4:160",
+      "aliasIds": [
+        "male_joint:face:5:0-0-4:160",
+        "male_joint:stable-node-key:sha256:df04b8264126d8a65268803e6cfcafd3201c18dfb15fd0c61bfb88b4bbc90d13:face:0-0-4:160"
+      ],
+      "partId": "male_joint",
+      "viewerNodeId": "male_joint",
+      "label": "Male Joint.Face6",
+      "editable": false,
+      "center": {
+        "x": 9.71445146547012e-17,
+        "y": -2.775557561562891e-16,
+        "z": 4.0
+      },
+      "normal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "area": 160.0
+    },
+    {
+      "targetId": "female_joint:face:13-0-4:192",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:face:13-0-4:192",
+      "canonicalTargetId": "female_joint:face:0:13-0-4:192",
+      "aliasIds": [
+        "female_joint:face:0:13-0-4:192",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:face:13-0-4:192"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Face1",
+      "editable": false,
+      "center": {
+        "x": 13.0,
+        "y": 2.220446049250313e-16,
+        "z": 4.0
+      },
+      "normal": [
+        1.0,
+        0.0,
+        -0.0
+      ],
+      "area": 192.0
+    },
+    {
+      "targetId": "female_joint:face:20--12-4:112",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:face:20--12-4:112",
+      "canonicalTargetId": "female_joint:face:1:20--12-4:112",
+      "aliasIds": [
+        "female_joint:face:1:20--12-4:112",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:face:20--12-4:112"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Face2",
+      "editable": false,
+      "center": {
+        "x": 20.0,
+        "y": -12.0,
+        "z": 4.0
+      },
+      "normal": [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      "area": 112.0
+    },
+    {
+      "targetId": "female_joint:face:20-0-8:336",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:face:20-0-8:336",
+      "canonicalTargetId": "female_joint:face:2:20-0-8:336",
+      "aliasIds": [
+        "female_joint:face:2:20-0-8:336",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:face:20-0-8:336"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Face3",
+      "editable": false,
+      "center": {
+        "x": 20.0,
+        "y": 0.0,
+        "z": 8.0
+      },
+      "normal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "area": 335.9999999999999
+    },
+    {
+      "targetId": "female_joint:face:20-12-4:112",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:face:20-12-4:112",
+      "canonicalTargetId": "female_joint:face:3:20-12-4:112",
+      "aliasIds": [
+        "female_joint:face:3:20-12-4:112",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:face:20-12-4:112"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Face4",
+      "editable": false,
+      "center": {
+        "x": 20.0,
+        "y": 12.0,
+        "z": 4.0
+      },
+      "normal": [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      "area": 112.0
+    },
+    {
+      "targetId": "female_joint:face:20-0-0:158.84",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:face:20-0-0:158.84",
+      "canonicalTargetId": "female_joint:face:4:20-0-0:158.84",
+      "aliasIds": [
+        "female_joint:face:4:20-0-0:158.84",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:face:20-0-0:158.84"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Face5",
+      "editable": false,
+      "center": {
+        "x": 20.0,
+        "y": 8.351136173647307e-16,
+        "z": 0.0
+      },
+      "normal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "area": 158.83999999999986
+    },
+    {
+      "targetId": "female_joint:face:27-0-4:192",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:face:27-0-4:192",
+      "canonicalTargetId": "female_joint:face:5:27-0-4:192",
+      "aliasIds": [
+        "female_joint:face:5:27-0-4:192",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:face:27-0-4:192"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Face6",
+      "editable": false,
+      "center": {
+        "x": 27.0,
+        "y": 2.220446049250313e-16,
+        "z": 4.0
+      },
+      "normal": [
+        1.0,
+        0.0,
+        -0.0
+      ],
+      "area": 192.0
+    },
+    {
+      "targetId": "female_joint:face:20--10.3-2.5:43",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:face:20--10.3-2.5:43",
+      "canonicalTargetId": "female_joint:face:6:20--10.3-2.5:43",
+      "aliasIds": [
+        "female_joint:face:6:20--10.3-2.5:43",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:face:20--10.3-2.5:43"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Face7",
+      "editable": false,
+      "center": {
+        "x": 20.0,
+        "y": -10.3,
+        "z": 2.5
+      },
+      "normal": [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      "area": 42.99999999999999
+    },
+    {
+      "targetId": "female_joint:face:24.3-0-2.5:103",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:face:24.3-0-2.5:103",
+      "canonicalTargetId": "female_joint:face:7:24.3-0-2.5:103",
+      "aliasIds": [
+        "female_joint:face:7:24.3-0-2.5:103",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:face:24.3-0-2.5:103"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Face8",
+      "editable": false,
+      "center": {
+        "x": 24.3,
+        "y": 0.0,
+        "z": 2.5
+      },
+      "normal": [
+        1.0,
+        0.0,
+        -0.0
+      ],
+      "area": 103.0
+    },
+    {
+      "targetId": "female_joint:face:20-10.3-2.5:43",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:face:20-10.3-2.5:43",
+      "canonicalTargetId": "female_joint:face:8:20-10.3-2.5:43",
+      "aliasIds": [
+        "female_joint:face:8:20-10.3-2.5:43",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:face:20-10.3-2.5:43"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Face9",
+      "editable": false,
+      "center": {
+        "x": 20.0,
+        "y": 10.3,
+        "z": 2.5
+      },
+      "normal": [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      "area": 42.99999999999999
+    },
+    {
+      "targetId": "female_joint:face:15.7-0-2.5:103",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:face:15.7-0-2.5:103",
+      "canonicalTargetId": "female_joint:face:9:15.7-0-2.5:103",
+      "aliasIds": [
+        "female_joint:face:9:15.7-0-2.5:103",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:face:15.7-0-2.5:103"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Face10",
+      "editable": false,
+      "center": {
+        "x": 15.7,
+        "y": 0.0,
+        "z": 2.5
+      },
+      "normal": [
+        1.0,
+        0.0,
+        -0.0
+      ],
+      "area": 103.0
+    },
+    {
+      "targetId": "female_joint:face:20-0-5:177.16",
+      "durableTargetId": "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:face:20-0-5:177.16",
+      "canonicalTargetId": "female_joint:face:10:20-0-5:177.16",
+      "aliasIds": [
+        "female_joint:face:10:20-0-5:177.16",
+        "female_joint:stable-node-key:sha256:4348bb829f0d301ac87defb2141223f16aa6e6929b10ac074a4128a068fa80fe:face:20-0-5:177.16"
+      ],
+      "partId": "female_joint",
+      "viewerNodeId": "female_joint",
+      "label": "Female Joint.Face11",
+      "editable": false,
+      "center": {
+        "x": 20.0,
+        "y": 2.0655312086049421e-16,
+        "z": 5.0
+      },
+      "normal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "area": 177.16000000000005
+    }
+  ],
+  "calloutAnchors": [],
+  "measurementGuides": [],
+  "exportArtifacts": [
+    {
+      "label": "STEP",
+      "format": "step",
+      "path": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-79104a29759f/model.step",
+      "role": "primary",
+      "geometryProvenance": {
+        "representation": "analyticBrep"
+      }
+    }
+  ],
+  "geometryProvenance": {
+    "representation": "analyticBrep"
+  }
+}

@@ -1,0 +1,20 @@
+(model
+  (params
+    (number case_w 72 :label "case width" :min 50 :max 120 :step 2)
+    (number case_d 48 :label "case depth" :min 34 :max 90 :step 2)
+    (number wall_t 3 :label "wall thickness" :min 2 :max 6 :step 0.5)
+    (number body_h 24 :label "body height" :min 16 :max 50 :step 2)
+    (number lid_t 3 :label "lid thickness" :min 2 :max 6 :step 0.5))
+  (part body
+    (build
+      (shape outer (box case_w case_d body_h))
+      (shape cavity
+        (translate 0 0 wall_t
+          (box (- case_w (* 2 wall_t)) (- case_d (* 2 wall_t)) body_h)))
+      (result (difference outer cavity))))
+  (part lid
+    (build
+      (shape lid_plate
+        (translate 0 0 (+ body_h (/ lid_t 2))
+          (box case_w case_d lid_t)))
+      (result lid_plate))))

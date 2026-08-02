@@ -1,0 +1,22 @@
+;; Checkpoint 4: generated front pattern. One cutter group; one final boolean.
+(model
+  (params
+    (number width 36.0 :label "holder width" :min 20.0 :max 60.0)
+    (number depth 25.0 :label "holder depth" :min 15.0 :max 50.0)
+    (number height 85.0 :label "holder height" :min 40.0 :max 150.0)
+    (number wall_margin 2.6 :label "wall margin" :min 1.5 :max 5.0)
+    (number drain_margin 5.0 :label "drain edge margin" :min 2.0 :max 8.0)
+    (number cutter_margin 2.0 :label "cutter wall overshoot" :min 0.5 :max 5.0)
+    (number pattern_margin 11.0 :label "pattern top and base margin" :min 8.0 :max 18.0))
+  (part toothbrush_holder
+    (let* ((radius (/ width 2.0)) (inner_width (- width (* 2 wall_margin))) (inner_depth (- depth wall_margin)) (inner_radius (- radius wall_margin))
+           (outer (union (box width depth height :align '(center max center)) (cylinder radius height :align '(center center center))))
+           (cavity (union (box inner_width inner_depth (+ height 4) :align '(center max center)) (cylinder inner_radius (+ height 4) :align '(center center center))))
+           (base_blank (translate 0 0 (- (/ height 2)) (union (box width depth wall_margin :align '(center max min)) (cylinder radius wall_margin :align '(center center min)))))
+           (drain (translate 0 0 (- (/ height 2) 1) (cylinder drain_margin (+ wall_margin 2) :align '(center center min))))
+           (body (union (difference outer cavity) (difference base_blank drain)))
+           (spade_profile (polygon ((0 4.7) (-3.05 1.5) (-3.25 -0.8) (-2.15 -1.95) (-0.55 -3.35) (-1.15 -5.35) (1.15 -5.35) (0.55 -3.35) (2.15 -1.95) (3.25 -0.8) (3.05 1.5))))
+           (spade (place (location (plane :origin '(0 0 0)) :rotate '(-90 0 180)) (extrude spade_profile (+ wall_margin (* 2 cutter_margin)))))
+           (front_cutters (repeat-union row 5 (repeat-union column 5 (let* ((angle (+ -48 (* column 24))) (zpos (+ (- (/ height 2) pattern_margin) (* row 13)))) (place (location (plane :origin '(0 0 0)) :rotate (list 0 0 angle)) (translate 0 (- radius wall_margin cutter_margin) zpos spade)))))))
+           (cutter_group front_cutters))
+      (difference body cutter_group))))

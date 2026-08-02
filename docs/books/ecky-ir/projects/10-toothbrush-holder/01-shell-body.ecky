@@ -1,0 +1,17 @@
+;; Checkpoint 1: printable D-shaped cup body, never a flat proxy.
+(model
+  (params
+    (number width 36.0 :label "holder width" :min 20.0 :max 60.0)
+    (number depth 25.0 :label "holder depth" :min 15.0 :max 50.0)
+    (number height 85.0 :label "holder height" :min 40.0 :max 150.0)
+    (number wall_margin 2.6 :label "wall margin" :min 1.5 :max 5.0))
+  (part toothbrush_holder
+    (let* ((radius (/ width 2.0))
+           (inner_width (- width (* 2.0 wall_margin)))
+           (inner_depth (- depth wall_margin))
+           (inner_radius (- radius wall_margin))
+           (outer (union (box width depth height :align '(center max center))
+                         (cylinder radius height :align '(center center center))))
+           (cavity (union (box inner_width inner_depth (+ height 4.0) :align '(center max center))
+                          (cylinder inner_radius (+ height 4.0) :align '(center center center)))))
+      (difference outer cavity))))
