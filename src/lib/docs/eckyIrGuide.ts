@@ -32,15 +32,7 @@ export function isDocsRoute(pathname: string): boolean {
 }
 
 export function docsSourcePath(pathname = '/'): string {
-  if (
-    pathname === '/learn/ecky-ir'
-    || pathname.startsWith('/learn/ecky-ir/')
-    || pathname === '/ecky-ir'
-    || pathname === '/ecky-ir/'
-    || pathname === '/'
-  ) {
-    return '/tutorials/ecky-campaign.md';
-  }
+  void pathname;
   return '/docs/ecky-ir.md';
 }
 
@@ -146,13 +138,15 @@ export function renderMarkdownFragment(markdown: string, options: DocsRenderOpti
 
     if (trimmed.startsWith('### ')) {
       flushParagraph();
-      chunks.push(`<h3>${renderInline(trimmed.slice(4).trim())}</h3>`);
+      const heading = trimmed.slice(4).trim();
+      chunks.push(`<h3 id="${docsHeadingSlug(heading)}">${renderInline(heading)}</h3>`);
       continue;
     }
 
     if (trimmed.startsWith('#### ')) {
       flushParagraph();
-      chunks.push(`<h4>${renderInline(trimmed.slice(5).trim())}</h4>`);
+      const heading = trimmed.slice(5).trim();
+      chunks.push(`<h4 id="${docsHeadingSlug(heading)}">${renderInline(heading)}</h4>`);
       continue;
     }
 
@@ -242,9 +236,17 @@ function extractFirstSnippet(markdown: string): string | null {
 
 function renderInline(text: string): string {
   let output = escapeHtml(text);
+  output = output.replace(
+    /\[([^\]]+)\]\((#[a-zA-Z0-9_-]+)\)/g,
+    '<a href="$2">$1</a>',
+  );
   output = output.replace(/`([^`]+)`/g, (_match, code) => `<code>${escapeHtml(code)}</code>`);
   output = output.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   return output;
+}
+
+export function docsHeadingSlug(value: string): string {
+  return slugify(value.replace(/[`*_]/g, ''));
 }
 
 function parseImageBlock(text: string): { alt: string; src: string } | null {

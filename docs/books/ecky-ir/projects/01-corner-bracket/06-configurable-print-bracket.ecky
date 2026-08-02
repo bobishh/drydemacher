@@ -1,0 +1,28 @@
+(model
+  (params
+    (number span 64 :label "Bracket span" :min 40 :max 120 :step 2)
+    (number foot_depth 36 :label "Foot depth" :min 20 :max 70 :step 2)
+    (number stock 6 :label "Stock thickness" :min 3 :max 12 :step 0.5)
+    (number fit_clearance 0.3 :label "Mounting clearance" :min 0.15 :max 0.6 :step 0.05)
+    (select mounting "slots" :label "Mounting pattern" :options (("Adjustment slots" "slots") ("Round bores" "bores")))
+    (toggle lighten #t :label "Cut center lightening channel")
+    :relations ((> stock fit_clearance)))
+  (part configurable_bracket
+    (let* ((flange_height 40)
+           (foot (box span foot_depth stock))
+           (flange (translate 0 (- (/ foot_depth 2) (/ stock 2)) (/ flange_height 2)
+                     (box span stock flange_height)))
+           (gusset (translate 0 (- (/ foot_depth 2) (/ stock 2)) stock
+                    (rotate 90 0 0 (wedge 26 stock 22 4 3 22 19))))
+           (bracket (union foot flange gusset))
+           (slot_cutter (extrude (slot-overall 18 (+ 5 (* 2 fit_clearance))) (+ stock 2)))
+           (bore_cutter (cylinder (+ 2.5 fit_clearance) (+ stock 2)))
+           (mount_cut (if (= mounting "slots")
+                          (linear-array 2 (- span 28) 0 0 slot_cutter)
+                          (linear-array 2 (- span 28) 0 0 bore_cutter)))
+           (lightening_cut
+             (translate 0 0 -1
+               (extrude (slot-overall (- span 24) 7) (+ stock 2)))))
+      (if lighten
+          (difference bracket mount_cut lightening_cut)
+          (difference bracket mount_cut)))))

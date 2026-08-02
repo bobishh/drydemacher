@@ -15,6 +15,17 @@ export function authoringContextFromConfig(config: Pick<
   AppConfig,
   'defaultEngineKind' | 'defaultSourceLanguage' | 'defaultGeometryBackend'
 >): RuntimeAuthoringContext {
+  if (
+    config.defaultEngineKind === 'build123d' ||
+    config.defaultSourceLanguage === 'build123d' ||
+    config.defaultGeometryBackend === 'build123d'
+  ) {
+    return {
+      engineKind: 'ecky',
+      sourceLanguage: 'ecky',
+      geometryBackend: 'mesh',
+    };
+  }
   return {
     engineKind: config.defaultEngineKind,
     sourceLanguage: config.defaultSourceLanguage,
@@ -35,7 +46,7 @@ type ActiveAuthoringContextInput = {
 
 function engineKindForSourceLanguage(sourceLanguage: SourceLanguage | undefined): EngineKind | null {
   if (sourceLanguage === 'ecky') return 'ecky';
-  if (sourceLanguage === 'build123d') return 'build123d';
+  if (sourceLanguage === 'build123d') return 'ecky';
   if (sourceLanguage === 'legacyPython') return 'freecad';
   return null;
 }
@@ -45,6 +56,17 @@ function applyAuthoringContextSource(
   source: AuthoringContextSource | null | undefined,
 ): RuntimeAuthoringContext {
   if (!source) return context;
+  if (
+    source.engineKind === 'build123d' ||
+    source.sourceLanguage === 'build123d' ||
+    source.geometryBackend === 'build123d'
+  ) {
+    return {
+      engineKind: 'ecky',
+      sourceLanguage: 'ecky',
+      geometryBackend: 'mesh',
+    };
+  }
   const sourceLanguage = source.sourceLanguage ?? context.sourceLanguage;
   return {
     engineKind:
@@ -99,15 +121,13 @@ export function capabilityForAuthoringContext(
 ): RuntimeBackendCapability | null {
   if (!capabilities) return null;
   if (sourceLanguage === 'legacyPython') return capabilities.freecad;
-  if (sourceLanguage === 'build123d') return capabilities.build123d;
+  if (sourceLanguage === 'build123d') return capabilities.mesh;
   if (sourceLanguage === 'ecky') {
-    return geometryBackend === 'build123d'
-      ? capabilities.build123d
-      : geometryBackend === 'freecad'
+    return geometryBackend === 'freecad'
         ? capabilities.freecad
         : capabilities.mesh;
   }
-  if (geometryBackend === 'build123d') return capabilities.build123d;
+  if (geometryBackend === 'build123d') return capabilities.mesh;
   if (geometryBackend === 'freecad') return capabilities.freecad;
   return capabilities.mesh;
 }
@@ -116,6 +136,21 @@ export function repairDefaultAuthoringContext(
   config: AppConfig,
   capabilities: RuntimeCapabilities,
 ): { config: AppConfig; repaired: boolean } {
+  const hasRemovedBuild123dContext =
+    config.defaultEngineKind === 'build123d' ||
+    config.defaultSourceLanguage === 'build123d' ||
+    config.defaultGeometryBackend === 'build123d';
+  if (hasRemovedBuild123dContext) {
+    return {
+      repaired: true,
+      config: {
+        ...config,
+        defaultEngineKind: 'ecky',
+        defaultSourceLanguage: 'ecky',
+        defaultGeometryBackend: 'mesh',
+      },
+    };
+  }
   const currentContext = authoringContextFromConfig(config);
   const currentCapability = capabilityForAuthoringContext(
     capabilities,
@@ -127,13 +162,18 @@ export function repairDefaultAuthoringContext(
     return { config, repaired: false };
   }
 
+  const recommended = capabilities.recommendedAuthoringContext;
+  const recommendedUsesRemovedBuild123d =
+    recommended.engineKind === 'build123d' ||
+    recommended.sourceLanguage === 'build123d' ||
+    recommended.geometryBackend === 'build123d';
   return {
     repaired: true,
     config: {
       ...config,
-      defaultEngineKind: capabilities.recommendedAuthoringContext.engineKind,
-      defaultSourceLanguage: capabilities.recommendedAuthoringContext.sourceLanguage,
-      defaultGeometryBackend: capabilities.recommendedAuthoringContext.geometryBackend,
+      defaultEngineKind: recommendedUsesRemovedBuild123d ? 'ecky' : recommended.engineKind,
+      defaultSourceLanguage: recommendedUsesRemovedBuild123d ? 'ecky' : recommended.sourceLanguage,
+      defaultGeometryBackend: recommendedUsesRemovedBuild123d ? 'mesh' : recommended.geometryBackend,
     },
   };
 }

@@ -1,0 +1,7 @@
+(model
+  ;; Case-pattern guide studies: a 2D Hénon opening and a 3D Lorenz guide rail.
+  ;; Not part of the final phone-case manufacturing source.
+  (part henon_opening
+    (extrude (polygon (henon-points 12 10)) 2))
+  (part lorenz_guide
+    (sweep (circle 0.8 12) (path (lorenz-points 12 0.01 18)))))

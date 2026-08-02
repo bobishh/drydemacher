@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "id": "04-parametric-wing",
+  "title": "Parametric Wing Stations",
+  "checkpoints": [
+    {
+      "id": "worked-stations",
+      "role": "worked",
+      "source": "worked-stations.ecky",
+      "summary": "A root and tip airfoil-station study lofted across a parametric span.",
+      "render": { "yaw": 35, "pitch": 20, "size": 220 }
+    },
+    {
+      "id": "worked-hull-leading-edge",
+      "role": "worked",
+      "source": "worked-hull-leading-edge.ecky",
+      "summary": "A lofted wing study with a hull-blended leading-edge fairing.",
+      "render": { "yaw": 35, "pitch": 20, "size": 220 }
+    },
+    {
+      "id": "worked-polyhedron-wingtip",
+      "role": "worked",
+      "source": "worked-polyhedron-wingtip.ecky",
+      "summary": "An isolated closed faceted wingtip representation.",
+      "render": { "yaw": 35, "pitch": 20, "size": 150 }
+    },
+    {
+      "id": "worked-mesh-planform",
+      "role": "worked",
+      "source": "worked-mesh-planform.ecky",
+      "summary": "An isolated indexed-mesh wing planform representation.",
+      "render": { "yaw": 35, "pitch": 20, "size": 150 }
+    },
+    {
+      "id": "derived-tip-starter",
+      "role": "starter",
+      "source": "starter-derived-tip.ecky",
+      "summary": "Root station is parametric; derive the tip station from taper and twist.",
+      "render": { "yaw": 35, "pitch": 20, "size": 220 }
+    },
+    {
+      "id": "taper-twist-solution",
+      "role": "solution",
+      "source": "solution-taper-twist.ecky",
+      "summary": "Taper and twist both flow into the tip station before lofting.",
+      "render": { "yaw": 35, "pitch": 20, "size": 220 }
+    }
+  ]
+}

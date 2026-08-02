@@ -1,0 +1,29 @@
+(model
+  (params
+    (select film_format "120_645" :label "film format" :options (("120 6x9" "120_6x9") ("120 6x4.5" "120_645") ("135 36x24" "135")))
+    (number rail_tip_w 5.4 :label "rail tip width" :min 3.5 :max 8 :step 0.1)
+    (number rail_h 4.2 :label "rail height" :min 2 :max 6 :step 0.1)
+    (number rail_length 90 :label "rail length" :min 60 :max 130 :step 1)
+    (number fit_clearance 0.25 :label "rail fit clearance" :min 0 :max 0.8 :step 0.05))
+  (part scanner_base_rail
+    (build
+      (shape rail_profile
+        (polygon (((/ rail_h 2) 0) (0 (/ rail_tip_w 2)) ((- (/ rail_h 2)) 0))))
+      (result (extrude rail_profile rail_length))))
+  (part scanner_film_insert
+    (build
+      ;; STARTER: derive frame_w and frame_h from film_format with (if ...).
+      (shape frame_w 42)
+      (shape frame_h 56)
+      (shape insert_blank (box (+ frame_w 12) (+ frame_h 12) 1.2))
+      (shape aperture_cut (translate 0 0 -0.1 (box frame_w frame_h 1.4)))
+      (result (difference insert_blank aperture_cut))))
+  (part scanner_tunnel_channel
+    (build
+      (shape channel_h (+ rail_h (* 2 fit_clearance)))
+      (shape channel_w (+ rail_tip_w (* 2 fit_clearance)))
+      (shape channel_profile
+        (polygon (((/ channel_h 2) 0) (0 (/ channel_w 2)) ((- (/ channel_h 2)) 0))))
+      (shape tunnel_blank (box rail_length 20 16))
+      (shape channel_cut (rotate 0 90 0 (extrude channel_profile (+ rail_length 2))))
+      (result (difference tunnel_blank channel_cut)))))

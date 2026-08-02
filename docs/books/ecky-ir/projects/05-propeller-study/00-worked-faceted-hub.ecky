@@ -1,0 +1,8 @@
+(model
+  (params
+    (number hub_radius 16 :label "hub radius" :min 10 :max 28 :step 1)
+    (number hub_height 10 :label "hub height" :min 6 :max 18 :step 1))
+  (part faceted_hub_envelope
+    (polyhedron
+      :vertices ((0 0 0) (hub_radius 0 0) (0 hub_radius 0) (0 0 hub_height))
+      :triangles ((0 2 1) (0 1 3) (1 2 3) (2 0 3)))))

@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "id": "05-propeller-study",
+  "title": "Drone Propeller Geometry Study",
+  "checkpoints": [
+    {
+      "id": "worked-faceted-hub",
+      "role": "worked",
+      "source": "00-worked-faceted-hub.ecky",
+      "summary": "Closed polyhedron hub-envelope study for early fit discussion; not flight-ready.",
+      "render": { "yaw": 0.72, "pitch": -0.46, "size": 280 }
+    },
+    {
+      "id": "worked-blade-mesh",
+      "role": "worked",
+      "source": "00-worked-blade-mesh.ecky",
+      "summary": "Open mesh blade-planform study for coarse visual prototyping only; not flight-ready or printable.",
+      "render": { "yaw": 0.72, "pitch": -0.46, "size": 280 }
+    },
+    {
+      "id": "worked-stations",
+      "role": "worked",
+      "source": "01-worked-stations.ecky",
+      "summary": "Station-loft and radial repetition study only; not flight-ready and makes no aerodynamic, balance, strength, or RPM claim.",
+      "render": { "yaw": 0.72, "pitch": -0.46, "size": 280 }
+    },
+    {
+      "id": "starter-hub-variant",
+      "role": "starter",
+      "source": "02-starter-hub-variant.ecky",
+      "summary": "Choose a same-kind hub variant while preserving named fit dimensions; geometry study only, not flight-ready.",
+      "render": { "yaw": 0.72, "pitch": -0.46, "size": 280 }
+    },
+    {
+      "id": "solution-propeller",
+      "role": "solution",
+      "source": "03-solution-propeller.ecky",
+      "summary": "Repeated station-loft blades and a selectable press-fit or split-bolt-style hub; not flight-ready.",
+      "render": { "yaw": 0.72, "pitch": -0.46, "size": 280 }
+    },
+    {
+      "id": "hub-control-math",
+      "role": "worked",
+      "source": "04-hub-control-math.ecky",
+      "summary": "List-driven hub sizing control checkpoint; same propeller study, not a separate syntax chapter.",
+      "render": { "yaw": 0.72, "pitch": -0.46, "size": 280 }
+    },
+    {
+      "id": "atan2-direct",
+      "role": "worked",
+      "source": "05-atan2-direct.ecky",
+      "summary": "Direct atan2 numeric probe; kept outside expanded list helpers because that compiler path currently rejects the same expression.",
+      "render": { "yaw": 0.72, "pitch": -0.46, "size": 280 }
+    },
+    {
+      "id": "native-point-helper-sampler",
+      "role": "worked",
+      "source": "06-native-point-helper-sampler.ecky",
+      "summary": "Native execution sampler for deterministic point-list generators used by later station and pattern work.",
+      "render": { "yaw": 0.72, "pitch": -0.46, "size": 280 }
+    }
+  ]
+}

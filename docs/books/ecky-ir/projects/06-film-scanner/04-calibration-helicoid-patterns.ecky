@@ -1,0 +1,34 @@
+(model
+  (params
+    (number pitch 2.0 :label "helicoid pitch" :min 1.2 :max 3 :step 0.1)
+    (number thread_clearance 0.2 :label "thread clearance" :min 0.1 :max 0.4 :step 0.05))
+  ;; Calibration carrier: visible thread coupon and repeated stop patterns around a focus target.
+  (part calibration_helicoid_carrier
+    (build
+      (shape carrier (cylinder 18 22 64))
+      (shape female_ridge
+        (helical-ridge :radius 14 :pitch pitch :height 18 :base-width 1.4
+          :crest-width 0.6 :depth 0.9 :female #t :clearance thread_clearance))
+      (shape threaded_body (fuse carrier female_ridge))
+      (shape central_bore (cylinder 8 26 64))
+      (shape cut_body (cut threaded_body central_bore))
+      (shape calibration_window (translate 0 0 11 (box 18 10 8)))
+      (shape window_common (common cut_body calibration_window))
+      (shape window_intersection (intersection cut_body calibration_window))
+      (shape window_xor (xor cut_body calibration_window))
+      (shape radial_stops
+        (repeat-union i 6 (rotate 0 0 (* i 60) (translate 14 0 10 (box 4 2 3)))))
+      (shape tick_compound
+        (repeat-compound i 8 (rotate 0 0 (* i 45) (translate 20 0 2 (box 2 1 2)))))
+      (shape witness
+        (repeat-pick i 6 (= i 5) (rotate 0 0 (* i 60) (translate 14 0 15 (sphere 1.4)))))
+      (shape sensor_ribs
+        (for-union (i 3) (translate (- (* i 8) 8) -12 0 (box 3 4 5))))
+      (shape test_markers
+        (for-compound (i 3) (translate (- (* i 8) 8) 12 0 (cylinder 1.5 5))))
+      (result (compound (union window_xor window_intersection radial_stops sensor_ribs) tick_compound witness test_markers))))
+  (part sampled_focus_knob
+    (sampled-radial-loft (theta z fz)
+      :height 8 :z-steps 4 :theta-steps 24
+      :radius (+ 10 (* 1.2 (sin theta)))
+      :z-map z)))

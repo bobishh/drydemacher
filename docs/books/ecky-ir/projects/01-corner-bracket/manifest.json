@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "01-corner-bracket",
+  "title": "Connected Corner Bracket",
+  "checkpoints": [
+    {"id":"worked","role":"worked","source":"01-worked.ecky","summary":"Name stock and overlap before joining the foot and flange.","render":{"yaw":0.62,"pitch":-0.92,"size":720}},
+    {"id":"starter","role":"starter","source":"02-flat-flange-starter.ecky","summary":"Compilable failure: the flange lies flat and cannot brace a corner.","render":{"yaw":0.62,"pitch":-0.92,"size":720}},
+    {"id":"solution","role":"solution","source":"03-upright-bracket-solution.ecky","summary":"Connected foot, upright flange, and triangular gusset.","render":{"yaw":0.62,"pitch":-0.92,"size":720}},
+    {"id":"reinforced-lightened","role":"worked","source":"04-reinforced-lightened-bracket.ecky","summary":"A wedge gusset, swept rib reinforcement, and swept groove lightening channel serve the bracket load path.","render":{"yaw":0.62,"pitch":-0.92,"size":720}},
+    {"id":"slotted-mounting","role":"worked","source":"05-slotted-mounting-bracket.ecky","summary":"Obround mounting slots provide positional adjustment without changing the bracket structure.","render":{"yaw":0.62,"pitch":-0.92,"size":720}},
+    {"id":"configurable-print-bracket","role":"solution","source":"06-configurable-print-bracket.ecky","summary":"Selectable round or slotted mounting and an optional lightening channel keep print choices in named parameters.","render":{"yaw":0.62,"pitch":-0.92,"size":720}}
+  ]
+}

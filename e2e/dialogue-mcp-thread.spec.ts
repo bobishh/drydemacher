@@ -323,7 +323,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await page.waitForSelector('.workbench');
 
     await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'OPEN' }).click();
+    await page.getByRole('button', { name: 'OPEN', exact: true }).click();
     await page.getByRole('button', { name: 'DIALOGUE' }).click({ force: true });
 
     await expect(page.locator('.trail-image-kicker')).toContainText('CONCEPT');
@@ -409,7 +409,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await page.waitForSelector('.workbench');
 
     await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'OPEN' }).click();
+    await page.getByRole('button', { name: 'OPEN', exact: true }).click();
     const dialogueWindow = page.locator('[data-window-id="dialogue"]');
     await expect(dialogueWindow).toBeHidden();
     await page.locator('button[title="Dialogue"]').evaluate((button) => (button as HTMLButtonElement).click());
@@ -1432,7 +1432,6 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await page.waitForSelector('.workbench');
 
     await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'MORE ACTIONS' }).click();
     await page.getByRole('button', { name: 'DELETE' }).click();
 
     const modal = page.getByRole('dialog', { name: /TRASH PROJECT/i });
@@ -1539,7 +1538,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await page.waitForSelector('.workbench');
 
     await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'OPEN' }).click();
+    await page.getByRole('button', { name: 'OPEN', exact: true }).click();
     await page.getByRole('button', { name: 'DIALOGUE' }).click();
     await page.locator('.prompt-input').fill('Message for external agent');
 
@@ -1564,7 +1563,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await page.waitForSelector('.workbench');
 
     await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'OPEN' }).click();
+    await page.getByRole('button', { name: 'OPEN', exact: true }).click();
     await page.getByRole('button', { name: 'DIALOGUE' }).click();
 
     const prompt = 'Message should paint immediately';
@@ -1651,7 +1650,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await page.waitForSelector('.workbench');
 
     await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'OPEN' }).click();
+    await page.getByRole('button', { name: 'OPEN', exact: true }).click();
     await page.getByRole('button', { name: 'DIALOGUE' }).click();
     await page.locator('.prompt-input').fill('Message for external agent');
 

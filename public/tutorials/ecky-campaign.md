@@ -4,44 +4,69 @@ Learn Ecky as six modeling levels. Each level ends in geometry you can preview,
 compile, and export as STL. Finish the clear condition before moving forward;
 the dry operation reference lives under `/docs/ecky-ir`.
 
-## Level 01: Marker
+## Level 01: Corner Bracket
 
-**Mission:** Build one printable part from two primitives.
+**Mission:** Build one connected corner bracket from a horizontal foot and a vertical flange.
 
-**Clear condition:** Preview shows one connected ball-on-base solid and the first code block compiles.
+**Clear condition:** Preview shows one connected L-bracket where the foot and flange overlap, and the source compiles.
 
-A renderable file needs a `model`, a named `part`, and geometry. We are making
-a marker: first its ball, then the base. Starting with one primitive keeps each
-added transform or boolean obvious.
+A renderable file needs a `model` root, a named `part`, and geometry. The first
+useful part is a **corner bracket**: one horizontal foot and one vertical flange
+that cross at a corner and fuse into a single printable L-shape. Starting with
+two primitives keeps each transform and boolean obvious.
+
+Begin with one solid so the root, the part id, and the primitive are clear.
 
 ```scheme
 (model
-  (part marker
-    (sphere 10)))
+  (part bracket
+    (box 40 40 6)))
 ```
 
-![Rendered output for First Solid: Ball on a Base, example 1](assets/01-first-solid-01.png)
+`model` is the root. `part` gives the geometry a stable id (`bracket`). `box`
+produces one solid centered at the origin. Nothing is joined yet.
 
-`model` is the root. `part` gives the geometry a stable id. `sphere` produces the solid.
-
-Add another primitive with `union` when two solids should become one part.
+Make the bracket from two solids that share the corner. A long thin foot and a
+long thin flange, each crossing the origin, overlap in a small square region.
+`union` fuses that overlap into one connected part.
 
 ```scheme
 (model
-  (part marker
+  (part bracket
     (union
-      (box 28 28 4)
-      (translate 0 0 10
-        (sphere 10)))))
+      (box 40 8 6)
+      (box 8 40 6))))
 ```
 
-![Rendered output for First Solid: Ball on a Base, example 2](assets/01-first-solid-02.png)
+The foot is `40 x 8 x 6`; the flange is `8 x 40 x 6`. Both start at the origin,
+so they overlap in an `8 x 8 x 6` corner. That deliberate overlap is what makes
+the union produce one connected L-bracket instead of two loose pieces. `union`
+merges overlapping solids; it does not glue solids that merely touch at a face.
 
-`box` makes the base. `translate` moves the ball up so it sits on the base instead of overlapping the center.
+When the foot and flange must sit at different heights, move one with
+`translate` so the overlap is preserved, not destroyed.
 
-Use this pattern for first tests: primitive first, then one transform, then one boolean.
+```scheme
+(model
+  (part bracket
+    (union
+      (box 40 8 6)
+      (translate 0 0 3
+        (box 8 40 6)))))
+```
 
-> **Watch for:** primitives start at the origin. Two untransformed solids overlap instead of stacking. If a union has the right members but the wrong silhouette, inspect placement before changing the boolean.
+`translate 0 0 3` lifts the flange so it still crosses the foot by half its
+thickness. The overlap region shrinks but never disappears, so the union stays
+one body. Move geometry to control placement; keep enough overlap so the
+boolean has connected material to merge.
+
+Use this pattern for the first real part: name the part, place primitives so
+they overlap, then join them with one boolean.
+
+> **Watch for:** primitives start at the origin. Two solids that do not overlap
+> produce a union of two disconnected bodies, not one part. If a union has the
+> right members but reads as two pieces, inspect placement and overlap before
+> changing the boolean.
 ## Level 02: Mounting Plate
 
 **Mission:** Turn a blank into a useful plate with repeated through-holes.
@@ -88,109 +113,43 @@ Add material with `union` or `fuse`.
 The result is still one part, but the intent stays readable.
 
 > **Watch for:** make cutters cross the stock completely; coincident cutter and stock faces can leave unstable slivers. Booleans also rebuild topology, so raw face and edge indices are not durable selectors. Use geometric selectors or tags after the boolean.
-## Level 03: Parametric Pattern
+## Level 03: Dovetail Fit
 
-**Mission:** Replace copied geometry with one repeated rule.
+**Mission:** Make one named fit_clearance drive both mating sides of a dovetail rail and channel.
 
-**Clear condition:** Changing count or pitch moves the whole pattern without editing shape blocks.
+**Clear condition:** Changing fit_clearance widens the channel while the rail stays nominal; no second anonymous offset needs editing.
 
-Represent repeated geometry with one body and an index. This keeps count, spacing, and fit math editable in one place.
+A dovetail is a sliding fit between a male rail and a female channel. The two
+parts mate because the channel is slightly larger than the rail, and that
+slight difference **is** the fit. Make the difference one named number and the
+whole fit becomes editable from one place.
 
-```scheme
-(model
-  (part ribbed_plate
-    (build
-      (shape base
-        (box 90 40 4))
-      (shape ribs
-        (repeat-union i 5
-          (translate (- (* i 18) 36) 0 5
-            (box 4 34 6))))
-      (result
-        (union base ribs)))))
-```
+The trap is authoring each side with its own hard-coded offset: the rail at its
+nominal size, the channel widened by a magic literal like `0.6`. That works
+once, but the moment you want a looser or tighter fit you have to find and edit
+two offsets that were never linked. Worse, the two numbers drift apart with
+every edit until the parts no longer mate.
 
-![Rendered output for Repetition: Ribs, Slots, and Patterns, example 1](assets/07-repetition-01.png)
+The fix is a single named clearance binding shared by both sides:
 
-`repeat-union` makes one merged body from repeated solids. The index `i` is local to the repeat body.
+- the **male** side uses the nominal profile directly;
+- the **female** side is the same profile enlarged by the clearance on every
+  side (`nominal + 2 * clearance`).
 
-When repeated features share the same fit math, hoist derived values once instead of repeating arithmetic at every call site. Use model-level `let*` for dependent dimensions, a helper `define` for placement math, and `define-component` when one repeated body needs the same closed geometry everywhere.
+Change the clearance once and only the channel moves — the rail stays nominal,
+so the fit changes through one relation instead of two anonymous offsets.
 
-```scheme
-(define (divider-depth tray_d wall)
-  (- tray_d (* 2 wall)))
+Reuse a proven profile instead of redesigning it. The dovetail rail in the
+film-adapter mechanism is already a tested triangular profile; extracting that
+profile and its clearance relation into a smaller fixture preserves the fit
+math without inventing a second dovetail. The surrounding mechanism (film path,
+detents, helicoid) is complexity you can drop; the mating profile and the named
+clearance are what you keep.
 
-(define-component divider
-  ((number height 12) (number depth 34))
-  (box 4 depth height))
-
-(model
-  (let* ((tray_d 40)
-         (wall 3)
-         (pitch 18)
-         (slot_w 6)
-         (rib_h 12)
-         (divider_d (divider-depth tray_d wall)))
-    (part tray
-      (difference
-        (union
-          (box 80 tray_d 18)
-          (repeat-union i 4
-            (translate (- (* i pitch) 27) 0 9
-              (divider :height rib_h :depth divider_d))))
-        (repeat-union i 4
-          (translate (- (* i pitch) 27) 0 0
-            (box slot_w 30 20)))))))
-```
-
-Here `pitch`, `slot_w`, and `wall` each have one definition. `divider-depth` owns the offset calculation, while `divider` owns the repeated body. Lift shared math or geometry as soon as a second call site appears.
-
-Use `repeat-compound` when repeated items should stay grouped instead of merged.
-
-```scheme
-(shape rollers
-  (repeat-compound i 4
-    (translate (- (* i 16) 24) 0 8
-      (cylinder 3 8))))
-```
-
-Use `repeat-pick` when only some indices should produce geometry.
-
-```scheme
-(shape end_stop
-  (repeat-pick i 5 (= i 4)
-    (translate 36 0 12
-      (sphere 4))))
-```
-
-### Common mistake: `(define ...)` inside `(model ...)`
-
-`(define ...)` is only valid at the **top level** (outside `(model ...)`), where it
-defines reusable helper functions like `divider-depth` above. Inside `(model ...)`,
-Steel evaluates `define` eagerly — before params have values — so any arithmetic
-on a param produces a misleading `TypeMismatch` error instead of a clear message.
-
-**Wrong** — define inside model:
-```scheme
-(model
-  (params (number frame_length 160))
-  (define half_len (/ frame_length 2))   ; ← TypeMismatch at runtime
-  (part body (box half_len 10 10)))
-```
-
-**Right** — `let*` inside the part:
-```scheme
-(model
-  (params (number frame_length 160))
-  (part body
-    (let* ((half_len (/ frame_length 2)))
-      (box half_len 10 10))))
-```
-
-The rule is simple: **`define` for top-level helper functions, `let*` for computed
-values inside parts.** If a derived value needs to reference a param, it belongs
-in a `let*` binding scoped to the part (or a `let*` wrapping model clauses that
-spans multiple parts).
+When the two mating parts are separate exportable solids, keep any
+preview-only assembly placement (a rail hovered above a channel for display)
+out of the exported geometry. Each part should export as the clean solid it
+really is; the assembly view is a diagnostic, not a feature of either part.
 ## Level 04: Procedural Workshop
 
 **Mission:** Build generated cutters and path-driven attachments from data.

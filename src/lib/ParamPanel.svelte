@@ -14,6 +14,7 @@
   } from './tauri/client';
   import { buildImportedSyntheticDesign } from './modelRuntime/importedRuntime';
   import MacroAstMap from './MacroAstMap.svelte';
+  import MacroAstDocument from './MacroAstDocument.svelte';
   import {
     filterFieldsBySearch,
     resolveContextSections,
@@ -33,6 +34,7 @@
   import { liveApply } from './stores/paramPanelState';
   import ParamPanelToolbar from './components/ParamPanelToolbar.svelte';
   import ParamPanelModeTabs from './components/ParamPanelModeTabs.svelte';
+  import ProjectFolderStatusChip from './ProjectFolderStatusChip.svelte';
   import ParamPanelEditFields from './components/ParamPanelEditFields.svelte';
   import ParamPanelImportedProposals from './components/ParamPanelImportedProposals.svelte';
   import ParamPanelLithophaneTab from './components/ParamPanelLithophaneTab.svelte';
@@ -138,6 +140,7 @@
     onViewerDisplayChange,
     onViewerSelectionModeChange,
     activeVersionId = null,
+    threadId = null,
     messageId = null,
     macroCode = '',
     postProcessing = null,
@@ -170,6 +173,7 @@
     onViewerDisplayChange?: (display: { outlineEnabled: boolean; topologyMode: TopologyMode }) => void;
     onViewerSelectionModeChange?: (mode: ViewerMode) => void;
     activeVersionId?: string | null;
+    threadId?: string | null;
     messageId?: string | null;
     macroCode?: string;
     onApplyMacroCode?: (code: string) => Promise<unknown>;
@@ -195,6 +199,10 @@
   let localSelectedPartId = $state<string | null>(null);
   let proposalMutationId = $state<string | null>(null);
   let activeTab = $state<'views' | 'raw' | 'litho' | 'newParams'>('views');
+  /** Alternate AstMap layout: spatial scene ('map') or nested document
+   *  ('doc'). Session-only view state, not source/config — same projection
+   *  and patch intents either way (filesystem-project-mirror 6.1). */
+  let astViewMode = $state<'map' | 'doc'>('map');
   let highlightedParamKey = $state<string | null>(null);
   let highlightTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
@@ -2380,6 +2388,12 @@
       </div>
     {/if}
 
+    <ProjectFolderStatusChip
+      threadId={threadId}
+      messageId={messageId}
+      {macroCode}
+    />
+
     <ParamPanelModeTabs
       activeTab={activeTab}
       outlineEnabled={outlineEnabled}
@@ -2403,21 +2417,58 @@
     {/if}
 
     {#if activeTab === 'newParams'}
-      <MacroAstMap
-        {macroCode}
-        {modelManifest}
-        {uiSpec}
-        parameters={effectiveLocalParams}
-        fields={mergedFields}
-        {highlightedParamKey}
-        liveApply={$liveApply}
-        focusNodeId={pendingMacroFocusNodeId}
-        onFocusNodeHandled={() => (pendingMacroFocusNodeId = null)}
-        {onApplyMacroCode}
-        onDraftValue={(key, value) => stageParamDraft(key, value)}
-        onUpdate={(key, value) => update(key, value)}
-        onControlFocusChange={(primitiveId, parameterKey) => setFocusedControl(primitiveId, parameterKey)}
-      />
+      <div class="ast-view-toggle" role="group" aria-label="AstMap layout">
+        <button
+          class="ast-view-toggle__btn"
+          class:ast-view-toggle__btn--active={astViewMode === 'map'}
+          data-testid="ast-view-map"
+          aria-pressed={astViewMode === 'map'}
+          onclick={() => (astViewMode = 'map')}
+          title="Spatial AstMap scene"
+        >MAP</button>
+        <button
+          class="ast-view-toggle__btn"
+          class:ast-view-toggle__btn--active={astViewMode === 'doc'}
+          data-testid="ast-view-doc"
+          aria-pressed={astViewMode === 'doc'}
+          onclick={() => (astViewMode = 'doc')}
+          title="Document skin over the AstMap projection (literate layout)"
+        >DOC</button>
+      </div>
+      {#if astViewMode === 'doc'}
+        <MacroAstDocument
+          {macroCode}
+          {modelManifest}
+          {uiSpec}
+          parameters={effectiveLocalParams}
+          fields={mergedFields}
+          {highlightedParamKey}
+          liveApply={$liveApply}
+          focusNodeId={pendingMacroFocusNodeId}
+          onFocusNodeHandled={() => (pendingMacroFocusNodeId = null)}
+          {onApplyMacroCode}
+          onDraftValue={(key, value) => stageParamDraft(key, value)}
+          onUpdate={(key, value) => update(key, value)}
+          onControlFocusChange={(primitiveId, parameterKey) => setFocusedControl(primitiveId, parameterKey)}
+        />
+      {:else}
+        <MacroAstMap
+          {macroCode}
+          {modelManifest}
+          {uiSpec}
+          parameters={effectiveLocalParams}
+          fields={mergedFields}
+          {searchQuery}
+          {highlightedParamKey}
+          liveApply={$liveApply}
+          focusNodeId={pendingMacroFocusNodeId}
+          onFocusNodeHandled={() => (pendingMacroFocusNodeId = null)}
+          {onApplyMacroCode}
+          onDraftValue={(key, value) => stageParamDraft(key, value)}
+          onUpdate={(key, value) => update(key, value)}
+          onControlFocusChange={(primitiveId, parameterKey) => setFocusedControl(primitiveId, parameterKey)}
+        />
+      {/if}
     {:else if activeTab === 'litho'}
       <ParamPanelLithophaneTab
         {modelManifest}
@@ -2575,6 +2626,33 @@
 </div>
 
 <style>
+  .ast-view-toggle {
+    display: inline-flex;
+    gap: 4px;
+    padding: 2px;
+    border: 1px solid var(--bg-300);
+    background: var(--bg-200);
+    overflow: hidden;
+  }
+
+  .ast-view-toggle__btn {
+    padding: 3px 8px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .ast-view-toggle__btn--active {
+    border-color: var(--secondary);
+    background: color-mix(in srgb, var(--secondary) 14%, var(--bg-200));
+    color: var(--secondary);
+  }
+
   .param-panel {
     --cad-accent: var(--primary);
     --cad-axis-x: var(--cad-accent);

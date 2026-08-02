@@ -1,0 +1,1264 @@
+{
+  "schemaVersion": 2,
+  "modelId": "generated-direct-occt-d584317f7a64",
+  "sourceKind": "generated",
+  "engineKind": "ecky",
+  "sourceLanguage": "ecky",
+  "geometryBackend": "mesh",
+  "contentHash": "d584317f7a64681684ad9cdc65479d2bf2b0fa980017bdff6df8bd3fceaa20b7",
+  "artifactVersion": 1,
+  "fcstdPath": "",
+  "manifestPath": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-d584317f7a64/manifest.json",
+  "macroPath": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-d584317f7a64/source.ecky",
+  "previewStlPath": "preview.stl",
+  "viewerAssets": [
+    {
+      "partId": "papa",
+      "nodeId": "papa",
+      "objectName": "papa",
+      "label": "Papa",
+      "path": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-d584317f7a64/parts/papa.stl",
+      "format": "stl"
+    },
+    {
+      "partId": "mama",
+      "nodeId": "mama",
+      "objectName": "mama",
+      "label": "Mama",
+      "path": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-d584317f7a64/parts/mama.stl",
+      "format": "stl"
+    }
+  ],
+  "edgeTargets": [
+    {
+      "targetId": "papa:edge:-26-0-0_-26-0-48",
+      "durableTargetId": "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:edge:-26-0-0_-26-0-48",
+      "canonicalTargetId": "papa:edge:0:-26-0-0_-26-0-48",
+      "aliasIds": [
+        "papa:edge:0:-26-0-0_-26-0-48",
+        "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:edge:-26-0-0_-26-0-48"
+      ],
+      "partId": "papa",
+      "viewerNodeId": "papa",
+      "label": "Papa.Edge1",
+      "editable": false,
+      "start": {
+        "x": -26.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": -26.0,
+        "y": 0.0,
+        "z": 48.0
+      }
+    },
+    {
+      "targetId": "papa:edge:-10-0-0_-10-0-48",
+      "durableTargetId": "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:edge:-10-0-0_-10-0-48",
+      "canonicalTargetId": "papa:edge:1:-10-0-0_-10-0-48",
+      "aliasIds": [
+        "papa:edge:1:-10-0-0_-10-0-48",
+        "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:edge:-10-0-0_-10-0-48"
+      ],
+      "partId": "papa",
+      "viewerNodeId": "papa",
+      "label": "Papa.Edge2",
+      "editable": false,
+      "start": {
+        "x": -10.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": -10.0,
+        "y": 0.0,
+        "z": 48.0
+      }
+    },
+    {
+      "targetId": "papa:edge:-10-0-0_-26-0-0",
+      "durableTargetId": "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:edge:-10-0-0_-26-0-0",
+      "canonicalTargetId": "papa:edge:2:-10-0-0_-26-0-0",
+      "aliasIds": [
+        "papa:edge:2:-10-0-0_-26-0-0",
+        "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:edge:-10-0-0_-26-0-0"
+      ],
+      "partId": "papa",
+      "viewerNodeId": "papa",
+      "label": "Papa.Edge3",
+      "editable": false,
+      "start": {
+        "x": -26.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": -10.0,
+        "y": 0.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "papa:edge:-10-0-48_-26-0-48",
+      "durableTargetId": "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:edge:-10-0-48_-26-0-48",
+      "canonicalTargetId": "papa:edge:3:-10-0-48_-26-0-48",
+      "aliasIds": [
+        "papa:edge:3:-10-0-48_-26-0-48",
+        "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:edge:-10-0-48_-26-0-48"
+      ],
+      "partId": "papa",
+      "viewerNodeId": "papa",
+      "label": "Papa.Edge4",
+      "editable": false,
+      "start": {
+        "x": -26.0,
+        "y": 0.0,
+        "z": 48.0
+      },
+      "end": {
+        "x": -10.0,
+        "y": 0.0,
+        "z": 48.0
+      }
+    },
+    {
+      "targetId": "papa:edge:-13.2-8-0_-13.2-8-48",
+      "durableTargetId": "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:edge:-13.2-8-0_-13.2-8-48",
+      "canonicalTargetId": "papa:edge:4:-13.2-8-0_-13.2-8-48",
+      "aliasIds": [
+        "papa:edge:4:-13.2-8-0_-13.2-8-48",
+        "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:edge:-13.2-8-0_-13.2-8-48"
+      ],
+      "partId": "papa",
+      "viewerNodeId": "papa",
+      "label": "Papa.Edge5",
+      "editable": false,
+      "start": {
+        "x": -13.2,
+        "y": 8.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": -13.2,
+        "y": 8.0,
+        "z": 48.0
+      }
+    },
+    {
+      "targetId": "papa:edge:-10-0-0_-13.2-8-0",
+      "durableTargetId": "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:edge:-10-0-0_-13.2-8-0",
+      "canonicalTargetId": "papa:edge:5:-10-0-0_-13.2-8-0",
+      "aliasIds": [
+        "papa:edge:5:-10-0-0_-13.2-8-0",
+        "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:edge:-10-0-0_-13.2-8-0"
+      ],
+      "partId": "papa",
+      "viewerNodeId": "papa",
+      "label": "Papa.Edge6",
+      "editable": false,
+      "start": {
+        "x": -10.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": -13.2,
+        "y": 8.000000000000002,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "papa:edge:-10-0-48_-13.2-8-48",
+      "durableTargetId": "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:edge:-10-0-48_-13.2-8-48",
+      "canonicalTargetId": "papa:edge:6:-10-0-48_-13.2-8-48",
+      "aliasIds": [
+        "papa:edge:6:-10-0-48_-13.2-8-48",
+        "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:edge:-10-0-48_-13.2-8-48"
+      ],
+      "partId": "papa",
+      "viewerNodeId": "papa",
+      "label": "Papa.Edge7",
+      "editable": false,
+      "start": {
+        "x": -10.0,
+        "y": 0.0,
+        "z": 48.0
+      },
+      "end": {
+        "x": -13.2,
+        "y": 8.000000000000002,
+        "z": 48.0
+      }
+    },
+    {
+      "targetId": "papa:edge:-22.8-8-0_-22.8-8-48",
+      "durableTargetId": "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:edge:-22.8-8-0_-22.8-8-48",
+      "canonicalTargetId": "papa:edge:7:-22.8-8-0_-22.8-8-48",
+      "aliasIds": [
+        "papa:edge:7:-22.8-8-0_-22.8-8-48",
+        "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:edge:-22.8-8-0_-22.8-8-48"
+      ],
+      "partId": "papa",
+      "viewerNodeId": "papa",
+      "label": "Papa.Edge8",
+      "editable": false,
+      "start": {
+        "x": -22.8,
+        "y": 8.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": -22.8,
+        "y": 8.0,
+        "z": 48.0
+      }
+    },
+    {
+      "targetId": "papa:edge:-13.2-8-0_-22.8-8-0",
+      "durableTargetId": "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:edge:-13.2-8-0_-22.8-8-0",
+      "canonicalTargetId": "papa:edge:8:-13.2-8-0_-22.8-8-0",
+      "aliasIds": [
+        "papa:edge:8:-13.2-8-0_-22.8-8-0",
+        "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:edge:-13.2-8-0_-22.8-8-0"
+      ],
+      "partId": "papa",
+      "viewerNodeId": "papa",
+      "label": "Papa.Edge9",
+      "editable": false,
+      "start": {
+        "x": -13.2,
+        "y": 8.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": -22.799999999999997,
+        "y": 8.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "papa:edge:-13.2-8-48_-22.8-8-48",
+      "durableTargetId": "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:edge:-13.2-8-48_-22.8-8-48",
+      "canonicalTargetId": "papa:edge:9:-13.2-8-48_-22.8-8-48",
+      "aliasIds": [
+        "papa:edge:9:-13.2-8-48_-22.8-8-48",
+        "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:edge:-13.2-8-48_-22.8-8-48"
+      ],
+      "partId": "papa",
+      "viewerNodeId": "papa",
+      "label": "Papa.Edge10",
+      "editable": false,
+      "start": {
+        "x": -13.2,
+        "y": 8.0,
+        "z": 48.0
+      },
+      "end": {
+        "x": -22.799999999999997,
+        "y": 8.0,
+        "z": 48.0
+      }
+    },
+    {
+      "targetId": "papa:edge:-22.8-8-0_-26-0-0",
+      "durableTargetId": "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:edge:-22.8-8-0_-26-0-0",
+      "canonicalTargetId": "papa:edge:10:-22.8-8-0_-26-0-0",
+      "aliasIds": [
+        "papa:edge:10:-22.8-8-0_-26-0-0",
+        "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:edge:-22.8-8-0_-26-0-0"
+      ],
+      "partId": "papa",
+      "viewerNodeId": "papa",
+      "label": "Papa.Edge11",
+      "editable": false,
+      "start": {
+        "x": -22.8,
+        "y": 8.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": -26.0,
+        "y": -2.0686552757793354e-15,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "papa:edge:-22.8-8-48_-26-0-48",
+      "durableTargetId": "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:edge:-22.8-8-48_-26-0-48",
+      "canonicalTargetId": "papa:edge:11:-22.8-8-48_-26-0-48",
+      "aliasIds": [
+        "papa:edge:11:-22.8-8-48_-26-0-48",
+        "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:edge:-22.8-8-48_-26-0-48"
+      ],
+      "partId": "papa",
+      "viewerNodeId": "papa",
+      "label": "Papa.Edge12",
+      "editable": false,
+      "start": {
+        "x": -22.8,
+        "y": 8.0,
+        "z": 48.0
+      },
+      "end": {
+        "x": -26.0,
+        "y": -2.0686552757793354e-15,
+        "z": 48.0
+      }
+    },
+    {
+      "targetId": "mama:edge:8.2--9-48_8.2-0-48",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.2--9-48_8.2-0-48",
+      "canonicalTargetId": "mama:edge:0:8.2--9-48_8.2-0-48",
+      "aliasIds": [
+        "mama:edge:0:8.2--9-48_8.2-0-48",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.2--9-48_8.2-0-48"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Edge1",
+      "editable": false,
+      "start": {
+        "x": 8.2,
+        "y": -9.0,
+        "z": 48.0
+      },
+      "end": {
+        "x": 8.2,
+        "y": 0.0,
+        "z": 48.0
+      }
+    },
+    {
+      "targetId": "mama:edge:8.2-0-0_8.2-0-48",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.2-0-0_8.2-0-48",
+      "canonicalTargetId": "mama:edge:1:8.2-0-0_8.2-0-48",
+      "aliasIds": [
+        "mama:edge:1:8.2-0-0_8.2-0-48",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.2-0-0_8.2-0-48"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Edge2",
+      "editable": false,
+      "start": {
+        "x": 8.2,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 8.2,
+        "y": 0.0,
+        "z": 48.0
+      }
+    },
+    {
+      "targetId": "mama:edge:8.2--9-0_8.2-0-0",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.2--9-0_8.2-0-0",
+      "canonicalTargetId": "mama:edge:2:8.2--9-0_8.2-0-0",
+      "aliasIds": [
+        "mama:edge:2:8.2--9-0_8.2-0-0",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.2--9-0_8.2-0-0"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Edge3",
+      "editable": false,
+      "start": {
+        "x": 8.2,
+        "y": -9.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 8.2,
+        "y": 0.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "mama:edge:8.2--9-0_8.2--9-48",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.2--9-0_8.2--9-48",
+      "canonicalTargetId": "mama:edge:3:8.2--9-0_8.2--9-48",
+      "aliasIds": [
+        "mama:edge:3:8.2--9-0_8.2--9-48",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.2--9-0_8.2--9-48"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Edge4",
+      "editable": false,
+      "start": {
+        "x": 8.2,
+        "y": -9.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 8.2,
+        "y": -9.0,
+        "z": 48.0
+      }
+    },
+    {
+      "targetId": "mama:edge:8.2-0-48_8.3-0-48",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.2-0-48_8.3-0-48",
+      "canonicalTargetId": "mama:edge:4:8.2-0-48_8.3-0-48",
+      "aliasIds": [
+        "mama:edge:4:8.2-0-48_8.3-0-48",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.2-0-48_8.3-0-48"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Edge5",
+      "editable": false,
+      "start": {
+        "x": 8.2,
+        "y": 0.0,
+        "z": 48.0
+      },
+      "end": {
+        "x": 8.3,
+        "y": 0.0,
+        "z": 48.0
+      }
+    },
+    {
+      "targetId": "mama:edge:8.3-0-48_8.3-8.3-48",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.3-0-48_8.3-8.3-48",
+      "canonicalTargetId": "mama:edge:5:8.3-0-48_8.3-8.3-48",
+      "aliasIds": [
+        "mama:edge:5:8.3-0-48_8.3-8.3-48",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.3-0-48_8.3-8.3-48"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Edge6",
+      "editable": false,
+      "start": {
+        "x": 8.3,
+        "y": 0.0,
+        "z": 48.0
+      },
+      "end": {
+        "x": 8.3,
+        "y": 8.3,
+        "z": 48.0
+      }
+    },
+    {
+      "targetId": "mama:edge:8.2-8.4-48_8.3-8.3-48",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.2-8.4-48_8.3-8.3-48",
+      "canonicalTargetId": "mama:edge:6:8.2-8.4-48_8.3-8.3-48",
+      "aliasIds": [
+        "mama:edge:6:8.2-8.4-48_8.3-8.3-48",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.2-8.4-48_8.3-8.3-48"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Edge7",
+      "editable": false,
+      "start": {
+        "x": 8.3,
+        "y": 8.3,
+        "z": 48.0
+      },
+      "end": {
+        "x": 8.2,
+        "y": 8.400000000000002,
+        "z": 48.0
+      }
+    },
+    {
+      "targetId": "mama:edge:8.2-8.4-48_8.2-9-48",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.2-8.4-48_8.2-9-48",
+      "canonicalTargetId": "mama:edge:7:8.2-8.4-48_8.2-9-48",
+      "aliasIds": [
+        "mama:edge:7:8.2-8.4-48_8.2-9-48",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.2-8.4-48_8.2-9-48"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Edge8",
+      "editable": false,
+      "start": {
+        "x": 8.2,
+        "y": 8.400000000000002,
+        "z": 48.0
+      },
+      "end": {
+        "x": 8.2,
+        "y": 9.0,
+        "z": 48.0
+      }
+    },
+    {
+      "targetId": "mama:edge:27.8-9-48_8.2-9-48",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:27.8-9-48_8.2-9-48",
+      "canonicalTargetId": "mama:edge:8:27.8-9-48_8.2-9-48",
+      "aliasIds": [
+        "mama:edge:8:27.8-9-48_8.2-9-48",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:27.8-9-48_8.2-9-48"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Edge9",
+      "editable": false,
+      "start": {
+        "x": 8.2,
+        "y": 9.0,
+        "z": 48.0
+      },
+      "end": {
+        "x": 27.8,
+        "y": 9.0,
+        "z": 48.0
+      }
+    },
+    {
+      "targetId": "mama:edge:27.8--9-48_27.8-9-48",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:27.8--9-48_27.8-9-48",
+      "canonicalTargetId": "mama:edge:9:27.8--9-48_27.8-9-48",
+      "aliasIds": [
+        "mama:edge:9:27.8--9-48_27.8-9-48",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:27.8--9-48_27.8-9-48"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Edge10",
+      "editable": false,
+      "start": {
+        "x": 27.8,
+        "y": -9.0,
+        "z": 48.0
+      },
+      "end": {
+        "x": 27.8,
+        "y": 9.0,
+        "z": 48.0
+      }
+    },
+    {
+      "targetId": "mama:edge:27.8--9-48_8.2--9-48",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:27.8--9-48_8.2--9-48",
+      "canonicalTargetId": "mama:edge:10:27.8--9-48_8.2--9-48",
+      "aliasIds": [
+        "mama:edge:10:27.8--9-48_8.2--9-48",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:27.8--9-48_8.2--9-48"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Edge11",
+      "editable": false,
+      "start": {
+        "x": 8.2,
+        "y": -9.0,
+        "z": 48.0
+      },
+      "end": {
+        "x": 27.8,
+        "y": -9.0,
+        "z": 48.0
+      }
+    },
+    {
+      "targetId": "mama:edge:8.2-0-0_8.3-0-0",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.2-0-0_8.3-0-0",
+      "canonicalTargetId": "mama:edge:11:8.2-0-0_8.3-0-0",
+      "aliasIds": [
+        "mama:edge:11:8.2-0-0_8.3-0-0",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.2-0-0_8.3-0-0"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Edge12",
+      "editable": false,
+      "start": {
+        "x": 8.2,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 8.3,
+        "y": 0.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "mama:edge:8.3-0-0_8.3-0-48",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.3-0-0_8.3-0-48",
+      "canonicalTargetId": "mama:edge:12:8.3-0-0_8.3-0-48",
+      "aliasIds": [
+        "mama:edge:12:8.3-0-0_8.3-0-48",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.3-0-0_8.3-0-48"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Edge13",
+      "editable": false,
+      "start": {
+        "x": 8.3,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 8.3,
+        "y": 0.0,
+        "z": 48.0
+      }
+    },
+    {
+      "targetId": "mama:edge:8.3-0-0_8.3-8.3-0",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.3-0-0_8.3-8.3-0",
+      "canonicalTargetId": "mama:edge:13:8.3-0-0_8.3-8.3-0",
+      "aliasIds": [
+        "mama:edge:13:8.3-0-0_8.3-8.3-0",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.3-0-0_8.3-8.3-0"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Edge14",
+      "editable": false,
+      "start": {
+        "x": 8.3,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 8.3,
+        "y": 8.3,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "mama:edge:8.2-8.4-0_8.3-8.3-0",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.2-8.4-0_8.3-8.3-0",
+      "canonicalTargetId": "mama:edge:14:8.2-8.4-0_8.3-8.3-0",
+      "aliasIds": [
+        "mama:edge:14:8.2-8.4-0_8.3-8.3-0",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.2-8.4-0_8.3-8.3-0"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Edge15",
+      "editable": false,
+      "start": {
+        "x": 8.3,
+        "y": 8.3,
+        "z": 0.0
+      },
+      "end": {
+        "x": 8.2,
+        "y": 8.400000000000002,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "mama:edge:8.2-8.4-0_8.2-9-0",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.2-8.4-0_8.2-9-0",
+      "canonicalTargetId": "mama:edge:15:8.2-8.4-0_8.2-9-0",
+      "aliasIds": [
+        "mama:edge:15:8.2-8.4-0_8.2-9-0",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.2-8.4-0_8.2-9-0"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Edge16",
+      "editable": false,
+      "start": {
+        "x": 8.2,
+        "y": 8.400000000000002,
+        "z": 0.0
+      },
+      "end": {
+        "x": 8.2,
+        "y": 9.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "mama:edge:27.8-9-0_8.2-9-0",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:27.8-9-0_8.2-9-0",
+      "canonicalTargetId": "mama:edge:16:27.8-9-0_8.2-9-0",
+      "aliasIds": [
+        "mama:edge:16:27.8-9-0_8.2-9-0",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:27.8-9-0_8.2-9-0"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Edge17",
+      "editable": false,
+      "start": {
+        "x": 8.2,
+        "y": 9.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 27.8,
+        "y": 9.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "mama:edge:27.8--9-0_27.8-9-0",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:27.8--9-0_27.8-9-0",
+      "canonicalTargetId": "mama:edge:17:27.8--9-0_27.8-9-0",
+      "aliasIds": [
+        "mama:edge:17:27.8--9-0_27.8-9-0",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:27.8--9-0_27.8-9-0"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Edge18",
+      "editable": false,
+      "start": {
+        "x": 27.8,
+        "y": -9.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 27.8,
+        "y": 9.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "mama:edge:27.8--9-0_8.2--9-0",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:27.8--9-0_8.2--9-0",
+      "canonicalTargetId": "mama:edge:18:27.8--9-0_8.2--9-0",
+      "aliasIds": [
+        "mama:edge:18:27.8--9-0_8.2--9-0",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:27.8--9-0_8.2--9-0"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Edge19",
+      "editable": false,
+      "start": {
+        "x": 8.2,
+        "y": -9.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 27.8,
+        "y": -9.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "mama:edge:27.8--9-0_27.8--9-48",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:27.8--9-0_27.8--9-48",
+      "canonicalTargetId": "mama:edge:19:27.8--9-0_27.8--9-48",
+      "aliasIds": [
+        "mama:edge:19:27.8--9-0_27.8--9-48",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:27.8--9-0_27.8--9-48"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Edge20",
+      "editable": false,
+      "start": {
+        "x": 27.8,
+        "y": -9.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 27.8,
+        "y": -9.0,
+        "z": 48.0
+      }
+    },
+    {
+      "targetId": "mama:edge:8.3-8.3-0_8.3-8.3-48",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.3-8.3-0_8.3-8.3-48",
+      "canonicalTargetId": "mama:edge:20:8.3-8.3-0_8.3-8.3-48",
+      "aliasIds": [
+        "mama:edge:20:8.3-8.3-0_8.3-8.3-48",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.3-8.3-0_8.3-8.3-48"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Edge21",
+      "editable": false,
+      "start": {
+        "x": 8.3,
+        "y": 8.3,
+        "z": 0.0
+      },
+      "end": {
+        "x": 8.3,
+        "y": 8.3,
+        "z": 48.0
+      }
+    },
+    {
+      "targetId": "mama:edge:8.2-8.4-0_8.2-8.4-48",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.2-8.4-0_8.2-8.4-48",
+      "canonicalTargetId": "mama:edge:21:8.2-8.4-0_8.2-8.4-48",
+      "aliasIds": [
+        "mama:edge:21:8.2-8.4-0_8.2-8.4-48",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.2-8.4-0_8.2-8.4-48"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Edge22",
+      "editable": false,
+      "start": {
+        "x": 8.2,
+        "y": 8.400000000000006,
+        "z": 48.0
+      },
+      "end": {
+        "x": 8.2,
+        "y": 8.400000000000006,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "mama:edge:8.2-9-0_8.2-9-48",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.2-9-0_8.2-9-48",
+      "canonicalTargetId": "mama:edge:22:8.2-9-0_8.2-9-48",
+      "aliasIds": [
+        "mama:edge:22:8.2-9-0_8.2-9-48",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:8.2-9-0_8.2-9-48"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Edge23",
+      "editable": false,
+      "start": {
+        "x": 8.2,
+        "y": 9.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 8.2,
+        "y": 9.0,
+        "z": 48.0
+      }
+    },
+    {
+      "targetId": "mama:edge:27.8-9-0_27.8-9-48",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:27.8-9-0_27.8-9-48",
+      "canonicalTargetId": "mama:edge:23:27.8-9-0_27.8-9-48",
+      "aliasIds": [
+        "mama:edge:23:27.8-9-0_27.8-9-48",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:edge:27.8-9-0_27.8-9-48"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Edge24",
+      "editable": false,
+      "start": {
+        "x": 27.8,
+        "y": 9.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 27.8,
+        "y": 9.0,
+        "z": 48.0
+      }
+    }
+  ],
+  "faceTargets": [
+    {
+      "targetId": "papa:face:-18-0-24:768",
+      "durableTargetId": "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:face:-18-0-24:768",
+      "canonicalTargetId": "papa:face:0:-18-0-24:768",
+      "aliasIds": [
+        "papa:face:0:-18-0-24:768",
+        "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:face:-18-0-24:768"
+      ],
+      "partId": "papa",
+      "viewerNodeId": "papa",
+      "label": "Papa.Face1",
+      "editable": false,
+      "center": {
+        "x": -18.0,
+        "y": 0.0,
+        "z": 24.0
+      },
+      "normal": [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      "area": 768.0
+    },
+    {
+      "targetId": "papa:face:-11.6-4-24:413.581",
+      "durableTargetId": "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:face:-11.6-4-24:413.581",
+      "canonicalTargetId": "papa:face:1:-11.6-4-24:413.581",
+      "aliasIds": [
+        "papa:face:1:-11.6-4-24:413.581",
+        "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:face:-11.6-4-24:413.581"
+      ],
+      "partId": "papa",
+      "viewerNodeId": "papa",
+      "label": "Papa.Face2",
+      "editable": false,
+      "center": {
+        "x": -11.6,
+        "y": 4.000000000000001,
+        "z": 24.0
+      },
+      "normal": [
+        -0.9284766908852594,
+        -0.3713906763541038,
+        0.0
+      ],
+      "area": 413.58065718793
+    },
+    {
+      "targetId": "papa:face:-18-8-24:460.8",
+      "durableTargetId": "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:face:-18-8-24:460.8",
+      "canonicalTargetId": "papa:face:2:-18-8-24:460.8",
+      "aliasIds": [
+        "papa:face:2:-18-8-24:460.8",
+        "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:face:-18-8-24:460.8"
+      ],
+      "partId": "papa",
+      "viewerNodeId": "papa",
+      "label": "Papa.Face3",
+      "editable": false,
+      "center": {
+        "x": -18.0,
+        "y": 8.0,
+        "z": 23.999999999999996
+      },
+      "normal": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "area": 460.80000000000007
+    },
+    {
+      "targetId": "papa:face:-24.4-4-24:413.581",
+      "durableTargetId": "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:face:-24.4-4-24:413.581",
+      "canonicalTargetId": "papa:face:3:-24.4-4-24:413.581",
+      "aliasIds": [
+        "papa:face:3:-24.4-4-24:413.581",
+        "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:face:-24.4-4-24:413.581"
+      ],
+      "partId": "papa",
+      "viewerNodeId": "papa",
+      "label": "Papa.Face4",
+      "editable": false,
+      "center": {
+        "x": -24.4,
+        "y": 3.999999999999999,
+        "z": 24.0
+      },
+      "normal": [
+        0.9284766908852594,
+        -0.3713906763541038,
+        0.0
+      ],
+      "area": 413.58065718793
+    },
+    {
+      "targetId": "papa:face:-18-3.667-0:102.4",
+      "durableTargetId": "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:face:-18-3.667-0:102.4",
+      "canonicalTargetId": "papa:face:4:-18-3.667-0:102.4",
+      "aliasIds": [
+        "papa:face:4:-18-3.667-0:102.4",
+        "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:face:-18-3.667-0:102.4"
+      ],
+      "partId": "papa",
+      "viewerNodeId": "papa",
+      "label": "Papa.Face5",
+      "editable": false,
+      "center": {
+        "x": -18.0,
+        "y": 3.666666666666668,
+        "z": 0.0
+      },
+      "normal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "area": 102.40000000000003
+    },
+    {
+      "targetId": "papa:face:-18-3.667-48:102.4",
+      "durableTargetId": "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:face:-18-3.667-48:102.4",
+      "canonicalTargetId": "papa:face:5:-18-3.667-48:102.4",
+      "aliasIds": [
+        "papa:face:5:-18-3.667-48:102.4",
+        "papa:stable-node-key:sha256:29bf680374374b04caecea86f3a8eebb2196d4d25ceff38557f4ce0e08e17ca0:face:-18-3.667-48:102.4"
+      ],
+      "partId": "papa",
+      "viewerNodeId": "papa",
+      "label": "Papa.Face6",
+      "editable": false,
+      "center": {
+        "x": -18.0,
+        "y": 3.666666666666668,
+        "z": 48.0
+      },
+      "normal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "area": 102.40000000000003
+    },
+    {
+      "targetId": "mama:face:8.2--4.5-24:432",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:face:8.2--4.5-24:432",
+      "canonicalTargetId": "mama:face:0:8.2--4.5-24:432",
+      "aliasIds": [
+        "mama:face:0:8.2--4.5-24:432",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:face:8.2--4.5-24:432"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Face1",
+      "editable": false,
+      "center": {
+        "x": 8.2,
+        "y": -4.5,
+        "z": 24.0
+      },
+      "normal": [
+        1.0,
+        0.0,
+        -0.0
+      ],
+      "area": 432.0
+    },
+    {
+      "targetId": "mama:face:18.023--0.01-48:351.965",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:face:18.023--0.01-48:351.965",
+      "canonicalTargetId": "mama:face:1:18.023--0.01-48:351.965",
+      "aliasIds": [
+        "mama:face:1:18.023--0.01-48:351.965",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:face:18.023--0.01-48:351.965"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Face2",
+      "editable": false,
+      "center": {
+        "x": 18.02313108784491,
+        "y": -0.009904867434736175,
+        "z": 48.0
+      },
+      "normal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "area": 351.965
+    },
+    {
+      "targetId": "mama:face:8.25-0-24:4.8",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:face:8.25-0-24:4.8",
+      "canonicalTargetId": "mama:face:2:8.25-0-24:4.8",
+      "aliasIds": [
+        "mama:face:2:8.25-0-24:4.8",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:face:8.25-0-24:4.8"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Face3",
+      "editable": false,
+      "center": {
+        "x": 8.25,
+        "y": 0.0,
+        "z": 24.0
+      },
+      "normal": [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      "area": 4.800000000000068
+    },
+    {
+      "targetId": "mama:face:18.023--0.01-0:351.965",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:face:18.023--0.01-0:351.965",
+      "canonicalTargetId": "mama:face:3:18.023--0.01-0:351.965",
+      "aliasIds": [
+        "mama:face:3:18.023--0.01-0:351.965",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:face:18.023--0.01-0:351.965"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Face4",
+      "editable": false,
+      "center": {
+        "x": 18.02313108784491,
+        "y": -0.009904867434736175,
+        "z": 0.0
+      },
+      "normal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "area": 351.965
+    },
+    {
+      "targetId": "mama:face:18--9-24:940.8",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:face:18--9-24:940.8",
+      "canonicalTargetId": "mama:face:4:18--9-24:940.8",
+      "aliasIds": [
+        "mama:face:4:18--9-24:940.8",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:face:18--9-24:940.8"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Face5",
+      "editable": false,
+      "center": {
+        "x": 18.0,
+        "y": -9.0,
+        "z": 24.0
+      },
+      "normal": [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      "area": 940.8
+    },
+    {
+      "targetId": "mama:face:8.3-4.15-24:398.4",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:face:8.3-4.15-24:398.4",
+      "canonicalTargetId": "mama:face:5:8.3-4.15-24:398.4",
+      "aliasIds": [
+        "mama:face:5:8.3-4.15-24:398.4",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:face:8.3-4.15-24:398.4"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Face6",
+      "editable": false,
+      "center": {
+        "x": 8.3,
+        "y": 4.15,
+        "z": 24.0
+      },
+      "normal": [
+        -1.0,
+        0.0,
+        0.0
+      ],
+      "area": 398.4
+    },
+    {
+      "targetId": "mama:face:8.25-8.35-24:6.788",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:face:8.25-8.35-24:6.788",
+      "canonicalTargetId": "mama:face:6:8.25-8.35-24:6.788",
+      "aliasIds": [
+        "mama:face:6:8.25-8.35-24:6.788",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:face:8.25-8.35-24:6.788"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Face7",
+      "editable": false,
+      "center": {
+        "x": 8.25,
+        "y": 8.350000000000001,
+        "z": 24.0
+      },
+      "normal": [
+        -0.7071067811865476,
+        -0.7071067811865476,
+        0.0
+      ],
+      "area": 6.788225099391074
+    },
+    {
+      "targetId": "mama:face:8.2-8.7-24:28.8",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:face:8.2-8.7-24:28.8",
+      "canonicalTargetId": "mama:face:7:8.2-8.7-24:28.8",
+      "aliasIds": [
+        "mama:face:7:8.2-8.7-24:28.8",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:face:8.2-8.7-24:28.8"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Face8",
+      "editable": false,
+      "center": {
+        "x": 8.2,
+        "y": 8.700000000000003,
+        "z": 24.0
+      },
+      "normal": [
+        1.0,
+        0.0,
+        -0.0
+      ],
+      "area": 28.799999999999898
+    },
+    {
+      "targetId": "mama:face:18-9-24:940.8",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:face:18-9-24:940.8",
+      "canonicalTargetId": "mama:face:8:18-9-24:940.8",
+      "aliasIds": [
+        "mama:face:8:18-9-24:940.8",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:face:18-9-24:940.8"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Face9",
+      "editable": false,
+      "center": {
+        "x": 18.0,
+        "y": 9.0,
+        "z": 24.0
+      },
+      "normal": [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      "area": 940.8
+    },
+    {
+      "targetId": "mama:face:27.8-0-24:864",
+      "durableTargetId": "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:face:27.8-0-24:864",
+      "canonicalTargetId": "mama:face:9:27.8-0-24:864",
+      "aliasIds": [
+        "mama:face:9:27.8-0-24:864",
+        "mama:stable-node-key:sha256:f6fcd76f6219054d9e68f35824164a9096df1d67749b18a0ebbc04d49754e16e:face:27.8-0-24:864"
+      ],
+      "partId": "mama",
+      "viewerNodeId": "mama",
+      "label": "Mama.Face10",
+      "editable": false,
+      "center": {
+        "x": 27.8,
+        "y": 2.5905203907920316e-16,
+        "z": 24.0
+      },
+      "normal": [
+        1.0,
+        0.0,
+        -0.0
+      ],
+      "area": 864.0
+    }
+  ],
+  "calloutAnchors": [],
+  "measurementGuides": [],
+  "exportArtifacts": [
+    {
+      "label": "STEP",
+      "format": "step",
+      "path": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-d584317f7a64/model.step",
+      "role": "primary",
+      "geometryProvenance": {
+        "representation": "analyticBrep"
+      }
+    }
+  ],
+  "geometryProvenance": {
+    "representation": "analyticBrep"
+  }
+}

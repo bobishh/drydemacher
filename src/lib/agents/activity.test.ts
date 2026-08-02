@@ -305,6 +305,29 @@ test('resolveGenieBubblePresentation surfaces session error text in the bubble',
   assert.equal(bubble.text, 'Render Error: mock render exploded');
 });
 
+test('Given an authoring error When resolving the bubble Then it exposes layer and fix without replacing raw text', () => {
+  const bubble = resolveGenieBubblePresentation({
+    sessionError: 'Unknown operation `spher`.',
+    sessionAuthoringError: {
+      layer: 'coreIr',
+      fix: { hint: 'Use a supported Core IR operation.', suggestions: ['sphere'] },
+    },
+  });
+
+  assert.equal(bubble.text, 'Unknown operation `spher`.');
+  assert.equal(bubble.layer, 'CORE IR');
+  assert.equal(bubble.fix, 'Use a supported Core IR operation. Try: sphere');
+});
+
+test('Given a legacy error without authoring fields When resolving the bubble Then it keeps existing presentation', () => {
+  const bubble = resolveGenieBubblePresentation({
+    sessionError: 'Render Error: disk full',
+  });
+
+  assert.equal(bubble.layer, null);
+  assert.equal(bubble.fix, null);
+});
+
 test('resolveGenieBubblePresentation prioritizes session error over other sources', () => {
   const bubble = resolveGenieBubblePresentation({
     sessionError: 'Export Error: disk full',

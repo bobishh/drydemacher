@@ -56,11 +56,11 @@ test('modelEngineLabel prefers artifact metadata over stale output defaults', ()
         },
       }),
     ),
-    'build123d (.py)',
+    'Ecky Native (.ecky)',
   );
 });
 
-test('modelEngineLabel distinguishes IR lowered into build123d', () => {
+test('modelEngineLabel labels migrated build123d IR as native', () => {
   assert.equal(
     modelEngineLabel(
       message({
@@ -85,7 +85,7 @@ test('modelEngineLabel distinguishes IR lowered into build123d', () => {
         },
       }),
     ),
-    'Ecky + build123d (.ecky)',
+    'Ecky Native (.ecky)',
   );
 });
 

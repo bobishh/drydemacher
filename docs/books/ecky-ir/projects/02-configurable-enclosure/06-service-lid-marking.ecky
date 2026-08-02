@@ -1,0 +1,18 @@
+(model
+  (params
+    (number lid_w 72 :label "service lid width" :min 48 :max 120 :step 2)
+    (number lid_d 48 :label "service lid depth" :min 32 :max 90 :step 2)
+    (number wall 3 :label "service lid wall" :min 2 :max 6 :step 0.5))
+  ;; A field-service lid: label and vent face.
+  (part marked_service_lid
+    (build
+      (shape vent_ring (ring 4 2.5 32))
+      (shape vent_profile (profile :outer (rectangle 24 12)))
+      (shape lid
+        (extrude
+          (make-face (rounded-polygon ((-36 -24) (36 -24) (36 24) (-36 24)) 5 16))
+          wall))
+      (shape vent (translate 0 0 -1 (extrude vent_profile (+ wall 2))))
+      (shape ring_vent (translate 18 0 -1 (extrude vent_ring (+ wall 2))))
+      (shape label (translate -27 -14 wall (extrude (text "OPEN" 7) 0.8)))
+      (result (union (difference lid vent ring_vent) label)))))

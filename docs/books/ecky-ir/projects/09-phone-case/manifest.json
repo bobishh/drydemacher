@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "id": "09-phone-case",
+  "title": "Three-Part Phone Case",
+  "checkpoints": [
+    {
+      "id": "phone-envelope-pocket",
+      "role": "worked",
+      "source": "01-phone-envelope-pocket.ecky",
+      "summary": "Derive the phone pocket from measured envelope dimensions and one named per-side clearance.",
+      "render": { "yaw": 0.35, "pitch": -0.42, "size": 320 }
+    },
+    {
+      "id": "shell-rim-buttons-eyelet",
+      "role": "worked",
+      "source": "02-shell-rim-buttons-eyelet.ecky",
+      "summary": "Add a rim, compliant button pads, inner button relief, and a named eyelet bore.",
+      "render": { "yaw": 0.35, "pitch": -0.42, "size": 320 }
+    },
+    {
+      "id": "cell-grid",
+      "role": "worked",
+      "source": "03-cell-grid.ecky",
+      "summary": "Teachable procedural cell grid derived from iphone-17e-cell-grid.ecky. The final ~230-strut data graph is a static edge fixture, not procedural Voronoi.",
+      "render": { "yaw": 0.1, "pitch": -0.5, "size": 320 }
+    },
+    {
+      "id": "camera-datum-tpu-support",
+      "role": "worked",
+      "source": "04-camera-datum-tpu-support.ecky",
+      "summary": "Map camera coordinates from the phone datum and form the TPU support around the measured cluster.",
+      "render": { "yaw": 0.15, "pitch": -0.5, "size": 320 }
+    },
+    {
+      "id": "inner-petg-island",
+      "role": "worked",
+      "source": "05-inner-petg-island.ecky",
+      "summary": "Inner PETG island uses named seat clearance and capture thickness.",
+      "render": { "yaw": 0.2, "pitch": -0.52, "size": 320 }
+    },
+    {
+      "id": "outer-snap-island",
+      "role": "starter",
+      "source": "06-outer-snap-island.ecky",
+      "summary": "Complete the outer PETG snap island with named interference and generated relief slots.",
+      "render": { "yaw": 0.2, "pitch": -0.52, "size": 320 }
+    },
+    {
+      "id": "final-voronoi-case",
+      "role": "solution",
+      "source": "../../../../../sites/landing/src/models/iphone-17e-voronoi-case.ecky",
+      "summary": "Exact landing reference: TPU case plus inner and outer PETG islands. Static ~230-strut edge data is a fixed fixture, never procedural Voronoi.",
+      "render": { "yaw": 0.12, "pitch": -0.08, "size": 340 }
+    },
+    {
+      "id": "attractor-guides",
+      "role": "worked",
+      "source": "07-attractor-guides.ecky",
+      "summary": "Hénon opening and Lorenz sweep guide: executable point-list helpers, not a phone-case production part.",
+      "render": { "yaw": 0.72, "pitch": -0.46, "size": 280 }
+    },
+    {
+      "id": "wall-pattern-boundary",
+      "role": "worked",
+      "source": "08-wall-pattern-boundary.ecky",
+      "summary": "Cellular wall-pattern checkpoint rendered natively; sampled surface result is not claimed as an analytic primitive.",
+      "render": { "yaw": 0.72, "pitch": -0.46, "size": 280 }
+    }
+  ]
+}

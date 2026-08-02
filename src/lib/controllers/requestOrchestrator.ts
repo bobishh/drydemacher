@@ -53,6 +53,7 @@ import {
 } from '../tauri/client';
 import { pendingHeightfieldImages, pendingHeightfieldStatus } from '../heightfieldPending';
 import { hydrateActiveRenderSnapshot } from '../stores/activeRenderSnapshot';
+import type { AppError } from '../tauri/contracts';
 
 // ---------------------------------------------------------------------------
 // Constants & Helpers
@@ -95,7 +96,6 @@ function pickRetryMessage(nextAttempt: number, maxAttempts: number): string {
 }
 
 function renderBackendLabel(design: DesignOutput): string {
-  if (design.geometryBackend === 'build123d' || design.sourceLanguage === 'build123d') return 'build123d';
   if (design.macroDialect === 'ecky' || design.sourceLanguage === 'ecky') {
     return 'Ecky';
   }
@@ -145,6 +145,19 @@ function isGenericRoutingResponse(responseText: string): boolean {
 
 function toErrorMessage(err: unknown): string {
   return formatBackendError(err);
+}
+
+function toSessionError(err: unknown): string | AppError {
+  if (
+    err &&
+    typeof err === 'object' &&
+    'code' in err &&
+    'message' in err &&
+    typeof (err as { message?: unknown }).message === 'string'
+  ) {
+    return err as AppError;
+  }
+  return toErrorMessage(err);
 }
 
 function toAssetUrl(path: string | null | undefined): string {
@@ -934,7 +947,7 @@ class GenerationPipeline {
             attempt++;
             continue;
           } else {
-            await this.handleRenderFailure(data, toErrorMessage(renderError));
+            await this.handleRenderFailure(data, renderError);
             return;
           }
         }
@@ -1300,8 +1313,8 @@ class GenerationPipeline {
     if (this.isActiveThread()) session.setStatus(msg);
   }
 
-  private updateError(err: string) {
-    if (this.isActiveThread()) session.setError(err);
+  private updateError(err: unknown) {
+    if (this.isActiveThread()) session.setError(toSessionError(err));
   }
 
   private stopMicrowave(success: boolean) {
@@ -1341,7 +1354,7 @@ class GenerationPipeline {
 
   private async handleGlobalError(err: unknown) {
     const errText = toErrorMessage(err);
-    this.updateError(`Pipeline Error: ${errText}`);
+    this.updateError(err && typeof err === 'object' ? err : `Pipeline Error: ${errText}`);
     if (this.isActiveThread()) {
       try {
         const messPath = await getMessStlPath();
@@ -1357,8 +1370,13 @@ class GenerationPipeline {
     syncSessionPhaseFromQueue();
   }
 
-  private async handleRenderFailure(data: DesignOutput, renderError: string) {
-    this.updateError(`Render Error: ${renderError}`);
+  private async handleRenderFailure(data: DesignOutput, renderError: unknown) {
+    const renderErrorText = toErrorMessage(renderError);
+    this.updateError(
+      renderError && typeof renderError === 'object'
+        ? renderError
+        : `Render Error: ${renderErrorText}`,
+    );
     if (this.isActiveThread()) {
       try {
         const messPath = await getMessStlPath();
@@ -1369,9 +1387,9 @@ class GenerationPipeline {
       }
     }
 
-    await this.finalizeAttempt('error', data, `Render Error: ${renderError}`);
+    await this.finalizeAttempt('error', data, `Render Error: ${renderErrorText}`);
     this.uiDeps.openCodeModalManual?.(data);
-    requestQueue.patch(this.requestId, { phase: 'error', error: `Render Error: ${renderError}` });
+    requestQueue.patch(this.requestId, { phase: 'error', error: `Render Error: ${renderErrorText}` });
     this.stopMicrowave(false);
     syncSessionPhaseFromQueue();
   }

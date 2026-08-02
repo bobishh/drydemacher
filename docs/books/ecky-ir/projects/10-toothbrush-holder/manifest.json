@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "10-toothbrush-holder",
+  "title": "Perforated Toothbrush Holder",
+  "checkpoints": [
+    { "id": "shell-body", "role": "worked", "source": "01-shell-body.ecky", "summary": "Build the printable D-shaped shell from an outer body and a cavity driven by named wall margin.", "render": { "yaw": 32, "pitch": 22, "size": 260 } },
+    { "id": "drained-base", "role": "worked", "source": "02-drained-base.ecky", "summary": "Add a solid base and a central drain with named drain edge margin.", "render": { "yaw": 32, "pitch": 22, "size": 260 } },
+    { "id": "proven-spade-cutter", "role": "worked", "source": "03-proven-spade-cutter.ecky", "summary": "Prove one spade-shaped through-wall cutter using a named cutter overshoot.", "render": { "yaw": 38, "pitch": 18, "size": 260 } },
+    { "id": "repeated-wall-pattern", "role": "worked", "source": "04-repeated-wall-pattern.ecky", "summary": "Generate the front wall pattern with repeat-union, then subtract one cutter group once.", "render": { "yaw": 38, "pitch": 18, "size": 260 } },
+    { "id": "final-printable-holder", "role": "solution", "source": "05-final-printable-holder.ecky", "summary": "Complete printable holder with generated front and side spade groups, named margins, drain, and one final boolean.", "render": { "yaw": 35, "pitch": 20, "size": 280 } }
+  ]
+}

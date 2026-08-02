@@ -30,6 +30,16 @@ export type MacroAstMapProjection = {
   root: MacroAstMapNode;
 };
 
+export type MacroAstSearchEntry = {
+  nodeId: string;
+  ownerNodeId: string;
+  nodeKind: MacroAstMapNodeKind;
+  label: string;
+  ownerLabel: string;
+  fieldKey?: string;
+  searchText: string;
+};
+
 type MacroAstMapInput = {
   macroCode?: string;
   modelManifest?: ModelManifest | null;
@@ -72,6 +82,79 @@ function synthesizeParts(fields: UiField[]): MacroAstPart[] {
 function normalizeSyntaxVariant(value: string | null | undefined): string {
   const normalized = `${value ?? ''}`.trim().toLowerCase();
   return normalized.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'unknown';
+}
+
+function normalizeSearchText(value: string): string {
+  return value
+    .toLocaleLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+export function buildMacroAstSearchIndex(
+  projection: MacroAstMapProjection,
+): MacroAstSearchEntry[] {
+  const entries: MacroAstSearchEntry[] = [];
+  const visit = (node: MacroAstMapNode, owner: MacroAstMapNode) => {
+    const currentOwner = node.kind === 'part' ? node : owner;
+    entries.push({
+      nodeId: node.id,
+      ownerNodeId: currentOwner.id,
+      nodeKind: node.kind,
+      label: node.label,
+      ownerLabel: currentOwner.label,
+      fieldKey: node.fieldKey,
+      searchText: normalizeSearchText(
+        [
+          node.id,
+          node.label,
+          node.fieldKey,
+          node.syntaxLabel,
+          currentOwner.id,
+          currentOwner.label,
+        ]
+          .filter(Boolean)
+          .join(' '),
+      ),
+    });
+    for (const child of node.children ?? []) visit(child, currentOwner);
+  };
+  visit(projection.root, projection.root);
+  return entries;
+}
+
+export function searchMacroAstMap(
+  index: readonly MacroAstSearchEntry[],
+  query: string,
+  limit = 12,
+): MacroAstSearchEntry[] {
+  const normalizedQuery = normalizeSearchText(query);
+  if (!normalizedQuery) return [];
+  const compactQuery = normalizedQuery.replace(/\s/g, '');
+  const score = (entry: MacroAstSearchEntry) => {
+    const label = normalizeSearchText(entry.label);
+    const fieldKey = normalizeSearchText(entry.fieldKey ?? '');
+    const nodeId = normalizeSearchText(entry.nodeId);
+    if ([label, fieldKey, nodeId].includes(normalizedQuery)) return 0;
+    if ([label, fieldKey, nodeId].some((value) => value.startsWith(normalizedQuery))) return 1;
+    if (entry.searchText.includes(normalizedQuery)) return 2;
+    return entry.searchText.replace(/\s/g, '').includes(compactQuery) ? 3 : null;
+  };
+
+  return index
+    .map((entry) => ({ entry, score: score(entry) }))
+    .filter((candidate): candidate is { entry: MacroAstSearchEntry; score: number } =>
+      candidate.score !== null,
+    )
+    .sort(
+      (left, right) =>
+        left.score - right.score ||
+        Number(right.entry.nodeKind === 'param') - Number(left.entry.nodeKind === 'param') ||
+        left.entry.label.localeCompare(right.entry.label),
+    )
+    .slice(0, Math.max(0, limit))
+    .map(({ entry }) => entry);
 }
 
 function sourceRangeFor(

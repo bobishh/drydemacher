@@ -1,0 +1,5 @@
+(model
+  ;; Bare `repeat` expands to a list, not one geometry node. Native planner
+  ;; rejects that list at a part root; use repeat-union/compound/pick instead.
+  (part unsupported_repeat_probe
+    (repeat i 3 (translate (* i 8) 0 0 (box 3 3 3)))))

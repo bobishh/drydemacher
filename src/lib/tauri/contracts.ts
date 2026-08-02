@@ -74,9 +74,62 @@ async openProjectInEditor(threadId: string | null, messageId: string | null) : P
     else return { status: "error", error: e  as any };
 }
 },
-async getAnimalCapCatalog() : Promise<Result<AnimalCapCatalog, AppError>> {
+/**
+ * Reveal the exact persisted source folder without also opening model.ecky.
+ */
+async revealProjectFolder(threadId: string | null, messageId: string | null) : Promise<Result<ProjectEditorLink, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("get_animal_cap_catalog") };
+    return { status: "ok", data: await TAURI_INVOKE("reveal_project_folder", { threadId, messageId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getAuthoringGraph(request: AuthoringGraphRequest) : Promise<Result<AuthoringGraph, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_authoring_graph", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Export the active version's macro source to its project folder, writing
+ * `model.ecky` and refreshing the `ecky-project.json` manifest. Re-export
+ * preserves the existing `projectId`.
+ */
+async projectFolderExport(threadId: string | null, messageId: string | null) : Promise<Result<ProjectFolderExportResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("project_folder_export", { threadId, messageId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Read-only sync classification (`clean` / `fileChanged` / `threadAdvanced`
+ * / `conflict` / `missing`) for the active thread's folder. Does not mutate
+ * the folder, the thread, or any history.
+ */
+async projectFolderStatus(threadId: string | null, messageId: string | null) : Promise<Result<ProjectFolderStatus, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("project_folder_status", { threadId, messageId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Apply an externally edited `model.ecky` for the active thread's folder by
+ * compile-checking, rendering a preview, and committing it as a new version
+ * through the existing preview/commit pipeline, then rebasing the manifest.
+ * Refuses on `threadAdvanced`; refuses on `conflict` unless `force` is set.
+ * Raw compiler/render errors surface untouched and leave folder + thread
+ * unchanged.
+ */
+async projectFolderApply(threadId: string | null, messageId: string | null, force: boolean | null) : Promise<Result<ProjectFolderApplyResponse, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("project_folder_apply", { threadId, messageId, force }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -154,9 +207,37 @@ async listInstalledComponentPackageHeaders() : Promise<Result<ComponentPackageHe
     else return { status: "error", error: e  as any };
 }
 },
+async uninstallComponentPackageCoordinate(packageId: string, version: string) : Promise<Result<boolean, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("uninstall_component_package_coordinate", { packageId, version }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async garbageCollectComponentPackageStore(gracePeriodSeconds: number) : Promise<Result<ComponentStoreGcReport, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("garbage_collect_component_package_store", { gracePeriodSeconds }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async resolveInstalledComponentSource(packageId: string, version: string, componentId: string) : Promise<Result<InstalledComponentSource, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("resolve_installed_component_source", { packageId, version, componentId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Workbench entry point for the same copy-inline materializer used by the
+ * MCP `component_import` tool. Do not replace this with a live import.
+ */
+async componentImportCopyInline(request: CopyInlineComponentImportRequest) : Promise<Result<CopyInlineComponentImportResponse, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("component_import_copy_inline", { request }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -226,6 +307,118 @@ async macroAstSourceMap(macroCode: string) : Promise<Result<MacroAstSourceNode[]
     else return { status: "error", error: e  as any };
 }
 },
+async evaluateMissionCoreIr(candidateSource: string, referenceSource: string) : Promise<Result<MissionCoreIrEvaluation, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("evaluate_mission_core_ir", { candidateSource, referenceSource }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async listCampaignDefinitions() : Promise<Result<CampaignSummary[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_campaign_definitions") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getCampaignStep(definitionId: string, stepId: string) : Promise<Result<CampaignStepPayload, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_campaign_step", { definitionId, stepId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async checkCampaignStep(definitionId: string, stepId: string, candidateSource: string) : Promise<Result<MissionCoreIrEvaluation, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("check_campaign_step", { definitionId, stepId, candidateSource }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async createCampaignRun(input: CreateCampaignRunInput) : Promise<Result<CampaignRun, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_campaign_run", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async listCampaignRuns() : Promise<Result<CampaignRun[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_campaign_runs") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getCampaignRun(id: string) : Promise<Result<CampaignRun, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_campaign_run", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async saveCampaignRun(run: CampaignRun) : Promise<Result<CampaignRun, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_campaign_run", { run }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async deleteCampaignRun(id: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_campaign_run", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getActiveProjectNavigation() : Promise<Result<ActiveProjectNavigation | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_active_project_navigation") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async saveActiveProjectNavigation(navigation: ActiveProjectNavigation) : Promise<Result<ActiveProjectNavigation, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_active_project_navigation", { navigation }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async clearActiveProjectNavigation() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("clear_active_project_navigation") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getAppWindowLayout() : Promise<Result<ThreadWindowLayout | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_app_window_layout") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async saveAppWindowLayout(layout: ThreadWindowLayout) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_app_window_layout", { layout }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getHistory() : Promise<Result<Thread[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_history") };
@@ -245,6 +438,14 @@ async getThread(id: string) : Promise<Result<Thread, AppError>> {
 async getThreadLatestVersion(threadId: string) : Promise<Result<Message | null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_thread_latest_version", { threadId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getThreadPreview(id: string) : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_thread_preview", { id }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -937,6 +1138,11 @@ async wakeAutoAgent(label: string) : Promise<Result<null, AppError>> {
 
 /** user-defined types **/
 
+/**
+ * Last Project surface selected by the user. Campaign runs and design threads
+ * deliberately keep separate identities.
+ */
+export type ActiveProjectNavigation = { kind: string; id: string; view: string }
 export type AddManualVersionInput = { threadId: string; title: string; versionName: string; macroCode: string; sourceLanguage: SourceLanguage | null; geometryBackend: GeometryBackend | null; parameters: Partial<{ [key in string]: ParamValue }>; uiSpec: UiSpec; postProcessing: PostProcessingSpec | null; artifactBundle: ArtifactBundle | null; modelManifest: ModelManifest | null }
 export type Advisory = { advisoryId: string; label: string; severity: AdvisorySeverity; primitiveIds?: string[]; viewIds?: string[]; message: string; condition?: AdvisoryCondition; threshold?: number | null }
 export type AdvisoryCondition = "always" | "below" | "above"
@@ -945,42 +1151,31 @@ export type AgentModelList = { models: string[]; isLive: boolean }
 export type AgentOrigin = { hostLabel: string; clientKind: string; agentLabel: string; llmModelId?: string | null; llmModelLabel?: string | null; sessionId: string; createdAt: number }
 export type AgentSession = { sessionId: string; clientKind: string; hostLabel: string; agentLabel: string; llmModelId?: string | null; llmModelLabel?: string | null; threadId: string | null; messageId: string | null; modelId: string | null; phase: string; statusText: string; updatedAt: number }
 export type AgentTerminalInput = { agentId: string; text?: string; key?: string | null; ctrl?: boolean; alt?: boolean; shift?: boolean; meta?: boolean; submit?: boolean }
-export type AgentTerminalSnapshot = { agentId: string; agentLabel: string; sessionId?: string | null; providerKind?: string | null; 
+export type AgentTerminalSnapshot = { agentId: string; agentLabel: string; sessionId?: string | null; providerKind?: string | null;
 /**
  * Stable per-PTY-session token. Changes whenever the backend creates
  * a fresh terminal session for the agent.
  */
-sessionNonce: number; 
+sessionNonce: number;
 /**
  * Deprecated compatibility snapshot for inactive/last-session display.
  * Live terminal rendering should use `vtStream`.
  */
-screenText: string; 
+screenText: string;
 /**
  * Authoritative raw VT replay stream for live terminal rendering.
  */
-vtStream?: string; 
+vtStream?: string;
 /**
  * Optional incremental VT chunk for live updates. When present, the frontend
  * should merge it into its local replay state instead of treating `vtStream`
  * as a full snapshot replacement.
  */
 vtDelta?: string | null; attentionRequired: boolean; busy?: boolean; activityLabel?: string | null; activityStartedAt?: number | null; attentionKind?: string | null; summary?: string | null; active: boolean; updatedAt: number }
-export type AnimalCapArtifact = { verificationStatus: AnimalCapVerificationStatus; verifiedPartCount: number; verifiedComponentCount: number; verifiedNonManifoldEdgeCount: number; verifiedTriangleCount: number; modelId: string; threadId: string; messageId: string; sourcePath: string; stlPath: string; previewPath: string; sourceSha256: string; stlSha256: string }
-export type AnimalCapAxis = "x" | "y" | "z"
-export type AnimalCapBoreProfile = { prestaMajorDiameterMm: number; threadDepthMm: number; baseThreadClearanceMm: number; freeBoreClearanceMm: number; threadStartMm: number; threadLengthMm: number; innerConeStartMm: number; blindDepthMm: number; entryLeadMm: number; entryFlareMm: number }
-export type AnimalCapCatalog = { schemaVersion: number; boreProfiles: Partial<{ [key in string]: AnimalCapBoreProfile }>; entries: AnimalCapCatalogEntry[] }
-export type AnimalCapCatalogEntry = { id: string; displayName: string; species: string; state: AnimalCapState; surfaces: AnimalCapSurfaces; source: AnimalCapSource; sourceBounds: AnimalCapSourceBounds; recipe?: AnimalCapRecipe | null; artifact?: AnimalCapArtifact | null }
-export type AnimalCapRecipe = { boreProfileId: string; boreAxis: AnimalCapAxis; boreMouthSourceCoordinate: number; boreAxisHeightMm: number; uniformScale: number; floorOffsetSourceCoordinate: number }
-export type AnimalCapSource = { author: string; pageUrl: string; downloadUrl: string; archiveMember: string; license: string; licenseUrl: string; sourceFormat: string; sourceSha256?: string | null; sourceMeshPath?: string | null; ingestedStlPath?: string | null; ingestedStlSha256?: string | null }
-export type AnimalCapSourceBounds = { min: [number, number, number]; max: [number, number, number]; size: [number, number, number] }
-export type AnimalCapState = "candidate" | "published"
-export type AnimalCapSurfaces = { engine: boolean; landing: boolean }
-export type AnimalCapVerificationStatus = "passed"
 export type AppError = { code: AppErrorCode; message: string; details?: string | null; stableNodeKey?: string | null; startLine?: number | null; endLine?: number | null; operation?: string | null; diagnosticContext?: DiagnosticContext | null; layer?: ErrorLayer | null; fix?: ErrorFix | null }
 export type AppErrorCode = "validation" | "notFound" | "conflict" | "provider" | "persistence" | "render" | "parse" | "internal"
 export type AppLogEntry = { tsMs: number; message: string }
-export type ArtifactBundle = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; contentHash: string; artifactVersion?: number; fcstdPath: string; manifestPath: string; macroPath?: string | null; previewStlPath: string; viewerAssets?: ViewerAsset[]; edgeTargets?: ViewerEdgeTarget[]; faceTargets?: ViewerFaceTarget[]; calloutAnchors?: CalloutAnchor[]; measurementGuides?: MeasurementGuide[]; exportArtifacts?: ExportArtifact[]; geometryProvenance?: GeometryProvenance | null }
+export type ArtifactBundle = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; contentHash: string; artifactVersion?: number; fcstdPath: string; manifestPath: string; macroPath?: string | null; previewStlPath: string; viewerAssets?: ViewerAsset[]; edgeTargets?: ViewerEdgeTarget[]; faceTargets?: ViewerFaceTarget[]; calloutAnchors?: CalloutAnchor[]; measurementGuides?: MeasurementGuide[]; exportArtifacts?: ExportArtifact[]; geometryProvenance?: GeometryProvenance | null; componentDependencyLock?: ComponentDependencyLock | null; componentDependencyLockDigest?: string | null; componentImportOrigins?: ComponentImportOrigin[] }
 export type ArtifactBundleComponentPackageRequest = { packageId: string; version: string; displayName: string; tags?: string[]; componentId: string; componentVersion: string; componentDisplayName: string; sourceRef?: string | null; artifactBundle: ArtifactBundle; portTypes?: PortTypeDefinition[]; params?: ComponentParam[]; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; ports?: ComponentPort[] }
 export type AssemblyComponentRef = { instanceId: string; componentId: string }
 export type AssemblyDefinition = { assemblyId: string; displayName: string; components?: AssemblyComponentRef[]; mates?: AssemblyMate[]; operations?: AssemblyOperation[]; output: AssemblyOutput }
@@ -992,7 +1187,7 @@ export type AssemblyOutputMode = "separateParts" | "joinedAssembly" | "fusedSoli
 export type Asset = { id: string; name: string; path: string; format: string }
 export type Attachment = { path: string; name: string; explanation: string; dataUrl?: string | null; kind: AttachmentKind }
 export type AttachmentKind = "image" | "cad"
-export type AuthoredVerifyCheck = { tag: string; status: AuthoredVerifyCheckStatus; message: string; stableNodeId?: string | null; 
+export type AuthoredVerifyCheck = { tag: string; status: AuthoredVerifyCheckStatus; message: string; stableNodeId?: string | null;
 /**
  * Machine-readable delta: where the metric came from, the comparator, and
  * the expected vs actual values. Lets the agent fix a red check without
@@ -1005,6 +1200,14 @@ export type AuthoredVerifyCheckStatus = "passed" | "failed" | "error"
  * and UI chips read machine values instead of parsing the message string.
  */
 export type AuthoredVerifyValue = { kind: "number"; value: number } | { kind: "boolean"; value: boolean } | { kind: "text"; value: string }
+export type AuthoringGraph = { sourceDigest: string; coreDigest: string; artifactDigest?: string | null; astNodes: AuthoringGraphAstNode[]; features: AuthoringGraphFeature[]; dependencies: AuthoringGraphDependency[]; constraints: AuthoringGraphConstraint[]; targets: AuthoringGraphTarget[]; handles: AuthoringGraphHandle[] }
+export type AuthoringGraphAstNode = { path: string; stableNodeKey: string; kind: string; valueKind: string; operation?: string | null; partId?: string | null }
+export type AuthoringGraphConstraint = { constraintId: string; label: string; kind: string; parameterKeys: string[]; affectedStableNodeKeys: string[] }
+export type AuthoringGraphDependency = { parameterKey: string; parameterStableNodeKey: string; dependentSourcePaths: string[]; affectedStableNodeKeys: string[]; impactedPartIds: string[]; featureIds: string[]; targetIds: string[] }
+export type AuthoringGraphFeature = { featureId: string; kind: string; label: string; sourcePath?: string | null; sourceStableNodeKey?: string | null; dependencyIds: string[]; outputIds: string[]; targetIds: string[] }
+export type AuthoringGraphHandle = { handleId: string; parameterKeys: string[]; targetIds: string[] }
+export type AuthoringGraphRequest = { source: string; modelId?: string | null }
+export type AuthoringGraphTarget = { targetId: string; durableTargetId?: string | null; canonicalTargetId?: string | null; aliasIds: string[]; partId: string; viewerNodeId: string; label: string; kind: SelectionTargetKind; parameterKeys: string[]; primitiveIds: string[]; featureIds: string[]; sourceStableNodeKeys: string[]; editable: boolean; nonEditableReason?: string | null }
 /**
  * Stable, explicit identity for saved and draft authoring authorities.
  */
@@ -1012,7 +1215,7 @@ export type AuthoringTargetRef = { kind: "savedVersion"; threadId: string; messa
 /**
  * Whether Ecky runs the embedded MCP HTTP server.
  */
-export type AutoAgent = { id: string; label: string; cmd: string; model?: string | null; args: string[]; enabled: boolean; 
+export type AutoAgent = { id: string; label: string; cmd: string; model?: string | null; args: string[]; enabled: boolean;
 /**
  * Deprecated compatibility flag from the old eager-start implementation.
  * Active-mode wake behavior now depends on `mcp.mode` and `mcp.primaryAgentId`.
@@ -1027,18 +1230,112 @@ export type BrepProjectedEdge2d = { edgeId: string; points?: ([number, number])[
 export type BrepProjectedLoop2d = { loopId: string; edgeIds?: string[]; points?: ([number, number])[]; role?: BrepProjectedLoopRole; sourceClass: string }
 export type BrepProjectedLoopRole = "outer" | "hole" | "unknown"
 export type CalloutAnchor = { anchorId: string; position: [number, number, number]; normal?: [number, number, number] | null }
+export type CampaignAcceptance = { mode: string; referenceStepId: string }
+export type CampaignCanonicalPreview = { canonicalSourceDigest: string; runtimeDigest: string; artifactBundle: ArtifactBundle }
+export type CampaignCurrentStep = { missionIndex: number; stepIndex: number; stepCount: number; id: string; kind: string; title: string; prose: string; source: string | null; canonicalSourceDigest: string | null; canonicalPreview: CampaignCanonicalPreview | null; acceptance: CampaignAcceptance | null; nextStepId: string | null; previousStep: CampaignPreviousStep | null; missionCount: number }
+export type CampaignPreviousStep = { id: string }
+/**
+ * A self-contained learner workspace. Unlike a design `Thread`, a campaign
+ * run never creates chat messages, model versions, or history rows.
+ */
+export type CampaignRun = { id: string;
+/**
+ * Explicit discriminator for heterogeneous Projects inventory.
+ */
+kind?: string; title: string; definitionId: string; definitionVersion: string; currentStepId: string; completedStepIds?: string[]; passedChallengeIds?: string[]; draftOverridesByStepId?: Partial<{ [key in string]: string }>; createdAt: number; updatedAt: number }
+export type CampaignStepPayload = { definitionId: string; definitionVersion: string; currentStep: CampaignCurrentStep | null }
+export type CampaignSummary = { definitionId: string; sectionSlug: string; title: string; stepCount: number; firstStepId: string }
 export type ClearSketchPreviewDraftRequest = { scopeId?: string | null }
-export type ComponentDefinition = { componentId: string; version: string; displayName: string; sourceRef?: string | null; sourceLanguage?: SourceLanguage | null; geometryBackend?: GeometryBackend | null; macroDialect?: MacroDialect | null; sketches?: SketchDefinition[]; keepouts?: ComponentKeepoutVolume[]; fusionZones?: ComponentFusionZone[]; params?: ComponentParam[]; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; ports?: ComponentPort[] }
+export type ComponentDefinition = { componentId: string; version: string; displayName: string; sourceRef?: string | null;
+/**
+ * Optional live-reference export symbol selecting the top-level
+ * `define-component` exposed for `(import-component ...)`. When omitted,
+ * a valid Ecky-symbol `componentId` is the fallback. Interface metadata
+ * only; it does not change copy-inline vendoring.
+ */
+entrySymbol?: string | null; sourceLanguage?: SourceLanguage | null; geometryBackend?: GeometryBackend | null; macroDialect?: MacroDialect | null;
+/**
+ * Package-carried representation evidence required for live STEP
+ * components. A `.step` suffix alone never proves analytic geometry.
+ */
+geometryProvenance?: GeometryProvenance | null; sketches?: SketchDefinition[]; keepouts?: ComponentKeepoutVolume[]; fusionZones?: ComponentFusionZone[]; params?: ComponentParam[]; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; ports?: ComponentPort[] }
+/**
+ * Canonical dependency lock produced by successful live resolution and owned
+ * by `Message.artifactBundle.componentDependencyLock`. Canonical ordering is
+ * dependencies by `(packageId, version)`, components by `componentId`.
+ */
+export type ComponentDependencyLock = { schemaVersion?: number; dependencies?: ComponentDependencyLockEntry[] }
+/**
+ * One component entry inside a dependency lock.
+ */
+export type ComponentDependencyLockComponent = { componentId: string;
+/**
+ * Selected export symbol (`entrySymbol`) or `None` when the component id
+ * fallback was used.
+ */
+entrySymbol?: string | null;
+/**
+ * `sha256:<hex>` digest of the resolved package payload that produced this
+ * component's source. Independent of the package-coordinate digest so a
+ * single payload lock survives coordinate reindexing.
+ */
+payloadDigest: string;
+/**
+ * Static STEP entries set `step`; source entries set `source`. Optional
+ * only for schema-v1 source-lock backward compatibility.
+ */
+payloadKind?: ComponentPayloadKind | null;
+/**
+ * Required when `payloadKind=step`; copied from package provenance.
+ */
+geometryRepresentation?: GeometryRepresentation | null }
+/**
+ * One package dependency inside a dependency lock.
+ */
+export type ComponentDependencyLockEntry = { packageId: string; version: string;
+/**
+ * `sha256:<hex>` digest of the package payload at install time.
+ */
+packageDigest: string; components: ComponentDependencyLockComponent[] }
 export type ComponentFusionZone = { zoneId: string; surfaceRef: string; allowedOps?: OperationKind[]; maxBlendRadius?: number | null; keepoutIds?: string[] }
-export type ComponentHeader = { componentId: string; version: string; displayName: string; params?: ComponentParam[]; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; ports?: ComponentPort[] }
+export type ComponentHeader = { componentId: string; version: string; displayName: string; entrySymbol?: string | null; geometryProvenance?: GeometryProvenance | null; params?: ComponentParam[]; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; ports?: ComponentPort[] }
+/**
+ * Persisted and transient provenance for one live-referenced component.
+ * Lives outside Core IR; equivalent records appear in `ArtifactBundle` and
+ * `ModelManifest`.
+ */
+export type ComponentImportOrigin = { packageId: string; version: string; componentId: string;
+/**
+ * Model-local alias the export was bound to.
+ */
+alias: string;
+/**
+ * `sha256:<hex>` package payload digest.
+ */
+payloadDigest: string; authoredSpan?: ComponentImportSourceSpan | null; resolvedSpan?: ComponentImportSourceSpan | null;
+/**
+ * Part ids that originated from this import's expansion.
+ */
+partIds?: string[];
+/**
+ * Raw Core node ids that originated from this import's expansion.
+ */
+nodeIds?: number[] }
+/**
+ * A byte range in authored or ephemeral materialized source. Provenance uses
+ * this host-owned value rather than adding package metadata to Core IR spans.
+ */
+export type ComponentImportSourceSpan = { start: number; end: number }
 export type ComponentInterfaceValue = number | string | boolean
 export type ComponentKeepoutVolume = { keepoutId: string; label: string; kind: KeepoutVolumeKind; frame?: PortFrame | null; size?: [number, number, number] | null; radius?: number | null; height?: number | null }
 export type ComponentPackage = { schemaVersion?: number; packageId: string; version: string; displayName: string; visibility: PackageVisibility; tags?: string[]; portTypes?: PortTypeDefinition[]; mateTypes?: MateTypeDefinition[]; components?: ComponentDefinition[]; assemblies?: AssemblyDefinition[] }
 export type ComponentPackageHeader = { schemaVersion: number; packageId: string; version: string; displayName: string; visibility: PackageVisibility; tags?: string[]; portTypes?: PortTypeDefinition[]; mateTypes?: MateTypeDefinition[]; components?: ComponentHeader[]; assemblies?: AssemblyHeader[] }
 export type ComponentParam = { key: string; label: string; kind: ComponentParamKind; unit?: string | null }
 export type ComponentParamKind = "number" | "text" | "boolean" | "choice"
+export type ComponentPayloadKind = "source" | "step"
 export type ComponentPort = { portId: string; typeId: string; targetIds?: string[]; frame?: PortFrame | null; params?: Partial<{ [key in string]: ComponentInterfaceValue }>; interfaces?: string[]; compatibleWith?: string[]; allowedOps?: OperationKind[] }
-export type Config = { engines: Engine[]; selectedEngineId: string; freecadCmd?: string; cadTextFontPath?: string; freecadLibraryRoots?: string[]; assets?: Asset[]; microwave?: MicrowaveConfig | null; voice?: VoiceConfig; mcp?: McpConfig; hasSeenOnboarding?: boolean; connectionType?: string | null; defaultEngineKind?: EngineKind; defaultSourceLanguage?: SourceLanguage; defaultGeometryBackend?: GeometryBackend; maxGenerationAttempts?: number; maxVerifyAttempts?: number; 
+export type ComponentStoreGcReport = { deletedPackageDigests: string[]; retainedPackageDigests: string[] }
+export type Config = { engines: Engine[]; selectedEngineId: string; freecadCmd?: string; cadTextFontPath?: string; freecadLibraryRoots?: string[]; assets?: Asset[]; microwave?: MicrowaveConfig | null; voice?: VoiceConfig; mcp?: McpConfig; hasSeenOnboarding?: boolean; connectionType?: string | null; defaultEngineKind?: EngineKind; defaultSourceLanguage?: SourceLanguage; defaultGeometryBackend?: GeometryBackend; maxGenerationAttempts?: number; maxVerifyAttempts?: number;
 /**
  * Filesystem root for exported project folders. Blank/None uses the
  * default `<app_data>/projects`. See `filesystem-project-mirror`.
@@ -1052,8 +1349,24 @@ export type ControlView = { viewId: string; label: string; scope: ControlViewSco
 export type ControlViewScope = "global" | "part"
 export type ControlViewSection = { sectionId: string; label: string; primitiveIds?: string[]; collapsed?: boolean }
 export type ControlViewSource = "generated" | "inherited" | "llm" | "manual"
+/**
+ * Request for the copy-inline component workflow used by MCP and Workbench.
+ * This is intentionally distinct from the live-reference resolver above.
+ */
+export type CopyInlineComponentImportRequest = { packageId: string; version: string; componentId: string;
+/**
+ * Current persisted-or-draft authoring source. The inserted result remains
+ * ordinary source and carries no package dependency state.
+ */
+authoredSource: string }
+/**
+ * Result of a copy-inline component insertion. `authored_source` contains
+ * full package definitions plus one concrete `(part ...)` instance.
+ */
+export type CopyInlineComponentImportResponse = { authoredSource: string; componentSource: string; entrySymbol: string; partKey: string }
 export type CorrespondenceEdge = { edgeId: string; source: FeatureOutputRef; target: FeatureOutputRef; relation: string; sourceRef?: SourceRef | null }
 export type CorrespondenceGraph = { edges: CorrespondenceEdge[] }
+export type CreateCampaignRunInput = { title: string; definitionId: string; definitionVersion: string; currentStepId: string }
 export type DeletedMessage = { id: string; threadId: string; threadTitle: string; role: MessageRole; content: string; output?: DesignOutput | null; usage?: UsageSummary | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; structuralVerification?: StructuralVerificationResult | null; agentOrigin?: AgentOrigin | null; timestamp: number; imageData?: string | null; visualKind?: MessageVisualKind | null; attachmentImages?: string[]; deletedAt: number }
 export type DeletedThreadSummary = { id: string; title: string; summary?: string; updatedAt: number; deletedAt: number; versionCount: number }
 export type DeletedThreadsPage = { items: DeletedThreadSummary[]; nextBefore: string | null; hasMore: boolean }
@@ -1062,7 +1375,7 @@ export type DiagnosticContext = { partKey?: string | null; opName?: string | nul
 export type DiagnosticParamValue = { key: string; value: ParamValue }
 export type DisplacementSpec = { imageParam: string; projection: ProjectionType; depthMm: number; invert?: boolean }
 export type DocumentMetadata = { documentName: string; documentLabel: string; sourcePath?: string | null; objectCount?: number; warnings?: string[] }
-export type Engine = { id: string; name: string; provider: string; apiKey: string; model: string; lightModel?: string; baseUrl: string; enabled?: boolean; 
+export type Engine = { id: string; name: string; provider: string; apiKey: string; model: string; lightModel?: string; baseUrl: string; enabled?: boolean;
 /**
  * Per-model vision capability overrides. Keyed by model id. Absent key = `Auto`.
  */
@@ -1080,15 +1393,15 @@ export type ErrorFix = { hint?: string | null; suggestions: string[] }
  * answers "which wall did I hit", not "what kind of error". Only populated for
  * authoring failures (`None` on `AppError` means "not an authoring error").
  */
-export type ErrorLayer = 
+export type ErrorLayer =
 /**
  * The parenthesized `.ecky` surface (syntax, references, bad inputs).
  */
-"surface" | 
+"surface" |
 /**
  * The finite Core IR op vocabulary (op/selector not in the set, arity, types).
  */
-"coreIr" | 
+"coreIr" |
 /**
  * The active geometry backend cannot execute a lowered op.
  */
@@ -1136,7 +1449,7 @@ export type LithophanePlacementMode = "partSidePatch"
 export type LithophaneRelief = { depthMm?: number; invert?: boolean }
 export type LithophaneSide = "front" | "back" | "left" | "right" | "top" | "bottom"
 export type LoadSketchPreviewDraftRequest = { scopeId?: string | null }
-export type MacroAstSourceNode = { id: string; kind: string; label: string; 
+export type MacroAstSourceNode = { id: string; kind: string; label: string;
 /**
  * Byte offsets into the exact source string that was passed in.
  */
@@ -1146,31 +1459,31 @@ export type ManifestBounds = { xMin: number; yMin: number; zMin: number; xMax: n
 export type ManifestEnrichmentState = { status: EnrichmentStatus; proposals?: EnrichmentProposal[] }
 export type MatePortTypePair = { aTypeId: string; bTypeId: string }
 export type MateTypeDefinition = { typeId: string; displayName: string; allowedPortTypePairs?: MatePortTypePair[]; params?: ComponentParam[] }
-export type McpConfig = { 
+export type McpConfig = {
 /**
  * HTTP port for the MCP server. Defaults to 39249.
  */
-port?: number | null; 
+port?: number | null;
 /**
  * Max concurrent agent sessions. None = unlimited.
  */
-maxSessions?: number | null; 
+maxSessions?: number | null;
 /**
  * How Ecky exposes MCP: passive server-only or active server + lazy auto-agent wake.
  */
-mode?: McpMode; 
+mode?: McpMode;
 /**
  * Which auto-agent should be woken when the user queues a message in active mode.
  */
-primaryAgentId?: string | null; 
+primaryAgentId?: string | null;
 /**
  * Default request_user_prompt timeout used when the agent does not pass timeoutSecs.
  */
-promptTimeoutSecs?: number; 
+promptTimeoutSecs?: number;
 /**
  * Experimental: expose read-only Ecky Core AST tools for agent authoring.
  */
-eckyAstAuthoring?: boolean; 
+eckyAstAuthoring?: boolean;
 /**
  * External processes available to Ecky in active mode.
  */
@@ -1188,7 +1501,8 @@ export type MessageRole = "user" | "assistant"
 export type MessageStatus = "pending" | "working" | "success" | "error" | "discarded"
 export type MessageVisualKind = "conceptPreview"
 export type MicrowaveConfig = { humId?: string | null; dingId?: string | null; muted?: boolean }
-export type ModelManifest = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; sourceDigest?: string | null; coreDigest?: string | null; astSchemaVersion?: number | null; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; document: DocumentMetadata; parts?: PartBinding[]; parameterGroups?: ParameterGroup[]; controlPrimitives?: ControlPrimitive[]; controlRelations?: ControlRelation[]; controlViews?: ControlView[]; previewViews?: PreviewView[]; advisories?: Advisory[]; selectionTargets?: SelectionTarget[]; measurementAnnotations?: MeasurementAnnotation[]; taggedAnchors: Partial<{ [key in string]: TaggedAnchorBinding }>; featureGraph?: FeatureGraph | null; correspondenceGraph?: CorrespondenceGraph | null; warnings?: string[]; enrichmentState?: ManifestEnrichmentState; geometryProvenance?: GeometryProvenance | null }
+export type MissionCoreIrEvaluation = { matched: boolean }
+export type ModelManifest = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; sourceDigest?: string | null; coreDigest?: string | null; astSchemaVersion?: number | null; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; document: DocumentMetadata; parts?: PartBinding[]; parameterGroups?: ParameterGroup[]; controlPrimitives?: ControlPrimitive[]; controlRelations?: ControlRelation[]; controlViews?: ControlView[]; previewViews?: PreviewView[]; advisories?: Advisory[]; selectionTargets?: SelectionTarget[]; measurementAnnotations?: MeasurementAnnotation[]; taggedAnchors: Partial<{ [key in string]: TaggedAnchorBinding }>; featureGraph?: FeatureGraph | null; correspondenceGraph?: CorrespondenceGraph | null; warnings?: string[]; enrichmentState?: ManifestEnrichmentState; geometryProvenance?: GeometryProvenance | null; componentImportOrigins?: ComponentImportOrigin[] }
 export type ModelSourceKind = "generated" | "importedFcstd" | "importedStep" | "importedMesh"
 export type OperationKind = "place" | "mate" | "join" | "cut" | "fuse" | "mold" | "blend"
 export type OverflowMode = "contain" | "cover" | "clamp" | "bleed"
@@ -1206,6 +1520,41 @@ export type PreviewView = { viewId: string; label: string; offsets?: PreviewView
 export type PreviewViewOffset = { partId: string; dx: number; dy: number; dz: number }
 export type PrimitiveBinding = { parameterKey: string; scale?: number; offset?: number; min?: number | null; max?: number | null }
 export type ProjectEditorLink = { slug: string; folder: string; file: string }
+export type ProjectFolderApplyResponse = { stateBefore: ProjectSyncState;
+/**
+ * True when the folder was already clean and nothing was committed.
+ */
+noOp: boolean; threadId: string; messageId: string; modelId?: string | null; manifest: ProjectManifest }
+export type ProjectFolderExportResult = { slug: string; folder: string; manifest: ProjectManifest }
+export type ProjectFolderStatus = { state: ProjectSyncState; folder: string; manifest?: ProjectManifest | null; fileDigest?: string | null; threadHeadMessageId?: string | null }
+export type ProjectManifest = { schemaVersion: number; projectId: string; threadId: string; messageId: string; modelId?: string | null;
+/**
+ * Digest of the `model.ecky` bytes Ecky last wrote or applied. The only
+ * thing distinguishing "user edited the file" from "clean".
+ */
+sourceDigest: string; exportedAt: number }
+export type ProjectSyncState =
+/**
+ * No `model.ecky` or no manifest in the folder.
+ */
+"missing" |
+/**
+ * File matches the manifest digest and the thread head is still the
+ * bound message.
+ */
+"clean" |
+/**
+ * File was edited externally; thread head unchanged. Safe to apply.
+ */
+"fileChanged" |
+/**
+ * Thread gained versions past the binding; folder is stale. Re-export.
+ */
+"threadAdvanced" |
+/**
+ * Both sides moved. Applying requires an explicit force.
+ */
+"conflict"
 export type ProjectionType = "planar" | "auto" | "cylindrical" | "spherical"
 export type PromptTranscription = { text: string; provider: string; model: string }
 export type QueueAgentPromptInput = { threadId?: string | null; promptText: string; attachments?: Attachment[] }
@@ -1261,7 +1610,7 @@ export type SketchValidationSeverity = "warning" | "error"
 export type SketchView = "front" | "side" | "top" | "custom"
 export type SourceLanguage = "legacyPython" | "ecky" | "build123d"
 export type SourceRef = { sourceId?: string | null; path?: string | null; startByte?: number | null; endByte?: number | null }
-export type StructuralIssue = { code: string; message: string; 
+export type StructuralIssue = { code: string; message: string;
 /**
  * ID of the affected part, when the issue is part-specific.
  */
@@ -1271,7 +1620,7 @@ export type StructuralVerificationResult = { passed: boolean; summary: string; i
 export type TaggedAnchorBinding = { kind: TaggedAnchorKind; authoredSelector: string; target: string; targetIds: string[]; durableTargetIds: string[]; canonicalTargetIds: string[]; aliasIds: string[] }
 export type TaggedAnchorKind = "face" | "edge"
 export type Thread = { id: string; title: string; summary?: string; messages: Message[]; updatedAt: number; genieTraits?: GenieTraits | null; versionCount?: number; pendingCount?: number; queuedCount?: number; errorCount?: number; status?: ThreadStatus; finalizedAt?: number | null; pendingConfirm?: string | null }
-export type ThreadAgentState = { 
+export type ThreadAgentState = {
 /**
  * "none" | "sleeping" | "waking" | "waiting" | "active" | "disconnected" | "error"
  */
@@ -1297,15 +1646,15 @@ export type ViewportCameraState = { position: [number, number, number]; target: 
  * Per-model vision capability override, keyed by model id on `Engine::vision_overrides`.
  * `Auto` (or absence) lets name-pattern inference decide; the other two are authoritative.
  */
-export type VisionCapability = 
+export type VisionCapability =
 /**
  * Infer from model name patterns; optimistic (vision-capable) when unknown.
  */
-"auto" | 
+"auto" |
 /**
  * Force vision-capable regardless of inference.
  */
-"vision" | 
+"vision" |
 /**
  * Force text-only. Screenshots, image attachments, and drawing annotations are suppressed.
  */

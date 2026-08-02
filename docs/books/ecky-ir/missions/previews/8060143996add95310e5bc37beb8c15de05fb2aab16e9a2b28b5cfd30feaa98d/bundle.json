@@ -1,0 +1,1116 @@
+{
+  "schemaVersion": 2,
+  "modelId": "generated-direct-occt-9f0060a5b01c",
+  "sourceKind": "generated",
+  "engineKind": "ecky",
+  "sourceLanguage": "ecky",
+  "geometryBackend": "mesh",
+  "contentHash": "9f0060a5b01c37054e75523e7a1fee325ef72b3969dfcde85dbb3cfdc808545d",
+  "artifactVersion": 1,
+  "fcstdPath": "",
+  "manifestPath": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-9f0060a5b01c/manifest.json",
+  "macroPath": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-9f0060a5b01c/source.ecky",
+  "previewStlPath": "preview.stl",
+  "viewerAssets": [
+    {
+      "partId": "bracket",
+      "nodeId": "bracket",
+      "objectName": "bracket",
+      "label": "Bracket",
+      "path": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-9f0060a5b01c/preview.stl",
+      "format": "stl"
+    }
+  ],
+  "edgeTargets": [
+    {
+      "targetId": "bracket:edge:-32--18-0_-32--18-6",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-32--18-0_-32--18-6",
+      "canonicalTargetId": "bracket:edge:0:-32--18-0_-32--18-6",
+      "aliasIds": [
+        "bracket:edge:0:-32--18-0_-32--18-6",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-32--18-0_-32--18-6"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge1",
+      "editable": false,
+      "start": {
+        "x": -32.0,
+        "y": -18.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": -32.0,
+        "y": -18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:-32--18-6_-32-18-6",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-32--18-6_-32-18-6",
+      "canonicalTargetId": "bracket:edge:1:-32--18-6_-32-18-6",
+      "aliasIds": [
+        "bracket:edge:1:-32--18-6_-32-18-6",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-32--18-6_-32-18-6"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge2",
+      "editable": false,
+      "start": {
+        "x": -32.0,
+        "y": -18.0,
+        "z": 6.0
+      },
+      "end": {
+        "x": -32.0,
+        "y": 18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:-32-18-0_-32-18-6",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-32-18-0_-32-18-6",
+      "canonicalTargetId": "bracket:edge:2:-32-18-0_-32-18-6",
+      "aliasIds": [
+        "bracket:edge:2:-32-18-0_-32-18-6",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-32-18-0_-32-18-6"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge3",
+      "editable": false,
+      "start": {
+        "x": -32.0,
+        "y": 18.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": -32.0,
+        "y": 18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:-32--18-0_-32-18-0",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-32--18-0_-32-18-0",
+      "canonicalTargetId": "bracket:edge:3:-32--18-0_-32-18-0",
+      "aliasIds": [
+        "bracket:edge:3:-32--18-0_-32-18-0",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-32--18-0_-32-18-0"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge4",
+      "editable": false,
+      "start": {
+        "x": -32.0,
+        "y": -18.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": -32.0,
+        "y": 18.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:-32--18-0_32--18-0",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-32--18-0_32--18-0",
+      "canonicalTargetId": "bracket:edge:4:-32--18-0_32--18-0",
+      "aliasIds": [
+        "bracket:edge:4:-32--18-0_32--18-0",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-32--18-0_32--18-0"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge5",
+      "editable": false,
+      "start": {
+        "x": -32.0,
+        "y": -18.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": -18.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:32--18-0_32--18-6",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:32--18-0_32--18-6",
+      "canonicalTargetId": "bracket:edge:5:32--18-0_32--18-6",
+      "aliasIds": [
+        "bracket:edge:5:32--18-0_32--18-6",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:32--18-0_32--18-6"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge6",
+      "editable": false,
+      "start": {
+        "x": 32.0,
+        "y": -18.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": -18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:-32--18-6_32--18-6",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-32--18-6_32--18-6",
+      "canonicalTargetId": "bracket:edge:6:-32--18-6_32--18-6",
+      "aliasIds": [
+        "bracket:edge:6:-32--18-6_32--18-6",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-32--18-6_32--18-6"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge7",
+      "editable": false,
+      "start": {
+        "x": -32.0,
+        "y": -18.0,
+        "z": 6.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": -18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:-26-18-6_-32-18-6",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-18-6_-32-18-6",
+      "canonicalTargetId": "bracket:edge:7:-26-18-6_-32-18-6",
+      "aliasIds": [
+        "bracket:edge:7:-26-18-6_-32-18-6",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-18-6_-32-18-6"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge8",
+      "editable": false,
+      "start": {
+        "x": -32.0,
+        "y": 18.0,
+        "z": 6.0
+      },
+      "end": {
+        "x": -26.0,
+        "y": 18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:-26-12-6_-26-18-6",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-12-6_-26-18-6",
+      "canonicalTargetId": "bracket:edge:8:-26-12-6_-26-18-6",
+      "aliasIds": [
+        "bracket:edge:8:-26-12-6_-26-18-6",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-12-6_-26-18-6"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge9",
+      "editable": false,
+      "start": {
+        "x": -26.0,
+        "y": 12.0,
+        "z": 6.0
+      },
+      "end": {
+        "x": -26.0,
+        "y": 18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:-26-12-6_26-12-6",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-12-6_26-12-6",
+      "canonicalTargetId": "bracket:edge:9:-26-12-6_26-12-6",
+      "aliasIds": [
+        "bracket:edge:9:-26-12-6_26-12-6",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-12-6_26-12-6"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge10",
+      "editable": false,
+      "start": {
+        "x": 26.0,
+        "y": 12.0,
+        "z": 6.0
+      },
+      "end": {
+        "x": -26.0,
+        "y": 12.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:26-12-6_26-18-6",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:26-12-6_26-18-6",
+      "canonicalTargetId": "bracket:edge:10:26-12-6_26-18-6",
+      "aliasIds": [
+        "bracket:edge:10:26-12-6_26-18-6",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:26-12-6_26-18-6"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge11",
+      "editable": false,
+      "start": {
+        "x": 26.0,
+        "y": 12.0,
+        "z": 6.0
+      },
+      "end": {
+        "x": 26.0,
+        "y": 18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:26-18-6_32-18-6",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:26-18-6_32-18-6",
+      "canonicalTargetId": "bracket:edge:11:26-18-6_32-18-6",
+      "aliasIds": [
+        "bracket:edge:11:26-18-6_32-18-6",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:26-18-6_32-18-6"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge12",
+      "editable": false,
+      "start": {
+        "x": 26.0,
+        "y": 18.0,
+        "z": 6.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": 18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:32--18-6_32-18-6",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:32--18-6_32-18-6",
+      "canonicalTargetId": "bracket:edge:12:32--18-6_32-18-6",
+      "aliasIds": [
+        "bracket:edge:12:32--18-6_32-18-6",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:32--18-6_32-18-6"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge13",
+      "editable": false,
+      "start": {
+        "x": 32.0,
+        "y": -18.0,
+        "z": 6.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": 18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:-26-18-0_-32-18-0",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-18-0_-32-18-0",
+      "canonicalTargetId": "bracket:edge:13:-26-18-0_-32-18-0",
+      "aliasIds": [
+        "bracket:edge:13:-26-18-0_-32-18-0",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-18-0_-32-18-0"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge14",
+      "editable": false,
+      "start": {
+        "x": -32.0,
+        "y": 18.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": -26.0,
+        "y": 18.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:-26-18-0_-26-18-6",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-18-0_-26-18-6",
+      "canonicalTargetId": "bracket:edge:14:-26-18-0_-26-18-6",
+      "aliasIds": [
+        "bracket:edge:14:-26-18-0_-26-18-6",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-18-0_-26-18-6"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge15",
+      "editable": false,
+      "start": {
+        "x": -26.0,
+        "y": 18.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": -26.0,
+        "y": 18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:-26-12-0_-26-18-0",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-12-0_-26-18-0",
+      "canonicalTargetId": "bracket:edge:15:-26-12-0_-26-18-0",
+      "aliasIds": [
+        "bracket:edge:15:-26-12-0_-26-18-0",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-12-0_-26-18-0"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge16",
+      "editable": false,
+      "start": {
+        "x": -26.0,
+        "y": 12.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": -26.0,
+        "y": 18.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:-26-12-0_26-12-0",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-12-0_26-12-0",
+      "canonicalTargetId": "bracket:edge:16:-26-12-0_26-12-0",
+      "aliasIds": [
+        "bracket:edge:16:-26-12-0_26-12-0",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-12-0_26-12-0"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge17",
+      "editable": false,
+      "start": {
+        "x": -26.0,
+        "y": 12.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 26.0,
+        "y": 12.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:26-12-0_26-18-0",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:26-12-0_26-18-0",
+      "canonicalTargetId": "bracket:edge:17:26-12-0_26-18-0",
+      "aliasIds": [
+        "bracket:edge:17:26-12-0_26-18-0",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:26-12-0_26-18-0"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge18",
+      "editable": false,
+      "start": {
+        "x": 26.0,
+        "y": 12.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 26.0,
+        "y": 18.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:26-18-0_32-18-0",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:26-18-0_32-18-0",
+      "canonicalTargetId": "bracket:edge:18:26-18-0_32-18-0",
+      "aliasIds": [
+        "bracket:edge:18:26-18-0_32-18-0",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:26-18-0_32-18-0"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge19",
+      "editable": false,
+      "start": {
+        "x": 26.0,
+        "y": 18.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": 18.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:32--18-0_32-18-0",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:32--18-0_32-18-0",
+      "canonicalTargetId": "bracket:edge:19:32--18-0_32-18-0",
+      "aliasIds": [
+        "bracket:edge:19:32--18-0_32-18-0",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:32--18-0_32-18-0"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge20",
+      "editable": false,
+      "start": {
+        "x": 32.0,
+        "y": -18.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": 18.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:32-18-0_32-18-6",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:32-18-0_32-18-6",
+      "canonicalTargetId": "bracket:edge:20:32-18-0_32-18-6",
+      "aliasIds": [
+        "bracket:edge:20:32-18-0_32-18-6",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:32-18-0_32-18-6"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge21",
+      "editable": false,
+      "start": {
+        "x": 32.0,
+        "y": 18.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 32.0,
+        "y": 18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:-26-12-40_-26-12-6",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-12-40_-26-12-6",
+      "canonicalTargetId": "bracket:edge:21:-26-12-40_-26-12-6",
+      "aliasIds": [
+        "bracket:edge:21:-26-12-40_-26-12-6",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-12-40_-26-12-6"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge22",
+      "editable": false,
+      "start": {
+        "x": -26.0,
+        "y": 12.0,
+        "z": 6.0
+      },
+      "end": {
+        "x": -26.0,
+        "y": 12.0,
+        "z": 40.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:-26-12-40_-26-18-40",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-12-40_-26-18-40",
+      "canonicalTargetId": "bracket:edge:22:-26-12-40_-26-18-40",
+      "aliasIds": [
+        "bracket:edge:22:-26-12-40_-26-18-40",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-12-40_-26-18-40"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge23",
+      "editable": false,
+      "start": {
+        "x": -26.0,
+        "y": 12.0,
+        "z": 40.0
+      },
+      "end": {
+        "x": -26.0,
+        "y": 18.0,
+        "z": 40.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:-26-18-40_-26-18-6",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-18-40_-26-18-6",
+      "canonicalTargetId": "bracket:edge:23:-26-18-40_-26-18-6",
+      "aliasIds": [
+        "bracket:edge:23:-26-18-40_-26-18-6",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-18-40_-26-18-6"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge24",
+      "editable": false,
+      "start": {
+        "x": -26.0,
+        "y": 18.0,
+        "z": 6.0
+      },
+      "end": {
+        "x": -26.0,
+        "y": 18.0,
+        "z": 40.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:26-12-40_26-12-6",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:26-12-40_26-12-6",
+      "canonicalTargetId": "bracket:edge:24:26-12-40_26-12-6",
+      "aliasIds": [
+        "bracket:edge:24:26-12-40_26-12-6",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:26-12-40_26-12-6"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge25",
+      "editable": false,
+      "start": {
+        "x": 26.0,
+        "y": 12.0,
+        "z": 6.0
+      },
+      "end": {
+        "x": 26.0,
+        "y": 12.0,
+        "z": 40.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:-26-12-40_26-12-40",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-12-40_26-12-40",
+      "canonicalTargetId": "bracket:edge:25:-26-12-40_26-12-40",
+      "aliasIds": [
+        "bracket:edge:25:-26-12-40_26-12-40",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-12-40_26-12-40"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge26",
+      "editable": false,
+      "start": {
+        "x": -26.0,
+        "y": 12.0,
+        "z": 40.0
+      },
+      "end": {
+        "x": 26.0,
+        "y": 12.0,
+        "z": 40.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:26-12-40_26-18-40",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:26-12-40_26-18-40",
+      "canonicalTargetId": "bracket:edge:26:26-12-40_26-18-40",
+      "aliasIds": [
+        "bracket:edge:26:26-12-40_26-18-40",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:26-12-40_26-18-40"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge27",
+      "editable": false,
+      "start": {
+        "x": 26.0,
+        "y": 12.0,
+        "z": 40.0
+      },
+      "end": {
+        "x": 26.0,
+        "y": 18.0,
+        "z": 40.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:26-18-40_26-18-6",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:26-18-40_26-18-6",
+      "canonicalTargetId": "bracket:edge:27:26-18-40_26-18-6",
+      "aliasIds": [
+        "bracket:edge:27:26-18-40_26-18-6",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:26-18-40_26-18-6"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge28",
+      "editable": false,
+      "start": {
+        "x": 26.0,
+        "y": 18.0,
+        "z": 6.0
+      },
+      "end": {
+        "x": 26.0,
+        "y": 18.0,
+        "z": 40.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:26-18-0_26-18-6",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:26-18-0_26-18-6",
+      "canonicalTargetId": "bracket:edge:28:26-18-0_26-18-6",
+      "aliasIds": [
+        "bracket:edge:28:26-18-0_26-18-6",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:26-18-0_26-18-6"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge29",
+      "editable": false,
+      "start": {
+        "x": 26.0,
+        "y": 18.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 26.0,
+        "y": 18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:-26-18-0_26-18-0",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-18-0_26-18-0",
+      "canonicalTargetId": "bracket:edge:29:-26-18-0_26-18-0",
+      "aliasIds": [
+        "bracket:edge:29:-26-18-0_26-18-0",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-18-0_26-18-0"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge30",
+      "editable": false,
+      "start": {
+        "x": -26.0,
+        "y": 18.0,
+        "z": 0.0
+      },
+      "end": {
+        "x": 26.0,
+        "y": 18.0,
+        "z": 0.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:-26-18-6_26-18-6",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-18-6_26-18-6",
+      "canonicalTargetId": "bracket:edge:30:-26-18-6_26-18-6",
+      "aliasIds": [
+        "bracket:edge:30:-26-18-6_26-18-6",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-18-6_26-18-6"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge31",
+      "editable": false,
+      "start": {
+        "x": -26.0,
+        "y": 18.0,
+        "z": 6.0
+      },
+      "end": {
+        "x": 26.0,
+        "y": 18.0,
+        "z": 6.0
+      }
+    },
+    {
+      "targetId": "bracket:edge:-26-18-40_26-18-40",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-18-40_26-18-40",
+      "canonicalTargetId": "bracket:edge:31:-26-18-40_26-18-40",
+      "aliasIds": [
+        "bracket:edge:31:-26-18-40_26-18-40",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:edge:-26-18-40_26-18-40"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Edge32",
+      "editable": false,
+      "start": {
+        "x": -26.0,
+        "y": 18.0,
+        "z": 40.0
+      },
+      "end": {
+        "x": 26.0,
+        "y": 18.0,
+        "z": 40.0
+      }
+    }
+  ],
+  "faceTargets": [
+    {
+      "targetId": "bracket:face:-32-0-3:216",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:-32-0-3:216",
+      "canonicalTargetId": "bracket:face:0:-32-0-3:216",
+      "aliasIds": [
+        "bracket:face:0:-32-0-3:216",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:-32-0-3:216"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Face1",
+      "editable": false,
+      "center": {
+        "x": -32.0,
+        "y": 5.181040781584063e-16,
+        "z": 3.0
+      },
+      "normal": [
+        1.0,
+        0.0,
+        -0.0
+      ],
+      "area": 216.0
+    },
+    {
+      "targetId": "bracket:face:0--18-3:384",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:0--18-3:384",
+      "canonicalTargetId": "bracket:face:1:0--18-3:384",
+      "aliasIds": [
+        "bracket:face:1:0--18-3:384",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:0--18-3:384"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Face2",
+      "editable": false,
+      "center": {
+        "x": 2.96059473233375e-16,
+        "y": -18.0,
+        "z": 3.0
+      },
+      "normal": [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      "area": 384.0
+    },
+    {
+      "targetId": "bracket:face:0--2.349-6:1992",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:0--2.349-6:1992",
+      "canonicalTargetId": "bracket:face:2:0--2.349-6:1992",
+      "aliasIds": [
+        "bracket:face:2:0--2.349-6:1992",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:0--2.349-6:1992"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Face3",
+      "editable": false,
+      "center": {
+        "x": 7.847359531487049e-16,
+        "y": -2.349397590361445,
+        "z": 6.0
+      },
+      "normal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "area": 1992.0
+    },
+    {
+      "targetId": "bracket:face:-29-18-3:36",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:-29-18-3:36",
+      "canonicalTargetId": "bracket:face:3:-29-18-3:36",
+      "aliasIds": [
+        "bracket:face:3:-29-18-3:36",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:-29-18-3:36"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Face4",
+      "editable": false,
+      "center": {
+        "x": -29.0,
+        "y": 18.0,
+        "z": 3.0
+      },
+      "normal": [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      "area": 36.0
+    },
+    {
+      "targetId": "bracket:face:0--2.349-0:1992",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:0--2.349-0:1992",
+      "canonicalTargetId": "bracket:face:4:0--2.349-0:1992",
+      "aliasIds": [
+        "bracket:face:4:0--2.349-0:1992",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:0--2.349-0:1992"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Face5",
+      "editable": false,
+      "center": {
+        "x": 7.847359531487049e-16,
+        "y": -2.349397590361445,
+        "z": 0.0
+      },
+      "normal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "area": 1992.0
+    },
+    {
+      "targetId": "bracket:face:32-0-3:216",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:32-0-3:216",
+      "canonicalTargetId": "bracket:face:5:32-0-3:216",
+      "aliasIds": [
+        "bracket:face:5:32-0-3:216",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:32-0-3:216"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Face6",
+      "editable": false,
+      "center": {
+        "x": 32.0,
+        "y": 5.181040781584063e-16,
+        "z": 3.0
+      },
+      "normal": [
+        1.0,
+        0.0,
+        -0.0
+      ],
+      "area": 216.0
+    },
+    {
+      "targetId": "bracket:face:-26-15-23:204",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:-26-15-23:204",
+      "canonicalTargetId": "bracket:face:6:-26-15-23:204",
+      "aliasIds": [
+        "bracket:face:6:-26-15-23:204",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:-26-15-23:204"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Face7",
+      "editable": false,
+      "center": {
+        "x": -26.0,
+        "y": 15.0,
+        "z": 23.0
+      },
+      "normal": [
+        1.0,
+        0.0,
+        -0.0
+      ],
+      "area": 204.0
+    },
+    {
+      "targetId": "bracket:face:0-12-23:1768",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:0-12-23:1768",
+      "canonicalTargetId": "bracket:face:7:0-12-23:1768",
+      "aliasIds": [
+        "bracket:face:7:0-12-23:1768",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:0-12-23:1768"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Face8",
+      "editable": false,
+      "center": {
+        "x": 2.0898315757650008e-16,
+        "y": 12.0,
+        "z": 23.0
+      },
+      "normal": [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      "area": 1768.0
+    },
+    {
+      "targetId": "bracket:face:26-15-23:204",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:26-15-23:204",
+      "canonicalTargetId": "bracket:face:8:26-15-23:204",
+      "aliasIds": [
+        "bracket:face:8:26-15-23:204",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:26-15-23:204"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Face9",
+      "editable": false,
+      "center": {
+        "x": 26.0,
+        "y": 15.0,
+        "z": 23.0
+      },
+      "normal": [
+        1.0,
+        0.0,
+        -0.0
+      ],
+      "area": 204.0
+    },
+    {
+      "targetId": "bracket:face:29-18-3:36",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:29-18-3:36",
+      "canonicalTargetId": "bracket:face:9:29-18-3:36",
+      "aliasIds": [
+        "bracket:face:9:29-18-3:36",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:29-18-3:36"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Face10",
+      "editable": false,
+      "center": {
+        "x": 29.0,
+        "y": 18.0,
+        "z": 3.0
+      },
+      "normal": [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      "area": 36.0
+    },
+    {
+      "targetId": "bracket:face:0-18-3:312",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:0-18-3:312",
+      "canonicalTargetId": "bracket:face:10:0-18-3:312",
+      "aliasIds": [
+        "bracket:face:10:0-18-3:312",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:0-18-3:312"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Face11",
+      "editable": false,
+      "center": {
+        "x": -1.1842378929335002e-15,
+        "y": 18.0,
+        "z": 3.0
+      },
+      "normal": [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      "area": 312.0
+    },
+    {
+      "targetId": "bracket:face:0-15-0:312",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:0-15-0:312",
+      "canonicalTargetId": "bracket:face:11:0-15-0:312",
+      "aliasIds": [
+        "bracket:face:11:0-15-0:312",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:0-15-0:312"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Face12",
+      "editable": false,
+      "center": {
+        "x": 1.249000902703301e-16,
+        "y": 14.999999999999996,
+        "z": 0.0
+      },
+      "normal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "area": 312.0
+    },
+    {
+      "targetId": "bracket:face:0-15-40:312",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:0-15-40:312",
+      "canonicalTargetId": "bracket:face:12:0-15-40:312",
+      "aliasIds": [
+        "bracket:face:12:0-15-40:312",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:0-15-40:312"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Face13",
+      "editable": false,
+      "center": {
+        "x": 1.249000902703301e-16,
+        "y": 15.0,
+        "z": 40.0
+      },
+      "normal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "area": 312.0
+    },
+    {
+      "targetId": "bracket:face:0-18-23:1768",
+      "durableTargetId": "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:0-18-23:1768",
+      "canonicalTargetId": "bracket:face:13:0-18-23:1768",
+      "aliasIds": [
+        "bracket:face:13:0-18-23:1768",
+        "bracket:stable-node-key:sha256:1f97eb36037b1a8432f9f0b04493070531f7cbe2068fae73466c9b77975bd275:face:0-18-23:1768"
+      ],
+      "partId": "bracket",
+      "viewerNodeId": "bracket",
+      "label": "Bracket.Face14",
+      "editable": false,
+      "center": {
+        "x": 2.0898315757650008e-16,
+        "y": 18.0,
+        "z": 23.0
+      },
+      "normal": [
+        -0.0,
+        1.0,
+        0.0
+      ],
+      "area": 1768.0
+    }
+  ],
+  "calloutAnchors": [],
+  "measurementGuides": [],
+  "exportArtifacts": [
+    {
+      "label": "STEP",
+      "format": "step",
+      "path": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-9f0060a5b01c/model.step",
+      "role": "primary",
+      "geometryProvenance": {
+        "representation": "analyticBrep"
+      }
+    }
+  ],
+  "geometryProvenance": {
+    "representation": "analyticBrep"
+  }
+}

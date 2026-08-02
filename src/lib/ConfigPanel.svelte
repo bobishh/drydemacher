@@ -2,8 +2,10 @@
   import { onMount, onDestroy } from 'svelte';
   import Dropdown from './Dropdown.svelte';
   import VertexGenie from './VertexGenie.svelte';
+  import SourceRootField from './components/SourceRootField.svelte';
   import { open, save } from '@tauri-apps/plugin-dialog';
   import { derivePrimaryAgentId, normalizeMcpMode } from './agents/state';
+  import { modelSourceFingerprint } from './modelFetchPolicy';
   import { resolveEngineCapabilitySummary, resolveEngineVision } from './modelRuntime/modelCapabilities';
   import type { VisionCapability } from './tauri/contracts';
   import {
@@ -258,6 +260,7 @@
   ];
 
   const selectedEngine = $derived(config.engines.find(e => e.id === config.selectedEngineId));
+  let modelSourceFingerprints = $state<Record<string, string>>({});
   const selectedEngineCapabilities = $derived.by(() =>
     resolveEngineCapabilitySummary(selectedEngine),
   );
@@ -268,8 +271,6 @@
     return engine.visionOverrides?.[model] ?? null;
   });
   const freecadCapability = $derived(runtimeCapabilities?.freecad ?? null);
-  const build123dCapability = $derived(runtimeCapabilities?.build123d ?? null);
-  const directOcctCapability = $derived(runtimeCapabilities?.directOcct ?? null);
   const selectedEnginePromptCarrier = $derived.by(() => {
     switch (selectedEngine?.provider) {
       case 'gemini':
@@ -288,25 +289,14 @@
     config.defaultEngineKind = 'freecad';
   }
 
-  function setDefaultBuild123dContext() {
-    if (!build123dCapability?.available) return;
-    config.defaultSourceLanguage = 'build123d';
-    config.defaultGeometryBackend = 'build123d';
-    config.defaultEngineKind = 'build123d';
-  }
-
   function setDefaultEckyIrContext() {
     config.defaultSourceLanguage = 'ecky';
-    if (config.defaultGeometryBackend === 'build123d' && !build123dCapability?.available) {
-      config.defaultGeometryBackend = freecadCapability?.available ? 'freecad' : 'mesh';
-    } else if (config.defaultGeometryBackend === 'freecad' && !freecadCapability?.available) {
-      config.defaultGeometryBackend = build123dCapability?.available ? 'build123d' : 'mesh';
-    } else if (!config.defaultGeometryBackend) {
-      config.defaultGeometryBackend = build123dCapability?.available
-        ? 'build123d'
-        : freecadCapability?.available
-          ? 'freecad'
-          : 'mesh';
+    if (
+      config.defaultGeometryBackend === 'build123d' ||
+      (config.defaultGeometryBackend === 'freecad' && !freecadCapability?.available) ||
+      !config.defaultGeometryBackend
+    ) {
+      config.defaultGeometryBackend = 'mesh';
     }
     config.defaultEngineKind = 'ecky';
   }
@@ -656,7 +646,23 @@
     };
     config.engines = [...config.engines, newEngine];
     selectEngine(id);
+    modelSourceFingerprints = {
+      ...modelSourceFingerprints,
+      [id]: modelSourceFingerprint(newEngine),
+    };
     setConnectionType('api_key');
+    activeSection = 'engines';
+  }
+
+  function openEngine(id: string) {
+    selectEngine(id);
+    const engine = config.engines.find((candidate) => candidate.id === id);
+    if (engine) {
+      modelSourceFingerprints = {
+        ...modelSourceFingerprints,
+        [id]: modelSourceFingerprint(engine),
+      };
+    }
     activeSection = 'engines';
   }
 
@@ -867,8 +873,14 @@
     }
   }
 
-  async function refreshModels() {
-    if (!onfetch) return;
+  async function refreshModels(force = false) {
+    if (!onfetch || !selectedEngine) return;
+    const fingerprint = modelSourceFingerprint(selectedEngine);
+    if (!force && modelSourceFingerprints[selectedEngine.id] === fingerprint) return;
+    modelSourceFingerprints = {
+      ...modelSourceFingerprints,
+      [selectedEngine.id]: fingerprint,
+    };
     try {
       await onfetch();
     } catch (e: unknown) {
@@ -935,7 +947,6 @@
         {#if runtimeCapabilities}
           <div class="field">
             <div class="field-title">RUNTIME STATUS</div>
-            <div class="field-help">BUILD123D: {runtimeCapabilities.build123d.detail}</div>
             <div class="field-help">FREECAD: {runtimeCapabilities.freecad.detail}</div>
             <div class="field-help">NATIVE: {runtimeCapabilities.mesh.detail}</div>
           </div>
@@ -1007,6 +1018,8 @@
             VLM screenshot verification rounds after render. 0 = disabled; structural verification still runs. Default: 2.
           </div>
         </div>
+
+        <SourceRootField bind:projectsRoot={config.projectsRoot} {onsave} />
 
         <div class="field">
           <div class="field-title">AUDIO</div>
@@ -1179,12 +1192,6 @@
               title={runtimeCapabilities && !runtimeCapabilities.freecad.available ? runtimeCapabilities.freecad.detail : undefined}
             >FREECAD PYTHON</button>
             <button
-              class="conn-type-btn {config.defaultSourceLanguage === 'build123d' ? 'active' : ''}"
-              onclick={setDefaultBuild123dContext}
-              disabled={runtimeCapabilities ? !runtimeCapabilities.build123d.available : false}
-              title={runtimeCapabilities && !runtimeCapabilities.build123d.available ? runtimeCapabilities.build123d.detail : undefined}
-            >BUILD123D PYTHON</button>
-            <button
               class="conn-type-btn {config.defaultSourceLanguage === 'ecky' ? 'active' : ''}"
               onclick={setDefaultEckyIrContext}
             >ECKY</button>
@@ -1199,27 +1206,10 @@
                 title={runtimeCapabilities && !runtimeCapabilities.freecad.available ? runtimeCapabilities.freecad.detail : undefined}
               >FREECAD</button>
               <button
-                class="conn-type-btn {config.defaultGeometryBackend === 'build123d' ? 'active' : ''}"
-                onclick={() => { config.defaultGeometryBackend = 'build123d'; }}
-                disabled={runtimeCapabilities ? !runtimeCapabilities.build123d.available : false}
-                title={runtimeCapabilities && !runtimeCapabilities.build123d.available ? runtimeCapabilities.build123d.detail : undefined}
-              >BUILD123D</button>
-              <button
                 class="conn-type-btn {config.defaultGeometryBackend === 'mesh' ? 'active' : ''}"
                 onclick={() => { config.defaultGeometryBackend = 'mesh'; }}
               >NATIVE</button>
             </div>
-            {#if directOcctCapability}
-              <div class="direct-occt-fastpath" aria-label="Direct OCCT STEP fast path">
-                <div class="direct-occt-fastpath__head">
-                  <span>DIRECT OCCT STEP FAST PATH</span>
-                  <strong class:direct-occt-fastpath__state--ready={directOcctCapability.available}>
-                    {directOcctCapability.available ? 'READY' : 'BLOCKED'}
-                  </strong>
-                </div>
-                <div class="direct-occt-fastpath__detail">{directOcctCapability.detail}</div>
-              </div>
-            {/if}
           {/if}
           <div class="field-help">
             New generated threads inherit this source and backend by default. Imported FCStd threads stay FreeCAD Python.
@@ -1242,7 +1232,7 @@
                 {#each config.engines as engine}
                   <button
                     class="engine-card {config.selectedEngineId === engine.id ? 'selected' : ''}"
-                    onclick={() => { selectEngine(engine.id); activeSection = 'engines'; }}
+                    onclick={() => openEngine(engine.id)}
                   >
                     <span class="engine-card__name">{engine.name || '(unnamed)'}</span>
                     <span class="engine-card__meta">
@@ -1536,7 +1526,7 @@
               class="input-mono" 
               placeholder="Enter API key..." 
               bind:value={selectedEngine.apiKey}
-              onblur={refreshModels}
+              onblur={() => refreshModels()}
             />
           </div>
 
@@ -1544,7 +1534,7 @@
             <div class="field flex-1">
               <div class="prompt-header">
                 <label for="e-model">RENDER AND HEAVY REASONING</label>
-                <button class="btn btn-xs btn-ghost" onclick={refreshModels} disabled={isLoadingModels}>
+                <button class="btn btn-xs btn-ghost" onclick={() => refreshModels(true)} disabled={isLoadingModels}>
                   ↻ FETCH MODELS
                 </button>
               </div>
@@ -1588,7 +1578,7 @@
               class="input-mono" 
               placeholder="Default" 
               bind:value={selectedEngine.baseUrl}
-              onblur={refreshModels}
+              onblur={() => refreshModels()}
             />
           </div>
 
@@ -1928,42 +1918,6 @@
   .system-prompt-preview code {
     font: inherit;
     color: inherit;
-  }
-
-  .direct-occt-fastpath {
-    margin-top: 8px;
-    padding: 9px 10px;
-    border: 1px solid var(--bg-300);
-    background: var(--bg-200);
-    overflow: hidden;
-  }
-
-  .direct-occt-fastpath__head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    color: var(--text-dim);
-    font-size: 0.62rem;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-  }
-
-  .direct-occt-fastpath__head strong {
-    color: var(--red);
-    white-space: nowrap;
-  }
-
-  .direct-occt-fastpath__head strong.direct-occt-fastpath__state--ready {
-    color: var(--secondary);
-  }
-
-  .direct-occt-fastpath__detail {
-    margin-top: 5px;
-    color: var(--text-dim);
-    font-size: 0.62rem;
-    line-height: 1.35;
-    overflow-wrap: anywhere;
   }
 
   .flex-1 { flex: 1; }

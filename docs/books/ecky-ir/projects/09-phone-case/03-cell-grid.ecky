@@ -1,0 +1,17 @@
+(model
+  (params
+    (number grid_width 62 :label "cell grid width" :min 40 :max 80 :step 1)
+    (number grid_length 132 :label "cell grid length" :min 80 :max 160 :step 1)
+    (number cell_pitch 12 :label "cell pitch" :min 8 :max 18 :step 1)
+    (number strut_width 1.6 :label "cell strut width" :min 1 :max 3 :step 0.1)
+    (number rear_thickness 1.7 :label "rear strut thickness" :min 1 :max 3 :step 0.1))
+  (part procedural_cell_grid
+    (build
+      (shape grid_cols 5)
+      (shape grid_rows 10)
+      (shape cell_struts
+        (repeat-union row grid_rows
+          (repeat-union col grid_cols
+            (translate (- (* col cell_pitch) 24) (- (* row cell_pitch) 54) 0
+              (extrude (slot-center-point 0 0 8 0 strut_width) rear_thickness)))))
+      (result cell_struts))))

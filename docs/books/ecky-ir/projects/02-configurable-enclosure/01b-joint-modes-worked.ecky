@@ -1,0 +1,21 @@
+(model
+  (params
+    (number fit_clearance 0.3 :label "joint clearance" :min 0.15 :max 0.6 :step 0.05)
+    (select joint_type "snap" :label "joint type" :options (("Snap" "snap") ("Bolted" "bolted"))))
+  ;; `if` returns complete solids. Do not pass a named build shape through it.
+  (part male_joint
+    (if (= joint_type "snap")
+      (box 8 20 4)
+      (difference
+        (cylinder 5 6)
+        (translate 0 0 -0.5 (cylinder 2 7)))))
+  (part female_joint
+    (if (= joint_type "snap")
+      (difference
+        (translate 20 0 0 (box 14 24 8))
+        (translate 20 0 0
+          (box (+ 8 (* 2 fit_clearance)) (+ 20 (* 2 fit_clearance)) 5)))
+      (difference
+        (translate 20 0 0 (box 14 24 8))
+        (translate 20 0 -0.5
+          (cylinder (+ 2 fit_clearance) 7))))))

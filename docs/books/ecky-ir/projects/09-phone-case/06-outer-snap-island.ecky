@@ -1,0 +1,21 @@
+(model
+  (params
+    (number camera_pad_radius 11 :label "camera pad radius" :min 8 :max 15 :step 0.1)
+    (number camera_opening_radius 8.3 :label "camera opening radius" :min 5 :max 12 :step 0.1)
+    (number snap_neck_radius 9.1 :label "snap neck radius" :min 6 :max 13 :step 0.1)
+    (number snap_interference 0.24 :label "snap radial interference" :min 0.05 :max 0.5 :step 0.01)
+    (number skirt_length 1.15 :label "snap skirt length" :min 0.6 :max 2 :step 0.05)
+    (number relief_slot_width 0.7 :label "relief slot width" :min 0.4 :max 1.4 :step 0.05)
+    (number relief_slot_count 3 :label "relief slot count" :min 3 :max 6 :step 1))
+  (part outer_petg_snap_island
+    (build
+      (shape snap_bead_radius (+ snap_neck_radius snap_interference))
+      (shape outer_plate (cylinder camera_pad_radius 1.2))
+      (shape snap_skirt (translate 0 0 1.2 (cylinder snap_neck_radius skirt_length)))
+      ;; STARTER: subtract camera_opening and generated relief_slots from this snap body.
+      (shape camera_opening (translate 0 0 -0.1 (cylinder camera_opening_radius (+ skirt_length 1.5))))
+      (shape relief_slots
+        (repeat-union slot_index relief_slot_count
+          (rotate 0 0 (* slot_index (/ 360 relief_slot_count))
+            (translate snap_neck_radius 0 1.1 (box 4 relief_slot_width (+ skirt_length 0.2))))))
+      (result (difference (union outer_plate snap_skirt) camera_opening relief_slots)))))

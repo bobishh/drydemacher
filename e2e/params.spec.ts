@@ -1,4 +1,16 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
+
+async function openSeededMacroMap(page: Page) {
+  await page.getByRole('button', { name: 'Dialogue', exact: true }).click();
+  await page.fill('textarea.prompt-input', 'make a seeded macro');
+  await page
+    .locator('textarea.prompt-input')
+    .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+  await page.getByRole('button', { name: 'Parameters', exact: true }).click();
+  await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
+  await page.getByRole('button', { name: 'new params', exact: true }).click();
+  await expect(page.locator('.macro-ast-map-shell')).toBeVisible();
+}
 
 test.describe('ParamPanel Persistence', () => {
   test.beforeEach(async ({ page }) => {
@@ -790,16 +802,7 @@ endsolid mock
   test('Given seeded macro When New Params opens Then syntax markers reflect block types', async ({
     page,
   }) => {
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
-    await page.fill('textarea.prompt-input', 'make a seeded macro');
-    await page
-      .locator('textarea.prompt-input')
-      .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
-
-    await page.getByRole('button', { name: 'PARAMS' }).click();
-    await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
-    await page.getByRole('button', { name: 'new params', exact: true }).click();
-    await expect(page.locator('.macro-ast-map-shell')).toBeVisible();
+    await openSeededMacroMap(page);
 
     await expect(page.locator('.macro-ast-node-root .macro-ast-node__shape')).toBeVisible();
     await expect.soft(page.locator('.macro-ast-node-root .macro-ast-syntax-badge')).toContainText('MODEL');
@@ -812,16 +815,7 @@ endsolid mock
   test('Given seeded macro When New Params opens Then connector layer and overlay anchors exist', async ({
     page,
   }) => {
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
-    await page.fill('textarea.prompt-input', 'make a seeded macro');
-    await page
-      .locator('textarea.prompt-input')
-      .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
-
-    await page.getByRole('button', { name: 'PARAMS' }).click();
-    await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
-    await page.getByRole('button', { name: 'new params', exact: true }).click();
-    await expect(page.locator('.macro-ast-map-shell')).toBeVisible();
+    await openSeededMacroMap(page);
 
     await expect(page.locator('.macro-ast-scene__svg')).toBeVisible();
     await expect
@@ -833,16 +827,7 @@ endsolid mock
   test('Given seeded macro When a param blob is clicked Then the embedded control gets focus', async ({
     page,
   }) => {
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
-    await page.fill('textarea.prompt-input', 'make a seeded macro');
-    await page
-      .locator('textarea.prompt-input')
-      .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
-
-    await page.getByRole('button', { name: 'PARAMS' }).click();
-    await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
-    await page.getByRole('button', { name: 'new params', exact: true }).click();
-    await expect(page.locator('.macro-ast-map-shell')).toBeVisible();
+    await openSeededMacroMap(page);
 
     await page.locator('.macro-ast-node-param .macro-ast-node__header').first().click();
     await expect(page.locator('.macro-ast-node-param input.param-input').first()).toBeFocused();
@@ -874,16 +859,7 @@ endsolid mock
   test('Given seeded macro When New Params edits a value Then Apply rerenders the draft', async ({
     page,
   }) => {
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
-    await page.fill('textarea.prompt-input', 'make a seeded macro');
-    await page
-      .locator('textarea.prompt-input')
-      .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
-
-    await page.getByRole('button', { name: 'PARAMS' }).click();
-    await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
-    await page.getByRole('button', { name: 'new params', exact: true }).click();
-    await expect(page.locator('.macro-ast-map-shell')).toBeVisible();
+    await openSeededMacroMap(page);
 
     const beforeRenderCount = await page.evaluate(
       () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
@@ -911,6 +887,112 @@ endsolid mock
         ),
       )
       .toBe(beforeRenderCount + 1);
+  });
+
+  test('Given several map params When search result is chosen Then owning region frames, pulses, and inline apply keeps identity', async ({
+    page,
+  }, testInfo) => {
+    await openSeededMacroMap(page);
+
+    const camera = page.locator('.macro-ast-camera');
+    const cameraBefore = await camera.getAttribute('style');
+    const search = page.getByPlaceholder('Search controls...');
+    await search.fill('Input Port Diameter');
+
+    const results = page.getByRole('listbox', { name: 'Map search results' });
+    const result = results.getByRole('option', { name: /Input Port Diameter/ });
+    await expect(result).toBeVisible();
+    await result.click();
+
+    const target = page.locator(
+      '.macro-ast-node[data-node-id="part:input-port/param:input_port_diameter_mm"]',
+    );
+    const owner = page.locator('.macro-ast-node[data-node-id="part:input-port"]');
+    await expect(target).toHaveAttribute('data-search-selected', 'true');
+    await expect(owner).toHaveAttribute('data-search-owner', 'true');
+    await expect
+      .poll(async () => camera.getAttribute('style'))
+      .not.toBe(cameraBefore);
+    await expect(target.locator('.macro-ast-node__shape')).toHaveCSS(
+      'animation-name',
+      'macro-search-pulse',
+    );
+    await expect(target.locator('.macro-ast-node__shape path')).toHaveAttribute('d', /C/);
+    await expect(results.locator('.macro-ast-camera')).toHaveCount(0);
+    const visualPath = testInfo.outputPath('macro-map-search-focus.png');
+    await page.locator('.macro-ast-map-shell').screenshot({
+      path: visualPath,
+      animations: 'disabled',
+    });
+    await testInfo.attach('macro map search focus', {
+      path: visualPath,
+      contentType: 'image/png',
+    });
+
+    const input = page.locator('#macro-input_port_diameter_mm');
+    await expect(input).toBeFocused();
+    const beforeRenderCount = await page.evaluate(
+      () =>
+        (window as any).__PARAM_CALLS__.filter(
+          (entry: { cmd: string }) => entry.cmd === 'render_model',
+        ).length,
+    );
+    await input.fill('17');
+    await page.getByRole('button', { name: 'APPLY' }).click();
+    await expect
+      .poll(async () =>
+        page.evaluate(
+          () =>
+            (window as any).__PARAM_CALLS__.filter(
+              (entry: { cmd: string }) => entry.cmd === 'render_model',
+            ).length,
+        ),
+      )
+      .toBe(beforeRenderCount + 1);
+    const appliedParameters = await page.evaluate(() => {
+      const calls = (window as any).__PARAM_CALLS__.filter(
+        (entry: { cmd: string }) => entry.cmd === 'render_model',
+      );
+      return calls.at(-1)?.args?.parameters;
+    });
+    expect(appliedParameters?.input_port_diameter_mm).toBe(17);
+    await expect(target).toHaveAttribute('data-search-selected', 'true');
+  });
+
+  test('Given a selected map param When search has no match Then source and selection stay unchanged', async ({
+    page,
+  }) => {
+    await openSeededMacroMap(page);
+
+    const search = page.getByPlaceholder('Search controls...');
+    await search.fill('Inline Anchor Width');
+    await page
+      .getByRole('listbox', { name: 'Map search results' })
+      .getByRole('option', { name: /Inline Anchor Width/ })
+      .click();
+    const selected = page.locator(
+      '.macro-ast-node[data-node-id="part:inline-anchor/param:inline_anchor_width_mm"]',
+    );
+    await expect(selected).toHaveAttribute('data-search-selected', 'true');
+    const before = await page.evaluate(() => {
+      const renders = (window as any).__PARAM_CALLS__.filter(
+        (entry: { cmd: string }) => entry.cmd === 'render_model',
+      );
+      return { count: renders.length, macroCode: renders.at(-1)?.args?.macroCode };
+    });
+
+    await search.fill('no_such_fastener_zzz');
+    await expect(page.getByRole('status', { name: 'Map search status' })).toHaveText(
+      'NO MAP MATCHES',
+    );
+    await expect(selected).toHaveAttribute('data-search-selected', 'true');
+    const after = await page.evaluate(() => {
+      const renders = (window as any).__PARAM_CALLS__.filter(
+        (entry: { cmd: string }) => entry.cmd === 'render_model',
+      );
+      return { count: renders.length, macroCode: renders.at(-1)?.args?.macroCode };
+    });
+    expect(after).toEqual(before);
   });
 
   test('views tab keeps context actions and empty state after the split', async ({ page }) => {

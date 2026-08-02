@@ -1,0 +1,64 @@
+(model
+  (params
+    (number case_w 72 :label "case width" :min 50 :max 120 :step 2)
+    (number case_d 48 :label "case depth" :min 34 :max 90 :step 2)
+    (number wall_t 3 :label "wall thickness" :min 2 :max 6 :step 0.5)
+    (number body_h 24 :label "body height" :min 16 :max 50 :step 2)
+    (number lid_t 3 :label "lid thickness" :min 2 :max 6 :step 0.5)
+    (number bolt_d 4.2 :label "external bolt bore" :min 3 :max 6 :step 0.1)
+    (number fit_clearance 0.3 :label "joint clearance" :min 0.15 :max 0.6 :step 0.05)
+    (select joint_type "snap" :label "joint type" :options (("Snap" "snap") ("Bolted" "bolted")))
+    (toggle countersink #t :label "recess bolt heads"))
+  ;; Each branch returns a finished shape. `if` never selects a build-shape name.
+  (part body
+    (let* ((joint_z (- body_h wall_t))
+           (corner_x (- (/ case_w 2) (* 2 wall_t)))
+           (corner_y (- (/ case_d 2) (* 2 wall_t))))
+      (if (= joint_type "snap")
+        (union
+          (difference
+            (box case_w case_d body_h)
+            (translate 0 0 wall_t
+              (box (- case_w (* 2 wall_t)) (- case_d (* 2 wall_t)) body_h)))
+          (translate corner_x 0 joint_z (box wall_t 12 8))
+          (translate (- corner_x) 0 joint_z (box wall_t 12 8)))
+        (union
+          (difference
+            (box case_w case_d body_h)
+            (translate 0 0 wall_t
+              (box (- case_w (* 2 wall_t)) (- case_d (* 2 wall_t)) body_h)))
+          (translate corner_x corner_y body_h
+            (difference
+              (cylinder (+ (/ bolt_d 2) wall_t) 6)
+              (translate 0 0 -0.5 (cylinder (+ (/ bolt_d 2) fit_clearance) 7))))
+          (translate (- corner_x) corner_y body_h
+            (difference
+              (cylinder (+ (/ bolt_d 2) wall_t) 6)
+              (translate 0 0 -0.5 (cylinder (+ (/ bolt_d 2) fit_clearance) 7))))))))
+  (part lid
+    (let* ((corner_x (- (/ case_w 2) (* 2 wall_t)))
+           (corner_y (- (/ case_d 2) (* 2 wall_t))))
+      (if (= joint_type "snap")
+        (difference
+          (translate 0 0 (+ body_h (/ lid_t 2)) (box case_w case_d lid_t))
+          (translate corner_x 0 (- body_h wall_t)
+            (box (+ wall_t (* 2 fit_clearance)) (+ 12 (* 2 fit_clearance)) (+ lid_t 2)))
+          (translate (- corner_x) 0 (- body_h wall_t)
+            (box (+ wall_t (* 2 fit_clearance)) (+ 12 (* 2 fit_clearance)) (+ lid_t 2))))
+        (if countersink
+          (difference
+            (translate 0 0 (+ body_h (/ lid_t 2)) (box case_w case_d lid_t))
+            (translate corner_x corner_y (- body_h 1)
+              (cylinder (+ (/ bolt_d 2) fit_clearance) (+ lid_t 2)))
+            (translate (- corner_x) corner_y (- body_h 1)
+              (cylinder (+ (/ bolt_d 2) fit_clearance) (+ lid_t 2)))
+            (translate corner_x corner_y (+ body_h (- lid_t 2))
+              (cone (+ bolt_d (* 2 fit_clearance)) (/ bolt_d 2) 2))
+            (translate (- corner_x) corner_y (+ body_h (- lid_t 2))
+              (cone (+ bolt_d (* 2 fit_clearance)) (/ bolt_d 2) 2)))
+          (difference
+            (translate 0 0 (+ body_h (/ lid_t 2)) (box case_w case_d lid_t))
+            (translate corner_x corner_y (- body_h 1)
+              (cylinder (+ (/ bolt_d 2) fit_clearance) (+ lid_t 2)))
+            (translate (- corner_x) corner_y (- body_h 1)
+              (cylinder (+ (/ bolt_d 2) fit_clearance) (+ lid_t 2)))))))))

@@ -1,0 +1,16 @@
+(model
+  (params
+    (number span 64 :label "bracket span" :min 40 :max 120 :step 2)
+    (number foot_d 36 :label "foot depth" :min 20 :max 70 :step 2)
+    (number stock_t 6 :label "stock thickness" :min 3 :max 12 :step 0.5))
+  (part bracket
+    (let* ((flange_h 40)
+           (overlap stock_t))
+      (build
+        (shape foot (box span foot_d stock_t :align '(center center min)))
+        (shape flange
+          ;; FIX: move X from 60 to 0 so flange overlaps foot.
+          (translate 60 (- (/ foot_d 2) (/ overlap 2)) 0
+            (box (- span (* 2 stock_t)) overlap flange_h :align '(center center min))))
+        ;; FIX: replace compound with union after the solids overlap.
+        (result (compound foot flange))))))

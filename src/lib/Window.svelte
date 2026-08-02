@@ -2,7 +2,7 @@
   import { onDestroy } from 'svelte';
   import type { Snippet } from 'svelte';
   import type { WindowId } from './stores/windowStore';
-  import { bringToFront, updateRect, closeWindow, windowRegistry } from './stores/windowStore';
+  import { bringToFront, updateRect, closeWindow, getWindowSafeInsets, windowRegistry } from './stores/windowStore';
   import { fitRectToViewport } from './windowGeometry';
 
   let {
@@ -54,6 +54,7 @@
       { x, y, width, height },
       { width: minWidth, height: minHeight },
       { width: window.innerWidth, height: window.innerHeight },
+      getWindowSafeInsets(),
     );
     x = next.x;
     y = next.y;

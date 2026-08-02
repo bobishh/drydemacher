@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 
-type PackageLibraryMockMode = 'ok' | 'error' | 'empty' | 'installError';
+type PackageLibraryMockMode = 'ok' | 'error' | 'empty' | 'installError' | 'componentImportError' | 'componentImportPending';
 
 async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMode) {
   await page.addInitScript((mockMode) => {
@@ -59,8 +59,12 @@ async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMo
     };
 
     const mockWindow = window as any;
-    mockWindow.__PACKAGE_HEADERS__ = mockMode === 'ok' ? [packageHeader] : [];
+    mockWindow.__PACKAGE_HEADERS__ = ['ok', 'componentImportError', 'componentImportPending'].includes(mockMode)
+      ? [packageHeader]
+      : [];
     mockWindow.__LAST_PACKAGE_ARCHIVE__ = null;
+    mockWindow.__LAST_COMPONENT_IMPORT__ = null;
+    mockWindow.__RESOLVE_COMPONENT_IMPORT__ = null;
 
     window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
     window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
@@ -147,6 +151,27 @@ async function installProjectLibraryMocks(page: Page, mode: PackageLibraryMockMo
           packageDir: '/mock/component-library/bike-bottle-system/0.1.0',
         };
       }
+      if (cmd === 'component_import_copy_inline') {
+        mockWindow.__LAST_COMPONENT_IMPORT__ = args?.request ?? null;
+        if (mockMode === 'componentImportError') {
+          throw {
+            code: 'validation',
+            message: 'component import failed',
+            details: 'raw package source has unresolved dependency',
+          };
+        }
+        if (mockMode === 'componentImportPending') {
+          return new Promise((resolve) => {
+            mockWindow.__RESOLVE_COMPONENT_IMPORT__ = resolve;
+          });
+        }
+        return {
+          authoredSource: '(define-component bottle_cage () (box 1 1 1)) (model (part bottle_cage (bottle_cage)))',
+          componentSource: '(define-component bottle_cage () (box 1 1 1))',
+          entrySymbol: 'bottle_cage',
+          partKey: 'bottle_cage',
+        };
+      }
       if (cmd === 'plugin:dialog|open') {
         return '/mock/bike-bottle-system.ecky';
       }
@@ -207,5 +232,52 @@ test.describe('Component package library', () => {
 
     await expect(page.getByText('package install failed')).toBeVisible();
     await expect(page.getByText('raw invalid package manifest')).toBeVisible();
+  });
+
+  test('Given an installed component When user imports Then copy-inline source path is called', async ({ page }) => {
+    await installProjectLibraryMocks(page, 'ok');
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'LIBRARY' }).click();
+    await page.getByRole('button', { name: 'COMPONENTS' }).click();
+    await page.getByRole('button', { name: 'IMPORT Bottle Cage' }).click();
+
+    await expect(page.evaluate(() => (window as any).__LAST_COMPONENT_IMPORT__)).resolves.toMatchObject({
+      packageId: 'bike-bottle-system',
+      version: '0.1.0',
+      componentId: 'bottle_cage',
+    });
+  });
+
+  test('Given component import fails When user clicks import Then raw backend body stays visible', async ({ page }) => {
+    await installProjectLibraryMocks(page, 'componentImportError');
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'LIBRARY' }).click();
+    await page.getByRole('button', { name: 'COMPONENTS' }).click();
+    await page.getByRole('button', { name: 'IMPORT Bottle Cage' }).click();
+
+    await expect(page.getByText('component import failed')).toBeVisible();
+    await expect(page.getByText('raw package source has unresolved dependency')).toBeVisible();
+  });
+
+  test('Given component import is pending When user clicks import Then pending state is visible', async ({ page }) => {
+    await installProjectLibraryMocks(page, 'componentImportPending');
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'LIBRARY' }).click();
+    await page.getByRole('button', { name: 'COMPONENTS' }).click();
+    await page.getByRole('button', { name: 'IMPORT Bottle Cage' }).click();
+
+    await expect(page.getByRole('button', { name: 'IMPORTING Bottle Cage' })).toBeVisible();
+    await page.evaluate(() => (window as any).__RESOLVE_COMPONENT_IMPORT__?.({
+      authoredSource: '(define-component bottle_cage () (box 1 1 1)) (model (part bottle_cage (bottle_cage)))',
+      componentSource: '(define-component bottle_cage () (box 1 1 1))',
+      entrySymbol: 'bottle_cage',
+      partKey: 'bottle_cage',
+    }));
   });
 });

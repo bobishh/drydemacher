@@ -56,10 +56,10 @@ test("toContractDesignOutput preserves authoring context fields", () => {
 
   assert.equal(contract.engineKind, "ecky");
   assert.equal(contract.sourceLanguage, "ecky");
-  assert.equal(contract.geometryBackend, "build123d");
+  assert.equal(contract.geometryBackend, "mesh");
 });
 
-test("normalizeMessage heals ecky ir output backend from build123d runtime bundle", () => {
+test("normalizeMessage migrates build123d runtime bundle to native", () => {
   const message = normalizeMessage({
     id: "m1",
     role: "assistant",
@@ -86,7 +86,7 @@ test("normalizeMessage heals ecky ir output backend from build123d runtime bundl
     modelManifest: null,
   } as any);
 
-  assert.equal(message.output?.geometryBackend, "build123d");
+  assert.equal(message.output?.geometryBackend, "mesh");
   assert.equal(message.output?.sourceLanguage, "ecky");
 });
 
@@ -313,7 +313,7 @@ test("normalizeMessage preserves durable topology target ids on manifest", () =>
   );
 });
 
-test("normalizeLastDesignSnapshot heals ecky ir output backend from build123d runtime bundle", () => {
+test("normalizeLastDesignSnapshot migrates build123d runtime bundle to native", () => {
   const snapshot = normalizeLastDesignSnapshot({
     design: {
       engineKind: "ecky",
@@ -335,7 +335,7 @@ test("normalizeLastDesignSnapshot heals ecky ir output backend from build123d ru
     modelManifest: null,
   } as any);
 
-  assert.equal(snapshot?.design?.geometryBackend, "build123d");
+  assert.equal(snapshot?.design?.geometryBackend, "mesh");
   assert.equal(snapshot?.design?.sourceLanguage, "ecky");
 });
 

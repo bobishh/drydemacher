@@ -1,9 +1,10 @@
 import { get, writable, derived } from 'svelte/store';
 import { listen } from '@tauri-apps/api/event';
 import { getThreadWindowLayout, saveThreadWindowLayout } from '../tauri/client';
+import { campaignRunClient } from '../projects/campaignRunClient';
 import { triggerHighlight } from './uiHighlightStore';
 import type { ThreadWindowLayout, ThreadWindowState } from '../tauri/contracts';
-import { fitRectToViewport } from '../windowGeometry';
+import { fitRectToViewport, type ViewportInsets } from '../windowGeometry';
 
 export type WindowId =
   | 'code'
@@ -120,6 +121,7 @@ const ALL_WINDOW_IDS: WindowId[] = [
 ];
 
 const HIDDEN_WINDOW_IDS = new Set<WindowId>(['sketch']);
+let windowSafeInsets: ViewportInsets = {};
 
 function isWindowAvailable(id: WindowId): boolean {
   return !HIDDEN_WINDOW_IDS.has(id);
@@ -144,10 +146,19 @@ function clampRect(
   rect: { x: number; y: number; width: number; height: number },
   minSize: { width: number; height: number },
   viewport?: { width: number; height: number },
+  insets: ViewportInsets = windowSafeInsets,
 ): { x: number; y: number; width: number; height: number } {
   const vw = viewport?.width ?? (typeof window !== 'undefined' ? window.innerWidth : 1920);
   const vh = viewport?.height ?? (typeof window !== 'undefined' ? window.innerHeight : 1080);
-  return fitRectToViewport(rect, minSize, { width: vw, height: vh });
+  return fitRectToViewport(rect, minSize, { width: vw, height: vh }, insets);
+}
+
+export function setWindowSafeInsets(insets: ViewportInsets) {
+  windowSafeInsets = { ...insets };
+}
+
+export function getWindowSafeInsets(): ViewportInsets {
+  return { ...windowSafeInsets };
 }
 
 function mergeDbLayout(dbLayout: ThreadWindowLayout | null): WindowStoreState {
@@ -181,6 +192,7 @@ let writeThreadWindowLayout = saveThreadWindowLayout;
 
 let nextZ = 1;
 let boundThreadId: string | null = null;
+let usingAppWindowLayout = false;
 let dirty = false;
 let dirtyTimerId: ReturnType<typeof setInterval> | null = null;
 let layoutLoadToken = 0;
@@ -296,7 +308,17 @@ function toDbLayout(state: WindowStoreState): ThreadWindowLayout {
 }
 
 async function flushLayout() {
-  if (!dirty || !boundThreadId || !windowLayoutRememberedValue()) return;
+  if (!dirty || !windowLayoutRememberedValue()) return;
+  if (usingAppWindowLayout) {
+    try {
+      await campaignRunClient.saveAppWindowLayout(toDbLayout(currentState()));
+      dirty = false;
+    } catch {
+      // Persistence failure is non-fatal; layout will re-save next tick.
+    }
+    return;
+  }
+  if (!boundThreadId) return;
   const threadId = boundThreadId;
   const layout = toDbLayout(currentState());
   const cachedRevision = layoutCacheByThreadId.get(threadId)?.dirtyRevision ?? null;
@@ -343,6 +365,7 @@ export async function loadLayoutForThread(threadId: string) {
   await flushLayout();
 
   const token = ++layoutLoadToken;
+  usingAppWindowLayout = false;
   boundThreadId = threadId;
   dirty = false;
   const cacheEntry = ensureThreadCache(threadId);
@@ -368,6 +391,27 @@ export async function loadLayoutForThread(threadId: string) {
   for (const id of ALL_WINDOW_IDS) {
     if (merged[id].z >= nextZ) nextZ = merged[id].z + 1;
   }
+  store.set(merged);
+}
+
+/** Campaigns have no thread identity. Their app-level window surface remains DB-backed. */
+export async function loadAppWindowLayout() {
+  await flushLayout();
+  const token = ++layoutLoadToken;
+  boundThreadId = null;
+  usingAppWindowLayout = true;
+  dirty = false;
+  let layout: ThreadWindowLayout | null = null;
+  try {
+    layout = await campaignRunClient.getAppWindowLayout();
+  } catch {
+    return;
+  }
+  if (token !== layoutLoadToken || !usingAppWindowLayout) return;
+  const rememberLayout = layout?.rememberLayout ?? true;
+  windowLayoutRemembered.set(rememberLayout);
+  const merged = rememberLayout ? mergeDbLayout(layout) : buildDefaults();
+  nextZ = Math.max(1, ...ALL_WINDOW_IDS.map((id) => merged[id].z + 1));
   store.set(merged);
 }
 
@@ -441,6 +485,15 @@ export function fitVisibleWindowsToViewport(viewport: { width: number; height: n
 
 export async function setThreadWindowLayoutRemembered(rememberLayout: boolean) {
   windowLayoutRemembered.set(rememberLayout);
+  if (usingAppWindowLayout) {
+    const layout = {
+      schemaVersion: 1,
+      rememberLayout,
+      windows: toDbLayout(currentState()).windows,
+    } satisfies ThreadWindowLayout;
+    await campaignRunClient.saveAppWindowLayout(layout);
+    return;
+  }
   if (!boundThreadId) return;
   const threadId = boundThreadId;
   const current = currentState();
@@ -468,6 +521,7 @@ export function teardown() {
   stopDirtyTick();
   void flushLayout();
   boundThreadId = null;
+  usingAppWindowLayout = false;
   layoutCacheByThreadId.clear();
   windowLayoutRemembered.set(true);
 }
@@ -515,9 +569,11 @@ export function _resetWindowStoreForTest() {
   stopDirtyTick();
   nextZ = 1;
   boundThreadId = null;
+  usingAppWindowLayout = false;
   dirty = false;
   layoutLoadToken = 0;
   layoutCacheByThreadId.clear();
+  windowSafeInsets = {};
   store.set(buildDefaults());
   windowLayoutRemembered.set(true);
   readThreadWindowLayout = getThreadWindowLayout;

@@ -1,0 +1,22 @@
+(model
+  (params
+    (number span 90 :label "Span" :min 50 :max 180 :step 5)
+    (number root_chord 44 :label "Root chord" :min 24 :max 80 :step 1)
+    (number tip_chord 26 :label "Tip chord" :min 12 :max 60 :step 1)
+    (number twist 6 :label "Tip twist" :min -12 :max 12 :step 1)
+    :relations ((> root_chord tip_chord)))
+  (part wing
+    (let* (
+      (root_thickness (* root_chord 0.12))
+      (root_station
+        (polygon (list
+          (list 0 0)
+          (list (* 0.35 root_chord) root_thickness)
+          (list root_chord 0)
+          (list (* 0.35 root_chord) (* -0.45 root_thickness)))))
+      ;; Replace these literals with a derived tip chord and thickness.
+      (tip_station_raw
+        (polygon (list (list 0 0) (list 9 2.6)
+                       (list 26 0) (list 9 -1.2))))
+      (tip_station (rotate 0 0 twist tip_station_raw)))
+      (loft span root_station tip_station))))

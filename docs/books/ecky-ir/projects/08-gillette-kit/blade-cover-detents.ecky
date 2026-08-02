@@ -1,0 +1,24 @@
+(model
+  (params
+    (number cover_length 48 :label "Cover length" :min 35 :max 70 :step 1)
+    (number cover_width 28 :label "Cover width" :min 18 :max 40 :step 1)
+    (number cover_thickness 1.2 :label "Cover thickness" :min 0.8 :max 3 :step 0.1)
+    (number detent_radius 0.55 :label "Detent radius" :min 0.3 :max 1.2 :step 0.05)
+    (number detent_engagement 0.2 :label "Detent engagement" :min 0.1 :max 0.3 :step 0.05)
+    :relations ((> cover_width detent_radius)))
+  (part blade_box
+    (let* (
+      (outer (extrude (rounded-rect (+ cover_length 4) (+ cover_width 4) 2) 7))
+      (seat (translate 0 0 1.2
+              (extrude (rounded-rect cover_length cover_width 1.4) 7)))
+      (difference outer seat)))
+  (part blade_cover
+    (let* (
+      (cover (translate 0 44 0
+               (extrude (rounded-rect cover_length cover_width 1.4) cover_thickness)))
+      (pocket_radius (+ detent_radius 0.1))
+      (detent_offset (- (/ cover_width 2) detent_engagement))
+      (pocket (sphere pocket_radius))
+      (pockets (translate 0 (+ 44 (- detent_offset)) 0.4
+               (linear-array 2 0 (* 2 detent_offset) 0 pocket)))
+      (difference cover pockets))))

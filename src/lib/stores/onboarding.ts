@@ -28,6 +28,20 @@ type OnboardingDeps = {
   saveConfig?: () => Promise<void>;
 };
 
+export function shouldAutoStartOnboarding(input: {
+  configLoaded: boolean;
+  isBooting: boolean;
+  hasSeenOnboarding: boolean;
+  isActive: boolean;
+  isSuppressed: boolean;
+}): boolean {
+  return input.configLoaded &&
+    !input.isBooting &&
+    !input.hasSeenOnboarding &&
+    !input.isActive &&
+    !input.isSuppressed;
+}
+
 export const ONBOARDING_STEPS: OnboardingStep[] = [
   {
     id: 'intro',

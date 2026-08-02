@@ -19,7 +19,8 @@ const docsRoot = join(wwwRoot, 'docs');
 function stage() {
   mkdirSync(docsRoot, { recursive: true });
 
-  const docsHtml = join(root, 'target', 'book', 'dist', 'docs-site', 'index.html');
+  const docsSite = join(root, 'target', 'book', 'dist', 'docs-site');
+  const docsHtml = join(docsSite, 'index.html');
   const bookDir = join(root, 'target', 'book', 'dist', 'books');
   const mdSource = join(root, 'public', 'docs', 'ecky-ir.md');
   const favicon = join(root, 'sites', 'landing', 'public', 'favicon.svg');
@@ -31,7 +32,7 @@ function stage() {
     throw new Error(`Build the EPUB first: expected ${bookDir}/ (run: npm run build:book)`);
   }
 
-  copyFileSync(docsHtml, join(docsRoot, 'index.html'));
+  cpSync(docsSite, docsRoot, { recursive: true });
   cpSync(join(bookDir, 'assets'), join(docsRoot, 'assets'), { recursive: true });
   copyFileSync(join(bookDir, 'ecky-ir-field-guide.epub'), join(docsRoot, 'ecky-ir-field-guide.epub'));
   copyFileSync(mdSource, join(docsRoot, 'ecky-ir.md'));

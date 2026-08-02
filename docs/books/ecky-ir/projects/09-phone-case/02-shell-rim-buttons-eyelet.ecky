@@ -1,0 +1,20 @@
+(model
+  (params
+    (number phone_width 71.5 :label "phone width" :min 60 :max 90 :step 0.1)
+    (number phone_length 146.7 :label "phone length" :min 130 :max 180 :step 0.1)
+    (number phone_thickness 7.8 :label "phone thickness" :min 5 :max 12 :step 0.1)
+    (number pocket_clearance 0.2 :label "pocket clearance per side" :min 0 :max 0.6 :step 0.05)
+    (number wall_thickness 2.4 :label "case wall thickness" :min 1.8 :max 4 :step 0.1)
+    (number button_membrane 0.8 :label "button membrane thickness" :min 0.5 :max 1.4 :step 0.1)
+    (number eyelet_bore_radius 2 :label "eyelet bore radius" :min 1 :max 4 :step 0.1))
+  (part tpu_shell_detail
+    (build
+      (shape pocket_w (+ phone_width (* 2 pocket_clearance)))
+      (shape pocket_l (+ phone_length (* 2 pocket_clearance)))
+      (shape outer (extrude (rounded-rect (+ pocket_w (* 2 wall_thickness)) (+ pocket_l (* 2 wall_thickness)) 14) (+ phone_thickness wall_thickness)))
+      (shape pocket (translate 0 0 wall_thickness (extrude (rounded-rect pocket_w pocket_l 12) (+ phone_thickness 1))))
+      (shape rim (difference outer pocket))
+      (shape button_pad (translate (- (/ pocket_w 2) 0.5) 12 (+ phone_thickness (/ button_membrane 2)) (box wall_thickness 18 button_membrane)))
+      (shape button_relief (translate (- (/ pocket_w 2) 0.1) 12 phone_thickness (box wall_thickness 20 (+ button_membrane 0.4))))
+      (shape eyelet (translate 0 (- (/ pocket_l 2)) -0.1 (cylinder eyelet_bore_radius (+ wall_thickness 0.2))))
+      (result (difference (union rim button_pad) button_relief eyelet)))))

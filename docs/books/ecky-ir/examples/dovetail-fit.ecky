@@ -1,0 +1,62 @@
+;; Canonical Dovetail Fit — Level 03 render + teaching source of truth.
+;;
+;; EXTRACTED from the production film-adapter dovetail/rail subsystem in
+;; ecky-integrated-film-adapter-open-helicoid-v9.ecky. This is NOT a second
+;; dovetail design: the rail profile below is the same triangular profile and
+;; the female side uses the same `(+ nominal (* 2 fit_clearance))` enlargement
+;; the film adapter uses for its recessed pocket. Surrounding mechanism
+;; complexity (film path, detents, helicoid) is removed; the mating profile and
+;; the named fit relation are preserved.
+;;
+;; One named `fit_clearance` binding drives the fit:
+;;   - male side:  nominal profile (rail_h, rail_tip_w).
+;;   - female side: channel profile enlarged by `fit_clearance` on every side.
+;; Change fit_clearance once and the channel widens while the rail stays
+;; nominal — the fit is edited through one binding, not two anonymous offsets.
+;;
+;; The two `(part ...)` forms are separate, independently exportable solids.
+;; Render pipeline: native Ecky (direct-occt) -> STL -> Three/WebGL -> PNG.
+;; CAD correctness (polygon/extrude/difference/rail validity) is owned by the
+;; existing Ecky runtime/model and film-adapter tests; this fixture is
+;; validated once by native compile/render, not re-tested here.
+(model
+  (params
+    (number rail_h 7 :label "rail height" :min 4 :max 12 :step 0.5)
+    (number rail_tip_w 12 :label "rail mouth width" :min 8 :max 18 :step 0.5)
+    (number rail_length 40 :label "rail length" :min 24 :max 80 :step 2)
+    (number body_w 18 :label "body width" :min 12 :max 30 :step 1)
+    (number body_d 12 :label "body depth" :min 8 :max 24 :step 1)
+    (number fit_clearance 0.3 :label "fit clearance" :min 0 :max 1 :step 0.05))
+  (part male_dovetail_rail
+    (build
+      ;; Same triangular profile as the film-adapter rail_profile_pos:
+      ;; base on the x axis, peak pointing +y.
+      (shape profile
+        (polygon
+          (((/ rail_h 2) 0)
+           (0 (/ rail_tip_w 2))
+           ((- (/ rail_h 2)) 0))))
+      (shape rail
+        (translate -26 0 0
+          (rotate 0 90 0
+            (extrude profile rail_length))))
+      (result rail)))
+  (part female_dovetail_body
+    (build
+      ;; Female channel = the male profile enlarged by fit_clearance on every
+      ;; side (rail_h + 2c, rail_tip_w + 2c). This is the single shared-clearance
+      ;; relation: editing fit_clearance widens the channel only.
+      (shape channel_profile
+        (polygon
+          (((/ (+ rail_h (* 2 fit_clearance)) 2) 0)
+           (0 (- (/ (+ rail_tip_w (* 2 fit_clearance)) 2)))
+           ((- (/ (+ rail_h (* 2 fit_clearance)) 2)) 0))))
+      (shape channel
+        (translate 26 (/ body_w 2) 0
+          (rotate 0 90 0
+            (extrude channel_profile (+ rail_length (* 2 fit_clearance))))))
+      (shape block
+        (translate 26 0 0
+          (box rail_length body_w body_d)))
+      (result
+        (difference block channel)))))

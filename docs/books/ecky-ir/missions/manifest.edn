@@ -1,0 +1,466 @@
+{
+  :id "ecky-ir-build-missions"
+  :version 1
+  :schema-version 3
+  :title "Ecky: six build missions"
+  :progression "ordered"
+  :source-policy "Source is canonical Ecky input. The application loads it for each step without displaying repository paths or source controls."
+  :missions [
+  {
+  :id "mission-01-bracket-enclosure"
+  :section-slug "level-01-corner-bracket"
+  :title "Make a bracket close an enclosure"
+  :content "docs/books/ecky-ir/missions/level-01-corner-bracket.md"
+  :steps [
+  {
+  :id "worked-bracket"
+  :kind "challenge"
+  :title "Join the corner bracket"
+  :source "docs/books/ecky-ir/projects/01-corner-bracket/01-worked.ecky"
+  :acceptance {
+  :mode "equivalentCoreIr"
+  :reference-step-id "bracket-solution"
+}
+}
+  {
+  :id "bracket-solution"
+  :kind "solution"
+  :title "Inspect the connected bracket"
+  :source "docs/books/ecky-ir/projects/01-corner-bracket/02-connected-solution.ecky"
+  :reveal "afterPass"
+}
+  {
+  :id "build-forms"
+  :kind "explain"
+  :title "Read the modeling scaffold"
+}
+  {
+  :id "enclosure-shell"
+  :kind "worked"
+  :title "Separate body from lid"
+  :source "docs/books/ecky-ir/projects/02-configurable-enclosure/01-worked.ecky"
+}
+  {
+  :id "joint-branch"
+  :kind "worked"
+  :title "Switch one interface between snap and bolt"
+  :source "docs/books/ecky-ir/projects/02-configurable-enclosure/01b-joint-modes-worked.ecky"
+}
+  {
+  :id "joint"
+  :kind "challenge"
+  :title "Choose a closure"
+  :source "docs/books/ecky-ir/projects/02-configurable-enclosure/02-joint-starter.ecky"
+  :acceptance {
+  :mode "equivalentCoreIr"
+  :reference-step-id "configurable-enclosure"
+}
+}
+  {
+  :id "configurable-enclosure"
+  :kind "solution"
+  :title "Reveal the configurable enclosure"
+  :source "docs/books/ecky-ir/projects/02-configurable-enclosure/03-configurable-enclosure-solution.ecky"
+  :reveal "afterPass"
+}
+  {
+  :id "print-choice"
+  :kind "explain"
+  :title "Tune hardware after the structure"
+}
+  {
+  :id "finish"
+  :kind "worked"
+  :title "Finish the printable bracket"
+  :source "docs/books/ecky-ir/projects/01-corner-bracket/06-configurable-print-bracket.ecky"
+}
+]
+  :deep-dive [
+  {
+  :id "reinforced-lightened"
+  :title "Ribs and grooves"
+  :source "docs/books/ecky-ir/projects/01-corner-bracket/04-reinforced-lightened-bracket.ecky"
+}
+  {
+  :id "slotted-mounting"
+  :title "Mounting slots"
+  :source "docs/books/ecky-ir/projects/01-corner-bracket/05-slotted-mounting-bracket.ecky"
+}
+  {
+  :id "threaded-fastening"
+  :title "Threaded fastening"
+  :source "docs/books/ecky-ir/projects/02-configurable-enclosure/04-threaded-fastening.ecky"
+}
+  {
+  :id "service-lid-marking"
+  :title "Service lid marking"
+  :source "docs/books/ecky-ir/projects/02-configurable-enclosure/06-service-lid-marking.ecky"
+}
+  {
+  :id "vented-adjustment-lid"
+  :title "Vents and adjustment slots"
+  :source "docs/books/ecky-ir/projects/02-configurable-enclosure/05-vented-adjustment-lid.ecky"
+}
+  {
+  :id "owned-asset-import"
+  :title "Owned asset import"
+  :source "docs/books/ecky-ir/projects/02-configurable-enclosure/07-owned-asset-import.ecky"
+}
+  {
+  :id "svg-service-badge"
+  :title "SVG service badge"
+  :source "docs/books/ecky-ir/projects/02-configurable-enclosure/08-service-badge.ecky"
+}
+  {
+  :id "frame-array-bracket"
+  :title "Arrays on a frame"
+  :source "docs/books/ecky-ir/examples/frame-array-bracket.ecky"
+}
+]
+}
+  {
+  :id "mission-02-bottle-cage-dovetail"
+  :section-slug "level-02-mounting-plate"
+  :title "Mount a bottle cage without support"
+  :content "docs/books/ecky-ir/missions/level-02-bottle-cage-dovetail.md"
+  :steps [
+  {
+  :id "fit-first"
+  :kind "explain"
+  :title "Fit is a named relation"
+}
+  {
+  :id "clamp"
+  :kind "worked"
+  :title "Make the frame interface"
+  :source "docs/books/ecky-ir/projects/07-bottle-cage/01-frame-clamp.ecky"
+}
+  {
+  :id "roof"
+  :kind "challenge"
+  :title "Remove the unsupported roof"
+  :source "docs/books/ecky-ir/projects/07-bottle-cage/02-supportless-rail.ecky"
+  :acceptance {
+  :mode "equivalentCoreIr"
+  :reference-step-id "peaked-roof"
+}
+}
+  {
+  :id "peaked-roof"
+  :kind "solution"
+  :title "Reveal the peaked rail"
+  :source "docs/books/ecky-ir/projects/03-supportless-dovetail/solution-peaked-roof.ecky"
+  :reveal "afterPass"
+}
+  {
+  :id "full-cage"
+  :kind "worked"
+  :title "Use the complete mount"
+  :source "docs/books/ecky-ir/projects/07-bottle-cage/04-full-cage.ecky"
+}
+]
+  :deep-dive [
+  {
+  :id "flat-roof-dovetail"
+  :title "Flat-roof failure coupon"
+  :source "docs/books/ecky-ir/projects/03-supportless-dovetail/worked-flat-roof.ecky"
+}
+  {
+  :id "frame-guided-accessory-mount"
+  :title "Frame-guided accessory rail"
+  :source "docs/books/ecky-ir/projects/07-bottle-cage/03-frame-guided-accessory-mount.ecky"
+}
+]
+}
+  {
+  :id "mission-03-wing-propeller-study"
+  :section-slug "level-03-printable-wing-propeller"
+  :title "Drive form from stations and parameters"
+  :content "docs/books/ecky-ir/missions/level-03-printable-wing-propeller.md"
+  :steps [
+  {
+  :id "stations"
+  :kind "explain"
+  :title "A station is a contract"
+}
+  {
+  :id "wing-worked-stations"
+  :kind "worked"
+  :title "Loft the first wing"
+  :source "docs/books/ecky-ir/projects/04-parametric-wing/worked-stations.ecky"
+}
+  {
+  :id "wing-tip"
+  :kind "challenge"
+  :title "Derive the tip station"
+  :source "docs/books/ecky-ir/projects/04-parametric-wing/starter-derived-tip.ecky"
+  :acceptance {
+  :mode "equivalentCoreIr"
+  :reference-step-id "wing-solution"
+}
+}
+  {
+  :id "wing-solution"
+  :kind "solution"
+  :title "Reveal taper and twist"
+  :source "docs/books/ecky-ir/projects/04-parametric-wing/solution-taper-twist.ecky"
+  :reveal "afterPass"
+}
+  {
+  :id "propeller-worked"
+  :kind "worked"
+  :title "Repeat one blade from controls"
+  :source "docs/books/ecky-ir/projects/05-propeller-study/01-worked-stations.ecky"
+}
+  {
+  :id "hub-variant"
+  :kind "challenge"
+  :title "Finish the hub variant"
+  :source "docs/books/ecky-ir/projects/05-propeller-study/02-starter-hub-variant.ecky"
+  :acceptance {
+  :mode "equivalentCoreIr"
+  :reference-step-id "propeller-solution"
+}
+}
+  {
+  :id "propeller-solution"
+  :kind "solution"
+  :title "Reveal the repeated propeller study"
+  :source "docs/books/ecky-ir/projects/05-propeller-study/03-solution-propeller.ecky"
+  :reveal "afterPass"
+}
+]
+  :deep-dive [
+  {
+  :id "wing-leading-edge-hull"
+  :title "Hull leading edge"
+  :source "docs/books/ecky-ir/projects/04-parametric-wing/worked-hull-leading-edge.ecky"
+}
+  {
+  :id "wing-faceted-wingtip"
+  :title "Faceted wingtip"
+  :source "docs/books/ecky-ir/projects/04-parametric-wing/worked-polyhedron-wingtip.ecky"
+}
+  {
+  :id "wing-open-mesh-planform"
+  :title "Open mesh planform"
+  :source "docs/books/ecky-ir/projects/04-parametric-wing/worked-mesh-planform.ecky"
+}
+  {
+  :id "propeller-faceted-hub"
+  :title "Faceted hub"
+  :source "docs/books/ecky-ir/projects/05-propeller-study/00-worked-faceted-hub.ecky"
+}
+  {
+  :id "propeller-open-blade-mesh"
+  :title "Open blade mesh"
+  :source "docs/books/ecky-ir/projects/05-propeller-study/00-worked-blade-mesh.ecky"
+}
+  {
+  :id "hub-control-math"
+  :title "Hub control math"
+  :source "docs/books/ecky-ir/projects/05-propeller-study/04-hub-control-math.ecky"
+}
+  {
+  :id "atan2-direct"
+  :title "Direct atan2"
+  :source "docs/books/ecky-ir/projects/05-propeller-study/05-atan2-direct.ecky"
+}
+  {
+  :id "native-point-helper-sampler"
+  :title "Point-helper sampler"
+  :source "docs/books/ecky-ir/projects/05-propeller-study/06-native-point-helper-sampler.ecky"
+}
+]
+}
+  {
+  :id "mission-04-gillette-travel-kit"
+  :section-slug "level-04-gillette-travel-kit"
+  :title "Pack a razor into three printed parts"
+  :content "docs/books/ecky-ir/missions/level-04-gillette-travel-kit.md"
+  :steps [
+  {
+  :id "separate-parts"
+  :kind "explain"
+  :title "Parts have different jobs"
+}
+  {
+  :id "shell"
+  :kind "worked"
+  :title "Make the shell"
+  :source "docs/books/ecky-ir/projects/08-gillette-kit/shell-blank.ecky"
+}
+  {
+  :id "detents"
+  :kind "challenge"
+  :title "Complete the cover detents"
+  :source "docs/books/ecky-ir/projects/08-gillette-kit/blade-cover-detents.ecky"
+  :acceptance {
+  :mode "equivalentCoreIr"
+  :reference-step-id "kit-solution"
+}
+}
+  {
+  :id "kit-solution"
+  :kind "solution"
+  :title "Reveal the finished kit"
+  :source "sites/landing/src/models/gillette-travel-kit.ecky"
+  :reveal "afterPass"
+}
+  {
+  :id "fit-coupon"
+  :kind "worked"
+  :title "Study snap and rail fit"
+  :source "docs/books/ecky-ir/projects/08-gillette-kit/handle-snap.ecky"
+}
+]
+  :deep-dive [
+  {
+  :id "gillette-dovetail-lid"
+  :title "Dovetail lid"
+  :source "docs/books/ecky-ir/projects/08-gillette-kit/dovetail-lid.ecky"
+}
+  {
+  :id "surface-finish-caddy"
+  :title "Surface-finish caddy"
+  :source "docs/books/ecky-ir/projects/08-gillette-kit/05-surface-finish-caddy.ecky"
+}
+]
+}
+  {
+  :id "mission-05-iphone-case-fixture"
+  :section-slug "level-05-iphone-case-fixture"
+  :title "Read a three-material phone case"
+  :content "docs/books/ecky-ir/missions/level-05-iphone-case-fixture.md"
+  :steps [
+  {
+  :id "materials"
+  :kind "explain"
+  :title "One design, three printable parts"
+}
+  {
+  :id "phone-shell"
+  :kind "worked"
+  :title "Trace the TPU envelope"
+  :source "sites/landing/src/models/iphone-17e-voronoi-case.ecky"
+}
+  {
+  :id "lattice"
+  :kind "worked"
+  :title "Distinguish authored from generated pattern"
+  :source "sites/landing/src/models/iphone-17e-voronoi-case.ecky"
+}
+  {
+  :id "islands"
+  :kind "worked"
+  :title "Place the PETG islands"
+  :source "sites/landing/src/models/iphone-17e-voronoi-case.ecky"
+}
+  {
+  :id "case-solution"
+  :kind "solution"
+  :title "Inspect the complete assembly"
+  :source "sites/landing/src/models/iphone-17e-voronoi-case.ecky"
+  :reveal "immediate"
+}
+  {
+  :id "fit-warning"
+  :kind "explain"
+  :title "Make a coupon before committing"
+}
+]
+  :deep-dive [
+  {
+  :id "procedural-perforation"
+  :title "Procedural perforation"
+  :source "docs/books/ecky-ir/examples/voronoi-perforated-panel.ecky"
+}
+  {
+  :id "procedural-chamber-grid"
+  :title "Chamber grid"
+  :source "docs/books/ecky-ir/examples/woodlouse-hotel.ecky"
+}
+  {
+  :id "organic-perforation-legacy"
+  :title "Organic perforation"
+  :source "sites/landing/src/models/iphone-17e-old-perforated.ecky"
+}
+  {
+  :id "attractor-guides"
+  :title "Attractor guides"
+  :source "docs/books/ecky-ir/projects/09-phone-case/07-attractor-guides.ecky"
+}
+  {
+  :id "wall-pattern-boundary"
+  :title "Wall-pattern study"
+  :source "docs/books/ecky-ir/projects/09-phone-case/08-wall-pattern-boundary.ecky"
+}
+  {
+  :id "heightfield-target"
+  :title "Heightfield target"
+  :source "docs/books/ecky-ir/projects/06-film-scanner/00-worked-heightfield-target.ecky"
+}
+]
+}
+  {
+  :id "mission-06-film-scanner"
+  :section-slug "level-06-film-scanner"
+  :title "Keep a film scanner adjustable"
+  :content "docs/books/ecky-ir/missions/level-06-film-scanner.md"
+  :steps [
+  {
+  :id "interfaces"
+  :kind "explain"
+  :title "The interfaces are the model"
+}
+  {
+  :id "rail-fit"
+  :kind "worked"
+  :title "Make the rail and channel agree"
+  :source "docs/books/ecky-ir/projects/06-film-scanner/01-worked-fit-profile.ecky"
+}
+  {
+  :id "format"
+  :kind "worked"
+  :title "Branch by film format"
+  :source "docs/books/ecky-ir/projects/06-film-scanner/03-solution-scanner-subassembly.ecky"
+}
+  {
+  :id "scanner-final"
+  :kind "solution"
+  :title "Inspect the final scanner"
+  :source "sites/landing/src/models/film-scanner.ecky"
+  :reveal "immediate"
+}
+  {
+  :id "coupon"
+  :kind "worked"
+  :title "Calibrate the moving interface"
+  :source "docs/books/ecky-ir/projects/06-film-scanner/04-calibration-helicoid-patterns.ecky"
+}
+  {
+  :id "print"
+  :kind "explain"
+  :title "Print fit before finish"
+}
+]
+  :deep-dive [
+  {
+  :id "heightfield-focus-target"
+  :title "Heightfield focus target"
+  :source "docs/books/ecky-ir/projects/06-film-scanner/00-worked-heightfield-target.ecky"
+}
+  {
+  :id "calibration-helicoid-patterns"
+  :title "Calibration helicoid and stops"
+  :source "docs/books/ecky-ir/projects/06-film-scanner/04-calibration-helicoid-patterns.ecky"
+}
+  {
+  :id "bare-repeat-boundary"
+  :title "Bare repeat semantic boundary"
+  :source "docs/books/ecky-ir/projects/06-film-scanner/05-repeat-boundary.ecky"
+}
+]
+}
+]
+}

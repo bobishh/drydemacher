@@ -1,10 +1,12 @@
 <script lang="ts">
-  import PromptPanel from './lib/PromptPanel.svelte';
+  import DialogueWindowContent from './lib/dialogue/DialogueWindowContent.svelte';
   import Viewer from './lib/Viewer.svelte';
   import VertexGenie from './lib/VertexGenie.svelte';
   import DrawingOverlay from './lib/DrawingOverlay.svelte';
   import ParamPanel from './lib/ParamPanel.svelte';
   import ConfigPanel from './lib/ConfigPanel.svelte';
+  import ViewportWorkspace from './lib/workbench/ViewportWorkspace.svelte';
+  import WorkbenchWindows from './lib/workbench/WorkbenchWindows.svelte';
   import { convertFileSrc } from '@tauri-apps/api/core';
   import { open, save } from '@tauri-apps/plugin-dialog';
   import { writeTextFile } from '@tauri-apps/plugin-fs';
@@ -17,24 +19,31 @@
   import ImportEnrichmentModal from './lib/ImportEnrichmentModal.svelte';
   import ManualImportModal from './lib/ManualImportModal.svelte';
   import AgentTerminalSurface from './lib/AgentTerminalSurface.svelte';
-  import DocsSite from './lib/DocsSite.svelte';
+  import DocsHub from './lib/DocsHub.svelte';
   import Modal from './lib/Modal.svelte';
   import Window from './lib/Window.svelte';
   import ProjectSwitcher from './lib/ProjectSwitcher.svelte';
+  import CampaignWorkbench from './lib/CampaignWorkbench.svelte';
   import LibraryPanel from './lib/LibraryPanel.svelte';
+  import { campaignDefinitionClient, type CampaignCurrentStepPayload, type CampaignDefinitionSummary } from './lib/projects/campaignDefinitionClient';
+  import { campaignRunClient, type CampaignRun } from './lib/projects/campaignRunClient';
   import {
     windowStore,
     windowLayoutRemembered,
     loadLayoutForThread,
+    loadAppWindowLayout,
     showWindow,
+    bringToFront,
     toggleWindow,
     fitVisibleWindowsToViewport,
+    setWindowSafeInsets,
     closeWindow as closeWindowStore,
     hardFlush as hardFlushWindowLayout,
     teardown as teardownWindowStore,
     setThreadWindowLayoutRemembered,
     type WindowId,
   } from './lib/stores/windowStore';
+  import type { DockLauncherAction } from './lib/workbench/dock';
   import { triggerMacroNodeFocus } from './lib/stores/uiHighlightStore';
   import {
     activeMicrowaveCount,
@@ -46,12 +55,11 @@
   } from './lib/audio/microwave';
   import { setSpeechMuted, speakEckyText, stopEckySpeech } from './lib/audio/tts';
   import { resolveGenieSpeechCue } from './lib/genie/speechPolicy';
-  import { onboarding } from './lib/stores/onboarding';
+  import { onboarding, shouldAutoStartOnboarding } from './lib/stores/onboarding';
   import { session } from './lib/stores/sessionStore';
   import { startCookingPhraseLoop, stopPhraseLoop } from './lib/stores/phraseEngine';
   import { handleGenerate, isQuestionIntent } from './lib/controllers/requestOrchestrator';
   import { handleParamChange, commitManualVersion, stageParamChange, applyManualCodeDraft } from './lib/controllers/manualController';
-  import { openProjectInEditor } from './lib/tauri/client';
   import {
     loadFromHistory,
     createNewThread,
@@ -70,6 +78,7 @@
     activeThreadIdStore as activeThreadId,
     activeVersionId,
     config,
+    configLoaded,
     availableModels,
     isLoadingModels,
     runtimeCapabilities,
@@ -137,6 +146,7 @@
   } from './lib/agents/workspaceCapture';
   import { codeInspectorTitle } from './lib/modelEngineLabel';
   import { buildFailedDraftSeed } from './lib/manualDraftSeed';
+  import { buildCodeWindowTranspilePrompt } from './lib/cadTranspile';
   import type { TopologyMode } from './lib/viewerDisplayMode';
   import {
     agentTerminalAttentionStore,
@@ -189,13 +199,13 @@
     type MeasurementControlFocus,
     type ContextSelectionTarget,
   } from './lib/modelRuntime/contextualEditing';
-  import {
-    getStepExportPath,
-    type ExportMode,
-  } from './lib/exportOptions';
+  import { type ExportMode } from './lib/exportOptions';
   import { deriveContextState } from './lib/composables/contextState';
   import { deriveViewportState } from './lib/composables/viewportState';
   import { deriveAgentOpsState, type PendingViewportScreenshotChoice } from './lib/composables/agentOps';
+  import { createAgentRuntime } from './lib/composables/agentRuntime';
+  import { createModelIo } from './lib/composables/modelIo';
+  import { createViewerLoadRuntime, isMissingViewerArtifactError } from './lib/composables/viewerRuntime';
   import { deriveExportState } from './lib/composables/exportOps';
   import {
     composeBubbleEvent,
@@ -552,27 +562,89 @@
     closeCodeModal();
   }
 
-  function openDocsSnippetInCode(snippet: string, title: string) {
-    void openVersionCodeModal({
-      code: snippet,
-      title,
-      sourceLanguage: 'ecky',
-      geometryBackend: 'build123d',
+  function handleDockWindowActivate(id: WindowId, action: DockLauncherAction) {
+    if (action === 'focus') {
+      bringToFront(id);
+      return;
+    }
+    if (action === 'close') {
+      closeWindowStore(id);
+      return;
+    }
+    if (id === 'code') {
+      void openVersionCodeModal();
+      return;
+    }
+    showWindow(id);
+  }
+
+  async function waitForRequestTerminal(requestId: string): Promise<Request> {
+    const existing = get(requestQueue).byId[requestId];
+    if (existing && ['success', 'error', 'canceled'].includes(existing.phase)) return existing;
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let unsubscribe = () => {};
+      unsubscribe = requestQueue.subscribe((queue) => {
+        const request = queue.byId[requestId];
+        if (!request || !['success', 'error', 'canceled'].includes(request.phase)) return;
+        settled = true;
+        unsubscribe();
+        resolve(request);
+      });
+      if (settled) unsubscribe();
+      if (!get(requestQueue).byId[requestId]) {
+        unsubscribe();
+        reject(new Error(`CAD transpile request '${requestId}' was not queued.`));
+      }
     });
   }
 
-  function handleDockCodeToggle() {
-    if ($windowStore.code.visible) {
-      closeCodeModal();
-      return;
+  async function handleTranslateCodeToEcky(source: string): Promise<string> {
+    if (generationUnavailableReason) {
+      throw new Error(generationUnavailableReason);
     }
-    void openVersionCodeModal();
+    const requestId = await handleGenerate(
+      buildCodeWindowTranspilePrompt(source),
+      [],
+      {
+        uiDeps: {
+          ...requestOrchestratorUiDeps,
+          // Failed generated drafts must not replace the recoverable foreign source.
+          openCodeModalManual: null,
+        },
+      },
+    );
+    const request = await waitForRequestTerminal(requestId);
+    if (request.phase !== 'success') {
+      throw new Error(request.error || `CAD transpile ended in ${request.phase}.`);
+    }
+    const design = request.result?.design;
+    const translated = design?.macroCode?.trim() ?? '';
+    if (!translated) {
+      throw new Error('CAD transpile completed without Ecky source.');
+    }
+    codeModalSourceLanguage = 'ecky';
+    selectedTitle.set(
+      codeInspectorTitle(
+        design?.title || 'Transpiled model',
+        design?.sourceLanguage ?? 'ecky',
+        design?.geometryBackend ?? 'mesh',
+      ),
+    );
+    return translated;
   }
 
   // Local reactive aliases for templates
   const phase = $derived($session.phase);
   const status = $derived($session.status);
   const error = $derived($session.error);
+  const errorText = $derived(error ? formatBackendError(error) : null);
+  const sessionAuthoringError = $derived(
+    error && typeof error !== 'string' && (error.layer || error.fix)
+      ? { layer: error.layer, fix: error.fix }
+      : null,
+  );
   const stlUrl = $derived($session.stlUrl);
   const activeArtifactBundle = $derived($session.artifactBundle);
   const sessionModelManifest = $derived($session.modelManifest);
@@ -585,6 +657,11 @@
   let viewerMode = $state<'orbit' | 'select' | 'measure'>('orbit');
   let showNewProjectChooser = $state(false);
   let showNewProjectImport = $state(false);
+  let campaignDefinitions = $state<CampaignDefinitionSummary[]>([]);
+  let campaignStep = $state<CampaignCurrentStepPayload | null>(null);
+  let campaignRuns = $state<CampaignRun[]>([]);
+  let activeCampaignRun = $state<CampaignRun | null>(null);
+  let campaignRunError = $state<string | null>(null);
   let sketchPreview = $state<SketchPreviewState | null>(null);
   let sketchPreviewDraft = $state<SketchPreviewDraftState | null>(null);
   const sketchWorkspaceAvailable = false;
@@ -892,6 +969,15 @@
   const hasMultipartExportModel = $derived.by(() => exportState.hasMultipartExportModel);
   const multipartExportParts = $derived.by(() => exportState.multipartExportParts);
   const canExportModel = $derived.by(() => exportState.canExportModel);
+  const modelIo = createModelIo({
+    save,
+    exportFile,
+    exportMultipart3mf,
+    exportMultipartStlZip,
+    setStatus: (message) => session.setStatus(message),
+    setError: (message) => session.setError(message),
+    formatError: formatBackendError,
+  });
   const viewportCodeWorkingCopyAligned = $derived.by(
     () =>
       Boolean(
@@ -922,14 +1008,24 @@
   let agentControlBusy = $state(false);
 
   $effect(() => {
-    if (!overlayActionsEl || typeof ResizeObserver === 'undefined' || typeof window === 'undefined') {
+    const workbenchActive = $currentView === 'workbench';
+    if (!overlayActionsEl || !workbenchActive || typeof ResizeObserver === 'undefined' || typeof window === 'undefined') {
       genieSafeRightInset = 360;
+      setWindowSafeInsets({});
       return;
     }
 
     const measure = () => {
-      const width = overlayActionsEl?.getBoundingClientRect().width ?? 0;
+      const dockRect = overlayActionsEl?.getBoundingClientRect();
+      const width = dockRect?.width ?? 0;
       genieSafeRightInset = Math.max(220, Math.ceil(width) + 28);
+      setWindowSafeInsets({
+        bottom: dockRect ? Math.ceil(window.innerHeight - dockRect.top + 8) : 0,
+      });
+      fitVisibleWindowsToViewport({
+        width: window.innerWidth,
+        height: window.innerHeight,
+      });
     };
 
     measure();
@@ -1216,76 +1312,18 @@
     clearDrawing: () => { drawingOverlay?.clear(); drawMode = false; },
   };
 
-  type ViewerLoadWaiter = {
-    targetNonce: number;
-    resolve: () => void;
-    reject: (error: Error) => void;
-    timer: ReturnType<typeof setTimeout>;
-  };
-  let visibleViewerWaiters: ViewerLoadWaiter[] = [];
-  let hiddenViewerWaiters: ViewerLoadWaiter[] = [];
-
-  function settleViewerLoadWaiters(
-    waiters: ViewerLoadWaiter[],
-    currentNonce: number,
-  ): ViewerLoadWaiter[] {
-    const pending: ViewerLoadWaiter[] = [];
-    for (const waiter of waiters) {
-      if (currentNonce >= waiter.targetNonce) {
-        clearTimeout(waiter.timer);
-        waiter.resolve();
-      } else {
-        pending.push(waiter);
-      }
-    }
-    return pending;
-  }
-
-  function rejectViewerLoadWaiters(
-    waiters: ViewerLoadWaiter[],
-    error: Error,
-  ): ViewerLoadWaiter[] {
-    for (const waiter of waiters) {
-      clearTimeout(waiter.timer);
-      waiter.reject(error);
-    }
-    return [];
-  }
+  const viewerLoadRuntime = createViewerLoadRuntime();
 
   function waitForViewerLoad(
     kind: 'visible' | 'hidden',
     previousNonce: number,
     timeoutMs = 12000,
   ): Promise<void> {
-    const currentNonce = kind === 'visible' ? visibleViewerLoadNonce : hiddenViewerLoadNonce;
-    if (currentNonce > previousNonce) {
-      return Promise.resolve();
-    }
-    return new Promise<void>((resolve, reject) => {
-      const waiter: ViewerLoadWaiter = {
-        targetNonce: previousNonce + 1,
-        resolve,
-        reject,
-        timer: setTimeout(() => {
-          if (kind === 'visible') {
-            visibleViewerWaiters = visibleViewerWaiters.filter((candidate) => candidate !== waiter);
-          } else {
-            hiddenViewerWaiters = hiddenViewerWaiters.filter((candidate) => candidate !== waiter);
-          }
-          reject(new Error(`Timed out waiting for the ${kind} viewer to load.`));
-        }, timeoutMs),
-      };
-      if (kind === 'visible') {
-        visibleViewerWaiters = [...visibleViewerWaiters, waiter];
-      } else {
-        hiddenViewerWaiters = [...hiddenViewerWaiters, waiter];
-      }
-    });
+    return viewerLoadRuntime.waitForLoad(kind, previousNonce, timeoutMs);
   }
 
   function handleVisibleViewerLoaded() {
-    visibleViewerLoadNonce += 1;
-    visibleViewerWaiters = settleViewerLoadWaiters(visibleViewerWaiters, visibleViewerLoadNonce);
+    visibleViewerLoadNonce = viewerLoadRuntime.markLoaded('visible');
     if (
       !hasSketchPreview &&
       shouldPersistVersionPreview(activeVersionMessage, get(session).artifactBundle, get(session).stlUrl)
@@ -1295,8 +1333,7 @@
   }
 
   function handleHiddenViewerLoaded() {
-    hiddenViewerLoadNonce += 1;
-    hiddenViewerWaiters = settleViewerLoadWaiters(hiddenViewerWaiters, hiddenViewerLoadNonce);
+    hiddenViewerLoadNonce = viewerLoadRuntime.markLoaded('hidden');
   }
 
   function handleVisibleViewerLoadError(message: string) {
@@ -1304,26 +1341,11 @@
   }
 
   function handleHiddenViewerLoadError(message: string) {
-    hiddenViewerWaiters = rejectViewerLoadWaiters(
-      hiddenViewerWaiters,
-      new Error(`Hidden viewer failed to load model. ${message}`),
-    );
-  }
-
-  function isMissingViewerArtifactError(message: string): boolean {
-    const normalized = message.toLowerCase();
-    return (
-      normalized.includes('responded with 404') ||
-      normalized.includes('not found') ||
-      normalized.includes('status 404')
-    );
+    viewerLoadRuntime.markFailed('hidden', message);
   }
 
   async function recoverVisibleViewerRuntime(message: string) {
-    visibleViewerWaiters = rejectViewerLoadWaiters(
-      visibleViewerWaiters,
-      new Error(`Visible viewer failed to load model. ${message}`),
-    );
+    viewerLoadRuntime.markFailed('visible', message);
 
     const threadId = get(activeThreadId);
     const messageId = get(activeVersionId);
@@ -1948,12 +1970,13 @@
   });
 
   $effect(() => {
-    if (
-      !isBooting &&
-      !$config.hasSeenOnboarding &&
-      !$onboarding.isActive &&
-      !shouldSuppressOnboardingForAutomation()
-    ) {
+    if (shouldAutoStartOnboarding({
+      configLoaded: $configLoaded,
+      isBooting,
+      hasSeenOnboarding: $config.hasSeenOnboarding,
+      isActive: $onboarding.isActive,
+      isSuppressed: shouldSuppressOnboardingForAutomation(),
+    })) {
       onboarding.start();
     }
   });
@@ -2236,6 +2259,122 @@
     createNewThread({ mode: 'blank' });
   }
 
+  async function loadCampaignRuns() {
+    try {
+      campaignRuns = await campaignRunClient.list();
+    } catch (error) {
+      campaignRunError = formatBackendError(error);
+    }
+  }
+
+  async function loadCampaignDefinitions() {
+    campaignDefinitions = await campaignDefinitionClient.list();
+  }
+
+  async function loadCampaignStep(definitionId: string, stepId: string) {
+    campaignStep = await campaignDefinitionClient.getStep(definitionId, stepId);
+  }
+
+  async function checkCampaignSolution(source: string, stepId: string) {
+    if (!campaignStep) {
+      return { ok: false as const, rawError: 'Campaign step is unavailable.' };
+    }
+    return campaignDefinitionClient.checkSolution(campaignStep.definitionId, stepId, source);
+  }
+
+  async function startCampaign() {
+    const definition = campaignDefinitions[0];
+    if (!definition?.firstStepId) {
+      campaignRunError = 'Campaign definition has no first step.';
+      return;
+    }
+    try {
+      const run = await campaignRunClient.create({
+        title: 'Ecky IR build missions',
+        definitionId: definition.definitionId,
+        definitionVersion: (await campaignDefinitionClient.getStep(definition.definitionId, definition.firstStepId)).definitionVersion,
+        currentStepId: definition.firstStepId,
+      });
+      campaignRuns = [run, ...campaignRuns.filter((candidate) => candidate.id !== run.id)];
+      activeCampaignRun = run;
+      await loadCampaignStep(definition.definitionId, definition.firstStepId);
+      campaignRunError = null;
+      showNewProjectChooser = false;
+      await campaignRunClient.saveActiveProjectNavigation({ kind: 'campaign', id: run.id, view: 'campaign' });
+      await loadAppWindowLayout();
+      closeWindowStore('projects');
+      currentView.set('campaign');
+    } catch (error) {
+      campaignRunError = formatBackendError(error);
+    }
+  }
+
+  async function openCampaignRun(run: CampaignRun) {
+    activeCampaignRun = run;
+    await loadCampaignStep(run.definitionId, run.currentStepId);
+    campaignRunError = null;
+    try {
+      await campaignRunClient.saveActiveProjectNavigation({ kind: 'campaign', id: run.id, view: 'campaign' });
+      await loadAppWindowLayout();
+    } catch (error) {
+      campaignRunError = formatBackendError(error);
+      return;
+    }
+    closeWindowStore('projects');
+    currentView.set('campaign');
+  }
+
+  async function saveCampaignRun(next: CampaignRun): Promise<CampaignRun> {
+    const saved = await campaignRunClient.save(next);
+    campaignRuns = campaignRuns.map((run) => run.id === saved.id ? saved : run);
+    activeCampaignRun = saved;
+    if (campaignStep?.currentStep?.id !== saved.currentStepId) {
+      await loadCampaignStep(saved.definitionId, saved.currentStepId);
+    }
+    return saved;
+  }
+
+  async function deleteCampaignRun(run: CampaignRun) {
+    await campaignRunClient.delete(run.id);
+    campaignRuns = campaignRuns.filter((candidate) => candidate.id !== run.id);
+    if (activeCampaignRun?.id === run.id) {
+      activeCampaignRun = null;
+      await campaignRunClient.clearActiveProjectNavigation();
+      currentView.set('workbench');
+      await loadAppWindowLayout();
+      showWindow('projects');
+    }
+  }
+
+  async function closeCampaignSurface() {
+    activeCampaignRun = null;
+    await campaignRunClient.clearActiveProjectNavigation();
+    currentView.set('workbench');
+    await loadAppWindowLayout();
+    showWindow('projects');
+  }
+
+  async function restoreCampaignProject() {
+    try {
+      const navigation = await campaignRunClient.getActiveProjectNavigation();
+      if (!navigation || navigation.kind !== 'campaign' || navigation.view !== 'campaign') return;
+      await loadAppWindowLayout();
+      const run = await campaignRunClient.get(navigation.id);
+      activeCampaignRun = run;
+      await loadCampaignStep(run.definitionId, run.currentStepId);
+      campaignRuns = [run, ...campaignRuns.filter((candidate) => candidate.id !== run.id)];
+      campaignRunError = null;
+      currentView.set('campaign');
+    } catch (error) {
+      activeCampaignRun = null;
+      campaignRunError = `Campaign run is unavailable: ${formatBackendError(error)}`;
+      await campaignRunClient.clearActiveProjectNavigation().catch(() => {});
+      currentView.set('workbench');
+      await loadAppWindowLayout();
+      showWindow('projects');
+    }
+  }
+
   async function handleTopImportFcstd() {
     showNewProjectChooser = false;
     if (freecadUnavailableReason) {
@@ -2262,7 +2401,12 @@
   }
 
   onMount(() => {
-    void boot();
+    void (async () => {
+      await boot();
+      await loadCampaignDefinitions();
+      await loadCampaignRuns();
+      await restoreCampaignProject();
+    })();
     // Initial fetch of agent sessions (push events only fire on changes, not on load)
     void getActiveAgentSessions().then(sessions => { activeAgentSessions = sessions; }).catch(() => {});
     void getAgentTerminalSnapshots()
@@ -2536,17 +2680,15 @@
     return typeof (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ === 'object';
   }
 
+  const agentRuntime = createAgentRuntime<ThreadAgentState>({
+    hasIpc: hasTauriIpc,
+    getState: getThreadAgentState,
+    setState: (next) => { threadAgentState = next; },
+    setError: (message) => session.setError(message),
+  });
+
   async function refreshThreadAgentState() {
-    if (!hasTauriIpc() || !$activeThreadId) {
-      threadAgentState = null;
-      return;
-    }
-    try {
-      const nextState = await getThreadAgentState($activeThreadId);
-      threadAgentState = nextState;
-    } catch {
-      threadAgentState = null;
-    }
+    await agentRuntime.refresh($activeThreadId ?? null);
   }
 
   $effect(() => {
@@ -2682,7 +2824,8 @@
 
   const genieBubbleState = $derived.by(() =>
     resolveGenieBubblePresentation({
-      sessionError: error,
+      sessionError: errorText,
+      sessionAuthoringError,
       onboardingText: $onboarding.isActive ? $onboarding.text : null,
       viewportScreenshotMessage: activeViewportScreenshotChoice?.message ?? null,
       confirmMessage: activeConfirm?.message ?? null,
@@ -2925,14 +3068,12 @@
     agentControlBusy = true;
     try {
       const target = currentVisibleTargetRef();
-      await wakePrimaryAutoAgent(
+      await agentRuntime.runControl(
+        'wake',
         target?.threadId ?? $activeThreadId,
-        target?.messageId ?? null,
-        target?.modelId ?? null,
+        { messageId: target?.messageId ?? null, modelId: target?.modelId ?? null },
+        wakePrimaryAutoAgent,
       );
-      await refreshThreadAgentState();
-    } catch (e: unknown) {
-      session.setError(`Agent Wake Error: ${formatBackendError(e)}`);
     } finally {
       agentControlBusy = false;
     }
@@ -2943,14 +3084,12 @@
     agentControlBusy = true;
     try {
       const target = currentVisibleTargetRef();
-      await stopPrimaryAutoAgent(
+      await agentRuntime.runControl(
+        'stop',
         target?.threadId ?? $activeThreadId,
-        target?.messageId ?? null,
-        target?.modelId ?? null,
+        { messageId: target?.messageId ?? null, modelId: target?.modelId ?? null },
+        stopPrimaryAutoAgent,
       );
-      await refreshThreadAgentState();
-    } catch (e: unknown) {
-      session.setError(`Agent Stop Error: ${formatBackendError(e)}`);
     } finally {
       agentControlBusy = false;
     }
@@ -2961,14 +3100,12 @@
     agentControlBusy = true;
     try {
       const target = currentVisibleTargetRef();
-      await restartPrimaryAutoAgent(
+      await agentRuntime.runControl(
+        'restart',
         target?.threadId ?? $activeThreadId,
-        target?.messageId ?? null,
-        target?.modelId ?? null,
+        { messageId: target?.messageId ?? null, modelId: target?.modelId ?? null },
+        restartPrimaryAutoAgent,
       );
-      await refreshThreadAgentState();
-    } catch (e: unknown) {
-      session.setError(`Agent Restart Error: ${formatBackendError(e)}`);
     } finally {
       agentControlBusy = false;
     }
@@ -3049,80 +3186,8 @@
   }
 
   async function handleExport(mode: ExportMode) {
-    const bundle = activeArtifactBundle;
-    if (!bundle) return;
-
     showExportChooser = false;
-    try {
-      if (mode === '3mf') {
-        if (!hasMultipartExportModel) return;
-        const path = await save({
-          filters: [{ name: '3MF Package', extensions: ['3mf'] }],
-          defaultPath: exportDefaultNames.threeMf,
-        });
-        if (typeof path === 'string') {
-          await exportMultipart3mf(multipartExportParts, path, exportModelTitle);
-          session.setStatus('Exported multipart 3MF.');
-        }
-        return;
-      }
-
-      if (mode === 'multipartStlZip') {
-        if (!hasMultipartExportModel) return;
-        const path = await save({
-          filters: [{ name: 'Multipart STL Archive', extensions: ['zip'] }],
-          defaultPath: exportDefaultNames.multipartStlZip,
-        });
-        if (typeof path === 'string') {
-          await exportMultipartStlZip(multipartExportParts, path, exportModelTitle);
-          session.setStatus('Exported multipart STL archive.');
-        }
-        return;
-      }
-
-      if (mode === 'stl') {
-        if (!bundle.previewStlPath) return;
-        const path = await save({
-          filters: [{ name: 'STL 3D Model', extensions: ['stl'] }],
-          defaultPath: exportDefaultNames.stl,
-        });
-        if (typeof path === 'string') {
-          await exportFile(bundle.previewStlPath, path);
-          session.setStatus(
-            hasMultipartExportModel
-              ? 'Exported flattened STL. Use 3MF or Multipart STL to preserve separate bodies.'
-              : 'Exported STL.',
-          );
-        }
-        return;
-      }
-
-      if (mode === 'step') {
-        const sourcePath = getStepExportPath(bundle);
-        if (!sourcePath) return;
-        const path = await save({
-          filters: [{ name: 'STEP CAD Model', extensions: ['step', 'stp'] }],
-          defaultPath: exportDefaultNames.step,
-        });
-        if (typeof path === 'string') {
-          await exportFile(sourcePath, path);
-          session.setStatus('Exported STEP.');
-        }
-        return;
-      }
-
-      if (!bundle.fcstdPath) return;
-      const path = await save({
-        filters: [{ name: 'FreeCAD Document', extensions: ['FCStd'] }],
-        defaultPath: exportDefaultNames.fcstd,
-      });
-      if (typeof path === 'string') {
-        await exportFile(bundle.fcstdPath, path);
-        session.setStatus('Exported FCStd.');
-      }
-    } catch (e: unknown) {
-      session.setError(`Export Error: ${formatBackendError(e)}`);
-    }
+    await modelIo.exportModel(mode, activeArtifactBundle, exportDefaultNames, multipartExportParts, hasMultipartExportModel, exportModelTitle);
   }
 
   function dismissGenie() {
@@ -3363,6 +3428,11 @@
     }
   }
 
+  async function handleApplyComponentImport(source: string, label: string) {
+    session.setStatus(`Copy-inlining component: ${label}...`);
+    await applyManualCodeDraft(source);
+  }
+
 </script>
 
 <svelte:window onbeforeunload={hardFlushWindowLayout} onresize={handleViewportResize} />
@@ -3371,182 +3441,6 @@
   {#if $onboarding.isActive}
     <div class="onboarding-backdrop"></div>
   {/if}
-  <div
-    class="app-overlay-actions"
-    class:app-overlay-actions--dock={$currentView === 'workbench'}
-    data-testid="workbench-bottom-dock"
-    bind:this={overlayActionsEl}
-  >
-    {#if $currentView === 'workbench'}
-      <div class="dock-group dock-group--primary">
-        <button
-          class="dock-btn"
-          class:dock-btn--active={$windowStore.params.visible}
-          class:onboarding-highlight={$onboarding.highlightTarget === 'params'}
-          data-onboarding-target="params"
-          data-dock-label="PARAMS"
-          onclick={() => toggleWindow('params')}
-          aria-label="PARAMS"
-          title="Parameters"
-        >
-          <svg class="dock-svg dock-svg--params" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="M4 7h16" />
-            <path d="M4 12h16" />
-            <path d="M4 17h16" />
-            <path d="M8 5v4" />
-            <path d="M15 10v4" />
-            <path d="M11 15v4" />
-          </svg>
-        </button>
-        <button
-          class="dock-btn"
-          class:dock-btn--active={$windowStore.dialogue.visible}
-          class:onboarding-highlight={$onboarding.highlightTarget === 'dialogue'}
-          data-onboarding-target="dialogue"
-          data-dock-label="DIALOGUE"
-          onclick={() => toggleWindow('dialogue')}
-          aria-label="DIALOGUE"
-          title="Dialogue"
-        >
-          <svg class="dock-svg dock-svg--dialogue" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="M5 6h14v10H10l-5 4V6Z" />
-            <path d="M8 10h8" />
-            <path d="M8 13h5" />
-          </svg>
-        </button>
-        <button
-          class="dock-btn"
-          class:draw-active={drawMode}
-          class:dock-btn--disabled={!selectedModelCapabilities.supportsVision}
-          data-dock-label="DRAW"
-          disabled={!selectedModelCapabilities.supportsVision}
-          onclick={() => { if (drawMode) { drawingOverlay?.clear(); } drawMode = !drawMode; }}
-          aria-label={drawMode ? 'Exit Draw Mode' : 'Draw Annotations'}
-          title={selectedModelCapabilities.supportsVision
-            ? (drawMode ? 'Exit Draw Mode' : 'Draw Annotations')
-            : (selectedModelCapabilities.reason ?? 'Drawing unavailable for this model')}
-        >
-          <svg class="dock-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="m6 17 1-4 9-9 4 4-9 9-4 1Z" />
-            <path d="m14 6 4 4" />
-            <path d="M5 21h14" />
-          </svg>
-        </button>
-        <button
-          class="dock-btn"
-          class:dock-btn--active={$windowStore.code.visible}
-          data-dock-label="CODE"
-          onclick={handleDockCodeToggle}
-          aria-label="CODE"
-          title="Code inspector"
-        >
-          <svg class="dock-svg dock-svg--code" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="m9 7-5 5 5 5" />
-            <path d="m15 7 5 5-5 5" />
-            <path d="m13 4-2 16" />
-          </svg>
-        </button>
-      </div>
-      <div class="dock-group dock-group--utility">
-        <button
-          class="dock-btn"
-          class:dock-btn--active={$windowStore.projects.visible}
-          class:onboarding-highlight={$onboarding.highlightTarget === 'projects'}
-          data-onboarding-target="projects"
-          data-dock-label="PROJECTS"
-          onclick={() => toggleWindow('projects')}
-          aria-label="PROJECTS"
-          title="Projects"
-        >
-          <svg class="dock-svg dock-svg--projects" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="M4 7h6l2 2h8v10H4V7Z" />
-            <path d="M4 11h16" />
-            <path d="M7 15h10" />
-          </svg>
-        </button>
-        <button
-          class="dock-btn"
-          class:dock-btn--active={$windowStore.library.visible}
-          data-dock-label="LIBRARY"
-          onclick={() => toggleWindow('library')}
-          aria-label="LIBRARY"
-          title="Reusable component library"
-        >
-          <svg class="dock-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="M5 5h6v14H5V5Z" />
-            <path d="M13 5h6v14h-6V5Z" />
-            <path d="M8 8v8" />
-            <path d="M16 8v8" />
-          </svg>
-        </button>
-        <button
-          class="dock-btn"
-          class:dock-btn--active={$windowStore.docs.visible}
-          data-dock-label="DOCS"
-          onclick={() => toggleWindow('docs')}
-          aria-label="DOCS"
-          title="Ecky IR docs"
-        >
-          <svg class="dock-svg dock-svg--docs" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="M7 4h8l4 4v12H7V4Z" />
-            <path d="M15 4v5h5" />
-            <path d="M10 13h7" />
-            <path d="M10 17h5" />
-          </svg>
-        </button>
-        {#if visibleAgentTerminal}
-          <button
-            class="dock-btn dock-btn--utility terminal-overlay-btn"
-            class:terminal-overlay-btn-attention={visibleAgentTerminal.attentionRequired}
-            data-dock-label="TERMINAL"
-            onclick={() => {
-              if (!terminalWindowState.visible) toggleWindow('terminal');
-            }}
-            aria-label={
-              visibleAgentTerminal.attentionRequired
-                ? `${visibleAgentTerminal.agentLabel} needs terminal input`
-                : `Open ${visibleAgentTerminal.agentLabel} terminal`
-            }
-            title={
-              visibleAgentTerminal.attentionRequired
-                ? `${visibleAgentTerminal.agentLabel} needs terminal input`
-                : `Open ${visibleAgentTerminal.agentLabel} terminal`
-            }
-            >
-            >_
-          </button>
-        {/if}
-        <button
-          class="dock-btn dock-btn--utility dock-btn--settings"
-          data-dock-label="SETTINGS"
-          onclick={() => toggleWindow('settings')}
-          aria-label="Settings"
-          title="Settings"
-        >
-          <svg class="dock-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="M12 4v3" />
-            <path d="M12 17v3" />
-            <path d="M4 12h3" />
-            <path d="M17 12h3" />
-            <path d="m6.3 6.3 2.1 2.1" />
-            <path d="m15.6 15.6 2.1 2.1" />
-            <path d="m17.7 6.3-2.1 2.1" />
-            <path d="m8.4 15.6-2.1 2.1" />
-            <path d="M9 12a3 3 0 1 0 6 0 3 3 0 0 0-6 0Z" />
-          </svg>
-        </button>
-      </div>
-    {:else}
-      <button
-        class="settings-overlay-btn"
-        onclick={() => currentView.set('workbench')}
-        title="Close"
-      >
-        ×
-      </button>
-    {/if}
-  </div>
-
   <div class="app-container">
     {#if $currentView === 'workbench' || $currentView === 'inventory-model'}
       <div class="workbench">
@@ -3679,6 +3573,8 @@
                 compact={genieBubbleState.compact}
                 badge={genieBubbleState.badge}
                 contextLabel={genieBubbleState.contextLabel}
+                errorLayer={genieBubbleState.layer}
+                errorFix={genieBubbleState.fix}
                 safeRightInset={genieSafeRightInset}
                 onBubbleClick={openSessionActivityFromBubble}
                 bubbleTestId="genie-session-bubble"
@@ -3753,24 +3649,30 @@
 
             {#if $activeThreadId && ($workingCopy.macroCode || stlUrl)}
               <div class="viewport-overlay">
-                <div class="export-actions">
-                  <button class="btn btn-xs btn-secondary" onclick={forkDesign} disabled={showViewerBusyMask} title="Fork this design into a new project">🍴 FORK</button>
-                  {#if activeArtifactBundle}
-                    <button
-                      class="btn btn-xs btn-primary"
-                      onclick={() => showExportChooser = true}
-                      disabled={!canExportModel || showViewerBusyMask || hasSketchPreview}
-                      title={hasSketchPreview ? 'Sketch preview is diagnostic only. Accepted CAD export needs exact BRep/STEP validation.' : 'Open export options'}
-                    >
-                      💾 EXPORT
-                    </button>
-                  {/if}
-                </div>
+                <ViewportWorkspace
+                  showCode={false}
+                  busy={showViewerBusyMask}
+                  showExport={Boolean(activeArtifactBundle)}
+                  canExport={canExportModel}
+                  hasSketchPreview={hasSketchPreview}
+                  onFork={() => void forkDesign()}
+                  onExport={() => (showExportChooser = true)}
+                />
               </div>
             {/if}
           </main>
         </div>
       </div>
+    {:else if $currentView === 'campaign' && activeCampaignRun && campaignStep}
+      <main class="campaign-project-page" aria-label="Campaign project">
+        <CampaignWorkbench
+          campaign={campaignStep}
+          onCheckSolution={checkCampaignSolution}
+          bind:run={activeCampaignRun}
+          onSaveRun={saveCampaignRun}
+          onClose={() => void closeCampaignSurface()}
+        />
+      </main>
     {/if}
   </div>
 
@@ -3808,65 +3710,62 @@
     </div>
   {/if}
 
-  {#if projectsWindowState.visible}
-    <Window
-      windowId="projects"
-      x={projectsWindowState.x}
-      y={projectsWindowState.y}
-      width={projectsWindowState.width}
-      height={projectsWindowState.height}
-      z={projectsWindowState.z}
-      minWidth={320}
-      minHeight={300}
-      title="Projects"
-      focused={projectsWindowState.active}
-      hidden={!projectsWindowState.visible}
-      highlighted={$onboarding.highlightTarget === 'projects'}
-      onclose={() => closeWindowStore('projects')}
-    >
+  <WorkbenchWindows
+    currentView={$currentView}
+    windowStates={{
+      code: codeWindowState,
+      projects: projectsWindowState,
+      library: libraryWindowState,
+      params: paramsWindowState,
+      dialogue: dialogueWindowState,
+      docs: docsWindowState,
+      settings: settingsWindowState,
+      terminal: terminalWindowState,
+      activity: activityWindowState,
+      sketch: $windowStore.sketch,
+    }}
+    {mountedWindows}
+    highlightTarget={$onboarding.highlightTarget}
+    {drawMode}
+    canDraw={selectedModelCapabilities.supportsVision}
+    drawUnavailableReason={selectedModelCapabilities.reason}
+    terminalDock={visibleAgentTerminal
+      ? { agentLabel: visibleAgentTerminal.agentLabel, attentionRequired: visibleAgentTerminal.attentionRequired }
+      : null}
+    bind:overlayActionsEl
+    onActivateWindow={handleDockWindowActivate}
+    onDrawToggle={() => {
+      if (drawMode) drawingOverlay?.clear();
+      drawMode = !drawMode;
+    }}
+    onCloseView={() => currentView.set('workbench')}
+    onCloseWindow={closeWindowStore}
+  >
+    {#snippet projectsContent()}
+      {#if campaignRunError}
+        <p class="campaign-project-error" role="alert">{campaignRunError}</p>
+      {/if}
       <ProjectSwitcher
         onImportFcstd={handleImportFcstd}
         onOpenNewProjectChooser={() => showNewProjectChooser = true}
         freecadUnavailableReason={freecadUnavailableReason}
+        {campaignRuns}
+        activeCampaignRunId={activeCampaignRun?.id ?? null}
+        onStartCampaign={() => void startCampaign()}
+        onOpenCampaignRun={(run) => void openCampaignRun(run)}
+        onDeleteCampaignRun={deleteCampaignRun}
       />
-    </Window>
-  {/if}
+    {/snippet}
 
-  {#if libraryWindowState.visible}
-    <Window
-      windowId="library"
-      x={libraryWindowState.x}
-      y={libraryWindowState.y}
-      width={libraryWindowState.width}
-      height={libraryWindowState.height}
-      z={libraryWindowState.z}
-      minWidth={320}
-      minHeight={320}
-      title="Library"
-      focused={libraryWindowState.active}
-      hidden={!libraryWindowState.visible}
-      onclose={() => closeWindowStore('library')}
-    >
-      <LibraryPanel onImportFreecadLibraryPart={handleImportFreecadLibraryPart} />
-    </Window>
-  {/if}
+    {#snippet libraryContent()}
+      <LibraryPanel
+        onImportFreecadLibraryPart={handleImportFreecadLibraryPart}
+        authoredSource={$workingCopy.macroCode || activeVersionMessage?.output?.macroCode || ''}
+        onApplyComponentImport={handleApplyComponentImport}
+      />
+    {/snippet}
 
-  {#if mountedWindows.params}
-    <Window
-      windowId="params"
-      x={paramsWindowState.x}
-      y={paramsWindowState.y}
-      width={paramsWindowState.width}
-      height={paramsWindowState.height}
-      z={paramsWindowState.z}
-      minWidth={280}
-      minHeight={250}
-      title="Parameters"
-      focused={paramsWindowState.active}
-      hidden={!paramsWindowState.visible}
-      highlighted={$onboarding.highlightTarget === 'params'}
-      onclose={() => closeWindowStore('params')}
-      >
+    {#snippet paramsContent()}
       <div class="window-scroll-container">
         <ParamPanel
           uiSpec={effectiveUiSpec}
@@ -3882,9 +3781,7 @@
           onControlFocusChange={(focus) => focusedMeasurementControl = focus}
           onSelectControlView={handleSelectControlView}
           onSelectPart={handlePartSelect}
-          onpostprocessingchange={(nextPostProcessing) => {
-            workingCopy.patch({ postProcessing: nextPostProcessing });
-          }}
+          onpostprocessingchange={(nextPostProcessing) => workingCopy.patch({ postProcessing: nextPostProcessing })}
           onSemanticChange={handleSemanticControlChange}
           onApplyMacroCode={(code) => applyManualCodeDraft(code)}
           onchange={handleParamPanelChange}
@@ -3898,10 +3795,9 @@
             }
           }}
           activeVersionId={$paramPanelState.versionId}
+          threadId={$activeThreadId}
           messageId={$activeVersionId}
-          macroCode={viewportCodeWorkingCopyAligned
-            ? $workingCopy.macroCode
-            : activeVersionMessage?.output?.macroCode ?? ''}
+          macroCode={viewportCodeWorkingCopyAligned ? $workingCopy.macroCode : activeVersionMessage?.output?.macroCode ?? ''}
           outlineEnabled={viewerOutlineEnabled}
           topologyMode={viewerTopologyMode}
           selectionMode={viewerMode}
@@ -3909,14 +3805,7 @@
             viewerOutlineEnabled = display.outlineEnabled;
             viewerTopologyMode = display.topologyMode;
           }}
-          onViewerSelectionModeChange={(mode) => {
-            viewerMode = mode;
-          }}
-          onOpenInEditor={() => {
-            void openProjectInEditor($activeThreadId ?? null, $activeVersionId ?? null).catch((error) => {
-              console.error('open in editor failed:', error);
-            });
-          }}
+          onViewerSelectionModeChange={(mode) => viewerMode = mode}
           onShowCode={() => {
             void openVersionCodeModal({
               code: $workingCopy.macroCode,
@@ -3927,28 +3816,10 @@
             });
           }}
         />
-
       </div>
-      </Window>
+    {/snippet}
 
-  {/if}
-
-  {#if settingsWindowState.visible}
-    <Window
-      windowId="settings"
-      x={settingsWindowState.x}
-      y={settingsWindowState.y}
-      width={settingsWindowState.width}
-      height={settingsWindowState.height}
-      z={settingsWindowState.z}
-      minWidth={400}
-      minHeight={350}
-      title="Settings"
-      focused={settingsWindowState.active}
-      hidden={!settingsWindowState.visible}
-      highlighted={false}
-      onclose={() => closeWindowStore('settings')}
-    >
+    {#snippet settingsContent()}
       <div class="window-scroll-container">
         <ConfigPanel
           bind:config={$config}
@@ -3961,220 +3832,107 @@
           onsave={saveConfig}
         />
       </div>
-    </Window>
-  {/if}
+    {/snippet}
 
-  {#if mountedWindows.activity}
-    <Window
-      windowId="activity"
-      x={activityWindowState.x}
-      y={activityWindowState.y}
-      width={activityWindowState.width}
-      height={activityWindowState.height}
-      z={activityWindowState.z}
-      minWidth={440}
-      minHeight={320}
-      title="Session Activity"
-      focused={activityWindowState.active}
-      hidden={!activityWindowState.visible}
-      highlighted={false}
-      onclose={() => closeWindowStore('activity')}
-    >
+    {#snippet activityContent()}
       <SessionActivityWindow
         events={sessionActivity.visibleEvents}
         selectedEventId={selectedSessionActivityEventId}
         onSelectEvent={selectSessionActivityEvent}
       />
-    </Window>
-  {/if}
+    {/snippet}
 
-  {#if mountedWindows.dialogue}
-    <Window
-      windowId="dialogue"
-      x={dialogueWindowState.x}
-      y={dialogueWindowState.y}
-      width={dialogueWindowState.width}
-      height={dialogueWindowState.height}
-      z={dialogueWindowState.z}
-      minWidth={350}
-      minHeight={260}
-      title="Dialogue"
-      focused={dialogueWindowState.active}
-      hidden={!dialogueWindowState.visible}
-      highlighted={$onboarding.highlightTarget === 'dialogue'}
-      onclose={() => closeWindowStore('dialogue')}
-    >
-      <div class="dialogue-content">
-        <div class="dialogue-toolbar">
-          <label class="dialogue-toolbar__remember">
-            <input
-              type="checkbox"
-              checked={$windowLayoutRemembered}
-              onchange={(event) => void setThreadWindowLayoutRemembered((event.currentTarget as HTMLInputElement).checked)}
+    {#snippet dialogueContent()}
+      <DialogueWindowContent
+        rememberLayout={$windowLayoutRemembered}
+        onRememberLayoutChange={(remember) => void setThreadWindowLayoutRemembered(remember)}
+        activeThreadId={$activeThreadId}
+        bind:activeVersionId={$activeVersionId}
+        promptProps={{
+          onGenerate: handlePromptPanelSubmit,
+          isGenerating: $activeThreadBusy,
+          generationUnavailableReason,
+          imageAttachmentUnavailableReason: imageInputUnavailableReason,
+          dialogueState,
+          messages: activeThreadDialogueMessages,
+          messagesLoading: $activeThreadMessagesLoading,
+          messagesHasMore: activeThread ? ($threadMessagePageState[activeThread.id]?.hasMore ?? false) : false,
+          messagesPageLoading: activeThread ? ($threadMessagePageState[activeThread.id]?.isLoading ?? false) : false,
+          requests: $activeThreadRequests,
+          onLoadOlderMessages: () => activeThread ? loadOlderThreadMessages(activeThread.id) : undefined,
+          activeThreadId: $activeThreadId,
+          sendWorkspaceCapture: sendWorkspaceCaptureForActiveThread,
+          workspaceCaptureHint,
+          sttLanguageCode: $config.voice?.sttLanguageCode ?? 'en-US',
+          onToggleWorkspaceCapture: setWorkspaceCaptureForActiveThread,
+          onShowCode: (m) => {
+            void openVersionCodeModal({
+              code: m.output.macroCode,
+              title: m.output.title,
+              messageId: m.id,
+              sourceLanguage: m.artifactBundle?.sourceLanguage ?? m.modelManifest?.sourceLanguage ?? m.output.sourceLanguage ?? null,
+              geometryBackend: m.artifactBundle?.geometryBackend ?? m.modelManifest?.geometryBackend ?? m.output.geometryBackend ?? null,
+            });
+          },
+          onDeleteVersion: deleteVersion,
+          onRestoreVersion: restoreVersion,
+          onAuthoredVerifyFocus: handlePromptPanelAuthoredVerifyFocus,
+          onVersionChange: loadVersion,
+        }}
+      />
+    {/snippet}
+
+    {#snippet docsContent()}
+      <DocsHub />
+    {/snippet}
+
+    {#snippet terminalContent()}
+      {#if visibleAgentTerminal}
+        <div class="agent-terminal-window">
+          <div class="agent-terminal-window__meta">
+            <div class="agent-terminal-window__status">{visibleAgentTerminal.active ? 'LIVE PTY' : 'LAST SESSION'}</div>
+            {#if activeAgentTerminalMetaSummary}<div class="agent-terminal-window__summary">{activeAgentTerminalMetaSummary}</div>{/if}
+          </div>
+          {#if threadAgentState?.sessionId}
+            <div class="agent-terminal-window__trace-meta">
+              <span>SESSION {shortSessionId(threadAgentState.sessionId)}</span>
+              <span>THREAD {activeThread?.title ?? 'UNKNOWN'}</span>
+              {#if threadAgentState.providerKind}<span>PROVIDER {threadAgentState.providerKind.toUpperCase()}</span>{/if}
+              {#if threadAgentState.waitingOnPrompt}<span>WAITING ON PROMPT</span>
+              {:else if activeMcpBusy}<span>TURN ACTIVE</span>
+              {:else if threadAgentState.phase}<span>{formatAgentPhase(threadAgentState.phase)}</span>{/if}
+            </div>
+          {/if}
+          <div class="agent-terminal-window__hint">{visibleAgentTerminal.active ? 'CLICK TERMINAL TO TYPE DIRECTLY. ARROWS, TAB, ESC, CTRL+C AND PASTE GO STRAIGHT TO THE PTY.' : 'LAST CAPTURED TERMINAL OUTPUT'}</div>
+          <div class="agent-terminal-window__screen" class:agent-terminal-window__screen--live={visibleAgentTerminal.active} aria-label={visibleAgentTerminal.agentLabel + ' terminal'}>
+            <AgentTerminalSurface
+              bind:this={agentTerminalSurface}
+              snapshot={visibleAgentTerminal}
+              visible={terminalWindowState.visible}
+              onRawInput={(data) => void handleAgentTerminalRawInput(data)}
+              onResize={({ cols, rows }) => void handleAgentTerminalResize(visibleAgentTerminal.agentId, cols, rows)}
             />
-            <span>Remember layout</span>
-          </label>
-        </div>
-        {#key $activeThreadId ?? 'new-thread'}
-          <PromptPanel
-            onGenerate={handlePromptPanelSubmit}
-            isGenerating={$activeThreadBusy}
-            generationUnavailableReason={generationUnavailableReason}
-            imageAttachmentUnavailableReason={imageInputUnavailableReason}
-            dialogueState={dialogueState}
-            messages={activeThreadDialogueMessages}
-            messagesLoading={$activeThreadMessagesLoading}
-            messagesHasMore={activeThread ? ($threadMessagePageState[activeThread.id]?.hasMore ?? false) : false}
-            messagesPageLoading={activeThread ? ($threadMessagePageState[activeThread.id]?.isLoading ?? false) : false}
-            requests={$activeThreadRequests}
-            onLoadOlderMessages={() => activeThread && loadOlderThreadMessages(activeThread.id)}
-            activeThreadId={$activeThreadId}
-            sendWorkspaceCapture={sendWorkspaceCaptureForActiveThread}
-            workspaceCaptureHint={workspaceCaptureHint}
-            sttLanguageCode={$config.voice?.sttLanguageCode ?? 'en-US'}
-            onToggleWorkspaceCapture={setWorkspaceCaptureForActiveThread}
-            onShowCode={(m) => {
-              void openVersionCodeModal({
-                code: m.output.macroCode,
-                title: m.output.title,
-                messageId: m.id,
-                sourceLanguage:
-                  m.artifactBundle?.sourceLanguage ?? m.modelManifest?.sourceLanguage ?? m.output.sourceLanguage ?? null,
-                geometryBackend:
-                  m.artifactBundle?.geometryBackend ?? m.modelManifest?.geometryBackend ?? m.output.geometryBackend ?? null,
-              });
-            }}
-            onDeleteVersion={deleteVersion}
-            onRestoreVersion={restoreVersion}
-            onAuthoredVerifyFocus={handlePromptPanelAuthoredVerifyFocus}
-            bind:activeVersionId={$activeVersionId}
-            onVersionChange={loadVersion}
-          />
-        {/key}
-      </div>
-    </Window>
-  {/if}
-
-  {#if mountedWindows.docs}
-    <Window
-      windowId="docs"
-      x={docsWindowState.x}
-      y={docsWindowState.y}
-      width={docsWindowState.width}
-      height={docsWindowState.height}
-      z={docsWindowState.z}
-      minWidth={760}
-      minHeight={480}
-      title="Ecky IR Docs"
-      focused={docsWindowState.active}
-      hidden={!docsWindowState.visible}
-      highlighted={false}
-      onclose={() => closeWindowStore('docs')}
-    >
-      <DocsSite showHead={false} onOpenSnippet={openDocsSnippetInCode} />
-    </Window>
-  {/if}
-
-  {#if mountedWindows.terminal && visibleAgentTerminal}
-    <Window
-      windowId="terminal"
-      x={terminalWindowState.x}
-      y={terminalWindowState.y}
-      width={terminalWindowState.width}
-      height={terminalWindowState.height}
-      z={terminalWindowState.z}
-      minWidth={400}
-      minHeight={300}
-      title={`${visibleAgentTerminal.agentLabel} Terminal`}
-      focused={terminalWindowState.active}
-      hidden={!terminalWindowState.visible}
-      highlighted={false}
-      onclose={() => {
-        closeWindowStore('terminal');
-      }}
-    >
-      <div class="agent-terminal-window">
-        <div class="agent-terminal-window__meta">
-          <div class="agent-terminal-window__status">
-            {#if visibleAgentTerminal.active}
-              LIVE PTY
-            {:else}
-              LAST SESSION
-            {/if}
           </div>
-          {#if activeAgentTerminalMetaSummary}
-            <div class="agent-terminal-window__summary">{activeAgentTerminalMetaSummary}</div>
-          {/if}
-        </div>
-        {#if threadAgentState?.sessionId}
-          <div class="agent-terminal-window__trace-meta">
-            <span>SESSION {shortSessionId(threadAgentState.sessionId)}</span>
-            <span>THREAD {activeThread?.title ?? 'UNKNOWN'}</span>
-            {#if threadAgentState.providerKind}
-              <span>PROVIDER {threadAgentState.providerKind.toUpperCase()}</span>
-            {/if}
-            {#if threadAgentState.waitingOnPrompt}
-              <span>WAITING ON PROMPT</span>
-            {:else if activeMcpBusy}
-              <span>TURN ACTIVE</span>
-            {:else if threadAgentState.phase}
-              <span>{formatAgentPhase(threadAgentState.phase)}</span>
-            {/if}
+          <div class="agent-terminal-window__composer">
+            <input
+              class="input-mono agent-terminal-window__input"
+              bind:value={agentTerminalInput}
+              placeholder={'Paste or send a full line to ' + visibleAgentTerminal.agentLabel + '...'}
+              disabled={!visibleAgentTerminal.active}
+              onkeydown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  void submitAgentTerminalInput();
+                }
+              }}
+            />
+            <button class="btn btn-xs btn-secondary" onclick={() => void submitAgentTerminalInput(true)} disabled={!visibleAgentTerminal.active} title="Send Enter">ENTER</button>
+            <button class="btn btn-xs btn-primary" onclick={() => void submitAgentTerminalInput()} disabled={!visibleAgentTerminal.active || !agentTerminalInput.length}>SEND</button>
           </div>
-        {/if}
-        <div class="agent-terminal-window__hint">
-          {#if visibleAgentTerminal.active}
-            CLICK TERMINAL TO TYPE DIRECTLY. ARROWS, TAB, ESC, CTRL+C AND PASTE GO STRAIGHT TO THE PTY.
-          {:else}
-            LAST CAPTURED TERMINAL OUTPUT
-          {/if}
         </div>
-        <div
-          class="agent-terminal-window__screen"
-          class:agent-terminal-window__screen--live={visibleAgentTerminal.active}
-          aria-label={`${visibleAgentTerminal.agentLabel} terminal`}
-        >
-          <AgentTerminalSurface
-            bind:this={agentTerminalSurface}
-            snapshot={visibleAgentTerminal}
-            visible={terminalWindowState.visible}
-            onRawInput={(data) => void handleAgentTerminalRawInput(data)}
-            onResize={({ cols, rows }) =>
-              void handleAgentTerminalResize(visibleAgentTerminal.agentId, cols, rows)}
-          />
-        </div>
-        <div class="agent-terminal-window__composer">
-          <input
-            class="input-mono agent-terminal-window__input"
-            bind:value={agentTerminalInput}
-            placeholder={`Paste or send a full line to ${visibleAgentTerminal.agentLabel}...`}
-            disabled={!visibleAgentTerminal.active}
-            onkeydown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault();
-                void submitAgentTerminalInput();
-              }
-            }}
-          />
-          <button
-            class="btn btn-xs btn-secondary"
-            onclick={() => void submitAgentTerminalInput(true)}
-            disabled={!visibleAgentTerminal.active}
-            title="Send Enter"
-          >
-            ENTER
-          </button>
-          <button
-            class="btn btn-xs btn-primary"
-            onclick={() => void submitAgentTerminalInput()}
-            disabled={!visibleAgentTerminal.active || !agentTerminalInput.length}
-          >
-            SEND
-          </button>
-        </div>
-      </div>
-    </Window>
-  {/if}
+      {/if}
+    {/snippet}
+  </WorkbenchWindows>
 
   {#if showExportChooser}
     <Modal title="Export Model" onclose={() => showExportChooser = false}>
@@ -4212,8 +3970,11 @@
       draftScopeKey={codeModalDraftScopeKey}
       defaultTitle={$workingCopy.title}
       defaultVersionName={$workingCopy.versionName || 'V-manual'}
+      sourceThreadId={$activeThreadId}
+      sourceMessageId={$activeVersionId}
       onApply={codeModalMode === 'version' ? applyManualCodeDraft : undefined}
       onCommit={codeModalMode === 'version' ? commitManualVersionAndClose : undefined}
+      onTranslateToEcky={codeModalMode === 'version' ? handleTranslateCodeToEcky : undefined}
       z={codeWindowState.z}
       hidden={!codeWindowState.visible}
       focused={codeWindowState.active}
@@ -4239,6 +4000,7 @@
   .app-page { position: relative; height: 100vh; display: flex; flex-direction: column; background: var(--bg); color: var(--text); }
   .app-container { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
   .workbench { display: flex; height: 100%; width: 100%; overflow: hidden; }
+  .campaign-project-page { height: 100%; min-height: 0; padding: 14px; overflow: hidden; }
   .main-workbench { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
   .viewport-area { flex: 1; min-height: 100px; background: #0b0f1a; position: relative; overflow: hidden; }
   .viewer-shell {
@@ -4330,153 +4092,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .dialogue-content { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-  .dialogue-toolbar {
-    flex: 0 0 auto;
-    padding: 6px 10px;
-    border-bottom: 1px solid var(--bg-300);
-    background: color-mix(in srgb, var(--bg-200) 90%, transparent);
-  }
-  .dialogue-toolbar__remember {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 0.65rem;
-    color: var(--text-dim);
-    font-family: var(--font-mono);
-  }
-  .app-overlay-actions {
-    position: absolute;
-    top: 10px;
-    right: 10px;
-    z-index: 5001;
-    display: flex;
-    gap: 12px;
-    align-items: flex-start;
-  }
-  .app-overlay-actions--dock {
-    top: auto;
-    right: auto;
-    left: 50%;
-    bottom: 16px;
-    transform: translateX(-50%);
-    max-width: calc(100vw - 24px);
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    padding: 6px;
-    border: 1px solid var(--bg-300);
-    background: color-mix(in srgb, var(--bg-100) 94%, transparent);
-    box-shadow: 0 10px 22px color-mix(in srgb, #000 42%, transparent);
-    backdrop-filter: blur(10px);
-    overflow: visible;
-  }
-  .dock-group { display: flex; gap: 4px; min-width: 0; }
-  .dock-group--primary,
-  .dock-group--utility {
-    overflow: visible;
-  }
-  .dock-group--utility {
-    position: relative;
-    padding-left: 10px;
-  }
-  .dock-group--utility::before {
-    content: '';
-    position: absolute;
-    left: 2px;
-    top: 5px;
-    bottom: 5px;
-    width: 1px;
-    background: linear-gradient(180deg, transparent, var(--secondary), transparent);
-  }
-  .dock-btn {
-    position: relative;
-    width: 44px;
-    height: 44px;
-    padding: 0;
-    background: color-mix(in srgb, var(--bg-200) 86%, transparent);
-    border: 1px solid var(--bg-300);
-    color: var(--text-dim);
-    font-family: var(--font-mono);
-    font-size: 0.72rem;
-    font-weight: bold;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    backdrop-filter: blur(6px);
-    box-shadow: none;
-    overflow: visible;
-  }
-  .dock-btn:hover,
-  .dock-btn:focus-visible {
-    border-color: var(--primary);
-    color: var(--primary);
-    box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--primary) 72%, transparent);
-  }
-  .dock-btn--active {
-    border-color: var(--primary);
-    color: var(--primary);
-    background: color-mix(in srgb, var(--primary) 16%, var(--bg-100));
-  }
-  .dock-btn:disabled,
-  .dock-btn--disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-  .dock-btn:disabled:hover,
-  .dock-btn--disabled:hover,
-  .dock-btn:disabled:focus-visible,
-  .dock-btn--disabled:focus-visible {
-    border-color: var(--bg-300);
-    color: var(--text-dim);
-    box-shadow: none;
-  }
-  .dock-btn[data-dock-label]::after {
-    content: attr(data-dock-label);
-    position: absolute;
-    left: 50%;
-    bottom: calc(100% + 10px);
-    transform: translateX(-50%) translateY(4px);
-    min-width: max-content;
-    padding: 4px 8px;
-    border: 1px solid var(--bg-300);
-    background: color-mix(in srgb, var(--bg-100) 96%, transparent);
-    color: var(--text-dim);
-    font-size: 0.58rem;
-    letter-spacing: 0.08em;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 120ms ease, transform 120ms ease;
-  }
-  .dock-btn:hover::after,
-  .dock-btn:focus-visible::after {
-    opacity: 1;
-    transform: translateX(-50%) translateY(0);
-  }
-  .dock-svg {
-    width: 25px;
-    height: 25px;
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 1.9;
-    stroke-linecap: square;
-    stroke-linejoin: miter;
-  }
-  .dock-btn--utility {
-    width: 38px;
-    height: 38px;
-    color: color-mix(in srgb, var(--text) 78%, var(--primary) 22%);
-  }
-  .dock-btn--settings {
-    width: 44px;
-    height: 44px;
-  }
-  .settings-overlay-btn { width: 34px; height: 34px; background: color-mix(in srgb, var(--bg-100) 90%, transparent); border: 1px solid var(--bg-300); color: var(--text); cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: var(--shadow); }
-  .settings-overlay-btn:hover { border-color: var(--primary); color: var(--primary); }
-  .dock-btn.draw-active { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 25%, var(--bg-100)); box-shadow: 0 0 8px var(--primary); }
   .new-project-chooser {
     display: flex;
     flex-direction: column;
@@ -4499,8 +4114,6 @@
     border-color: var(--primary);
     color: var(--primary);
   }
-  .terminal-overlay-btn { font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.04em; }
-  .terminal-overlay-btn-attention { border-color: var(--secondary); color: var(--secondary); box-shadow: 0 0 10px color-mix(in srgb, var(--secondary) 50%, transparent); }
   .genie-layer { position: absolute; left: 10px; top: 10px; z-index: 120; pointer-events: auto; max-width: min(56vw, 380px); }
 
   /* STL Cafeteria — multi-microwave strip */
@@ -4567,7 +4180,6 @@
     overflow: hidden;
   }
   .viewport-overlay { position: absolute; bottom: 12px; right: 12px; max-width: min(420px, calc(100vw - 24px)); background: rgba(11, 15, 26, 0.6); backdrop-filter: blur(4px); padding: 8px; border: 1px solid var(--bg-300); z-index: 50; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; overflow: hidden; }
-  .export-actions { display: flex; gap: 4px; }
   .export-chooser {
     display: flex;
     flex-direction: column;

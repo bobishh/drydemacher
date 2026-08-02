@@ -1,0 +1,36 @@
+(model
+  ;; Propeller hub sizing. List work derives a safe hub envelope before geometry.
+  (params
+    (number blade-count 4 :min 3 :max 8 :step 1)
+    (number hub-radius 12 :min 8 :max 20 :step 0.5)
+    (toggle symmetric-hub #t))
+  (part control_coupon
+    (begin
+      (let ((hub-floor 8))
+        (let* (
+          (seed-values (list 1 2 3 4))
+          (reversed-values (reverse seed-values))
+          (pairs (zip seed-values reversed-values))
+          (indexed-values (enumerate seed-values))
+          (angle-samples (linspace 0 180 4))
+          (even-samples (filter even? (range 0 4)))
+          (signed-samples (flat-map (lambda (n) (list n (- n))) seed-values))
+          (copied-samples (concat-map (lambda (n) (list n n)) seed-values))
+          (all-samples (append seed-values reversed-values))
+          (sum (fold + 0 seed-values))
+          (product (reduce * 1 seed-values))
+          (trig (+ (sin (deg->rad 30)) (cos (deg->rad 60)) (tan (deg->rad 0)) (atan 0)))
+          (units (+ (rad->deg (deg->rad 1)) (deg (rad 1))))
+          (noise (+ (hash01 1 2 3) (noise2 0.1 0.2 3)
+                    (fbm2 0.1 0.2 3 2 2 0.5) (cell-distance2 0.1 0.2 3)))
+          (limits (+ (min 2 3) (max 2 3)))
+          (safe-radius
+            (if (and (not (zero? 4))
+                     (or (> 4 2) (>= 4 3))
+                     (<= 4 8) (even? 4) (odd? 3) (list? seed-values)
+                     (not (null? seed-values)) (not (empty? seed-values)))
+              (clamp (lerp 12 (+ 12 (smoothstep 0 1 0.5)) 0.5) 8 24)
+              hub-floor))
+      (if symmetric-hub
+        (box (+ safe-radius (abs (- sum product))) 8 (+ 4 (floor (+ trig units noise limits))))
+        (box safe-radius 8 4)))))))

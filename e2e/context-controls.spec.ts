@@ -165,23 +165,93 @@ const design = {
   postProcessing: null,
 };
 
+const authoringGraph = {
+  sourceDigest: 'sha256:context-source',
+  coreDigest: 'sha256:context-core',
+  artifactDigest: 'sha256:context-artifact',
+  astNodes: [
+    {
+      path: 'parts.low',
+      stableNodeKey: 'part:low',
+      kind: 'part',
+      valueKind: 'form',
+      operation: 'box',
+      partId: 'low',
+    },
+    {
+      path: 'parameters.low_width',
+      stableNodeKey: 'part:low/param:low_width',
+      kind: 'parameter',
+      valueKind: 'number',
+      partId: 'low',
+    },
+  ],
+  features: [
+    {
+      featureId: 'feature:low-box',
+      kind: 'box',
+      label: 'Low box',
+      sourcePath: 'parts.low',
+      sourceStableNodeKey: 'part:low',
+      dependencyIds: ['low_width'],
+      outputIds: ['output:low'],
+      targetIds: ['low:face:top'],
+    },
+  ],
+  dependencies: [
+    {
+      parameterKey: 'low_width',
+      parameterStableNodeKey: 'part:low/param:low_width',
+      dependentSourcePaths: ['parts.low'],
+      affectedStableNodeKeys: ['part:low'],
+      impactedPartIds: ['low'],
+      featureIds: ['feature:low-box'],
+      targetIds: ['low:face:top'],
+    },
+  ],
+  constraints: [],
+  targets: [
+    {
+      targetId: 'low:face:top',
+      durableTargetId: 'low:node:low-node:face:top',
+      canonicalTargetId: 'low:face:top:canonical',
+      aliasIds: ['low:face:top:alias'],
+      partId: 'low',
+      viewerNodeId: 'low-node',
+      label: 'Low Top Face',
+      kind: 'face',
+      parameterKeys: ['low_width'],
+      primitiveIds: [],
+      featureIds: ['feature:low-box'],
+      sourceStableNodeKeys: ['part:low'],
+      editable: true,
+      nonEditableReason: null as string | null,
+    },
+  ],
+  handles: [],
+};
+
 async function installContextMocks(
   page: Page,
   overrides?: {
     artifactBundle?: typeof artifactBundle;
     modelManifest?: typeof modelManifest;
     design?: typeof design;
+    authoringGraph?: typeof authoringGraph;
+    authoringGraphDelayMs?: number;
   },
 ) {
   const bundle = overrides?.artifactBundle ?? artifactBundle;
   const manifest = overrides?.modelManifest ?? modelManifest;
   const mockedDesign = overrides?.design ?? design;
+  const graph = overrides?.authoringGraph ?? authoringGraph;
+  const graphDelayMs = overrides?.authoringGraphDelayMs ?? 0;
   await page.route(/\/mock\/context\/.*\.stl(?:\?.*)?$/, async (route) => {
     const body = route.request().url().includes('offscreen') ? MOCK_STL_OFFSCREEN : MOCK_STL;
     await route.fulfill({ status: 200, contentType: 'model/stl', body });
   });
 
-  await page.addInitScript(({ config, runtimeCapabilities, artifactBundle, modelManifest, design }) => {
+  await page.addInitScript(({ config, runtimeCapabilities, artifactBundle, modelManifest, design, authoringGraph, authoringGraphDelayMs }) => {
     window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
     window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
       if (cmd === 'get_config') return config;
@@ -210,6 +280,12 @@ async function installContextMocks(
       }
       if (cmd === 'render_model') return artifactBundle;
       if (cmd === 'get_model_manifest') return modelManifest;
+      if (cmd === 'get_authoring_graph') {
+        if (authoringGraphDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, authoringGraphDelayMs));
+        }
+        return authoringGraph;
+      }
       if (cmd === 'get_thread') {
         return {
           id: args.id,
@@ -286,7 +362,7 @@ async function installContextMocks(
       }
       return null;
     };
-  }, { config, runtimeCapabilities, artifactBundle: bundle, modelManifest: manifest, design: mockedDesign });
+  }, { config, runtimeCapabilities, artifactBundle: bundle, modelManifest: manifest, design: mockedDesign, authoringGraph: graph, authoringGraphDelayMs: graphDelayMs });
 }
 
 async function selectViewerTarget(page: Page, expectedPanelText: string) {
@@ -320,7 +396,7 @@ test('Given part selection When only model-global controls exist Then part panel
     .locator('textarea.prompt-input')
     .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
-  await page.getByRole('button', { name: 'PARAMS' }).click();
+  await page.getByRole('button', { name: 'Parameters', exact: true }).click();
   await expect(page.locator('.param-panel')).toBeVisible();
 
   await page.getByRole('button', { name: 'Low' }).click();
@@ -726,6 +802,115 @@ test('Given Params select mode When viewer face is clicked Then Params focuses e
   await expect(page.locator('.part-chip.part-chip-active')).toContainText('low');
 });
 
+test('Given exact backend provenance When geometry is selected Then source owner, upstream parameter, and output trace focus together', async ({ page }) => {
+  await installContextMocks(page);
+  await page.goto('/');
+  await expect(page.locator('.boot-overlay')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'DIALOGUE' }).click();
+  await page.fill('textarea.prompt-input', 'make source-aware contextual controls');
+  await page
+    .locator('textarea.prompt-input')
+    .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+  await page.getByRole('button', { name: 'Parameters', exact: true }).click();
+  await page.getByRole('button', { name: 'SELECT' }).click();
+  await selectViewerTarget(page, 'Low Width');
+
+  const trace = page.getByTestId('viewer-dependency-trace');
+  await expect(trace).toContainText('Low Top Face');
+  await expect(trace).toContainText('low_width');
+  await expect(trace).toContainText('Low box');
+  await expect(page.locator('.macro-ast-map-shell')).toBeVisible();
+  await expect(page.locator('.macro-ast-node[data-node-id="part:low"]')).toHaveAttribute(
+    'data-authoring-selected',
+    'true',
+  );
+  await expect(
+    page.locator('.macro-ast-node[data-node-id="part:low/param:low_width"]'),
+  ).toHaveAttribute('data-authoring-upstream', 'true');
+});
+
+test('Given source graph When AST owner is selected Then mapped model target highlights without rendering whole graph in viewport', async ({ page }) => {
+  await installContextMocks(page);
+  await page.goto('/');
+  await expect(page.locator('.boot-overlay')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'DIALOGUE' }).click();
+  await page.fill('textarea.prompt-input', 'make source-aware contextual controls');
+  await page
+    .locator('textarea.prompt-input')
+    .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+  await page.getByRole('button', { name: 'Parameters', exact: true }).click();
+  await page.getByRole('button', { name: 'new params', exact: true }).click();
+
+  await page.locator('.macro-ast-node[data-node-id="part:low"] .macro-ast-node__header').click();
+
+  await expect(page.locator('.viewer-host')).toHaveAttribute(
+    'data-authoring-highlight-targets',
+    'low:face:top',
+  );
+  await expect(page.getByTestId('viewer-dependency-trace')).toContainText('Low Top Face');
+  await expect(page.getByTestId('authoring-graph-source')).toContainText('low_width');
+  await expect(page.getByTestId('authoring-graph-source')).toContainText('Low Top Face');
+  await expect(page.locator('.viewer-host [data-authoring-graph-node]')).toHaveCount(0);
+});
+
+test('Given missing backend provenance When geometry is selected Then target stays inspectable and raw reason replaces edit focus', async ({ page }) => {
+  await installContextMocks(page, {
+    authoringGraph: {
+      ...authoringGraph,
+      targets: [
+        {
+          ...authoringGraph.targets[0],
+          featureIds: [],
+          sourceStableNodeKeys: [],
+          editable: false,
+          nonEditableReason: 'Kernel face has no exact source provenance after boolean refinement.',
+        },
+      ],
+    },
+  });
+  await page.goto('/');
+  await expect(page.locator('.boot-overlay')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'DIALOGUE' }).click();
+  await page.fill('textarea.prompt-input', 'make source-aware contextual controls');
+  await page
+    .locator('textarea.prompt-input')
+    .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+  await page.getByRole('button', { name: 'Parameters', exact: true }).click();
+  await page.getByRole('button', { name: 'SELECT' }).click();
+  await selectViewerTarget(page, 'Low Width');
+
+  const trace = page.getByTestId('viewer-dependency-trace');
+  await expect(trace).toHaveAttribute('data-resolution', 'missing');
+  await expect(trace).toContainText(
+    'Kernel face has no exact source provenance after boolean refinement.',
+  );
+  await expect(page.locator('.macro-ast-node[data-authoring-selected="true"]')).toHaveCount(0);
+});
+
+test('Given authoring graph is pending When geometry is selected Then compact trace reports loading', async ({ page }) => {
+  await installContextMocks(page, { authoringGraphDelayMs: 1500 });
+  await page.goto('/');
+  await expect(page.locator('.boot-overlay')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'DIALOGUE' }).click();
+  await page.fill('textarea.prompt-input', 'make source-aware contextual controls');
+  await page
+    .locator('textarea.prompt-input')
+    .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+  await page.getByRole('button', { name: 'Parameters', exact: true }).click();
+  await page.getByRole('button', { name: 'SELECT' }).click();
+  await selectViewerTarget(page, 'Low Width');
+
+  await expect(page.getByTestId('viewer-dependency-trace')).toHaveAttribute(
+    'data-resolution',
+    'pending',
+  );
+  await expect(page.getByTestId('viewer-dependency-trace')).toContainText('LOADING SOURCE GRAPH');
+});
+
 test('Given Params select mode When viewer click hits unmapped part Then Params shows empty semantic state', async ({ page }) => {
   await installContextMocks(page, {
     artifactBundle: {
@@ -893,9 +1078,14 @@ test('Given Params measure mode When viewer is clicked and dragged Then Params f
 
   await expect(page.locator('.viewer-part-overlay')).toHaveCount(0);
   await expect(page.locator('.part-chip-active')).toHaveCount(0);
-  await expect(page.locator('.param-panel .param-list .param-field')).toHaveCount(0);
-  await expect(page.locator('.param-panel')).toContainText('hose od');
-  await expect(page.locator('.param-panel')).toContainText('low width');
+  // Measure mode "keeps parameter focus unchanged" (MEASURE tooltip): entering it
+  // from the default global view leaves that view rendered (count 2), and a
+  // viewport drag must not select a part or filter the controls. f16917e briefly
+  // inverted this to count 0 / lowercase, but that was a test-only edit with no
+  // backing implementation or spec and contradicts every sibling assertion.
+  await expect(page.locator('.param-panel .param-list .param-field')).toHaveCount(2);
+  await expect(page.locator('.param-panel')).toContainText('Hose OD');
+  await expect(page.locator('.param-panel')).toContainText('Low Width');
 });
 
 test('Given default orbit mode and no selection When user drags viewer Then it does not select a part or open viewport controls', async ({ page }) => {

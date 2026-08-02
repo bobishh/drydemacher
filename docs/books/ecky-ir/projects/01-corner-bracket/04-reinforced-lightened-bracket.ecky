@@ -1,0 +1,21 @@
+(model
+  (params
+    (number span 64 :label "Bracket span" :min 40 :max 120 :step 2)
+    (number foot_depth 36 :label "Foot depth" :min 20 :max 70 :step 2)
+    (number stock 6 :label "Stock thickness" :min 3 :max 12 :step 0.5))
+  (part reinforced_bracket
+    (let* ((flange_height 40)
+           (foot (box span foot_depth stock))
+           (flange (translate 0 (- (/ foot_depth 2) (/ stock 2)) (/ flange_height 2)
+                     (box span stock flange_height)))
+           (gusset (translate 0 (- (/ foot_depth 2) (/ stock 2)) stock
+                    (rotate 90 0 0 (wedge 26 stock 22 4 3 22 19))))
+           (bracket_blank (union foot flange gusset))
+           (reinforcement_path (path ((- (/ span 2) 8) 0 stock)
+                                     (0 0 (+ stock 14))
+                                     ((- 0 (/ span 2) 8) 0 (+ stock 28))))
+           (reinforced (rib bracket_blank (circle 1.8 24) reinforcement_path))
+           (lightening_path (path ((- (/ span 2) 14) 0 (+ stock 5))
+                                  (0 0 (+ stock 5))
+                                  ((- 0 (/ span 2) 14) 0 (+ stock 5)))))
+      (groove reinforced (circle 2.2 24) lightening_path))))

@@ -1,0 +1,12 @@
+(model
+  (params
+    (number camera_pad_radius 11 :label "camera pad radius" :min 8 :max 15 :step 0.1)
+    (number snap_neck_radius 9.1 :label "snap neck radius" :min 6 :max 13 :step 0.1)
+    (number fit_clearance 0.18 :label "PETG seat clearance" :min 0.05 :max 0.5 :step 0.01)
+    (number capture_thickness 0.8 :label "TPU capture thickness" :min 0.5 :max 1.4 :step 0.1))
+  (part inner_petg_island
+    (build
+      (shape seat_radius (+ snap_neck_radius fit_clearance))
+      (shape island (cylinder camera_pad_radius capture_thickness))
+      (shape camera_bore (translate 0 0 -0.1 (cylinder seat_radius (+ capture_thickness 0.2))))
+      (result (difference island camera_bore)))))

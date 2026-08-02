@@ -1,0 +1,9 @@
+(model
+  (params
+    (number blade_length 70 :label "blade planform length" :min 40 :max 120 :step 1)
+    (number root_chord 28 :label "root chord" :min 12 :max 40 :step 1)
+    (number tip_chord 14 :label "tip chord" :min 6 :max 24 :step 1))
+  (part coarse_blade_planform
+    (mesh
+      :vertices ((0 0 0) (blade_length 0 0) (blade_length tip_chord 0) (0 root_chord 0))
+      :triangles ((0 1 2) (0 2 3)))))

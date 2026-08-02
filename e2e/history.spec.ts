@@ -12,6 +12,9 @@ function installProjectSwitcherMocks(options?: {
   latestVersions?: Record<string, Record<string, unknown> | null>;
   messagePages?: Record<string, Array<Record<string, unknown>>>;
   latestVersionDelayMs?: number;
+  threadPreviews?: Record<string, string | null>;
+  threadPreviewDelayMs?: number;
+  campaignRuns?: Array<Record<string, unknown>>;
 }) {
   const history = options?.history ?? [];
   const inventory = options?.inventory ?? [];
@@ -20,10 +23,24 @@ function installProjectSwitcherMocks(options?: {
   const latestVersions = options?.latestVersions ?? {};
   const messagePages = options?.messagePages ?? {};
   const latestVersionDelayMs = options?.latestVersionDelayMs ?? 0;
+  const threadPreviews = options?.threadPreviews ?? {};
+  const threadPreviewDelayMs = options?.threadPreviewDelayMs ?? 0;
+  const campaignRuns = options?.campaignRuns ?? [];
 
   return async ({ page }: { page: import('@playwright/test').Page }) => {
     await page.addInitScript(
-      ({ history, inventory, inventoryError, deletedProjectPages, latestVersions, messagePages, latestVersionDelayMs }) => {
+      ({
+        history,
+        inventory,
+        inventoryError,
+        deletedProjectPages,
+        latestVersions,
+        messagePages,
+        latestVersionDelayMs,
+        threadPreviews,
+        threadPreviewDelayMs,
+        campaignRuns,
+      }) => {
         const mockWindow = window as any;
         localStorage.clear();
         mockWindow.__PROJECTS_CALLS__ = [];
@@ -58,6 +75,8 @@ function installProjectSwitcherMocks(options?: {
         window.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: Record<string, unknown>) => {
           mockWindow.__PROJECTS_CALLS__.push({ cmd, args });
           if (cmd === 'get_config') return structuredClone(config);
+          if (cmd === 'list_campaign_runs') return structuredClone(campaignRuns);
+          if (cmd === 'list_campaign_definitions') return [];
           if (cmd === 'save_config') return null;
           if (cmd === 'get_runtime_capabilities') {
             return {
@@ -70,9 +89,6 @@ function installProjectSwitcherMocks(options?: {
                 geometryBackend: 'freecad',
               },
             };
-          }
-          if (cmd === 'get_animal_cap_catalog') {
-            return { schemaVersion: 1, generatedAt: 0, entries: [] };
           }
           if (cmd === 'list_installed_component_package_headers') return [];
           if (cmd === 'get_history') return structuredClone(mutableHistory);
@@ -137,6 +153,12 @@ function installProjectSwitcherMocks(options?: {
             return null;
           }
           if (cmd === 'get_deleted_thread_preview') return null;
+          if (cmd === 'get_thread_preview') {
+            if (threadPreviewDelayMs > 0) {
+              await new Promise((resolve) => setTimeout(resolve, threadPreviewDelayMs));
+            }
+            return structuredClone(threadPreviews[String(args?.id ?? '')] ?? null);
+          }
           if (cmd === 'get_last_design') return null;
           if (cmd === 'get_active_agent_sessions') return [];
           if (cmd === 'get_agent_terminal_snapshots') return [];
@@ -175,12 +197,46 @@ function installProjectSwitcherMocks(options?: {
         latestVersions,
         messagePages,
         latestVersionDelayMs,
+        threadPreviews,
+        threadPreviewDelayMs,
+        campaignRuns,
       },
     );
   };
 }
 
 test.describe('Projects', () => {
+  test('Given campaign projects When Campaigns opens Then definition and run cards show a canonical preview', async ({ page }) => {
+    await installProjectSwitcherMocks({
+      campaignRuns: [{
+        id: 'campaign-run-1',
+        kind: 'campaignRun',
+        title: 'My Ecky campaign',
+        definitionId: 'ecky-ir-build-missions',
+        definitionVersion: 'sha256:test',
+        currentStepId: 'mission-01-bracket-enclosure/brief',
+        completedStepIds: [],
+        passedChallengeIds: [],
+        draftOverridesByStepId: {},
+        createdAt: Date.UTC(2026, 7, 2) / 1000,
+        updatedAt: Date.UTC(2026, 7, 2) / 1000,
+      }],
+    })({ page });
+
+    await page.goto('/');
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    const projectsWindow = page.locator('[data-window-id="projects"]');
+    await projectsWindow.getByRole('button', { name: 'CAMPAIGNS' }).click();
+
+    const definitionPreview = projectsWindow.getByAltText('Ecky IR campaign preview');
+    const runPreview = projectsWindow.getByAltText('My Ecky campaign preview');
+    await expect(definitionPreview).toBeVisible();
+    await expect(runPreview).toBeVisible();
+    await expect(definitionPreview).toHaveAttribute('src', /\/docs\/assets\/corner-bracket\.png$/);
+    await expect(runPreview).toHaveAttribute('src', /\/docs\/assets\/corner-bracket\.png$/);
+    await expect.poll(() => definitionPreview.evaluate((image) => (image as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+  });
+
   test('shows search input', async ({ page }) => {
     await page.goto('/');
     await page.getByRole('button', { name: 'PROJECTS' }).click();
@@ -223,9 +279,9 @@ test.describe('Projects', () => {
     await expect(page.locator('[data-window-id="projects"] .project-card')).toHaveCount(0);
   });
 
-  test('Given more than six projects When projects opens Then thumbnail fetch warms every card', async ({ page }) => {
+  test('Given many projects When Projects opens Then only visible cards request lightweight previews', async ({ page }) => {
     await installProjectSwitcherMocks({
-      history: Array.from({ length: 8 }, (_, index) => ({
+      history: Array.from({ length: 40 }, (_, index) => ({
         id: `thread-${index + 1}`,
         title: `Preview thread ${index + 1}`,
         summary: '',
@@ -240,22 +296,33 @@ test.describe('Projects', () => {
         finalizedAt: null,
         pendingConfirm: null,
       })),
+      threadPreviews: Object.fromEntries(
+        Array.from({ length: 40 }, (_, index) => [
+          `thread-${index + 1}`,
+          `data:image/png;base64,${btoa(`preview-${index + 1}`)}`,
+        ]),
+      ),
     })({ page });
 
     await page.goto('/');
     await page.getByRole('button', { name: 'PROJECTS' }).click();
 
     const projectsWindow = page.locator('[data-window-id="projects"]');
-    await expect(projectsWindow.locator('.project-card')).toHaveCount(8);
+    await expect(projectsWindow.locator('.project-card')).toHaveCount(40);
     await expect
       .poll(async () =>
         page.evaluate(() =>
           ((window as any).__PROJECTS_CALLS__ as Array<{ cmd: string }>).filter(
-            (entry) => entry.cmd === 'get_thread_latest_version',
+            (entry) => entry.cmd === 'get_thread_preview',
           ).length,
         ),
       )
-      .toBe(8);
+      .toBeGreaterThan(0);
+
+    const calls = await page.evaluate(() => (window as any).__PROJECTS_CALLS__ as Array<{ cmd: string }>);
+    const previewCalls = calls.filter((entry) => entry.cmd === 'get_thread_preview');
+    expect(previewCalls.length).toBeLessThan(40);
+    expect(calls.filter((entry) => entry.cmd === 'get_thread_latest_version')).toHaveLength(0);
   });
 
   test('Given latest version lacks thumbnail When older page has preview Then project card displays preview image', async ({ page }) => {
@@ -278,25 +345,8 @@ test.describe('Projects', () => {
           pendingConfirm: null,
         },
       ],
-      latestVersions: {
-        'thread-preview': {
-          id: 'latest-no-image',
-          role: 'assistant',
-          status: 'success',
-          artifactBundle: { previewStlPath: '/mock/latest.stl' },
-          imageData: null,
-        },
-      },
-      messagePages: {
-        'thread-preview': [
-          {
-            id: 'older-with-image',
-            role: 'assistant',
-            status: 'success',
-            artifactBundle: { previewStlPath: '/mock/older.stl' },
-            imageData: previewImage,
-          },
-        ],
+      threadPreviews: {
+        'thread-preview': previewImage,
       },
     })({ page });
 
@@ -304,7 +354,12 @@ test.describe('Projects', () => {
     await page.getByRole('button', { name: 'PROJECTS' }).click();
 
     const card = page.locator('[data-window-id="projects"] .project-card').filter({ hasText: 'Paged Preview Thread' });
-    await expect(card.locator('.card-thumb img')).toHaveAttribute('src', previewImage);
+    const preview = card.locator('.preview-frame');
+    await expect(preview).toHaveAttribute('data-preview-state', 'ready');
+    await expect(preview.locator('img')).toHaveAttribute('src', previewImage);
+    await expect
+      .poll(() => preview.locator('img').evaluate((image) => getComputedStyle(image).objectFit))
+      .toBe('contain');
     await expect(card.getByText('NO PREVIEW')).toHaveCount(0);
   });
 
@@ -357,7 +412,9 @@ test.describe('Projects', () => {
       );
     }, { previewImage });
 
-    await expect(card.locator('.card-thumb img')).toHaveAttribute('src', previewImage);
+    const preview = card.locator('.preview-frame');
+    await expect(preview).toHaveAttribute('data-preview-state', 'ready');
+    await expect(preview.locator('img')).toHaveAttribute('src', previewImage);
     await expect(card.getByText('NO PREVIEW')).toHaveCount(0);
   });
 
@@ -387,7 +444,6 @@ test.describe('Projects', () => {
 
     const projectsWindow = page.locator('[data-window-id="projects"]');
     const activeCard = projectsWindow.locator('.project-card').filter({ hasText: 'Bike light enclosure' });
-    await activeCard.getByRole('button', { name: 'MORE ACTIONS' }).click();
     await activeCard.getByRole('button', { name: 'COMPLETE' }).click();
     await projectsWindow.getByRole('button', { name: 'COMPLETED' }).click();
 
@@ -513,7 +569,7 @@ test.describe('Projects', () => {
     await expect(libraryWindow).toBeVisible();
     await expect(libraryWindow.getByRole('button', { name: 'COMPONENT PACKAGES' })).toBeVisible();
     await expect(libraryWindow.getByRole('button', { name: 'FREECAD PARTS' })).toBeVisible();
-    await expect(libraryWindow.getByRole('button', { name: 'CATALOG' })).toBeVisible();
+    await expect(libraryWindow.getByRole('button', { name: 'CATALOG' })).toHaveCount(0);
   });
 
   test('Given Projects is open When viewport narrows Then window and compact card remain fully reachable', async ({ page }) => {
@@ -557,7 +613,7 @@ test.describe('Projects', () => {
 
     const card = projectsWindow.locator('.project-card').filter({ hasText: 'Responsive enclosure' });
     await expect(card).toBeVisible();
-    await expect(card.getByRole('button', { name: 'MORE ACTIONS' })).toBeVisible();
+    await expect(card.getByRole('button', { name: 'COMPLETE' })).toBeVisible();
   });
 
   test.describe('Completed projects', () => {
@@ -580,11 +636,14 @@ test.describe('Projects', () => {
             pendingConfirm: null,
           },
         ],
-        latestVersionDelayMs: 3000,
+        threadPreviews: {
+          'completed-1': `data:image/png;base64,${btoa('completed-preview')}`,
+        },
+        threadPreviewDelayMs: 3000,
       }),
     );
 
-    test('Given slow preview metadata, when Completed opens, then cards render without waiting', async ({ page }) => {
+    test('Given slow preview payload, when Completed opens, then summary cards render without full-version fetches', async ({ page }) => {
       await page.goto('/');
       await page.getByRole('button', { name: 'PROJECTS' }).click();
       await page.locator('[data-window-id="projects"]').getByRole('button', { name: 'COMPLETED' }).click();
@@ -592,8 +651,10 @@ test.describe('Projects', () => {
       const projectsWindow = page.locator('[data-window-id="projects"]');
       await expect(projectsWindow.locator('.project-card')).toHaveCount(1);
       await expect(projectsWindow.getByText('Tradescantia zebrina pot')).toBeVisible();
+      await expect(projectsWindow.getByText('LOADING COMPLETED...')).toHaveCount(0);
 
       const calls = await page.evaluate(() => (window as any).__PROJECTS_CALLS__ as Array<{ cmd: string }>);
+      expect(calls.filter((entry) => entry.cmd === 'get_thread_latest_version')).toHaveLength(0);
       expect(calls.filter((entry) => entry.cmd === 'get_thread_messages_page')).toHaveLength(0);
     });
   });

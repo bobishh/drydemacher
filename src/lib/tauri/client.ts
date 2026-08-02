@@ -1,8 +1,14 @@
 import {
   commands,
+  type ActiveProjectNavigation,
   type AppError,
   type AppLogEntry,
+  type CampaignRun,
+  type CampaignStepPayload,
+  type CampaignSummary,
+  type CreateCampaignRunInput,
   type DeletedThreadsPage,
+  type MissionCoreIrEvaluation,
   type Result,
   type ThreadAgentState,
   type ThreadWindowLayout,
@@ -57,8 +63,12 @@ import {
   type ViewportCameraState,
 } from '../types/domain';
 import { resolveSketchPreviewDraftScopeId } from '../sketchPreviewDraftStore';
+import {
+  decodeAuthoringGraph,
+  type AuthoringGraph,
+  type AuthoringGraphRequest,
+} from '../authoringGraph';
 import type {
-  AnimalCapCatalog,
   ComponentPackage,
   ComponentPackageHeader,
   BrepHiddenLineProjectionRequest,
@@ -343,6 +353,10 @@ export async function getDeletedThreadPreview(id: string): Promise<string | null
   return invokeCommand(commands.getDeletedThreadPreview(id));
 }
 
+export async function getThreadPreview(id: string): Promise<string | null> {
+  return invokeCommand(commands.getThreadPreview(id));
+}
+
 export async function restoreDeletedThread(id: string): Promise<void> {
   await invokeCommand(commands.restoreDeletedThread(id));
 }
@@ -483,6 +497,43 @@ export async function openProjectInEditor(
   return invokeCommand(commands.openProjectInEditor(threadId, messageId));
 }
 
+export async function revealProjectFolder(
+  threadId: string | null,
+  messageId: string | null,
+): Promise<import('./contracts').ProjectEditorLink> {
+  return invokeCommand(commands.revealProjectFolder(threadId, messageId));
+}
+
+export type {
+  ProjectFolderExportResult,
+  ProjectFolderStatus,
+  ProjectFolderApplyResponse,
+  ProjectManifest,
+  ProjectSyncState,
+} from './contracts';
+
+export async function projectFolderExport(
+  threadId: string | null,
+  messageId: string | null,
+): Promise<import('./contracts').ProjectFolderExportResult> {
+  return invokeCommand(commands.projectFolderExport(threadId, messageId));
+}
+
+export async function projectFolderStatus(
+  threadId: string | null,
+  messageId: string | null,
+): Promise<import('./contracts').ProjectFolderStatus> {
+  return invokeCommand(commands.projectFolderStatus(threadId, messageId));
+}
+
+export async function projectFolderApply(
+  threadId: string | null,
+  messageId: string | null,
+  force = false,
+): Promise<import('./contracts').ProjectFolderApplyResponse> {
+  return invokeCommand(commands.projectFolderApply(threadId, messageId, force));
+}
+
 export async function macroAstSourceMap(macroCode: string): Promise<import('./contracts').MacroAstSourceNode[]> {
   return invokeCommand(commands.macroAstSourceMap(macroCode));
 }
@@ -542,6 +593,11 @@ export async function getModelManifest(modelId: string): Promise<ModelManifest> 
   return invokeCommand(commands.getModelManifest(modelId), normalizeModelManifest);
 }
 
+export async function getAuthoringGraph(request: AuthoringGraphRequest): Promise<AuthoringGraph> {
+  const graph = await invokeCommand(commands.getAuthoringGraph(request));
+  return decodeAuthoringGraph(graph);
+}
+
 export async function saveModelManifest(
   modelId: string,
   manifest: ModelManifest,
@@ -580,8 +636,24 @@ export async function listInstalledComponentPackageHeaders(): Promise<ComponentP
   return invokeCommand(commands.listInstalledComponentPackageHeaders());
 }
 
-export async function getAnimalCapCatalog(): Promise<AnimalCapCatalog> {
-  return invokeCommand(commands.getAnimalCapCatalog());
+export type CopyInlineComponentImportRequest = {
+  packageId: string;
+  version: string;
+  componentId: string;
+  authoredSource: string;
+};
+
+export type CopyInlineComponentImportResponse = {
+  authoredSource: string;
+  componentSource: string;
+  entrySymbol: string;
+  partKey: string;
+};
+
+export async function copyInlineComponentImport(
+  request: CopyInlineComponentImportRequest,
+): Promise<CopyInlineComponentImportResponse> {
+  return invokeCommand(commands.componentImportCopyInline(request));
 }
 
 export async function suggestSketchFeatures(
@@ -771,6 +843,67 @@ export async function updateVersionPreview(
 
 export async function parseMacroParams(macroCode: string): Promise<ParsedParamsResult> {
   return normalizeParsedParamsResult(await commands.parseMacroParams(macroCode));
+}
+
+export async function listCampaignDefinitions(): Promise<CampaignSummary[]> {
+  return invokeCommand(commands.listCampaignDefinitions());
+}
+
+export async function getCampaignStep(
+  definitionId: string,
+  stepId: string,
+): Promise<CampaignStepPayload> {
+  return invokeCommand(commands.getCampaignStep(definitionId, stepId));
+}
+
+export async function checkCampaignStep(
+  definitionId: string,
+  stepId: string,
+  candidateSource: string,
+): Promise<MissionCoreIrEvaluation> {
+  return invokeCommand(commands.checkCampaignStep(definitionId, stepId, candidateSource));
+}
+
+export async function createCampaignRun(input: CreateCampaignRunInput): Promise<CampaignRun> {
+  return invokeCommand(commands.createCampaignRun(input));
+}
+
+export async function listCampaignRuns(): Promise<CampaignRun[]> {
+  return invokeCommand(commands.listCampaignRuns());
+}
+
+export async function getCampaignRun(id: string): Promise<CampaignRun> {
+  return invokeCommand(commands.getCampaignRun(id));
+}
+
+export async function saveCampaignRun(run: CampaignRun): Promise<CampaignRun> {
+  return invokeCommand(commands.saveCampaignRun(run));
+}
+
+export async function deleteCampaignRun(id: string): Promise<void> {
+  await invokeCommand(commands.deleteCampaignRun(id));
+}
+
+export async function getActiveProjectNavigation(): Promise<ActiveProjectNavigation | null> {
+  return invokeCommand(commands.getActiveProjectNavigation());
+}
+
+export async function saveActiveProjectNavigation(
+  navigation: ActiveProjectNavigation,
+): Promise<ActiveProjectNavigation> {
+  return invokeCommand(commands.saveActiveProjectNavigation(navigation));
+}
+
+export async function clearActiveProjectNavigation(): Promise<void> {
+  await invokeCommand(commands.clearActiveProjectNavigation());
+}
+
+export async function getAppWindowLayout(): Promise<ThreadWindowLayout | null> {
+  return invokeCommand(commands.getAppWindowLayout());
+}
+
+export async function saveAppWindowLayout(layout: ThreadWindowLayout): Promise<void> {
+  await invokeCommand(commands.saveAppWindowLayout(layout));
 }
 
 export async function uploadAsset(input: {

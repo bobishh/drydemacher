@@ -1,0 +1,6 @@
+(model
+  ;; Original filled closed SVG, embossed as a real enclosure service badge.
+  (part service_badge
+    (extrude
+      (svg "docs/books/ecky-ir/projects/02-configurable-enclosure/service-badge.svg")
+      0.8)))

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "02-configurable-enclosure",
+  "title": "Configurable Two-Part Enclosure",
+  "checkpoints": [
+    {"id":"worked","role":"worked","source":"01-worked.ecky","summary":"Two fixed parts share named shell and lid dimensions.","render":{"yaw":0.62,"pitch":-0.92,"size":720}},
+    {"id":"starter","role":"starter","source":"02-joint-starter.ecky","summary":"Compilable enclosure missing its selectable joint geometry.","render":{"yaw":0.62,"pitch":-0.92,"size":720}},
+    {"id":"solution","role":"solution","source":"03-configurable-enclosure-solution.ecky","summary":"Fixed body and lid select snap hooks or external-bolt bosses and optional recesses.","render":{"yaw":0.62,"pitch":-0.92,"size":720}},
+    {"id":"threaded-fastening","role":"worked","source":"04-threaded-fastening.ecky","summary":"A threaded fastener mates with a tapped enclosure boss.","render":{"yaw":0.62,"pitch":-0.92,"size":720}},
+    {"id":"vented-adjustment-lid","role":"worked","source":"05-vented-adjustment-lid.ecky","summary":"Ellipse and polygon vents plus straight and curved adjustment slots are cut from the lid.","render":{"yaw":0.62,"pitch":-0.92,"size":720}},
+    {"id":"service-lid-marking","role":"worked","source":"06-service-lid-marking.ecky","summary":"A service lid combines a rounded outline, profile vent, annular vent, and raised OPEN label.","render":{"yaw":0.62,"pitch":-0.92,"size":720}},
+    {"id":"owned-asset-import","role":"worked","source":"07-owned-asset-import.ecky","summary":"Imports an Ecky-owned STL only as an explicit cable-gland reference.","render":{"yaw":0.62,"pitch":-0.92,"size":720}},
+    {"id":"svg-service-badge","role":"worked","source":"08-service-badge.ecky","summary":"Extrudes an original filled SVG badge as enclosure geometry.","render":{"yaw":0.62,"pitch":-0.92,"size":720}}
+  ]
+}

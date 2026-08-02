@@ -36,20 +36,20 @@ test('isDocsRoute matches docs and learn guide paths only', () => {
   assert.equal(isDocsRoute('/docs/direct-occt'), false);
 });
 
-test('docsSourcePath separates campaign routes from dry reference routes', () => {
-  assert.equal(docsSourcePath('/learn/ecky-ir'), '/tutorials/ecky-campaign.md');
-  assert.equal(docsSourcePath('/learn/ecky-ir/level-04'), '/tutorials/ecky-campaign.md');
+test('docsSourcePath always resolves the canonical reference, never a campaign fallback', () => {
+  assert.equal(docsSourcePath('/learn/ecky-ir'), '/docs/ecky-ir.md');
+  assert.equal(docsSourcePath('/learn/ecky-ir/level-04'), '/docs/ecky-ir.md');
   assert.equal(docsSourcePath('/docs/ecky-ir'), '/docs/ecky-ir.md');
   assert.equal(docsSourcePath('/docs/ecky-ir/union'), '/docs/ecky-ir.md');
-  assert.equal(docsSourcePath('/ecky-ir'), '/tutorials/ecky-campaign.md');
-  assert.equal(docsSourcePath('/'), '/tutorials/ecky-campaign.md');
+  assert.equal(docsSourcePath('/ecky-ir'), '/docs/ecky-ir.md');
+  assert.equal(docsSourcePath('/'), '/docs/ecky-ir.md');
 });
 
 test('parseDocsDocument reads markdown corpus into title and sections', () => {
   const parsed = parseDocsDocument(docsFixture());
 
   assert.equal(parsed.title, 'Ecky Language Reference');
-  assert.ok(parsed.summaryHtml.includes('Dry syntax'));
+  assert.ok(parsed.summaryHtml.includes('Exact forms'));
   assert.equal(parsed.sections[0]?.title, 'Operation Index');
   assert.ok(parsed.sections.some((section) => section.title === 'Language Overview'));
   assert.ok(parsed.sections.some((section) => section.title === 'Verify Clauses'));
@@ -62,7 +62,7 @@ test('parseDocsDocument reads tutorial campaign as six ordered levels', () => {
 
   assert.equal(parsed.title, 'Ecky Campaign');
   assert.equal(parsed.sections.length, 6);
-  assert.equal(parsed.sections[0]?.title, 'Level 01: Marker');
+  assert.equal(parsed.sections[0]?.title, 'Level 01: Corner Bracket');
   assert.equal(parsed.sections[4]?.title, 'Level 05: Perforated Toothbrush Holder');
   assert.equal(parsed.sections[5]?.title, 'Level 06: Film Adapter');
   assert.ok(parsed.sections.every((section) => section.bodyHtml.includes('<strong>Mission:</strong>')));
@@ -119,14 +119,23 @@ test('renderMarkdownFragment omits hidden render-source comments', () => {
   assert.doesNotMatch(html, /render-source/);
 });
 
-test('renderMarkdownFragment renders generated operation tables as semantic tables', () => {
+test('renderMarkdownFragment gives signature headings anchors and renders markdown links', () => {
   const html = renderMarkdownFragment(
-    '| Form | Available backends |\n| --- | --- |\n| `box` | ecky-rust, build123d |',
+    '### `box`\n\nSee [`cylinder`](#cylinder).',
+  );
+
+  assert.match(html, /<h3 id="box"><code>box<\/code><\/h3>/);
+  assert.match(html, /<a href="#cylinder"><code>cylinder<\/code><\/a>/);
+});
+
+test('renderMarkdownFragment renders generated operation tables as linked semantic tables', () => {
+  const html = renderMarkdownFragment(
+    '| Form | Reference |\n| --- | --- |\n| [`box`](#box) | Primitive Signatures |',
   );
 
   assert.match(html, /<table>/);
   assert.match(html, /<th>Form<\/th>/);
-  assert.match(html, /<th>Available backends<\/th>/);
-  assert.match(html, /<td><code>box<\/code><\/td>/);
-  assert.match(html, /<td>ecky-rust, build123d<\/td>/);
+  assert.match(html, /<th>Reference<\/th>/);
+  assert.match(html, /<td><a href="#box"><code>box<\/code><\/a><\/td>/);
+  assert.doesNotMatch(html, /build123d|ecky-rust|freecad/);
 });

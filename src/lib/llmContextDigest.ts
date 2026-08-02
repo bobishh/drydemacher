@@ -108,8 +108,6 @@ function authoringSourceExtension(
   geometryBackend: ModelManifest['geometryBackend'] | null | undefined,
 ) : string | null {
   switch (sourceLanguage) {
-    case 'build123d':
-      return '.py';
     case 'legacyPython':
       return '.FCMacro';
     case 'ecky':

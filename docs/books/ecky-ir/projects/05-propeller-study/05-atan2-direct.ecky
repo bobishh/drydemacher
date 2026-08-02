@@ -1,0 +1,5 @@
+(model
+  ;; atan2 lowers as a direct numeric call. Keep it outside the list-expansion
+  ;; path, where the current expanded helper compiler resolves it too early.
+  (part angle_probe
+    (box (+ 1 (atan2 0 1)) 1 1)))

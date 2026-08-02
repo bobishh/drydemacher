@@ -1,0 +1,20 @@
+(model
+  (params
+    (number rail_tip_w 5.4 :label "rail tip width" :min 3.5 :max 8 :step 0.1)
+    (number rail_h 4.2 :label "rail height" :min 2 :max 6 :step 0.1)
+    (number rail_length 90 :label "rail length" :min 60 :max 130 :step 1)
+    (number fit_clearance 0.25 :label "rail fit clearance" :min 0 :max 0.8 :step 0.05))
+  (part scanner_base_rail
+    (build
+      (shape rail_profile
+        (polygon (((/ rail_h 2) 0) (0 (/ rail_tip_w 2)) ((- (/ rail_h 2)) 0))))
+      (result (extrude rail_profile rail_length))))
+  (part scanner_tunnel_channel
+    (build
+      (shape channel_h (+ rail_h (* 2 fit_clearance)))
+      (shape channel_w (+ rail_tip_w (* 2 fit_clearance)))
+      (shape channel_profile
+        (polygon (((/ channel_h 2) 0) (0 (/ channel_w 2)) ((- (/ channel_h 2)) 0))))
+      (shape tunnel_blank (box rail_length 20 16))
+      (shape channel_cut (rotate 0 90 0 (extrude channel_profile (+ rail_length 2))))
+      (result (difference tunnel_blank channel_cut)))))

@@ -1,0 +1,17 @@
+(model
+  (params
+    (number handle_diameter 14 :label "Handle diameter" :min 12 :max 16 :step 0.1)
+    (number snap_clearance 0.4 :label "Snap clearance" :min 0.2 :max 0.8 :step 0.05)
+    (number clip_wall 1.6 :label "Clip wall" :min 1.2 :max 3 :step 0.1)
+    (number clip_width 4 :label "Clip width" :min 2 :max 8 :step 0.5)
+    :relations ((> handle_diameter snap_clearance)))
+  (part snap_clip
+    (let* (
+      (inner_radius (+ (/ handle_diameter 2) snap_clearance))
+      (outer_radius (+ inner_radius clip_wall))
+      (outer (rotate 0 90 0 (cylinder outer_radius clip_width 64)))
+      (bore (translate -1 0 0
+              (rotate 0 90 0 (cylinder inner_radius (+ clip_width 2) 64))))
+      (opening (translate 0 0 outer_radius
+                 (box (+ clip_width 2) (* inner_radius 1.4) outer_radius)))
+      (difference outer bore opening))))

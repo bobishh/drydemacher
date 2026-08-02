@@ -1,185 +1,79 @@
 # Ecky Language Reference
 
-Dry syntax, signatures, selectors, backend support, and verification grammar.
-For project-driven learning, use the campaign under `/learn/ecky-ir`.
-
-Use this section after the lessons when you need exact forms, signatures, helper names, selector strings, and verification grammar. The reference is intentionally dense; the earlier chapters show when each piece matters.
+Exact forms, signatures, selectors, and verification grammar.
 
 ## Operation Index
 
-Generated from the runtime surface registry. Do not edit this table by hand.
+Documented forms and operations. Select a name to open its signature.
 
 <!-- ECKY_GENERATED_OP_INDEX_START -->
-| Form | Available backends |
+| Form | Reference |
 | --- | --- |
-| `*` | build123d, ecky-rust, freecad |
-| `+` | build123d, ecky-rust, freecad |
-| `-` | build123d, ecky-rust, freecad |
-| `/` | build123d, ecky-rust, freecad |
-| `<` | build123d, ecky-rust, freecad |
-| `<=` | build123d, ecky-rust, freecad |
-| `=` | build123d, ecky-rust, freecad |
-| `>` | build123d, ecky-rust, freecad |
-| `>=` | build123d, ecky-rust, freecad |
-| `abs` | build123d, ecky-rust, freecad |
-| `and` | build123d, ecky-rust, freecad |
-| `append` | build123d, ecky-rust, freecad |
-| `apply` | build123d, ecky-rust, freecad |
-| `arc-array` | build123d, ecky-rust, freecad |
-| `atan` | build123d, ecky-rust, freecad |
-| `atan2` | build123d, ecky-rust, freecad |
-| `attractor-field` | ecky-rust |
-| `begin` | build123d, ecky-rust, freecad |
-| `bezier-path` | build123d, ecky-rust, freecad |
-| `box` | build123d, ecky-rust, freecad |
-| `bspline` | build123d, ecky-rust, freecad |
-| `build` | build123d, ecky-rust, freecad |
-| `cell-distance2` | build123d, ecky-rust, freecad |
-| `cellular` | ecky-rust |
-| `chamfer` | build123d, ecky-rust, freecad |
-| `circle` | build123d, ecky-rust, freecad |
-| `clamp` | build123d, ecky-rust, freecad |
-| `clip-box` | build123d, ecky-rust, freecad |
-| `common` | build123d, ecky-rust, freecad |
-| `compound` | build123d, ecky-rust, freecad |
-| `concat-map` | build123d, ecky-rust, freecad |
-| `cone` | build123d, ecky-rust, freecad |
-| `cos` | build123d, ecky-rust, freecad |
-| `cut` | build123d, ecky-rust, freecad |
-| `cylinder` | build123d, ecky-rust, freecad |
-| `define` | build123d, ecky-rust, freecad |
-| `deg` | build123d, ecky-rust, freecad |
-| `deg->rad` | build123d, ecky-rust, freecad |
-| `diamond` | ecky-rust |
-| `diamond-field` | ecky-rust |
-| `difference` | build123d, ecky-rust, freecad |
-| `ellipse` | build123d, ecky-rust, freecad |
-| `empty?` | build123d, ecky-rust, freecad |
-| `enumerate` | build123d, ecky-rust, freecad |
-| `even?` | build123d, ecky-rust, freecad |
-| `extrude` | build123d, ecky-rust, freecad |
-| `fbm` | ecky-rust |
-| `fbm2` | build123d, ecky-rust, freecad |
-| `fillet` | build123d, ecky-rust, freecad |
-| `filter` | build123d, ecky-rust, freecad |
-| `flat-map` | build123d, ecky-rust, freecad |
-| `floor` | build123d, ecky-rust, freecad |
-| `fold` | build123d, ecky-rust, freecad |
-| `for-compound` | build123d, ecky-rust, freecad |
-| `for-union` | build123d, ecky-rust, freecad |
-| `fourier` | ecky-rust |
-| `fuse` | build123d, ecky-rust, freecad |
-| `grid-array` | build123d, ecky-rust, freecad |
-| `groove` | build123d, ecky-rust, freecad |
-| `gyroid` | ecky-rust |
-| `hammered` | ecky-rust |
-| `hash-signed` | build123d, ecky-rust, freecad |
-| `hash01` | build123d, ecky-rust, freecad |
-| `heightfield` | ecky-rust |
-| `helical-ridge` | build123d, ecky-rust, freecad |
-| `henon-points` | build123d, ecky-rust, freecad |
-| `hull` | ecky-rust |
-| `if` | build123d, ecky-rust, freecad |
-| `import-stl` | build123d, ecky-rust, freecad |
-| `intersection` | build123d, ecky-rust, freecad |
-| `jitter2` | build123d, ecky-rust, freecad |
-| `jittered-grid` | build123d, ecky-rust, freecad |
-| `lambda` | build123d, ecky-rust, freecad |
-| `lerp` | build123d, ecky-rust, freecad |
-| `let` | build123d, ecky-rust, freecad |
-| `let*` | build123d, ecky-rust, freecad |
-| `linear-array` | build123d, ecky-rust, freecad |
-| `linspace` | build123d, ecky-rust, freecad |
-| `list` | build123d, ecky-rust, freecad |
-| `list?` | build123d, ecky-rust, freecad |
-| `location` | build123d, ecky-rust, freecad |
-| `loft` | build123d, ecky-rust, freecad |
-| `logistic-bifurcation-points` | build123d, ecky-rust, freecad |
-| `lorenz-points` | build123d, ecky-rust, freecad |
-| `make-face` | build123d, ecky-rust, freecad |
-| `map` | build123d, ecky-rust, freecad |
-| `max` | build123d, ecky-rust, freecad |
-| `mesh` | ecky-rust |
-| `meta` | build123d, ecky-rust, freecad |
-| `min` | build123d, ecky-rust, freecad |
-| `mirror` | build123d, ecky-rust, freecad |
-| `neovius` | ecky-rust |
-| `noise2` | build123d, ecky-rust, freecad |
-| `not` | build123d, ecky-rust, freecad |
-| `null?` | build123d, ecky-rust, freecad |
-| `odd?` | build123d, ecky-rust, freecad |
-| `offset` | build123d, ecky-rust, freecad |
-| `offset-rounded` | build123d, ecky-rust, freecad |
-| `or` | build123d, ecky-rust, freecad |
-| `organic-loop` | build123d, ecky-rust, freecad |
-| `params` | build123d, ecky-rust, freecad |
-| `part` | build123d, ecky-rust, freecad |
-| `path` | build123d, ecky-rust, freecad |
-| `path-frame` | build123d, ecky-rust, freecad |
-| `place` | build123d, ecky-rust, freecad |
-| `plane` | build123d, ecky-rust, freecad |
-| `polar-points` | build123d, ecky-rust, freecad |
-| `polygon` | build123d, ecky-rust, freecad |
-| `polyhedron` | ecky-rust |
-| `polyline` | build123d, ecky-rust, freecad |
-| `profile` | build123d, ecky-rust, freecad |
-| `quote` | build123d, ecky-rust, freecad |
-| `rad` | build123d, ecky-rust, freecad |
-| `rad->deg` | build123d, ecky-rust, freecad |
-| `radial-array` | build123d, ecky-rust, freecad |
-| `range` | build123d, ecky-rust, freecad |
-| `rectangle` | build123d, ecky-rust, freecad |
-| `reduce` | build123d, ecky-rust, freecad |
-| `regular-polygon` | build123d, ecky-rust, freecad |
-| `repeat` | build123d, ecky-rust, freecad |
-| `repeat-compound` | build123d, ecky-rust, freecad |
-| `repeat-pick` | build123d, ecky-rust, freecad |
-| `repeat-union` | build123d, ecky-rust, freecad |
-| `result` | build123d, ecky-rust, freecad |
-| `reverse` | build123d, ecky-rust, freecad |
-| `revolve` | build123d, ecky-rust, freecad |
-| `rib` | build123d, ecky-rust, freecad |
-| `ribs` | ecky-rust |
-| `ring` | build123d, ecky-rust, freecad |
-| `rings` | ecky-rust |
-| `rossler-points` | build123d, ecky-rust, freecad |
-| `rotate` | build123d, ecky-rust, freecad |
-| `rounded-polygon` | build123d, ecky-rust, freecad |
-| `rounded-rect` | build123d, ecky-rust, freecad |
-| `sampled-radial-loft` | build123d, ecky-rust, freecad |
-| `scale` | build123d, ecky-rust, freecad |
-| `schwarz-d` | ecky-rust |
-| `schwarz-p` | ecky-rust |
-| `shape` | build123d, ecky-rust, freecad |
-| `shell` | build123d, ecky-rust, freecad |
-| `sin` | build123d, ecky-rust, freecad |
-| `slot-arc` | build123d, ecky-rust, freecad |
-| `slot-center-point` | build123d, ecky-rust, freecad |
-| `slot-center-to-center` | build123d, ecky-rust, freecad |
-| `slot-overall` | build123d, ecky-rust, freecad |
-| `smoothstep` | build123d, ecky-rust, freecad |
-| `sphere` | build123d, ecky-rust, freecad |
-| `spiral` | ecky-rust |
-| `superellipse-point` | build123d, ecky-rust, freecad |
-| `svg` | build123d, ecky-rust, freecad |
-| `sweep` | build123d, ecky-rust, freecad |
-| `tan` | build123d, ecky-rust, freecad |
-| `taper` | build123d, ecky-rust, freecad |
-| `text` | build123d, ecky-rust, freecad |
-| `thread` | build123d, ecky-rust, freecad |
-| `torus` | build123d, ecky-rust, freecad |
-| `translate` | build123d, ecky-rust, freecad |
-| `trapezoid` | build123d, ecky-rust, freecad |
-| `twist` | build123d, ecky-rust, freecad |
-| `union` | build123d, ecky-rust, freecad |
-| `voronoi-cells` | build123d, ecky-rust, freecad |
-| `voronoi2` | build123d, ecky-rust, freecad |
-| `wall-pattern` | ecky-rust |
-| `wave-loop` | build123d, ecky-rust, freecad |
-| `wedge` | build123d, ecky-rust, freecad |
-| `xor` | build123d, ecky-rust, freecad |
-| `zero?` | build123d, ecky-rust, freecad |
-| `zip` | build123d, ecky-rust, freecad |
+| [`arc-array`](#arc-array) | Array and Frame Signatures |
+| [`bezier-path`](#bezier-path) | Surface and Path Signatures |
+| [`box`](#box) | Primitive Signatures |
+| [`bspline`](#bspline) | Surface and Path Signatures |
+| [`build`](#build) | Forms and Structure |
+| [`chamfer`](#chamfer) | Surface and Path Signatures |
+| [`circle`](#circle) | Primitive Signatures |
+| [`clip-box`](#clip-box) | Array and Frame Signatures |
+| [`common`](#common) | Boolean and Transform Signatures |
+| [`compound`](#compound) | Special / Custom Operations |
+| [`cone`](#cone) | Primitive Signatures |
+| [`cut`](#cut) | Boolean and Transform Signatures |
+| [`cylinder`](#cylinder) | Primitive Signatures |
+| [`difference`](#difference) | Boolean and Transform Signatures |
+| [`extrude`](#extrude) | Surface and Path Signatures |
+| [`fillet`](#fillet) | Surface and Path Signatures |
+| [`for-compound`](#for-compound) | Array and Frame Signatures |
+| [`for-union`](#for-union) | Array and Frame Signatures |
+| [`fuse`](#fuse) | Boolean and Transform Signatures |
+| [`grid-array`](#grid-array) | Array and Frame Signatures |
+| [`helical-ridge`](#helical-ridge) | Special / Custom Operations |
+| [`import-stl`](#import-stl) | Primitive Signatures |
+| [`intersection`](#intersection) | Boolean and Transform Signatures |
+| [`linear-array`](#linear-array) | Array and Frame Signatures |
+| [`location`](#location) | Array and Frame Signatures |
+| [`loft`](#loft) | Surface and Path Signatures |
+| [`make-face`](#make-face) | Primitive Signatures |
+| [`mirror`](#mirror) | Boolean and Transform Signatures |
+| [`offset`](#offset) | Surface and Path Signatures |
+| [`offset-rounded`](#offset-rounded) | Surface and Path Signatures |
+| [`params`](#params) | Params and Controls |
+| [`part`](#part) | Forms and Structure |
+| [`path`](#path) | Surface and Path Signatures |
+| [`path-frame`](#path-frame) | Array and Frame Signatures |
+| [`place`](#place) | Array and Frame Signatures |
+| [`plane`](#plane) | Array and Frame Signatures |
+| [`polygon`](#polygon) | Primitive Signatures |
+| [`polyline`](#polyline) | Surface and Path Signatures |
+| [`profile`](#profile) | Primitive Signatures |
+| [`radial-array`](#radial-array) | Array and Frame Signatures |
+| [`rectangle`](#rectangle) | Primitive Signatures |
+| [`repeat`](#repeat) | Array and Frame Signatures |
+| [`repeat-compound`](#repeat-compound) | Array and Frame Signatures |
+| [`repeat-pick`](#repeat-pick) | Array and Frame Signatures |
+| [`repeat-union`](#repeat-union) | Array and Frame Signatures |
+| [`result`](#result) | Forms and Structure |
+| [`revolve`](#revolve) | Surface and Path Signatures |
+| [`ring`](#ring) | Primitive Signatures |
+| [`rotate`](#rotate) | Boolean and Transform Signatures |
+| [`rounded-polygon`](#rounded-polygon) | Primitive Signatures |
+| [`rounded-rect`](#rounded-rect) | Primitive Signatures |
+| [`sampled-radial-loft`](#sampled-radial-loft) | Special / Custom Operations |
+| [`scale`](#scale) | Boolean and Transform Signatures |
+| [`shape`](#shape) | Forms and Structure |
+| [`shell`](#shell) | Surface and Path Signatures |
+| [`sphere`](#sphere) | Primitive Signatures |
+| [`svg`](#svg) | Primitive Signatures |
+| [`sweep`](#sweep) | Surface and Path Signatures |
+| [`taper`](#taper) | Surface and Path Signatures |
+| [`text`](#text) | Primitive Signatures |
+| [`translate`](#translate) | Boolean and Transform Signatures |
+| [`twist`](#twist) | Surface and Path Signatures |
+| [`union`](#union) | Boolean and Transform Signatures |
+| [`wall-pattern`](#wall-pattern) | Special / Custom Operations |
+| [`xor`](#xor) | Boolean and Transform Signatures |
 <!-- ECKY_GENERATED_OP_INDEX_END -->
 
 ## Language Overview
@@ -202,7 +96,7 @@ Mental model:
 - `.ecky` is Scheme surface syntax
 - compiler lowers it into Core IR
 - verifier checks value kinds and op signatures
-- lowerers map Core IR into build123d, FreeCAD, or direct OCCT execution
+- native execution maps Core IR into `OcctPlan`, then the precompiled Direct OCCT runner; FreeCAD lowering is optional interop
 
 Read this order if new:
 
@@ -214,7 +108,6 @@ Read this order if new:
 - `Array and Frame Signatures`
 - `Special / Custom Operations`
 - `Selector Strings and Named Keywords`
-- `Cookbook`
 
 ## Forms and Structure
 
@@ -410,30 +303,52 @@ Agents lift proven parts into the shared library and reuse them by source:
 Extraction is copy-inline only: the returned source is self-contained and
 no registry reference is created implicitly.
 
-## Projects As Folders
+### Live package references
 
-A project can live as a plain folder on disk: edit `model.ecky` with any
-editor or LLM file skill; Ecky stays the renderer, validator, and history.
+Use a live reference when the authored model must retain an installed package
+coordinate instead of vendoring source:
 
-```text
-<projectsRoot>/<slug>/
-  model.ecky          edit this with anything
-  ecky-project.json   binding manifest, owned by Ecky
+```scheme
+(import-component
+  "bike.bottle-holder-kit"
+  :version "1.2.0"
+  :component "bottle-cage"
+  :as cage)
+
+(model
+  (part holder
+    (cage :diameter 74)))
 ```
 
-- `project_folder_export` writes the folder from a thread's active version
-- `project_folder_status` classifies it: `clean`, `fileChanged`,
-  `threadAdvanced` (stale; re-export), `conflict`, or `missing`
-- `project_folder_apply` compiles the edited file, renders a preview, and
-  commits it as a new version on the bound thread, then rebases the manifest
+Package id, version, component id, and alias are mandatory literal values.
+Resolution is exact. No semver ranges, `latest`, network fallback, or
+transitive package lookup occurs.
 
-Rules:
+Copy-inline and live reference are separate modes:
 
-- the folder is a mirror; threads and versions remain the record
-- a stale folder never silently clobbers the thread: re-export to refresh
-- a conflict (both sides moved) applies only with an explicit force, and the
-  previous head stays available as a version
-- never edit `ecky-project.json` by hand
+- `component_get` is vendor mode: paste closed source; no package dependency
+  or dependency lock exists afterward.
+- `import-component` is live mode: the committed model version owns a
+  canonical exact lock containing package coordinates and payload digests.
+- preview, render, export, reopen, and historical rerender read the committed
+  lock and never update it.
+- installing a newer package changes nothing until an explicit upgrade
+  previews and commits a new model version. The old version keeps its old lock.
+
+Payloads live once in the application-global content-addressed store. Models
+do not receive `node_modules`-style dependency trees. Uninstall removes package
+discovery; committed locks continue resolving their immutable payload digests.
+Garbage collection removes a payload only after installed coordinates,
+committed versions, and in-flight operations stop retaining it.
+
+Filesystem projects mirror the canonical lock as `ecky.lock.json`. Normal
+export references the global store. Portable export vendors locked payloads by
+digest; portable import verifies every digest before publishing anything.
+
+STEP-backed live components preserve analytic BRep provenance and import
+through native Direct OCCT. This path never calls FreeCAD, converts through
+STL, invokes `solidify`, repairs geometry, or implicitly fuses multiple roots.
+STL remains the separate `import-stl` → `solidify` mesh bridge.
 
 ## Verify Clauses
 
@@ -1013,8 +928,8 @@ Example:
 
 ### `svg`
 
-- build123d-authored signature: `svg path`
-- FreeCAD-authored signature: `svg path [target-width] [target-height] [fit-mode]`
+- native signature: `svg path`
+- FreeCAD interop signature: `svg path [target-width] [target-height] [fit-mode]`
 - result: `Sketch`
 
 Known fit modes from lowerers/tests:
@@ -1089,7 +1004,7 @@ Boolean rule:
 - verifier accepts:
   - `scale factor shape`
   - `scale x y z shape`
-- build123d lowerer supports both
+- native planner supports both forms
 - FreeCAD lowerer currently expects explicit `x y z shape`
 - result kind follows input shape kind
 
@@ -1133,6 +1048,19 @@ Examples:
 
 - signature: `sweep profile path`
 - result: `Solid`
+
+Example:
+
+```scheme
+(model
+  (part rail
+    (sweep
+      (circle 1.2)
+      (bezier-path ((0 0 0) (0 0 12) (12 0 20) (24 0 20))))))
+```
+
+The circle is the cross-section. The Bézier path carries it upward, then
+through the bend, producing a capped solid rail.
 
 ### `shell`
 
@@ -1213,17 +1141,19 @@ Notes:
 
 - verifier only requires point-list first
 - lowerers accept tangent hints
-- tangents list may use 2 entries or one per point in build123d path
+- tangents list may use 2 entries or one per point in native path
 
 Example:
 
 ```scheme
 (model
-  (part latch
-    (translate 0 -17 5
-      (sweep
-        (circle 1.4)
-        (bezier-path ((-18 0 0) (-8 -8 4) (8 -8 4) (18 0 0)))))))
+  (part body
+    (extrude
+      (bspline
+        ((-14 -8) (-8 -14) (8 -14) (14 -8)
+         (14 8) (8 14) (-8 14) (-14 8))
+        :closed #t)
+      4)))
 ```
 
 ## Array and Frame Signatures
@@ -1267,7 +1197,7 @@ Example:
 - index must be symbol
 - body should produce geometry
 - result: compound geometry
-- build123d caveat: currently solid-only
+- native caveat: currently solid-only
 
 ### `repeat-pick`
 
@@ -1464,8 +1394,7 @@ Observed modes:
 
 Backend caveat:
 
-- build123d lowerer currently rejects `wall-pattern`
-- use direct Rust/OCCT path when pattern op matters
+- native OCCT handles BREP operations; `wall-pattern` remains mesh-only
 
 ## Selector Strings and Named Keywords
 
@@ -1539,158 +1468,3 @@ Accepted anchor values:
 - `start`
 - `end`
 - numeric position
-
-## Cookbook
-
-### Cube
-
-```scheme
-(model
-  (part body
-    (box 20 20 20)))
-```
-
-### Rotate a part
-
-```scheme
-(model
-  (part body
-    (rotate 0 0 45
-      (box 20 20 10))))
-```
-
-### Box with named intermediate shapes
-
-```scheme
-(model
-  (part body
-    (build
-      (shape outer (box 80 60 24))
-      (shape cavity (translate 2 2 2 (box 76 56 22)))
-      (result (difference outer cavity)))))
-```
-
-### Profile with hole
-
-```scheme
-(model
-  (part body
-    (extrude
-      (profile :outer (circle 20 96) :holes (circle 10 96))
-      10)))
-```
-
-### Repeat ribs and rollers
-
-```scheme
-(model
-  (part body
-    (build
-      (shape ribs
-        (repeat-union i 4
-          (translate (* i 10) 0 0 (box 4 8 6))))
-      (shape rollers
-        (repeat-compound i 4
-          (translate (+ (* i 10) 5) 0 0 (cylinder 2 6))))
-      (result (compound ribs rollers)))))
-```
-
-### Cup from real fixture
-
-```scheme
-(model
-  (part cup
-    (fillet 1.47
-      (union
-        (shell 3
-          (revolve
-            (make-face
-              (union
-                (bspline ((30 10) (69 105)) #f
-                  :tangents ((1 0.5) (0.7 1))
-                  :tangent-scalars (1.75 1))
-                (path (30 10 0) (40 0 0) (0 0 0) (0 105 0) (69 105 0))))
-            360))
-        (translate 0 0 10
-          (cylinder 30 3))))))
-```
-
-## Tutorial: Loop to Profile
-
-Sample points, close loop, extrude profile.
-
-```scheme
-(define control-points
-  (map
-    (lambda (angle)
-      (list
-        (* 26 (cos (* pi (/ angle 180.0))))
-        (* 16 (sin (* pi (/ angle 180.0))))))
-    (linspace 0 315 8)))
-
-(model
-  (part body
-    (extrude (bspline control-points :closed #t) 10)))
-```
-
-What to notice:
-
-- `linspace` drives repeatable sampling
-- point list becomes curve
-- curve becomes profile
-- profile becomes solid
-
-## Tutorial: Path to Solid
-
-Separate motion logic from body logic.
-
-```scheme
-(model
-  (part latch
-    (translate 0 -17 5
-      (sweep
-        (circle 1.4)
-        (bezier-path ((-18 0 0) (-8 -8 4) (8 -8 4) (18 0 0)))))))
-```
-
-What to notice:
-
-- profile is tiny and stable
-- path carries shape motion
-- latch stays separate from any main body
-
-## Tutorial: Repeat Logic
-
-Author repeated geometry as structure, not copy-paste.
-
-```scheme
-(model
-  (part body
-    (build
-      (shape ribs
-        (repeat-union i 4
-          (translate (* i 10) 0 0 (box 4 8 6))))
-      (shape rollers
-        (repeat-compound i 4
-          (translate (+ (* i 10) 5) 0 0 (cylinder 2 6))))
-      (shape marker
-        (repeat-pick i 4 (= i 3)
-          (translate (+ (* i 10) 5) 0 12 (sphere 3))))
-      (result (compound ribs rollers marker)))))
-```
-
-What to notice:
-
-- index symbol `i` becomes body-local numeric binding
-- repetition lives in one source block
-- final boolean/compound intent stays obvious
-
-## Constraint Dojo
-
-Use this section as fit/tolerance checklist when a model crosses from “looks right” into “must assemble”:
-
-- named clearances
-- relation constraints
-- lower/upper bounds
-- failure examples
-- why anonymous offsets are garbage for physical fit

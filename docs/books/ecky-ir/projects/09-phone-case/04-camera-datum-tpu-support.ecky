@@ -1,0 +1,15 @@
+(model
+  (params
+    (number phone_width 71.5 :label "phone width" :min 60 :max 90 :step 0.1)
+    (number phone_length 146.7 :label "phone length" :min 130 :max 180 :step 0.1)
+    (number rear_camera_left 58.2 :label "camera left from phone edge" :min 40 :max 70 :step 0.1)
+    (number rear_camera_top 13.32 :label "camera top from phone edge" :min 5 :max 30 :step 0.1)
+    (number camera_support_radius 12 :label "TPU support radius" :min 8 :max 18 :step 0.1)
+    (number camera_opening_radius 8.3 :label "camera opening radius" :min 5 :max 12 :step 0.1))
+  (part tpu_camera_support
+    (build
+      (shape camera_x (- rear_camera_left (/ phone_width 2)))
+      (shape camera_y (- (/ phone_length 2) rear_camera_top))
+      (shape support (translate camera_x camera_y 0 (cylinder camera_support_radius 1.7)))
+      (shape opening (translate camera_x camera_y -0.1 (cylinder camera_opening_radius 1.9)))
+      (result (difference support opening)))))

@@ -104,7 +104,7 @@ async function installCapabilityMock(
           recommendedAuthoringContext: {
             engineKind: 'ecky',
             sourceLanguage: 'ecky',
-            geometryBackend: 'build123d',
+            geometryBackend: 'mesh',
           },
         };
       }
@@ -226,7 +226,7 @@ test.describe('Runtime capability boot repair', () => {
     await expect(page.locator('.freecad-missing-banner')).toHaveCount(0);
   });
 
-  test('Given persisted FreeCAD default When boot repairs Then repaired config persists to build123d-backed IR', async ({ page }) => {
+  test('Given persisted FreeCAD default When boot repairs Then native Ecky becomes sole BRep authoring path', async ({ page }) => {
     await installCapabilityMock(page, {
       defaultEngineKind: 'freecad',
       defaultSourceLanguage: 'legacyPython',
@@ -253,16 +253,17 @@ test.describe('Runtime capability boot repair', () => {
     expect(repairedCall).toMatchObject({
       defaultEngineKind: 'ecky',
       defaultSourceLanguage: 'ecky',
-      defaultGeometryBackend: 'build123d',
+      defaultGeometryBackend: 'mesh',
     });
 
     await expect(page.getByRole('button', { name: 'ECKY', exact: true })).toHaveClass(/active/);
     const authoringField = page.locator('.field').filter({ has: page.getByText('DEFAULT AUTHORING CONTEXT', { exact: true }) });
     await expect(authoringField.getByText('SOURCE', { exact: true })).toBeVisible();
     await expect(authoringField.getByText('BACKEND FOR ECKY', { exact: true })).toBeVisible();
-    await expect(page.locator('button.conn-type-btn.active', { hasText: 'BUILD123D' }).first()).toBeVisible();
     await expect(page.getByRole('button', { name: 'FREECAD PYTHON' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'BUILD123D PYTHON' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'BUILD123D PYTHON' })).toHaveCount(0);
+    await expect(authoringField.getByRole('button', { name: 'BUILD123D', exact: true })).toHaveCount(0);
+    await expect(authoringField.getByRole('button', { name: 'NATIVE', exact: true })).toHaveClass(/active/);
     await expect(authoringField.getByRole('button', { name: 'FREECAD', exact: true })).toBeVisible();
   });
 
@@ -283,19 +284,12 @@ test.describe('Runtime capability boot repair', () => {
     await expect(authoringField.getByRole('button', { name: 'MESH', exact: true })).toHaveCount(0);
   });
 
-  test('Given FreeCAD absent When user opens import and settings Then FreeCAD actions stay visible but disabled with reason', async ({ page }) => {
+  test('Given FreeCAD absent When settings open Then FreeCAD action stays visible but disabled with reason', async ({ page }) => {
     await installCapabilityMock(page);
 
     await page.goto('/');
     await expect(page.locator('.boot-overlay')).toHaveCount(0);
     await page.waitForSelector('.workbench');
-
-    await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.locator('[data-window-id="projects"]').getByRole('button', { name: '+ NEW' }).click();
-    const importButton = page.getByRole('button', { name: 'Import FreeCAD' }).last();
-    await expect(importButton).toBeDisabled();
-    await expect(importButton).toHaveAttribute('title', /FreeCAD executable not found/);
-    await page.keyboard.press('Escape');
 
     await page.locator('button[title="Settings"]').click();
     const freecadDefault = page.getByRole('button', { name: 'FREECAD PYTHON' });
@@ -307,48 +301,30 @@ test.describe('Runtime capability boot repair', () => {
     await expect(freecadBackend).toHaveAttribute('title', /FreeCAD executable not found/);
   });
 
-  test('Given direct OCCT is blocked When Ecky backend settings open Then fast-path blocker is visible but not selectable', async ({ page }) => {
-    await installCapabilityMock(
-      page,
-      {
-        defaultEngineKind: 'ecky',
-        defaultSourceLanguage: 'ecky',
-        defaultGeometryBackend: 'mesh',
-      },
-      { directOcctAvailable: false, directOcctDetail: 'Direct OCCT unavailable: missing TKDESTEP' },
-    );
+  for (const directOcctAvailable of [false, true]) {
+    test(`Given direct OCCT is ${directOcctAvailable ? 'ready' : 'blocked'} When Ecky backend settings open Then internal runtime detail stays hidden`, async ({ page }) => {
+      const directOcctDetail = directOcctAvailable
+        ? 'Direct OCCT ready'
+        : 'Direct OCCT unavailable: missing TKDESTEP';
+      await installCapabilityMock(
+        page,
+        {
+          defaultEngineKind: 'ecky',
+          defaultSourceLanguage: 'ecky',
+          defaultGeometryBackend: 'mesh',
+        },
+        { directOcctAvailable, directOcctDetail },
+      );
 
-    await page.goto('/');
-    await expect(page.locator('.boot-overlay')).toHaveCount(0);
-    await page.waitForSelector('.workbench');
-    await page.locator('button[title="Settings"]').click();
+      await page.goto('/');
+      await expect(page.locator('.boot-overlay')).toHaveCount(0);
+      await page.waitForSelector('.workbench');
+      await page.locator('button[title="Settings"]').click();
 
-    const authoringField = page.locator('.field').filter({ has: page.getByText('DEFAULT AUTHORING CONTEXT', { exact: true }) });
-    await expect(authoringField.getByText('DIRECT OCCT STEP FAST PATH', { exact: true })).toBeVisible();
-    await expect(authoringField).toContainText('Direct OCCT unavailable: missing TKDESTEP');
-    await expect(authoringField.getByRole('button', { name: /DIRECT OCCT/i })).toHaveCount(0);
-  });
-
-  test('Given direct OCCT is ready When Ecky backend settings open Then internal STEP fast path is shown as ready', async ({ page }) => {
-    await installCapabilityMock(
-      page,
-      {
-        defaultEngineKind: 'ecky',
-        defaultSourceLanguage: 'ecky',
-        defaultGeometryBackend: 'mesh',
-      },
-      { directOcctAvailable: true, directOcctDetail: 'Direct OCCT ready' },
-    );
-
-    await page.goto('/');
-    await expect(page.locator('.boot-overlay')).toHaveCount(0);
-    await page.waitForSelector('.workbench');
-    await page.locator('button[title="Settings"]').click();
-
-    const authoringField = page.locator('.field').filter({ has: page.getByText('DEFAULT AUTHORING CONTEXT', { exact: true }) });
-    await expect(authoringField.getByText('DIRECT OCCT STEP FAST PATH', { exact: true })).toBeVisible();
-    await expect(authoringField).toContainText('READY');
-    await expect(authoringField).toContainText('Direct OCCT ready');
-    await expect(authoringField.getByRole('button', { name: /DIRECT OCCT/i })).toHaveCount(0);
-  });
+      const authoringField = page.locator('.field').filter({ has: page.getByText('DEFAULT AUTHORING CONTEXT', { exact: true }) });
+      await expect(authoringField.getByRole('button', { name: 'NATIVE', exact: true })).toBeVisible();
+      await expect(authoringField.getByText('DIRECT OCCT STEP FAST PATH', { exact: true })).toHaveCount(0);
+      await expect(authoringField).not.toContainText(directOcctDetail);
+    });
+  }
 });
