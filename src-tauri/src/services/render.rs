@@ -13,9 +13,6 @@ const ECKY_DIRECT_OCCT_DEFAULT_STACK_SIZE: usize = 64 * 1024 * 1024;
 const ECKY_DIRECT_OCCT_STACK_MB_ENV: &str = "ECKY_DIRECT_OCCT_STACK_MB";
 const DIRECT_OCCT_RESOURCE_SNAPSHOT_PATHS: &[&str] = &[
     "runtime/occt",
-    "runtime/build123d",
-    "runtime/build123d/bin/python3",
-    "runtime/build123d/bin/python",
     "runtime/occt/bin/direct-occt-runner",
     "bin/direct-occt-runner",
 ];
@@ -189,6 +186,7 @@ fn render_dependency_identities(
         let parameters = parameters.clone();
         if let Ok(plan) = run_direct_occt_with_large_stack("dependency-plan", move || {
             crate::ecky_cad_host::direct_occt::plan_core_program_with_params(&program, &parameters)
+                .map_err(AppError::from)
         }) {
             for command in plan.parts.iter().flat_map(|part| part.commands.iter()) {
                 if command.op != OcctOp::ImportStl {
@@ -963,8 +961,7 @@ fn try_render_direct_occt_ecky_ir(
             Ok(runtime_root) => runtime_root,
             Err(_) => return Ok(None),
         };
-        let layout =
-            crate::ecky_cad_host::direct_occt_sdk::inspect_build123d_ocp_runtime(&runtime_root);
+        let layout = crate::ecky_cad_host::direct_occt_sdk::inspect_occt_runtime(&runtime_root);
         let (bundle, _manifest) =
             crate::ecky_cad_host::direct_occt_runtime::render_core_program_runtime_bundle_with_font_path(
                 &program,
@@ -1023,8 +1020,7 @@ fn try_render_hybrid_poly_brep(
         }
         let runtime_root =
             crate::runtime_capabilities::resolve_direct_occt_runtime_root(&app_clone)?;
-        let layout =
-            crate::ecky_cad_host::direct_occt_sdk::inspect_build123d_ocp_runtime(&runtime_root);
+        let layout = crate::ecky_cad_host::direct_occt_sdk::inspect_occt_runtime(&runtime_root);
 
         // Phase 1: resolve each mesh island to the engine-independent
         // MeshAsset contract. Today EckyRust is one producer; imported or
@@ -1125,10 +1121,6 @@ fn try_render_hybrid_poly_brep(
                     }
                 };
                 let indexed_asset = crate::ecky_ir::mesh_asset::IndexedMeshAsset::read_cache(
-                    crate::ecky_ir::mesh_asset::MeshAssetSource::EckyMeshPhase {
-                        part_id: part.key.clone(),
-                        node_id: *output_node_id,
-                    },
                     &mesh_part_path.with_extension("indexed-mesh.json"),
                 )?;
                 if let Err(error) = indexed_asset.validate_for_boolean() {
@@ -1295,6 +1287,7 @@ fn direct_occt_plan_diagnostic(macro_code: &str, parameters: &DesignParams) -> R
         };
         crate::ecky_cad_host::direct_occt::plan_core_program_with_params(&program, &parameters)
             .map(|_| ())
+            .map_err(AppError::from)
     })
     .map_err(|err| {
         let message = format_nested_app_error(&err);
@@ -1319,6 +1312,33 @@ fn blocked_direct_occt_native_error(details: String) -> AppError {
         crate::contracts::AppErrorCode::Validation,
         "Ecky Native direct OCCT render failed.",
         details,
+    )
+}
+
+/// Synchronous CLI seam. The CLI supplies an Ecky source and an explicit backend;
+/// this keeps argument and output ownership outside of the render service.
+pub fn render_cli_ecky(
+    source: &str,
+    parameters: &DesignParams,
+    geometry_backend: GeometryBackend,
+    configured_freecad_cmd: Option<&str>,
+    app: &dyn PathResolver,
+) -> AppResult<ArtifactBundle> {
+    let config = RenderConfigSnapshot {
+        default_source_language: crate::contracts::SourceLanguage::EckyIrV0,
+        default_geometry_backend: geometry_backend,
+        freecad_cmd: configured_freecad_cmd.unwrap_or_default().to_string(),
+        cad_text_font_path: String::new(),
+    };
+    render_model_unlocked(
+        source,
+        parameters,
+        Some(MacroDialect::EckyIrV0),
+        Some(geometry_backend),
+        None,
+        None,
+        &config,
+        app,
     )
 }
 
@@ -1365,6 +1385,150 @@ pub async fn render_model(
 }
 
 pub async fn render_model_with_previous_manifest(
+    macro_code: &str,
+    parameters: &DesignParams,
+    macro_dialect: Option<MacroDialect>,
+    geometry_backend: Option<GeometryBackend>,
+    post_processing: Option<&crate::contracts::PostProcessingSpec>,
+    previous_manifest: Option<&ModelManifest>,
+    state: &AppState,
+    app: &dyn PathResolver,
+) -> AppResult<ArtifactBundle> {
+    if crate::component_import_runtime::source_has_live_component_import(macro_code) {
+        let previous_bundle = previous_manifest
+            .map(|manifest| crate::model_runtime::read_artifact_bundle(app, &manifest.model_id))
+            .transpose()?;
+        return render_model_with_component_lock(
+            macro_code,
+            parameters,
+            macro_dialect,
+            geometry_backend,
+            post_processing,
+            previous_manifest,
+            previous_bundle
+                .as_ref()
+                .and_then(|bundle| bundle.component_dependency_lock.as_ref()),
+            state,
+            app,
+        )
+        .await;
+    }
+    render_model_with_previous_manifest_resolved(
+        macro_code,
+        parameters,
+        macro_dialect,
+        geometry_backend,
+        post_processing,
+        previous_manifest,
+        state,
+        app,
+    )
+    .await
+}
+
+/// Host package-aware render seam. Project apply and historical re-render pass
+/// their committed lock explicitly; unlocked first preview receives a
+/// candidate lock in the returned ArtifactBundle.
+#[allow(clippy::too_many_arguments)]
+pub async fn render_model_with_component_lock(
+    authored_source: &str,
+    parameters: &DesignParams,
+    macro_dialect: Option<MacroDialect>,
+    geometry_backend: Option<GeometryBackend>,
+    post_processing: Option<&crate::contracts::PostProcessingSpec>,
+    previous_manifest: Option<&ModelManifest>,
+    expected_lock: Option<&crate::contracts::ComponentDependencyLock>,
+    state: &AppState,
+    app: &dyn PathResolver,
+) -> AppResult<ArtifactBundle> {
+    let resolver = crate::component_import_runtime::InstalledLibraryComponentResolver { app };
+    let compilation = crate::component_import_runtime::compile_authoring_source(
+        crate::component_import_runtime::ResolveAuthoringSourceRequest {
+            authored_source,
+            expected_lock,
+        },
+        &resolver,
+    )?;
+    let _component_payload_pins = crate::component_package_runtime::pin_component_store_payloads(
+        compilation
+            .dependency_lock
+            .dependencies
+            .iter()
+            .map(|dependency| dependency.package_digest.clone()),
+    );
+    let lock_digest = crate::services::render_snapshot::component_dependency_lock_digest(
+        &compilation.dependency_lock,
+    )?;
+    // Runtime model ids and backend caches hash source identity. The lock salt
+    // prevents byte-identical package exports at different immutable
+    // coordinates from sharing one artifact directory.
+    let render_source = format!(
+        "; componentDependencyLockDigest {lock_digest}\n{}",
+        compilation.compiler_source
+    );
+    let mut bundle = render_model_with_previous_manifest_resolved(
+        &render_source,
+        parameters,
+        macro_dialect,
+        geometry_backend,
+        post_processing,
+        previous_manifest,
+        state,
+        app,
+    )
+    .await?;
+    if let Some(path) = bundle.macro_path.as_deref() {
+        fs::write(path, authored_source).map_err(|error| {
+            AppError::persistence(format!(
+                "Failed to persist authored live-reference source '{}': {}",
+                path, error
+            ))
+        })?;
+    }
+    let mut manifest = crate::model_runtime::read_model_manifest(app, &bundle.model_id)?;
+    manifest.source_digest = Some(crate::services::render_snapshot::canonical_source_digest(
+        authored_source,
+    ));
+    crate::component_import_runtime::attach_resolved_component_evidence(
+        &mut bundle,
+        &mut manifest,
+        &compilation,
+    )?;
+    crate::model_runtime::write_runtime_bundle(app, &bundle.model_id, &bundle, &manifest)
+        .map(|(stored_bundle, _)| stored_bundle)
+}
+
+/// Explicit dependency-upgrade preview. Unlike ordinary historical re-render,
+/// this deliberately resolves the authored exact coordinates without the
+/// previous version's lock. The returned bundle owns a candidate new lock;
+/// callers commit it as a new message version. The prior bundle is never
+/// mutated.
+#[allow(clippy::too_many_arguments)]
+pub async fn render_model_with_dependency_upgrade(
+    authored_source: &str,
+    parameters: &DesignParams,
+    macro_dialect: Option<MacroDialect>,
+    geometry_backend: Option<GeometryBackend>,
+    post_processing: Option<&crate::contracts::PostProcessingSpec>,
+    previous_manifest: Option<&ModelManifest>,
+    state: &AppState,
+    app: &dyn PathResolver,
+) -> AppResult<ArtifactBundle> {
+    render_model_with_component_lock(
+        authored_source,
+        parameters,
+        macro_dialect,
+        geometry_backend,
+        post_processing,
+        previous_manifest,
+        None,
+        state,
+        app,
+    )
+    .await
+}
+
+async fn render_model_with_previous_manifest_resolved(
     macro_code: &str,
     parameters: &DesignParams,
     macro_dialect: Option<MacroDialect>,
@@ -1442,6 +1606,11 @@ fn render_model_unlocked(
         crate::contracts::SourceLanguage::LegacyPython => MacroDialect::Legacy,
     };
     let effective_dialect = macro_dialect.unwrap_or(configured_dialect);
+    if effective_dialect == MacroDialect::Build123d {
+        return Err(AppError::validation(
+            "build123d source/runtime was removed; migrate this model to `.ecky`.",
+        ));
+    }
     let config_default_backend = config.default_geometry_backend;
     let resolved_backend =
         resolve_geometry_backend(&effective_dialect, geometry_backend, config_default_backend);
@@ -1456,24 +1625,9 @@ fn render_model_unlocked(
     // Legacy Python and Build123d sources stay as-is.
     let lowered = match (dispatch_backend, effective_dialect.clone()) {
         (GeometryBackend::Build123d, MacroDialect::EckyIrV0) => {
-            lower_ecky_with_large_stack("build123d", macro_code, parameters, {
-                let previous_manifest = previous_manifest.cloned();
-                move |source| {
-                    crate::ecky_ir::lower_to_build123d_with_previous_manifest(
-                        source,
-                        previous_manifest.as_ref(),
-                    )
-                }
-            })
-            .map(Some)
-            .map_err(|err| {
-                attach_diagnostic_context(
-                    err,
-                    Some(macro_code),
-                    parameters,
-                    Some("lower:build123d"),
-                )
-            })?
+            return Err(AppError::validation(
+                "build123d backend was removed; render `.ecky` through Ecky Native.",
+            ));
         }
         (GeometryBackend::Freecad, MacroDialect::EckyIrV0) => {
             lower_ecky_with_large_stack("freecad", macro_code, parameters, {
@@ -1566,7 +1720,7 @@ fn render_model_unlocked(
                     if uses_direct_occt_required {
                         Err(attach_diagnostic_context(
                             unsupported_required_direct_occt_error(
-                                "Direct OCCT did not produce a native bundle for native-required CAD ops like `chamfer`, `fillet`, `text`, `svg`, `import-stl`, or `helical-ridge`.".to_string()
+                                "Direct OCCT did not produce a native bundle for native-required CAD ops like `chamfer`, `fillet`, `text`, `svg`, `import-stl`, `import-step`, or `helical-ridge`.".to_string()
                             ),
                             Some(macro_code),
                             parameters,
@@ -1643,24 +1797,9 @@ fn render_model_unlocked(
                 }
             }
         }
-        GeometryBackend::Build123d => {
-            let source_language = if effective_dialect == MacroDialect::EckyIrV0 {
-                crate::contracts::SourceLanguage::EckyIrV0
-            } else {
-                crate::contracts::SourceLanguage::Build123d
-            };
-            crate::build123d::render_model_with_sources(
-                dispatch_source,
-                if effective_dialect == MacroDialect::EckyIrV0 {
-                    Some(macro_code)
-                } else {
-                    None
-                },
-                parameters,
-                app,
-                source_language,
-            )
-        }
+        GeometryBackend::Build123d => Err(AppError::validation(
+            "build123d backend was removed; render `.ecky` through Ecky Native.",
+        )),
         GeometryBackend::Freecad => {
             let source_language = if effective_dialect == MacroDialect::EckyIrV0 {
                 crate::contracts::SourceLanguage::EckyIrV0
@@ -1846,12 +1985,13 @@ mod tests {
         acquire_render_flight, annotate_lowering_error, apply_requested_post_processing,
         is_tagged_selector_mismatch_error, load_manifest_for_bundle, render_flight_key,
         render_flight_keys, render_flight_strong_count, render_model,
-        render_model_with_previous_manifest, resolve_dispatch_backend, resolve_geometry_backend,
-        resolve_source_macro_dialect, wait_for_render_flight, RenderConfigSnapshot,
-        RenderFlightRole,
+        render_model_with_dependency_upgrade, render_model_with_previous_manifest,
+        resolve_dispatch_backend, resolve_geometry_backend, resolve_source_macro_dialect,
+        wait_for_render_flight, RenderConfigSnapshot, RenderFlightRole,
     };
     use crate::contracts::{
-        AppError, DesignParams, GeometryBackend, GeometryRepresentation, ParamValue, SourceLanguage,
+        AppError, ComponentDefinition, ComponentPackage, DesignParams, GeometryBackend,
+        GeometryRepresentation, PackageVisibility, ParamValue, SourceLanguage, UiSpec,
     };
     use crate::contracts::{
         Config, DisplacementSpec, LithophaneAttachment, LithophaneAttachmentSource,
@@ -2003,6 +2143,268 @@ endsolid sample
     fn test_state(root: &std::path::Path) -> AppState {
         let conn = crate::db::init_db(&root.join("test.db")).expect("test db");
         AppState::new(test_config(), None, conn)
+    }
+
+    fn install_live_source_fixture(
+        resolver: &TestResolver,
+        root: &std::path::Path,
+        version: &str,
+    ) -> crate::component_package_runtime::InstalledStorePackage {
+        let project = root.join(format!("live-source-package-{version}"));
+        let source_path = project.join("components/cage.ecky");
+        std::fs::create_dir_all(source_path.parent().expect("component parent"))
+            .expect("package source dir");
+        std::fs::write(
+            &source_path,
+            r#"(define-component cage ()
+          (verify
+    (tag package_wall)
+    (metric min_wall_thickness "body")
+    (expect (>= value 1)))
+  (box 5 6 7))"#,
+        )
+        .expect("package source");
+        crate::component_package_runtime::write_component_package_manifest(
+            &project,
+            &ComponentPackage {
+                schema_version: crate::contracts::COMPONENT_PACKAGE_SCHEMA_VERSION,
+                package_id: "fixture.live".to_string(),
+                version: version.to_string(),
+                display_name: "Live fixture".to_string(),
+                visibility: PackageVisibility::Source,
+                tags: Vec::new(),
+                port_types: Vec::new(),
+                mate_types: Vec::new(),
+                components: vec![ComponentDefinition {
+                    component_id: "cage".to_string(),
+                    version: version.to_string(),
+                    display_name: "Cage".to_string(),
+                    source_ref: Some("components/cage.ecky".to_string()),
+                    entry_symbol: Some("cage".to_string()),
+                    source_language: Some(SourceLanguage::EckyIrV0),
+                    geometry_backend: Some(GeometryBackend::EckyRust),
+                    macro_dialect: Some(MacroDialect::EckyIrV0),
+                    geometry_provenance: None,
+                    sketches: Vec::new(),
+                    keepouts: Vec::new(),
+                    fusion_zones: Vec::new(),
+                    params: Vec::new(),
+                    ui_spec: UiSpec::default(),
+                    initial_params: DesignParams::new(),
+                    ports: Vec::new(),
+                }],
+                assemblies: Vec::new(),
+            },
+        )
+        .expect("package manifest");
+        let archive = root.join(format!("fixture-live-{version}.eckypkg"));
+        crate::component_package_runtime::write_component_package_archive(&project, &archive)
+            .expect("package archive");
+        crate::component_package_runtime::install_component_package_to_store(resolver, &archive)
+            .expect("install package")
+    }
+
+    #[tokio::test]
+    async fn installed_live_source_component_travels_verify_and_renders_with_lock_evidence() {
+        let root = temp_root("live-source-outer");
+        let resolver = TestResolver { root: root.clone() };
+        let state = test_state(&root);
+        let installed = install_live_source_fixture(&resolver, &root, "1.0.0");
+        let authored = r#"
+          (import-component "fixture.live" :version "1.0.0" :component "cage" :as holder)
+          (model
+            (part body (holder))
+            (part mesh_route
+              (translate 12 0 0
+                (wall-pattern (:mode ribs :depth 0.2 :uFreq 4)
+                  (extrude (circle 5) 8)))))
+        "#;
+
+        let resolved = crate::component_import_runtime::resolve_authoring_source(
+            crate::component_import_runtime::ResolveAuthoringSourceRequest {
+                authored_source: authored,
+                expected_lock: None,
+            },
+            &crate::component_import_runtime::InstalledLibraryComponentResolver { app: &resolver },
+        )
+        .expect("host pre-resolution");
+        let compiled = crate::component_import_runtime::compile_authoring_source(
+            crate::component_import_runtime::ResolveAuthoringSourceRequest {
+                authored_source: authored,
+                expected_lock: None,
+            },
+            &crate::component_import_runtime::InstalledLibraryComponentResolver { app: &resolver },
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "host pre-resolution compile: {error}; source:\n{}",
+                resolved.compiler_source
+            )
+        });
+        assert!(compiled
+            .program
+            .constraints
+            .verify_clauses
+            .iter()
+            .any(|clause| matches!(
+                clause.tag.items.first(),
+                Some(crate::ecky_core_ir::CoreVerifyValue::Symbol(tag))
+                    if tag == "body/package_wall"
+            )));
+
+        let bundle = render_model_with_previous_manifest(
+            authored,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            None,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("normal render service");
+        let lock = bundle
+            .component_dependency_lock
+            .as_ref()
+            .expect("dependency lock");
+        assert_eq!(
+            lock.dependencies[0].package_digest,
+            installed.package_digest
+        );
+        assert!(bundle.component_dependency_lock_digest.is_some());
+        assert_eq!(bundle.component_import_origins.len(), 1);
+        assert_eq!(bundle.component_import_origins[0].alias, "holder");
+        let manifest = crate::model_runtime::read_model_manifest(&resolver, &bundle.model_id)
+            .expect("manifest");
+        let expected_source_digest =
+            crate::services::render_snapshot::canonical_source_digest(authored);
+        assert_eq!(
+            manifest.source_digest.as_deref(),
+            Some(expected_source_digest.as_str())
+        );
+        assert_eq!(
+            bundle.component_import_origins,
+            manifest.component_import_origins
+        );
+        let (restored_bundle, restored_manifest) =
+            crate::model_runtime::read_runtime_bundle(&resolver, &bundle.model_id)
+                .expect("restore validates lock/origin evidence");
+        assert_eq!(
+            restored_bundle.component_dependency_lock,
+            bundle.component_dependency_lock
+        );
+        assert_eq!(
+            restored_manifest.component_import_origins,
+            manifest.component_import_origins
+        );
+        let persisted_source =
+            std::fs::read_to_string(bundle.macro_path.as_ref().expect("macro path"))
+                .expect("persisted authored source");
+        assert!(persisted_source.contains("(import-component \"fixture.live\""));
+        assert!(!persisted_source.contains("(define-component cage"));
+
+        let installed_v2 = install_live_source_fixture(&resolver, &root, "2.0.0");
+        let upgraded_source = authored.replace("1.0.0", "2.0.0");
+        let locked_error = render_model_with_previous_manifest(
+            &upgraded_source,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            Some(&manifest),
+            &state,
+            &resolver,
+        )
+        .await
+        .expect_err("ordinary re-render cannot rewrite committed lock");
+        assert!(
+            locked_error
+                .message
+                .contains("Expected dependency lock does not contain exact package coordinate"),
+            "{locked_error}"
+        );
+        let upgraded_bundle = render_model_with_dependency_upgrade(
+            &upgraded_source,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            Some(&manifest),
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("explicit upgrade preview");
+        assert_eq!(
+            upgraded_bundle
+                .component_dependency_lock
+                .as_ref()
+                .expect("upgraded lock")
+                .dependencies[0]
+                .package_digest,
+            installed_v2.package_digest
+        );
+        assert_eq!(
+            bundle
+                .component_dependency_lock
+                .as_ref()
+                .expect("prior version lock")
+                .dependencies[0]
+                .package_digest,
+            installed.package_digest,
+            "candidate upgrade must not mutate the prior committed bundle"
+        );
+        assert_ne!(
+            upgraded_bundle.component_dependency_lock_digest,
+            bundle.component_dependency_lock_digest
+        );
+        assert_ne!(
+            upgraded_bundle.model_id, bundle.model_id,
+            "different dependency locks must never reuse one cached artifact"
+        );
+
+        let missing = authored.replace("1.0.0", "9.9.9");
+        let error = render_model_with_previous_manifest(
+            &missing,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            None,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect_err("missing exact version");
+        assert!(error.message.contains("fixture.live@9.9.9"), "{error}");
+        assert!(error.message.contains("not indexed"), "{error}");
+
+        let vendored = r#"
+          (define-component holder () (box 5 6 7))
+          (model
+            (part body (holder))
+            (part mesh_route
+              (translate 12 0 0
+                (wall-pattern (:mode ribs :depth 0.2 :uFreq 4)
+                  (extrude (circle 5) 8)))))
+        "#;
+        let vendored_bundle = render_model_with_previous_manifest(
+            vendored,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            None,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("copy-inline render");
+        assert!(vendored_bundle.component_dependency_lock.is_none());
+        assert!(vendored_bundle.component_import_origins.is_empty());
+
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[tokio::test]
@@ -2280,34 +2682,6 @@ endsolid sample
             .unwrap_or_else(|err| panic!("failed to read fixture {}: {err}", path.display()))
     }
 
-    fn film_adapter_golden_six_part_fixture_source() -> String {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../model-runtime/examples/film-adapter-golden-6part.ecky");
-        std::fs::read_to_string(&path).unwrap_or_else(|_| {
-            r#"(model
-  (part film_gate_lower_035 (box 40 16 3))
-  (part film_gate_upper_035 (translate 0 0 3 (box 40 8 2)))
-  (part film_gate_lower_045 (translate 44 0 0 (box 40 16 3)))
-  (part film_gate_upper_045 (translate 44 0 3 (box 40 8 2)))
-  (part film_gate_lower_055 (translate 88 0 0 (box 40 16 3)))
-  (part film_gate_upper_055 (translate 88 0 3 (box 40 8 2))))"#
-                .to_string()
-        })
-    }
-
-    fn fixture_part_ids(source: &str) -> Vec<String> {
-        source
-            .lines()
-            .filter_map(|line| {
-                let trimmed = line.trim();
-                let rest = trimmed.strip_prefix("(part ")?;
-                rest.split_whitespace()
-                    .next()
-                    .map(|token| token.trim_end_matches(')').to_string())
-            })
-            .collect()
-    }
-
     #[test]
     fn apply_requested_displacement_surfaces_raw_displacement_errors() {
         let params = DesignParams::from([(
@@ -2316,6 +2690,9 @@ endsolid sample
         )]);
         let mut bundle = crate::contracts::ArtifactBundle {
             geometry_provenance: None,
+            component_dependency_lock: None,
+            component_dependency_lock_digest: None,
+            component_import_origins: Vec::new(),
             schema_version: 1,
             model_id: "model".to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -2464,40 +2841,13 @@ endsolid sample
     }
 
     #[test]
-    fn broken_helical_ridge_lowering_surfaces_operation_and_diagnostic_kind() {
-        let source = r#"(model
-  (part body
-    (wall-pattern
-      (:mode ribs :depth 1.0)
-      (shell 2 (cylinder 10 20)))))"#;
-
-        let err = super::lower_ecky_with_large_stack(
-            "build123d",
-            source,
-            &DesignParams::new(),
-            crate::ecky_ir::lower_to_build123d,
-        )
-        .expect_err("wall-pattern should fail for build123d lowering");
-
-        assert_eq!(err.operation.as_deref(), Some("lower:build123d"));
-        assert!(
-            err.message
-                .starts_with("lowering_diagnostic[unsupported_backend] "),
-            "{err:?}"
-        );
-        assert!(
-            err.details
-                .as_deref()
-                .is_some_and(|text| text.contains("wall-pattern")),
-            "{err:?}"
-        );
-    }
-
-    #[test]
     fn post_processing_noop_preserves_existing_step_export_artifacts() {
         let params = DesignParams::new();
         let mut bundle = crate::contracts::ArtifactBundle {
             geometry_provenance: None,
+            component_dependency_lock: None,
+            component_dependency_lock_digest: None,
+            component_import_origins: Vec::new(),
             schema_version: 1,
             model_id: "model".to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -2558,6 +2908,9 @@ endsolid sample
         let params = DesignParams::new();
         let mut bundle = crate::contracts::ArtifactBundle {
             geometry_provenance: None,
+            component_dependency_lock: None,
+            component_dependency_lock_digest: None,
+            component_import_origins: Vec::new(),
             schema_version: 1,
             model_id: "model".to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -2637,6 +2990,7 @@ endsolid sample
             &manifest_path,
             serde_json::to_vec_pretty(&crate::contracts::ModelManifest {
                 geometry_provenance: None,
+                component_import_origins: Vec::new(),
                 schema_version: 1,
                 model_id: "model".to_string(),
                 source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -2702,6 +3056,9 @@ endsolid sample
         let params = DesignParams::new();
         let mut bundle = crate::contracts::ArtifactBundle {
             geometry_provenance: None,
+            component_dependency_lock: None,
+            component_dependency_lock_digest: None,
+            component_import_origins: Vec::new(),
             schema_version: 1,
             model_id: "model".to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -3460,192 +3817,6 @@ exit 5
     }
 
     #[tokio::test]
-    async fn film_scanning_adapter_helicoid_fixture_non_eckyrust_path_keeps_parts_and_step_readiness(
-    ) {
-        let root = temp_root("film-scanning-adapter-helicoid-golden");
-        let resolver = TestResolver { root: root.clone() };
-        let state = test_state(&root);
-        let source = example_fixture_source("film-scanning-adapter-helicoid.ecky");
-
-        assert!(
-            source.contains("(helical-ridge"),
-            "fixture must contain helicoid ops"
-        );
-
-        let build123d = crate::runtime_capabilities::probe_build123d_runtime(&resolver);
-        let freecad =
-            crate::runtime_capabilities::probe_freecad_runtime(Some("FreeCADCmd"), &resolver);
-
-        if build123d.available || freecad.available {
-            let backend = if build123d.available {
-                GeometryBackend::Build123d
-            } else {
-                GeometryBackend::Freecad
-            };
-
-            let bundle = render_model(
-                &source,
-                &DesignParams::new(),
-                Some(MacroDialect::EckyIrV0),
-                Some(backend),
-                None,
-                &state,
-                &resolver,
-            )
-            .await
-            .expect("non-eckyrust render");
-
-            assert_eq!(bundle.geometry_backend, backend);
-            assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
-            assert!(
-                bundle
-                    .export_artifacts
-                    .iter()
-                    .any(|artifact| artifact.format == "step"
-                        && std::path::Path::new(&artifact.path).is_file()),
-                "step artifact must exist on non-EckyRust render path"
-            );
-
-            let manifest = load_manifest_for_bundle(&bundle)
-                .expect("load manifest")
-                .expect("runtime manifest");
-            assert_eq!(manifest.document.object_count, 2);
-            assert_eq!(
-                manifest
-                    .parts
-                    .iter()
-                    .map(|part| part.part_id.as_str())
-                    .collect::<Vec<_>>(),
-                vec!["top_cover_integrated_helicoid", "moving_lens_carrier"]
-            );
-        } else {
-            let dispatch = resolve_dispatch_backend(
-                &source,
-                &MacroDialect::EckyIrV0,
-                GeometryBackend::Build123d,
-            )
-            .expect("dispatch backend");
-            assert_eq!(dispatch, GeometryBackend::Build123d);
-
-            let lowered = super::lower_ecky_with_large_stack(
-                "build123d",
-                &source,
-                &DesignParams::new(),
-                crate::ecky_ir::lower_to_build123d,
-            )
-            .expect("build123d lower");
-
-            assert!(lowered.contains("_ecky_helical_ridge("), "{}", lowered);
-            assert!(lowered.contains("Edge.make_helix("), "{}", lowered);
-            assert!(
-                lowered.contains(r#"("top_cover_integrated_helicoid","#)
-                    && lowered.contains(r#"("moving_lens_carrier","#),
-                "{}",
-                lowered
-            );
-            assert!(
-                lowered.contains("_ecky_parts"),
-                "fallback readiness signal must preserve deterministic part tuple"
-            );
-        }
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[tokio::test]
-    async fn film_adapter_golden_six_part_fixture_non_eckyrust_path_keeps_six_parts_and_step_readiness(
-    ) {
-        let root = temp_root("film-adapter-golden-6part");
-        let resolver = TestResolver { root: root.clone() };
-        let state = test_state(&root);
-        let source = film_adapter_golden_six_part_fixture_source();
-        let expected_part_ids = fixture_part_ids(&source);
-        assert_eq!(
-            expected_part_ids.len(),
-            6,
-            "fixture must declare exactly 6 parts"
-        );
-
-        let build123d = crate::runtime_capabilities::probe_build123d_runtime(&resolver);
-        let freecad =
-            crate::runtime_capabilities::probe_freecad_runtime(Some("FreeCADCmd"), &resolver);
-
-        if build123d.available || freecad.available {
-            let backend = if build123d.available {
-                GeometryBackend::Build123d
-            } else {
-                GeometryBackend::Freecad
-            };
-            let bundle = render_model(
-                &source,
-                &DesignParams::new(),
-                Some(MacroDialect::EckyIrV0),
-                Some(backend),
-                None,
-                &state,
-                &resolver,
-            )
-            .await
-            .expect("non-eckyrust render");
-
-            assert_eq!(bundle.geometry_backend, backend);
-            assert!(
-                bundle
-                    .export_artifacts
-                    .iter()
-                    .any(|artifact| artifact.format == "step"
-                        && std::path::Path::new(&artifact.path).is_file()),
-                "step artifact must exist on non-EckyRust render path"
-            );
-
-            let manifest = load_manifest_for_bundle(&bundle)
-                .expect("load manifest")
-                .expect("runtime manifest");
-            assert_eq!(manifest.parts.len(), 6);
-            assert_eq!(manifest.document.object_count, 6);
-            let manifest_ids = manifest
-                .parts
-                .iter()
-                .map(|part| part.part_id.as_str())
-                .collect::<Vec<_>>();
-            let expected_ids = expected_part_ids
-                .iter()
-                .map(|id| id.as_str())
-                .collect::<Vec<_>>();
-            assert_eq!(manifest_ids, expected_ids);
-        } else {
-            let dispatch = resolve_dispatch_backend(
-                &source,
-                &MacroDialect::EckyIrV0,
-                GeometryBackend::Build123d,
-            )
-            .expect("dispatch backend");
-            assert_eq!(dispatch, GeometryBackend::Build123d);
-
-            let lowered = super::lower_ecky_with_large_stack(
-                "build123d",
-                &source,
-                &DesignParams::new(),
-                crate::ecky_ir::lower_to_build123d,
-            )
-            .expect("build123d lower");
-
-            assert!(
-                lowered.contains("_ecky_parts"),
-                "fallback readiness signal must preserve deterministic part tuple"
-            );
-            for part_id in expected_part_ids {
-                assert!(
-                    lowered.contains(&format!(r#"("{part_id}","#)),
-                    "missing tuple entry for part id {part_id}"
-                );
-            }
-        }
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[tokio::test]
     async fn build123d_request_falls_back_to_mesh_for_wall_pattern_source() {
         let root = temp_root("build123d-wall-pattern");
         let resolver = TestResolver { root: root.clone() };
@@ -4246,87 +4417,6 @@ exit 5
     }
 
     #[tokio::test]
-    async fn tagged_face_selector_survives_parameter_sweep_across_manifest_rebind() {
-        let root = temp_root("tagged-face-parameter-sweep");
-        let resolver = TestResolver { root: root.clone() };
-        let state = test_state(&root);
-        let build123d = crate::runtime_capabilities::probe_build123d_runtime(&resolver);
-        let freecad =
-            crate::runtime_capabilities::probe_freecad_runtime(Some("FreeCADCmd"), &resolver);
-        let backend = if build123d.available {
-            Some(GeometryBackend::Build123d)
-        } else if freecad.available {
-            Some(GeometryBackend::Freecad)
-        } else {
-            None
-        };
-        let Some(backend) = backend else {
-            let _ = std::fs::remove_dir_all(root);
-            return;
-        };
-
-        let source = r#"(model
-            (params (number pedestal 2 :min 2 :max 8))
-            (tag-face mounting_top :faces "top" body)
-            (part body
-              (fillet 1.5
-                :faces (tag mounting_top)
-                (union
-                  (box 20 20 20)
-                  (translate 0 0 (- pedestal) (box 8 8 pedestal))))))"#;
-
-        let base_bundle = render_model(
-            source,
-            &DesignParams::from([("pedestal".to_string(), ParamValue::Number(2.0))]),
-            Some(MacroDialect::EckyIrV0),
-            Some(backend),
-            None,
-            &state,
-            &resolver,
-        )
-        .await
-        .expect("base tagged render");
-        let base_manifest = load_manifest_for_bundle(&base_bundle)
-            .expect("load base manifest")
-            .expect("base manifest");
-        let base_anchor = base_manifest
-            .tagged_anchors
-            .get("mounting_top")
-            .expect("base anchor");
-        assert!(!base_anchor.target_ids.is_empty());
-
-        let next_bundle = render_model_with_previous_manifest(
-            source,
-            &DesignParams::from([("pedestal".to_string(), ParamValue::Number(8.0))]),
-            Some(MacroDialect::EckyIrV0),
-            Some(backend),
-            None,
-            Some(&base_manifest),
-            &state,
-            &resolver,
-        )
-        .await
-        .expect("rerender with previous manifest");
-        let next_manifest = load_manifest_for_bundle(&next_bundle)
-            .expect("load next manifest")
-            .expect("next manifest");
-        let next_anchor = next_manifest
-            .tagged_anchors
-            .get("mounting_top")
-            .expect("next anchor");
-
-        assert!(!next_anchor.target_ids.is_empty());
-        assert_eq!(base_anchor.target_ids, next_anchor.target_ids);
-        // The backend is free to renumber faces across the sweep (canonical
-        // ids embed the face index); the contract under test is only that the
-        // durable tagged anchor keeps resolving. Requiring a renumber here
-        // over-constrained the backend: a stable face order is equally valid.
-        assert!(!next_anchor.canonical_target_ids.is_empty());
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[tokio::test]
     async fn ecky_rust_dispatch_renders_dome_style_exact_stack_via_direct_occt_when_sdk_ready() {
         let root = temp_root("direct-dome-style-radial-loft");
         let resolver = TestResolver { root: root.clone() };
@@ -4621,75 +4711,12 @@ exit 5
     /// produce a manifold result, not the 30k+ non-manifold garbage the mesh
     /// renderer produces on CSG over displaced meshes.
     #[tokio::test]
-    async fn hybrid_poly_brep_routes_wall_pattern_difference_to_occt_boolean() {
-        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("repo root");
-        let runtime_root =
-            crate::ecky_cad_host::direct_occt_sdk::bundled_build123d_runtime_root_from_repo(
-                repo_root,
-            );
-        if !runtime_root.exists() {
-            return;
-        }
-        let root = temp_root("hybrid-poly-brep-dispatch");
-        let resolver = TestResolver { root: root.clone() };
-        let source = r#"(model
-  (part body
-    (difference
-      (wall-pattern (:mode ribs :depth 0.4 :uFreq 8)
-        (extrude (circle 10) 20))
-      (cylinder 3 30))))"#;
-
-        let result = render_model(
-            source,
-            &DesignParams::new(),
-            Some(MacroDialect::EckyIrV0),
-            Some(GeometryBackend::EckyRust),
-            None,
-            &test_state(&root),
-            &resolver,
-        )
-        .await;
-
-        let bundle =
-            result.expect("wall-pattern + difference must render through hybrid poly BRep bridge");
-        assert!(
-            !bundle.preview_stl_path.is_empty(),
-            "must produce a preview STL"
-        );
-        assert!(
-            std::path::Path::new(&bundle.preview_stl_path).is_file(),
-            "preview STL must exist on disk"
-        );
-
-        // The result must be manifold: far fewer than 100 non-manifold edges
-        // (the mesh renderer alone produced 30k+ on the iPhone case).
-        let non_manifold =
-            crate::ecky_cad_host::native_parity_harness::ascii_stl_non_manifold_edge_count(
-                std::path::Path::new(&bundle.preview_stl_path),
-            );
-        assert!(
-            non_manifold < 100,
-            "hybrid poly BRep result has {non_manifold} non-manifold edges (expected < 100). \
-             The bridge should route wall-pattern through mesh renderer then difference \
-             through OCCT solidify + boolean."
-        );
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    /// Hybrid parts must export both STL and STEP. The OCCT phase produces
-    /// exact BRep topology (STEP) with poly faces from the solidified mesh.
-    #[tokio::test]
     async fn hybrid_poly_brep_exports_both_stl_and_step() {
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
         let runtime_root =
-            crate::ecky_cad_host::direct_occt_sdk::bundled_build123d_runtime_root_from_repo(
-                repo_root,
-            );
+            crate::ecky_cad_host::direct_occt_sdk::bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
@@ -4805,9 +4832,7 @@ exit 5
             .parent()
             .expect("repo root");
         let runtime_root =
-            crate::ecky_cad_host::direct_occt_sdk::bundled_build123d_runtime_root_from_repo(
-                repo_root,
-            );
+            crate::ecky_cad_host::direct_occt_sdk::bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
@@ -4884,9 +4909,7 @@ exit 5
             .parent()
             .expect("repo root");
         let runtime_root =
-            crate::ecky_cad_host::direct_occt_sdk::bundled_build123d_runtime_root_from_repo(
-                repo_root,
-            );
+            crate::ecky_cad_host::direct_occt_sdk::bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
@@ -4994,9 +5017,7 @@ exit 5
             .parent()
             .expect("repo root");
         let runtime_root =
-            crate::ecky_cad_host::direct_occt_sdk::bundled_build123d_runtime_root_from_repo(
-                repo_root,
-            );
+            crate::ecky_cad_host::direct_occt_sdk::bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
@@ -5115,9 +5136,7 @@ exit 5
             .parent()
             .expect("repo root");
         let runtime_root =
-            crate::ecky_cad_host::direct_occt_sdk::bundled_build123d_runtime_root_from_repo(
-                repo_root,
-            );
+            crate::ecky_cad_host::direct_occt_sdk::bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }

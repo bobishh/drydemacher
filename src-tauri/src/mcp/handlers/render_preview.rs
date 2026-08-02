@@ -1,10 +1,9 @@
 use super::{
     artifact_bundle_digest, carry_forward_semantic_manifest,
     draft_feedback_from_structural_verification, mark_live_session_busy, persist_agent_session,
-    push_mcp_profile, push_trace_event_with_conn, reserve_authoring_actor_revision,
-    session_render_preview_for_request, session_target_ref, settle_live_render_phase,
-    store_session_render_preview_at_revision, try_record_agent_error, AgentContext,
-    StoreSessionRenderPreviewRequest, TraceEvent,
+    push_mcp_profile, push_trace_event_with_conn, session_render_preview_for_request,
+    session_target_ref, settle_live_render_phase, store_session_render_preview_at_revision,
+    try_record_agent_error, AgentContext, StoreSessionRenderPreviewRequest, TraceEvent,
 };
 use crate::contracts::{AppError, AppResult, DesignOutput, InteractionMode, MacroDialect, UiSpec};
 use crate::mcp::contracts::{
@@ -26,7 +25,10 @@ pub async fn handle_params_preview_render(
     let requested_actor_revision = if let Some(thread_id) = req.thread_id.as_deref() {
         Some((
             thread_id.to_string(),
-            reserve_authoring_actor_revision(ctx, thread_id).await,
+            state
+                .authoring_actor_registry
+                .reserve_authoring_actor_revision(&ctx.session_id, thread_id)
+                .await,
         ))
     } else {
         None
@@ -82,7 +84,7 @@ pub async fn handle_params_preview_render(
         tracked_message_id = Some(target_message_id.clone());
         let actor_revision = match requested_actor_revision {
             Some((ref thread_id, revision)) if thread_id == &target_thread_id => revision,
-            _ => reserve_authoring_actor_revision(ctx, &target_thread_id).await,
+            _ => state.authoring_actor_registry.reserve_authoring_actor_revision(&ctx.session_id, &target_thread_id).await,
         };
 
         persist_agent_session(
@@ -334,7 +336,7 @@ pub(super) fn infer_macro_source_language(
 ) -> crate::contracts::SourceLanguage {
     match dialect {
         MacroDialect::EckyIrV0 => crate::contracts::SourceLanguage::EckyIrV0,
-        MacroDialect::Build123d => crate::contracts::SourceLanguage::Build123d,
+        MacroDialect::Build123d => crate::contracts::SourceLanguage::EckyIrV0,
         MacroDialect::Legacy | MacroDialect::CadFrameworkV1 => {
             crate::contracts::SourceLanguage::LegacyPython
         }
@@ -346,7 +348,7 @@ fn macro_dialect_for_source_language(
 ) -> MacroDialect {
     match source_language {
         crate::contracts::SourceLanguage::EckyIrV0 => MacroDialect::EckyIrV0,
-        crate::contracts::SourceLanguage::Build123d => MacroDialect::Build123d,
+        crate::contracts::SourceLanguage::Build123d => MacroDialect::EckyIrV0,
         crate::contracts::SourceLanguage::LegacyPython => MacroDialect::Legacy,
     }
 }
@@ -504,7 +506,10 @@ pub async fn handle_macro_preview_render(
     let requested_actor_revision = if let Some(thread_id) = req.thread_id.as_deref() {
         Some((
             thread_id.to_string(),
-            reserve_authoring_actor_revision(ctx, thread_id).await,
+            state
+                .authoring_actor_registry
+                .reserve_authoring_actor_revision(&ctx.session_id, thread_id)
+                .await,
         ))
     } else {
         None
@@ -576,7 +581,7 @@ pub async fn handle_macro_preview_render(
         };
         let actor_revision = match requested_actor_revision {
             Some((ref thread_id, revision)) if thread_id == &working_thread_id => revision,
-            _ => reserve_authoring_actor_revision(ctx, &working_thread_id).await,
+            _ => state.authoring_actor_registry.reserve_authoring_actor_revision(&ctx.session_id, &working_thread_id).await,
         };
 
         let conn = state.db.lock().await;

@@ -12,7 +12,7 @@ fi
 THREAD_ID="$1"
 SOURCE_FILE="$2"
 MCP_URL="${3:-http://127.0.0.1:39249/mcp}"
-GEOMETRY_BACKEND="${GEOMETRY_BACKEND:-build123d}"
+GEOMETRY_BACKEND="${GEOMETRY_BACKEND:-mesh}"
 VERSION_NAME="${VERSION_NAME:-MCP smoke $(date +%Y-%m-%dT%H:%M:%S)}"
 
 if [[ ! -f "$SOURCE_FILE" ]]; then

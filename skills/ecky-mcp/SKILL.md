@@ -29,6 +29,19 @@ flows through MCP.
 4. **Commit.** Persist the previewed draft with `commit_preview_version`. Record
    the returned `threadId`, `messageId`, and `modelId`.
 
+## Transpiling foreign CAD source
+
+No separate MCP transpile tool exists. Send the foreign CAD text in a normal
+thread message with an explicit request to translate it into parametric Ecky.
+Treat that message as the recoverable source attachment: do not overwrite or
+discard it while translation or verification is red.
+
+Translate through the same authoring loop above. Add `(verify ...)` clauses for
+the source invariants and any requirements accumulated in dialogue, preview the
+complete `.ecky` model, call `verify_generated_model`, repair exact diagnostics
+within the attempt cap, then call `commit_preview_version` only when green. The
+answer is a new Ecky version in that thread. Report capped red without commit.
+
 ## Rules
 
 - **Prefer AST patches over full rewrites.** When an `ecky_ast_*` patch can

@@ -1,5 +1,6 @@
 use crate::contracts::{
-    AppError, AppResult, ArtifactBundle, DesignOutput, DesignParams, ModelManifest, RenderSnapshot,
+    AppError, AppResult, ArtifactBundle, ComponentDependencyLock, DesignOutput, DesignParams,
+    ModelManifest, RenderSnapshot,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -23,6 +24,7 @@ struct SnapshotIdentity<'a> {
     artifact_content_hash: &'a str,
     artifact_digest: &'a str,
     manifest_digest: &'a str,
+    component_dependency_lock_digest: Option<&'a str>,
 }
 
 fn digest_bytes(bytes: &[u8]) -> String {
@@ -51,6 +53,13 @@ pub fn model_manifest_digest(manifest: &ModelManifest) -> AppResult<String> {
     canonical_digest(manifest, "modelManifest")
 }
 
+/// Canonical `sha256:<hex>` digest of a dependency lock's canonical bytes.
+/// Enters `RenderSnapshot` identity and artifact cache keys so equal
+/// source/params with different dependency locks cannot reuse one artifact.
+pub fn component_dependency_lock_digest(lock: &ComponentDependencyLock) -> AppResult<String> {
+    canonical_digest(&lock.clone().canonical(), "componentDependencyLock")
+}
+
 pub fn build_render_snapshot(input: RenderSnapshotInput<'_>) -> AppResult<RenderSnapshot> {
     validate_render_compatibility(input.design, input.artifact_bundle, input.model_manifest)?;
 
@@ -77,6 +86,10 @@ pub fn build_render_snapshot(input: RenderSnapshotInput<'_>) -> AppResult<Render
         artifact_content_hash: &input.artifact_bundle.content_hash,
         artifact_digest: &artifact_digest,
         manifest_digest: &manifest_digest,
+        component_dependency_lock_digest: input
+            .artifact_bundle
+            .component_dependency_lock_digest
+            .as_deref(),
     };
     let snapshot_id = canonical_digest(&identity, "snapshot identity")?;
 
@@ -96,6 +109,10 @@ pub fn build_render_snapshot(input: RenderSnapshotInput<'_>) -> AppResult<Render
         artifact_digest,
         model_manifest: input.model_manifest.clone(),
         manifest_digest,
+        component_dependency_lock_digest: input
+            .artifact_bundle
+            .component_dependency_lock_digest
+            .clone(),
     })
 }
 
@@ -141,6 +158,12 @@ fn validate_render_compatibility(
     bundle: &ArtifactBundle,
     manifest: &ModelManifest,
 ) -> AppResult<()> {
+    crate::contracts::validate_component_import_evidence(
+        bundle.component_dependency_lock.as_ref(),
+        bundle.component_dependency_lock_digest.as_deref(),
+        &bundle.component_import_origins,
+        &manifest.component_import_origins,
+    )?;
     if bundle.model_id != manifest.model_id {
         return Err(AppError::validation(format!(
             "modelId mismatch: artifactBundle.modelId '{}' conflicts with modelManifest.modelId '{}'.",
@@ -217,6 +240,9 @@ mod tests {
             measurement_guides: Vec::new(),
             export_artifacts: Vec::new(),
             geometry_provenance: None,
+            component_dependency_lock: None,
+            component_dependency_lock_digest: None,
+            component_import_origins: Vec::new(),
         }
     }
 
@@ -256,6 +282,7 @@ mod tests {
                 proposals: Vec::new(),
             },
             geometry_provenance: None,
+            component_import_origins: Vec::new(),
         }
     }
 
@@ -342,5 +369,97 @@ mod tests {
         assert!(record_json.get("verificationId").is_some());
         assert!(record_json.get("artifactDigest").is_some());
         assert!(record_json.get("verification_id").is_none());
+    }
+
+    #[test]
+    fn component_dependency_lock_digest_is_independent_of_input_order() {
+        use crate::contracts::{
+            ComponentDependencyLock, ComponentDependencyLockComponent,
+            ComponentDependencyLockEntry, COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION,
+        };
+
+        fn lock(payload: &str) -> ComponentDependencyLock {
+            ComponentDependencyLock {
+                schema_version: COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION,
+                dependencies: vec![ComponentDependencyLockEntry {
+                    package_id: "bike.kit".to_string(),
+                    version: "1.2.0".to_string(),
+                    package_digest: payload.to_string(),
+                    components: vec![ComponentDependencyLockComponent {
+                        component_id: "cage".to_string(),
+                        entry_symbol: None,
+                        payload_digest: payload.to_string(),
+                        payload_kind: None,
+                        geometry_representation: None,
+                    }],
+                }],
+            }
+        }
+
+        let a = component_dependency_lock_digest(&lock("sha256:aaa")).expect("digest a");
+        let b = component_dependency_lock_digest(&lock("sha256:aaa")).expect("digest b");
+        let c = component_dependency_lock_digest(&lock("sha256:bbb")).expect("digest c");
+
+        assert_eq!(a, b, "identical lock content must hash identically");
+        assert_ne!(
+            a, c,
+            "different payload digests must change the lock digest"
+        );
+    }
+
+    #[test]
+    fn snapshot_identity_separates_equal_source_and_params_by_dependency_lock() {
+        use crate::contracts::{
+            ComponentDependencyLockComponent, ComponentDependencyLockEntry, ComponentPayloadKind,
+            COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION,
+        };
+
+        fn locked_bundle(model_id: &str, payload: &str) -> ArtifactBundle {
+            let mut bundle = bundle(model_id);
+            let lock = ComponentDependencyLock {
+                schema_version: COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION,
+                dependencies: vec![ComponentDependencyLockEntry {
+                    package_id: "fixture.live".to_string(),
+                    version: "1.0.0".to_string(),
+                    package_digest: payload.to_string(),
+                    components: vec![ComponentDependencyLockComponent {
+                        component_id: "cage".to_string(),
+                        entry_symbol: Some("cage".to_string()),
+                        payload_digest: payload.to_string(),
+                        payload_kind: Some(ComponentPayloadKind::Source),
+                        geometry_representation: None,
+                    }],
+                }],
+            };
+            bundle.component_dependency_lock_digest =
+                Some(component_dependency_lock_digest(&lock).expect("lock digest"));
+            bundle.component_dependency_lock = Some(lock);
+            bundle
+        }
+
+        let design = design();
+        let params = BTreeMap::new();
+        let first = locked_bundle("model-a", &format!("sha256:{}", "a".repeat(64)));
+        let second = locked_bundle("model-a", &format!("sha256:{}", "b".repeat(64)));
+        let first_snapshot = build_render_snapshot(RenderSnapshotInput {
+            design: &design,
+            effective_params: &params,
+            artifact_bundle: &first,
+            model_manifest: &manifest("model-a"),
+        })
+        .expect("first snapshot");
+        let second_snapshot = build_render_snapshot(RenderSnapshotInput {
+            design: &design,
+            effective_params: &params,
+            artifact_bundle: &second,
+            model_manifest: &manifest("model-a"),
+        })
+        .expect("second snapshot");
+
+        assert_ne!(
+            first_snapshot.component_dependency_lock_digest,
+            second_snapshot.component_dependency_lock_digest
+        );
+        assert_ne!(first_snapshot.snapshot_id, second_snapshot.snapshot_id);
     }
 }

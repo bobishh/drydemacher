@@ -1,7 +1,6 @@
 # Keep the Kamal remote build context lean.
-# The Dockerfile only needs: sites/landing, src/lib/genie, src/lib/docs,
-# scripts/build_ecky_ir_book.ts, public/docs/ecky-ir.md,
-# docs/books/ecky-ir/assets, Dockerfile, nginx.conf.
+# Dockerfile copies only landing/shared UI, selected showcase sources,
+# docs projection inputs, builders, Dockerfile, and nginx.conf.
 
 # Heavy build artifacts
 src-tauri/target/

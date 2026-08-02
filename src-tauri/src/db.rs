@@ -29,7 +29,6 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
          PRAGMA synchronous = NORMAL;
          PRAGMA busy_timeout = 5000;",
     )?;
-
     conn.execute(
         "CREATE TABLE IF NOT EXISTS threads (
             id TEXT PRIMARY KEY,
@@ -40,6 +39,42 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
             deleted_at INTEGER
         )",
         [],
+    )?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS campaign_runs (
+            id TEXT PRIMARY KEY,
+            definition_id TEXT NOT NULL,
+            definition_version TEXT NOT NULL,
+            title TEXT NOT NULL,
+            current_step_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS campaign_run_steps (
+            run_id TEXT NOT NULL REFERENCES campaign_runs(id) ON DELETE CASCADE,
+            step_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('completed', 'passed', 'draft')),
+            draft_override TEXT,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(run_id, step_id, status),
+            CHECK((status = 'draft' AND draft_override IS NOT NULL)
+                  OR (status != 'draft' AND draft_override IS NULL))
+        );",
+    )?;
+    migrate_campaign_step_primary_key(&conn)?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS active_project_navigation (
+            slot INTEGER PRIMARY KEY CHECK(slot = 1),
+            kind TEXT NOT NULL CHECK(kind IN ('design', 'campaign')),
+            project_id TEXT NOT NULL,
+            view TEXT NOT NULL CHECK(view IN ('workbench', 'campaign')),
+            updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS app_window_layouts (
+            slot INTEGER PRIMARY KEY CHECK(slot = 1),
+            layout_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        );",
     )?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS messages (
@@ -181,6 +216,22 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
         [],
     )?;
 
+    // Persistent per-thread source binding (openspec thread-source-binding).
+    // Folder + model.ecky + ecky-thread.json live under config.projectsRoot;
+    // this row is the authoritative binding lookup. SQLite history stays
+    // canonical; the file is the editable working copy.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS thread_source_bindings (
+            thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+            folder_path TEXT NOT NULL,
+            source_path TEXT NOT NULL UNIQUE,
+            source_digest TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_messages_thread_visible_timestamp
          ON messages(thread_id, timestamp DESC)
@@ -261,6 +312,42 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
     migrate_thread_genie_traits(&conn)?;
 
     Ok(conn)
+}
+
+fn migrate_campaign_step_primary_key(conn: &Connection) -> SqlResult<()> {
+    let mut statement = conn.prepare("PRAGMA table_info(campaign_run_steps)")?;
+    let mut primary_key_columns = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    primary_key_columns.sort_by_key(|(_, position)| *position);
+    let primary_key_columns = primary_key_columns
+        .into_iter()
+        .filter_map(|(name, position)| (position > 0).then_some(name))
+        .collect::<Vec<_>>();
+    if primary_key_columns == ["run_id", "step_id", "status"] {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "BEGIN;
+         ALTER TABLE campaign_run_steps RENAME TO campaign_run_steps_legacy;
+         CREATE TABLE campaign_run_steps (
+            run_id TEXT NOT NULL REFERENCES campaign_runs(id) ON DELETE CASCADE,
+            step_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('completed', 'passed', 'draft')),
+            draft_override TEXT,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(run_id, step_id, status),
+            CHECK((status = 'draft' AND draft_override IS NOT NULL)
+                  OR (status != 'draft' AND draft_override IS NULL))
+         );
+         INSERT INTO campaign_run_steps (run_id, step_id, status, draft_override, updated_at)
+         SELECT run_id, step_id, status, draft_override, updated_at FROM campaign_run_steps_legacy;
+         DROP TABLE campaign_run_steps_legacy;
+         COMMIT;",
+    )
 }
 
 fn deserialize_thread_genie_traits(thread_id: &str, raw: Option<&str>) -> GenieTraits {
@@ -1602,24 +1689,39 @@ pub fn restore_deleted_thread(conn: &Connection, id: &str) -> SqlResult<bool> {
     Ok(changed > 0)
 }
 
-pub fn get_deleted_thread_preview(conn: &Connection, thread_id: &str) -> SqlResult<Option<String>> {
+fn get_thread_preview_for_deleted_state(
+    conn: &Connection,
+    thread_id: &str,
+    deleted: bool,
+) -> SqlResult<Option<String>> {
     conn.query_row(
         "
-        SELECT image_data
+        SELECT messages.image_data
         FROM messages
-        WHERE thread_id = ?1
-          AND role = 'assistant'
-          AND status = 'success'
-          AND artifact_bundle IS NOT NULL
-          AND deleted_at IS NULL
-          AND image_data IS NOT NULL
-        ORDER BY timestamp DESC, rowid DESC
+        JOIN threads ON threads.id = messages.thread_id
+        WHERE messages.thread_id = ?1
+          AND ((?2 = 1 AND threads.deleted_at IS NOT NULL)
+            OR (?2 = 0 AND threads.deleted_at IS NULL))
+          AND messages.role = 'assistant'
+          AND messages.status = 'success'
+          AND messages.artifact_bundle IS NOT NULL
+          AND messages.deleted_at IS NULL
+          AND messages.image_data IS NOT NULL
+        ORDER BY messages.timestamp DESC, messages.rowid DESC
         LIMIT 1
         ",
-        [thread_id],
+        params![thread_id, if deleted { 1 } else { 0 }],
         |row| row.get(0),
     )
     .optional()
+}
+
+pub fn get_thread_preview(conn: &Connection, thread_id: &str) -> SqlResult<Option<String>> {
+    get_thread_preview_for_deleted_state(conn, thread_id, false)
+}
+
+pub fn get_deleted_thread_preview(conn: &Connection, thread_id: &str) -> SqlResult<Option<String>> {
+    get_thread_preview_for_deleted_state(conn, thread_id, true)
 }
 
 pub fn get_deleted_messages(conn: &Connection) -> SqlResult<Vec<DeletedMessage>> {
@@ -1782,6 +1884,38 @@ pub fn update_message_artifact_bundle(
         params![serialized, message_id],
     )?;
     Ok(())
+}
+
+/// Persisted dependency locks are GC roots. Invalid bundle JSON aborts root
+/// collection: retaining too much is safer than deleting historical payloads.
+pub fn component_dependency_package_digests(
+    conn: &Connection,
+) -> SqlResult<std::collections::BTreeSet<String>> {
+    let mut statement = conn.prepare(
+        "SELECT artifact_bundle
+         FROM messages
+         WHERE artifact_bundle IS NOT NULL
+           AND deleted_at IS NULL
+           AND status != 'discarded'",
+    )?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    let mut roots = std::collections::BTreeSet::new();
+    for row in rows {
+        let raw = row?;
+        let bundle: ArtifactBundle = serde_json::from_str(&raw).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+        if let Some(lock) = bundle.component_dependency_lock {
+            for dependency in lock.dependencies {
+                roots.insert(dependency.package_digest);
+            }
+        }
+    }
+    Ok(roots)
 }
 
 pub fn update_message_structural_verification(
@@ -2515,7 +2649,9 @@ pub fn get_message_runtime_and_thread(
 mod tests {
     use super::*;
     use crate::contracts::{
-        DesignParams, InteractionMode, MessageRole, MessageStatus, ParamValue, UiField, UiSpec,
+        ComponentDependencyLock, ComponentDependencyLockComponent, ComponentDependencyLockEntry,
+        ComponentPayloadKind, DesignParams, InteractionMode, MessageRole, MessageStatus,
+        ParamValue, UiField, UiSpec,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -2668,6 +2804,9 @@ mod tests {
     fn sample_artifact_bundle(model_id: &str) -> ArtifactBundle {
         ArtifactBundle {
             geometry_provenance: None,
+            component_dependency_lock: None,
+            component_dependency_lock_digest: None,
+            component_import_origins: Vec::new(),
             schema_version: 1,
             model_id: model_id.to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -2687,6 +2826,111 @@ mod tests {
             measurement_guides: Vec::new(),
             export_artifacts: Vec::new(),
         }
+    }
+
+    fn bundle_with_package_lock(
+        model_id: &str,
+        version: &str,
+        package_digest: &str,
+    ) -> ArtifactBundle {
+        let mut bundle = sample_artifact_bundle(model_id);
+        let lock = ComponentDependencyLock {
+            schema_version: crate::contracts::COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION,
+            dependencies: vec![ComponentDependencyLockEntry {
+                package_id: "fixture.live".to_string(),
+                version: version.to_string(),
+                package_digest: package_digest.to_string(),
+                components: vec![ComponentDependencyLockComponent {
+                    component_id: "cage".to_string(),
+                    entry_symbol: Some("cage".to_string()),
+                    payload_digest: package_digest.to_string(),
+                    payload_kind: Some(ComponentPayloadKind::Source),
+                    geometry_representation: None,
+                }],
+            }],
+        }
+        .canonical();
+        bundle.component_dependency_lock_digest = Some(
+            crate::services::render_snapshot::component_dependency_lock_digest(&lock)
+                .expect("lock digest"),
+        );
+        bundle.component_dependency_lock = Some(lock);
+        bundle
+    }
+
+    #[test]
+    fn committed_upgrade_versions_keep_distinct_locks_and_both_root_gc() {
+        let conn = Connection::open_in_memory().expect("memory db");
+        init_db_internal(&conn).expect("schema");
+        create_or_update_thread(&conn, "upgrade-thread", "Upgrade", 1, None).expect("thread");
+
+        let first_digest = format!("sha256:{}", "a".repeat(64));
+        let second_digest = format!("sha256:{}", "b".repeat(64));
+        for (id, timestamp, bundle) in [
+            (
+                "version-1",
+                1,
+                bundle_with_package_lock("generated-v1", "1.0.0", &first_digest),
+            ),
+            (
+                "version-2",
+                2,
+                bundle_with_package_lock("generated-v2", "2.0.0", &second_digest),
+            ),
+        ] {
+            add_message(
+                &conn,
+                "upgrade-thread",
+                &Message {
+                    id: id.to_string(),
+                    role: MessageRole::Assistant,
+                    content: String::new(),
+                    status: MessageStatus::Success,
+                    output: Some(sample_output()),
+                    usage: None,
+                    artifact_bundle: Some(bundle),
+                    model_manifest: None,
+                    structural_verification: None,
+                    agent_origin: None,
+                    timestamp,
+                    image_data: None,
+                    visual_kind: None,
+                    attachment_images: Vec::new(),
+                },
+            )
+            .expect("commit version");
+        }
+
+        let first = get_thread_message_version(&conn, "upgrade-thread", "version-1")
+            .expect("read v1")
+            .expect("v1")
+            .artifact_bundle
+            .expect("v1 bundle");
+        let second = get_thread_message_version(&conn, "upgrade-thread", "version-2")
+            .expect("read v2")
+            .expect("v2")
+            .artifact_bundle
+            .expect("v2 bundle");
+        assert_eq!(
+            first
+                .component_dependency_lock
+                .expect("v1 lock")
+                .dependencies[0]
+                .package_digest,
+            first_digest
+        );
+        assert_eq!(
+            second
+                .component_dependency_lock
+                .expect("v2 lock")
+                .dependencies[0]
+                .package_digest,
+            second_digest
+        );
+        assert_eq!(
+            component_dependency_package_digests(&conn).expect("gc roots"),
+            [first_digest, second_digest].into_iter().collect()
+        );
     }
 
     #[test]
@@ -2963,6 +3207,59 @@ mod tests {
 
         restore_version_cluster(&conn, &assistant_msg.id).unwrap();
         assert!(get_deleted_messages(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn thread_preview_returns_only_newest_visible_preview_payload() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db_internal(&conn).unwrap();
+
+        let thread_id = "thread-preview";
+        create_or_update_thread(&conn, thread_id, "Preview", 100, None).unwrap();
+        for (id, timestamp, image_data) in [
+            (
+                "preview-older",
+                100,
+                Some("data:image/png;base64,preview".to_string()),
+            ),
+            ("preview-newer-without-image", 200, None),
+        ] {
+            add_message(
+                &conn,
+                thread_id,
+                &Message {
+                    id: id.to_string(),
+                    role: MessageRole::Assistant,
+                    content: "Version".to_string(),
+                    status: MessageStatus::Success,
+                    output: Some(sample_output()),
+                    usage: None,
+                    artifact_bundle: Some(sample_artifact_bundle(id)),
+                    model_manifest: None,
+                    structural_verification: None,
+                    agent_origin: None,
+                    timestamp,
+                    image_data,
+                    visual_kind: None,
+                    attachment_images: Vec::new(),
+                },
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            get_thread_preview(&conn, thread_id).unwrap().as_deref(),
+            Some("data:image/png;base64,preview")
+        );
+
+        assert!(delete_thread(&conn, thread_id).unwrap());
+        assert_eq!(get_thread_preview(&conn, thread_id).unwrap(), None);
+        assert_eq!(
+            get_deleted_thread_preview(&conn, thread_id)
+                .unwrap()
+                .as_deref(),
+            Some("data:image/png;base64,preview")
+        );
     }
 
     #[test]
@@ -3609,31 +3906,6 @@ mod tests {
     }
 
     #[test]
-    fn test_read_real_db() {
-        let db_path = std::path::Path::new(
-            "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/history.sqlite",
-        );
-        if !db_path.exists() {
-            println!("No DB found at path");
-            return;
-        }
-        let conn = rusqlite::Connection::open_with_flags(
-            db_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap();
-        match get_all_threads(&conn) {
-            Ok(threads) => {
-                println!("Found {} threads", threads.len());
-            }
-            Err(e) => {
-                println!("Failed to get threads: {:?}", e);
-                panic!("DB read failed");
-            }
-        }
-    }
-
-    #[test]
     fn trimmed_mcp_fixture_keeps_thread_bound_agent_sessions() {
         let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/mcp_regression_fixture.sqlite");
@@ -3841,6 +4113,9 @@ mod tests {
             },
             artifact_bundle: ArtifactBundle {
                 geometry_provenance: None,
+                component_dependency_lock: None,
+                component_dependency_lock_digest: None,
+                component_import_origins: Vec::new(),
                 schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
                 model_id: "model-1".to_string(),
                 source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -3862,6 +4137,7 @@ mod tests {
             },
             model_manifest: crate::contracts::ModelManifest {
                 geometry_provenance: None,
+                component_import_origins: Vec::new(),
                 schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
                 model_id: "model-1".to_string(),
                 source_kind: crate::contracts::ModelSourceKind::Generated,

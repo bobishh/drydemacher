@@ -18,6 +18,7 @@
     (number thread_turns 3.2 :label "helicoid turns" :min 1.5 :max 5 :step 0.1)
     (number thread_depth 1.25 :label "helicoid depth" :min 0.7 :max 2.2 :step 0.05)
     (number thread_width 1.45 :label "helicoid ridge W" :min 0.9 :max 2.6 :step 0.05)
+    (number thread_flank 10deg :label "helicoid flank" :min 5deg :max 45deg :step 1deg)
     (number thread_clearance 0.25 :label "helicoid clearance" :min 0.15 :max 0.6 :step 0.05)
     (number thread_start_z 0.8 :label "thread start Z" :min 0.2 :max 3 :step 0.1)
     (number lens_stop_lip_w 2.4 :label "lens stop lip W" :min 1 :max 5 :step 0.1)
@@ -71,13 +72,14 @@
       (shape female_thread_clip_r (+ female_root_r female_depth 1))
       (shape female_thread_a_raw
         (translate 0 0 (+ socket_base_z thread_z0)
-          (helical-ridge
+          (thread
             :radius female_root_r
             :pitch thread_pitch
-            :height thread_len
-            :base-width female_axial_width
-            :crest-width (* female_axial_width 0.58)
-            :depth female_depth)))
+            :length thread_len
+            :depth female_depth
+            :crest female_axial_width
+            :flank thread_flank
+            :female true)))
       (shape female_thread_a
         (clip-box female_thread_a_raw
           :x ((- female_thread_clip_r) female_thread_clip_r)
@@ -127,13 +129,13 @@
       (shape thread_clip_r (+ ridge_root_r ridge_sweep_depth 1))
       (shape male_thread_a_raw
         (translate 0 0 thread_z0
-          (helical-ridge
+          (thread
             :radius ridge_root_r
             :pitch thread_pitch
-            :height thread_len
-            :base-width thread_width
-            :crest-width (* thread_width 0.58)
-            :depth ridge_sweep_depth)))
+            :length thread_len
+            :depth ridge_sweep_depth
+            :crest thread_width
+            :flank thread_flank)))
       (shape male_thread_a
         (clip-box male_thread_a_raw
           :x ((- thread_clip_r) thread_clip_r)

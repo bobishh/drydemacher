@@ -224,13 +224,27 @@ precompiled native runner when the runner is available.
 The system SHALL optimize planned command dependencies before serializing a
 Direct OCCT plan without changing the part root or observable source semantics.
 
-#### Scenario: Difference consumes repeated tools directly
+#### Scenario: Difference uses a stable binary cut chain
 
 - **WHEN** normalized Core IR produces a difference whose tool is a union of
   repeated cutters
-- **THEN** the serialized plan contains one difference with the repeated
-  cutters as direct tool operands
+- **THEN** the serialized plan contains an ordered chain of binary differences,
+  one base/tool pair per cutter
+- **AND** every intermediate uses a fresh output slot with no keywords
+- **AND** each later cut consumes the preceding cut result as its base
+- **AND** the final cut retains the original difference output slot and
+  keywords, so the part root and downstream references remain unchanged
 - **AND** no unreachable intermediate union is serialized.
+
+#### Scenario: Affine transform of a cutter union distributes safely
+
+- **WHEN** a difference tool is a keyword-free affine transform of a
+  keyword-free all-reference union
+- **THEN** planning emits one equivalent transform for each union child before
+  the ordered binary cut chain
+- **AND** the transformed union is not serialized when unreachable
+- **AND** a union referenced by a keyword or topology selector is retained
+- **AND** a transform or union with keywords is not distributed.
 
 #### Scenario: Topology reference prevents dead-command removal
 

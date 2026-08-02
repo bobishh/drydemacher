@@ -11,7 +11,7 @@
 - **Strictly adhere to the established UI theme** (Tactical Midnight, square borders, `--primary` / `--secondary` bronze accents).
 - **Enforce layout boundaries**: All major layout containers must have `overflow: hidden` to prevent UI jitter and content bleeding.
 - **Real Error Reporting**: Never use generic "Check API Key" messages. Always capture and display the raw error body from the backend/provider.
-- **Persistence**: Any configuration changes made in the UI must be persisted to `app_config_dir/config.json` via the `save_config` command.
+- **Persistence**: Canonical config lives at `app_config_dir/config.edn`, written only through `save_config` / `config_store::save_config`. `config.json` is import-only legacy input; never evaluate EDN. Keep Tauri camelCase payload boundary.
 - **Tauri Invoke**: Reminder: Tauri expects `camelCase` in JS arguments, which maps to `snake_case` in Rust.
 - **Agent UX**: Do not introduce a separate agent status bar or dump live auto-agent terminal output into app logs. Agent state belongs in Ecky bubble copy, and interactive agent stdout/stderr belongs in the dedicated terminal modal.
 - **Repeated CAD Structures**: New repeated shelves/ribs/clips/doors/corridors must be authored with `repeat` or `instance`, not copy-paste shape blocks.
@@ -82,6 +82,13 @@ adjust your understanding, then proceed.
 ## Clarity
 
 Work with persistence, clarity, and evidence.
+
+## Proportional Verification
+
+- Use the cheapest sufficient proof for the requested change. Stop after that proof passes.
+- Do not duplicate an authoritative success signal with another check. Example: a completed Kamal deploy with a healthy container and successful proxy switch proves deployment.
+- Run browser or visual checks only when the change is visual or interactive, when existing proof cannot establish the result, or when the user explicitly asks.
+- Do not add speculative smoke tests after the requested outcome is already proven. Extra checks consume time and tokens and may distract from the task.
 
 ## Documentation Hard Gate
 

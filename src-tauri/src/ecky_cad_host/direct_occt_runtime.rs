@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::direct_occt::{OcctArg, OcctOp};
@@ -34,7 +34,14 @@ const STEP_FILE_NAME: &str = "model.step";
 const TOPOLOGY_FILE_NAME: &str = "topology.json";
 const DIRECT_OCCT_TEXT_FONT_ENV: &str = "ECKYCAD_FONT_PATH";
 const DIRECT_OCCT_HOT_CACHE_CAPACITY: usize = 2;
+/// Resident on-disk artifact bytes the process-hot Direct OCCT cache may hold
+/// before byte-budgeted LRU eviction drops entries. This is a secondary bound
+/// on top of [`DIRECT_OCCT_HOT_CACHE_CAPACITY`]; it guards a couple of
+/// pathological oversized renders from pinning the hot cache.
+const DIRECT_OCCT_HOT_CACHE_BYTE_BUDGET: u64 = 128 * 1024 * 1024;
 const DIRECT_OCCT_CACHE_SCHEMA: &str = "direct-occt-v5-analytic-brep-cache-contract";
+const DIGESTS_FILE_NAME: &str = "digests.json";
+const CACHED_ARTIFACT_DIGEST_SCHEMA_VERSION: u32 = 1;
 
 fn direct_occt_analytic_brep_provenance() -> GeometryProvenance {
     GeometryProvenance {
@@ -51,6 +58,10 @@ struct DirectOcctHotCacheEntry {
     content_hash: String,
     bundle: ArtifactBundle,
     manifest: ModelManifest,
+    /// Resident on-disk artifact bytes for [`bundle`], recorded once at
+    /// insertion via [`resident_artifact_bytes`] so byte-budgeted eviction
+    /// never re-stats files. See [`DIRECT_OCCT_HOT_CACHE_BYTE_BUDGET`].
+    resident_bytes: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -244,7 +255,7 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
             ))
         })
         .collect::<HashMap<_, _>>();
-    let manifest = build_direct_occt_manifest_with_stable_node_keys(
+    let mut manifest = build_direct_occt_manifest_with_stable_node_keys(
         &model_id,
         &source_path,
         &part_specs,
@@ -255,6 +266,12 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
         &part_root_node_ids,
         &part_asset_paths,
     )?;
+    let thread_warnings = super::direct_occt::thread_printability_warnings(&program, parameters)?;
+    manifest
+        .document
+        .warnings
+        .extend(thread_warnings.iter().cloned());
+    manifest.warnings.extend(thread_warnings);
     let fallback_step_path = bundle_dir.join(STEP_FILE_NAME);
     let mut bundle = build_direct_occt_bundle(
         &model_id,
@@ -269,6 +286,7 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
         bundle.export_artifacts.clear();
     }
     let stored = crate::model_runtime::write_runtime_bundle(app, &model_id, &bundle, &manifest)?;
+    write_complete_cached_bundle_digests(&bundle_dir, &stored.0)?;
     remember_complete_cached_bundle(&bundle_dir, &content_hash, &stored);
     Ok(stored)
 }
@@ -287,6 +305,9 @@ fn read_complete_cached_bundle(
     }
     let (bundle, manifest) = crate::model_runtime::read_runtime_bundle(app, model_id).ok()?;
     if !cached_direct_occt_bundle_is_current(&bundle, &manifest, model_id, content_hash) {
+        return None;
+    }
+    if !complete_cached_bundle_digests_match(&bundle_dir, &bundle) {
         return None;
     }
     let cached = (bundle, manifest);
@@ -339,6 +360,145 @@ fn runtime_bundle_artifacts_ready(bundle: &ArtifactBundle) -> bool {
         && bundle.macro_path.as_deref().is_none_or(path_ready)
 }
 
+/// Collects the on-disk artifact paths that participate in warm reuse, in the
+/// same set covered by [`runtime_bundle_artifacts_ready`]. Each of these paths
+/// owns an immutable geometry or source artifact that must not change between
+/// the verified render and a later warm reuse.
+fn cached_artifact_paths(bundle: &ArtifactBundle) -> Vec<String> {
+    let mut paths = Vec::new();
+    let push_trimmed = |paths: &mut Vec<String>, path: &str| {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            paths.push(trimmed.to_string());
+        }
+    };
+    push_trimmed(&mut paths, &bundle.preview_stl_path);
+    for asset in &bundle.viewer_assets {
+        push_trimmed(&mut paths, &asset.path);
+    }
+    for artifact in &bundle.export_artifacts {
+        push_trimmed(&mut paths, &artifact.path);
+    }
+    if let Some(macro_path) = bundle.macro_path.as_deref() {
+        push_trimmed(&mut paths, macro_path);
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// Resident on-disk bytes used by a cached bundle. Computed once from the same
+/// [`cached_artifact_paths`] metadata that warm-reuse readiness and the
+/// per-artifact digest sidecar cover, then stored on the hot entry so eviction
+/// never re-stats files. Missing files contribute zero bytes.
+fn resident_artifact_bytes(bundle: &ArtifactBundle) -> u64 {
+    cached_artifact_paths(bundle)
+        .iter()
+        .filter_map(|path| fs::metadata(path).ok())
+        .map(|metadata| metadata.len())
+        .sum()
+}
+
+fn file_sha256_hex(path: &str) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    Some(format!("{:x}", Sha256::digest(&bytes)))
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedArtifactDigestSidecar {
+    schema_version: u32,
+    digests: std::collections::BTreeMap<String, String>,
+}
+
+/// Writes a per-artifact content digest sidecar next to a freshly rendered
+/// complete bundle. The render path calls this after the verified bundle is
+/// persisted so that later warm reuse can detect on-disk mutation (including
+/// same-size edits that a size-only readiness check would miss).
+fn write_complete_cached_bundle_digests(
+    bundle_dir: &Path,
+    bundle: &ArtifactBundle,
+) -> AppResult<()> {
+    let mut digests = std::collections::BTreeMap::new();
+    for path in cached_artifact_paths(bundle) {
+        let digest = file_sha256_hex(&path).ok_or_else(|| {
+            AppError::persistence(format!(
+                "Cannot compute artifact digest for cached bundle '{}': missing artifact '{}'",
+                bundle_dir.display(),
+                path
+            ))
+        })?;
+        digests.insert(path, digest);
+    }
+    let sidecar = CachedArtifactDigestSidecar {
+        schema_version: CACHED_ARTIFACT_DIGEST_SCHEMA_VERSION,
+        digests,
+    };
+    let data = serde_json::to_string_pretty(&sidecar)
+        .map_err(|err| AppError::persistence(err.to_string()))?;
+    // Publish the sidecar atomically: write a temp file in the bundle
+    // directory, then rename it into place as the final step. Readers only
+    // ever observe the previous complete sidecar or the new complete one,
+    // never a partially-written `digests.json`. On any failure the temp file
+    // is removed so no partial residue lingers.
+    let final_path = bundle_dir.join(DIGESTS_FILE_NAME);
+    let temp_path = bundle_dir.join(format!("{DIGESTS_FILE_NAME}.tmp"));
+    if let Err(err) = fs::write(&temp_path, &data) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(AppError::persistence(format!(
+            "Failed to write cached artifact digests '{}': {}",
+            temp_path.display(),
+            err
+        )));
+    }
+    if let Err(err) = fs::rename(&temp_path, &final_path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(AppError::persistence(format!(
+            "Failed to publish cached artifact digests '{}': {}",
+            final_path.display(),
+            err
+        )));
+    }
+    Ok(())
+}
+
+/// Returns `true` when the on-disk artifact bytes still match the stored
+/// per-artifact digests. The sidecar is the trust anchor for cold reuse of a
+/// complete bundle: a missing or unreadable sidecar is a cache miss (the
+/// bundle is re-rendered), which is what happens when sidecar persistence
+/// failed after `write_runtime_bundle` succeeded. A present sidecar is
+/// enforced strictly and rejects any byte mismatch or uncovered artifact,
+/// including a same-size mutation that a size-only readiness check cannot
+/// detect.
+fn complete_cached_bundle_digests_match(bundle_dir: &Path, bundle: &ArtifactBundle) -> bool {
+    let sidecar_path = bundle_dir.join(DIGESTS_FILE_NAME);
+    let raw = match fs::read_to_string(&sidecar_path) {
+        Ok(raw) => raw,
+        Err(_) => return false,
+    };
+    let sidecar: CachedArtifactDigestSidecar = match serde_json::from_str(&raw) {
+        Ok(parsed) => parsed,
+        Err(_) => return false,
+    };
+    if sidecar.schema_version != CACHED_ARTIFACT_DIGEST_SCHEMA_VERSION {
+        return false;
+    }
+    for path in cached_artifact_paths(bundle) {
+        let expected = match sidecar.digests.get(&path) {
+            Some(digest) => digest,
+            None => return false,
+        };
+        let actual = match file_sha256_hex(&path) {
+            Some(digest) => digest,
+            None => return false,
+        };
+        if &actual != expected {
+            return false;
+        }
+    }
+    true
+}
+
 fn direct_occt_hot_cache() -> &'static Mutex<VecDeque<DirectOcctHotCacheEntry>> {
     static CACHE: OnceLock<Mutex<VecDeque<DirectOcctHotCacheEntry>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(VecDeque::new()))
@@ -377,13 +537,40 @@ fn remember_complete_cached_bundle(
         return;
     };
     cache.retain(|entry| entry.bundle_dir != bundle_dir);
+    let resident_bytes = resident_artifact_bytes(&cached.0);
     cache.push_front(DirectOcctHotCacheEntry {
         bundle_dir: bundle_dir.to_path_buf(),
         content_hash: content_hash.to_string(),
         bundle: cached.0.clone(),
         manifest: cached.1.clone(),
+        resident_bytes,
     });
     cache.truncate(DIRECT_OCCT_HOT_CACHE_CAPACITY);
+    evict_hot_cache_to_byte_budget(&mut cache, DIRECT_OCCT_HOT_CACHE_BYTE_BUDGET);
+}
+
+/// Total resident artifact bytes held by `entries`.
+fn total_resident_bytes(entries: &VecDeque<DirectOcctHotCacheEntry>) -> u64 {
+    entries.iter().map(|entry| entry.resident_bytes).sum()
+}
+
+/// Evicts least-recently-used hot cache entries from the back until the total
+/// resident artifact bytes are within `byte_budget`. Because eviction
+/// continues while the running total exceeds the budget, an entry larger than
+/// the whole budget is never retained either, even at the most-recently-used
+/// position. Pure over `entries`: it never touches the process-global cache,
+/// so it is safe to unit-test deterministically without cache races.
+fn evict_hot_cache_to_byte_budget(
+    entries: &mut VecDeque<DirectOcctHotCacheEntry>,
+    byte_budget: u64,
+) {
+    let mut total: u64 = total_resident_bytes(entries);
+    while total > byte_budget {
+        match entries.pop_back() {
+            Some(evicted) => total = total.saturating_sub(evicted.resident_bytes),
+            None => break,
+        }
+    }
 }
 
 pub(crate) fn build_direct_occt_manifest(
@@ -445,6 +632,7 @@ pub(crate) fn build_direct_occt_manifest_with_stable_node_keys(
 
     Ok(ModelManifest {
         geometry_provenance: Some(direct_occt_analytic_brep_provenance()),
+        component_import_origins: Vec::new(),
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind: ModelSourceKind::Generated,
@@ -554,6 +742,9 @@ pub(crate) fn build_direct_occt_bundle(
 ) -> AppResult<ArtifactBundle> {
     Ok(ArtifactBundle {
         geometry_provenance: Some(direct_occt_analytic_brep_provenance()),
+        component_dependency_lock: None,
+        component_dependency_lock_digest: None,
+        component_import_origins: Vec::new(),
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind: ModelSourceKind::Generated,
@@ -602,8 +793,27 @@ fn content_hash_with_font_path(
     params_json: &str,
     cad_text_font_path: Option<&str>,
 ) -> String {
+    content_hash_with_backend_version(
+        DIRECT_OCCT_CACHE_SCHEMA,
+        source_identity,
+        params_json,
+        cad_text_font_path,
+    )
+}
+
+/// Content-addressed cache key seeded by the backend cache schema, which is the
+/// backend-version component of cache identity. Production always passes
+/// [`DIRECT_OCCT_CACHE_SCHEMA`]; the `backend_version` parameter exists so a
+/// schema bump can be proven to invalidate the key without adding legacy or
+/// version branches to the render path.
+fn content_hash_with_backend_version(
+    backend_version: &str,
+    source_identity: &str,
+    params_json: &str,
+    cad_text_font_path: Option<&str>,
+) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(DIRECT_OCCT_CACHE_SCHEMA.as_bytes());
+    hasher.update(backend_version.as_bytes());
     hasher.update(b"|");
     hasher.update(source_identity.as_bytes());
     hasher.update(b"|");
@@ -1350,8 +1560,7 @@ mod tests {
     };
     use crate::ecky_cad_host::direct_occt_executor::export_core_program_step_stl_with_params;
     use crate::ecky_cad_host::direct_occt_sdk::{
-        bundled_build123d_runtime_root_from_repo, bundled_occt_runtime_root_from_repo,
-        inspect_build123d_ocp_runtime,
+        bundled_occt_runtime_root_from_repo, inspect_occt_runtime,
     };
     use crate::ecky_core_ir::CoreSelectorTagKind;
     use crate::models::PathResolver;
@@ -1414,19 +1623,19 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn assert_runner_first_bundle_matches_generated_source_artifacts_for_fixture(
+    fn assert_runner_first_bundle_matches_generated_runner_artifacts_for_fixture(
         label: &str,
         source: &str,
     ) {
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
-        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout = inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 
@@ -1457,7 +1666,7 @@ mod tests {
             ..
         } = direct_outcome
         else {
-            panic!("expected generated-source export");
+            panic!("expected generated-runner export");
         };
         let direct_topology_path = direct_dir.join(TOPOLOGY_FILE_NAME);
         let direct_topology = read_direct_occt_topology_report(&direct_topology_path)
@@ -1619,16 +1828,16 @@ echo "fake runner plan: $plan"
 
     #[cfg(unix)]
     #[test]
-    fn runner_first_bundle_matches_generated_source_artifacts_for_coarse_edge_selector_fixture() {
+    fn runner_first_bundle_matches_generated_runner_artifacts_for_coarse_edge_selector_fixture() {
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
-        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout = inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 
@@ -1664,7 +1873,7 @@ echo "fake runner plan: $plan"
             ..
         } = direct_outcome
         else {
-            panic!("expected generated-source export");
+            panic!("expected generated-runner export");
         };
         let direct_topology_path = direct_dir.join(TOPOLOGY_FILE_NAME);
         let direct_topology = read_direct_occt_topology_report(&direct_topology_path)
@@ -1827,12 +2036,11 @@ echo "fake runner plan: $plan"
     fn blocked_layout(root: PathBuf) -> DirectOcctSdkLayout {
         DirectOcctSdkLayout {
             runtime_root: root,
-            ocp_root: None,
             dylib_dir: None,
             include_dir: None,
             missing_headers: vec!["BRepPrimAPI_MakeBox.hxx".to_string()],
             missing_libs: vec!["TKernel".to_string()],
-            install_name_prefix: "/DLC/OCP/.dylibs",
+            install_name_prefix: "@rpath",
         }
     }
 
@@ -2022,6 +2230,10 @@ echo "fake runner plan: $plan"
         .expect("bundle");
         crate::model_runtime::write_runtime_bundle(&resolver, &model_id, &bundle, &manifest)
             .expect("write cached runtime bundle");
+        // A production render records stored per-artifact digests after the
+        // bundle is persisted; the cold-reuse path requires the sidecar before
+        // trusting the bundle, so mirror that here.
+        write_complete_cached_bundle_digests(&bundle_dir, &bundle).expect("write digests");
 
         let _runner_guard =
             crate::ecky_cad_host::direct_occt_runner::test_discovery::CwdFallbackGuard::disable();
@@ -2061,6 +2273,318 @@ echo "fake runner plan: $plan"
             "missing artifact must invalidate cache hit"
         );
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cached_bundle_rejects_same_size_preview_mutation_via_stored_digest() {
+        let root = temp_root("direct-occt-content-cache-same-size-mutation");
+        let resolver = TestResolver { root: root.clone() };
+        let source = "(model (part body (box 10 20 30)))";
+        let program = compile(source);
+        let params = DesignParams::new();
+        let params_json = serde_json::to_string(&params).expect("params");
+        let hash = content_hash_with_runtime_inputs(&program, source, &params_json, &params, None)
+            .expect("content hash");
+        let model_id = model_id_from_hash(&hash);
+        let bundle_dir =
+            crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
+        fs::create_dir_all(&bundle_dir).expect("bundle dir");
+        let source_path = bundle_dir.join(SOURCE_FILE_NAME);
+        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let step_path = bundle_dir.join(STEP_FILE_NAME);
+        fs::write(&source_path, source).expect("source");
+        // Same-length payload so a size-only readiness check cannot detect it.
+        let original: &[u8] = b"solid cached preview payload";
+        let mutated: &[u8] = b"SOLID cached preview payload";
+        assert_eq!(
+            original.len(),
+            mutated.len(),
+            "fixture must mutate preview at the same byte length"
+        );
+        fs::write(&preview_path, original).expect("preview");
+        fs::write(&step_path, b"ISO-10303-21; cached step").expect("step");
+
+        let manifest = build_direct_occt_manifest(
+            &model_id,
+            &source_path,
+            &[("body".to_string(), "Body".to_string())],
+            &[],
+            &[],
+            None,
+            &HashMap::new(),
+        )
+        .expect("manifest");
+        let bundle = build_direct_occt_bundle(
+            &model_id,
+            &hash,
+            &source_path,
+            &preview_path,
+            &step_path,
+            None,
+            &manifest,
+        )
+        .expect("bundle");
+        let stored =
+            crate::model_runtime::write_runtime_bundle(&resolver, &model_id, &bundle, &manifest)
+                .expect("write cached runtime bundle");
+        // The render path records stored per-artifact digests after a verified
+        // render, which is the trust anchor for later warm reuse.
+        write_complete_cached_bundle_digests(&bundle_dir, &stored.0).expect("write digests");
+
+        // Sanity: the unmutated bundle is a warm-reuse hit.
+        assert!(
+            read_complete_cached_bundle(&resolver, &model_id, &hash).is_some(),
+            "unmutated cached bundle with matching digests must hit"
+        );
+        // The hot in-memory cache would mask a disk mutation; simulate a cold
+        // reuse (e.g. after a process restart) by evicting the hot entry.
+        forget_hot_cached_bundle(&bundle_dir);
+
+        // Mutate preview.stl in place, preserving the exact byte length so only
+        // a content digest can detect it.
+        fs::write(&preview_path, mutated).expect("mutate preview in place");
+
+        assert!(
+            read_complete_cached_bundle(&resolver, &model_id, &hash).is_none(),
+            "same-size preview mutation must miss the artifact cache via the stored digest"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cached_bundle_without_digest_sidecar_is_a_cold_cache_miss() {
+        // BDD: a complete bundle persisted without its digest sidecar (the
+        // state left behind when sidecar persistence fails after
+        // write_runtime_bundle succeeds) MUST NOT be trusted on cold reuse.
+        // The cold read must miss and the render must re-execute. We prove the
+        // re-execution by using a blocked Direct OCCT layout: a cache hit would
+        // skip the kernel and return the bundle, while a cache miss starts the
+        // blocked kernel and fails.
+        let root = temp_root("direct-occt-content-cache-missing-sidecar");
+        let resolver = TestResolver { root: root.clone() };
+        let source = "(model (part body (box 10 20 30)))";
+        let program = compile(source);
+        let params = DesignParams::new();
+        let params_json = serde_json::to_string(&params).expect("params");
+        let hash = content_hash_with_runtime_inputs(&program, source, &params_json, &params, None)
+            .expect("content hash");
+        let model_id = model_id_from_hash(&hash);
+        let bundle_dir =
+            crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
+        fs::create_dir_all(&bundle_dir).expect("bundle dir");
+        let source_path = bundle_dir.join(SOURCE_FILE_NAME);
+        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let step_path = bundle_dir.join(STEP_FILE_NAME);
+        fs::write(&source_path, source).expect("source");
+        fs::write(&preview_path, b"solid cached preview").expect("preview");
+        fs::write(&step_path, b"ISO-10303-21; cached step").expect("step");
+
+        let manifest = build_direct_occt_manifest(
+            &model_id,
+            &source_path,
+            &[("body".to_string(), "Body".to_string())],
+            &[],
+            &[],
+            None,
+            &HashMap::new(),
+        )
+        .expect("manifest");
+        let bundle = build_direct_occt_bundle(
+            &model_id,
+            &hash,
+            &source_path,
+            &preview_path,
+            &step_path,
+            None,
+            &manifest,
+        )
+        .expect("bundle");
+        // Persist a complete bundle + manifest, exactly as write_runtime_bundle
+        // would, but deliberately omit the digest sidecar.
+        let _ =
+            crate::model_runtime::write_runtime_bundle(&resolver, &model_id, &bundle, &manifest)
+                .expect("write cached runtime bundle");
+        assert!(
+            !bundle_dir.join(DIGESTS_FILE_NAME).exists(),
+            "test setup: sidecar must be absent"
+        );
+
+        let _runner_guard =
+            crate::ecky_cad_host::direct_occt_runner::test_discovery::CwdFallbackGuard::disable();
+        let miss = render_core_program_runtime_bundle(
+            &program,
+            source,
+            &params,
+            &blocked_layout(root.clone()),
+            &resolver,
+        );
+
+        assert!(
+            miss.is_err(),
+            "missing digest sidecar must be a cold cache miss and re-render, not trusted reuse"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn digest_match_fixture(label: &str) -> (PathBuf, PathBuf, ArtifactBundle) {
+        let root = temp_root(label);
+        let resolver = TestResolver { root: root.clone() };
+        let source = "(model (part body (box 10 20 30)))";
+        let program = compile(source);
+        let params = DesignParams::new();
+        let params_json = serde_json::to_string(&params).expect("params");
+        let hash = content_hash_with_runtime_inputs(&program, source, &params_json, &params, None)
+            .expect("content hash");
+        let model_id = model_id_from_hash(&hash);
+        let bundle_dir =
+            crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
+        fs::create_dir_all(&bundle_dir).expect("bundle dir");
+        let source_path = bundle_dir.join(SOURCE_FILE_NAME);
+        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let step_path = bundle_dir.join(STEP_FILE_NAME);
+        fs::write(&source_path, source).expect("source");
+        fs::write(&preview_path, b"solid cached preview payload").expect("preview");
+        fs::write(&step_path, b"ISO-10303-21; cached step").expect("step");
+        let manifest = build_direct_occt_manifest(
+            &model_id,
+            &source_path,
+            &[("body".to_string(), "Body".to_string())],
+            &[],
+            &[],
+            None,
+            &HashMap::new(),
+        )
+        .expect("manifest");
+        let bundle = build_direct_occt_bundle(
+            &model_id,
+            &hash,
+            &source_path,
+            &preview_path,
+            &step_path,
+            None,
+            &manifest,
+        )
+        .expect("bundle");
+        (root, bundle_dir, bundle)
+    }
+
+    #[test]
+    fn complete_cached_bundle_digests_match_accepts_unmutated_sidecar() {
+        let (root, bundle_dir, bundle) = digest_match_fixture("direct-occt-digest-match-unmutated");
+        write_complete_cached_bundle_digests(&bundle_dir, &bundle).expect("write digests");
+        assert!(
+            complete_cached_bundle_digests_match(&bundle_dir, &bundle),
+            "unmutated artifacts with a matching sidecar must verify"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn complete_cached_bundle_digests_match_rejects_different_size_mutation() {
+        let (root, bundle_dir, bundle) =
+            digest_match_fixture("direct-occt-digest-match-different-size");
+        write_complete_cached_bundle_digests(&bundle_dir, &bundle).expect("write digests");
+        fs::write(
+            bundle_dir.join(PREVIEW_STL_FILE_NAME),
+            b"solid a completely different and longer preview payload",
+        )
+        .expect("mutate preview");
+        assert!(
+            !complete_cached_bundle_digests_match(&bundle_dir, &bundle),
+            "different-size preview mutation must miss via the stored digest"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn complete_cached_bundle_digests_match_rejects_absent_sidecar() {
+        let (root, bundle_dir, bundle) =
+            digest_match_fixture("direct-occt-digest-match-absent-sidecar");
+        // No sidecar written: a bundle that lacks its stored per-artifact
+        // digests must NOT be trusted for reuse (e.g. when sidecar persistence
+        // failed after the bundle itself was written). It is a cache miss.
+        assert!(
+            !complete_cached_bundle_digests_match(&bundle_dir, &bundle),
+            "absent digest sidecar must be a cache miss, not trusted legacy reuse"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn write_complete_cached_bundle_digests_publishes_atomically_without_temp_residue() {
+        let (root, bundle_dir, bundle) = digest_match_fixture("direct-occt-digest-write-atomic");
+        write_complete_cached_bundle_digests(&bundle_dir, &bundle).expect("write digests");
+
+        let final_path = bundle_dir.join(DIGESTS_FILE_NAME);
+        let temp_path = bundle_dir.join(format!("{DIGESTS_FILE_NAME}.tmp"));
+        assert!(
+            final_path.is_file(),
+            "atomic publish must produce digests.json"
+        );
+        assert!(
+            !temp_path.exists(),
+            "temp file must be renamed away, not left behind"
+        );
+        // The published sidecar must be complete, parseable JSON.
+        let raw = fs::read_to_string(&final_path).expect("read sidecar");
+        let sidecar: CachedArtifactDigestSidecar =
+            serde_json::from_str(&raw).expect("published sidecar must be valid JSON");
+        assert_eq!(
+            sidecar.schema_version,
+            CACHED_ARTIFACT_DIGEST_SCHEMA_VERSION
+        );
+        // Every on-disk artifact is covered by a stored digest.
+        for path in cached_artifact_paths(&bundle) {
+            assert!(
+                sidecar.digests.contains_key(&path),
+                "artifact '{path}' must be covered"
+            );
+        }
+        assert!(
+            complete_cached_bundle_digests_match(&bundle_dir, &bundle),
+            "atomically published digests must verify"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn complete_cached_bundle_digests_match_rejects_corrupt_sidecar() {
+        let (root, bundle_dir, bundle) =
+            digest_match_fixture("direct-occt-digest-match-corrupt-sidecar");
+        // Simulate a torn/corrupt sidecar (e.g. a non-atomic write that was
+        // interrupted). Readers must treat it as a cache miss, not a hit.
+        fs::write(bundle_dir.join(DIGESTS_FILE_NAME), b"{ not valid json ")
+            .expect("write corrupt sidecar");
+        assert!(
+            !complete_cached_bundle_digests_match(&bundle_dir, &bundle),
+            "corrupt digest sidecar must be a cache miss"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn complete_cached_bundle_digests_match_rejects_uncovered_artifact() {
+        let (root, bundle_dir, bundle) = digest_match_fixture("direct-occt-digest-match-uncovered");
+        write_complete_cached_bundle_digests(&bundle_dir, &bundle).expect("write digests");
+        // Drop the preview entry from the sidecar so the artifact is present on
+        // disk but no longer covered by a stored digest.
+        let sidecar_path = bundle_dir.join(DIGESTS_FILE_NAME);
+        let mut sidecar: CachedArtifactDigestSidecar =
+            serde_json::from_str(&fs::read_to_string(&sidecar_path).expect("sidecar"))
+                .expect("parse sidecar");
+        sidecar.digests.remove(&bundle.preview_stl_path);
+        fs::write(
+            &sidecar_path,
+            serde_json::to_string_pretty(&sidecar).expect("reserialize"),
+        )
+        .expect("write sidecar");
+        assert!(
+            !complete_cached_bundle_digests_match(&bundle_dir, &bundle),
+            "an artifact missing from the sidecar must invalidate reuse"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2130,8 +2654,8 @@ echo "fake runner plan: $plan"
 
     #[cfg(unix)]
     #[test]
-    fn runner_first_bundle_matches_generated_source_artifacts_for_same_fixture() {
-        assert_runner_first_bundle_matches_generated_source_artifacts_for_fixture(
+    fn runner_first_bundle_matches_generated_runner_artifacts_for_same_fixture() {
+        assert_runner_first_bundle_matches_generated_runner_artifacts_for_fixture(
             "direct-occt-runner-parity",
             "(model (part body (box 10 20 30)))",
         );
@@ -2139,8 +2663,8 @@ echo "fake runner plan: $plan"
 
     #[cfg(unix)]
     #[test]
-    fn runner_first_bundle_matches_generated_source_for_nary_boolean_fixture() {
-        assert_runner_first_bundle_matches_generated_source_artifacts_for_fixture(
+    fn runner_first_bundle_matches_generated_runner_for_nary_boolean_fixture() {
+        assert_runner_first_bundle_matches_generated_runner_artifacts_for_fixture(
             "direct-occt-runner-parity-nary-boolean",
             r#"
             (model
@@ -2158,8 +2682,8 @@ echo "fake runner plan: $plan"
 
     #[cfg(unix)]
     #[test]
-    fn runner_first_bundle_matches_generated_source_for_coarse_edge_selector_fixture() {
-        assert_runner_first_bundle_matches_generated_source_artifacts_for_fixture(
+    fn runner_first_bundle_matches_generated_runner_for_coarse_edge_selector_fixture() {
+        assert_runner_first_bundle_matches_generated_runner_artifacts_for_fixture(
             "direct-occt-runner-parity-coarse-edge-selector",
             r#"(model (part body (fillet 1.5 :edges "left+vertical" (box 20 20 10))))"#,
         );
@@ -2167,8 +2691,8 @@ echo "fake runner plan: $plan"
 
     #[cfg(unix)]
     #[test]
-    fn runner_first_bundle_matches_generated_source_for_edge_all_selector_fixture() {
-        assert_runner_first_bundle_matches_generated_source_artifacts_for_fixture(
+    fn runner_first_bundle_matches_generated_runner_for_edge_all_selector_fixture() {
+        assert_runner_first_bundle_matches_generated_runner_artifacts_for_fixture(
             "direct-occt-runner-parity-edge-all-selector",
             r#"(model (part body (fillet 1.5 :edges "all" (box 20 20 10))))"#,
         );
@@ -2176,8 +2700,8 @@ echo "fake runner plan: $plan"
 
     #[cfg(unix)]
     #[test]
-    fn runner_first_bundle_matches_generated_source_for_shell_clause_fixture() {
-        assert_runner_first_bundle_matches_generated_source_artifacts_for_fixture(
+    fn runner_first_bundle_matches_generated_runner_for_shell_clause_fixture() {
+        assert_runner_first_bundle_matches_generated_runner_artifacts_for_fixture(
             "direct-occt-runner-parity-shell-clause-selector",
             r#"(model (part body (shell 1.5 :faces "planar+normal-z+area-max" (box 20 20 10))))"#,
         );
@@ -2185,8 +2709,8 @@ echo "fake runner plan: $plan"
 
     #[cfg(unix)]
     #[test]
-    fn runner_first_bundle_matches_generated_source_for_keywordless_shell_fixture() {
-        assert_runner_first_bundle_matches_generated_source_artifacts_for_fixture(
+    fn runner_first_bundle_matches_generated_runner_for_keywordless_shell_fixture() {
+        assert_runner_first_bundle_matches_generated_runner_artifacts_for_fixture(
             "direct-occt-runner-parity-shell-default",
             r#"(model (part body (shell 1.5 (box 20 20 10))))"#,
         );
@@ -2194,8 +2718,8 @@ echo "fake runner plan: $plan"
 
     #[cfg(unix)]
     #[test]
-    fn runner_first_bundle_matches_generated_source_for_coarse_chamfer_selector_fixture() {
-        assert_runner_first_bundle_matches_generated_source_artifacts_for_fixture(
+    fn runner_first_bundle_matches_generated_runner_for_coarse_chamfer_selector_fixture() {
+        assert_runner_first_bundle_matches_generated_runner_artifacts_for_fixture(
             "direct-occt-runner-parity-coarse-chamfer-selector",
             r#"(model (part body (chamfer 1.25 :edges "left+vertical" (box 20 20 10))))"#,
         );
@@ -2203,16 +2727,16 @@ echo "fake runner plan: $plan"
 
     #[cfg(unix)]
     #[test]
-    fn runner_first_bundle_matches_generated_source_for_exact_edge_target_id_fixture() {
+    fn runner_first_bundle_matches_generated_runner_for_exact_edge_target_id_fixture() {
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
-        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout = inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 
@@ -2240,7 +2764,7 @@ echo "fake runner plan: $plan"
         );
         let _ = fs::remove_dir_all(root);
 
-        assert_runner_first_bundle_matches_generated_source_artifacts_for_fixture(
+        assert_runner_first_bundle_matches_generated_runner_artifacts_for_fixture(
             "direct-occt-runner-parity-exact-edge-target-id",
             &exact_source,
         );
@@ -2248,16 +2772,16 @@ echo "fake runner plan: $plan"
 
     #[cfg(unix)]
     #[test]
-    fn runner_first_bundle_matches_generated_source_for_exact_face_target_id_fixture() {
+    fn runner_first_bundle_matches_generated_runner_for_exact_face_target_id_fixture() {
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
-        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout = inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 
@@ -2285,7 +2809,7 @@ echo "fake runner plan: $plan"
         );
         let _ = fs::remove_dir_all(root);
 
-        assert_runner_first_bundle_matches_generated_source_artifacts_for_fixture(
+        assert_runner_first_bundle_matches_generated_runner_artifacts_for_fixture(
             "direct-occt-runner-parity-exact-face-target-id",
             &exact_source,
         );
@@ -3156,12 +3680,12 @@ echo "fake runner plan: $plan"
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
-        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout = inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 
@@ -3230,12 +3754,10 @@ echo "fake runner plan: $plan"
             return;
         }
 
-        let layout = inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
-
-        assert_eq!(layout.ocp_root.as_deref(), Some(runtime_root.as_path()));
 
         let root = temp_root("direct-occt-standalone-live-bundle");
         let resolver = TestResolver { root: root.clone() };
@@ -3266,7 +3788,7 @@ echo "fake runner plan: $plan"
         {
             assert!(
                 !bundle_dir.join("direct_occt_executor.cpp").exists(),
-                "runner-first export should not emit generated C++ source"
+                "runner-first export should not emit precompiled runner"
             );
         }
 
@@ -3283,12 +3805,12 @@ echo "fake runner plan: $plan"
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
-        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout = inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 
@@ -3366,12 +3888,12 @@ echo "fake runner plan: $plan"
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
-        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout = inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 
@@ -3433,12 +3955,12 @@ echo "fake runner plan: $plan"
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
-        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout = inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 
@@ -3478,7 +4000,7 @@ echo "fake runner plan: $plan"
         );
         assert!(
             !bundle_dir.join("direct_occt_executor.cpp").exists(),
-            "runner-first coarse selector export should not emit generated C++ source"
+            "runner-first coarse selector export should not emit precompiled runner"
         );
         assert_eq!(manifest.parts[0].part_id, "body");
         validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
@@ -3493,12 +4015,12 @@ echo "fake runner plan: $plan"
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
-        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout = inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 
@@ -3538,7 +4060,7 @@ echo "fake runner plan: $plan"
         );
         assert!(
             !bundle_dir.join("direct_occt_executor.cpp").exists(),
-            "runner-first edge-all export should not emit generated C++ source"
+            "runner-first edge-all export should not emit precompiled runner"
         );
         assert_eq!(manifest.parts[0].part_id, "body");
         validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
@@ -3553,12 +4075,12 @@ echo "fake runner plan: $plan"
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
-        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout = inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 
@@ -3599,7 +4121,7 @@ echo "fake runner plan: $plan"
         );
         assert!(
             !bundle_dir.join("direct_occt_executor.cpp").exists(),
-            "runner-first shell clause export should not emit generated C++ source"
+            "runner-first shell clause export should not emit precompiled runner"
         );
         assert_eq!(manifest.parts[0].part_id, "body");
         validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
@@ -3614,12 +4136,12 @@ echo "fake runner plan: $plan"
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
-        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout = inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 
@@ -3659,7 +4181,7 @@ echo "fake runner plan: $plan"
         );
         assert!(
             !bundle_dir.join("direct_occt_executor.cpp").exists(),
-            "runner-first shell default export should not emit generated C++ source"
+            "runner-first shell default export should not emit precompiled runner"
         );
         assert_eq!(manifest.parts[0].part_id, "body");
         validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
@@ -3674,12 +4196,12 @@ echo "fake runner plan: $plan"
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
-        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout = inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 
@@ -3732,12 +4254,12 @@ echo "fake runner plan: $plan"
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
-        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout = inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 
@@ -3777,7 +4299,7 @@ echo "fake runner plan: $plan"
         );
         assert!(
             !bundle_dir.join("direct_occt_executor.cpp").exists(),
-            "runner-first coarse chamfer export should not emit generated C++ source"
+            "runner-first coarse chamfer export should not emit precompiled runner"
         );
         assert_eq!(manifest.parts[0].part_id, "body");
         validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
@@ -3792,12 +4314,12 @@ echo "fake runner plan: $plan"
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
-        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout = inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 
@@ -3846,12 +4368,12 @@ echo "fake runner plan: $plan"
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
-        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout = inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 
@@ -3908,12 +4430,12 @@ echo "fake runner plan: $plan"
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
-        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout = inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 
@@ -3970,12 +4492,12 @@ echo "fake runner plan: $plan"
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
-        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout = inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 
@@ -4053,12 +4575,12 @@ echo "fake runner plan: $plan"
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
-        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout = inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 
@@ -4107,12 +4629,12 @@ echo "fake runner plan: $plan"
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
-        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout = inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 
@@ -4154,12 +4676,12 @@ echo "fake runner plan: $plan"
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
-        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout = inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 
@@ -4190,12 +4712,12 @@ echo "fake runner plan: $plan"
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
-        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout = inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 
@@ -4249,12 +4771,12 @@ echo "fake runner plan: $plan"
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
-        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout = inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 
@@ -4302,12 +4824,12 @@ echo "fake runner plan: $plan"
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("repo root");
-        let runtime_root = bundled_build123d_runtime_root_from_repo(repo_root);
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout = inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 
@@ -4399,6 +4921,209 @@ echo "fake runner plan: $plan"
         assert_eq!(
             bindings[0].viewer_asset_path,
             Some(PREVIEW_STL_FILE_NAME.to_string())
+        );
+    }
+
+    // --- Byte-budgeted hot-cache eviction -------------------------------------
+
+    fn hot_cache_entry(content_hash: &str, resident_bytes: u64) -> DirectOcctHotCacheEntry {
+        // Minimal bundle whose artifact paths point at non-existent files. The
+        // eviction helper trusts the stored `resident_bytes` field (mirroring
+        // production, which records bytes once at insertion time), so no disk
+        // access is needed and the unit tests stay deterministic and free of
+        // global-cache races.
+        let bundle_dir = PathBuf::from(format!("/tmp/ecky-hot-cache-evict-fixture-{content_hash}"));
+        let source_path = bundle_dir.join(SOURCE_FILE_NAME);
+        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let step_path = bundle_dir.join(STEP_FILE_NAME);
+        let manifest = build_direct_occt_manifest(
+            content_hash,
+            &source_path,
+            &[("body".to_string(), "Body".to_string())],
+            &[],
+            &[],
+            None,
+            &HashMap::new(),
+        )
+        .expect("manifest");
+        let bundle = build_direct_occt_bundle(
+            content_hash,
+            content_hash,
+            &source_path,
+            &preview_path,
+            &step_path,
+            None,
+            &manifest,
+        )
+        .expect("bundle");
+        DirectOcctHotCacheEntry {
+            bundle_dir,
+            content_hash: content_hash.to_string(),
+            bundle,
+            manifest,
+            resident_bytes,
+        }
+    }
+
+    fn hot_cache_content_hashes(entries: &VecDeque<DirectOcctHotCacheEntry>) -> Vec<String> {
+        entries
+            .iter()
+            .map(|entry| entry.content_hash.clone())
+            .collect()
+    }
+
+    #[test]
+    fn evict_hot_cache_to_byte_budget_preserves_order_when_within_budget() {
+        // BDD: when resident bytes are already within the budget, no entry is
+        // evicted and MRU->LRU (front->back) ordering is preserved.
+        let mut entries: VecDeque<DirectOcctHotCacheEntry> = vec![
+            hot_cache_entry("mru", 10),
+            hot_cache_entry("mid", 20),
+            hot_cache_entry("lru", 30),
+        ]
+        .into_iter()
+        .collect();
+        evict_hot_cache_to_byte_budget(&mut entries, 1_000);
+        assert_eq!(
+            hot_cache_content_hashes(&entries),
+            vec!["mru".to_string(), "mid".to_string(), "lru".to_string()],
+            "entries within budget must be retained in MRU->LRU order"
+        );
+    }
+
+    #[test]
+    fn evict_hot_cache_to_byte_budget_evicts_lru_from_back_until_under_budget() {
+        // BDD: when total resident bytes exceed the budget, only the
+        // least-recently-used entries (back of the deque) are dropped until the
+        // total fits; the most-recent entries are kept.
+        let mut entries: VecDeque<DirectOcctHotCacheEntry> = vec![
+            hot_cache_entry("mru", 40),
+            hot_cache_entry("mid", 30),
+            hot_cache_entry("lru", 20),
+        ]
+        .into_iter()
+        .collect();
+        // total 90; budget 70; drop LRU (20) -> 70 which fits. Keep [mru, mid].
+        evict_hot_cache_to_byte_budget(&mut entries, 70);
+        assert_eq!(
+            hot_cache_content_hashes(&entries),
+            vec!["mru".to_string(), "mid".to_string()],
+            "LRU entries must be evicted from the back until within byte budget"
+        );
+    }
+
+    #[test]
+    fn evict_hot_cache_to_byte_budget_does_not_retain_oversized_single_entry() {
+        // BDD: a single entry whose resident bytes exceed the whole budget is
+        // never retained, even when it is the only entry. This prevents one
+        // pathological render from pinning the hot cache.
+        let mut entries: VecDeque<DirectOcctHotCacheEntry> =
+            vec![hot_cache_entry("huge", 200)].into_iter().collect();
+        evict_hot_cache_to_byte_budget(&mut entries, 100);
+        assert!(
+            entries.is_empty(),
+            "an oversized single entry must not be retained"
+        );
+    }
+
+    #[test]
+    fn evict_hot_cache_to_byte_budget_drops_mru_when_only_oversized_remain() {
+        // BDD: eviction is total-driven, not position-shielded. After the older
+        // LRU entries are evicted, an oversized most-recent entry is dropped
+        // too, so the MRU slot is never a safe harbor for an oversized bundle.
+        let mut entries: VecDeque<DirectOcctHotCacheEntry> = vec![
+            hot_cache_entry("huge-mru", 150),
+            hot_cache_entry("small-lru", 10),
+        ]
+        .into_iter()
+        .collect();
+        // total 160; budget 100; drop LRU (10) -> 150 still over; drop huge-mru.
+        evict_hot_cache_to_byte_budget(&mut entries, 100);
+        assert!(
+            entries.is_empty(),
+            "an oversized MRU entry must also be evicted once LRU entries are gone"
+        );
+    }
+
+    #[test]
+    fn resident_artifact_bytes_sums_cached_artifact_path_sizes() {
+        // BDD: the resident byte count that drives byte-budgeted eviction is the
+        // sum of the on-disk artifact sizes reported by `cached_artifact_paths`
+        // (preview STL, STEP export, and source macro).
+        let root = temp_root("direct-occt-resident-bytes");
+        let resolver = TestResolver { root: root.clone() };
+        let source = "(model (part body (box 10 20 30)))";
+        let program = compile(source);
+        let params = DesignParams::new();
+        let params_json = serde_json::to_string(&params).expect("params");
+        let hash = content_hash_with_runtime_inputs(&program, source, &params_json, &params, None)
+            .expect("content hash");
+        let model_id = model_id_from_hash(&hash);
+        let bundle_dir =
+            crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
+        fs::create_dir_all(&bundle_dir).expect("bundle dir");
+        let source_path = bundle_dir.join(SOURCE_FILE_NAME);
+        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let step_path = bundle_dir.join(STEP_FILE_NAME);
+        let source_bytes = source.as_bytes();
+        let preview_bytes: &[u8] = b"solid resident preview payload";
+        let step_bytes: &[u8] = b"ISO-10303-21; resident step";
+        fs::write(&source_path, source_bytes).expect("source");
+        fs::write(&preview_path, preview_bytes).expect("preview");
+        fs::write(&step_path, step_bytes).expect("step");
+        let manifest = build_direct_occt_manifest(
+            &model_id,
+            &source_path,
+            &[("body".to_string(), "Body".to_string())],
+            &[],
+            &[],
+            None,
+            &HashMap::new(),
+        )
+        .expect("manifest");
+        let bundle = build_direct_occt_bundle(
+            &model_id,
+            &hash,
+            &source_path,
+            &preview_path,
+            &step_path,
+            None,
+            &manifest,
+        )
+        .expect("bundle");
+
+        let expected = (source_bytes.len() + preview_bytes.len() + step_bytes.len()) as u64;
+        assert_eq!(
+            resident_artifact_bytes(&bundle),
+            expected,
+            "resident bytes must sum the cached artifact path sizes"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn content_key_changes_when_backend_cache_schema_changes() {
+        // BDD: the cache key is seeded by the backend cache schema (the backend
+        // version). Identical source and parameters under two different schemas
+        // MUST yield different keys, so a schema bump invalidates the hot and
+        // disk caches. Production keys on DIRECT_OCCT_CACHE_SCHEMA with no
+        // legacy/version branch.
+        let source = "(model (part body (box 10 20 30)))";
+        let params_json = "{}";
+        let previous_schema = "direct-occt-v4-hypothetical-prior-cache-contract";
+        let current =
+            content_hash_with_backend_version(DIRECT_OCCT_CACHE_SCHEMA, source, params_json, None);
+        let previous =
+            content_hash_with_backend_version(previous_schema, source, params_json, None);
+        assert_ne!(
+            current, previous,
+            "bumping the backend cache schema must invalidate the cache key for identical inputs"
+        );
+        assert_eq!(
+            content_hash_with_font_path(source, params_json, None),
+            current,
+            "production must key on DIRECT_OCCT_CACHE_SCHEMA with no legacy branch"
         );
     }
 }

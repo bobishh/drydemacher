@@ -771,6 +771,9 @@ mod tests {
 
         ArtifactBundle {
             geometry_provenance: None,
+            component_dependency_lock: None,
+            component_dependency_lock_digest: None,
+            component_import_origins: Vec::new(),
             schema_version: 1,
             model_id: "generated-test-001".into(),
             source_kind: ModelSourceKind::Generated,
@@ -874,6 +877,7 @@ mod tests {
     fn test_manifest() -> ModelManifest {
         ModelManifest {
             geometry_provenance: None,
+            component_import_origins: Vec::new(),
             schema_version: 1,
             model_id: "generated-test-001".into(),
             source_kind: ModelSourceKind::Generated,

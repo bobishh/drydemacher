@@ -22,7 +22,7 @@ use crate::{
 
 /// Per-language documentation appended to the API-mode system prompt.
 ///
-/// FreeCAD Python and build123d are publicly documented, so a short recall note plus
+/// FreeCAD Python is publicly documented, so a short recall note plus
 /// the app-specific runtime contract is enough. Ecky is proprietary and unknown to
 /// models, so a compact authoring guide is embedded.
 pub fn language_guide_text(
@@ -37,21 +37,43 @@ pub fn language_guide_text(
              Prefer the smallest model that satisfies the request, then add named structure.\n",
             crate::agent_prompt::agent_language_reference(geometry_backend)
         ),
-        crate::contracts::SourceLanguage::Build123d => build123d_python_guide_text(),
+        crate::contracts::SourceLanguage::Build123d => {
+            "build123d source/runtime was removed. Migrate this target to canonical `.ecky` source and Ecky Native.".to_string()
+        }
         crate::contracts::SourceLanguage::LegacyPython => freecad_python_guide_text(),
     }
 }
 
-/// Full system prompt for API-mode design generation: base technical contract plus
-/// documentation for the target source language.
+/// Static system prefix for API-mode design generation. Carries, once and in a
+/// stable order so provider exact-prefix caching can reuse it:
+///   1. the output/behaviour contract (`TECHNICAL_SYSTEM_PROMPT`);
+///   2. the shared single-source language body (`language_guide_text`);
+///   3. the applicable static CAD-framework rules, when provided.
+///
+/// Variable thread state and the current ask live in user content
+/// (`format_contextual_prompt`), after this prefix. The CAD-framework contract is
+/// passed by the caller only for applicable FreeCAD/CAD-SDK contexts (task 3.3);
+/// it is `None` (omitted) for Ecky requests where it is irrelevant.
 pub fn design_system_prompt(
     source_language: crate::contracts::SourceLanguage,
     geometry_backend: crate::contracts::GeometryBackend,
+    framework_contract: Option<&str>,
 ) -> String {
+    let framework_block = framework_contract
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            format!(
+                "\n\nACTUAL CURRENT CAD FRAMEWORK (AUTHORITATIVE):\n```text\n{}\n```",
+                value
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "{}\n\nTARGET LANGUAGE GUIDE (AUTHORITATIVE FOR `macro_code`)\n{}",
+        "{}\n\nTARGET LANGUAGE GUIDE (AUTHORITATIVE FOR `macro_code`)\n{}{}",
         TECHNICAL_SYSTEM_PROMPT,
-        language_guide_text(source_language, geometry_backend)
+        language_guide_text(source_language, geometry_backend),
+        framework_block
     )
 }
 
@@ -76,28 +98,11 @@ pub fn ecky_ir_v0_guide_text(backend: crate::contracts::GeometryBackend) -> Stri
 }
 
 pub fn build123d_guide_text() -> String {
-    ecky_build123d_guide_text()
+    "build123d was removed. Migrate to `.ecky` with Ecky Native.".to_string()
 }
 
 pub fn build123d_python_guide_text() -> String {
-    concat!(
-        "Return canonical `build123d` source in `macro_code`.\n",
-        "Current fileExtension: `.py`.\n",
-        "Current sourceLanguage: `build123d`.\n",
-        "build123d is a publicly documented Python CAD library; use standard, well-known API only.\n",
-        "Start with `from build123d import *`.\n\n",
-        "Rules:\n",
-        "- Use `with BuildPart() as body:` or similar containers to define parts.\n",
-        "- To expose dynamic parameters, use the `params` dictionary which will be provided at runtime.\n",
-        "- Example: `radius = params.get('radius', 10.0)`\n",
-        "- Ensure the final shapes are added to the `_ecky_parts` list if you want them exported as separate objects.\n",
-        "- Example: `_ecky_parts = [('body', body.part)]` (list of tuples: label, shape)\n\n",
-        "Example:\n",
-        "from build123d import *\n",
-        "with BuildPart() as lamp:\n",
-        "    Cylinder(radius=params.get('radius', 20), height=params.get('height', 100))\n",
-        "_ecky_parts = [('lamp', lamp.part)]\n"
-    ).to_string()
+    build123d_guide_text()
 }
 
 #[allow(dead_code)]
@@ -296,10 +301,6 @@ READING ORDER FOR GENERATED CODE\n\
 Start primitive or sketch. Add params. Add named `build` stages. Add booleans. Add repetition/placement. Add verification clauses for measurable model invariants before final JSON.\n",
         typed_hole_policy = surface.typed_hole_policy,
     )
-}
-
-fn ecky_build123d_guide_text() -> String {
-    crate::agent_prompt::agent_language_reference(crate::contracts::GeometryBackend::Build123d)
 }
 
 pub fn freecad_guide_text() -> String {
@@ -589,9 +590,25 @@ fn load_framework_contract(app: &AppHandle) -> Option<String> {
     fs::read_to_string(path).ok()
 }
 
+/// Whether the CAD-SDK framework contract applies to this generation
+/// (OpenSpec `agent-context-budgeting`, task 3.3).
+///
+/// The FreeCAD CAD-SDK contract is relevant only for FreeCAD-based authoring
+/// (legacy Python, or a current macro already using the CAD framework). Ecky and
+/// build123d have their own language surfaces and never use the FreeCAD CAD-SDK,
+/// so the framework block is omitted for them to avoid irrelevant policy in the
+/// stable system prefix. A new thread with no current output defaults to the
+/// FreeCAD CAD-SDK path (the historical default).
 fn should_use_framework_for_generation(ctx: &PromptContext) -> bool {
-    let _ = ctx;
-    true
+    match ctx
+        .last_output
+        .as_ref()
+        .map(|output| output.source_language)
+    {
+        Some(crate::contracts::SourceLanguage::EckyIrV0)
+        | Some(crate::contracts::SourceLanguage::Build123d) => false,
+        _ => true,
+    }
 }
 
 fn prepend_follow_up_context(prompt: String, follow_up_question: Option<&str>) -> String {
@@ -688,24 +705,43 @@ pub async fn generate_design(
     } else {
         "DESIGN_EDIT"
     };
-    let framework_enabled = should_use_framework_for_generation(&ctx);
+    let framework_enabled = should_use_framework_for_generation(&ctx)
+        && source_language == crate::contracts::SourceLanguage::LegacyPython;
     let framework_contract = if framework_enabled {
         load_framework_contract(&app)
     } else {
         None
     };
-    let contextual_prompt = format_contextual_prompt(
+    let target_authoring = crate::context::ResolvedAuthoringContext {
+        engine_kind,
+        source_language,
+        geometry_backend,
+    };
+    // 3.2/3.4: route the generation user content through the typed envelope.
+    // The static output contract / language / framework live once in the system
+    // prefix; user content carries current state + the current ask once (no
+    // duplicate EXECUTION RULES). Mandatory/authoritative state that cannot fit
+    // the generation ceiling fails here, pre-dispatch, with a raw context-budget
+    // error naming observed/allowed section sizes — never a lossy request.
+    // 4.2: assemble the payload directly (rather than the `format_contextual_
+    // prompt` thin wrapper) so the budgeted envelope is retained for safe,
+    // content-free telemetry recorded after dispatch through the existing
+    // profiler/session-activity path. The rendered user content is byte-
+    // identical; this is the only generation-assembly hook telemetry needs.
+    let generation_payload = crate::context::assemble_generation_payload(
         &ctx,
         &prompt,
-        TECHNICAL_SYSTEM_PROMPT,
         intent_mode,
-        framework_contract.as_deref(),
-        crate::context::ResolvedAuthoringContext {
-            engine_kind,
-            source_language,
-            geometry_backend,
-        },
-    );
+        target_authoring,
+    )
+    .map_err(|budget_err| {
+        AppError::with_details(
+            AppErrorCode::Validation,
+            "Context budget overflow: mandatory authoritative state cannot fit the generation ceiling; refusing to dispatch a lossy request.",
+            serde_json::to_string(&budget_err).unwrap_or_else(|_| budget_err.to_string()),
+        )
+    })?;
+    let contextual_prompt = generation_payload.user_content;
     let contextual_prompt =
         prepend_follow_up_context(contextual_prompt, follow_up_question.as_deref());
     let contextual_prompt =
@@ -716,7 +752,11 @@ pub async fn generate_design(
         };
     let images = prepare_images(image_data, attachments);
 
-    let system_prompt = design_system_prompt(source_language, geometry_backend);
+    let system_prompt = design_system_prompt(
+        source_language,
+        geometry_backend,
+        framework_contract.as_deref(),
+    );
     let mut output = llm::generate_design(&engine, &system_prompt, &contextual_prompt, images)
         .await
         .map_err(|raw_body| {
@@ -726,6 +766,14 @@ pub async fn generate_design(
                 raw_body,
             )
         })?;
+
+    // 4.2: emit content-free context telemetry (envelope shape plus provider
+    // cache/input/output usage) through the existing profiler/session-activity
+    // path. No new status bar or UI surface; the record is derived from the
+    // shape-only envelope so it cannot leak prompt/source/references/image
+    // bytes/API keys/headers/paths. Recorded after a successful dispatch so it
+    // pairs section budget decisions with the provider's reported usage.
+    state.record_context_telemetry(&generation_payload.envelope, output.usage.as_ref());
 
     if !question_mode {
         if framework_enabled {
@@ -821,6 +869,7 @@ pub async fn init_generation_attempt(
     prompt: String,
     attachments: Option<Vec<Attachment>>,
     image_data: Option<String>,
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<String> {
     let now = SystemTime::now()
@@ -829,25 +878,18 @@ pub async fn init_generation_attempt(
         .as_secs();
     let assistant_message_id = Uuid::new_v4().to_string();
     let user_message_id = Uuid::new_v4().to_string();
+    let configured_root = state.config.lock().unwrap().projects_root.clone();
 
     {
         let db = state.db.lock().await;
-        if db::get_thread_title(&db, &thread_id)
-            .map_err(|err| AppError::persistence(err.to_string()))?
-            .is_none()
-        {
-            let traits = crate::generate_genie_traits();
-            let initial_title = {
-                let chars: Vec<char> = prompt.chars().collect();
-                if chars.len() > 30 {
-                    format!("{}...", chars[..27].iter().collect::<String>())
-                } else {
-                    prompt.clone()
-                }
-            };
-            db::create_or_update_thread(&db, &thread_id, &initial_title, now, Some(&traits))
-                .map_err(|err| AppError::persistence(err.to_string()))?;
-        }
+        ensure_generation_thread_binding(
+            &db,
+            &app,
+            configured_root.as_deref(),
+            &thread_id,
+            &prompt,
+            now,
+        )?;
 
         let attachment_images = collect_attachment_images(attachments.as_ref());
         let user_msg = Message {
@@ -901,6 +943,39 @@ pub async fn init_generation_attempt(
     Ok(assistant_message_id)
 }
 
+fn ensure_generation_thread_binding(
+    conn: &rusqlite::Connection,
+    app: &dyn crate::models::PathResolver,
+    configured_root: Option<&str>,
+    thread_id: &str,
+    prompt: &str,
+    now: u64,
+) -> AppResult<()> {
+    if db::get_thread_title(conn, thread_id)
+        .map_err(|err| AppError::persistence(err.to_string()))?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let traits = crate::generate_genie_traits();
+    let chars: Vec<char> = prompt.chars().collect();
+    let initial_title = if chars.len() > 30 {
+        format!("{}...", chars[..27].iter().collect::<String>())
+    } else {
+        prompt.to_string()
+    };
+    db::create_or_update_thread(conn, thread_id, &initial_title, now, Some(&traits))
+        .map_err(|err| AppError::persistence(err.to_string()))?;
+    crate::thread_source_binding::bind_new_thread(
+        app,
+        conn,
+        configured_root,
+        thread_id,
+        &initial_title,
+    )?;
+    Ok(())
+}
+
 #[tauri::command]
 #[specta::specta]
 #[allow(clippy::too_many_arguments)]
@@ -920,7 +995,21 @@ pub async fn finalize_generation_attempt(
         validate_design_output(design)?;
     }
 
+    let configured_root = state.config.lock().unwrap().projects_root.clone();
     let db = state.db.lock().await;
+    let thread_id = db::get_message_thread_id(&db, &message_id)
+        .map_err(|err| AppError::persistence(err.to_string()))?;
+    if status == FinalizeStatus::Success {
+        if let (Some(thread_id), Some(design)) = (thread_id.as_deref(), design.as_ref()) {
+            crate::thread_source_binding::pre_commit_guard(
+                &app,
+                &db,
+                configured_root.as_deref(),
+                thread_id,
+                &design.title,
+            )?;
+        }
+    }
     let content = match status {
         FinalizeStatus::Success => {
             if let Some(design) = &design {
@@ -957,17 +1046,6 @@ pub async fn finalize_generation_attempt(
     .map_err(|err| AppError::persistence(err.to_string()))?;
 
     if status == FinalizeStatus::Success {
-        let thread_id = if let Some((_, _, thread_id)) =
-            db::get_message_runtime_and_thread(&db, &message_id)
-                .map_err(|err| AppError::persistence(err.to_string()))?
-        {
-            Some(thread_id)
-        } else {
-            db::get_message_output_and_thread(&db, &message_id)
-                .map_err(|err| AppError::persistence(err.to_string()))?
-                .map(|(_, thread_id)| thread_id)
-        };
-
         if let Some(thread_id) = thread_id {
             let title = design
                 .as_ref()
@@ -983,6 +1061,17 @@ pub async fn finalize_generation_attempt(
                 })
                 .unwrap_or_else(|| "Question Session".to_string());
             let _ = persist_thread_summary(&db, &thread_id, &title);
+            let committed_model_id = artifact_bundle
+                .as_ref()
+                .map(|bundle| bundle.model_id.clone())
+                .or_else(|| {
+                    model_manifest
+                        .as_ref()
+                        .map(|manifest| manifest.model_id.clone())
+                });
+            let committed_source = design
+                .as_ref()
+                .map(|design| (design.title.clone(), design.macro_code.clone()));
 
             if design.is_some() || artifact_bundle.is_some() || model_manifest.is_some() {
                 let snapshot = build_runtime_snapshot(
@@ -998,6 +1087,19 @@ pub async fn finalize_generation_attempt(
                     *last = Some(snapshot.clone());
                 }
                 write_last_snapshot(&app, Some(&snapshot));
+            }
+            if let Some((design_title, macro_code)) = committed_source {
+                crate::thread_source_binding::refresh_on_commit(
+                    &app,
+                    &db,
+                    configured_root.as_deref(),
+                    &thread_id,
+                    &design_title,
+                    &macro_code,
+                    &message_id,
+                    committed_model_id.as_deref(),
+                    Some(&message_id),
+                )?;
             }
         }
     }
@@ -1035,29 +1137,25 @@ pub async fn classify_intent(
             let db = state.db.lock().await;
             crate::context::assemble_context(&db, thread_id, None, None)
         };
-        let mut blocks = Vec::new();
-        if !ctx.summary.trim().is_empty() {
-            blocks.push(format!("THREAD SUMMARY\n{}", ctx.summary));
+        // 3.4: route classification through its own compact typed envelope (8K
+        // ceiling; design digest + latest dialogue + frontend snapshot; pinned
+        // references only with attachment/reference intent). Full source, params,
+        // and authoring policy never enter the classifier projection. On envelope
+        // overflow the classifier falls back to a request-only context rather
+        // than dispatching a lossy one.
+        let include_references = attachments
+            .as_ref()
+            .map(|items| !items.is_empty())
+            .unwrap_or(false)
+            || !ctx.pinned_references.trim().is_empty();
+        match crate::context::assemble_classifier_context(
+            &ctx,
+            context.as_deref(),
+            include_references,
+        ) {
+            Ok(rendered) if !rendered.trim().is_empty() => Some(rendered),
+            _ => None,
         }
-        if !ctx.recent_dialogue.trim().is_empty() {
-            blocks.push(format!("RECENT DIALOGUE\n{}", ctx.recent_dialogue));
-        }
-        if !ctx.pinned_references.trim().is_empty() {
-            blocks.push(format!("PINNED REFERENCES\n{}", ctx.pinned_references));
-        }
-        if !ctx.design_digest.trim().is_empty() {
-            blocks.push(format!(
-                "ACTUAL LIVE DESIGN DIGEST (AUTHORITATIVE)\n{}",
-                ctx.design_digest
-            ));
-        }
-        if let Some(frontend_context) = context.as_ref().filter(|value| !value.trim().is_empty()) {
-            blocks.push(format!(
-                "ACTUAL LIVE WORKING SNAPSHOT (FRONTEND)\n{}",
-                frontend_context
-            ));
-        }
-        Some(blocks.join("\n\n"))
     } else {
         context
     };
@@ -1163,10 +1261,10 @@ pub async fn verify_generated_model(
 #[cfg(test)]
 mod tests {
     use super::{
-        build123d_guide_text, build123d_python_guide_text, ecky_ir_v0_guide_text,
-        freecad_guide_text, prepend_follow_up_context, resolve_generation_engine_kind,
-        resolve_generation_geometry_backend, resolve_generation_source_language,
-        should_use_framework_for_generation,
+        build123d_guide_text, build123d_python_guide_text, design_system_prompt,
+        ecky_ir_v0_guide_text, freecad_guide_text, prepend_follow_up_context,
+        resolve_generation_engine_kind, resolve_generation_geometry_backend,
+        resolve_generation_source_language, should_use_framework_for_generation,
     };
     use crate::context::PromptContext;
     use crate::contracts::{Config, McpConfig};
@@ -1265,6 +1363,87 @@ mod tests {
     fn framework_contract_stays_enabled_even_for_legacy_threads() {
         let ctx = prompt_context_with_last_output(MacroDialect::Legacy);
         assert!(should_use_framework_for_generation(&ctx));
+    }
+
+    #[test]
+    fn framework_contract_is_omitted_for_ecky_and_build123d_contexts() {
+        // 3.3: the FreeCAD CAD-SDK framework contract applies only to FreeCAD-
+        // based authoring. Ecky and build123d have their own language surfaces.
+        let ecky = PromptContext {
+            last_output: Some(DesignOutput {
+                title: "D".to_string(),
+                version_name: "v1".to_string(),
+                response: String::new(),
+                interaction_mode: InteractionMode::Design,
+                macro_code: "(model (part body (box 1 1 1)))".to_string(),
+                macro_dialect: MacroDialect::EckyIrV0,
+                engine_kind: EngineKind::EckyIrV0,
+                source_language: SourceLanguage::EckyIrV0,
+                geometry_backend: GeometryBackend::EckyRust,
+                ui_spec: UiSpec { fields: Vec::new() },
+                initial_params: Default::default(),
+                post_processing: None,
+            }),
+            ..prompt_context_with_last_output(MacroDialect::EckyIrV0)
+        };
+        let build123d = PromptContext {
+            last_output: Some(DesignOutput {
+                title: "D".to_string(),
+                version_name: "v1".to_string(),
+                response: String::new(),
+                interaction_mode: InteractionMode::Design,
+                macro_code: "from build123d import *".to_string(),
+                macro_dialect: MacroDialect::Build123d,
+                engine_kind: EngineKind::Freecad,
+                source_language: SourceLanguage::Build123d,
+                geometry_backend: GeometryBackend::Build123d,
+                ui_spec: UiSpec { fields: Vec::new() },
+                initial_params: Default::default(),
+                post_processing: None,
+            }),
+            ..prompt_context_with_last_output(MacroDialect::Build123d)
+        };
+        assert!(!should_use_framework_for_generation(&ecky));
+        assert!(!should_use_framework_for_generation(&build123d));
+    }
+
+    #[test]
+    fn design_system_prompt_includes_framework_only_when_applicable() {
+        // 3.2/3.3: the static system prefix carries the output contract, the
+        // language body, and (only when provided) the CAD-framework rules.
+        let without =
+            design_system_prompt(SourceLanguage::LegacyPython, GeometryBackend::Freecad, None);
+        // The output contract references the framework block by name, but the
+        // actual contract body / `(AUTHORITATIVE):` header must be absent when no
+        // framework is provided.
+        assert!(!without.contains("ACTUAL CURRENT CAD FRAMEWORK (AUTHORITATIVE):"));
+        assert!(!without.contains("CAD-SDK-CONTRACT-BODY"));
+        assert!(without.contains("TARGET LANGUAGE GUIDE"));
+
+        let with = design_system_prompt(
+            SourceLanguage::LegacyPython,
+            GeometryBackend::Freecad,
+            Some("CAD-SDK-CONTRACT-BODY"),
+        );
+        assert!(with.contains("ACTUAL CURRENT CAD FRAMEWORK (AUTHORITATIVE):"));
+        assert!(with.contains("CAD-SDK-CONTRACT-BODY"));
+        // The framework appears exactly once.
+        assert_eq!(with.matches("CAD-SDK-CONTRACT-BODY").count(), 1);
+    }
+
+    #[test]
+    fn api_system_prompt_uses_shared_language_builder_exactly_once() {
+        // 3.1: the API system prompt consumes the single-source language builder
+        // (`agent_language_reference`) exactly once; no second language copy is
+        // introduced into the assembled generation payload.
+        let prompt =
+            design_system_prompt(SourceLanguage::EckyIrV0, GeometryBackend::EckyRust, None);
+        let body = crate::agent_prompt::canonical_agent_reference();
+        assert_eq!(
+            prompt.matches(body).count(),
+            1,
+            "shared language body must appear exactly once in the system prompt"
+        );
     }
 
     #[test]
@@ -1502,5 +1681,243 @@ mod tests {
         assert_eq!(engine_kind, stale_design.engine_kind);
         assert_eq!(source_language, stale_design.source_language);
         assert_eq!(geometry_backend, stale_design.geometry_backend);
+    }
+}
+
+// OpenSpec `agent-context-budgeting`, section 1 — OUTER RED tests (now GREEN).
+//
+// These pin the provider/API envelope contract at the generation-assembly
+// seam. They started RED before the section-3 wiring landed and are now GREEN:
+// one technical-policy copy, a stable system prefix with a variable user tail,
+// total-size metadata covering the full user content, and a pre-dispatch
+// mandatory-overflow failure. Sub-behaviours that already held are kept as
+// green evidence inside the same test. No telemetry or frontend changes here —
+// only the smallest protocol/payload assertions at the assembly seam.
+#[cfg(test)]
+mod agent_context_budget_outer_red {
+    use super::{design_system_prompt, ensure_generation_thread_binding};
+    use crate::context::{assemble_generation_payload, PromptContext, ResolvedAuthoringContext};
+    use crate::context_envelope::GENERATION_CEILING_CHARS;
+    use crate::contracts::{
+        DesignOutput, EngineKind, GeometryBackend, InteractionMode, MacroDialect, SourceLanguage,
+        UiSpec,
+    };
+    use crate::models::PathResolver;
+    use std::path::PathBuf;
+
+    /// Distinctive phrase that occurs exactly once inside
+    /// `TECHNICAL_SYSTEM_PROMPT` and nowhere in the per-language guides, so
+    /// counting it measures how many technical-policy copies a payload carries.
+    const POLICY_ANCHOR: &str = "If the image parameter is empty, the displacement should no-op";
+
+    fn policy_copy_count(haystack: &str) -> usize {
+        haystack.matches(POLICY_ANCHOR).count()
+    }
+
+    fn legacy_design_output(macro_code: &str) -> DesignOutput {
+        DesignOutput {
+            title: "Bracket".to_string(),
+            version_name: "V1".to_string(),
+            response: String::new(),
+            interaction_mode: InteractionMode::Design,
+            macro_dialect: MacroDialect::Legacy,
+            engine_kind: EngineKind::Freecad,
+            source_language: SourceLanguage::LegacyPython,
+            geometry_backend: GeometryBackend::Freecad,
+            macro_code: macro_code.to_string(),
+            ui_spec: UiSpec::default(),
+            initial_params: Default::default(),
+            post_processing: None,
+        }
+    }
+
+    fn prompt_context(macro_code: &str) -> PromptContext {
+        PromptContext {
+            thread_id: "thread-1".to_string(),
+            thread_title: "Thread A".to_string(),
+            summary: "Thread: Bracket\n\nRecent user intents:\n- add a fillet".to_string(),
+            recent_dialogue: "USER: add a fillet\nECKY EINACS: done".to_string(),
+            pinned_references: String::new(),
+            available_assets: String::new(),
+            last_output: Some(legacy_design_output(macro_code)),
+            design_digest: "Current working snapshot\nBracket [V1] (legacyPython)".to_string(),
+            artifact_digest: String::new(),
+        }
+    }
+
+    fn freecad_target() -> ResolvedAuthoringContext {
+        ResolvedAuthoringContext {
+            engine_kind: EngineKind::Freecad,
+            source_language: SourceLanguage::LegacyPython,
+            geometry_backend: GeometryBackend::Freecad,
+        }
+    }
+
+    /// Assemble the two API message bodies exactly the way the generation
+    /// command does: a system message from `design_system_prompt` (static
+    /// output contract + language + applicable framework, once) and a user
+    /// message routed through the typed generation envelope (current state +
+    /// current ask once, no duplicate `EXECUTION RULES`). On mandatory overflow
+    /// the envelope refuses to dispatch and the budget error text (observed /
+    /// allowed sizes) stands in for the user body, which stays bounded.
+    fn assemble_api_generation_payload(ctx: &PromptContext, base_prompt: &str) -> (String, String) {
+        let target = freecad_target();
+        let system = design_system_prompt(target.source_language, target.geometry_backend, None);
+        let user = match assemble_generation_payload(ctx, base_prompt, "DESIGN_EDIT", target) {
+            Ok(payload) => payload.user_content,
+            Err(budget_err) => budget_err.to_string(),
+        };
+        (system, user)
+    }
+
+    // ── 1.1 provider/API payload snapshot (one copy / stable prefix / variable tail) ──
+    #[test]
+    fn api_payload_has_one_policy_copy_with_stable_prefix_and_variable_tail() {
+        let ctx_a = prompt_context(
+            "import FreeCAD\nbox = App.ActiveDocument.addObject('Part::Box','Box')\n",
+        );
+        let ctx_b = prompt_context(
+            "import FreeCAD\nbox = App.ActiveDocument.addObject('Part::Box','Box')\n",
+        );
+
+        let (system_a, user_a) =
+            assemble_api_generation_payload(&ctx_a, "increase the fillet radius");
+        let (system_b, user_b) =
+            assemble_api_generation_payload(&ctx_b, "add a counterbore on the top face");
+
+        // (1) GREEN evidence — stable system prefix: same provider/backend/
+        //     language/output contract yields a byte-identical system message so
+        //     exact-prefix caching can work. Already holds today.
+        assert_eq!(
+            system_a, system_b,
+            "system prefix must be byte-identical across turns sharing backend/language"
+        );
+
+        // (2) GREEN evidence — variable user tail: thread-specific request/state
+        //     follows the stable prefix and differs between turns.
+        assert_ne!(
+            user_a, user_b,
+            "user tail must vary with the current request"
+        );
+
+        // (3) GREEN — one technical-policy copy: the output rules occur
+        //     exactly once across (system + user). The system message carries
+        //     them once in the stable prefix; the user message no longer
+        //     re-embeds them as `EXECUTION RULES`.
+        let combined_policy_copies = policy_copy_count(&system_a) + policy_copy_count(&user_a);
+        assert_eq!(
+            combined_policy_copies, 1,
+            "technical policy must appear exactly once in the assembled payload; \
+             found {combined_policy_copies} copies (duplicate EXECUTION RULES in user content)"
+        );
+    }
+
+    // ── 1.1 total-size metadata accompanying the assembled payload ──────────
+    #[test]
+    fn api_generation_payload_carries_total_size_metadata() {
+        // Kept separate from the duplicate-policy assertion so the size-metadata
+        // requirement is independently confirmable, not hidden behind the
+        // duplicate-prompt failure.
+        let ctx = prompt_context(
+            "import FreeCAD\nbox = App.ActiveDocument.addObject('Part::Box','Box')\n",
+        );
+        let (_system, user) = assemble_api_generation_payload(&ctx, "increase the fillet radius");
+
+        // GREEN — the assembled generation payload is accompanied by typed
+        // total-size metadata (total chars / ceiling) covering the FULL user
+        // content (sections plus the structural wrapper), produced by routing
+        // the whole variable context through the typed generation envelope.
+        let payload = assemble_generation_payload(
+            &ctx,
+            "increase the fillet radius",
+            "DESIGN_EDIT",
+            freecad_target(),
+        )
+        .expect("normal-sized context assembles without overflow");
+        assert!(
+            payload.envelope.total_returned_chars >= user.chars().count(),
+            "generation payload must carry total-size metadata covering the full user content \
+             ({} chars); the routed envelope accounts for {} chars",
+            user.chars().count(),
+            payload.envelope.total_returned_chars
+        );
+    }
+
+    // ── 1.2 mandatory-overflow pre-dispatch failure ─────────────────────────
+    #[test]
+    fn mandatory_overflow_fails_pre_dispatch_instead_of_unbounded_assembly() {
+        // Authoritative current source larger than the 64K generation ceiling.
+        // Mandatory authoritative state must never be silently truncated, so the
+        // generation assembly must refuse to dispatch and surface a raw
+        // context-budget error naming observed/allowed section sizes — not embed
+        // the oversized source verbatim and dispatch a lossy request.
+        let overflow_source = "x".repeat(GENERATION_CEILING_CHARS + 6_000);
+        let ctx = prompt_context(&overflow_source);
+
+        let (_system, user) = assemble_api_generation_payload(&ctx, "edit the oversized model");
+
+        // GREEN — the generation assembly refuses to dispatch oversized
+        // authoritative state. Mandatory overflow fails pre-dispatch with a raw
+        // context-budget error (observed/allowed section sizes), observable here
+        // as the assembled user content never exceeding the ceiling (the budget
+        // error text stands in for the user body on overflow).
+        assert!(
+            user.chars().count() <= GENERATION_CEILING_CHARS,
+            "mandatory overflow must fail pre-dispatch with a raw context-budget error \
+             (observed/allowed section sizes); instead the generation assembly produced a \
+             {}-char user payload past the {}-char ceiling",
+            user.chars().count(),
+            GENERATION_CEILING_CHARS
+        );
+    }
+
+    struct BindingTestResolver {
+        root: PathBuf,
+    }
+
+    impl PathResolver for BindingTestResolver {
+        fn app_config_dir(&self) -> PathBuf {
+            self.root.clone()
+        }
+
+        fn app_data_dir(&self) -> PathBuf {
+            self.root.clone()
+        }
+
+        fn resource_path(&self, _path: &str) -> Option<PathBuf> {
+            None
+        }
+    }
+
+    #[test]
+    fn blank_ui_generation_creates_default_bound_source_immediately() {
+        let root = std::env::temp_dir().join(format!(
+            "ecky-ui-generation-binding-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = crate::db::init_db(&root.join("history.sqlite")).expect("db");
+        let resolver = BindingTestResolver { root };
+
+        ensure_generation_thread_binding(
+            &conn,
+            &resolver,
+            None,
+            "thread-ui-1",
+            "Make a bracket",
+            100,
+        )
+        .expect("bind blank UI thread");
+
+        let binding = crate::thread_source_binding::get_binding(&conn, "thread-ui-1")
+            .unwrap()
+            .expect("binding row");
+        assert_eq!(
+            std::fs::read_to_string(&binding.source_path).unwrap(),
+            crate::thread_source_binding::DEFAULT_THREAD_SOURCE
+        );
+        assert!(PathBuf::from(binding.folder_path)
+            .join(crate::project_mirror::PROJECT_MANIFEST_FILE_NAME)
+            .is_file());
     }
 }

@@ -946,7 +946,10 @@ pub async fn add_imported_model_version(
     db::add_message(&db, &thread_id, &msg).map_err(|err| AppError::persistence(err.to_string()))?;
     let _ = persist_thread_summary(&db, &thread_id, &title);
     drop(db);
-    crate::mcp::handlers::invalidate_authoring_actors_for_thread(&thread_id).await;
+    state
+        .authoring_actor_registry
+        .invalidate_authoring_actors_for_thread(&thread_id)
+        .await;
     let snapshot = build_runtime_snapshot(
         None,
         Some(thread_id.clone()),
@@ -1007,7 +1010,10 @@ pub async fn update_ui_spec(
             model_manifest,
         )
     };
-    crate::mcp::handlers::invalidate_authoring_actors_for_thread(&updated_thread_id).await;
+    state
+        .authoring_actor_registry
+        .invalidate_authoring_actors_for_thread(&updated_thread_id)
+        .await;
 
     {
         let snapshot = build_runtime_snapshot(
@@ -1057,7 +1063,10 @@ pub async fn update_parameters(
             model_manifest,
         )
     };
-    crate::mcp::handlers::invalidate_authoring_actors_for_thread(&updated_thread_id).await;
+    state
+        .authoring_actor_registry
+        .invalidate_authoring_actors_for_thread(&updated_thread_id)
+        .await;
 
     {
         let snapshot = build_runtime_snapshot(
@@ -1106,7 +1115,10 @@ pub async fn update_post_processing(
             model_manifest,
         )
     };
-    crate::mcp::handlers::invalidate_authoring_actors_for_thread(&updated_thread_id).await;
+    state
+        .authoring_actor_registry
+        .invalidate_authoring_actors_for_thread(&updated_thread_id)
+        .await;
 
     {
         let snapshot = build_runtime_snapshot(
@@ -1152,7 +1164,10 @@ pub async fn update_version_runtime(
             .ok_or_else(|| AppError::not_found("Message runtime not found for update."))?;
         (current_output, current_thread_id)
     };
-    crate::mcp::handlers::invalidate_authoring_actors_for_thread(&current_thread_id).await;
+    state
+        .authoring_actor_registry
+        .invalidate_authoring_actors_for_thread(&current_thread_id)
+        .await;
 
     {
         let snapshot = build_runtime_snapshot(
@@ -1228,6 +1243,9 @@ mod tests {
     fn sample_artifact_bundle(model_id: &str) -> ArtifactBundle {
         ArtifactBundle {
             geometry_provenance: None,
+            component_dependency_lock: None,
+            component_dependency_lock_digest: None,
+            component_import_origins: Vec::new(),
             schema_version: 2,
             model_id: model_id.to_string(),
             source_kind: ModelSourceKind::Generated,

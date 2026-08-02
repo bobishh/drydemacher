@@ -1,11 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use ecky_render::{
     KernelArg as RunnerArg, KernelCommand as RunnerCommand, KernelKeyword as RunnerKeyword,
-    KernelPart as RunnerPart, KernelPlan as RunnerPlan,
+    KernelPart as RunnerPart, KernelPartialBooleanGroupPlan as RunnerPartialBooleanGroupPlan,
+    KernelPlan as RunnerPlan,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -61,7 +62,57 @@ const RUNNER_STAGE_NAMES: [&str; 8] = [
 struct RunnerStageReport {
     schema_version: u32,
     total_elapsed_ms: u64,
+    #[serde(default)]
+    worker_budget: Option<u32>,
+    #[serde(default)]
+    peak_dag_concurrency: Option<u32>,
+    #[serde(default)]
+    mesh_outer_worker_budget: Option<u32>,
+    #[serde(default)]
+    mesh_pool_budget: Option<u32>,
+    #[serde(default)]
+    mesh_launcher_budget: Option<u32>,
+    #[serde(default)]
+    mesh_build_count: Option<u32>,
+    #[serde(default)]
+    mesh_cache_hit_count: Option<u32>,
+    #[serde(default)]
+    preview_facet_count: Option<u64>,
+    #[serde(default)]
+    partial_boolean_cache_hit_count: Option<u64>,
+    #[serde(default)]
+    partial_boolean_cache_miss_count: Option<u64>,
+    #[serde(default)]
+    partial_boolean_cache_write_count: Option<u64>,
+    #[serde(default)]
+    four_way_intersection_count: Option<u64>,
+    #[serde(default)]
+    parts: Vec<RunnerPartExecutionEvidence>,
+    #[serde(default)]
+    commands: Vec<RunnerCommandExecutionEvidence>,
     stages: Vec<RunnerStageReportEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct RunnerPartExecutionEvidence {
+    part_id: String,
+    cache_hit: bool,
+    executed_command_count: u32,
+    #[serde(default)]
+    mesh_identity: Option<String>,
+    #[serde(default)]
+    mesh_facet_count: Option<u64>,
+    #[serde(default)]
+    executed_command_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct RunnerCommandExecutionEvidence {
+    command_id: String,
+    cache_admitted: bool,
+    cache_hit: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -159,7 +210,9 @@ pub(crate) fn run_plan_step_stl_with_mode(
 
     let runner_safe_plan = runner_supports_plan(plan);
     if !runner_safe_plan {
-        return Ok(None);
+        return Err(AppError::validation(
+            "Direct OCCT runner does not support plan; generated-C++ fallback was removed.",
+        ));
     }
 
     let Some(plan_json) = serialize_runner_plan(plan)? else {
@@ -202,17 +255,9 @@ pub(crate) fn run_plan_step_stl_with_mode(
         })?;
 
     if !output.status.success() && runner_reported_unsupported(&output) {
-        // Exit 11 means the runner build itself claims an op our support gate
-        // accepted is unsupported — version skew between gate and runner is a
-        // bug and must surface loudly. Any other structured unsupported exit
-        // is a graceful "this runner cannot take the plan": skip the runner
-        // tier and let the caller fall through to the next backend.
-        if output.status.code() != Some(11) {
-            return Ok(None);
-        }
         return Err(AppError::with_details(
             crate::contracts::AppErrorCode::Validation,
-            "Direct OCCT runner rejected a plan that runner support gate accepted.",
+            "Direct OCCT runner rejected the native plan; generated-C++ fallback was removed.",
             format!(
                 "runner: {}\nexit: {}\nstdout: {}\nstderr: {}",
                 runner_path.display(),
@@ -361,10 +406,30 @@ fn serialize_runner_plan(plan: &OcctPlan) -> AppResult<Option<String>> {
 
 fn runner_plan(plan: &OcctPlan) -> AppResult<Option<RunnerPlan>> {
     let mut parts = Vec::with_capacity(plan.parts.len());
+    let mut partial_boolean_groups = Vec::new();
     for part in &plan.parts {
         let indexed_imports = indexed_mesh_imports_for_root_boolean(part)?;
         let mut commands = Vec::with_capacity(part.commands.len());
         for command in &part.commands {
+            if command.op == OcctOp::Union
+                && command.args.len() == 4
+                && command
+                    .args
+                    .iter()
+                    .all(|arg| matches!(arg, OcctArg::Ref(_)))
+                && command.keywords.is_empty()
+            {
+                for (ordinal, input_indices) in [[0_u32, 1], [2, 3]].into_iter().enumerate() {
+                    partial_boolean_groups.push(RunnerPartialBooleanGroupPlan {
+                        part_key: part.key.clone(),
+                        parent_output: command.output.0,
+                        operation: "union".to_string(),
+                        input_indices: input_indices.to_vec(),
+                        ordinal: ordinal as u32,
+                        version: 1,
+                    });
+                }
+            }
             let runner_command = if let Some(asset) = indexed_imports.get(&command.output.0) {
                 runner_indexed_mesh_command(command, asset)?
             } else {
@@ -387,6 +452,7 @@ fn runner_plan(plan: &OcctPlan) -> AppResult<Option<RunnerPlan>> {
         schema_version: 1,
         plan_id: runner_plan_id(&parts)?,
         parts,
+        partial_boolean_groups,
     };
     Ok(Some(body))
 }
@@ -440,18 +506,26 @@ fn indexed_mesh_imports_for_root_boolean(
         if !matches!(
             boolean.op,
             OcctOp::Union | OcctOp::Difference | OcctOp::Intersection
-        ) || boolean.output != part.root
+        ) || boolean.args.len() != 2
+            || boolean.args.first() != Some(&OcctArg::Ref(current))
+            || !binary_boolean_chain_reaches_root(boolean.output, part.root, &consumers)
         {
             continue;
         }
 
-        let source = crate::ecky_ir::mesh_asset::MeshAssetSource::Imported;
         let sidecar = path.with_extension("indexed-mesh.json");
         let asset = if sidecar.is_file() {
-            crate::ecky_ir::mesh_asset::IndexedMeshAsset::read_cache(source, &sidecar)?
+            crate::ecky_ir::mesh_asset::IndexedMeshAsset::read_cache(&sidecar)?
         } else {
-            let mesh = crate::ecky_ir::read_stl_mesh(&path)?;
-            crate::ecky_ir::mesh_asset::IndexedMeshAsset::from_ir_mesh(source, &mesh)?
+            // Standalone imports preserve authored coordinates: decode through
+            // the canonical authored dispatch (STL by IEEE-754 bit-equality,
+            // 3MF by explicit indexing). The evaluated-CAD 1e-6 mm seam weld
+            // is intentionally NOT applied here, so the runner consumes the
+            // same authored coordinates/digest a sidecar would carry.
+            crate::ecky_ir::mesh_asset::IndexedMeshAsset::from_imported_file(
+                crate::ecky_ir::mesh_asset::MeshAssetSource::Imported,
+                &path,
+            )?
         };
         if asset.validate_for_boolean().is_err() {
             continue;
@@ -459,6 +533,39 @@ fn indexed_mesh_imports_for_root_boolean(
         admitted.insert(command.output.0, asset);
     }
     Ok(admitted)
+}
+
+/// Imported indexed meshes remain on the Manifold path when their first root
+/// Boolean is the first link of a binary Boolean chain. The optimizer emits
+/// `Difference(import, tool-a) -> fresh` then consumes that fresh output as the
+/// BASE of each later link, ending at `part.root`. Do not admit a mesh used as a
+/// tool, branched result, or with a non-Boolean post-consumer.
+fn binary_boolean_chain_reaches_root(
+    mut current: super::direct_occt::OcctSlot,
+    root: super::direct_occt::OcctSlot,
+    consumers: &HashMap<u64, Vec<&OcctCommand>>,
+) -> bool {
+    let mut visited = HashSet::new();
+    loop {
+        if current == root {
+            return !consumers.contains_key(&root.0);
+        }
+        if !visited.insert(current.0) {
+            return false;
+        }
+        let Some([consumer]) = consumers.get(&current.0).map(Vec::as_slice) else {
+            return false;
+        };
+        if !matches!(
+            consumer.op,
+            OcctOp::Union | OcctOp::Difference | OcctOp::Intersection
+        ) || consumer.args.len() != 2
+            || consumer.args.first() != Some(&OcctArg::Ref(current))
+        {
+            return false;
+        }
+        current = consumer.output;
+    }
 }
 
 fn runner_manifold_transform(command: &OcctCommand, input: super::direct_occt::OcctSlot) -> bool {
@@ -954,6 +1061,7 @@ fn runner_op_supported(op: OcctOp) -> bool {
             | OcctOp::Profile
             | OcctOp::MakeFace
             | OcctOp::ImportStl
+            | OcctOp::ImportStep
             | OcctOp::Solidify
             | OcctOp::Extrude
             | OcctOp::Revolve
@@ -1251,6 +1359,7 @@ fn runner_op_token(op: OcctOp) -> &'static str {
         OcctOp::Profile => "profile",
         OcctOp::MakeFace => "make-face",
         OcctOp::ImportStl => "import-stl",
+        OcctOp::ImportStep => "import-step",
         OcctOp::Extrude => "extrude",
         OcctOp::Revolve => "revolve",
         OcctOp::Loft => "loft",
@@ -1302,7 +1411,6 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::OnceLock;
-    use std::time::Instant;
 
     struct TestResolver {
         root: PathBuf,
@@ -1355,10 +1463,10 @@ mod tests {
             "native runner must preserve the failing STEP/STL export stage"
         );
         assert!(
-            source.contains("direct_occt_current_stage")
-                && source.contains("write-topology")
-                && source.contains("assemble-export-shape"),
-            "native runner must retain context outside command and file-writer wrappers"
+            source.contains("ExecutionContext")
+                && source.contains("context.set_stage(\"write-topology\")")
+                && source.contains("context.set_stage(\"assemble-export-shape\")"),
+            "native runner must retain render-local context outside command and file-writer wrappers"
         );
     }
 
@@ -1367,6 +1475,20 @@ mod tests {
         let report = RunnerStageReport {
             schema_version: 1,
             total_elapsed_ms: 3,
+            worker_budget: None,
+            peak_dag_concurrency: None,
+            mesh_outer_worker_budget: None,
+            mesh_pool_budget: None,
+            mesh_launcher_budget: None,
+            mesh_build_count: None,
+            mesh_cache_hit_count: None,
+            preview_facet_count: None,
+            partial_boolean_cache_hit_count: None,
+            partial_boolean_cache_miss_count: None,
+            partial_boolean_cache_write_count: None,
+            four_way_intersection_count: None,
+            parts: Vec::new(),
+            commands: Vec::new(),
             stages: RUNNER_STAGE_NAMES
                 .into_iter()
                 .map(|name| {
@@ -1393,18 +1515,39 @@ mod tests {
         let source = include_str!("../../native/direct_occt_runner.cpp");
 
         assert!(source.contains("stage-report.json"));
-        assert!(source.contains("write_stage_report(stage_report_path)"));
+        assert!(source.contains("write_stage_report(stage_report_path, context)"));
         for stage in RUNNER_STAGE_NAMES {
             assert!(
                 source.contains(&format!("\"{stage}\"")),
                 "missing `{stage}` stage"
             );
         }
-        assert!(source.contains("StageExecutionTimer stage_timer(\"import\")"));
-        assert!(source.contains("StageExecutionTimer stage_timer(\"solidify\")"));
-        assert!(source.contains("StageExecutionTimer stage_timer(\"boolean\")"));
-        assert!(source.contains("StageExecutionTimer stage_timer(\"mesh\")"));
-        assert!(source.contains("StageExecutionTimer stage_timer(\"export\")"));
+        assert!(source.contains("StageExecutionTimer stage_timer(context, \"import\")"));
+        assert!(source.contains("StageExecutionTimer stage_timer(context, \"solidify\")"));
+        assert!(source.contains("StageExecutionTimer stage_timer(context, \"boolean\")"));
+        assert!(source.contains("StageExecutionTimer stage_timer(context, \"mesh\")"));
+        assert!(source.contains("StageExecutionTimer stage_timer(context, \"export\")"));
+    }
+
+    #[test]
+    fn runner_plan_declares_two_partial_groups_for_four_ref_union() {
+        let program = crate::ecky_scheme::compile_to_core_program(
+            r#"(model (part lid (union
+                (box 1 1 1)
+                (translate 2 0 0 (box 1 1 1))
+                (translate 4 0 0 (box 1 1 1))
+                (translate 6 0 0 (box 1 1 1)))))"#,
+        )
+        .expect("compile");
+        let occt = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+        let runner = runner_plan(&occt).expect("runner plan").expect("supported");
+        assert_eq!(runner.partial_boolean_groups.len(), 2);
+        assert_eq!(runner.partial_boolean_groups[0].input_indices, vec![0, 1]);
+        assert_eq!(runner.partial_boolean_groups[1].input_indices, vec![2, 3]);
+        assert_eq!(
+            runner.partial_boolean_groups[0].parent_output,
+            runner.parts[0].root
+        );
     }
 
     #[test]
@@ -1440,6 +1583,411 @@ mod tests {
         assert_eq!(report.stages[5].status, "executed");
         assert_eq!(report.stages[7].status, "executed");
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn given_independent_ready_commands_when_worker_budget_is_four_then_native_runner_reports_overlap(
+    ) {
+        let root = temp_root("native-dag-ready-overlap");
+        let resolver = TestResolver { root: root.clone() };
+        let Some(runner) = discover_direct_occt_runner_with_mode(&resolver, true) else {
+            return;
+        };
+        let output_dir = root.join("bundle");
+        fs::create_dir_all(&output_dir).expect("output directory");
+        fs::write(
+            output_dir.join(PLAN_FILE_NAME),
+            serialize_runner_plan(&independent_ready_dag_plan())
+                .expect("plan serialization")
+                .expect("runner plan"),
+        )
+        .expect("write plan");
+        let output = std::process::Command::new(runner)
+            .env("ECKY_DIRECT_OCCT_WORKERS", "4")
+            .arg("--plan")
+            .arg(output_dir.join(PLAN_FILE_NAME))
+            .arg("--out")
+            .arg(&output_dir)
+            .output()
+            .expect("start runner");
+        assert!(
+            output.status.success(),
+            "runner failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report = read_runner_stage_report(&output_dir).expect("stage report");
+        assert_eq!(report.worker_budget, Some(4));
+        assert!(
+            report.peak_dag_concurrency.unwrap_or_default() >= 2,
+            "independent ready commands must overlap: {report:#?}"
+        );
+        assert_eq!(report.parts.len(), 2);
+        assert!(report
+            .parts
+            .iter()
+            .all(|part| part.executed_command_count == 5));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn given_complete_part_cache_when_same_plan_rerenders_then_clean_parts_execute_zero_commands() {
+        let root = temp_root("native-dag-part-cache");
+        let resolver = TestResolver { root: root.clone() };
+        let Some(runner) = discover_direct_occt_runner_with_mode(&resolver, true) else {
+            return;
+        };
+        let cache_dir = root.join("selective-cache");
+        let plan = serialize_runner_plan(&independent_ready_dag_plan())
+            .expect("plan serialization")
+            .expect("runner plan");
+        for run in ["cold", "warm"] {
+            let output_dir = root.join(run);
+            fs::create_dir_all(&output_dir).expect("output directory");
+            fs::write(output_dir.join(PLAN_FILE_NAME), &plan).expect("write plan");
+            let output = std::process::Command::new(&runner)
+                .env("ECKY_DIRECT_OCCT_WORKERS", "4")
+                .env("ECKY_DIRECT_OCCT_CACHE_DIR", &cache_dir)
+                .arg("--plan")
+                .arg(output_dir.join(PLAN_FILE_NAME))
+                .arg("--out")
+                .arg(&output_dir)
+                .output()
+                .expect("start runner");
+            assert!(
+                output.status.success(),
+                "runner failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let report = read_runner_stage_report(&root.join("warm")).expect("warm stage report");
+        assert_eq!(report.parts.len(), 2);
+        assert!(report.parts.iter().all(|part| part.cache_hit));
+        assert!(report
+            .parts
+            .iter()
+            .all(|part| part.executed_command_count == 0));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn given_cached_expensive_boolean_when_late_transform_changes_then_only_transform_executes() {
+        let root = temp_root("native-dag-command-cache");
+        let resolver = TestResolver { root: root.clone() };
+        let Some(runner) = discover_direct_occt_runner_with_mode(&resolver, true) else {
+            return;
+        };
+        let cache_dir = root.join("selective-cache");
+        for (label, translate_x) in [("cold", 0.0), ("late-change", 7.0)] {
+            let output_dir = root.join(label);
+            fs::create_dir_all(&output_dir).expect("output directory");
+            fs::write(
+                output_dir.join(PLAN_FILE_NAME),
+                serialize_runner_plan(&boolean_with_late_translate_plan(translate_x))
+                    .expect("plan serialization")
+                    .expect("runner plan"),
+            )
+            .expect("write plan");
+            let output = std::process::Command::new(&runner)
+                .env("ECKY_DIRECT_OCCT_CACHE_DIR", &cache_dir)
+                .arg("--plan")
+                .arg(output_dir.join(PLAN_FILE_NAME))
+                .arg("--out")
+                .arg(&output_dir)
+                .output()
+                .expect("start runner");
+            assert!(
+                output.status.success(),
+                "runner failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let report = read_runner_stage_report(&root.join("late-change")).expect("stage report");
+        let part = report
+            .parts
+            .iter()
+            .find(|part| part.part_id == "cached-boolean")
+            .expect("part evidence");
+        assert!(!part.cache_hit);
+        assert_eq!(part.executed_command_count, 1);
+        assert_eq!(part.executed_command_ids, vec!["cached-boolean:4"]);
+        assert!(report
+            .commands
+            .iter()
+            .any(|command| command.command_id == "cached-boolean:3"
+                && command.cache_admitted
+                && command.cache_hit));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn given_late_sibling_failure_when_selective_entries_were_staged_then_no_entry_is_published() {
+        let root = temp_root("native-dag-cache-transaction");
+        let resolver = TestResolver { root: root.clone() };
+        let Some(runner) = discover_direct_occt_runner_with_mode(&resolver, true) else {
+            return;
+        };
+        let cache_dir = root.join("selective-cache");
+        let output_dir = root.join("failed-render");
+        fs::create_dir_all(&output_dir).expect("output directory");
+        let plan = serialize_runner_plan(&boolean_with_late_translate_plan(0.0))
+            .expect("plan serialization")
+            .expect("runner plan")
+            .replacen(
+                "\"op\": \"translate\"",
+                "\"op\": \"unsupported-late-sibling\"",
+                1,
+            );
+        assert!(
+            plan.contains("unsupported-late-sibling"),
+            "test plan must contain the late failure"
+        );
+        fs::write(output_dir.join(PLAN_FILE_NAME), plan).expect("write failing plan");
+
+        let output = std::process::Command::new(runner)
+            .env("ECKY_DIRECT_OCCT_CACHE_DIR", &cache_dir)
+            .arg("--plan")
+            .arg(output_dir.join(PLAN_FILE_NAME))
+            .arg("--out")
+            .arg(&output_dir)
+            .output()
+            .expect("start runner");
+        assert!(!output.status.success(), "late sibling must fail");
+        for kind in ["commands", "parts", "part-meshes"] {
+            let directory = cache_dir.join(kind);
+            assert!(
+                !directory.exists()
+                    || fs::read_dir(&directory)
+                        .expect("cache directory")
+                        .next()
+                        .is_none(),
+                "failed render published selective cache entries in {}",
+                directory.display()
+            );
+        }
+        assert!(
+            !cache_dir.read_dir().expect("cache root").any(|entry| {
+                entry
+                    .expect("cache entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".render-cache-staging-")
+            }),
+            "failed render left private cache staging behind"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn given_corrupt_selective_brep_when_plan_rerenders_then_entry_is_rejected_and_rebuilt() {
+        let root = temp_root("native-dag-corrupt-selective-cache");
+        let resolver = TestResolver { root: root.clone() };
+        let Some(runner) = discover_direct_occt_runner_with_mode(&resolver, true) else {
+            return;
+        };
+        let cache_dir = root.join("selective-cache");
+        let plan = serialize_runner_plan(&independent_ready_dag_plan())
+            .expect("plan serialization")
+            .expect("runner plan");
+        for label in ["cold", "corrupt-rebuild"] {
+            let output_dir = root.join(label);
+            fs::create_dir_all(&output_dir).expect("output directory");
+            fs::write(output_dir.join(PLAN_FILE_NAME), &plan).expect("write plan");
+            if label == "corrupt-rebuild" {
+                let artifact = fs::read_dir(cache_dir.join("parts"))
+                    .expect("part cache directory")
+                    .map(|entry| entry.expect("cache entry").path())
+                    .find(|path| {
+                        path.extension()
+                            .is_some_and(|extension| extension == "brepbin")
+                    })
+                    .expect("part artifact");
+                fs::write(artifact, b"corrupt-brep").expect("corrupt artifact");
+            }
+            let output = std::process::Command::new(&runner)
+                .env("ECKY_DIRECT_OCCT_CACHE_DIR", &cache_dir)
+                .arg("--plan")
+                .arg(output_dir.join(PLAN_FILE_NAME))
+                .arg("--out")
+                .arg(&output_dir)
+                .output()
+                .expect("start runner");
+            assert!(
+                output.status.success(),
+                "runner failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let report = read_runner_stage_report(&root.join("corrupt-rebuild")).expect("stage report");
+        assert!(report.parts.iter().any(|part| !part.cache_hit));
+        assert!(report
+            .parts
+            .iter()
+            .any(|part| part.executed_command_count == 5));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn given_zero_byte_selective_cache_budget_when_plan_rerenders_then_lru_keeps_no_entries() {
+        let root = temp_root("native-dag-selective-cache-lru");
+        let resolver = TestResolver { root: root.clone() };
+        let Some(runner) = discover_direct_occt_runner_with_mode(&resolver, true) else {
+            return;
+        };
+        let cache_dir = root.join("selective-cache");
+        let plan = serialize_runner_plan(&independent_ready_dag_plan())
+            .expect("plan serialization")
+            .expect("runner plan");
+        for label in ["cold", "warm"] {
+            let output_dir = root.join(label);
+            fs::create_dir_all(&output_dir).expect("output directory");
+            fs::write(output_dir.join(PLAN_FILE_NAME), &plan).expect("write plan");
+            let output = std::process::Command::new(&runner)
+                .env("ECKY_DIRECT_OCCT_CACHE_DIR", &cache_dir)
+                .env("ECKY_DIRECT_OCCT_CACHE_BYTES", "0")
+                .arg("--plan")
+                .arg(output_dir.join(PLAN_FILE_NAME))
+                .arg("--out")
+                .arg(&output_dir)
+                .output()
+                .expect("start runner");
+            assert!(
+                output.status.success(),
+                "runner failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let report = read_runner_stage_report(&root.join("warm")).expect("stage report");
+        assert!(report.parts.iter().all(|part| !part.cache_hit));
+        assert!(report
+            .parts
+            .iter()
+            .all(|part| part.executed_command_count == 5));
+        assert!(
+            !cache_dir.join("parts").exists()
+                || fs::read_dir(cache_dir.join("parts"))
+                    .expect("part cache")
+                    .next()
+                    .is_none(),
+            "zero-byte budget must evict part entries"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn given_two_brep_parts_when_native_runner_exports_then_each_part_mesh_is_built_once_and_reused(
+    ) {
+        let root = temp_root("native-part-mesh-reuse");
+        let resolver = TestResolver { root: root.clone() };
+        let Some(runner) = discover_direct_occt_runner_with_mode(&resolver, true) else {
+            return;
+        };
+        let cache_dir = root.join("selective-cache");
+        let output_dir = root.join("bundle");
+        fs::create_dir_all(&output_dir).expect("output directory");
+        fs::write(
+            output_dir.join(PLAN_FILE_NAME),
+            serialize_runner_plan(&shared_root_part_mesh_plan())
+                .expect("plan serialization")
+                .expect("runner plan"),
+        )
+        .expect("write plan");
+        let output = std::process::Command::new(runner)
+            .env("ECKY_DIRECT_OCCT_WORKERS", "2")
+            .env("ECKY_DIRECT_OCCT_CACHE_DIR", &cache_dir)
+            .arg("--plan")
+            .arg(output_dir.join(PLAN_FILE_NAME))
+            .arg("--out")
+            .arg(&output_dir)
+            .output()
+            .expect("start runner");
+        assert!(
+            output.status.success(),
+            "runner failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let report = read_runner_stage_report(&output_dir).expect("stage report");
+        assert_eq!(report.parts.len(), 2);
+        assert_eq!(report.mesh_outer_worker_budget, Some(1));
+        assert_eq!(report.mesh_pool_budget, Some(2));
+        assert_eq!(report.mesh_launcher_budget, Some(2));
+        assert_eq!(
+            report.mesh_build_count,
+            Some(report.parts.len() as u32),
+            "one final BRep part must produce one tessellation; preview and per-part STL reuse it"
+        );
+        assert_eq!(report.mesh_cache_hit_count, Some(0));
+        assert_eq!(
+            report.preview_facet_count,
+            Some(
+                report
+                    .parts
+                    .iter()
+                    .map(|part| part.mesh_facet_count.expect("per-part facet evidence"))
+                    .sum()
+            ),
+            "preview triangle stream must be deterministic concatenation of part streams"
+        );
+        assert!(
+            report.parts.iter().all(|part| part.mesh_identity.is_some()),
+            "per-part STL must identify the exact immutable mesh reused by preview"
+        );
+        assert_eq!(
+            report.parts[0].mesh_identity,
+            report.parts[1].mesh_identity,
+            "two instances of one root must retain geometry parity while each mesh job owns private topology"
+        );
+
+        let warm_dir = root.join("warm");
+        fs::create_dir_all(&warm_dir).expect("warm output directory");
+        fs::write(
+            warm_dir.join(PLAN_FILE_NAME),
+            serialize_runner_plan(&shared_root_part_mesh_plan())
+                .expect("plan serialization")
+                .expect("runner plan"),
+        )
+        .expect("write warm plan");
+        let warm_output = std::process::Command::new(
+            discover_direct_occt_runner_with_mode(&resolver, true)
+                .expect("runner remains available"),
+        )
+        .env("ECKY_DIRECT_OCCT_WORKERS", "2")
+        .env("ECKY_DIRECT_OCCT_CACHE_DIR", &cache_dir)
+        .arg("--plan")
+        .arg(warm_dir.join(PLAN_FILE_NAME))
+        .arg("--out")
+        .arg(&warm_dir)
+        .output()
+        .expect("start warm runner");
+        assert!(
+            warm_output.status.success(),
+            "warm runner failed: {}",
+            String::from_utf8_lossy(&warm_output.stderr)
+        );
+        let warm_report = read_runner_stage_report(&warm_dir).expect("warm stage report");
+        assert_eq!(warm_report.mesh_build_count, Some(0));
+        assert_eq!(
+            warm_report.mesh_cache_hit_count,
+            Some(warm_report.parts.len() as u32)
+        );
+        assert_eq!(
+            warm_report.preview_facet_count, report.preview_facet_count,
+            "warm preview must assemble the cached immutable streams in plan order"
+        );
+        assert_eq!(
+            warm_report
+                .parts
+                .iter()
+                .map(|part| part.mesh_identity.as_deref())
+                .collect::<Vec<_>>(),
+            report
+                .parts
+                .iter()
+                .map(|part| part.mesh_identity.as_deref())
+                .collect::<Vec<_>>(),
+            "warm cache must reuse each BRep/policy/runtime mesh identity"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1589,12 +2137,549 @@ mod tests {
         Some((root, output))
     }
 
+    fn import_step_plan(step_path: &Path, with_boolean: bool) -> OcctPlan {
+        let mut commands = vec![OcctCommand {
+            output: OcctSlot(1),
+            op: OcctOp::ImportStep,
+            args: vec![OcctArg::Text(step_path.to_string_lossy().to_string())],
+            keywords: Vec::new(),
+        }];
+        let root = if with_boolean {
+            commands.push(OcctCommand {
+                output: OcctSlot(2),
+                op: OcctOp::Box,
+                args: vec![
+                    OcctArg::Number(3.0),
+                    OcctArg::Number(3.0),
+                    OcctArg::Number(3.0),
+                ],
+                keywords: Vec::new(),
+            });
+            commands.push(OcctCommand {
+                output: OcctSlot(3),
+                op: OcctOp::Difference,
+                args: vec![OcctArg::Ref(OcctSlot(1)), OcctArg::Ref(OcctSlot(2))],
+                keywords: Vec::new(),
+            });
+            OcctSlot(3)
+        } else {
+            OcctSlot(1)
+        };
+        OcctPlan {
+            parameters: Vec::new(),
+            parts: vec![OcctPartPlan {
+                key: "body".to_string(),
+                label: "Body".to_string(),
+                root,
+                commands,
+            }],
+        }
+    }
+
+    fn multi_solid_step_fixture_plan() -> OcctPlan {
+        OcctPlan {
+            parameters: Vec::new(),
+            parts: vec![
+                OcctPartPlan {
+                    key: "left".to_string(),
+                    label: "Left".to_string(),
+                    root: OcctSlot(1),
+                    commands: vec![OcctCommand {
+                        output: OcctSlot(1),
+                        op: OcctOp::Box,
+                        args: vec![
+                            OcctArg::Number(10.0),
+                            OcctArg::Number(10.0),
+                            OcctArg::Number(10.0),
+                        ],
+                        keywords: Vec::new(),
+                    }],
+                },
+                OcctPartPlan {
+                    key: "right".to_string(),
+                    label: "Right".to_string(),
+                    root: OcctSlot(3),
+                    commands: vec![
+                        OcctCommand {
+                            output: OcctSlot(2),
+                            op: OcctOp::Box,
+                            args: vec![
+                                OcctArg::Number(10.0),
+                                OcctArg::Number(10.0),
+                                OcctArg::Number(10.0),
+                            ],
+                            keywords: Vec::new(),
+                        },
+                        OcctCommand {
+                            output: OcctSlot(3),
+                            op: OcctOp::Translate,
+                            args: vec![
+                                OcctArg::Number(30.0),
+                                OcctArg::Number(0.0),
+                                OcctArg::Number(0.0),
+                                OcctArg::Ref(OcctSlot(2)),
+                            ],
+                            keywords: Vec::new(),
+                        },
+                    ],
+                },
+            ],
+        }
+    }
+
     #[test]
-    fn native_runner_boolean_builder_enables_parallel_obb_and_nary_union() {
+    fn live_runner_imports_valid_and_multi_solid_step_without_repair_when_available() {
+        // First export two disconnected solids using the real runner. Reimport
+        // the resulting STEP through the same native binary, then exercise a
+        // normal boolean. This proves STEP reaches Direct OCCT as BRep and can
+        // flow through downstream topology/export without any FreeCAD/STL path.
+        let Some((fixture_root, _)) = run_real_runner_plan_json(
+            "live-runner-step-multi-fixture",
+            &multi_solid_step_fixture_plan(),
+        ) else {
+            return;
+        };
+        let fixture_step = fixture_root.join("bundle").join("model.step");
+        assert!(fixture_step.is_file(), "fixture STEP was not exported");
+
+        let Some((root, topology)) = run_real_runner_plan_json(
+            "live-runner-import-step-multi",
+            &import_step_plan(&fixture_step, true),
+        ) else {
+            let _ = fs::remove_dir_all(fixture_root);
+            return;
+        };
+        let output_dir = root.join("bundle");
+        let faces = topology["parts"][0]["faces"].as_array().expect("faces");
+        assert!(
+            faces.len() >= 6,
+            "expected native STEP topology after boolean"
+        );
+        assert!(output_dir.join("model.step").is_file());
+        assert!(output_dir.join("preview.stl").is_file());
+        let report = read_runner_stage_report(&output_dir).expect("stage report");
+        assert_eq!(report.stages[0].name, "import");
+        assert_eq!(report.stages[0].execution_count, 1);
+        assert_eq!(report.stages[1].name, "validate");
+        assert_eq!(report.stages[1].execution_count, 1);
+        assert_eq!(report.stages[2].name, "solidify");
+        assert_eq!(report.stages[2].execution_count, 0);
+
+        let _ = fs::remove_dir_all(fixture_root);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn installed_live_step_component_resolves_cuts_and_renders_natively_when_available() {
+        let Some((fixture_root, _)) = run_real_runner_plan_json(
+            "live-package-step-fixture",
+            &multi_solid_step_fixture_plan(),
+        ) else {
+            return;
+        };
+        let fixture_step = fixture_root.join("bundle").join("model.step");
+        let package_root = temp_root("live-package-step");
+        let project_dir = package_root.join("package");
+        fs::create_dir_all(project_dir.join("assets")).expect("package assets");
+        fs::copy(&fixture_step, project_dir.join("assets/bracket.step"))
+            .expect("copy fixture STEP");
+        fs::write(
+            project_dir.join(crate::component_package_runtime::COMPONENT_PACKAGE_FILE_NAME),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schemaVersion": 1,
+                "packageId": "fixture.native-step",
+                "version": "1.0.0",
+                "displayName": "Native STEP fixture",
+                "visibility": "source",
+                "components": [{
+                    "componentId": "bracket",
+                    "version": "1.0.0",
+                    "displayName": "Bracket",
+                    "sourceRef": "assets/bracket.step",
+                    "geometryProvenance": {
+                        "representation": "analyticBrep"
+                    }
+                }]
+            }))
+            .expect("package json"),
+        )
+        .expect("write package manifest");
+        let archive = package_root.join("fixture.eckypkg");
+        crate::component_package_runtime::write_component_package_archive(&project_dir, &archive)
+            .expect("write package archive");
+        let resolver = TestResolver {
+            root: package_root.clone(),
+        };
+        crate::component_package_runtime::install_component_package_to_store(&resolver, &archive)
+            .expect("install package into CAS");
+
+        let authored = r#"
+            (import-component "fixture.native-step" :version "1.0.0" :component "bracket" :as mount)
+            (model
+              (part body
+                (difference
+                  (mount)
+                  (translate 1 1 1 (box 2 2 2)))))
+        "#;
+        let compilation = crate::component_import_runtime::compile_authoring_source(
+            crate::component_import_runtime::ResolveAuthoringSourceRequest {
+                authored_source: authored,
+                expected_lock: None,
+            },
+            &crate::component_import_runtime::InstalledLibraryComponentResolver { app: &resolver },
+        )
+        .expect("resolve locked STEP component");
+        let locked = &compilation.dependency_lock.dependencies[0].components[0];
+        assert_eq!(
+            locked.payload_kind,
+            Some(crate::contracts::ComponentPayloadKind::Step)
+        );
+        assert_eq!(
+            locked.geometry_representation,
+            Some(crate::contracts::GeometryRepresentation::AnalyticBrep)
+        );
+        assert!(compilation.compiler_source.contains("(import-step"));
+        assert!(!compilation.compiler_source.contains("(import-component"));
+        assert!(!authored.contains(compilation.step_assets[0].path.to_string_lossy().as_ref()));
+
+        let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&compilation.program)
+            .expect("plan package STEP component");
+        assert!(plan.parts[0]
+            .commands
+            .iter()
+            .any(|command| command.op == OcctOp::ImportStep));
+        assert!(!plan.parts[0]
+            .commands
+            .iter()
+            .any(|command| command.op == OcctOp::Solidify));
+        let Some((render_root, topology)) =
+            run_real_runner_plan_json("live-package-step-render", &plan)
+        else {
+            let _ = fs::remove_dir_all(fixture_root);
+            let _ = fs::remove_dir_all(package_root);
+            return;
+        };
+        assert!(!topology["parts"][0]["faces"]
+            .as_array()
+            .expect("native faces")
+            .is_empty());
+        let output_dir = render_root.join("bundle");
+        assert!(output_dir.join("model.step").is_file());
+        let report = read_runner_stage_report(&output_dir).expect("stage report");
+        assert_eq!(report.stages[0].execution_count, 1);
+        assert_eq!(report.stages[1].execution_count, 1);
+        assert_eq!(report.stages[2].execution_count, 0);
+
+        let forbidden_freecad_marker = package_root.join("freecad-invoked");
+        let forbidden_freecad = package_root.join("forbidden-freecad.sh");
+        write_executable(
+            &forbidden_freecad,
+            format!(
+                "#!/bin/sh\nprintf invoked > '{}'\nexit 88\n",
+                forbidden_freecad_marker.display()
+            ),
+        );
+        let state = crate::models::AppState::new(
+            crate::contracts::Config {
+                engines: Vec::new(),
+                selected_engine_id: String::new(),
+                freecad_cmd: forbidden_freecad.to_string_lossy().to_string(),
+                cad_text_font_path: String::new(),
+                freecad_library_roots: Vec::new(),
+                assets: Vec::new(),
+                microwave: None,
+                voice: crate::contracts::VoiceConfig::default(),
+                mcp: crate::contracts::McpConfig::default(),
+                has_seen_onboarding: true,
+                connection_type: None,
+                default_engine_kind: crate::contracts::EngineKind::EckyIrV0,
+                default_source_language: crate::contracts::SourceLanguage::EckyIrV0,
+                default_geometry_backend: crate::contracts::GeometryBackend::EckyRust,
+                max_generation_attempts: 1,
+                max_verify_attempts: 0,
+                projects_root: None,
+            },
+            None,
+            crate::db::init_db(&package_root.join("test.db")).expect("test db"),
+        );
+        let service_bundle = crate::services::render::render_model_with_previous_manifest(
+            authored,
+            &crate::contracts::DesignParams::new(),
+            Some(crate::contracts::MacroDialect::EckyIrV0),
+            Some(crate::contracts::GeometryBackend::EckyRust),
+            None,
+            None,
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("normal render service consumes installed STEP package");
+        assert_eq!(
+            service_bundle.geometry_backend,
+            crate::contracts::GeometryBackend::EckyRust
+        );
+        assert_eq!(
+            service_bundle
+                .geometry_provenance
+                .as_ref()
+                .map(|evidence| evidence.representation.clone()),
+            Some(crate::contracts::GeometryRepresentation::AnalyticBrep)
+        );
+        assert_eq!(service_bundle.component_import_origins.len(), 1);
+        assert!(service_bundle
+            .export_artifacts
+            .iter()
+            .any(|artifact| artifact.format.eq_ignore_ascii_case("step")
+                && Path::new(&artifact.path).is_file()
+                && artifact
+                    .geometry_provenance
+                    .as_ref()
+                    .is_some_and(|evidence| evidence.representation
+                        == crate::contracts::GeometryRepresentation::AnalyticBrep)));
+        let service_manifest =
+            crate::model_runtime::read_model_manifest(&resolver, &service_bundle.model_id)
+                .expect("service manifest");
+        assert_eq!(
+            service_manifest.geometry_provenance,
+            service_bundle.geometry_provenance
+        );
+        assert_eq!(
+            service_manifest.component_import_origins,
+            service_bundle.component_import_origins
+        );
+        assert!(
+            !forbidden_freecad_marker.exists(),
+            "native package composition must never invoke FreeCAD"
+        );
+        let service_report = read_runner_stage_report(
+            Path::new(&service_bundle.manifest_path)
+                .parent()
+                .expect("runtime bundle dir"),
+        )
+        .expect("service stage report");
+        assert_eq!(service_report.stages[0].execution_count, 1);
+        assert_eq!(service_report.stages[1].execution_count, 1);
+        assert_eq!(service_report.stages[2].execution_count, 0);
+
+        fs::write(
+            &compilation.step_assets[0].path,
+            b"mutated after committed lock",
+        )
+        .expect("mutate installed STEP");
+        let error = crate::component_import_runtime::compile_authoring_source(
+            crate::component_import_runtime::ResolveAuthoringSourceRequest {
+                authored_source: authored,
+                expected_lock: Some(&compilation.dependency_lock),
+            },
+            &crate::component_import_runtime::InstalledLibraryComponentResolver { app: &resolver },
+        )
+        .expect_err("mutated STEP must fail before native execution");
+        assert!(
+            error.message.contains("does not match package inventory"),
+            "{}",
+            error.message
+        );
+
+        let legacy_dir = package_root.join("legacy-package");
+        fs::create_dir_all(legacy_dir.join("assets")).expect("legacy package assets");
+        fs::copy(&fixture_step, legacy_dir.join("assets/bracket.step"))
+            .expect("copy legacy fixture STEP");
+        fs::write(
+            legacy_dir.join(crate::component_package_runtime::COMPONENT_PACKAGE_FILE_NAME),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schemaVersion": 1,
+                "packageId": "fixture.legacy-step",
+                "version": "1.0.0",
+                "displayName": "Legacy STEP fixture",
+                "visibility": "source",
+                "components": [{
+                    "componentId": "bracket",
+                    "version": "1.0.0",
+                    "displayName": "Bracket",
+                    "sourceRef": "assets/bracket.step"
+                }]
+            }))
+            .expect("legacy package json"),
+        )
+        .expect("write legacy package manifest");
+        let legacy_archive = package_root.join("legacy.eckypkg");
+        crate::component_package_runtime::write_component_package_archive(
+            &legacy_dir,
+            &legacy_archive,
+        )
+        .expect("write legacy package archive");
+        crate::component_package_runtime::install_component_package_to_store(
+            &resolver,
+            &legacy_archive,
+        )
+        .expect("install legacy STEP package");
+        let legacy_authored = r#"
+            (import-component "fixture.legacy-step" :version "1.0.0" :component "bracket" :as mount)
+            (model (part body (mount)))
+        "#;
+        let error = crate::component_import_runtime::compile_authoring_source(
+            crate::component_import_runtime::ResolveAuthoringSourceRequest {
+                authored_source: legacy_authored,
+                expected_lock: None,
+            },
+            &crate::component_import_runtime::InstalledLibraryComponentResolver { app: &resolver },
+        )
+        .expect_err("legacy STEP without provenance must require repackaging");
+        assert!(error.message.contains("repackage"), "{}", error.message);
+
+        let _ = fs::remove_dir_all(fixture_root);
+        let _ = fs::remove_dir_all(render_root);
+        let _ = fs::remove_dir_all(package_root);
+    }
+
+    #[test]
+    fn live_runner_step_read_failure_publishes_no_exports_when_available() {
+        let missing = std::env::temp_dir().join(format!(
+            "ecky-missing-native-step-{}.step",
+            uuid::Uuid::new_v4()
+        ));
+        let plan = import_step_plan(&missing, false);
+        let plan_text = serialize_runner_plan(&plan)
+            .expect("serialize plan")
+            .expect("runner-safe STEP plan");
+        let Some((root, output)) =
+            run_real_runner_plan_text("live-runner-import-step-missing", &plan_text)
+        else {
+            return;
+        };
+        assert!(
+            !output.status.success(),
+            "missing STEP unexpectedly succeeded"
+        );
+        let error: serde_json::Value =
+            serde_json::from_slice(&output.stderr).expect("structured runner error");
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("ReadFile"),
+            "{error}"
+        );
+        let output_dir = root.join("bundle");
+        assert!(!output_dir.join("model.step").exists());
+        assert!(!output_dir.join("preview.stl").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_runner_rejects_zero_transferred_step_roots_when_available() {
+        // `ReadFile` accepts a syntactically valid but rootless ISO-10303-21
+        // document. `TransferRoots` must then gate publication before
+        // `OneShape` or any downstream operation can run.
+        let empty_step = std::env::temp_dir().join(format!(
+            "ecky-zero-step-roots-{}.step",
+            uuid::Uuid::new_v4()
+        ));
+        fs::write(
+            &empty_step,
+            "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('empty'),'2;1');\nFILE_NAME('empty.step','2026-07-29T00:00:00',('ecky'),('ecky'),'ecky','ecky','');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\nENDSEC;\nDATA;\nENDSEC;\nEND-ISO-10303-21;\n",
+        )
+        .expect("write rootless STEP");
+        let plan = import_step_plan(&empty_step, false);
+        let plan_text = serialize_runner_plan(&plan)
+            .expect("serialize plan")
+            .expect("runner-safe STEP plan");
+        let Some((root, output)) =
+            run_real_runner_plan_text("live-runner-import-step-zero-roots", &plan_text)
+        else {
+            fs::remove_file(empty_step).ok();
+            return;
+        };
+        assert!(
+            !output.status.success(),
+            "rootless STEP unexpectedly succeeded"
+        );
+        let error: serde_json::Value =
+            serde_json::from_slice(&output.stderr).expect("structured runner error");
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("zero roots"),
+            "{error}"
+        );
+        let output_dir = root.join("bundle");
+        assert!(!output_dir.join("model.step").exists());
+        assert!(!output_dir.join("preview.stl").exists());
+        fs::remove_file(empty_step).ok();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_runner_rejects_shell_only_step_without_hidden_repair_when_available() {
+        let shell_fixture = OcctPlan {
+            parameters: Vec::new(),
+            parts: vec![OcctPartPlan {
+                key: "face".to_string(),
+                label: "Face".to_string(),
+                root: OcctSlot(1),
+                commands: vec![OcctCommand {
+                    output: OcctSlot(1),
+                    op: OcctOp::Rectangle,
+                    args: vec![OcctArg::Number(10.0), OcctArg::Number(10.0)],
+                    keywords: Vec::new(),
+                }],
+            }],
+        };
+        let Some((fixture_root, _)) =
+            run_real_runner_plan_json("live-runner-step-shell-fixture", &shell_fixture)
+        else {
+            return;
+        };
+        let fixture_step = fixture_root.join("bundle").join("model.step");
+        let import = import_step_plan(&fixture_step, false);
+        let plan_text = serialize_runner_plan(&import)
+            .expect("serialize plan")
+            .expect("runner-safe STEP plan");
+        let Some((root, output)) =
+            run_real_runner_plan_text("live-runner-import-step-shell", &plan_text)
+        else {
+            let _ = fs::remove_dir_all(fixture_root);
+            return;
+        };
+        assert!(
+            !output.status.success(),
+            "shell-only STEP unexpectedly succeeded"
+        );
+        let error: serde_json::Value =
+            serde_json::from_slice(&output.stderr).expect("structured runner error");
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("shell-only"),
+            "{error}"
+        );
+        let output_dir = root.join("bundle");
+        assert!(!output_dir.join("model.step").exists());
+        assert!(!output_dir.join("preview.stl").exists());
+        let _ = fs::remove_dir_all(fixture_root);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_runner_boolean_builder_adapts_pool_to_outer_dag_budget_obb_and_nary_union() {
         let source = include_str!("../../native/direct_occt_runner.cpp");
-        assert!(source.contains("builder.SetRunParallel(true);"), "{source}");
+        assert!(source.contains("bool boolean_runs_parallel"), "{source}");
+        assert!(source.contains("context.active_dag_nodes <= 1"), "{source}");
+        assert!(
+            source.contains("builder.SetRunParallel(boolean_runs_parallel(context));"),
+            "{source}"
+        );
+        assert!(
+            source.contains("builder.SetNonDestructive(true);"),
+            "{source}"
+        );
         assert!(source.contains("builder.SetUseOBB(true);"), "{source}");
-        assert!(source.contains("fuse_shapes(shapes_to_fuse)"), "{source}");
+        assert!(
+            source.contains("fuse_shapes(shapes_to_fuse, context)"),
+            "{source}"
+        );
     }
 
     #[test]
@@ -1905,6 +2990,110 @@ mod tests {
         })
     }
 
+    fn independent_ready_dag_plan() -> OcctPlan {
+        let part = |key: &str, offset: f64| OcctPartPlan {
+            key: key.to_string(),
+            label: key.to_string(),
+            root: OcctSlot(5),
+            commands: vec![
+                OcctCommand {
+                    output: OcctSlot(1),
+                    op: OcctOp::Sphere,
+                    args: vec![OcctArg::Number(18.0 + offset)],
+                    keywords: Vec::new(),
+                },
+                OcctCommand {
+                    output: OcctSlot(2),
+                    op: OcctOp::Sphere,
+                    args: vec![OcctArg::Number(19.0 + offset)],
+                    keywords: Vec::new(),
+                },
+                OcctCommand {
+                    output: OcctSlot(3),
+                    op: OcctOp::Sphere,
+                    args: vec![OcctArg::Number(20.0 + offset)],
+                    keywords: Vec::new(),
+                },
+                OcctCommand {
+                    output: OcctSlot(4),
+                    op: OcctOp::Sphere,
+                    args: vec![OcctArg::Number(21.0 + offset)],
+                    keywords: Vec::new(),
+                },
+                OcctCommand {
+                    output: OcctSlot(5),
+                    op: OcctOp::Compound,
+                    args: vec![
+                        OcctArg::Ref(OcctSlot(1)),
+                        OcctArg::Ref(OcctSlot(2)),
+                        OcctArg::Ref(OcctSlot(3)),
+                        OcctArg::Ref(OcctSlot(4)),
+                    ],
+                    keywords: Vec::new(),
+                },
+            ],
+        };
+        OcctPlan {
+            parameters: Vec::new(),
+            parts: vec![part("left", 0.0), part("right", 30.0)],
+        }
+    }
+
+    fn shared_root_part_mesh_plan() -> OcctPlan {
+        let mut plan = independent_ready_dag_plan();
+        let mut instance = plan.parts[0].clone();
+        instance.key = "right".to_string();
+        instance.label = "right".to_string();
+        plan.parts = vec![plan.parts[0].clone(), instance];
+        plan
+    }
+
+    fn boolean_with_late_translate_plan(translate_x: f64) -> OcctPlan {
+        OcctPlan {
+            parameters: Vec::new(),
+            parts: vec![OcctPartPlan {
+                key: "cached-boolean".to_string(),
+                label: "cached-boolean".to_string(),
+                root: OcctSlot(4),
+                commands: vec![
+                    OcctCommand {
+                        output: OcctSlot(1),
+                        op: OcctOp::Box,
+                        args: vec![
+                            OcctArg::Number(20.0),
+                            OcctArg::Number(20.0),
+                            OcctArg::Number(20.0),
+                        ],
+                        keywords: Vec::new(),
+                    },
+                    OcctCommand {
+                        output: OcctSlot(2),
+                        op: OcctOp::Cylinder,
+                        args: vec![OcctArg::Number(4.0), OcctArg::Number(30.0)],
+                        keywords: Vec::new(),
+                    },
+                    OcctCommand {
+                        output: OcctSlot(3),
+                        op: OcctOp::Difference,
+                        args: vec![OcctArg::Ref(OcctSlot(1)), OcctArg::Ref(OcctSlot(2))],
+                        keywords: Vec::new(),
+                    },
+                    OcctCommand {
+                        output: OcctSlot(4),
+                        op: OcctOp::Translate,
+                        args: vec![
+                            OcctArg::Number(translate_x),
+                            OcctArg::Number(0.0),
+                            OcctArg::Number(0.0),
+                            OcctArg::Ref(OcctSlot(3)),
+                        ],
+                        keywords: Vec::new(),
+                    },
+                ],
+            }],
+        }
+    }
+
     fn indexed_mesh_boolean_plan(stl_path: &Path, post_boolean: bool) -> OcctPlan {
         let mut commands = vec![
             OcctCommand {
@@ -2064,6 +3253,295 @@ mod tests {
             !stl_path.with_extension("indexed-mesh.json").exists(),
             "admission fallback must remain in memory"
         );
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    // --- Standalone STL/3MF authored-coordinate admission (task 6) ---------
+
+    /// Two disjoint tetrahedra where tetra B is tetra A shifted by 1 nm in X.
+    /// The authored (`from_stl`) decode keeps all 8 vertices bit-distinct; the
+    /// evaluated-CAD weld (`from_ir_mesh`, 1e-6 mm) collapses each pair, so the
+    /// two paths produce different vertex counts and digests. Coordinates are
+    /// authored as ASCII (f64) so the 1e-9 shift survives verbatim and the two
+    /// paths are distinguishable at the runner.
+    fn write_two_tetra_authored_seam_ascii_stl(path: &Path) {
+        let a = [
+            [0.0_f64, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [1.0, 2.0, 0.0],
+            [1.0, 1.0, 2.0],
+        ];
+        let shift = [1.0e-9_f64, 0.0, 0.0];
+        let b = a.map(|vertex| {
+            [
+                vertex[0] + shift[0],
+                vertex[1] + shift[1],
+                vertex[2] + shift[2],
+            ]
+        });
+        let tris_a = [[0_usize, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]];
+        let tris_b = tris_a.map(|triangle| triangle.map(|index| index + 4));
+        let mut text = String::from("solid seam\n");
+        for triangle in tris_a.iter().chain(tris_b.iter()) {
+            text.push_str("  facet normal 0 0 0\n    outer loop\n");
+            let source = if triangle[0] < 4 { &a } else { &b };
+            for vertex in triangle {
+                let coordinate = source[*vertex % 4];
+                text.push_str(&format!(
+                    "      vertex {} {} {}\n",
+                    coordinate[0], coordinate[1], coordinate[2]
+                ));
+            }
+            text.push_str("    endloop\n  endfacet\n");
+        }
+        text.push_str("endsolid seam\n");
+        fs::write(path, text).expect("write authored seam stl");
+    }
+
+    /// Minimal 3MF core package carrying one closed tetrahedron with authored
+    /// vertex coordinates and authored triangle indices.
+    fn write_tetra_3mf(path: &Path) {
+        use std::io::Write as _;
+        let vertices = [
+            [0.0_f64, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [1.0, 2.0, 0.0],
+            [1.0, 1.0, 2.0],
+        ];
+        let triangles = [[0_u32, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]];
+        let file = fs::File::create(path).expect("create 3mf");
+        let mut zip = zip::ZipWriter::new(file);
+        let options =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("3D/3dmodel.model", options)
+            .expect("3mf model part");
+        let mut xml = String::from(
+            r#"<?xml version="1.0" encoding="UTF-8"?><model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources><object id="1" type="model"><mesh><vertices>"#,
+        );
+        for vertex in &vertices {
+            xml.push_str(&format!(
+                r#"<vertex x="{}" y="{}" z="{}"/>"#,
+                vertex[0], vertex[1], vertex[2]
+            ));
+        }
+        xml.push_str("</vertices><triangles>");
+        for triangle in &triangles {
+            xml.push_str(&format!(
+                r#"<triangle v1="{}" v2="{}" v3="{}"/>"#,
+                triangle[0], triangle[1], triangle[2]
+            ));
+        }
+        xml.push_str("</triangles></mesh></object></resources><build></build></model>");
+        zip.write_all(xml.as_bytes()).expect("3mf model body");
+        zip.finish().expect("finish 3mf");
+    }
+
+    fn admitted_indexed_vertex_count(plan: &RunnerPlan) -> usize {
+        let import = &plan.parts[0].commands[0];
+        assert_eq!(import.op, "import-indexed-mesh", "import must be admitted");
+        import.args[0]
+            .value
+            .as_array()
+            .expect("indexed vertex list")
+            .len()
+    }
+
+    fn admitted_indexed_digest(plan: &RunnerPlan) -> String {
+        let import = &plan.parts[0].commands[0];
+        assert_eq!(import.op, "import-indexed-mesh", "import must be admitted");
+        import.args[2]
+            .value
+            .as_str()
+            .expect("digest text")
+            .to_string()
+    }
+
+    #[test]
+    fn runner_plan_inlines_authored_stl_coordinates_for_root_boolean_without_weld() {
+        // A standalone imported STL must reach the runner with authored
+        // coordinates preserved. Two tetrahedra shifted by 1 nm decode to 8
+        // authored vertices; the evaluated-CAD weld would collapse them to 4,
+        // so only the authored decoder keeps the seam open at the runner.
+        let root = temp_root("indexed-mesh-authored-stl");
+        fs::create_dir_all(&root).expect("fixture dir");
+        let stl_path = root.join("seam.stl");
+        write_two_tetra_authored_seam_ascii_stl(&stl_path);
+
+        let expected = crate::ecky_ir::mesh_asset::IndexedMeshAsset::from_stl(
+            crate::ecky_ir::mesh_asset::MeshAssetSource::Imported,
+            &stl_path,
+        )
+        .expect("authored decode");
+        assert_eq!(expected.vertices().len(), 8);
+
+        let plan = runner_plan(&indexed_mesh_boolean_plan(&stl_path, false))
+            .expect("runner plan")
+            .expect("supported plan");
+        assert_eq!(admitted_indexed_vertex_count(&plan), 8);
+        assert_eq!(admitted_indexed_digest(&plan), expected.content_digest());
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn runner_plan_reads_authored_stl_sidecar_consistently_with_decode() {
+        // Sidecar consumption and authored decode must agree. A sidecar written
+        // from the authored decoder must inline the same digest as a fresh
+        // authored decode: no welded-vs-authored split between sidecar and
+        // runner.
+        let root = temp_root("indexed-mesh-authored-stl-sidecar");
+        fs::create_dir_all(&root).expect("fixture dir");
+        let stl_path = root.join("seam.stl");
+        write_two_tetra_authored_seam_ascii_stl(&stl_path);
+
+        let authored = crate::ecky_ir::mesh_asset::IndexedMeshAsset::from_stl(
+            crate::ecky_ir::mesh_asset::MeshAssetSource::Imported,
+            &stl_path,
+        )
+        .expect("authored decode");
+        authored
+            .write_cache(&stl_path.with_extension("indexed-mesh.json"))
+            .expect("write sidecar");
+
+        let plan = runner_plan(&indexed_mesh_boolean_plan(&stl_path, false))
+            .expect("runner plan")
+            .expect("supported plan");
+        assert_eq!(admitted_indexed_vertex_count(&plan), 8);
+        assert_eq!(admitted_indexed_digest(&plan), authored.content_digest());
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn runner_plan_inlines_authored_3mf_import_for_root_boolean() {
+        // A standalone imported 3MF reaches the runner with authored indexing.
+        // The legacy STL-only fallback cannot parse a 3MF package, so this must
+        // route through the authored 3MF decoder rather than erroring or
+        // welding.
+        let root = temp_root("indexed-mesh-authored-3mf");
+        fs::create_dir_all(&root).expect("fixture dir");
+        let path = root.join("island.3mf");
+        write_tetra_3mf(&path);
+
+        let expected = crate::ecky_ir::mesh_asset::IndexedMeshAsset::from_3mf(
+            crate::ecky_ir::mesh_asset::MeshAssetSource::Imported,
+            &path,
+        )
+        .expect("authored 3mf decode");
+
+        let plan = runner_plan(&indexed_mesh_boolean_plan(&path, false))
+            .expect("runner plan")
+            .expect("supported plan");
+        assert_eq!(admitted_indexed_vertex_count(&plan), 4);
+        assert_eq!(admitted_indexed_digest(&plan), expected.content_digest());
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn indexed_mesh_import_rejects_authored_3mf_used_as_first_boolean_tool() {
+        let root = temp_root("indexed-mesh-authored-3mf-tool");
+        fs::create_dir_all(&root).expect("fixture dir");
+        let path = root.join("tool.3mf");
+        write_tetra_3mf(&path);
+        let mut source = indexed_mesh_boolean_plan(&path, false);
+        let difference = source.parts[0]
+            .commands
+            .iter_mut()
+            .find(|command| command.op == OcctOp::Difference)
+            .expect("difference");
+        difference.args.swap(0, 1);
+
+        let admitted = indexed_mesh_imports_for_root_boolean(&source.parts[0])
+            .expect("indexed mesh admission");
+        assert!(
+            admitted.is_empty(),
+            "an imported 3MF used as Boolean tool must not enter indexed-mesh path"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn indexed_mesh_import_rejects_malformed_cyclic_binary_chain() {
+        let root = temp_root("indexed-mesh-cyclic-binary-chain");
+        fs::create_dir_all(&root).expect("fixture dir");
+        let stl_path = root.join("island.stl");
+        write_indexed_cube_sidecar(&stl_path);
+        let mut source = indexed_mesh_boolean_plan(&stl_path, false);
+        source.parts[0].commands.push(OcctCommand {
+            output: OcctSlot(2),
+            op: OcctOp::Difference,
+            args: vec![OcctArg::Ref(OcctSlot(4)), OcctArg::Ref(OcctSlot(3))],
+            keywords: Vec::new(),
+        });
+        source.parts[0].root = OcctSlot(9);
+
+        let plan = runner_plan(&source).expect("cyclic plan must reject without hanging");
+        assert_eq!(
+            plan.expect("supported plan").parts[0].commands[0].op,
+            "import-stl",
+            "cyclic Boolean chain must not be admitted as indexed mesh"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn indexed_mesh_import_rejects_binary_chain_root_with_consumer() {
+        let root = temp_root("indexed-mesh-root-consumer");
+        fs::create_dir_all(&root).expect("fixture dir");
+        let stl_path = root.join("island.stl");
+        write_indexed_cube_sidecar(&stl_path);
+        let mut source = indexed_mesh_boolean_plan(&stl_path, false);
+        source.parts[0].commands.push(OcctCommand {
+            output: OcctSlot(5),
+            op: OcctOp::Difference,
+            args: vec![OcctArg::Ref(OcctSlot(4)), OcctArg::Ref(OcctSlot(3))],
+            keywords: Vec::new(),
+        });
+
+        let plan = runner_plan(&source)
+            .expect("runner plan")
+            .expect("supported plan");
+        assert_eq!(
+            plan.parts[0].commands[0].op, "import-stl",
+            "a claimed root with a Boolean consumer must not admit indexed mesh"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn runner_plan_admits_authored_3mf_through_binary_difference_chain() {
+        // Binary Difference lowering gives the first cut a fresh intermediate
+        // output. Admission must follow that base-side Boolean chain to the
+        // root so a 3MF never falls back to the STL-only import path.
+        let root = temp_root("indexed-mesh-authored-3mf-binary-chain");
+        fs::create_dir_all(&root).expect("fixture dir");
+        let path = root.join("island.3mf");
+        write_tetra_3mf(&path);
+
+        let mut source = indexed_mesh_boolean_plan(&path, false);
+        source.parts[0].commands.push(OcctCommand {
+            output: OcctSlot(5),
+            op: OcctOp::Cylinder,
+            args: vec![OcctArg::Number(0.25), OcctArg::Number(4.0)],
+            keywords: Vec::new(),
+        });
+        source.parts[0].commands.push(OcctCommand {
+            output: OcctSlot(6),
+            op: OcctOp::Difference,
+            args: vec![OcctArg::Ref(OcctSlot(4)), OcctArg::Ref(OcctSlot(5))],
+            keywords: Vec::new(),
+        });
+        source.parts[0].root = OcctSlot(6);
+
+        let plan = runner_plan(&source)
+            .expect("runner plan")
+            .expect("supported plan");
+        assert_eq!(admitted_indexed_vertex_count(&plan), 4);
 
         fs::remove_dir_all(root).expect("cleanup");
     }
@@ -3230,6 +4708,7 @@ mod tests {
             OcctOp::Profile,
             OcctOp::MakeFace,
             OcctOp::ImportStl,
+            OcctOp::ImportStep,
             OcctOp::Solidify,
             OcctOp::Extrude,
             OcctOp::Revolve,
@@ -3319,10 +4798,13 @@ mod tests {
                     .map(|command| runner_op_token(command.op))
             })
             .collect::<std::collections::BTreeSet<_>>();
+        // External imports need immutable on-disk payloads, so generated-source A/B
+        // fixtures cannot own them. Real-runner STEP tests cover this op separately.
+        let external_asset_ops = std::collections::BTreeSet::from(["import-step"]);
         let missing = runner_supported_ops()
             .into_iter()
             .map(runner_op_token)
-            .filter(|op| !covered.contains(op))
+            .filter(|op| !covered.contains(op) && !external_asset_ops.contains(op))
             .collect::<Vec<_>>();
 
         assert!(
@@ -3330,174 +4812,6 @@ mod tests {
             "runner-supported ops missing generated-source A/B fixtures: {}",
             missing.join(", ")
         );
-    }
-
-    fn topology_signature(path: &Path) -> Vec<(usize, usize)> {
-        let report: serde_json::Value = serde_json::from_slice(
-            &fs::read(path).unwrap_or_else(|err| panic!("read topology {path:?}: {err}")),
-        )
-        .unwrap_or_else(|err| panic!("parse topology {path:?}: {err}"));
-        report["parts"]
-            .as_array()
-            .expect("topology parts")
-            .iter()
-            .map(|part| {
-                (
-                    part["faces"].as_array().expect("topology faces").len(),
-                    part["edges"].as_array().expect("topology edges").len(),
-                )
-            })
-            .collect()
-    }
-
-    fn assert_metric_close(label: &str, metric: &str, generated: f64, runner: f64, rel: f64) {
-        let tolerance = generated.abs().max(runner.abs()).mul_add(rel, 1.0e-4);
-        assert!(
-            (generated - runner).abs() <= tolerance,
-            "{label} {metric} differs: generated={generated}, runner={runner}, tolerance={tolerance}"
-        );
-    }
-
-    fn assert_real_runner_matches_generated_source(label: &str, plan: &OcctPlan) {
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("repo root");
-        let runtime_root =
-            crate::ecky_cad_host::direct_occt_sdk::bundled_build123d_runtime_root_from_repo(
-                repo_root,
-            );
-        if !runtime_root.exists() {
-            return;
-        }
-        let layout =
-            crate::ecky_cad_host::direct_occt_sdk::inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
-            return;
-        }
-
-        let root = temp_root(&format!("generated-runner-parity-{label}"));
-        let resolver = TestResolver { root: root.clone() };
-        let Some(runner_binary) = discover_direct_occt_runner_with_mode(&resolver, true) else {
-            return;
-        };
-        if !runner_binary.is_file() {
-            return;
-        }
-        assert!(
-            runner_supports_plan(plan),
-            "runner support gate for {label}: {plan:#?}"
-        );
-
-        let generated_dir = root.join("generated");
-        let runner_dir = root.join("runner");
-        let generated =
-            crate::ecky_cad_host::direct_occt_executor::export_plan_step_stl_with_params(
-                plan,
-                &crate::contracts::DesignParams::new(),
-                &layout,
-                &generated_dir,
-            )
-            .unwrap_or_else(|err| panic!("generated-source export failed for {label}: {err:?}"));
-        let crate::ecky_cad_host::direct_occt_sdk::NativeExportOutcome::Exported {
-            step_path: generated_step,
-            stl_path: generated_stl,
-            ..
-        } = generated
-        else {
-            panic!("generated-source export blocked for {label}");
-        };
-
-        let runner = run_plan_step_stl_with_mode(plan, &runner_dir, &resolver, true)
-            .unwrap_or_else(|err| panic!("runner export failed for {label}: {err:?}"));
-        let Some(crate::ecky_cad_host::direct_occt_sdk::NativeExportOutcome::Exported {
-            step_path: runner_step,
-            stl_path: runner_stl,
-            ..
-        }) = runner
-        else {
-            panic!("runner did not accept parity fixture {label}");
-        };
-
-        let generated_metrics =
-            crate::ecky_cad_host::native_parity_harness::stl_metrics(&generated_stl);
-        let runner_metrics = crate::ecky_cad_host::native_parity_harness::stl_metrics(&runner_stl);
-        assert_metric_close(
-            label,
-            "volume",
-            generated_metrics.volume,
-            runner_metrics.volume,
-            0.002,
-        );
-        assert_metric_close(
-            label,
-            "area",
-            generated_metrics.area,
-            runner_metrics.area,
-            0.002,
-        );
-        for axis in 0..3 {
-            assert!(
-                (generated_metrics.bbox_min[axis] - runner_metrics.bbox_min[axis]).abs() <= 0.05,
-                "{label} bbox-min-{axis} differs: generated={}, runner={}",
-                generated_metrics.bbox_min[axis],
-                runner_metrics.bbox_min[axis]
-            );
-            assert!(
-                (generated_metrics.bbox_max[axis] - runner_metrics.bbox_max[axis]).abs() <= 0.05,
-                "{label} bbox-max-{axis} differs: generated={}, runner={}",
-                generated_metrics.bbox_max[axis],
-                runner_metrics.bbox_max[axis]
-            );
-        }
-        assert_eq!(
-            runner_metrics.components, generated_metrics.components,
-            "{label} connected components differ"
-        );
-        assert_eq!(
-            crate::ecky_cad_host::native_parity_harness::ascii_stl_non_manifold_edge_count(
-                &runner_stl
-            ),
-            crate::ecky_cad_host::native_parity_harness::ascii_stl_non_manifold_edge_count(
-                &generated_stl
-            ),
-            "{label} non-manifold edge counts differ"
-        );
-        assert_eq!(
-            topology_signature(&runner_dir.join("topology.json")),
-            topology_signature(&generated_dir.join("topology.json")),
-            "{label} topology face/edge counts differ"
-        );
-        for step in [&generated_step, &runner_step] {
-            assert!(
-                fs::metadata(step).expect("STEP metadata").len() > 1024,
-                "{label} STEP too small: {step:?}"
-            );
-        }
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn live_generated_source_runner_parity_matrix_when_available() {
-        for (label, plan) in runner_parity_fixture_plans() {
-            assert_real_runner_matches_generated_source(label, &plan);
-        }
-    }
-
-    #[test]
-    fn live_generated_source_matches_runner_for_each_surface_result_when_available() {
-        let plan = expanded_profile_surface_plan();
-        for (label, root) in [
-            ("surface-extrude", OcctSlot(2)),
-            ("surface-taper", OcctSlot(4)),
-            ("surface-loft", OcctSlot(7)),
-            ("surface-sweep", OcctSlot(10)),
-            ("surface-bspline-extrude", OcctSlot(12)),
-        ] {
-            let mut result_plan = plan.clone();
-            result_plan.parts[0].root = root;
-            assert_real_runner_matches_generated_source(label, &result_plan);
-        }
     }
 
     #[test]
@@ -3608,12 +4922,11 @@ printf '{"parts":[{"partId":"honjo_stay_clamp_v2","label":"Honjo Stay Clamp V2",
         let resolver = TestResolver { root: root.clone() };
         let layout = crate::ecky_cad_host::direct_occt_sdk::DirectOcctSdkLayout {
             runtime_root: root.join("runtime").join("occt"),
-            ocp_root: None,
             dylib_dir: None,
             include_dir: None,
             missing_headers: Vec::new(),
             missing_libs: Vec::new(),
-            install_name_prefix: "/DLC/OCP/.dylibs",
+            install_name_prefix: "@rpath",
         };
 
         let outcome =
@@ -3763,18 +5076,28 @@ exit 11
             .expect("runner plan");
         let json: serde_json::Value = serde_json::from_str(&plan_json).expect("json");
         let commands = json["parts"][0]["commands"].as_array().expect("commands");
-        let difference = commands
+        // parametric-thread-feature 3.1 binary-cut: base plus three flattened
+        // cutter tools now serialize as a chain of three binary Differences
+        // (each args.len() == 2), not one n-ary difference.
+        let differences: Vec<_> = commands
             .iter()
-            .find(|command| command["op"] == "difference")
-            .expect("difference");
-
+            .filter(|command| command["op"] == "difference")
+            .collect();
         assert_eq!(
-            difference["args"]
-                .as_array()
-                .expect("difference args")
-                .len(),
-            4
+            differences.len(),
+            3,
+            "three binary cuts for base plus three tools"
         );
+        for difference in &differences {
+            assert_eq!(
+                difference["args"]
+                    .as_array()
+                    .expect("difference args")
+                    .len(),
+                2,
+                "each serialized cut must be binary"
+            );
+        }
         assert!(
             commands.iter().all(|command| command["op"] != "union"),
             "dead cutter unions must not reach runner ABI"
@@ -3804,228 +5127,51 @@ exit 11
         );
 
         for part in &plan.parts {
-            let difference_index = part
-                .commands
-                .iter()
-                .position(|command| command.op == OcctOp::Difference)
-                .expect("difference");
             let barrier_index = part
                 .commands
                 .iter()
                 .position(|command| matches!(command.op, OcctOp::Fillet | OcctOp::Chamfer))
                 .expect("topology barrier");
-            assert!(difference_index < barrier_index);
-            assert_eq!(part.commands[difference_index].args.len(), 3);
+            let barrier_input_slot = match part.commands[barrier_index].args.last() {
+                Some(OcctArg::Ref(slot)) => *slot,
+                other => panic!("barrier must consume a shape ref, got {other:?}"),
+            };
+            // parametric-thread-feature 3.1 binary-cut: the cut is now a chain
+            // of binary Differences. The barrier (fillet/chamfer) consumes the
+            // FINAL link's output, which keeps the original difference's slot.
+            let final_difference_index = part
+                .commands
+                .iter()
+                .position(|command| {
+                    command.op == OcctOp::Difference && command.output == barrier_input_slot
+                })
+                .expect("barrier consumes a difference output");
+            assert!(
+                final_difference_index < barrier_index,
+                "final binary cut must precede the topology barrier"
+            );
+            let differences: Vec<_> = part
+                .commands
+                .iter()
+                .filter(|command| command.op == OcctOp::Difference)
+                .collect();
+            assert_eq!(
+                differences.len(),
+                2,
+                "base plus two tools -> two binary cuts"
+            );
+            for command in &differences {
+                assert_eq!(
+                    command.args.len(),
+                    2,
+                    "each cut must be binary (base plus one tool)"
+                );
+            }
             assert_eq!(
                 part.commands[barrier_index].args.last(),
-                Some(&OcctArg::Ref(part.commands[difference_index].output))
+                Some(&OcctArg::Ref(part.commands[final_difference_index].output))
             );
         }
-    }
-
-    #[test]
-    fn live_optimized_difference_preserves_fillet_and_chamfer_when_runner_available() {
-        let source = r#"
-            (model
-              (part filleted
-                (fillet 0.5 :edges "vertical"
-                  (difference
-                    (box 40 30 20)
-                    (union
-                      (translate -7 0 -2 (cylinder 2 24))
-                      (translate 7 0 -2 (cylinder 2 24))))))
-              (part chamfered
-                (chamfer 0.4 :edges "top"
-                  (difference
-                    (box 40 30 20)
-                    (union
-                      (translate -7 0 -2 (cylinder 2 24))
-                      (translate 7 0 -2 (cylinder 2 24)))))))
-            "#;
-        let program = crate::ecky_scheme::compile_to_core_program(source).expect("compile");
-        let baseline = crate::ecky_cad_host::direct_occt::plan_core_program_unoptimized(&program)
-            .expect("unoptimized plan");
-        let optimized =
-            crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("optimized plan");
-
-        let Some((baseline_root, baseline_topology)) =
-            run_real_runner_plan_json("difference-topology-baseline", &baseline)
-        else {
-            return;
-        };
-        let Some((optimized_root, optimized_topology)) =
-            run_real_runner_plan_json("difference-topology-optimized", &optimized)
-        else {
-            let _ = fs::remove_dir_all(baseline_root);
-            return;
-        };
-
-        let baseline_metrics = crate::ecky_cad_host::native_parity_harness::stl_metrics(
-            &baseline_root.join("bundle/preview.stl"),
-        );
-        let optimized_metrics = crate::ecky_cad_host::native_parity_harness::stl_metrics(
-            &optimized_root.join("bundle/preview.stl"),
-        );
-        assert_metric_close(
-            "difference-topology",
-            "volume",
-            baseline_metrics.volume,
-            optimized_metrics.volume,
-            0.002,
-        );
-        assert_metric_close(
-            "difference-topology",
-            "area",
-            baseline_metrics.area,
-            optimized_metrics.area,
-            0.002,
-        );
-        assert_eq!(baseline_metrics.components, optimized_metrics.components);
-        for part_index in 0..2 {
-            assert_eq!(
-                baseline_topology["parts"][part_index]["faces"]
-                    .as_array()
-                    .map(Vec::len),
-                optimized_topology["parts"][part_index]["faces"]
-                    .as_array()
-                    .map(Vec::len),
-                "part {part_index} face count"
-            );
-            assert_eq!(
-                baseline_topology["parts"][part_index]["edges"]
-                    .as_array()
-                    .map(Vec::len),
-                optimized_topology["parts"][part_index]["edges"]
-                    .as_array()
-                    .map(Vec::len),
-                "part {part_index} edge count"
-            );
-        }
-
-        let _ = fs::remove_dir_all(baseline_root);
-        let _ = fs::remove_dir_all(optimized_root);
-    }
-
-    #[test]
-    #[ignore = "manual native performance benchmark"]
-    fn benchmarks_toothbrush_holder_grouped_difference() {
-        let source = include_str!("../../tests/fixtures/cad/perf/toothbrush_holder_versions.ecky");
-        let program =
-            crate::ecky_scheme::compile_to_core_program(source).expect("compile toothbrush");
-        let baseline = crate::ecky_cad_host::direct_occt::plan_core_program_unoptimized(&program)
-            .expect("baseline plan");
-        let optimized =
-            crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("optimized plan");
-
-        for (label, plan) in [("baseline", &baseline), ("optimized", &optimized)] {
-            let unsupported = plan
-                .parts
-                .iter()
-                .flat_map(|part| {
-                    part.commands
-                        .iter()
-                        .filter(|command| !runner_command_supported(command))
-                })
-                .fold(std::collections::BTreeMap::new(), |mut counts, command| {
-                    let keywords = command
-                        .keywords
-                        .iter()
-                        .map(|keyword| format!("{}:{:?}", keyword.name, keyword.source_arg()))
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    *counts
-                        .entry(format!("op={:?} keywords=[{keywords}]", command.op))
-                        .or_insert(0usize) += 1;
-                    counts
-                });
-            assert!(
-                unsupported.is_empty(),
-                "toothbrush {label} plan cannot enter precompiled native runner; unsupported command forms: {unsupported:?}"
-            );
-        }
-
-        let baseline_start = Instant::now();
-        let Some((baseline_root, baseline_topology)) =
-            run_real_runner_plan_json("toothbrush-dag-baseline", &baseline)
-        else {
-            eprintln!("toothbrush benchmark skipped: native runner unavailable");
-            return;
-        };
-        let baseline_elapsed = baseline_start.elapsed();
-
-        let optimized_start = Instant::now();
-        let Some((optimized_root, optimized_topology)) =
-            run_real_runner_plan_json("toothbrush-dag-optimized", &optimized)
-        else {
-            eprintln!("toothbrush benchmark skipped: native runner unavailable");
-            let _ = fs::remove_dir_all(baseline_root);
-            return;
-        };
-        let optimized_elapsed = optimized_start.elapsed();
-
-        let baseline_metrics = crate::ecky_cad_host::native_parity_harness::stl_metrics(
-            &baseline_root.join("bundle/preview.stl"),
-        );
-        let optimized_metrics = crate::ecky_cad_host::native_parity_harness::stl_metrics(
-            &optimized_root.join("bundle/preview.stl"),
-        );
-        assert_metric_close(
-            "toothbrush-dag",
-            "volume",
-            baseline_metrics.volume,
-            optimized_metrics.volume,
-            0.002,
-        );
-        assert_metric_close(
-            "toothbrush-dag",
-            "area",
-            baseline_metrics.area,
-            optimized_metrics.area,
-            0.002,
-        );
-        assert_eq!(baseline_metrics.components, optimized_metrics.components);
-        assert_eq!(
-            baseline_topology["parts"][0]["faces"]
-                .as_array()
-                .map(Vec::len),
-            optimized_topology["parts"][0]["faces"]
-                .as_array()
-                .map(Vec::len)
-        );
-        assert_eq!(
-            baseline_topology["parts"][0]["edges"]
-                .as_array()
-                .map(Vec::len),
-            optimized_topology["parts"][0]["edges"]
-                .as_array()
-                .map(Vec::len)
-        );
-
-        let command_count = |plan: &OcctPlan| {
-            plan.parts
-                .iter()
-                .map(|part| part.commands.len())
-                .sum::<usize>()
-        };
-        let union_count = |plan: &OcctPlan| {
-            plan.parts
-                .iter()
-                .flat_map(|part| &part.commands)
-                .filter(|command| command.op == OcctOp::Union)
-                .count()
-        };
-        eprintln!(
-            "toothbrush geometry DAG benchmark sourceDigest=sha256:81f7ded44df1dbd1d38588fe2db876e721130889acbc235e4faa5c3b3c7e033f baselineMs={} optimizedMs={} baselineCommands={} optimizedCommands={} baselineUnions={} optimizedUnions={}",
-            baseline_elapsed.as_millis(),
-            optimized_elapsed.as_millis(),
-            command_count(&baseline),
-            command_count(&optimized),
-            union_count(&baseline),
-            union_count(&optimized),
-        );
-
-        let _ = fs::remove_dir_all(baseline_root);
-        let _ = fs::remove_dir_all(optimized_root);
     }
 
     #[test]
@@ -4131,7 +5277,7 @@ exit 7
 
     #[cfg(unix)]
     #[test]
-    fn keyword_runner_plan_skips_runner_for_structured_unsupported() {
+    fn keyword_runner_plan_reports_structured_unsupported_as_hard_error() {
         let root = temp_root("unsupported-json-skip");
         let runner = root
             .join("resources")
@@ -4148,11 +5294,11 @@ exit 3
         );
         let resolver = TestResolver { root: root.clone() };
 
-        let outcome =
+        let err =
             run_plan_step_stl_with_mode(&supported_sample_plan(), &output_dir, &resolver, true)
-                .expect("structured unsupported skip");
-
-        assert!(outcome.is_none());
+                .expect_err("structured unsupported must not silently fall back");
+        let diagnostic = format!("{} {}", err, err.details.as_deref().unwrap_or_default());
+        assert!(diagnostic.contains("unsupported direct OCCT op `box`"));
         assert!(output_dir.join(PLAN_FILE_NAME).is_file());
         let _ = fs::remove_dir_all(root);
     }
@@ -4432,7 +5578,7 @@ printf '{"parts":[{"partId":"body","label":"Body","edges":[],"faces":[]}]}' > "$
 
     #[cfg(unix)]
     #[test]
-    fn unsupported_keyword_runner_plan_skips_runner_for_generated_source_fallback() {
+    fn runner_only_path_rejects_unsupported_plan_instead_of_requesting_generated_source_fallback() {
         let root = temp_root("unsupported-skip");
         let runner = root
             .join("resources")
@@ -4449,15 +5595,15 @@ exit 7
         );
         let resolver = TestResolver { root: root.clone() };
 
-        let outcome = run_plan_step_stl_with_mode(
+        let error = run_plan_step_stl_with_mode(
             &unsupported_resolved_selector_plan(),
             &output_dir,
             &resolver,
             true,
         )
-        .expect("skip keyword runner plan");
+        .expect_err("runner-only path must reject unsupported plans");
 
-        assert!(outcome.is_none());
+        assert!(error.to_string().contains("runner does not support plan"));
         assert!(!output_dir.join(PLAN_FILE_NAME).exists());
         let _ = fs::remove_dir_all(root);
     }

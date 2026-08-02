@@ -3,8 +3,8 @@ use specta::Type;
 use std::collections::{BTreeMap, HashSet};
 
 use super::{
-    AppError, AppResult, ComponentInterfaceValue, EngineKind, GeometryBackend, PortFrame,
-    SourceLanguage, MODEL_RUNTIME_SCHEMA_VERSION,
+    AppError, AppResult, ComponentImportOrigin, ComponentInterfaceValue, EngineKind,
+    GeometryBackend, PortFrame, SourceLanguage, MODEL_RUNTIME_SCHEMA_VERSION,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -524,6 +524,10 @@ pub struct ModelManifest {
     pub enrichment_state: ManifestEnrichmentState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geometry_provenance: Option<super::GeometryProvenance>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[specta(optional)]
+    pub component_import_origins: Vec<ComponentImportOrigin>,
 }
 
 impl ModelManifest {
@@ -545,7 +549,7 @@ fn default_source_language() -> SourceLanguage {
 }
 
 fn default_geometry_backend() -> GeometryBackend {
-    GeometryBackend::Build123d
+    GeometryBackend::EckyRust
 }
 
 fn default_manifest_enrichment_state() -> ManifestEnrichmentState {

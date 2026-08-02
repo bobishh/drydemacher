@@ -2,6 +2,7 @@ use ecky_cad_lib::agent_prompt::agent_language_reference;
 use ecky_cad_lib::commands::generation::design_system_prompt;
 use ecky_cad_lib::contracts::{GeometryBackend, SourceLanguage};
 use ecky_cad_lib::ecky_language_surface::supported_surface_reference;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -27,7 +28,7 @@ fn api_prompt_projects_the_canonical_book_agent_reference() {
 #[test]
 fn api_design_generation_uses_the_shared_language_reference_verbatim() {
     let shared = agent_language_reference(GeometryBackend::EckyRust);
-    let design = design_system_prompt(SourceLanguage::EckyIrV0, GeometryBackend::EckyRust);
+    let design = design_system_prompt(SourceLanguage::EckyIrV0, GeometryBackend::EckyRust, None);
 
     assert!(design.contains(&shared));
 }
@@ -69,19 +70,78 @@ fn committed_prompt_artifacts_are_fresh() {
 }
 
 #[test]
-fn human_reference_operation_index_covers_the_surface_registry() {
+fn human_reference_operation_index_links_only_registered_documented_forms() {
+    let mut registered = BTreeSet::new();
     for backend in [
         GeometryBackend::EckyRust,
         GeometryBackend::Build123d,
         GeometryBackend::Freecad,
     ] {
         for entry in supported_surface_reference(backend).entries {
-            let row_key = format!("| `{}` |", entry.name);
-            assert!(
-                HUMAN_REFERENCE.contains(&row_key),
-                "human reference operation index missing `{}`",
-                entry.name
-            );
+            registered.insert(entry.name);
         }
+    }
+
+    let linked = HUMAN_REFERENCE
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("| [`")
+                .and_then(|rest| rest.split_once("`]("))
+                .map(|(name, _)| name.to_owned())
+        })
+        .collect::<BTreeSet<_>>();
+
+    assert!(
+        !linked.is_empty(),
+        "human operation index has no linked forms"
+    );
+    for name in &linked {
+        assert!(
+            registered.contains(name),
+            "human operation index links unregistered form `{name}`"
+        );
+    }
+    for required in ["box", "params", "part", "import-stl"] {
+        assert!(
+            linked.contains(required),
+            "human operation index lost documented form `{required}`"
+        );
+    }
+}
+
+#[test]
+fn canonical_references_explain_live_packages_locks_and_native_step_truth() {
+    let human_reference = HUMAN_REFERENCE
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for expected in [
+        "### Live package references",
+        "(import-component",
+        "No semver ranges, `latest`, network fallback, or transitive package lookup",
+        "application-global content-addressed store",
+        "`ecky.lock.json`",
+        "never calls FreeCAD, converts through STL, invokes `solidify`",
+    ] {
+        assert!(
+            human_reference.contains(expected),
+            "human reference missing `{expected}`"
+        );
+    }
+
+    let agent_reference = canonical_agent_reference()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for expected in [
+        "`component_get` is vendor mode",
+        "(import-component",
+        "committed exact dependency lock",
+        "STEP-backed live components",
+    ] {
+        assert!(
+            agent_reference.contains(expected),
+            "agent reference missing `{expected}`"
+        );
     }
 }

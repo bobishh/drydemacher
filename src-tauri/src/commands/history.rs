@@ -44,6 +44,21 @@ pub async fn get_thread_latest_version(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn get_thread_preview(
+    state: State<'_, AppState>,
+    id: String,
+) -> AppResult<Option<String>> {
+    if let Some(read_conn) = state.db_read.as_ref() {
+        let conn = read_conn.lock().await;
+        history_service::get_thread_preview(&conn, &id)
+    } else {
+        let conn = state.db.lock().await;
+        history_service::get_thread_preview(&conn, &id)
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn get_thread_message_version(
     state: State<'_, AppState>,
     thread_id: String,

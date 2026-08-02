@@ -32,14 +32,12 @@
     "targets": "all",
     "resources": {
       "../server/freecad_runner.py": "server/freecad_runner.py",
-      "../server/build123d_runner.py": "server/build123d_runner.py",
-      "../server/_ecky_build123d_helpers.py": "server/_ecky_build123d_helpers.py",
       "../model-runtime/cad_sdk.py": "model-runtime/cad_sdk.py",
       "../model-runtime/cad_framework_contract.md": "model-runtime/cad_framework_contract.md",
       "../templates/cache_pot_default.FCMacro": "templates/cache_pot_default.FCMacro",
       "../templates/mess.stl": "templates/mess.stl",
-      "../catalogs/animal-caps": "catalogs/animal-caps",
-      "../.dist/build123d-runtime": "runtime/build123d",
+      "../docs": "campaign-content",
+      "../sites/landing/src/models": "campaign-content/sites/landing/src/models",
       "../.dist/runtime/occt": "runtime/occt",
       "../.dist/speech-runtime": "runtime/speech"
     },

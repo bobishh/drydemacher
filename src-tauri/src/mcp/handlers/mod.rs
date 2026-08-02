@@ -42,16 +42,14 @@ mod verify;
 mod version_write;
 
 pub use artifact_read::{handle_artifact_feature_graph_get, handle_artifact_manifest_get};
-pub(crate) use authoring_actor::invalidate_authoring_actors_for_thread;
-use authoring_actor::{
-    acquire_authoring_actor_publish_permit, forget_authoring_actors_for_session,
-    reserve_authoring_actor_revision, AuthoringActorRevision,
-};
+pub use authoring_actor::AuthoringActorRegistry;
+use authoring_actor::AuthoringActorRevision;
 pub use compare::handle_compare_models;
 pub use component::{
-    handle_component_extract, handle_component_get, handle_component_search,
-    ComponentExtractToolRequest, ComponentExtractToolResponse, ComponentGetToolRequest,
-    ComponentSearchToolRequest, ComponentSearchToolResponse,
+    handle_component_extract, handle_component_get, handle_component_import,
+    handle_component_search, ComponentExtractToolRequest, ComponentExtractToolResponse,
+    ComponentGetToolRequest, ComponentImportToolRequest, ComponentSearchToolRequest,
+    ComponentSearchToolResponse,
 };
 #[cfg(test)]
 use ecky_ast::{
@@ -78,8 +76,9 @@ pub use printability::{
 };
 pub use project_folder::{
     handle_project_folder_apply, handle_project_folder_export, handle_project_folder_status,
-    project_folder_watcher_context, ProjectFolderApplyRequest, ProjectFolderExportRequest,
-    ProjectFolderStatusRequest, ProjectFolderWatchEvent, ProjectFolderWatcher,
+    project_folder_watcher_context, ProjectFolderApplyRequest, ProjectFolderApplyResponse,
+    ProjectFolderExportRequest, ProjectFolderStatusRequest, ProjectFolderWatchEvent,
+    ProjectFolderWatcher,
 };
 #[cfg(test)]
 use render_preview::{
@@ -177,6 +176,48 @@ pub(super) fn now_secs() -> u64 {
         .as_secs()
 }
 
+/// openspec thread-source-binding 4.1: resolve the bound-source view for an
+/// agent target metadata response (`sourcePath`, `sourceFolder`,
+/// `sourceState`). Reads the authoritative (stored) binding via
+/// `thread_source_binding::binding_info` and returns the exact stored paths.
+/// All three are `None` only when no binding row exists. A bound folder that
+/// is temporarily missing still exposes its exact stored paths with
+/// `sourceState=missing`, so agents can repair/reseed the known location.
+/// Read-only: this never backfills or writes the source.
+pub fn resolve_target_source_binding(
+    state: &AppState,
+    app: &dyn PathResolver,
+    conn: &rusqlite::Connection,
+    thread_id: &str,
+    title: &str,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<crate::project_mirror::ProjectSyncState>,
+) {
+    let configured_root = state.config.lock().unwrap().projects_root.clone();
+    let thread_head_message_id = db::get_latest_successful_message_id_in_thread(conn, thread_id)
+        .ok()
+        .flatten();
+    match crate::thread_source_binding::binding_info(
+        app,
+        conn,
+        configured_root.as_deref(),
+        thread_id,
+        title,
+        thread_head_message_id.as_deref(),
+        false,
+        None,
+    ) {
+        Ok(info) if !info.unbound => (
+            Some(info.source_path),
+            Some(info.folder_path),
+            Some(info.state),
+        ),
+        _ => (None, None, None),
+    }
+}
+
 fn mcp_profile_target(
     thread_id: Option<&str>,
     message_id: Option<&str>,
@@ -262,18 +303,7 @@ pub(super) fn push_unique_strings(target: &mut Vec<String>, values: &[String]) {
 pub(super) fn selection_target_match_ids(
     target: &crate::contracts::SelectionTarget,
 ) -> Vec<String> {
-    let mut ids = Vec::new();
-    if let Some(target_id) = target.target_id.as_deref() {
-        ids.push(target_id.to_string());
-    }
-    if let Some(durable_target_id) = target.durable_target_id.as_deref() {
-        ids.push(durable_target_id.to_string());
-    }
-    if let Some(canonical_target_id) = target.canonical_target_id.as_deref() {
-        ids.push(canonical_target_id.to_string());
-    }
-    ids.extend(target.alias_ids.iter().cloned());
-    ids
+    crate::services::authoring_graph::selection_target_ids(target)
 }
 
 fn is_specific_selection_binding(target: &crate::contracts::SelectionTarget) -> bool {
@@ -1436,7 +1466,9 @@ pub(super) async fn clear_session_render_preview_durable(
             .map_err(|e| AppError::persistence(e.to_string()))?;
     }
     clear_session_render_preview(session_id);
-    forget_authoring_actors_for_session(session_id);
+    state
+        .authoring_actor_registry
+        .forget_authoring_actors_for_session(session_id);
     Ok(())
 }
 
@@ -1460,7 +1492,10 @@ pub async fn store_session_render_preview(
     ctx: &AgentContext,
     req: StoreSessionRenderPreviewRequest,
 ) -> AppResult<SessionRenderPreview> {
-    let revision = reserve_authoring_actor_revision(ctx, &req.thread_id).await;
+    let revision = state
+        .authoring_actor_registry
+        .reserve_authoring_actor_revision(&ctx.session_id, &req.thread_id)
+        .await;
     store_session_render_preview_at_revision(state, app, ctx, revision, req).await
 }
 
@@ -1471,7 +1506,10 @@ async fn store_session_render_preview_at_revision(
     revision: AuthoringActorRevision,
     req: StoreSessionRenderPreviewRequest,
 ) -> AppResult<SessionRenderPreview> {
-    let mut permit = acquire_authoring_actor_publish_permit(ctx, &req.thread_id, revision).await?;
+    let mut permit = state
+        .authoring_actor_registry
+        .acquire_authoring_actor_publish_permit(&ctx.session_id, &req.thread_id, revision)
+        .await?;
     let preview = store_session_render_preview_unchecked(state, app, ctx, req).await?;
     permit.mark_published();
     Ok(preview)

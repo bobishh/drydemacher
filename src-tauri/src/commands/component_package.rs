@@ -226,6 +226,8 @@ fn write_artifact_bundle_component_package_project_impl(
             source_language: packaged_source.source_language,
             geometry_backend: packaged_source.geometry_backend,
             macro_dialect: packaged_source.macro_dialect,
+            geometry_provenance: request.artifact_bundle.geometry_provenance.clone(),
+            entry_symbol: None,
             sketches: Vec::new(),
             keepouts: Vec::new(),
             fusion_zones: Vec::new(),
@@ -746,7 +748,13 @@ pub async fn install_component_package_archive(
     archive_path: String,
     app: AppHandle,
 ) -> AppResult<InstalledComponentPackage> {
-    component_package_runtime::install_component_package_archive(&app, Path::new(&archive_path))
+    let archive = Path::new(&archive_path);
+    let header = component_package_runtime::read_component_package_header_from_archive(archive)?;
+    let installed = component_package_runtime::install_component_package_to_store(&app, archive)?;
+    Ok(InstalledComponentPackage {
+        header,
+        package_dir: installed.store_dir.to_string_lossy().to_string(),
+    })
 }
 
 #[tauri::command]
@@ -755,6 +763,38 @@ pub async fn list_installed_component_package_headers(
     app: AppHandle,
 ) -> AppResult<Vec<ComponentPackageHeader>> {
     component_package_runtime::list_installed_component_package_headers(&app)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn uninstall_component_package_coordinate(
+    package_id: String,
+    version: String,
+    app: AppHandle,
+) -> AppResult<bool> {
+    component_package_runtime::remove_coordinate_index(&app, &package_id, &version)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn garbage_collect_component_package_store(
+    grace_period_seconds: u64,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<component_package_runtime::ComponentStoreGcReport> {
+    let persisted_roots = {
+        let connection = state.db.lock().await;
+        crate::db::component_dependency_package_digests(&connection)
+            .map_err(|error| AppError::persistence(error.to_string()))?
+    };
+    component_package_runtime::garbage_collect_component_package_store(
+        &app,
+        &component_package_runtime::ComponentStoreGcRequest {
+            explicit_root_digests: persisted_roots,
+            grace_period: std::time::Duration::from_secs(grace_period_seconds),
+        },
+        &component_package_runtime::RuntimeComponentStorePins,
+    )
 }
 
 #[tauri::command]
@@ -770,6 +810,20 @@ pub async fn resolve_installed_component_source(
         &package_id,
         &version,
         &component_id,
+    )
+}
+
+/// Workbench entry point for the same copy-inline materializer used by the
+/// MCP `component_import` tool. Do not replace this with a live import.
+#[tauri::command]
+#[specta::specta]
+pub async fn component_import_copy_inline(
+    request: crate::component_import_runtime::CopyInlineComponentImportRequest,
+    app: AppHandle,
+) -> AppResult<crate::component_import_runtime::CopyInlineComponentImportResponse> {
+    crate::component_import_runtime::copy_inline_component_import(
+        request,
+        &crate::component_import_runtime::InstalledLibraryComponentResolver { app: &app },
     )
 }
 
@@ -2506,24 +2560,6 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    struct TestResolver {
-        root: PathBuf,
-    }
-
-    impl crate::models::PathResolver for TestResolver {
-        fn app_data_dir(&self) -> PathBuf {
-            self.root.clone()
-        }
-
-        fn app_config_dir(&self) -> PathBuf {
-            self.root.clone()
-        }
-
-        fn resource_path(&self, _path: &str) -> Option<PathBuf> {
-            None
-        }
-    }
-
     fn sample_manifest_value(alias_ids: &[&str]) -> serde_json::Value {
         serde_json::json!({
             "schemaVersion": crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
@@ -2586,6 +2622,9 @@ mod tests {
     fn sample_artifact_bundle(manifest_path: &str) -> ArtifactBundle {
         ArtifactBundle {
             geometry_provenance: None,
+            component_dependency_lock: None,
+            component_dependency_lock_digest: None,
+            component_import_origins: Vec::new(),
             schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: "generated-abc123".to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -2673,6 +2712,8 @@ mod tests {
             source_language: Some(SourceLanguage::EckyIrV0),
             geometry_backend: Some(GeometryBackend::Freecad),
             macro_dialect: Some(MacroDialect::EckyIrV0),
+            geometry_provenance: None,
+            entry_symbol: None,
             sketches: Vec::new(),
             keepouts: vec![ComponentKeepoutVolume {
                 keepout_id: "keepout".to_string(),
@@ -3650,135 +3691,5 @@ mod tests {
 
         assert_eq!(normalized[0].target_ids, vec!["alias-edge".to_string()]);
         fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn write_artifact_bundle_component_package_project_round_trips_build123d_exact_target_ids_through_step(
-    ) {
-        let root = std::env::temp_dir().join(format!(
-            "ecky-component-package-build123d-{}",
-            uuid::Uuid::new_v4()
-        ));
-        fs::create_dir_all(&root).expect("temp root");
-        let resolver = TestResolver { root: root.clone() };
-        let build123d_capability = crate::runtime_capabilities::probe_build123d_runtime(&resolver);
-        let freecad_capability =
-            crate::runtime_capabilities::probe_freecad_runtime(None, &resolver);
-        if !build123d_capability.available || !freecad_capability.available {
-            let _ = fs::remove_dir_all(&root);
-            return;
-        }
-
-        let source = r#"(model
-                (part body
-                  (box 10.246912 7.135791 3.864209)))"#;
-        let bundle = crate::build123d::render_model_with_sources(
-            &crate::ecky_ir::lower_to_build123d(source).expect("lower"),
-            Some(source),
-            &DesignParams::new(),
-            &resolver,
-            SourceLanguage::EckyIrV0,
-        )
-        .expect("build123d render");
-        let edge_target_id = bundle
-            .edge_targets
-            .first()
-            .map(|target| target.target_id.clone())
-            .expect("edge target");
-        let face_target_id = bundle
-            .face_targets
-            .first()
-            .map(|target| target.target_id.clone())
-            .expect("face target");
-        let build123d_manifest = read_model_manifest_from_path(Path::new(&bundle.manifest_path))
-            .expect("bundle manifest");
-        let expected_edge_target_id = build123d_manifest
-            .selection_targets
-            .iter()
-            .find(|target| target.kind == crate::contracts::SelectionTargetKind::Edge)
-            .and_then(|target| target.target_id.clone())
-            .expect("edge target");
-        let expected_face_target_id = build123d_manifest
-            .selection_targets
-            .iter()
-            .find(|target| target.kind == crate::contracts::SelectionTargetKind::Face)
-            .and_then(|target| target.target_id.clone())
-            .expect("face target");
-        let project_dir = root.join("pkg");
-        fs::create_dir_all(&project_dir).expect("project dir");
-
-        let package = write_artifact_bundle_component_package_project_impl(
-            &project_dir,
-            ArtifactBundleComponentPackageRequest {
-                package_id: "pkg.build123d".to_string(),
-                version: "1.0.0".to_string(),
-                display_name: "Build123d Pkg".to_string(),
-                tags: Vec::new(),
-                component_id: "body".to_string(),
-                component_version: "1.0.0".to_string(),
-                component_display_name: "Body".to_string(),
-                source_ref: Some("components/body/source.step".to_string()),
-                artifact_bundle: bundle,
-                port_types: vec![PortTypeDefinition {
-                    type_id: "mechanical.anchor.v1".to_string(),
-                    display_name: "Anchor".to_string(),
-                    base: None,
-                    interfaces: Vec::new(),
-                    compatible_with: Vec::new(),
-                    allowed_ops: Vec::new(),
-                    params: Vec::new(),
-                }],
-                params: Vec::new(),
-                ui_spec: crate::contracts::UiSpec::default(),
-                initial_params: DesignParams::new(),
-                ports: vec![ComponentPort {
-                    port_id: "anchor".to_string(),
-                    type_id: "mechanical.anchor.v1".to_string(),
-                    target_ids: vec![edge_target_id, face_target_id],
-                    frame: None,
-                    params: Default::default(),
-                    interfaces: Vec::new(),
-                    compatible_with: Vec::new(),
-                    allowed_ops: Vec::new(),
-                }],
-            },
-        )
-        .expect("package write");
-
-        assert_eq!(package.components.len(), 1);
-        assert_eq!(package.components[0].ports.len(), 1);
-        assert_eq!(package.components[0].ports[0].target_ids.len(), 2);
-        assert_eq!(
-            package.components[0].ports[0].target_ids,
-            vec![expected_edge_target_id, expected_face_target_id]
-        );
-        let source_path = project_dir.join("components/body/source.step");
-        assert!(source_path.is_file());
-
-        let imported_bundle =
-            crate::freecad::import_step(source_path.to_string_lossy().as_ref(), None, &resolver)
-                .expect("import packaged step");
-        let imported_manifest =
-            read_model_manifest_from_path(Path::new(&imported_bundle.manifest_path))
-                .expect("imported manifest");
-        let installed_source = InstalledComponentSource {
-            package_id: package.package_id.clone(),
-            version: package.version.clone(),
-            package_display_name: package.display_name.clone(),
-            package_dir: project_dir.to_string_lossy().to_string(),
-            component: package.components[0].clone(),
-            port_types: package.port_types.clone(),
-            mate_types: package.mate_types.clone(),
-            source_path: source_path.to_string_lossy().to_string(),
-        };
-
-        validate_rendered_component_port_targets(
-            &installed_source,
-            &imported_bundle,
-            &imported_manifest,
-        )
-        .expect("round-trip target ids");
-
-        let _ = fs::remove_dir_all(&root);
     }
 }

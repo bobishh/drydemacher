@@ -11,7 +11,7 @@ capture matches this CSS geometry. Live route inspection at 1280×720 found:
 - Dock is a generic container with eight tab stops, not a named toolbar.
 - DRAW uses native `disabled`, making its reason difficult to discover by keyboard.
 - Archived grouping intent and implementation differ: Draw is mixed into primary
-  windows; Projects, Docs, and Sketch are marked utility.
+  windows; Projects and Docs are marked utility.
 - CSS pseudo-elements carry labels. They are pointer/focus popovers, not durable
   visible content.
 
@@ -50,7 +50,7 @@ Research basis:
 
 Order normal window launchers by work sequence:
 
-`Projects · Parameters · Dialogue · Sketch · Code · Docs | Draw · Terminal? · Settings`
+`Projects · Parameters · Dialogue · Code · Docs · Library | Draw · Terminal? · Settings`
 
 Left group opens persistent workspace windows. Right group contains transient modes,
 conditional terminal, and app configuration. Divider has separator semantics and no
@@ -68,7 +68,6 @@ raster. Redraw meanings:
 - Projects: folder plus stacked project leaf.
 - Parameters: three constraint sliders.
 - Dialogue: speech panel with baseline.
-- Sketch: compass/arc plus construction nodes, not chart polyline.
 - Code: source brackets plus slash.
 - Docs: open reference book, not upload page.
 - Draw: pencil/annotation stroke.
@@ -84,14 +83,15 @@ Every dock control derives one state: `closed`, `open`, `focused`, `activeMode`,
 `disabled`, `busy`, or `attention`. Window buttons set `aria-pressed` from visibility;
 Draw sets it from draw mode. `data-state` drives visuals:
 
-- open: primary border plus persistent bottom marker;
-- focused/activeMode: primary fill plus stronger marker;
-- busy: non-blocking progress notch;
-- attention: secondary marker plus accessible copy;
+- open: primary border and text;
+- focused/activeMode: primary fill and border;
+- busy: accessible state copy;
+- attention: secondary border/glow plus accessible copy;
 - disabled: reduced contrast plus `aria-disabled="true"`, still focusable.
 
-State never depends on color alone. Settings uses same visible/focused logic as other
-windows.
+ARIA state remains authoritative. The dock intentionally avoids extra inline/bottom
+state glyphs; they created clipped visual noise at the control edge. Settings uses the
+same visible/focused logic as other windows.
 
 Alternative: CSS classes per button. Rejected because current drift already left
 Settings without active styling and semantics.

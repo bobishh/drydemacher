@@ -34,7 +34,7 @@ pub fn try_compile_to_legacy_source(source: &str) -> Option<AppResult<String>> {
         .map(|result| result.map_err(core_err_to_app))
 }
 
-fn core_err_to_app(err: CompilerError) -> AppError {
+pub(crate) fn core_err_to_app(err: CompilerError) -> AppError {
     match err.kind {
         CompilerErrorKind::Parse => AppError::parse(err.to_string()),
         CompilerErrorKind::Resolve | CompilerErrorKind::TypeMismatch => {
@@ -111,22 +111,5 @@ mod tests {
         assert!(compiled.contains("(extrude (circle "), "{}", compiled);
         assert!(!compiled.contains("##"), "{}", compiled);
         compile_to_core_program(&compiled).expect("emitted source reparses");
-    }
-
-    #[test]
-    fn scheme_source_flows_through_ecky_ir_lowerer() {
-        let code = crate::ecky_ir::lower_to_build123d(
-            r#"
-            (define (cup-body radius height)
-              (extrude (circle radius) height))
-
-            (model
-              (part body (cup-body 12 30)))
-            "#,
-        )
-        .expect("lower");
-
-        assert!(code.contains("Circle("), "{}", code);
-        assert!(code.contains("extrude"), "{}", code);
     }
 }

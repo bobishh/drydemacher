@@ -309,6 +309,34 @@ mod tests {
     }
 
     #[test]
+    fn equidistant_candidates_break_ties_deterministically() {
+        // `xox` is a genuine tie: distance 1 from `box` (x->b) and distance 1
+        // from `xor` (x->r), and farther than the threshold from every other
+        // op. The contract is deterministic — ties must resolve the same way
+        // every call, and the documented rule is alphabetical, so `box` must
+        // precede `xor`.
+        let first = suggest_ops("xox");
+        let second = suggest_ops("xox");
+        assert_eq!(
+            first, second,
+            "tie-breaking must be deterministic across repeated calls, got {first:?}"
+        );
+
+        let box_idx = first
+            .iter()
+            .position(|s| s == "box")
+            .expect("`box` should be suggested for the near-miss `xox`");
+        let xor_idx = first
+            .iter()
+            .position(|s| s == "xor")
+            .expect("`xor` should be suggested for the near-miss `xox`");
+        assert!(
+            box_idx < xor_idx,
+            "alphabetical tie-break must order `box` before `xor`, got {first:?}"
+        );
+    }
+
+    #[test]
     fn suggestions_are_capped() {
         assert!(
             suggest_ops("rotate").len() <= MAX_SUGGESTIONS,

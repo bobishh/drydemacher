@@ -74,16 +74,11 @@ pub(crate) enum FaceSelectorClause {
 pub(crate) struct EdgeSelectorSpec {
     canonical_string: String,
     python_payload_literal: String,
-    target_ids: Option<Vec<String>>,
 }
 
 impl EdgeSelectorSpec {
     pub(crate) fn canonical_string(&self) -> &str {
         &self.canonical_string
-    }
-
-    pub(crate) fn target_ids(&self) -> Option<&[String]> {
-        self.target_ids.as_deref()
     }
 
     pub(crate) fn python_payload_literal(&self) -> &str {
@@ -356,7 +351,6 @@ pub(crate) fn parse_edge_selector_spec(selector_str: &str) -> AppResult<EdgeSele
     Ok(EdgeSelectorSpec {
         canonical_string: parsed.canonical_string(),
         python_payload_literal: edge_selector_python_payload_literal(&parsed),
-        target_ids: parsed.target_ids().map(|ids| ids.to_vec()),
     })
 }
 
@@ -1553,15 +1547,13 @@ mod tests {
     }
 
     #[test]
-    fn selector_specs_canonicalize_and_expose_exact_ids() {
+    fn selector_specs_canonicalize_and_face_specs_expose_exact_ids() {
         let edge = parse_edge_selector_spec("left+vertical").expect("edge spec");
         assert_eq!(edge.canonical_string(), "x-min+axis-z");
         assert_eq!(
             edge.python_payload_literal(),
             "{'kind': 'clauses', 'clauses': [{'kind': 'boundary', 'axis': 'x', 'bound': 'min'}, {'kind': 'axis', 'axis': 'z'}]}"
         );
-        assert!(edge.target_ids().is_none(), "{edge:?}");
-
         let face = parse_face_selector_spec("target-id:body:face:5:0-0-10:100").expect("face spec");
         assert_eq!(face.canonical_string(), "target-ids:body:face:5:0-0-10:100");
         assert_eq!(

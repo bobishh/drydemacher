@@ -620,6 +620,8 @@ async fn queue_agent_prompt_impl(
     let content =
         agent_dialogue::build_user_reply_message_content(&input.prompt_text, &input.attachments);
     let attachment_images = agent_dialogue::collect_attachment_image_paths(&input.attachments);
+    let app = state.app_handle.lock().unwrap().clone();
+    let configured_root = state.config.lock().unwrap().projects_root.clone();
 
     {
         let conn = state.db.lock().await;
@@ -633,6 +635,15 @@ async fn queue_agent_prompt_impl(
             let traits = crate::generate_genie_traits();
             crate::db::create_or_update_thread(&conn, &thread_id, &title, now, Some(&traits))
                 .map_err(|err| AppError::persistence(err.to_string()))?;
+            if let Some(app) = app.as_ref() {
+                crate::thread_source_binding::bind_new_thread(
+                    app,
+                    &conn,
+                    configured_root.as_deref(),
+                    &thread_id,
+                    &title,
+                )?;
+            }
         }
 
         crate::db::add_message(

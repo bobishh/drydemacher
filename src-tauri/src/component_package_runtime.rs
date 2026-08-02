@@ -1,17 +1,25 @@
-use std::fs;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::fs::{self, OpenOptions};
 use std::io::{Cursor, Read, Seek, Write};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, SystemTime};
 
 use base64::{engine::general_purpose, Engine as _};
+use sha2::{Digest, Sha256};
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::contracts::{
     component_package_header, validate_component_package, validate_component_package_header,
-    validate_design_params, validate_ui_spec, AppError, AppResult, ComponentDefinition,
-    ComponentPackage, ComponentPackageHeader, ComponentParam, ComponentParamKind, DesignParams,
-    InstalledAssemblyComponentSource, InstalledAssemblySource, InstalledComponentPackage,
-    InstalledComponentSource, ParamValue, ParsedParamsResult, UiField, UiSpec,
+    validate_design_params, validate_ui_spec, AppError, AppResult, ComponentCoordinateIndexEntry,
+    ComponentDefinition, ComponentPackage, ComponentPackageHeader, ComponentParam,
+    ComponentParamKind, DesignParams, InstalledAssemblyComponentSource, InstalledAssemblySource,
+    InstalledComponentPackage, InstalledComponentSource, PackagePayloadInventory,
+    PackagePayloadInventoryEntry, ParamValue, ParsedParamsResult, UiField, UiSpec,
+    PACKAGE_PAYLOAD_INVENTORY_SCHEMA_VERSION,
 };
 use crate::models::PathResolver;
 
@@ -276,80 +284,112 @@ pub fn install_component_package_archive(
     archive_path: &Path,
 ) -> AppResult<InstalledComponentPackage> {
     let header = read_component_package_header_from_archive(archive_path)?;
-    let package_dir = component_package_install_dir(app, &header.package_id, &header.version)?;
-    extract_component_package_archive(archive_path, &package_dir)?;
+    let installed = install_component_package_to_store(app, archive_path)?;
     Ok(InstalledComponentPackage {
         header,
-        package_dir: package_dir.to_string_lossy().to_string(),
+        package_dir: installed.store_dir.to_string_lossy().to_string(),
+    })
+}
+
+/// Result of installing a package payload into the global content-addressed
+/// store plus the mutable coordinate index.
+#[derive(Clone, Debug)]
+pub struct InstalledStorePackage {
+    pub package_id: String,
+    pub version: String,
+    pub package_digest: String,
+    pub store_dir: PathBuf,
+}
+
+/// Decode the inner payload bytes (`ecky-payload.b64`) from a package archive.
+/// Returns an error for legacy flat archives that have no payload envelope.
+pub fn read_decoded_package_payload(archive_path: &Path) -> AppResult<Vec<u8>> {
+    let archive_file = fs::File::open(archive_path).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to open component package archive '{}': {err}",
+            archive_path.display()
+        ))
+    })?;
+    let mut archive = ZipArchive::new(archive_file).map_err(|err| {
+        AppError::parse(format!(
+            "Failed to parse component package archive '{}': {err}",
+            archive_path.display()
+        ))
+    })?;
+    read_payload_archive_bytes(&mut archive, archive_path)?.ok_or_else(|| {
+        AppError::validation(format!(
+            "Component package archive '{}' has no '{}' payload envelope; cannot install into the content-addressed store.",
+            archive_path.display(),
+            COMPONENT_PACKAGE_PAYLOAD_FILE_NAME
+        ))
+    })
+}
+
+/// Install a package payload into the global content-addressed store and write
+/// the mutable coordinate index entry. Same coordinate + same digest is
+/// idempotent; same coordinate + different digest is rejected before any
+/// mutation, leaving existing content intact.
+pub fn install_component_package_to_store(
+    app: &dyn PathResolver,
+    archive_path: &Path,
+) -> AppResult<InstalledStorePackage> {
+    let header = read_component_package_header_from_archive(archive_path)?;
+    let payload_bytes = read_decoded_package_payload(archive_path)?;
+    let validated = validate_payload_archive(&payload_bytes)?;
+    let payload_package = read_component_package_from_payload(&payload_bytes, archive_path)?;
+    if payload_package.package_id != header.package_id || payload_package.version != header.version
+    {
+        return Err(AppError::validation(format!(
+            "Package envelope coordinate '{}@{}' does not match payload coordinate '{}@{}'.",
+            header.package_id, header.version, payload_package.package_id, payload_package.version
+        )));
+    }
+    let (package_digest, inventory) = compute_package_payload_digest(&validated);
+    let _lock = acquire_component_store_mutation_lock(app)?;
+
+    if let Some(existing) = read_coordinate_index(app, &header.package_id, &header.version)? {
+        if existing.package_digest != package_digest {
+            return Err(AppError::validation(format!(
+                "Package coordinate '{}@{}' is already installed with payload digest '{}'; refusing to overwrite with differing digest '{}'.",
+                header.package_id, header.version, existing.package_digest, package_digest
+            )));
+        }
+    }
+    enforce_immutable_coordinate_locked(app, &header.package_id, &header.version, &package_digest)?;
+
+    let store_dir = publish_validated_payload_locked(app, &validated, &package_digest, inventory)?;
+    write_immutable_coordinate_record_locked(
+        app,
+        &header.package_id,
+        &header.version,
+        &package_digest,
+    )?;
+    write_coordinate_index_locked(app, &header.package_id, &header.version, &package_digest)?;
+    Ok(InstalledStorePackage {
+        package_id: header.package_id.clone(),
+        version: header.version.clone(),
+        package_digest,
+        store_dir,
     })
 }
 
 pub fn list_installed_component_package_headers(
     app: &dyn PathResolver,
 ) -> AppResult<Vec<ComponentPackageHeader>> {
-    let root = component_library_root(app)?;
-    if !root.exists() {
-        return Ok(Vec::new());
-    }
-    let mut headers = Vec::new();
-    for package_entry in fs::read_dir(&root).map_err(|err| {
-        AppError::persistence(format!(
-            "Failed to read component library directory '{}': {}",
-            root.display(),
-            err
-        ))
-    })? {
-        let package_entry = package_entry.map_err(|err| {
-            AppError::persistence(format!(
-                "Failed to read component library entry '{}': {}",
-                root.display(),
-                err
-            ))
-        })?;
-        let package_path = package_entry.path();
-        if !package_path.is_dir() {
-            continue;
-        }
-        for version_entry in fs::read_dir(&package_path).map_err(|err| {
-            AppError::persistence(format!(
-                "Failed to read component package directory '{}': {}",
-                package_path.display(),
-                err
-            ))
-        })? {
-            let version_entry = version_entry.map_err(|err| {
-                AppError::persistence(format!(
-                    "Failed to read component package version entry '{}': {}",
-                    package_path.display(),
-                    err
-                ))
-            })?;
-            let version_path = version_entry.path();
-            if !version_path.is_dir() {
-                continue;
+    let mut headers = coordinate_index_entries(app)?
+        .into_iter()
+        .map(|entry| {
+            let store_dir = payload_store_dir(app, &entry.package_digest)?;
+            let package = read_component_package_manifest(&store_dir)?;
+            if package.package_id != entry.package_id || package.version != entry.version {
+                return Err(AppError::validation(format!(
+                    "Coordinate index '{}@{}' points to a payload with coordinate '{}@{}'.",
+                    entry.package_id, entry.version, package.package_id, package.version
+                )));
             }
-            let header_path = version_path.join(COMPONENT_PACKAGE_HEADER_FILE_NAME);
-            if !header_path.exists() {
-                continue;
-            }
-            let raw = fs::read_to_string(&header_path).map_err(|err| {
-                AppError::persistence(format!(
-                    "Failed to read installed component package header '{}': {}",
-                    header_path.display(),
-                    err
-                ))
-            })?;
-            let header: ComponentPackageHeader = serde_json::from_str(&raw).map_err(|err| {
-                AppError::parse(format!(
-                    "Failed to parse installed component package header '{}': {}",
-                    header_path.display(),
-                    err
-                ))
-            })?;
-            validate_component_package_header(&header)?;
-            headers.push(header);
-        }
-    }
+            component_package_header(&package)
+        })
+        .collect::<AppResult<Vec<_>>>()?;
     headers.sort_by(|a, b| {
         a.package_id
             .cmp(&b.package_id)
@@ -423,8 +463,27 @@ fn load_installed_package(
     package_id: &str,
     version: &str,
 ) -> AppResult<(PathBuf, ComponentPackage)> {
-    let package_dir = component_package_install_dir(app, package_id, version)?;
+    let entry = read_coordinate_index(app, package_id, version)?.ok_or_else(|| {
+        AppError::not_found(format!(
+            "Installed component package '{}@{}' was not found in the coordinate index.",
+            package_id, version
+        ))
+    })?;
+    let package_dir = payload_store_dir(app, &entry.package_digest)?;
+    let inventory = read_payload_inventory(&package_dir)?;
+    if inventory.package_digest != entry.package_digest {
+        return Err(AppError::validation(format!(
+            "Installed component package '{}@{}' has an integrity sidecar digest '{}' that does not match coordinate digest '{}'.",
+            package_id, version, inventory.package_digest, entry.package_digest
+        )));
+    }
     let package = read_component_package_manifest(&package_dir)?;
+    if package.package_id != package_id || package.version != version {
+        return Err(AppError::validation(format!(
+            "Installed component package index '{}@{}' resolves to payload coordinate '{}@{}'.",
+            package_id, version, package.package_id, package.version
+        )));
+    }
     Ok((package_dir, package))
 }
 
@@ -625,16 +684,6 @@ fn component_library_root(app: &dyn PathResolver) -> AppResult<PathBuf> {
         ))
     })?;
     Ok(root)
-}
-
-fn component_package_install_dir(
-    app: &dyn PathResolver,
-    package_id: &str,
-    version: &str,
-) -> AppResult<PathBuf> {
-    Ok(component_library_root(app)?
-        .join(safe_library_segment(package_id, "packageId")?)
-        .join(safe_library_segment(version, "version")?))
 }
 
 fn collect_package_files(root: &Path) -> AppResult<Vec<PathBuf>> {
@@ -948,14 +997,906 @@ fn archive_entry_name(root: &Path, path: &Path) -> AppResult<String> {
     Ok(entry_name)
 }
 
+// --- Package payload integrity and content-addressed storage ---
+// (component-package-imports, Decisions 5 & 7)
+//
+// Pure payload validation + digesting, then the global content-addressed
+// store and the mutable coordinate index. This lives alongside the legacy
+// per-coordinate install layout; the two never collide (the store is under
+// `store/sha256/`, the index under `index/`, the legacy layout under
+// `<packageId>/<version>/`).
+
+/// Domain-separated prefix for package payload digests. Trailing NUL prevents
+/// prefix-extension ambiguity.
+pub const PACKAGE_PAYLOAD_DOMAIN_PREFIX: &[u8] = b"ecky-package-payload-v1\0";
+/// Runtime-owned integrity sidecar written into each store payload directory.
+/// It is reserved: a payload archive that itself contains this path is rejected
+/// before digesting, and it is never part of its own digest input.
+pub const PACKAGE_INTEGRITY_FILE_NAME: &str = "ecky-integrity.json";
+const PACKAGE_STORE_DIR_NAME: &str = "store";
+const PACKAGE_STORE_ALGORITHM_DIR: &str = "sha256";
+const PACKAGE_INDEX_DIR_NAME: &str = "index";
+const PACKAGE_COORDINATE_RECORD_DIR_NAME: &str = "coordinate-records";
+const PACKAGE_STORE_MUTATION_LOCK_FILE_NAME: &str = ".store-mutation.lock";
+
+/// Explicit roots supplied by the owner of persisted locks (for example,
+/// `Message.artifactBundle`) when collecting the shared package store.
+#[derive(Clone, Debug)]
+pub struct ComponentStoreGcRequest {
+    pub explicit_root_digests: BTreeSet<String>,
+    pub grace_period: Duration,
+}
+
+/// A seam for render/export work that has resolved a payload but has not yet
+/// persisted its dependency lock. The owner supplies currently pinned digests
+/// on both GC root checks.
+pub trait ComponentStoreInFlightPins {
+    fn pinned_package_digests(&self) -> BTreeSet<String>;
+}
+
+fn runtime_component_store_pin_counts() -> &'static Mutex<BTreeMap<String, usize>> {
+    static COUNTS: OnceLock<Mutex<BTreeMap<String, usize>>> = OnceLock::new();
+    COUNTS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// RAII pin held by live render/export work between dependency resolution and
+/// durable lock persistence.
+pub struct ComponentStorePinGuard {
+    digests: Vec<String>,
+}
+
+impl Drop for ComponentStorePinGuard {
+    fn drop(&mut self) {
+        let mut counts = runtime_component_store_pin_counts()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for digest in &self.digests {
+            if let Some(count) = counts.get_mut(digest) {
+                *count -= 1;
+                if *count == 0 {
+                    counts.remove(digest);
+                }
+            }
+        }
+    }
+}
+
+pub fn pin_component_store_payloads(
+    digests: impl IntoIterator<Item = String>,
+) -> ComponentStorePinGuard {
+    let mut digests = digests.into_iter().collect::<Vec<_>>();
+    digests.sort();
+    digests.dedup();
+    let mut counts = runtime_component_store_pin_counts()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for digest in &digests {
+        *counts.entry(digest.clone()).or_insert(0) += 1;
+    }
+    drop(counts);
+    ComponentStorePinGuard { digests }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RuntimeComponentStorePins;
+
+impl ComponentStoreInFlightPins for RuntimeComponentStorePins {
+    fn pinned_package_digests(&self) -> BTreeSet<String> {
+        runtime_component_store_pin_counts()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .keys()
+            .cloned()
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentStoreGcReport {
+    pub deleted_package_digests: Vec<String>,
+    pub retained_package_digests: Vec<String>,
+}
+
+struct ComponentStoreMutationLock {
+    file: fs::File,
+}
+
+impl Drop for ComponentStoreMutationLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        // SAFETY: this file descriptor is owned by this lock guard.
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+fn acquire_component_store_mutation_lock(
+    app: &dyn PathResolver,
+) -> AppResult<ComponentStoreMutationLock> {
+    let root = component_library_root(app)?;
+    let path = root.join(PACKAGE_STORE_MUTATION_LOCK_FILE_NAME);
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|err| {
+            AppError::persistence(format!(
+                "Failed to open component store mutation lock '{}': {err}",
+                path.display()
+            ))
+        })?;
+    #[cfg(unix)]
+    {
+        // SAFETY: flock is applied to a valid owned descriptor. LOCK_EX blocks
+        // until every other Ecky process releases the same store lock.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(AppError::persistence(format!(
+                "Failed to acquire component store mutation lock '{}': {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            )));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        return Err(AppError::persistence(
+            "Component store mutation locking is unsupported on this platform.",
+        ));
+    }
+    Ok(ComponentStoreMutationLock { file })
+}
+
+/// One validated, in-memory payload entry. Paths are normalized UTF-8 with `/`
+/// separators and unique within the payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedPayloadEntry {
+    pub path: String,
+    pub content: Vec<u8>,
+}
+
+/// A payload archive that has passed safe-path / reserved-name / duplicate /
+/// symlink validation and is ready for deterministic digesting. Entries are
+/// sorted by normalized UTF-8 path bytes.
+#[derive(Clone, Debug)]
+pub struct ValidatedPayload {
+    pub entries: Vec<ValidatedPayloadEntry>,
+}
+
+/// Validate a decoded inner package payload archive (raw zip bytes) against
+/// the package-digest file-set rules:
+/// - include every non-directory regular-file entry after safe-path validation;
+/// - exclude root-level outer-envelope `ecky-header.json` and `ecky-payload.b64`;
+/// - reject `ecky-integrity.json` (reserved), duplicate normalized paths,
+///   traversal, symlinks, and non-UTF-8 names.
+/// Returns entries sorted by normalized path bytes.
+pub fn validate_payload_archive(payload: &[u8]) -> AppResult<ValidatedPayload> {
+    let mut archive = ZipArchive::new(Cursor::new(payload)).map_err(|err| {
+        AppError::parse(format!("Failed to parse package payload archive: {err}"))
+    })?;
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut entries: Vec<ValidatedPayloadEntry> = Vec::with_capacity(archive.len() as usize);
+    for index in 0..archive.len() {
+        let mut file = archive.by_index(index).map_err(|err| {
+            AppError::parse(format!("Failed to read payload entry {index}: {err}"))
+        })?;
+        if file.is_dir() {
+            continue;
+        }
+        if let Some(mode) = file.unix_mode() {
+            let kind = mode & 0o170000;
+            if kind == 0o120000 {
+                return Err(AppError::validation(format!(
+                    "Package payload entry '{}' is a symlink; symlinks are not allowed.",
+                    file.name()
+                )));
+            }
+            if kind != 0 && kind != 0o100000 {
+                return Err(AppError::validation(format!(
+                    "Package payload entry '{}' is not a regular file.",
+                    file.name()
+                )));
+            }
+        }
+        // Reject non-UTF-8 archive names: decode from raw bytes.
+        let raw_name = file.name_raw();
+        let decoded_name = std::str::from_utf8(raw_name).map_err(|_| {
+            AppError::validation(format!(
+                "Package payload entry has a non-UTF-8 name ({} bytes); non-UTF-8 names are not allowed.",
+                raw_name.len()
+            ))
+        })?;
+        let normalized = normalize_payload_path(decoded_name)?;
+        // Reserved integrity sidecar cannot ship inside a payload. Nested
+        // files with this basename are ordinary payload content; only the
+        // runtime-owned root sidecar is reserved.
+        if normalized == PACKAGE_INTEGRITY_FILE_NAME {
+            return Err(AppError::validation(format!(
+                "Package payload entry '{}' is reserved for runtime integrity metadata and may not ship inside a payload.",
+                normalized
+            )));
+        }
+        // Outer-envelope files are excluded from the digest set (they are not
+        // part of the inner payload content).
+        if normalized == COMPONENT_PACKAGE_HEADER_FILE_NAME
+            || normalized == COMPONENT_PACKAGE_PAYLOAD_FILE_NAME
+        {
+            continue;
+        }
+        if !seen.insert(normalized.clone()) {
+            return Err(AppError::validation(format!(
+                "Package payload contains a duplicate normalized path '{}'.",
+                normalized
+            )));
+        }
+        let mut content = Vec::new();
+        file.read_to_end(&mut content).map_err(|err| {
+            AppError::parse(format!(
+                "Failed to read payload entry '{normalized}': {err}"
+            ))
+        })?;
+        entries.push(ValidatedPayloadEntry {
+            path: normalized,
+            content,
+        });
+    }
+    entries.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+    Ok(ValidatedPayload { entries })
+}
+
+/// Deterministically re-encode validated payload entries for explicit
+/// portable project export. Runtime sidecars remain excluded.
+pub fn encode_validated_payload_archive(payload: &ValidatedPayload) -> AppResult<Vec<u8>> {
+    let cursor = Cursor::new(Vec::new());
+    let mut archive = ZipWriter::new(cursor);
+    let options = FileOptions::default()
+        .compression_method(CompressionMethod::Stored)
+        .unix_permissions(0o644);
+    for entry in &payload.entries {
+        archive.start_file(&entry.path, options).map_err(|error| {
+            AppError::persistence(format!(
+                "Failed to create portable payload entry '{}': {}",
+                entry.path, error
+            ))
+        })?;
+        archive.write_all(&entry.content).map_err(|error| {
+            AppError::persistence(format!(
+                "Failed to write portable payload entry '{}': {}",
+                entry.path, error
+            ))
+        })?;
+    }
+    archive
+        .finish()
+        .map(|cursor| cursor.into_inner())
+        .map_err(|error| {
+            AppError::persistence(format!(
+                "Failed to finalize portable package payload: {error}"
+            ))
+        })
+}
+
+fn normalize_payload_path(entry_name: &str) -> AppResult<String> {
+    let slashed = entry_name.replace('\\', "/");
+    let safe = safe_archive_path(&slashed)?;
+    safe.to_str()
+        .map(|path| path.replace('\\', "/"))
+        .ok_or_else(|| {
+            AppError::validation(format!(
+                "Package payload entry '{}' is not valid UTF-8.",
+                entry_name
+            ))
+        })
+}
+
+/// Compute the canonical package payload digest (`sha256:<hex>`) and an ordered
+/// per-file inventory. The digest uses domain prefix `ecky-package-payload-v1\0`,
+/// length-delimited path/content bytes, and entries sorted by normalized path
+/// bytes. The inventory is NOT digest input (it would self-reference).
+pub fn compute_package_payload_digest(
+    payload: &ValidatedPayload,
+) -> (String, Vec<PackagePayloadInventoryEntry>) {
+    let mut hasher = Sha256::new();
+    hasher.update(PACKAGE_PAYLOAD_DOMAIN_PREFIX);
+    let mut inventory = Vec::with_capacity(payload.entries.len());
+    for entry in &payload.entries {
+        let path_bytes = entry.path.as_bytes();
+        hasher.update(&(path_bytes.len() as u64).to_be_bytes());
+        hasher.update(path_bytes);
+        hasher.update(&(entry.content.len() as u64).to_be_bytes());
+        hasher.update(&entry.content);
+        inventory.push(PackagePayloadInventoryEntry {
+            path: entry.path.clone(),
+            sha256: format!("sha256:{:x}", Sha256::digest(&entry.content)),
+        });
+    }
+    (format!("sha256:{:x}", hasher.finalize()), inventory)
+}
+
+fn component_store_algorithm_root(app: &dyn PathResolver) -> AppResult<PathBuf> {
+    Ok(component_library_root(app)?
+        .join(PACKAGE_STORE_DIR_NAME)
+        .join(PACKAGE_STORE_ALGORITHM_DIR))
+}
+
+/// Directory of one content-addressed payload in the global store, keyed by
+/// the package payload digest. Validates the digest is a hex `sha256:` value
+/// safe for use as a path segment.
+pub fn payload_store_dir(app: &dyn PathResolver, package_digest: &str) -> AppResult<PathBuf> {
+    let hex = package_digest.strip_prefix("sha256:").ok_or_else(|| {
+        AppError::validation(format!(
+            "Package payload digest '{package_digest}' must start with 'sha256:'."
+        ))
+    })?;
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(AppError::validation(format!(
+            "Package payload digest '{package_digest}' must contain exactly 64 hexadecimal bytes."
+        )));
+    }
+    Ok(component_store_algorithm_root(app)?.join(hex))
+}
+
+/// Publish a validated payload into the global content-addressed store. Writes
+/// every entry under its normalized path plus the runtime-owned
+/// `ecky-integrity.json` sidecar. Idempotent: if the store directory already
+/// holds an integrity sidecar, no files are rewritten.
+pub fn publish_validated_payload(
+    app: &dyn PathResolver,
+    payload: &ValidatedPayload,
+    package_digest: &str,
+    inventory: Vec<PackagePayloadInventoryEntry>,
+) -> AppResult<PathBuf> {
+    let _lock = acquire_component_store_mutation_lock(app)?;
+    publish_validated_payload_locked(app, payload, package_digest, inventory)
+}
+
+fn publish_validated_payload_locked(
+    app: &dyn PathResolver,
+    payload: &ValidatedPayload,
+    package_digest: &str,
+    inventory: Vec<PackagePayloadInventoryEntry>,
+) -> AppResult<PathBuf> {
+    let store_dir = payload_store_dir(app, package_digest)?;
+    let expected_sidecar = PackagePayloadInventory {
+        schema_version: PACKAGE_PAYLOAD_INVENTORY_SCHEMA_VERSION,
+        package_digest: package_digest.to_string(),
+        entries: inventory,
+    };
+    if store_dir.exists() {
+        if store_dir.join(PACKAGE_INTEGRITY_FILE_NAME).is_file() {
+            let found = read_payload_inventory(&store_dir)?;
+            if found != expected_sidecar {
+                return Err(AppError::validation(format!(
+                    "Content-addressed store '{}' has integrity metadata that does not match digest '{}'.",
+                    store_dir.display(), package_digest
+                )));
+            }
+            return Ok(store_dir);
+        }
+        fs::remove_dir_all(&store_dir).map_err(|err| {
+            AppError::persistence(format!(
+                "Failed to remove incomplete package payload store '{}': {err}",
+                store_dir.display()
+            ))
+        })?;
+    }
+
+    let store_parent = store_dir.parent().ok_or_else(|| {
+        AppError::internal(format!(
+            "Package store path '{}' has no parent.",
+            store_dir.display()
+        ))
+    })?;
+    fs::create_dir_all(store_parent).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to create package payload store parent '{}': {err}",
+            store_parent.display()
+        ))
+    })?;
+    let staging_dir = store_parent.join(format!(
+        ".{}.staging-{}",
+        store_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("payload"),
+        uuid::Uuid::new_v4()
+    ));
+    fs::create_dir(&staging_dir).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to create package payload staging directory '{}': {err}",
+            staging_dir.display()
+        ))
+    })?;
+    let publish_result = (|| {
+        for entry in &payload.entries {
+            let output = staging_dir.join(safe_archive_path(&entry.path)?);
+            if let Some(parent) = output.parent() {
+                fs::create_dir_all(parent).map_err(|err| {
+                    AppError::persistence(format!(
+                        "Failed to create package payload staging directory '{}': {err}",
+                        parent.display()
+                    ))
+                })?;
+            }
+            write_synced_file(&output, &entry.content)?;
+        }
+        write_payload_inventory(&staging_dir, &expected_sidecar)?;
+        sync_directory(&staging_dir)?;
+        fs::rename(&staging_dir, &store_dir).map_err(|err| {
+            AppError::persistence(format!(
+                "Failed to atomically publish package payload '{}' to '{}': {err}",
+                staging_dir.display(),
+                store_dir.display()
+            ))
+        })?;
+        sync_directory(store_parent)
+    })();
+    if publish_result.is_err() && staging_dir.exists() {
+        let _ = fs::remove_dir_all(&staging_dir);
+    }
+    publish_result?;
+    Ok(store_dir)
+}
+
+/// Write the runtime-owned `ecky-integrity.json` sidecar into a payload store
+/// directory.
+pub fn write_payload_inventory(
+    store_dir: &Path,
+    inventory: &PackagePayloadInventory,
+) -> AppResult<PathBuf> {
+    let path = store_dir.join(PACKAGE_INTEGRITY_FILE_NAME);
+    let json = serde_json::to_vec_pretty(inventory)
+        .map_err(|err| AppError::internal(format!("Cannot serialize payload inventory: {err}")))?;
+    write_synced_file(&path, &json)?;
+    Ok(path)
+}
+
+fn write_synced_file(path: &Path, bytes: &[u8]) -> AppResult<()> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|err| {
+            AppError::persistence(format!(
+                "Failed to create package store file '{}': {err}",
+                path.display()
+            ))
+        })?;
+    file.write_all(bytes).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to write package store file '{}': {err}",
+            path.display()
+        ))
+    })?;
+    file.sync_all().map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to sync package store file '{}': {err}",
+            path.display()
+        ))
+    })
+}
+
+fn sync_directory(path: &Path) -> AppResult<()> {
+    #[cfg(unix)]
+    {
+        let directory = fs::File::open(path).map_err(|err| {
+            AppError::persistence(format!(
+                "Failed to open package store directory '{}': {err}",
+                path.display()
+            ))
+        })?;
+        directory.sync_all().map_err(|err| {
+            AppError::persistence(format!(
+                "Failed to sync package store directory '{}': {err}",
+                path.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+/// Read the runtime-owned integrity sidecar from a payload store directory.
+pub fn read_payload_inventory(store_dir: &Path) -> AppResult<PackagePayloadInventory> {
+    let path = store_dir.join(PACKAGE_INTEGRITY_FILE_NAME);
+    let raw = fs::read_to_string(&path).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to read package payload inventory '{}': {err}",
+            path.display()
+        ))
+    })?;
+    serde_json::from_str(&raw).map_err(|err| {
+        AppError::parse(format!(
+            "Failed to parse package payload inventory '{}': {err}",
+            path.display()
+        ))
+    })
+}
+
+fn coordinate_index_dir(app: &dyn PathResolver, package_id: &str) -> AppResult<PathBuf> {
+    Ok(component_library_root(app)?
+        .join(PACKAGE_INDEX_DIR_NAME)
+        .join(safe_library_segment(package_id, "packageId")?))
+}
+
+fn coordinate_index_path(
+    app: &dyn PathResolver,
+    package_id: &str,
+    version: &str,
+) -> AppResult<PathBuf> {
+    Ok(coordinate_index_dir(app, package_id)?.join(format!(
+        "{}.json",
+        safe_library_segment(version, "version")?
+    )))
+}
+
+fn immutable_coordinate_record_path(
+    app: &dyn PathResolver,
+    package_id: &str,
+    version: &str,
+) -> AppResult<PathBuf> {
+    Ok(component_library_root(app)?
+        .join(PACKAGE_COORDINATE_RECORD_DIR_NAME)
+        .join(safe_library_segment(package_id, "packageId")?)
+        .join(format!(
+            "{}.json",
+            safe_library_segment(version, "version")?
+        )))
+}
+
+fn read_immutable_coordinate_record(
+    app: &dyn PathResolver,
+    package_id: &str,
+    version: &str,
+) -> AppResult<Option<ComponentCoordinateIndexEntry>> {
+    let path = immutable_coordinate_record_path(app, package_id, version)?;
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&path).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to read immutable coordinate record '{}': {err}",
+            path.display()
+        ))
+    })?;
+    serde_json::from_str(&raw).map(Some).map_err(|err| {
+        AppError::parse(format!(
+            "Failed to parse immutable coordinate record '{}': {err}",
+            path.display()
+        ))
+    })
+}
+
+fn enforce_immutable_coordinate_locked(
+    app: &dyn PathResolver,
+    package_id: &str,
+    version: &str,
+    package_digest: &str,
+) -> AppResult<()> {
+    if let Some(existing) = read_immutable_coordinate_record(app, package_id, version)? {
+        if existing.package_digest != package_digest {
+            return Err(AppError::validation(format!(
+                "Package coordinate '{}@{}' was previously bound to payload digest '{}'; refusing to overwrite with differing digest '{}'.",
+                package_id, version, existing.package_digest, package_digest
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn write_immutable_coordinate_record_locked(
+    app: &dyn PathResolver,
+    package_id: &str,
+    version: &str,
+    package_digest: &str,
+) -> AppResult<()> {
+    enforce_immutable_coordinate_locked(app, package_id, version, package_digest)?;
+    let path = immutable_coordinate_record_path(app, package_id, version)?;
+    if path.is_file() {
+        return Ok(());
+    }
+    let parent = path.parent().ok_or_else(|| {
+        AppError::internal(format!(
+            "Immutable coordinate record path '{}' has no parent.",
+            path.display()
+        ))
+    })?;
+    fs::create_dir_all(parent).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to create immutable coordinate record directory '{}': {err}",
+            parent.display()
+        ))
+    })?;
+    let entry = ComponentCoordinateIndexEntry {
+        package_id: package_id.to_string(),
+        version: version.to_string(),
+        package_digest: package_digest.to_string(),
+    };
+    let json = serde_json::to_vec(&entry).map_err(|err| {
+        AppError::internal(format!(
+            "Cannot serialize immutable coordinate record: {err}"
+        ))
+    })?;
+    let temporary = parent.join(format!(
+        ".{}.{}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("coordinate"),
+        uuid::Uuid::new_v4()
+    ));
+    write_synced_file(&temporary, &json)?;
+    fs::rename(&temporary, &path).map_err(|err| {
+        let _ = fs::remove_file(&temporary);
+        AppError::persistence(format!(
+            "Failed to publish immutable coordinate record '{}': {err}",
+            path.display()
+        ))
+    })?;
+    sync_directory(parent)
+}
+
+/// Write the mutable discovery index for an exact coordinate while preserving
+/// its permanent coordinate-to-digest binding across uninstall and GC.
+pub fn write_coordinate_index(
+    app: &dyn PathResolver,
+    package_id: &str,
+    version: &str,
+    package_digest: &str,
+) -> AppResult<PathBuf> {
+    let _lock = acquire_component_store_mutation_lock(app)?;
+    enforce_immutable_coordinate_locked(app, package_id, version, package_digest)?;
+    write_immutable_coordinate_record_locked(app, package_id, version, package_digest)?;
+    write_coordinate_index_locked(app, package_id, version, package_digest)
+}
+
+fn write_coordinate_index_locked(
+    app: &dyn PathResolver,
+    package_id: &str,
+    version: &str,
+    package_digest: &str,
+) -> AppResult<PathBuf> {
+    payload_store_dir(app, package_digest)?;
+    let path = coordinate_index_path(app, package_id, version)?;
+    let parent = path.parent().ok_or_else(|| {
+        AppError::internal(format!(
+            "Coordinate index path '{}' has no parent.",
+            path.display()
+        ))
+    })?;
+    fs::create_dir_all(parent).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to create coordinate index directory '{}': {err}",
+            parent.display()
+        ))
+    })?;
+    let entry = ComponentCoordinateIndexEntry {
+        package_id: package_id.to_string(),
+        version: version.to_string(),
+        package_digest: package_digest.to_string(),
+    };
+    let json = serde_json::to_vec(&entry)
+        .map_err(|err| AppError::internal(format!("Cannot serialize coordinate index: {err}")))?;
+    let temporary = parent.join(format!(
+        ".{}.{}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("index"),
+        uuid::Uuid::new_v4()
+    ));
+    write_synced_file(&temporary, &json)?;
+    fs::rename(&temporary, &path).map_err(|err| {
+        let _ = fs::remove_file(&temporary);
+        AppError::persistence(format!(
+            "Failed to atomically update coordinate index '{}': {err}",
+            path.display()
+        ))
+    })?;
+    sync_directory(parent)?;
+    Ok(path)
+}
+
+/// Read the mutable coordinate index entry for an exact coordinate, or `None`
+/// when the coordinate is not indexed.
+pub fn read_coordinate_index(
+    app: &dyn PathResolver,
+    package_id: &str,
+    version: &str,
+) -> AppResult<Option<ComponentCoordinateIndexEntry>> {
+    let path = coordinate_index_path(app, package_id, version)?;
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&path).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to read coordinate index '{}': {err}",
+            path.display()
+        ))
+    })?;
+    let entry: ComponentCoordinateIndexEntry = serde_json::from_str(&raw).map_err(|err| {
+        AppError::parse(format!(
+            "Failed to parse coordinate index '{}': {err}",
+            path.display()
+        ))
+    })?;
+    Ok(Some(entry))
+}
+
+/// Remove the coordinate index entry for an exact coordinate. Returns whether
+/// an entry was removed. Library uninstall uses this so new unlocked resolution
+/// cannot discover the coordinate, while committed locks keep payloads alive.
+pub fn remove_coordinate_index(
+    app: &dyn PathResolver,
+    package_id: &str,
+    version: &str,
+) -> AppResult<bool> {
+    let _lock = acquire_component_store_mutation_lock(app)?;
+    let path = coordinate_index_path(app, package_id, version)?;
+    if !path.is_file() {
+        return Ok(false);
+    }
+    fs::remove_file(&path).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to remove coordinate index '{}': {err}",
+            path.display()
+        ))
+    })?;
+    if let Some(parent) = path.parent() {
+        sync_directory(parent)?;
+    }
+    Ok(true)
+}
+
+fn coordinate_index_entries(
+    app: &dyn PathResolver,
+) -> AppResult<Vec<ComponentCoordinateIndexEntry>> {
+    let root = component_library_root(app)?.join(PACKAGE_INDEX_DIR_NAME);
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut entries = Vec::new();
+    for package in fs::read_dir(&root).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to read coordinate index root '{}': {err}",
+            root.display()
+        ))
+    })? {
+        let package = package.map_err(|err| AppError::persistence(err.to_string()))?;
+        if !package.path().is_dir() {
+            continue;
+        }
+        for version in fs::read_dir(package.path()).map_err(|err| {
+            AppError::persistence(format!(
+                "Failed to read coordinate index directory '{}': {err}",
+                package.path().display()
+            ))
+        })? {
+            let version = version.map_err(|err| AppError::persistence(err.to_string()))?;
+            let path = version.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let raw = fs::read_to_string(&path).map_err(|err| {
+                AppError::persistence(format!(
+                    "Failed to read coordinate index '{}': {err}",
+                    path.display()
+                ))
+            })?;
+            let entry =
+                serde_json::from_str::<ComponentCoordinateIndexEntry>(&raw).map_err(|err| {
+                    AppError::parse(format!(
+                        "Failed to parse coordinate index '{}': {err}",
+                        path.display()
+                    ))
+                })?;
+            entries.push(entry);
+        }
+    }
+    entries.sort_by(|left, right| {
+        left.package_id
+            .cmp(&right.package_id)
+            .then_with(|| left.version.cmp(&right.version))
+    });
+    Ok(entries)
+}
+
+fn component_store_root_digests(
+    app: &dyn PathResolver,
+    explicit_roots: &BTreeSet<String>,
+    in_flight: &dyn ComponentStoreInFlightPins,
+) -> AppResult<BTreeSet<String>> {
+    let mut roots = explicit_roots.clone();
+    roots.extend(in_flight.pinned_package_digests());
+    roots.extend(
+        coordinate_index_entries(app)?
+            .into_iter()
+            .map(|entry| entry.package_digest),
+    );
+    Ok(roots)
+}
+
+/// Collect unreachable package payloads. Callers provide persisted dependency
+/// lock digests explicitly; installed coordinates and in-flight pins are added
+/// here. Roots are collected once for candidate selection and again while the
+/// store mutation lock is held immediately before deletion.
+pub fn garbage_collect_component_package_store(
+    app: &dyn PathResolver,
+    request: &ComponentStoreGcRequest,
+    in_flight: &dyn ComponentStoreInFlightPins,
+) -> AppResult<ComponentStoreGcReport> {
+    let first_roots = component_store_root_digests(app, &request.explicit_root_digests, in_flight)?;
+    let store_root = component_store_algorithm_root(app)?;
+    if !store_root.exists() {
+        return Ok(ComponentStoreGcReport::default());
+    }
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(&store_root).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to read package store '{}': {err}",
+            store_root.display()
+        ))
+    })? {
+        let path = entry
+            .map_err(|err| AppError::persistence(err.to_string()))?
+            .path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(hex) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let digest = format!("sha256:{hex}");
+        if payload_store_dir(app, &digest).is_err() || first_roots.contains(&digest) {
+            continue;
+        }
+        let modified = fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        if SystemTime::now()
+            .duration_since(modified)
+            .unwrap_or_default()
+            >= request.grace_period
+        {
+            candidates.push((digest, path));
+        }
+    }
+
+    let _lock = acquire_component_store_mutation_lock(app)?;
+    let second_roots =
+        component_store_root_digests(app, &request.explicit_root_digests, in_flight)?;
+    let mut report = ComponentStoreGcReport::default();
+    for (digest, path) in candidates {
+        if second_roots.contains(&digest) {
+            report.retained_package_digests.push(digest);
+            continue;
+        }
+        if !path.join(PACKAGE_INTEGRITY_FILE_NAME).is_file() {
+            report.retained_package_digests.push(digest);
+            continue;
+        }
+        fs::remove_dir_all(&path).map_err(|err| {
+            AppError::persistence(format!(
+                "Failed to delete unreachable package payload '{}': {err}",
+                path.display()
+            ))
+        })?;
+        report.deleted_package_digests.push(digest);
+    }
+    sync_directory(&store_root)?;
+    report.deleted_package_digests.sort();
+    report.retained_package_digests.sort();
+    Ok(report)
+}
+
 // --- Extracted component library (component-unification T5) ---
 //
 // Extracted components are stored one directory per component directly under
 // the component-library dir: `<library>/<name>/component.ecky` (copy-inline
 // `define-component` source) plus `<library>/<name>/ecky-header.json`
-// (compact header). Installed component packages keep their deeper
-// `<library>/<package>/<version>/` layout; the two never collide because
-// extracted component dirs hold an `ecky-header.json` at depth 1.
+// (compact header). Installed package payloads live under
+// `<library>/store/sha256/<digest>/` and discovery records live under
+// `<library>/index/`; these layouts never collide.
 
 pub const EXTRACTED_COMPONENT_SOURCE_FILE_NAME: &str = "component.ecky";
 
@@ -963,6 +1904,10 @@ pub const EXTRACTED_COMPONENT_SOURCE_FILE_NAME: &str = "component.ecky";
 #[serde(rename_all = "camelCase")]
 pub struct ExtractedComponentSearchResult {
     pub name: String,
+    /// Immutable source revision for shipped components. User-extracted
+    /// components remain unversioned until they are packaged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     pub one_liner: String,
     pub param_keys: Vec<String>,
     pub tags: Vec<String>,
@@ -972,6 +1917,8 @@ pub struct ExtractedComponentSearchResult {
 #[serde(rename_all = "camelCase")]
 pub struct ExtractedComponentRecord {
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     pub source: String,
     pub header: crate::component_extract::ComponentHeader,
 }
@@ -1018,10 +1965,40 @@ pub fn search_extracted_components(
 ) -> AppResult<Vec<ExtractedComponentSearchResult>> {
     let root = extracted_component_library_root(app)?;
     let mut results = Vec::new();
+    let needle = query.trim().to_lowercase();
+    for component in BUILTIN_STDLIB {
+        let haystack = format!(
+            "{} {} {}",
+            component.name,
+            component.one_liner,
+            component.tags.join(" ")
+        )
+        .to_lowercase();
+        if !needle.is_empty() && !haystack.contains(&needle) {
+            continue;
+        }
+        results.push(ExtractedComponentSearchResult {
+            name: component.name.to_string(),
+            version: Some(component.version.to_string()),
+            one_liner: component.one_liner.to_string(),
+            param_keys: component
+                .params
+                .iter()
+                .map(|key| (*key).to_string())
+                .collect(),
+            tags: component
+                .tags
+                .iter()
+                .map(|tag| (*tag).to_string())
+                .collect(),
+        });
+        if results.len() >= limit {
+            return Ok(results);
+        }
+    }
     if !root.exists() {
         return Ok(results);
     }
-    let needle = query.trim().to_lowercase();
     let mut entries: Vec<PathBuf> = fs::read_dir(&root)
         .map_err(|err| {
             AppError::persistence(format!(
@@ -1068,6 +2045,7 @@ pub fn search_extracted_components(
             .unwrap_or_else(|| format!("component {} ({})", header.name, param_keys.join(" ")));
         results.push(ExtractedComponentSearchResult {
             name: header.name,
+            version: None,
             one_liner,
             param_keys,
             tags: header.tags,
@@ -1087,10 +2065,14 @@ pub fn read_extracted_component(
     let source_path = dir.join(EXTRACTED_COMPONENT_SOURCE_FILE_NAME);
     let header_path = dir.join(COMPONENT_PACKAGE_HEADER_FILE_NAME);
     if !source_path.is_file() || !header_path.is_file() {
-        return Err(AppError::not_found(format!(
-            "No extracted component named `{}` in the component library.",
-            name
-        )));
+        return builtin_stdlib_component(name)
+            .map(builtin_stdlib_record)
+            .ok_or_else(|| {
+                AppError::not_found(format!(
+                    "No component named `{}` in the component library or shipped stdlib.",
+                    name
+                ))
+            });
     }
     let source = fs::read_to_string(&source_path).map_err(|err| {
         AppError::persistence(format!(
@@ -1115,9 +2097,79 @@ pub fn read_extracted_component(
     })?;
     Ok(ExtractedComponentRecord {
         name: name.to_string(),
+        version: None,
         source,
         header,
     })
+}
+
+/// Curated, copy-inlineable parametric components shipped with Ecky.
+///
+/// Keep these as source, rather than generated geometry or per-size files: a
+/// caller can inspect, paste, alter, and render each definition without a
+/// registry dependency. `version` is carried by discovery and import callers
+/// can record it beside the vendored source.
+struct BuiltinStdlibComponent {
+    name: &'static str,
+    version: &'static str,
+    one_liner: &'static str,
+    params: &'static [&'static str],
+    tags: &'static [&'static str],
+    source: &'static str,
+}
+
+const BUILTIN_STDLIB: &[BuiltinStdlibComponent] = &[
+    BuiltinStdlibComponent { name: "hex-bolt", version: "1.0.0", one_liner: "ISO-style hex bolt with parametric thread", params: &["d", "length", "pitch"], tags: &["fastener", "bolt", "thread"], source: "(define-component hex-bolt ((number d 8) (number length 30) (number pitch 1.25)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (let ((thread-depth (* pitch 0.6134))) (let ((minor-radius (- (/ d 2) thread-depth))) (union (extrude (regular-polygon 6 (* d 0.58)) (* d 0.65)) (thread :radius minor-radius :pitch pitch :length length :depth thread-depth)))))" },
+    BuiltinStdlibComponent { name: "socket-head-cap-screw", version: "1.0.0", one_liner: "Socket-head cap screw with parametric thread", params: &["d", "length", "pitch"], tags: &["fastener", "screw", "thread"], source: "(define-component socket-head-cap-screw ((number d 6) (number length 24) (number pitch 1)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (let ((thread-depth (* pitch 0.6134))) (let ((minor-radius (- (/ d 2) thread-depth))) (union (difference (cylinder (* d 0.85) d 48) (cylinder (* d 0.32) (* d 0.45) 6)) (thread :radius minor-radius :pitch pitch :length length :depth thread-depth)))))" },
+    BuiltinStdlibComponent { name: "hex-nut", version: "1.0.0", one_liner: "Hex nut cut with a mating tapped hole", params: &["d", "pitch", "thickness"], tags: &["fastener", "nut", "thread"], source: "(define-component hex-nut ((number d 8) (number pitch 1.25) (number thickness 6.5)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (let ((thread-depth (* pitch 0.6134))) (let ((minor-radius (- (/ d 2) thread-depth))) (difference (extrude (regular-polygon 6 (* d 0.58)) thickness) (tapped-hole :radius minor-radius :pitch pitch :depth thread-depth :length (+ thickness 2))))))" },
+    BuiltinStdlibComponent { name: "washer", version: "1.0.0", one_liner: "Flat washer with parametric bore and outside diameter", params: &["inner-d", "outer-d", "thickness"], tags: &["fastener", "washer"], source: "(define-component washer ((number inner-d 8.4) (number outer-d 16) (number thickness 1.6)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (cylinder (/ outer-d 2) thickness 64) (cylinder (/ inner-d 2) (+ thickness 2) 64)))" },
+    BuiltinStdlibComponent { name: "threaded-rod", version: "1.0.0", one_liner: "Full-length parametric threaded rod", params: &["d", "length", "pitch"], tags: &["fastener", "rod", "thread"], source: "(define-component threaded-rod ((number d 8) (number length 100) (number pitch 1.25)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (let ((thread-depth (* pitch 0.6134))) (let ((minor-radius (- (/ d 2) thread-depth))) (thread :radius minor-radius :pitch pitch :length length :depth thread-depth))))" },
+    BuiltinStdlibComponent { name: "ball-bearing", version: "1.0.0", one_liner: "608/623/624-style radial bearing family", params: &["bore", "outer-d", "width"], tags: &["bearing", "mechanical", "608", "623", "624"], source: "(define-component ball-bearing ((number bore 8) (number outer-d 22) (number width 7)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (cylinder (/ outer-d 2) width 96) (cylinder (/ bore 2) (+ width 2) 64)))" },
+    BuiltinStdlibComponent { name: "gt2-pulley", version: "1.0.0", one_liner: "GT2 timing pulley with teeth and bore controls", params: &["teeth", "bore", "width"], tags: &["pulley", "gt2", "motion"], source: "(define-component gt2-pulley ((number teeth 20) (number bore 5) (number width 7)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (cylinder (+ (* teeth 0.3183) 1) width 96) (cylinder (/ bore 2) (+ width 2) 64)))" },
+    BuiltinStdlibComponent { name: "standoff", version: "1.0.0", one_liner: "Hexagonal PCB standoff with through-hole", params: &["length", "outer-d", "hole-d"], tags: &["standoff", "pcb", "mounting"], source: "(define-component standoff ((number length 12) (number outer-d 6) (number hole-d 3)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (extrude (regular-polygon 6 (/ outer-d 1.732)) length) (cylinder (/ hole-d 2) (+ length 2) 48)))" },
+    BuiltinStdlibComponent { name: "heat-set-insert-pocket", version: "1.0.0", one_liner: "FDM heat-set insert cavity cutter with lead-in", params: &["bore", "depth", "lead-in"], tags: &["fdm", "insert", "pocket"], source: "(define-component heat-set-insert-pocket ((number bore 4.6) (number depth 6) (number lead-in 1)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (union (cylinder (/ bore 2) depth 64) (cone (/ bore 2) (+ (/ bore 2) lead-in) lead-in 64)))" },
+    BuiltinStdlibComponent { name: "corner-bracket", version: "1.0.0", one_liner: "Reinforced right-angle mounting bracket", params: &["leg", "height", "thickness"], tags: &["bracket", "mounting", "corner"], source: "(define-component corner-bracket ((number leg 30) (number height 20) (number thickness 3)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (union (box leg thickness height) (box thickness leg height) (translate thickness thickness 0 (wedge (- leg thickness) (- leg thickness) height 0 0 (- leg thickness) height))))" },
+    BuiltinStdlibComponent { name: "l-bracket", version: "1.0.0", one_liner: "Simple parametric L mounting bracket", params: &["leg", "height", "thickness"], tags: &["bracket", "mounting"], source: "(define-component l-bracket ((number leg 30) (number height 20) (number thickness 3)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (union (box leg thickness height) (box thickness leg height)))" },
+    BuiltinStdlibComponent { name: "hole-plate", version: "1.0.0", one_liner: "Mounting plate with repeat-union hole grid", params: &["cols", "rows", "pitch", "hole-d", "thickness"], tags: &["plate", "mounting", "grid"], source: "(define-component hole-plate ((number cols 3) (number rows 2) (number pitch 15) (number hole-d 4) (number thickness 3)) (verify (tag manifold) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= value 0))) (difference (box (* (+ cols 1) pitch) (* (+ rows 1) pitch) thickness) (repeat-union col cols (translate (* (+ col 1) pitch) (* (/ (+ rows 1) 2) pitch) -1 (cylinder (/ hole-d 2) (+ thickness 2) 48)))))" },
+];
+
+fn builtin_stdlib_component(name: &str) -> Option<&'static BuiltinStdlibComponent> {
+    BUILTIN_STDLIB
+        .iter()
+        .find(|component| component.name == name)
+}
+
+fn builtin_stdlib_record(component: &BuiltinStdlibComponent) -> ExtractedComponentRecord {
+    ExtractedComponentRecord {
+        name: component.name.to_string(),
+        version: Some(component.version.to_string()),
+        source: component.source.to_string(),
+        header: crate::component_extract::ComponentHeader {
+            name: component.name.to_string(),
+            description: Some(component.one_liner.to_string()),
+            params: component
+                .params
+                .iter()
+                .map(|key| crate::component_extract::ComponentHeaderParam {
+                    key: (*key).to_string(),
+                    kind: "number".to_string(),
+                    default: None,
+                    label: None,
+                })
+                .collect(),
+            tags: component
+                .tags
+                .iter()
+                .map(|tag| (*tag).to_string())
+                .collect(),
+            provenance: crate::component_extract::ComponentProvenance {
+                thread_id: None,
+                message_id: None,
+                source_digest: format!("builtin:{}@{}", component.name, component.version),
+            },
+            interfaces: Vec::new(),
+        },
+    }
 }
 
 fn extracted_component_library_root(app: &dyn PathResolver) -> AppResult<PathBuf> {
@@ -1203,7 +2255,7 @@ mod extracted_component_library_tests {
         assert!(dir.join("component.ecky").is_file());
         assert!(dir.join("ecky-header.json").is_file());
 
-        let results = search_extracted_components(&resolver, "bracket", 10).expect("search");
+        let results = search_extracted_components(&resolver, "L-shaped", 10).expect("search");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "bracket");
         assert_eq!(results[0].one_liner, "L-shaped mounting bracket");
@@ -1242,8 +2294,10 @@ mod extracted_component_library_tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].name, "beta-hinge");
 
-        let all = search_extracted_components(&resolver, "", 10).expect("search all");
-        assert_eq!(all.len(), 2);
+        let all = search_extracted_components(&resolver, "", 20).expect("search all");
+        assert!(all.iter().any(|hit| hit.name == "alpha-bracket"));
+        assert!(all.iter().any(|hit| hit.name == "beta-hinge"));
+        assert!(all.iter().any(|hit| hit.name == "hex-bolt"));
 
         let limited = search_extracted_components(&resolver, "", 1).expect("limited");
         assert_eq!(limited.len(), 1);
@@ -1261,5 +2315,594 @@ mod extracted_component_library_tests {
         let resolver = temp_resolver("unsafe");
         let err = read_extracted_component(&resolver, "../escape").expect_err("unsafe");
         assert!(err.message.contains("not a safe"), "{}", err.message);
+    }
+
+    #[test]
+    fn shipped_stdlib_search_and_get_expose_pinned_source_without_disk_seed() {
+        let resolver = temp_resolver("builtin");
+        let hits = search_extracted_components(&resolver, "gt2", 10).expect("search stdlib");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].name, "gt2-pulley");
+        assert_eq!(hits[0].version.as_deref(), Some("1.0.0"));
+
+        let record = read_extracted_component(&resolver, "gt2-pulley").expect("get stdlib");
+        assert_eq!(record.version.as_deref(), Some("1.0.0"));
+        assert!(record.source.contains("(define-component gt2-pulley"));
+        assert!(!record.source.contains("(import-component"));
+    }
+}
+
+#[cfg(test)]
+mod package_payload_store_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestResolver {
+        root: PathBuf,
+    }
+
+    impl PathResolver for TestResolver {
+        fn app_config_dir(&self) -> PathBuf {
+            self.root.clone()
+        }
+        fn app_data_dir(&self) -> PathBuf {
+            self.root.clone()
+        }
+        fn resource_path(&self, _path: &str) -> Option<PathBuf> {
+            None
+        }
+    }
+
+    fn temp_resolver(label: &str) -> TestResolver {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        TestResolver {
+            root: std::env::temp_dir().join(format!("ecky-payload-store-{label}-{nonce}")),
+        }
+    }
+
+    /// Build an in-memory zip from `(name, bytes)` entries.
+    fn payload_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = FileOptions::default()
+            .compression_method(CompressionMethod::Stored)
+            .unix_permissions(0o644);
+        for (name, bytes) in entries {
+            writer
+                .start_file(*name, options)
+                .expect("start payload file");
+            writer.write_all(bytes).expect("write payload bytes");
+        }
+        writer.finish().expect("finish payload zip").into_inner()
+    }
+
+    fn manifest_bytes(package_id: &str, version: &str, component_id: &str) -> Vec<u8> {
+        let json = format!(
+            r#"{{"schemaVersion":1,"packageId":"{package_id}","version":"{version}","displayName":"{package_id}","visibility":"source","components":[{{"componentId":"{component_id}","version":"1.0.0","displayName":"{component_id}"}}]}}"#
+        );
+        json.into_bytes()
+    }
+
+    fn sample_payload(package_id: &str, version: &str, component_id: &str, body: &str) -> Vec<u8> {
+        payload_zip(&[
+            (
+                COMPONENT_PACKAGE_FILE_NAME,
+                &manifest_bytes(package_id, version, component_id),
+            ),
+            (
+                &format!("components/{component_id}/source.ecky"),
+                body.as_bytes(),
+            ),
+        ])
+    }
+
+    fn full_archive(package_id: &str, version: &str, payload_bytes: &[u8]) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("ecky-payload-archive-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("archive dir");
+        let archive_path = dir.join("pkg.ecky");
+        let mut writer = ZipWriter::new(fs::File::create(&archive_path).expect("create archive"));
+        let options = FileOptions::default()
+            .compression_method(CompressionMethod::Stored)
+            .unix_permissions(0o644);
+        let header_json = format!(
+            r#"{{"schemaVersion":1,"packageId":"{package_id}","version":"{version}","displayName":"{package_id}","visibility":"source","components":[{{"componentId":"cage","version":"1.0.0","displayName":"cage"}}]}}"#
+        );
+        writer
+            .start_file(COMPONENT_PACKAGE_HEADER_FILE_NAME, options)
+            .expect("header entry");
+        writer
+            .write_all(header_json.as_bytes())
+            .expect("header bytes");
+        writer
+            .start_file(COMPONENT_PACKAGE_PAYLOAD_FILE_NAME, options)
+            .expect("payload entry");
+        writer
+            .write_all(general_purpose::STANDARD.encode(payload_bytes).as_bytes())
+            .expect("payload bytes");
+        writer.finish().expect("finish archive");
+        archive_path
+    }
+
+    #[test]
+    fn digest_includes_manifest_and_source_and_excludes_envelope_files() {
+        // The inner payload contains ecky-package.json + a source file, plus
+        // outer-envelope names that must be excluded from the digest set.
+        let payload = payload_zip(&[
+            (COMPONENT_PACKAGE_FILE_NAME, b"{\"schemaVersion\":1}"),
+            (
+                "components/cage/source.ecky",
+                b"(model (part body (box 1 1 1)))",
+            ),
+            (COMPONENT_PACKAGE_HEADER_FILE_NAME, b"envelope-header"),
+            (COMPONENT_PACKAGE_PAYLOAD_FILE_NAME, b"envelope-payload"),
+        ]);
+        let validated = validate_payload_archive(&payload).expect("valid payload");
+        // Envelope files excluded; only manifest + source remain.
+        assert_eq!(validated.entries.len(), 2);
+        let paths: Vec<&str> = validated.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["components/cage/source.ecky", "ecky-package.json"]
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn digest_is_deterministic_and_independent_of_entry_order() {
+        let body = "(model (part body (box 2 2 2)))";
+        let a = sample_payload("bike.kit", "1.2.0", "cage", body);
+        // Same logical content, reversed entry order.
+        let b = payload_zip(&[
+            ("components/cage/source.ecky", body.as_bytes()),
+            (
+                COMPONENT_PACKAGE_FILE_NAME,
+                &manifest_bytes("bike.kit", "1.2.0", "cage"),
+            ),
+        ]);
+        let (digest_a, inv_a) =
+            compute_package_payload_digest(&validate_payload_archive(&a).expect("valid a"));
+        let (digest_b, inv_b) =
+            compute_package_payload_digest(&validate_payload_archive(&b).expect("valid b"));
+        assert_eq!(digest_a, digest_b, "order-independent digest");
+        assert!(digest_a.starts_with("sha256:"));
+        assert_eq!(inv_a.len(), 2);
+        assert_eq!(inv_a, inv_b, "order-independent inventory");
+    }
+
+    #[test]
+    fn digest_changes_when_content_changes() {
+        let base = sample_payload(
+            "bike.kit",
+            "1.2.0",
+            "cage",
+            "(model (part body (box 1 1 1)))",
+        );
+        let changed = sample_payload(
+            "bike.kit",
+            "1.2.0",
+            "cage",
+            "(model (part body (box 9 9 9)))",
+        );
+        let d_base =
+            compute_package_payload_digest(&validate_payload_archive(&base).expect("valid")).0;
+        let d_changed =
+            compute_package_payload_digest(&validate_payload_archive(&changed).expect("valid")).0;
+        assert_ne!(d_base, d_changed);
+    }
+
+    #[test]
+    fn validation_rejects_reserved_integrity_path() {
+        let payload = payload_zip(&[
+            (COMPONENT_PACKAGE_FILE_NAME, b"{}"),
+            (PACKAGE_INTEGRITY_FILE_NAME, b"{}"),
+        ]);
+        let err = validate_payload_archive(&payload).expect_err("reserved rejected");
+        assert!(err.message.contains("reserved"), "{}", err.message);
+        assert!(
+            err.message.contains("ecky-integrity.json"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn validation_rejects_duplicate_normalized_paths() {
+        let payload = payload_zip(&[
+            (COMPONENT_PACKAGE_FILE_NAME, b"{}"),
+            ("src/a.txt", b"x"),
+            ("src\\a.txt", b"y"),
+        ]);
+        let err = validate_payload_archive(&payload).expect_err("duplicate rejected");
+        assert!(err.message.contains("duplicate"), "{}", err.message);
+    }
+
+    #[test]
+    fn validation_rejects_traversal_entries() {
+        let payload = payload_zip(&[(COMPONENT_PACKAGE_FILE_NAME, b"{}"), ("../evil.txt", b"x")]);
+        let err = validate_payload_archive(&payload).expect_err("traversal rejected");
+        assert!(err.message.contains("safe to extract"), "{}", err.message);
+    }
+
+    #[test]
+    fn publish_writes_payload_files_and_inventory_sidecar() {
+        let resolver = temp_resolver("publish");
+        let payload = sample_payload(
+            "bike.kit",
+            "1.2.0",
+            "cage",
+            "(model (part body (box 1 1 1)))",
+        );
+        let validated = validate_payload_archive(&payload).expect("valid");
+        let (digest, inventory) = compute_package_payload_digest(&validated);
+        let store_dir =
+            publish_validated_payload(&resolver, &validated, &digest, inventory.clone())
+                .expect("publish");
+
+        assert!(store_dir.join(COMPONENT_PACKAGE_FILE_NAME).is_file());
+        assert!(store_dir.join("components/cage/source.ecky").is_file());
+        // Sidecar always exists after publish.
+        assert!(store_dir.join(PACKAGE_INTEGRITY_FILE_NAME).is_file());
+
+        let read_back = read_payload_inventory(&store_dir).expect("read inventory");
+        assert_eq!(read_back.package_digest, digest);
+        assert_eq!(read_back.entries, inventory);
+        // The sidecar itself is never a digest input.
+        assert!(
+            !read_back
+                .entries
+                .iter()
+                .any(|e| e.path == PACKAGE_INTEGRITY_FILE_NAME),
+            "integrity sidecar must not be in inventory"
+        );
+    }
+
+    #[test]
+    fn publish_is_idempotent_for_same_digest() {
+        let resolver = temp_resolver("idempotent");
+        let payload = sample_payload("bike.kit", "1.2.0", "cage", "(model)");
+        let validated = validate_payload_archive(&payload).expect("valid");
+        let (digest, inventory) = compute_package_payload_digest(&validated);
+        let first = publish_validated_payload(&resolver, &validated, &digest, inventory.clone())
+            .expect("first publish");
+        // Mutate a payload file on disk, then republish: idempotent path must
+        // NOT rewrite existing content.
+        let target = first.join(COMPONENT_PACKAGE_FILE_NAME);
+        fs::write(&target, b"tampered").expect("tamper");
+        publish_validated_payload(&resolver, &validated, &digest, inventory).expect("republish");
+        let after = fs::read_to_string(&target).expect("read after");
+        assert_eq!(after, "tampered", "idempotent publish must not rewrite");
+    }
+
+    #[test]
+    fn install_to_store_publishes_and_indexes_coordinate() {
+        let resolver = temp_resolver("install");
+        let payload = sample_payload(
+            "bike.kit",
+            "1.2.0",
+            "cage",
+            "(model (part body (box 1 1 1)))",
+        );
+        let archive = full_archive("bike.kit", "1.2.0", &payload);
+
+        let installed = install_component_package_to_store(&resolver, &archive).expect("install");
+        assert_eq!(installed.package_id, "bike.kit");
+        assert_eq!(installed.version, "1.2.0");
+        assert!(installed.package_digest.starts_with("sha256:"));
+        assert!(installed
+            .store_dir
+            .join(PACKAGE_INTEGRITY_FILE_NAME)
+            .is_file());
+
+        let indexed = read_coordinate_index(&resolver, "bike.kit", "1.2.0").expect("read index");
+        let indexed = indexed.expect("indexed");
+        assert_eq!(indexed.package_digest, installed.package_digest);
+    }
+
+    #[test]
+    fn install_to_store_idempotent_for_same_digest() {
+        let resolver = temp_resolver("install-idem");
+        let payload = sample_payload("bike.kit", "1.2.0", "cage", "(model)");
+        let archive = full_archive("bike.kit", "1.2.0", &payload);
+        let first = install_component_package_to_store(&resolver, &archive).expect("first");
+        let second = install_component_package_to_store(&resolver, &archive).expect("second");
+        assert_eq!(first.package_digest, second.package_digest);
+        assert_eq!(first.store_dir, second.store_dir);
+    }
+
+    #[test]
+    fn install_to_store_rejects_different_digest_at_same_coordinate() {
+        let resolver = temp_resolver("install-mutation");
+        let payload_v1 = sample_payload(
+            "bike.kit",
+            "1.2.0",
+            "cage",
+            "(model (part body (box 1 1 1)))",
+        );
+        let archive_v1 = full_archive("bike.kit", "1.2.0", &payload_v1);
+        let first = install_component_package_to_store(&resolver, &archive_v1).expect("first");
+        let payload_v2 = sample_payload(
+            "bike.kit",
+            "1.2.0",
+            "cage",
+            "(model (part body (box 9 9 9)))",
+        );
+        let archive_v2 = full_archive("bike.kit", "1.2.0", &payload_v2);
+        let err = install_component_package_to_store(&resolver, &archive_v2)
+            .expect_err("mutation rejected");
+        assert!(
+            err.message.contains("refusing to overwrite"),
+            "{}",
+            err.message
+        );
+        // Existing content intact.
+        let indexed = read_coordinate_index(&resolver, "bike.kit", "1.2.0").expect("read index");
+        assert_eq!(
+            indexed.expect("still indexed").package_digest,
+            first.package_digest
+        );
+    }
+
+    #[test]
+    fn cross_model_cas_dedup_reuses_same_coordinate_store_dir() {
+        let resolver = temp_resolver("cas-dedup");
+        let body = "(model (part body (box 4 4 4)))";
+        // Multiple model versions using one exact package coordinate reuse
+        // the same global payload directory.
+        let payload = sample_payload("bike.kit", "1.2.0", "cage", body);
+        let archive_a = full_archive("bike.kit", "1.2.0", &payload);
+        let archive_b = full_archive("bike.kit", "1.2.0", &payload);
+
+        let installed_a = install_component_package_to_store(&resolver, &archive_a).expect("a");
+        let installed_b = install_component_package_to_store(&resolver, &archive_b).expect("b");
+        assert_eq!(installed_a.package_digest, installed_b.package_digest);
+        assert_eq!(installed_a.store_dir, installed_b.store_dir);
+    }
+
+    #[test]
+    fn remove_coordinate_index_blocks_unlocked_resolution() {
+        let resolver = temp_resolver("uninstall");
+        let payload = sample_payload("bike.kit", "1.2.0", "cage", "(model)");
+        let archive = full_archive("bike.kit", "1.2.0", &payload);
+        let installed = install_component_package_to_store(&resolver, &archive).expect("install");
+
+        let removed = remove_coordinate_index(&resolver, "bike.kit", "1.2.0").expect("remove");
+        assert!(removed);
+        // The payload store survives uninstall (committed locks are GC roots).
+        assert!(installed
+            .store_dir
+            .join(PACKAGE_INTEGRITY_FILE_NAME)
+            .is_file());
+        // Unlocked discovery no longer finds the coordinate.
+        let after = read_coordinate_index(&resolver, "bike.kit", "1.2.0").expect("read");
+        assert!(after.is_none());
+        // Second remove reports nothing to do.
+        let again = remove_coordinate_index(&resolver, "bike.kit", "1.2.0").expect("remove again");
+        assert!(!again);
+    }
+
+    #[test]
+    fn uninstall_does_not_allow_exact_coordinate_to_be_rebound_to_new_payload() {
+        let resolver = temp_resolver("immutable-after-uninstall");
+        let first = full_archive(
+            "bike.immutable",
+            "1.0.0",
+            &sample_payload(
+                "bike.immutable",
+                "1.0.0",
+                "cage",
+                "(define-component cage () (box 1 1 1))",
+            ),
+        );
+        let installed =
+            install_component_package_to_store(&resolver, &first).expect("first install");
+        remove_coordinate_index(&resolver, "bike.immutable", "1.0.0").expect("uninstall");
+
+        let changed = full_archive(
+            "bike.immutable",
+            "1.0.0",
+            &sample_payload(
+                "bike.immutable",
+                "1.0.0",
+                "cage",
+                "(define-component cage () (box 9 9 9))",
+            ),
+        );
+        let error = install_component_package_to_store(&resolver, &changed)
+            .expect_err("exact coordinate remains immutable after uninstall");
+        assert!(error.message.contains("refusing to overwrite"), "{error}");
+        assert!(installed.store_dir.exists());
+        assert!(
+            read_coordinate_index(&resolver, "bike.immutable", "1.0.0")
+                .expect("discovery index")
+                .is_none(),
+            "failed mutation must not reinstall discovery metadata"
+        );
+    }
+
+    #[test]
+    fn installation_recovers_an_incomplete_store_without_publishing_an_incomplete_index() {
+        let resolver = temp_resolver("atomic-recovery");
+        let payload = sample_payload(
+            "bike.kit",
+            "1.2.0",
+            "cage",
+            "(model (part body (box 2 2 2)))",
+        );
+        let validated = validate_payload_archive(&payload).expect("valid payload");
+        let (digest, _) = compute_package_payload_digest(&validated);
+        let incomplete_dir = payload_store_dir(&resolver, &digest).expect("store path");
+        fs::create_dir_all(&incomplete_dir).expect("simulate interrupted publish");
+        fs::write(incomplete_dir.join(COMPONENT_PACKAGE_FILE_NAME), b"partial")
+            .expect("partial file");
+
+        let archive = full_archive("bike.kit", "1.2.0", &payload);
+        let installed =
+            install_component_package_to_store(&resolver, &archive).expect("recover install");
+
+        assert_eq!(installed.package_digest, digest);
+        assert_eq!(
+            fs::read(incomplete_dir.join(COMPONENT_PACKAGE_FILE_NAME)).expect("manifest"),
+            validated
+                .entries
+                .iter()
+                .find(|entry| entry.path == COMPONENT_PACKAGE_FILE_NAME)
+                .expect("manifest entry")
+                .content
+        );
+        assert!(incomplete_dir.join(PACKAGE_INTEGRITY_FILE_NAME).is_file());
+        assert_eq!(
+            read_coordinate_index(&resolver, "bike.kit", "1.2.0")
+                .expect("index")
+                .expect("published index")
+                .package_digest,
+            digest
+        );
+    }
+
+    #[test]
+    fn gc_retains_coordinate_explicit_and_in_flight_roots_and_deletes_orphans() {
+        struct Pins(std::collections::BTreeSet<String>);
+        impl ComponentStoreInFlightPins for Pins {
+            fn pinned_package_digests(&self) -> std::collections::BTreeSet<String> {
+                self.0.clone()
+            }
+        }
+
+        let resolver = temp_resolver("gc");
+        let indexed = install_component_package_to_store(
+            &resolver,
+            &full_archive(
+                "bike.indexed",
+                "1.0.0",
+                &sample_payload("bike.indexed", "1.0.0", "cage", "(model 1)"),
+            ),
+        )
+        .expect("indexed install");
+        let explicit = install_component_package_to_store(
+            &resolver,
+            &full_archive(
+                "bike.explicit",
+                "1.0.0",
+                &sample_payload("bike.explicit", "1.0.0", "cage", "(model 2)"),
+            ),
+        )
+        .expect("explicit install");
+        let in_flight = install_component_package_to_store(
+            &resolver,
+            &full_archive(
+                "bike.flight",
+                "1.0.0",
+                &sample_payload("bike.flight", "1.0.0", "cage", "(model 3)"),
+            ),
+        )
+        .expect("in-flight install");
+        let orphan = install_component_package_to_store(
+            &resolver,
+            &full_archive(
+                "bike.orphan",
+                "1.0.0",
+                &sample_payload("bike.orphan", "1.0.0", "cage", "(model 4)"),
+            ),
+        )
+        .expect("orphan install");
+        for package_id in ["bike.explicit", "bike.flight", "bike.orphan"] {
+            remove_coordinate_index(&resolver, package_id, "1.0.0").expect("uninstall");
+        }
+
+        let report = garbage_collect_component_package_store(
+            &resolver,
+            &ComponentStoreGcRequest {
+                explicit_root_digests: [explicit.package_digest.clone()].into_iter().collect(),
+                grace_period: std::time::Duration::ZERO,
+            },
+            &Pins([in_flight.package_digest.clone()].into_iter().collect()),
+        )
+        .expect("gc");
+
+        assert!(indexed.store_dir.exists(), "coordinate index is a root");
+        assert!(
+            explicit.store_dir.exists(),
+            "explicit lock root is retained"
+        );
+        assert!(in_flight.store_dir.exists(), "in-flight root is retained");
+        assert!(!orphan.store_dir.exists(), "unreachable store is deleted");
+        assert_eq!(report.deleted_package_digests, vec![orphan.package_digest]);
+    }
+
+    #[test]
+    fn gc_rechecks_in_flight_roots_while_holding_the_mutation_lock() {
+        struct AppearsDuringGc {
+            calls: std::sync::atomic::AtomicUsize,
+            digest: String,
+        }
+        impl ComponentStoreInFlightPins for AppearsDuringGc {
+            fn pinned_package_digests(&self) -> std::collections::BTreeSet<String> {
+                if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    Default::default()
+                } else {
+                    [self.digest.clone()].into_iter().collect()
+                }
+            }
+        }
+
+        let resolver = temp_resolver("gc-recheck");
+        let installed = install_component_package_to_store(
+            &resolver,
+            &full_archive(
+                "bike.recheck",
+                "1.0.0",
+                &sample_payload("bike.recheck", "1.0.0", "cage", "(model recheck)"),
+            ),
+        )
+        .expect("install");
+        remove_coordinate_index(&resolver, "bike.recheck", "1.0.0").expect("uninstall");
+        let pins = AppearsDuringGc {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            digest: installed.package_digest.clone(),
+        };
+
+        let report = garbage_collect_component_package_store(
+            &resolver,
+            &ComponentStoreGcRequest {
+                explicit_root_digests: Default::default(),
+                grace_period: std::time::Duration::ZERO,
+            },
+            &pins,
+        )
+        .expect("gc");
+
+        assert_eq!(pins.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(
+            installed.store_dir.exists(),
+            "second root check retains payload"
+        );
+        assert_eq!(
+            report.retained_package_digests,
+            vec![installed.package_digest]
+        );
+    }
+
+    #[test]
+    fn runtime_pin_guard_roots_payload_until_last_overlapping_owner_drops() {
+        let digest = format!("sha256:{}", "c".repeat(64));
+        let pins = RuntimeComponentStorePins;
+        let first = pin_component_store_payloads([digest.clone()]);
+        let second = pin_component_store_payloads([digest.clone(), digest.clone()]);
+        assert_eq!(
+            pins.pinned_package_digests(),
+            [digest.clone()].into_iter().collect()
+        );
+        drop(first);
+        assert_eq!(
+            pins.pinned_package_digests(),
+            [digest.clone()].into_iter().collect()
+        );
+        drop(second);
+        assert!(!pins.pinned_package_digests().contains(&digest));
     }
 }

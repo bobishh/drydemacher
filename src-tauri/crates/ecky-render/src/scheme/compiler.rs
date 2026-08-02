@@ -401,6 +401,7 @@ fn validate_source_budget_before_steel(source: &str) -> CoreResult<()> {
     let mut depth = 0usize;
     let mut list_forms = 0usize;
     let mut in_string = false;
+    let mut string_start: Option<usize> = None;
     let mut escaped = false;
     let mut in_comment = false;
     let mut open_paren_offsets: Vec<usize> = Vec::new();
@@ -420,13 +421,17 @@ fn validate_source_budget_before_steel(source: &str) -> CoreResult<()> {
                 escaped = true;
             } else if ch == '"' {
                 in_string = false;
+                string_start = None;
             }
             continue;
         }
 
         match ch {
             ';' => in_comment = true,
-            '"' => in_string = true,
+            '"' => {
+                in_string = true;
+                string_start = Some(offset);
+            }
             '(' => {
                 depth += 1;
                 list_forms += 1;
@@ -452,7 +457,12 @@ fn validate_source_budget_before_steel(source: &str) -> CoreResult<()> {
                             "Unexpected `)` at byte {offset} (line {}).",
                             byte_to_line(source, offset)
                         ),
-                    ));
+                    )
+                    .with_span(SourceSpan::new(
+                        None,
+                        offset as u32,
+                        offset.saturating_add(ch.len_utf8()) as u32,
+                    )));
                 }
                 depth -= 1;
                 open_paren_offsets.pop();
@@ -465,7 +475,12 @@ fn validate_source_budget_before_steel(source: &str) -> CoreResult<()> {
         return Err(CompilerError::new(
             CompilerErrorKind::Parse,
             "Unterminated string literal in Ecky source.",
-        ));
+        )
+        .with_span(SourceSpan::new(
+            None,
+            string_start.unwrap_or(source.len()) as u32,
+            source.len() as u32,
+        )));
     }
 
     if depth != 0 {
@@ -477,7 +492,12 @@ fn validate_source_budget_before_steel(source: &str) -> CoreResult<()> {
             format!(
                 "Unclosed `(` in Ecky source. {depth} unmatched opening paren(s). Last unclosed `(` at line {line}: {context}",
             ),
-        ));
+        )
+        .with_span(SourceSpan::new(
+            None,
+            last_open as u32,
+            last_open.saturating_add('('.len_utf8()) as u32,
+        )));
     }
 
     let forms = Parser::parse_without_lowering(source)
@@ -1552,7 +1572,7 @@ fn collect_component_free_vars(
             let Ok(items) = expr_list_items(expr, "component body form") else {
                 return;
             };
-            let head = items.first().and_then(expr_identifier);
+            let head = items.first().and_then(expr_head_name);
             match head.as_deref() {
                 Some("quote") => {}
                 Some("let") | Some("let*") if items.len() >= 3 => {
@@ -5323,96 +5343,38 @@ fn parse_expanded_fancy_list_node(
                 ));
             }
             let count = parse_positive_count(&args[0], "`rossler-points` count")?;
-            let mut x = number_literal_node(0.1, next_node, span);
-            let mut y = number_literal_node(0.0, next_node, span);
-            let mut z = number_literal_node(0.0, next_node, span);
+            let dt = expr_number_value(&args[1], "`rossler-points` dt")?;
+            let scale = parse(&args[2], next_node)?;
+            let mut x = 0.1;
+            let mut y = 0.0;
+            let mut z = 0.0;
             for _ in 0..count {
-                let dx = neg_number_node(
-                    add_number_node(y.clone(), z.clone(), next_node, span),
-                    next_node,
-                    span,
-                );
-                let dy = add_number_node(
-                    x.clone(),
-                    mul_number_node(
-                        number_literal_node(0.2, next_node, span),
-                        y.clone(),
-                        next_node,
-                        span,
-                    ),
-                    next_node,
-                    span,
-                );
-                let dz = add_number_node(
-                    number_literal_node(0.2, next_node, span),
-                    mul_number_node(
-                        z.clone(),
-                        sub_number_node(
-                            x.clone(),
-                            number_literal_node(5.7, next_node, span),
-                            next_node,
-                            span,
-                        ),
-                        next_node,
-                        span,
-                    ),
-                    next_node,
-                    span,
-                );
-                x = add_number_node(
-                    x,
-                    mul_number_node(parse(&args[1], next_node)?, dx, next_node, span),
-                    next_node,
-                    span,
-                );
-                y = add_number_node(
-                    y,
-                    mul_number_node(parse(&args[1], next_node)?, dy, next_node, span),
-                    next_node,
-                    span,
-                );
-                z = add_number_node(
-                    z,
-                    mul_number_node(parse(&args[1], next_node)?, dz, next_node, span),
-                    next_node,
-                    span,
-                );
-                let scale = parse(&args[2], next_node)?;
+                let dx = -(y + z);
+                let dy = x + 0.2 * y;
+                let dz = 0.2 + z * (x - 5.7);
+                x += dt * dx;
+                y += dt * dy;
+                z += dt * dz;
                 points.push(bounded_point3_node(
                     mul_number_node(
                         scale.clone(),
-                        div_number_node(
-                            x.clone(),
-                            number_literal_node(15.0, next_node, span),
-                            next_node,
-                            span,
-                        ),
+                        number_literal_node(x / 15.0, next_node, span),
                         next_node,
                         span,
                     ),
                     mul_number_node(
                         scale.clone(),
-                        div_number_node(
-                            y.clone(),
-                            number_literal_node(15.0, next_node, span),
-                            next_node,
-                            span,
-                        ),
+                        number_literal_node(y / 15.0, next_node, span),
                         next_node,
                         span,
                     ),
                     mul_number_node(
                         scale.clone(),
-                        div_number_node(
-                            z.clone(),
-                            number_literal_node(30.0, next_node, span),
-                            next_node,
-                            span,
-                        ),
+                        number_literal_node(z / 30.0, next_node, span),
                         next_node,
                         span,
                     ),
-                    scale,
+                    scale.clone(),
                     next_node,
                     span,
                 ));
@@ -5431,101 +5393,38 @@ fn parse_expanded_fancy_list_node(
             let samples = parse_positive_count(&args[1], "`logistic-bifurcation-points` samples")?;
             let transient =
                 parse_nonnegative_count(&args[2], "`logistic-bifurcation-points` transient")?;
+            let scale = parse(&args[3], next_node)?;
             for ri in 0..r_count {
                 let r = if r_count == 1 {
-                    number_literal_node(2.5, next_node, span)
+                    2.5
                 } else {
-                    add_number_node(
-                        number_literal_node(2.5, next_node, span),
-                        mul_number_node(
-                            number_literal_node(1.5, next_node, span),
-                            div_number_node(
-                                number_literal_node(ri as f64, next_node, span),
-                                number_literal_node((r_count - 1) as f64, next_node, span),
-                                next_node,
-                                span,
-                            ),
-                            next_node,
-                            span,
-                        ),
-                        next_node,
-                        span,
-                    )
+                    2.5 + 1.5 * (ri as f64 / (r_count - 1) as f64)
                 };
-                let mut x = add_number_node(
-                    number_literal_node(0.2, next_node, span),
-                    mul_number_node(
-                        number_literal_node(0.6, next_node, span),
-                        call_number_node(
-                            "hash01",
-                            vec![
-                                number_literal_node(ri as f64, next_node, span),
-                                number_literal_node(samples as f64, next_node, span),
-                                number_literal_node(transient as f64, next_node, span),
-                            ],
-                            next_node,
-                            span,
-                        ),
-                        next_node,
-                        span,
-                    ),
-                    next_node,
-                    span,
-                );
+                let mut x = 0.2
+                    + 0.6 * ecky_deterministic::hash01(ri as f64, samples as f64, transient as f64);
                 for _ in 0..transient {
-                    x = logistic_step_node(r.clone(), x, next_node, span);
+                    x = r * x * (1.0 - x);
                 }
                 for _ in 0..samples {
-                    x = logistic_step_node(r.clone(), x, next_node, span);
-                    let scale = parse(&args[3], next_node)?;
-                    let x_pos = sub_number_node(
-                        mul_number_node(
-                            scale.clone(),
-                            sub_number_node(
-                                mul_number_node(
-                                    number_literal_node(2.0, next_node, span),
-                                    div_number_node(
-                                        sub_number_node(
-                                            r.clone(),
-                                            number_literal_node(2.5, next_node, span),
-                                            next_node,
-                                            span,
-                                        ),
-                                        number_literal_node(1.5, next_node, span),
-                                        next_node,
-                                        span,
-                                    ),
-                                    next_node,
-                                    span,
-                                ),
-                                number_literal_node(1.0, next_node, span),
-                                next_node,
-                                span,
-                            ),
-                            next_node,
-                            span,
-                        ),
-                        number_literal_node(0.0, next_node, span),
-                        next_node,
-                        span,
-                    );
+                    x = r * x * (1.0 - x);
                     let y_pos = mul_number_node(
                         scale.clone(),
-                        sub_number_node(
-                            mul_number_node(
-                                number_literal_node(2.0, next_node, span),
-                                x.clone(),
-                                next_node,
-                                span,
-                            ),
-                            number_literal_node(1.0, next_node, span),
-                            next_node,
-                            span,
-                        ),
+                        number_literal_node(2.0 * x - 1.0, next_node, span),
                         next_node,
                         span,
                     );
-                    points.push(bounded_point2_node(x_pos, y_pos, scale, next_node, span));
+                    points.push(bounded_point2_node(
+                        mul_number_node(
+                            scale.clone(),
+                            number_literal_node(2.0 * ((r - 2.5) / 1.5) - 1.0, next_node, span),
+                            next_node,
+                            span,
+                        ),
+                        y_pos,
+                        scale.clone(),
+                        next_node,
+                        span,
+                    ));
                 }
             }
         }
@@ -5817,30 +5716,6 @@ fn div_number_node(
     span: Option<SourceSpan>,
 ) -> CoreNode {
     call_number_node("/", vec![left, right], next_node, span)
-}
-
-fn logistic_step_node(
-    r: CoreNode,
-    x: CoreNode,
-    next_node: &mut u64,
-    span: Option<SourceSpan>,
-) -> CoreNode {
-    mul_number_node(
-        r,
-        mul_number_node(
-            x.clone(),
-            sub_number_node(
-                number_literal_node(1.0, next_node, span),
-                x,
-                next_node,
-                span,
-            ),
-            next_node,
-            span,
-        ),
-        next_node,
-        span,
-    )
 }
 
 fn parse_expanded_flat_map_node(
@@ -11103,6 +10978,38 @@ mod tests {
         assert_point_list(&groups[1], 12, CoreValueKind::Point2, "logistic cloud");
         assert_eq!(count_custom_calls(&groups[0], "clamp"), 21);
         assert_eq!(count_custom_calls(&groups[1], "clamp"), 24);
+    }
+
+    #[test]
+    fn compiles_native_point_helper_sampler_without_recurrent_tree_explosion() {
+        let program = compile_to_core_program(
+            r#"
+            (model
+              (part point_helper_sampler
+                (let* ((jittered (jitter2 10 20 2 7))
+                       (grid (jittered-grid 3 4 8 8 1.5 7))
+                       (polar (polar-points 16 12))
+                       (wave (wave-loop 18 12 8 2 3 7))
+                       (super-point (superellipse-point (deg->rad 45) 12 8 4))
+                       (cells (voronoi-cells 3 4 8 8 1.5 7))
+                       (rossler (rossler-points 24 0.03 6))
+                       (logistic (logistic-bifurcation-points 8 4 12 10))
+                       (x (+ 8 (* 0.01 (+ (length jittered) (length grid) (length polar) (length wave)))))
+                       (y (+ 8 (* 0.01 (+ (length super-point) (length cells)))))
+                       (z (+ 4 (* 0.01 (+ (length rossler) (length logistic))))))
+                  (box x y z))))
+            "#,
+        )
+        .expect("native point helper sampler compiles");
+
+        assert_eq!(program.parts.len(), 1);
+        let mut node_ids = Vec::new();
+        collect_node_ids(&program.parts[0].root, &mut node_ids);
+        assert!(
+            node_ids.len() < 5_000,
+            "recurrent helpers should compile to a bounded tree, got {} nodes",
+            node_ids.len()
+        );
     }
 
     #[test]

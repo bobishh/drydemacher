@@ -87,3 +87,69 @@ fn production_export_modules_do_not_reference_debug_overlay_geometry() {
         violations.join("\n")
     );
 }
+
+#[test]
+fn rust_sources_do_not_reference_local_application_history_paths() {
+    let root = repo_root();
+    let source = root.join("src-tauri/src");
+    let mut files = Vec::new();
+    collect_files(&source, &mut files);
+
+    let forbidden = ["Application Support/com.alcoholics-audacious.ecky-cad/history.sqlite"];
+    let mut violations = Vec::new();
+    for path in files {
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if forbidden.iter().any(|pattern| text.contains(pattern)) {
+            violations.push(path.display().to_string());
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Rust source must not reference local application history paths:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn frontend_app_code_does_not_call_tauri_invoke_directly() {
+    let root = repo_root();
+    let source = root.join("src");
+    let mut files = Vec::new();
+    collect_files(&source, &mut files);
+
+    let allowlist = [
+        source.join("lib/tauri/contracts.ts"),
+        source.join("lib/docs/downloadBook.test.ts"),
+    ];
+    let mut violations = Vec::new();
+    for path in files {
+        if allowlist.iter().any(|allowed| allowed == &path) {
+            continue;
+        }
+        let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+            continue;
+        };
+        if !matches!(extension, "ts" | "svelte") {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if text.contains("@tauri-apps/api/core")
+            && (text.contains("import { invoke")
+                || text.contains("import {invoke")
+                || text.contains("invoke as"))
+        {
+            violations.push(path.display().to_string());
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "frontend command calls must go through src/lib/tauri/contracts.ts and src/lib/tauri/client.ts:\n{}",
+        violations.join("\n")
+    );
+}

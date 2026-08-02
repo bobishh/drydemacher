@@ -18,7 +18,22 @@ fn main() {
         .expect("Failed to export TypeScript contracts");
 
     let generated = fs::read_to_string(&output_path).expect("Failed to read generated contracts");
-    let patched = generated.replace("window.emit(name, arg)", "(window as any).emit(name, arg)");
+    let patched = generated
+        // specta-typescript leaves trailing whitespace before doc-comment
+        // continuations on multi-line type exports; strip it so `git diff
+        // --check` stays clean across regenerations.
+        .lines()
+        .map(|line| line.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace("window.emit(name, arg)", "(window as any).emit(name, arg)")
+        // `componentImportOrigins` is a serde-defaulted compatibility field.
+        // Specta rc does not mark this Vec optional, so preserve the legacy
+        // frontend contract here until the generator handles it natively.
+        .replace(
+            "componentImportOrigins: ComponentImportOrigin[]",
+            "componentImportOrigins?: ComponentImportOrigin[]",
+        );
     if patched != generated {
         fs::write(&output_path, patched).expect("Failed to patch generated contracts");
     }

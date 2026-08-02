@@ -28,7 +28,10 @@ The system SHALL let an author insert an stdlib or user-library component into
 the active model as instantiated, self-contained `define-component` source, with
 no implicit registry reference. Import SHALL be invocable both by the agent (an
 MCP tool) and by a human (a workbench panel), with both routed through one
-shared import path so the result is identical regardless of entry point.
+shared import path so the result is identical regardless of entry point. This
+copy-inline `component_import` action SHALL remain distinct from the
+language-level `(import-component ...)` live package-reference form: it SHALL
+NOT emit a package reference or dependency lock.
 
 #### Scenario: Import inlines self-contained source
 
@@ -51,3 +54,11 @@ shared import path so the result is identical regardless of entry point.
 - WHEN it is imported
 - THEN the inlined source records the version it was taken from
 - AND a later stdlib update does not silently change the model.
+
+#### Scenario: Copy-inline import does not become live reference
+
+- GIVEN a chosen library component
+- WHEN it is inserted through MCP/UI `component_import`
+- THEN the resulting model contains self-contained component source
+- AND contains no `(import-component ...)` declaration
+- AND requires no package dependency lock to compile.

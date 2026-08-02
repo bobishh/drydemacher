@@ -297,6 +297,8 @@ pub struct AuthoringError {
     pub fix: Option<ErrorFix>,
 }
 
+pub type AuthoringResult<T> = Result<T, AuthoringError>;
+
 impl AuthoringError {
     pub fn new(layer: ErrorLayer, reason: AuthoringReason, message: impl Into<String>) -> Self {
         Self {
@@ -334,6 +336,46 @@ impl AuthoringError {
     pub fn with_fix(mut self, fix: ErrorFix) -> Self {
         self.fix = Some(fix);
         self
+    }
+
+    pub fn for_op(
+        layer: ErrorLayer,
+        reason: AuthoringReason,
+        op: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::new(layer, reason, message).with_op(op)
+    }
+
+    pub fn constrained(
+        layer: ErrorLayer,
+        op: impl Into<String>,
+        message: impl Into<String>,
+        valid: &[&str],
+    ) -> Self {
+        Self::for_op(layer, AuthoringReason::ConstrainedValue, op, message).with_fix(ErrorFix {
+            hint: Some(format!("valid values: {}", valid.join(", "))),
+            suggestions: valid.iter().map(|value| (*value).to_string()).collect(),
+        })
+    }
+
+    pub fn unsupported_backend(
+        backend: &str,
+        op: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::for_op(
+            ErrorLayer::Backend,
+            AuthoringReason::Unsupported,
+            op,
+            message,
+        )
+        .with_fix(ErrorFix {
+            hint: Some(format!(
+                "switch from {backend} to a backend supporting this operation"
+            )),
+            suggestions: Vec::new(),
+        })
     }
 }
 

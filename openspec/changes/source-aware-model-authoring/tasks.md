@@ -15,12 +15,12 @@
 
 ## 2. Shared Authoring Graph
 
-- [ ] 2.1 Add backend tests joining AST stable node keys, dependency graph,
+- [x] 2.1 Add backend tests joining AST stable node keys, dependency graph,
   feature outputs, constraints, and stable viewer target IDs.
-- [ ] 2.2 Extract shared service from MCP-facing shape/dependency/selector logic.
-- [ ] 2.3 Add camelCase Tauri authoring graph contract and command.
-- [ ] 2.4 Mark targets without exact binding non-editable with raw reason.
-- [ ] 2.5 Add frontend contract tests rejecting incomplete editable targets.
+- [x] 2.2 Extract shared service from MCP-facing shape/dependency/selector logic.
+- [x] 2.3 Add camelCase Tauri authoring graph contract and command.
+- [x] 2.4 Mark targets without exact binding non-editable with raw reason.
+- [x] 2.5 Add frontend contract tests rejecting incomplete editable targets.
 
 ## 3. Synchronized Read-Only Lenses
 

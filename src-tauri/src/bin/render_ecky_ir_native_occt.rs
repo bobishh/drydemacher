@@ -48,13 +48,7 @@ fn run() -> Result<(), String> {
     let runtime_root = args
         .runtime_root
         .unwrap_or_else(|| direct_occt_sdk::bundled_occt_runtime_root_from_repo(&repo_root));
-    let fallback_runtime_root =
-        direct_occt_sdk::bundled_build123d_runtime_root_from_repo(&repo_root);
-    let layout = if runtime_root.exists() {
-        direct_occt_sdk::inspect_build123d_ocp_runtime(&runtime_root)
-    } else {
-        direct_occt_sdk::inspect_build123d_ocp_runtime(&fallback_runtime_root)
-    };
+    let layout = direct_occt_sdk::inspect_occt_runtime(&runtime_root);
 
     let outcome = direct_occt_executor::export_core_program_step_stl_with_params_runner_first(
         &program,

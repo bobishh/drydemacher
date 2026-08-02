@@ -407,6 +407,11 @@ mod tests {
         assert!(source_uses_direct_occt_required_cad_ops(
             r#"(model
                 (part body
+                  (import-step "/tmp/part.step")))"#
+        ));
+        assert!(source_uses_direct_occt_required_cad_ops(
+            r#"(model
+                (part body
                   (helical-ridge
                     :radius 20
                     :pitch 6
@@ -436,60 +441,6 @@ mod tests {
                 (part body
                   (box 1 1 1)))"#
         ));
-    }
-
-    #[test]
-    fn lower_build123d_from_core_program_matches_public_entrypoint() {
-        let source = r#"
-            (define base-radius 14)
-            (model
-              (params
-                (number radius base-radius :label "Radius")
-                (toggle vents true :label "Vents"))
-              (part body
-                (difference
-                  (extrude (circle radius) 20)
-                  (translate 0 0 2 (extrude (circle (- radius 2)) 18)))))
-        "#;
-        let program = crate::ecky_scheme::try_compile_to_core_program(source)
-            .expect("compiled path")
-            .expect("program");
-
-        let direct =
-            super::build123d_lowering::lower_core_program_to_build123d(&program).expect("direct");
-        let public = lower_to_build123d(source).expect("public");
-
-        assert_eq!(direct, public);
-        assert!(
-            public.contains("_ecky_cut_many("),
-            "difference helper: {}",
-            public
-        );
-    }
-
-    #[allow(dead_code)]
-    fn render_model_supports_boolean_mesh_pipeline() {
-        let root = render_root();
-        std::fs::create_dir_all(&root).unwrap();
-        let resolver = TestResolver { root };
-        let bundle = render_model(
-            r#"(model
-                (params
-                  (number radius 24)
-                  (number wall 2)
-                  (number height 80))
-                (part body
-                  (difference
-                    (cylinder radius height 48)
-                    (translate 0 0 wall
-                      (cylinder (- radius wall) height 48)))))"#,
-            &DesignParams::new(),
-            &resolver,
-        )
-        .expect("render");
-        assert_eq!(bundle.engine_kind, EngineKind::EckyIrV0);
-        assert!(Path::new(&bundle.preview_stl_path).exists());
-        assert!(!bundle.viewer_assets.is_empty());
     }
 
     #[test]

@@ -193,36 +193,6 @@ struct EckyAstNodeAddressability {
     non_editable_reason: Option<String>,
 }
 
-fn binding_label_for_ast_path(path: &str) -> Option<String> {
-    let segments = path
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .map(path_segment_decode)
-        .collect::<Vec<_>>();
-    if segments.len() == 2 && matches!(segments[0].as_str(), "params" | "parts") {
-        return Some(segments[1].clone());
-    }
-    segments.windows(2).find_map(|window| {
-        if matches!(window[0].as_str(), "bindings" | "keywords") {
-            Some(window[1].clone())
-        } else {
-            None
-        }
-    })
-}
-
-fn source_slice_digest(source: &str, span: Option<(usize, usize)>) -> Option<String> {
-    let (start, end) = span?;
-    if start >= end
-        || end > source.len()
-        || !source.is_char_boundary(start)
-        || !source.is_char_boundary(end)
-    {
-        return None;
-    }
-    Some(crate::mcp::macro_buffer::source_digest(&source[start..end]))
-}
-
 pub(super) fn bounded_ecky_ast_source_slice(
     source: &str,
     span: (usize, usize),
@@ -275,23 +245,9 @@ fn stable_ast_node_key(
     kind: &str,
     value_kind: &str,
     op: Option<&str>,
-    span: Option<(usize, usize)>,
+    _span: Option<(usize, usize)>,
 ) -> String {
-    let mut parts = vec![
-        format!("path={path}"),
-        format!("kind={kind}"),
-        format!("valueKind={value_kind}"),
-    ];
-    if let Some(op) = op {
-        parts.push(format!("op={op}"));
-    }
-    if let Some(binding) = binding_label_for_ast_path(path) {
-        parts.push(format!("binding={binding}"));
-    }
-    if let Some(digest) = source_slice_digest(source, span) {
-        parts.push(format!("source={digest}"));
-    }
-    crate::mcp::macro_buffer::source_digest(&parts.join("|"))
+    crate::services::authoring_graph::stable_node_key_from_parts(source, path, kind, value_kind, op)
 }
 
 fn editable_ops_for_source_target_kind(kind: &SourcePathTargetKind) -> Vec<EckyAstEditOperation> {
@@ -714,44 +670,7 @@ pub(super) fn stable_node_key_for_program_path(
     program: &crate::ecky_core_ir::CoreProgram,
     path: &str,
 ) -> Option<String> {
-    let segments = ast_path_segments(path);
-    if segments.len() == 2 && segments[0] == "params" {
-        let param = program
-            .parameters
-            .iter()
-            .find(|item| item.key == segments[1])?;
-        let span = source_span_for_ecky_path(source, path).ok();
-        return Some(stable_ast_node_key(
-            source,
-            path,
-            "Param",
-            &format!("{:?}", param.kind),
-            None,
-            span,
-        ));
-    }
-    if segments.len() == 2 && segments[0] == "parts" {
-        let _part = program.parts.iter().find(|item| item.key == segments[1])?;
-        let span = source_span_for_ecky_path(source, path).ok();
-        return Some(stable_ast_node_key(
-            source, path, "Part", "Part", None, span,
-        ));
-    }
-    let node = find_core_ast_node_in_program(program, path)?;
-    let fallback_span = node
-        .span
-        .map(|span| (span.start as usize, span.end as usize));
-    let span = source_span_for_ecky_path(source, path)
-        .ok()
-        .or(fallback_span);
-    Some(stable_ast_node_key(
-        source,
-        path,
-        core_node_kind_label(&node.kind),
-        &format!("{:?}", node.value_kind),
-        core_node_op_label(node).as_deref(),
-        span,
-    ))
+    crate::services::authoring_graph::stable_node_key_for_program_path(source, program, path)
 }
 
 fn collect_program_node_paths(
@@ -985,65 +904,7 @@ fn feature_bindings_for_target_ids(
     manifest: &ModelManifest,
     target_ids: &[String],
 ) -> (Vec<String>, Vec<String>) {
-    let Some(graph) = manifest.feature_graph.as_ref() else {
-        return (Vec::new(), Vec::new());
-    };
-
-    let mut feature_ids = Vec::new();
-    let mut source_paths = Vec::new();
-    for node in &graph.nodes {
-        let output_match = node.output_refs.iter().any(|output| {
-            output
-                .target_ids
-                .iter()
-                .any(|target_id| target_ids.iter().any(|requested| requested == target_id))
-        });
-        let port_match = node.ports.iter().any(|port| {
-            port.target_ids
-                .iter()
-                .any(|target_id| target_ids.iter().any(|requested| requested == target_id))
-        });
-        if !output_match && !port_match {
-            continue;
-        }
-
-        if !feature_ids
-            .iter()
-            .any(|existing| existing == &node.feature_id)
-        {
-            feature_ids.push(node.feature_id.clone());
-        }
-        if let Some(path) = node
-            .source_ref
-            .as_ref()
-            .and_then(|source_ref| source_ref.path.clone())
-        {
-            if !path.trim().is_empty() && !source_paths.iter().any(|existing| existing == &path) {
-                source_paths.push(path);
-            }
-        }
-        for port in &node.ports {
-            let port_hit = port
-                .target_ids
-                .iter()
-                .any(|target_id| target_ids.iter().any(|requested| requested == target_id));
-            if !port_hit {
-                continue;
-            }
-            if let Some(path) = port
-                .source_ref
-                .as_ref()
-                .and_then(|source_ref| source_ref.path.clone())
-            {
-                if !path.trim().is_empty() && !source_paths.iter().any(|existing| existing == &path)
-                {
-                    source_paths.push(path);
-                }
-            }
-        }
-    }
-
-    (feature_ids, source_paths)
+    crate::services::authoring_graph::feature_bindings_for_target_ids(manifest, target_ids)
 }
 
 fn selection_target_kind_role(kind: &crate::contracts::SelectionTargetKind) -> String {
@@ -1167,52 +1028,15 @@ fn collect_selector_provenance_candidates(
     }
 }
 
-fn collect_param_reference_paths(
-    node: &crate::ecky_core_ir::CoreNode,
-    path: &str,
-    param_id: crate::ecky_core_ir::ParamId,
-    paths: &mut Vec<String>,
-) {
-    if matches!(
-        &node.kind,
-        crate::ecky_core_ir::CoreNodeKind::Reference(
-            crate::ecky_core_ir::CoreReference::Parameter(id)
-        ) if *id == param_id
-    ) {
-        paths.push(path.to_string());
-    }
-    for (child_path, child) in core_node_child_paths(node, path) {
-        collect_param_reference_paths(child, &child_path, param_id, paths);
-    }
-}
-
 fn dependent_source_paths_for_param(
     program: &crate::ecky_core_ir::CoreProgram,
     param_id: crate::ecky_core_ir::ParamId,
 ) -> Vec<String> {
-    let mut paths = Vec::new();
-    for part in &program.parts {
-        let root_path = format!("/parts/{}/root", path_segment(&part.key));
-        collect_param_reference_paths(&part.root, &root_path, param_id, &mut paths);
-    }
-    paths
+    crate::services::authoring_graph::dependent_source_paths_for_param(program, param_id)
 }
 
 fn impacted_part_ids_for_dependency_paths(paths: &[String]) -> Vec<String> {
-    let mut ids = Vec::new();
-    for path in paths {
-        let segments = path
-            .split('/')
-            .filter(|segment| !segment.is_empty())
-            .collect::<Vec<_>>();
-        if segments.len() >= 2 && segments[0] == "parts" {
-            let part_id = path_segment_decode(segments[1]);
-            if !ids.iter().any(|existing| existing == &part_id) {
-                ids.push(part_id);
-            }
-        }
-    }
-    ids
+    crate::services::authoring_graph::impacted_part_ids_for_dependency_paths(paths)
 }
 
 fn impact_labels_for_dependency(

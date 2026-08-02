@@ -30,6 +30,45 @@ const SESSION_HEADER: &str = "Mcp-Session-Id";
 const LEASE_TTL_SECS: u64 = 45;
 const MCP_PROTOCOL_LATEST: &str = "2025-06-18";
 const MCP_PROTOCOL_LEGACY: &str = "2024-11-05";
+const MCP_TOOL_DISPATCH_STACK_BYTES: usize = 8 * 1024 * 1024;
+const MCP_TOOL_DISPATCH_THREAD_NAME: &str = "mcp-tool-dispatch";
+
+async fn run_on_mcp_tool_dispatch_stack<F, Fut, T>(task: F) -> AppResult<T>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = AppResult<T>> + 'static,
+    T: Send + 'static,
+{
+    let runtime = tokio::runtime::Handle::current();
+    let (sender, receiver) = oneshot::channel();
+    std::thread::Builder::new()
+        .name(MCP_TOOL_DISPATCH_THREAD_NAME.to_string())
+        .stack_size(MCP_TOOL_DISPATCH_STACK_BYTES)
+        .spawn(move || {
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.block_on(task())))
+                    .unwrap_or_else(|payload| {
+                        let detail = payload
+                            .downcast_ref::<&str>()
+                            .map(|value| (*value).to_string())
+                            .or_else(|| payload.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "non-string panic payload".to_string());
+                        Err(AppError::internal(format!(
+                            "MCP tool dispatcher panicked: {detail}"
+                        )))
+                    });
+            let _ = sender.send(result);
+        })
+        .map_err(|error| {
+            AppError::internal(format!(
+                "Failed to start MCP tool dispatcher thread: {error}"
+            ))
+        })?;
+
+    receiver.await.map_err(|_| {
+        AppError::internal("MCP tool dispatcher thread terminated without returning a result.")
+    })?
+}
 
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
@@ -280,7 +319,87 @@ fn json_rpc_error(id: Option<Value>, code: i32, message: impl Into<String>) -> J
     }
 }
 
+/// Above this serialized size (Unicode characters) an ordinary generic MCP
+/// result is considered large: `structuredContent` keeps the full canonical
+/// value available but the envelope surfaces observed/total counts and a
+/// continuation hint steering callers toward bounded section/window reads.
+/// Tunable in one place; intentionally generous so real authoring tool
+/// results stay canonical while pathological payloads are flagged.
+const MCP_RESPONSE_BUDGET_CHARS: usize = 32_000;
+
+/// Hard transport safety ceiling. A generic result larger than this cannot be
+/// shipped honestly, so the envelope fails with observed/allowed sizes instead
+/// of silently truncating authoritative state. Far above the response budget so
+/// every realistic tool result passes while runaway payloads are caught.
+const MCP_TRANSPORT_LIMIT_CHARS: usize = 1_000_000;
+
+/// Build a short, content-free text summary of a generic tool result: identity
+/// keys (threadId/messageId/modelId when present), the top-level key list, and
+/// array lengths. Never includes scalar values beyond identity or any array
+/// item bodies, so it cannot leak large payloads (e.g. screenshot/source bytes).
+fn concise_tool_summary(value: &Value) -> String {
+    let identity = ["threadId", "messageId", "modelId"]
+        .into_iter()
+        .filter_map(|key| {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .map(|v| format!("{key}={v}"))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut keys: Vec<String> = Vec::new();
+    if let Some(obj) = value.as_object() {
+        for (key, val) in obj {
+            let len = val.as_array().map(|items| items.len());
+            keys.push(match len {
+                Some(count) => format!("{key}[{count}]"),
+                None => key.clone(),
+            });
+        }
+    }
+    let mut summary = if identity.is_empty() {
+        format!("Tool result. Keys: {}.", keys.join(", "))
+    } else {
+        format!("Tool result for {}. Keys: {}.", identity, keys.join(", "))
+    };
+    // Hard ceiling (char-safe, never splits a multi-byte UTF-8 sequence) so
+    // the summary can never itself become a large payload.
+    if summary.chars().count() > 500 {
+        summary = format!("{}…", summary.chars().take(499).collect::<String>());
+    }
+    summary
+}
+
+/// Shared response-budget/continuation metadata for bounded MCP reads (the
+/// generic success envelope plus the source/messages/AST/manifest/target
+/// section-read tools). Carries observed/total counts and a continuation hint
+/// only — never the payload bytes.
+fn mcp_read_continuation(observed: usize, budget: usize) -> Value {
+    json!({
+        "large": true,
+        "budgetChars": budget,
+        "observedCount": observed,
+        "recommendation": "Payload exceeded the MCP response-budget guidance. \
+    structuredContent.data carries the complete canonical value; for model-context \
+    efficiency prefer bounded section/window reads (target_macro_get, target_detail_get, \
+    artifact_manifest_get, thread_messages_get, ecky_ast_get_node)."
+    })
+}
+
+/// True when `structuredContent` is the large-read envelope shape (canonical
+/// data nested under `data` alongside observedCount/continuation metadata)
+/// rather than an ordinary value carried directly.
+#[cfg(test)]
+fn structured_content_is_bounded_read(structured: &Value) -> bool {
+    structured.get("observedCount").is_some() && structured.get("continuation").is_some()
+}
+
 fn mcp_tool_success(id: Option<Value>, value: &Value) -> JsonRpcResponse {
+    // Rich pre-built content payloads (tools that compose their own `content`
+    // array — e.g. screenshot image+text, prompt attachments) pass through
+    // unchanged so their content ordering and any structuredContent survive.
     if value
         .get("content")
         .map(|content| content.is_array())
@@ -288,15 +407,72 @@ fn mcp_tool_success(id: Option<Value>, value: &Value) -> JsonRpcResponse {
     {
         return json_rpc_result(id, value.clone());
     }
+
+    let observed = serde_json::to_string(value)
+        .unwrap_or_default()
+        .chars()
+        .count();
+
+    // Transport safety: never silently ship a runaway payload. Fail honestly
+    // with observed/allowed sizes so the caller can re-request a bounded read.
+    if observed > MCP_TRANSPORT_LIMIT_CHARS {
+        return mcp_tool_error(
+            id,
+            &AppError::with_details(
+                AppErrorCode::Validation,
+                format!(
+                    "MCP tool result exceeds the transport safety limit: observed {observed} \
+chars, allowed {MCP_TRANSPORT_LIMIT_CHARS}."
+                ),
+                format!(
+                    "observedCount={observed}; allowedCount={MCP_TRANSPORT_LIMIT_CHARS}; \
+re-request with a bounded section/window read."
+                ),
+            ),
+        );
+    }
+
+    let summary = concise_tool_summary(value);
+
+    // Ordinary result: canonical machine output in structuredContent, concise
+    // text summary in content (no pretty-printed JSON duplication).
+    if observed <= MCP_RESPONSE_BUDGET_CHARS {
+        return json_rpc_result(
+            id,
+            json!({
+                "content": [
+                    { "type": "text", "text": summary }
+                ],
+                "structuredContent": value,
+            }),
+        );
+    }
+
+    // Large result: structuredContent still carries the complete canonical
+    // value (under `data`, so complete data remains available) plus the shared
+    // observed/returned/total counts and a continuation hint. Text stays a
+    // concise summary; nothing is silently truncated.
+    let continuation = mcp_read_continuation(observed, MCP_RESPONSE_BUDGET_CHARS);
     json_rpc_result(
         id,
         json!({
             "content": [
                 {
                     "type": "text",
-                    "text": serde_json::to_string_pretty(value).unwrap()
+                    "text": format!(
+                        "{summary}  (large result: {observed} chars; full value in \
+        structuredContent.data; prefer bounded section/window reads)"
+                    )
                 }
-            ]
+            ],
+            "structuredContent": {
+                "data": value,
+                "observedCount": observed,
+                "returnedCount": observed,
+                "totalCount": observed,
+                "truncated": false,
+                "continuation": continuation,
+            },
         }),
     )
 }
@@ -388,10 +564,11 @@ fn build_model_screenshot_result(
             "camera": capture.camera,
             "width": capture.width,
             "height": capture.height,
+            // Byte-free image metadata only: the base64 payload lives once, in
+            // the single MCP image `content` item above. Carrying `dataUrl` or a
+            // duplicate `base64` here would triplicate the screenshot bytes.
             "image": {
-                "dataUrl": capture.data_url,
                 "mimeType": mime_type,
-                "base64": image_payload,
             },
             "capturedAt": now_secs(),
         }
@@ -1374,7 +1551,7 @@ fn workspace_source_hints(
 ) -> (&'static str, &'static str) {
     match source_language {
         crate::contracts::SourceLanguage::EckyIrV0 => (".ecky", "ecky"),
-        crate::contracts::SourceLanguage::Build123d => (".py", "build123d"),
+        crate::contracts::SourceLanguage::Build123d => (".ecky", "ecky"),
         crate::contracts::SourceLanguage::LegacyPython => match geometry_backend {
             Some(crate::contracts::GeometryBackend::Freecad) => (".FCMacro", "freecad"),
             _ => (".py", "freecad"),
@@ -1384,7 +1561,7 @@ fn workspace_source_hints(
 
 fn backend_hint(geometry_backend: Option<crate::contracts::GeometryBackend>) -> &'static str {
     match geometry_backend {
-        Some(crate::contracts::GeometryBackend::Build123d) => "build123d",
+        Some(crate::contracts::GeometryBackend::Build123d) => "mesh",
         Some(crate::contracts::GeometryBackend::Freecad) => "freecad",
         Some(crate::contracts::GeometryBackend::EckyRust) => "mesh",
         None => "default",
@@ -1395,7 +1572,7 @@ fn backend_guide_uri(
     geometry_backend: Option<crate::contracts::GeometryBackend>,
 ) -> Option<&'static str> {
     match geometry_backend {
-        Some(crate::contracts::GeometryBackend::Build123d) => Some("ecky://guides/build123d"),
+        Some(crate::contracts::GeometryBackend::Build123d) => Some("ecky://guides/ecky-rust"),
         Some(crate::contracts::GeometryBackend::Freecad) => Some("ecky://guides/freecad"),
         Some(crate::contracts::GeometryBackend::EckyRust) => Some("ecky://guides/ecky-rust"),
         None => None,
@@ -1407,7 +1584,7 @@ fn surface_manifest_uri(
 ) -> Option<&'static str> {
     match geometry_backend {
         Some(crate::contracts::GeometryBackend::Build123d) => {
-            Some("ecky://guides/surface-manifest/build123d")
+            Some("ecky://guides/surface-manifest/ecky-rust")
         }
         Some(crate::contracts::GeometryBackend::Freecad) => {
             Some("ecky://guides/surface-manifest/freecad")
@@ -1424,7 +1601,7 @@ fn surface_reference_uri(
 ) -> Option<&'static str> {
     match geometry_backend {
         Some(crate::contracts::GeometryBackend::Build123d) => {
-            Some("ecky://guides/surface-reference/build123d")
+            Some("ecky://guides/surface-reference/ecky-rust")
         }
         Some(crate::contracts::GeometryBackend::Freecad) => {
             Some("ecky://guides/surface-reference/freecad")
@@ -1456,8 +1633,12 @@ fn workflow_guide_text(state: &AppState) -> String {
             "- For `sourceLanguage=ecky`, write `.ecky`. The backend is a lowerer, not a different source language.\n",
             "- Read `compatibilityManifestUri` only when a concrete `.ecky` op/support question is uncertain.\n",
             "- Read prose backend guides only after a lowerer/render error or when making artifact/export claims.\n",
-            "- Surface manifests: `ecky://guides/surface-manifest/build123d`, `ecky://guides/surface-manifest/freecad`, `ecky://guides/surface-manifest/ecky-rust`.\n\n",
-            "- Surface references: `ecky://guides/surface-reference/build123d`, `ecky://guides/surface-reference/freecad`, `ecky://guides/surface-reference/ecky-rust`.\n\n",
+            "- Surface manifests: `ecky://guides/surface-manifest/freecad`, `ecky://guides/surface-manifest/ecky-rust`.\n\n",
+            "- Surface references: `ecky://guides/surface-reference/freecad`, `ecky://guides/surface-reference/ecky-rust`.\n\n",
+            "Tool discovery (compact managed sessions):\n",
+            "- Managed MCP sessions start with a NARROW `tools/list`: core workflow tools plus `capability_search`/`capability_enable` only. Specialist schemas (target reads, source edits, AST edits, semantic, verify/printability, components/library, project files) are absent until enabled, and the server advertises `tools.listChanged`.\n",
+            "- Use `capability_search` (optional `query`) to find which group owns a tool or capability without loading every schema, then `capability_enable` with the group id to load that group's schemas for this session. Enabling a group emits `notifications/tools/list_changed` and the next `tools/list` reflects it.\n",
+            "- Prefer explicit detail reads over full reads: `target_detail_get(section=...)`, `target_macro_get`, `artifact_manifest_get`, and `thread_messages_get` return bounded chunks; reserve `target_get` for when the whole payload is truly needed. External clients that need the whole catalogue may pass `profile: full` to `tools/list` (standard opaque `cursor`/`pageSize` pagination is honored).\n\n",
             "Modeling rules:\n",
             "- Units are millimeters.\n",
             "- Prefer manifold printable solids with practical wall thickness and clearances.\n",
@@ -1480,16 +1661,16 @@ fn workflow_guide_text(state: &AppState) -> String {
             "- If verification is red and repairable, patch source/params and preview again. Commit only green verification; if the repair cap is exhausted, do not commit and report capped red honestly with exact issue codes/messages.\n",
             "- Use get_model_screenshot to visually verify geometric edits after `verify_generated_model` passes.\n\n",
             "Recommended startup sequence:\n",
-            "1. Call workspace_overview. It resolves sourceLanguage, geometryBackend, primaryGuideUri, and compatibilityManifestUri.\n",
+            "1. Call workspace_overview. It resolves sourceLanguage, geometryBackend, primaryGuideUri, and compatibilityManifestUri. (Managed sessions: the compact `tools/list` already covers workspace_overview; use capability_search/capability_enable to load specialist groups on demand.)\n",
             "2. Read only `agentBrief.primaryGuideUri` / `agentBrief.mustRead` for normal authoring.\n",
             "3. Read `agentBrief.compatibilityManifestUri` only when checking whether a concrete `.ecky` form/op is supported by the resolved backend. Read prose backend guides only after lowerer/render errors or artifact/export claims.\n",
             "4. Call workspace_overview, then target_meta_get. If choosing an existing thread, call thread_borrow; if this is a brand-new design with no target, call thread_create first.\n",
-            "5. Use target_macro_get for macro reasoning, macro_buffer_get for line-numbered source edits, artifact_manifest_get for full artifact JSON, and target_detail_get(section=...) for exact chunks.\n",
+            "5. Inspect sourcePath/sourceState from target metadata. When sourcePath is present, read and edit that file with normal file tools. Only when sourcePath is absent, use target_macro_get/macro_buffer_get for source edits. Use artifact_manifest_get for full artifact JSON and target_detail_get(section=...) for exact chunks.\n",
             "6. Use target_get only when you truly need the full payload.\n",
             "7. If semantic bindings matter, call semantic_manifest_get before changing views or annotations.\n",
-            "8. Then mutate with params_preview_render, macro_buffer_replace_and_preview, macro_preview_render, or semantic tools; prefer buffer replacement for non-trivial edits and use macro_preview_render for the first version after thread_create.\n",
-            "9. Call verify_generated_model on the preview/render draft. If red, repair source/params and preview again until green or repair cap exhausted.\n",
-            "10. Commit green verified preview drafts with commit_preview_version; capture returned threadId/messageId/modelId in output evidence. If capped red remains, do not commit; report exact red issues.\n",
+            "8. For a bound sourcePath, edit the file and call project_folder_apply with its folder slug; this validates, previews, and commits the edit. Do not export first. Only for an unbound legacy target, mutate with params_preview_render, macro_buffer_replace_and_preview, macro_preview_render, or semantic tools.\n",
+            "9. For preview/render tools: Call verify_generated_model on the preview/render draft. If red, repair source/params and preview again until green or repair cap exhausted.\n",
+            "10. Commit green verified preview drafts with commit_preview_version. project_folder_apply already commits its validated source result. Capture returned threadId/messageId/modelId in output evidence. If capped red remains, do not commit; report exact red issues.\n",
             "11. Never update history.sqlite directly. State mutations must go through MCP tools.\n",
             "12. Use measurement_annotation tools for dimension meaning, and long_action_notice/long_action_clear for slow work.\n"
         ),
@@ -1518,7 +1699,7 @@ fn workspace_overview_brief(
     let backend = backend_hint(geometry_backend);
     let primary_guide_uri = match resolved_lang {
         crate::contracts::SourceLanguage::EckyIrV0 => ecky_source_uri_for_backend(geometry_backend),
-        crate::contracts::SourceLanguage::Build123d => "ecky://guides/build123d",
+        crate::contracts::SourceLanguage::Build123d => "ecky://guides/ecky-rust",
         crate::contracts::SourceLanguage::LegacyPython => "ecky://guides/freecad",
     }
     .to_string();
@@ -1574,16 +1755,12 @@ fn workspace_overview_brief(
             "ecky://guides/technical-system-prompt".to_string(),
             "ecky://guides/modeling-guidelines".to_string(),
             "ecky://guides/ecky-source".to_string(),
-            "ecky://guides/ecky-source/build123d".to_string(),
             "ecky://guides/ecky-source/freecad".to_string(),
             "ecky://guides/ecky-source/ecky-rust".to_string(),
             "ecky://guides/freecad".to_string(),
-            "ecky://guides/build123d".to_string(),
             "ecky://guides/ecky-rust".to_string(),
-            "ecky://guides/surface-manifest/build123d".to_string(),
             "ecky://guides/surface-manifest/freecad".to_string(),
             "ecky://guides/surface-manifest/ecky-rust".to_string(),
-            "ecky://guides/surface-reference/build123d".to_string(),
             "ecky://guides/surface-reference/freecad".to_string(),
             "ecky://guides/surface-reference/ecky-rust".to_string(),
         ],
@@ -1698,12 +1875,6 @@ fn resource_definitions() -> Vec<Value> {
             "mimeType": "text/plain"
         }),
         json!({
-            "uri": "ecky://guides/ecky-source/build123d",
-            "name": "Ecky Source (.ecky, build123d)",
-            "description": "Canonical `.ecky` language guide with build123d backend support table.",
-            "mimeType": "text/plain"
-        }),
-        json!({
             "uri": "ecky://guides/ecky-source/freecad",
             "name": "Ecky Source (.ecky, FreeCAD)",
             "description": "Canonical `.ecky` language guide with FreeCAD backend support table.",
@@ -1722,22 +1893,10 @@ fn resource_definitions() -> Vec<Value> {
             "mimeType": "text/plain"
         }),
         json!({
-            "uri": "ecky://guides/build123d",
-            "name": "Ecky on build123d",
-            "description": "Backend guide for `.ecky` source when geometryBackend=build123d.",
-            "mimeType": "text/plain"
-        }),
-        json!({
             "uri": "ecky://guides/ecky-rust",
             "name": "Ecky on mesh/eckyRust",
             "description": "Backend guide for `.ecky` source when geometryBackend=mesh/eckyRust.",
             "mimeType": "text/plain"
-        }),
-        json!({
-            "uri": "ecky://guides/surface-manifest/build123d",
-            "name": "Ecky build123d Supported Surface Manifest",
-            "description": "Machine-readable `.ecky` supported authoring surface for geometryBackend=build123d.",
-            "mimeType": "application/json"
         }),
         json!({
             "uri": "ecky://guides/surface-manifest/freecad",
@@ -1749,12 +1908,6 @@ fn resource_definitions() -> Vec<Value> {
             "uri": "ecky://guides/surface-manifest/ecky-rust",
             "name": "EckyRust Supported Surface Manifest",
             "description": "Machine-readable `.ecky` supported authoring surface for geometryBackend=mesh/eckyRust.",
-            "mimeType": "application/json"
-        }),
-        json!({
-            "uri": "ecky://guides/surface-reference/build123d",
-            "name": "Ecky build123d Surface Reference",
-            "description": "Machine-readable `.ecky` signatures, descriptions, examples, determinism, and backend support for geometryBackend=build123d.",
             "mimeType": "application/json"
         }),
         json!({
@@ -1780,9 +1933,6 @@ struct ResourceContent {
 
 fn surface_manifest_backend_for_uri(uri: &str) -> Option<crate::contracts::GeometryBackend> {
     match uri {
-        "ecky://guides/surface-manifest/build123d" => {
-            Some(crate::contracts::GeometryBackend::Build123d)
-        }
         "ecky://guides/surface-manifest/freecad" => {
             Some(crate::contracts::GeometryBackend::Freecad)
         }
@@ -1795,9 +1945,6 @@ fn surface_manifest_backend_for_uri(uri: &str) -> Option<crate::contracts::Geome
 
 fn surface_reference_backend_for_uri(uri: &str) -> Option<crate::contracts::GeometryBackend> {
     match uri {
-        "ecky://guides/surface-reference/build123d" => {
-            Some(crate::contracts::GeometryBackend::Build123d)
-        }
         "ecky://guides/surface-reference/freecad" => {
             Some(crate::contracts::GeometryBackend::Freecad)
         }
@@ -1834,7 +1981,7 @@ fn surface_reference_json(backend: crate::contracts::GeometryBackend) -> Value {
 
 fn surface_reference_uri_for_backend(backend: crate::contracts::GeometryBackend) -> &'static str {
     match backend {
-        crate::contracts::GeometryBackend::Build123d => "ecky://guides/surface-reference/build123d",
+        crate::contracts::GeometryBackend::Build123d => "ecky://guides/surface-reference/ecky-rust",
         crate::contracts::GeometryBackend::Freecad => "ecky://guides/surface-reference/freecad",
         crate::contracts::GeometryBackend::EckyRust => "ecky://guides/surface-reference/ecky-rust",
     }
@@ -1842,7 +1989,7 @@ fn surface_reference_uri_for_backend(backend: crate::contracts::GeometryBackend)
 
 fn ecky_source_uri_for_backend(backend: Option<crate::contracts::GeometryBackend>) -> &'static str {
     match backend {
-        Some(crate::contracts::GeometryBackend::Build123d) => "ecky://guides/ecky-source/build123d",
+        Some(crate::contracts::GeometryBackend::Build123d) => "ecky://guides/ecky-source/ecky-rust",
         Some(crate::contracts::GeometryBackend::Freecad) => "ecky://guides/ecky-source/freecad",
         Some(crate::contracts::GeometryBackend::EckyRust) => "ecky://guides/ecky-source/ecky-rust",
         None => "ecky://guides/ecky-source",
@@ -1851,7 +1998,6 @@ fn ecky_source_uri_for_backend(backend: Option<crate::contracts::GeometryBackend
 
 fn ecky_source_backend_for_uri(uri: &str) -> Option<crate::contracts::GeometryBackend> {
     match uri {
-        "ecky://guides/ecky-source/build123d" => Some(crate::contracts::GeometryBackend::Build123d),
         "ecky://guides/ecky-source/freecad" => Some(crate::contracts::GeometryBackend::Freecad),
         "ecky://guides/ecky-source/ecky-rust" => Some(crate::contracts::GeometryBackend::EckyRust),
         _ => None,
@@ -1882,7 +2028,6 @@ fn read_resource_text(state: &AppState, uri: &str) -> Option<String> {
         "ecky://guides/freecad" | "ecky://guides/cad-sdk" => {
             Some(crate::commands::generation::freecad_guide_text())
         }
-        "ecky://guides/build123d" => Some(crate::commands::generation::build123d_guide_text()),
         "ecky://guides/ecky-rust" | "ecky://guides/mesh" => {
             Some(crate::commands::generation::ecky_ir_v0_guide_text(
                 crate::contracts::GeometryBackend::EckyRust,
@@ -2082,6 +2227,393 @@ pub fn export_mcp_tool_catalog() -> Vec<Value> {
     tool_definitions_with_ast_enabled(true)
 }
 
+// ── OpenSpec `agent-context-budgeting` §5: typed MCP capability groups ────
+//
+// Tool definitions are partitioned into typed capability groups so compact
+// managed MCP sessions can start narrow (core workflow + capability controls)
+// and load specialist schemas on demand, while a full compatibility profile
+// still exposes the whole catalogue. Every dispatched and every defined tool
+// belongs to exactly one group; a drift test enforces that invariant.
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum CapabilityGroup {
+    Core,
+    TargetReads,
+    SourceEdits,
+    AstEdits,
+    SemanticControls,
+    VerifyPrintability,
+    ComponentsLibrary,
+    ProjectFiles,
+    SessionActivity,
+}
+
+impl CapabilityGroup {
+    /// Stable, wire-facing group id (kebab-case). Stored in session state and
+    /// accepted by the `capability_enable` control.
+    pub(crate) fn id(self) -> &'static str {
+        match self {
+            CapabilityGroup::Core => "core",
+            CapabilityGroup::TargetReads => "target-reads",
+            CapabilityGroup::SourceEdits => "source-edits",
+            CapabilityGroup::AstEdits => "ast-edits",
+            CapabilityGroup::SemanticControls => "semantic-controls",
+            CapabilityGroup::VerifyPrintability => "verify-printability",
+            CapabilityGroup::ComponentsLibrary => "components-library",
+            CapabilityGroup::ProjectFiles => "project-files",
+            CapabilityGroup::SessionActivity => "session-activity",
+        }
+    }
+
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            CapabilityGroup::Core => "Core session & workspace",
+            CapabilityGroup::TargetReads => "Target & thread reads",
+            CapabilityGroup::SourceEdits => "Source / buffer edits",
+            CapabilityGroup::AstEdits => "AST edits (ecky)",
+            CapabilityGroup::SemanticControls => "Semantic controls",
+            CapabilityGroup::VerifyPrintability => "Verify & printability",
+            CapabilityGroup::ComponentsLibrary => "Components & library",
+            CapabilityGroup::ProjectFiles => "Project files",
+            CapabilityGroup::SessionActivity => "Session activity & notices",
+        }
+    }
+
+    pub(crate) fn description(self) -> &'static str {
+        match self {
+            CapabilityGroup::Core => {
+                "Bootstrap, identity, session/thread lifecycle, user interaction, \
+                 and capability discovery. Always present for managed sessions."
+            }
+            CapabilityGroup::TargetReads => {
+                "Read targets, threads, messages, artifacts, and model comparisons."
+            }
+            CapabilityGroup::SourceEdits => {
+                "Macro/buffer/params source edits, preview render, version commit \
+                 and restore. Macro buffer tools are absent when AST authoring \
+                 is enabled."
+            }
+            CapabilityGroup::AstEdits => {
+                "Experimental `.ecky` Core AST authoring (get/patch/set/replace). \
+                 Available only when `mcp.eckyAstAuthoring` is enabled."
+            }
+            CapabilityGroup::SemanticControls => {
+                "Semantic manifests, control primitives/views, measurement \
+                 annotations, selector/dependency/constraint resolution."
+            }
+            CapabilityGroup::VerifyPrintability => {
+                "Structural verification, printability analysis/recipes, \
+                 screenshots."
+            }
+            CapabilityGroup::ComponentsLibrary => {
+                "Component extract/search/get and FreeCAD library search/import."
+            }
+            CapabilityGroup::ProjectFiles => {
+                "Project-folder mirror export/status/apply for external editors."
+            }
+            CapabilityGroup::SessionActivity => {
+                "Session reply/activity state, long-action notices, and \
+                 confirmation requests."
+            }
+        }
+    }
+
+    /// All groups in stable display order (core first).
+    pub(crate) fn all() -> &'static [CapabilityGroup] {
+        &[
+            CapabilityGroup::Core,
+            CapabilityGroup::TargetReads,
+            CapabilityGroup::SourceEdits,
+            CapabilityGroup::AstEdits,
+            CapabilityGroup::SemanticControls,
+            CapabilityGroup::VerifyPrintability,
+            CapabilityGroup::ComponentsLibrary,
+            CapabilityGroup::ProjectFiles,
+            CapabilityGroup::SessionActivity,
+        ]
+    }
+
+    pub(crate) fn from_id(id: &str) -> Option<CapabilityGroup> {
+        CapabilityGroup::all()
+            .iter()
+            .copied()
+            .find(|group| group.id() == id)
+    }
+}
+
+/// Map a tool name to its exactly-one capability group. This is the single
+/// source of truth for the partition; the drift test asserts every defined and
+/// dispatched tool resolves here, and that no tool resolves twice.
+pub(crate) fn tool_capability_group(name: &str) -> Option<CapabilityGroup> {
+    let group = match name {
+        // ── Core session & workspace (+ capability discovery controls) ──────
+        "health_check"
+        | "workspace_overview"
+        | "agent_identity_set"
+        | "session_log_in"
+        | "session_log_out"
+        | "resume_session"
+        | "thread_list"
+        | "thread_create"
+        | "thread_borrow"
+        | "ui_dispatch"
+        | "mark_as_read"
+        | "request_user_prompt"
+        | "finalize_thread"
+        | "capability_search"
+        | "capability_enable" => CapabilityGroup::Core,
+        // ── Target & thread reads ──────────────────────────────────────────
+        "target_meta_get"
+        | "target_macro_get"
+        | "target_detail_get"
+        | "target_get"
+        | "thread_meta_get"
+        | "thread_messages_get"
+        | "thread_get"
+        | "artifact_manifest_get"
+        | "artifact_feature_graph_get"
+        | "compare_models" => CapabilityGroup::TargetReads,
+        // ── Source / buffer edits ──────────────────────────────────────────
+        "macro_buffer_get"
+        | "macro_buffer_replace_range"
+        | "macro_buffer_apply_patch"
+        | "macro_buffer_preview_render"
+        | "macro_buffer_replace_and_preview"
+        | "macro_preview_render"
+        | "params_preview_render"
+        | "concept_preview_save"
+        | "commit_preview_version"
+        | "version_restore"
+        | "thread_fork_from_target" => CapabilityGroup::SourceEdits,
+        // ── AST edits (ecky) ───────────────────────────────────────────────
+        "ecky_ast_get"
+        | "ecky_ast_inspect"
+        | "ecky_ast_get_node"
+        | "ecky_ast_patch_validate"
+        | "ecky_ast_replace_and_render"
+        | "ecky_ast_patch_preview"
+        | "ecky_ast_patch_commit"
+        | "ecky_ast_set_number"
+        | "ecky_ast_set_string"
+        | "ecky_ast_set_select"
+        | "ecky_ast_replace_call"
+        | "ecky_ast_insert_binding"
+        | "ecky_ast_delete_binding"
+        | "ecky_ast_rename_binding_scoped" => CapabilityGroup::AstEdits,
+        // ── Semantic controls ──────────────────────────────────────────────
+        "semantic_manifest_get"
+        | "semantic_manifest_detail_get"
+        | "control_primitive_save"
+        | "control_primitive_delete"
+        | "control_view_save"
+        | "control_view_delete"
+        | "measurement_annotation_save"
+        | "measurement_annotation_delete"
+        | "semantic_transform_preview"
+        | "ecky_dependency_get"
+        | "ecky_selector_resolve"
+        | "ecky_constraints_validate" => CapabilityGroup::SemanticControls,
+        // ── Verify & printability ──────────────────────────────────────────
+        "verify_generated_model"
+        | "get_structural_verification_summary"
+        | "printability_analyze"
+        | "printability_transform_recipes_get"
+        | "get_model_screenshot" => CapabilityGroup::VerifyPrintability,
+        // ── Components & library ───────────────────────────────────────────
+        "component_extract"
+        | "component_search"
+        | "component_get"
+        | "component_import"
+        | "freecad_library_search"
+        | "freecad_library_import" => CapabilityGroup::ComponentsLibrary,
+        // ── Project files ──────────────────────────────────────────────────
+        "project_folder_export" | "project_folder_status" | "project_folder_apply" => {
+            CapabilityGroup::ProjectFiles
+        }
+        // ── Session activity & notices ─────────────────────────────────────
+        "session_reply_save"
+        | "session_activity_set"
+        | "session_activity_clear"
+        | "long_action_notice"
+        | "long_action_clear"
+        | "user_confirm_request" => CapabilityGroup::SessionActivity,
+        _ => return None,
+    };
+    Some(group)
+}
+
+/// Partition an ordered tool list into `(group, tools)` pairs in stable group
+/// order, dropping tools whose name is not mapped to a group (none expected —
+/// the drift test guards this) and groups that own no tool in this config
+/// (e.g. `ast-edits` when AST authoring is disabled).
+pub(crate) fn partition_tools_by_group(tools: &[Value]) -> Vec<(CapabilityGroup, Vec<Value>)> {
+    CapabilityGroup::all()
+        .iter()
+        .map(|group| {
+            let owned: Vec<Value> = tools
+                .iter()
+                .filter(|tool| {
+                    tool_capability_group(tool.get("name").and_then(Value::as_str).unwrap_or(""))
+                        == Some(*group)
+                })
+                .cloned()
+                .collect();
+            (*group, owned)
+        })
+        .filter(|(_, owned)| !owned.is_empty())
+        .collect()
+}
+
+/// Tools for a single capability group (defined tools in the requested config).
+#[cfg(test)]
+pub(crate) fn group_tool_definitions(
+    group: CapabilityGroup,
+    ecky_ast_authoring: bool,
+) -> Vec<Value> {
+    tool_definitions_with_ast_enabled(ecky_ast_authoring)
+        .into_iter()
+        .filter(|tool| {
+            tool_capability_group(tool.get("name").and_then(Value::as_str).unwrap_or(""))
+                == Some(group)
+        })
+        .collect()
+}
+
+/// Compact managed `tools/list` view: core workflow tools (always) plus the
+/// session-enabled specialist groups, in stable group order. Pagination is
+/// applied by the caller (compact normally fits a single page).
+pub(crate) fn compact_managed_tool_definitions(
+    enabled_group_ids: &std::collections::HashSet<String>,
+    ecky_ast_authoring: bool,
+) -> Vec<Value> {
+    let all = tool_definitions_with_ast_enabled(ecky_ast_authoring);
+    let mut enabled_groups: Vec<CapabilityGroup> = enabled_group_ids
+        .iter()
+        .filter_map(|id| CapabilityGroup::from_id(id))
+        .collect();
+    // Stable order regardless of HashSet iteration.
+    enabled_groups.sort_by_key(|group| {
+        CapabilityGroup::all()
+            .iter()
+            .position(|candidate| candidate == group)
+    });
+    let wanted: std::collections::HashSet<CapabilityGroup> = std::iter::once(CapabilityGroup::Core)
+        .chain(enabled_groups)
+        .collect();
+    all.into_iter()
+        .filter(|tool| {
+            tool_capability_group(tool.get("name").and_then(Value::as_str).unwrap_or(""))
+                .map(|group| wanted.contains(&group))
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+/// Decode an opaque pagination cursor into a byte offset. Returns 0 for
+/// missing/unreadable cursors so a bad cursor degrades to the first page
+/// rather than erroring.
+pub(crate) fn decode_tools_cursor(cursor: Option<&str>) -> usize {
+    let Some(cursor) = cursor else {
+        return 0;
+    };
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(cursor.as_bytes())
+        .ok();
+    decoded
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .and_then(|text| {
+            text.strip_prefix("offset:")
+                .and_then(|rest| rest.parse::<usize>().ok())
+        })
+        .unwrap_or(0)
+}
+
+/// Encode a byte offset as an opaque pagination cursor.
+pub(crate) fn encode_tools_cursor(offset: usize) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(format!("offset:{offset}").as_bytes())
+}
+
+/// Apply standard opaque-cursor pagination to an ordered tool list. Returns the
+/// page slice and the next cursor when more tools remain.
+pub(crate) fn paginate_tools(
+    tools: &[Value],
+    cursor: Option<&str>,
+    page_size: Option<usize>,
+) -> (Vec<Value>, Option<String>) {
+    let start = decode_tools_cursor(cursor).min(tools.len());
+    let remaining = tools.len().saturating_sub(start);
+    let page_size = page_size.filter(|size| *size > 0);
+    let take = page_size
+        .map(|size| size.min(remaining))
+        .unwrap_or(remaining);
+    let end = start + take;
+    let page = tools[start..end].to_vec();
+    let next_cursor = if end < tools.len() {
+        Some(encode_tools_cursor(end))
+    } else {
+        None
+    };
+    (page, next_cursor)
+}
+
+/// `tools/list` request parameters. `profile` selects compact-managed vs full
+/// compatibility; `cursor`/`pageSize` drive standard opaque pagination.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ToolsListParams {
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    page_size: Option<usize>,
+}
+
+const MCP_PROFILE_COMPACT_MANAGED: &str = "compact-managed";
+const MCP_PROFILE_FULL: &str = "full";
+
+/// Resolve a `tools/list` request to the page of tool schemas and an optional
+/// standard continuation cursor. Managed sessions (client_kind =
+/// `managed-mcp-http`) default to compact-managed discovery unless an explicit
+/// profile is supplied; all other sessions default to the full compatibility
+/// catalogue so existing clients keep seeing every tool.
+async fn resolve_tools_list(
+    state: &AppState,
+    session_id: &str,
+    params: &ToolsListParams,
+    ecky_ast_authoring: bool,
+) -> (Vec<Value>, Option<String>) {
+    let managed = get_session(state, session_id)
+        .await
+        .map(|session| session.client_kind == "managed-mcp-http")
+        .unwrap_or(false);
+    let profile = params.profile.as_deref().unwrap_or(if managed {
+        MCP_PROFILE_COMPACT_MANAGED
+    } else {
+        MCP_PROFILE_FULL
+    });
+
+    if profile == MCP_PROFILE_COMPACT_MANAGED {
+        let enabled = state
+            .mcp_session_enabled_groups
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default();
+        let tools = compact_managed_tool_definitions(&enabled, ecky_ast_authoring);
+        // Compact discovery normally fits one page; honor an explicit pageSize
+        // for clients that still want to page core + enabled groups.
+        paginate_tools(&tools, params.cursor.as_deref(), params.page_size)
+    } else {
+        // Full compatibility profile: every enabled tool, paginated.
+        let tools = tool_definitions_with_ast_enabled(ecky_ast_authoring);
+        paginate_tools(&tools, params.cursor.as_deref(), params.page_size)
+    }
+}
+
 fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
     let mut tools = vec![
         json!({
@@ -2093,6 +2625,27 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
             "name": "workspace_overview",
             "description": "Fast entrypoint: resolve the default editable target, list recent threads, and report any conflicting lease.",
             "inputSchema": with_identity(&[], &[])
+        }),
+        json!({
+            "name": "capability_search",
+            "description": "Discover MCP capability groups and their tools without loading every schema. Compact managed sessions start with only core workflow tools; call this to find the specialist group (target reads, source edits, AST edits, semantic controls, verify/printability, components/library, project files, session activity) that owns a tool or capability, then capability_enable to load its schemas for tools/list. Optional query filters by group title/description or tool name/description; omit it to list every group with its tool names.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Optional case-insensitive search over group titles/descriptions and tool names/descriptions." }
+                }
+            }
+        }),
+        json!({
+            "name": "capability_enable",
+            "description": "Enable a specialist capability group for this session so its tool schemas appear in tools/list, then emit notifications/tools/list_changed. Compact managed sessions start with core only; use capability_search to find the group id first. Enabled groups are session-scoped. Returns the updated enabledGroups list.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "group": { "type": "string", "description": "Capability group id, e.g. target-reads, source-edits, ast-edits, semantic-controls, verify-printability, components-library, project-files, session-activity." }
+                },
+                "required": ["group"]
+            }
         }),
         json!({
             "name": "freecad_library_search",
@@ -2110,7 +2663,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "project_folder_export",
-            "description": "Mirror a thread's active macro into a plain folder (<projectsRoot>/<slug>/model.ecky + ecky-project.json) so external editors and file-skill agents can author source directly. Re-export refreshes a stale folder.",
+            "description": "Compatibility/recovery export. Bound targets already expose sourcePath/sourceFolder; edit sourcePath and call project_folder_apply instead. Use export only to seed/reseed a missing unbound folder. Existing bindings retain their exact stored folder.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2183,6 +2736,20 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     "name": { "type": "string" }
                 },
                 "required": ["name"]
+            }
+        }),
+        json!({
+            "name": "component_import",
+            "description": "Copy-inline an installed package component into active Ecky model source and add one instantiated part. Returns self-contained authored source; never emits import-component or a dependency lock.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "packageId": { "type": "string" },
+                    "version": { "type": "string" },
+                    "componentId": { "type": "string" },
+                    "source": { "type": "string", "description": "Current active `(model ...)` source." }
+                },
+                "required": ["packageId", "version", "componentId", "source"]
             }
         }),
         json!({
@@ -2355,7 +2922,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "target_macro_get",
-            "description": "Fetch active editable source metadata plus a 1-based line window, authoringContext, and artifactDigest. Pass startLine/endLine for a specific range. Prefer macro_buffer_get for edits.",
+            "description": "Fetch active editable source metadata plus a 1-based line window, authoringContext, and artifactDigest. Pass startLine/endLine for a specific range. For bound targets edit sourcePath instead; macro-buffer edits are compatibility-only when sourcePath is absent.",
             "inputSchema": with_identity(
                 &[
                     ("threadId", json!({ "type": "string" })),
@@ -2368,7 +2935,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "macro_buffer_get",
-            "description": "Open the active target source into this MCP session's editable source buffer. Returns digest, artifactDigest, lineCount, and a 1-based line window only. Pass startLine/endLine for a specific range. Use before macro_buffer_replace_range, macro_buffer_apply_patch, or macro_buffer_preview_render.",
+            "description": "Compatibility-only for targets without sourcePath: open source into this session's buffer. Bound targets must edit sourcePath then project_folder_apply. Returns digest, artifactDigest, lineCount, and a 1-based line window.",
             "inputSchema": with_identity(
                 &[
                     ("threadId", json!({ "type": "string" })),
@@ -2381,7 +2948,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "macro_buffer_replace_range",
-            "description": "Edit this session's macro buffer by replacing one or more 1-based inclusive line ranges. Requires expectedDigest from macro_buffer_get or prior buffer edit.",
+            "description": "Deprecated for bound targets; edit sourcePath instead. Compatibility-only line replacement for an unbound session buffer. Requires expectedDigest.",
             "inputSchema": with_identity(
                 &[
                     ("expectedDigest", json!({ "type": "string" })),
@@ -2403,7 +2970,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "macro_buffer_apply_patch",
-            "description": "Apply a simple unified diff patch to this session's macro buffer. Requires expectedDigest from macro_buffer_get or prior buffer edit.",
+            "description": "Deprecated for bound targets; patch sourcePath instead. Compatibility-only unified diff for an unbound session buffer. Requires expectedDigest.",
             "inputSchema": with_identity(
                 &[
                     ("expectedDigest", json!({ "type": "string" })),
@@ -2414,7 +2981,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "macro_buffer_preview_render",
-            "description": "Validate/render this session's macro buffer through the existing macro_preview_render path. Preserves sourceLanguage, macroDialect, and geometryBackend captured by macro_buffer_get. Returns artifactDigest; check hasStepExport before promising STEP.",
+            "description": "Compatibility-only for targets without sourcePath: validate/render the session macro buffer. Bound targets use project_folder_apply. Returns artifactDigest; check hasStepExport before promising STEP.",
             "inputSchema": with_identity(
                 &[
                     ("expectedDigest", json!({ "type": "string" })),
@@ -2426,7 +2993,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "macro_buffer_replace_and_preview",
-            "description": "Replace 1-based inclusive line ranges in this session's macro buffer, then validate/render a preview through macro_preview_render. Returns artifactDigest; check hasStepExport before promising STEP. Prefer separate edit then render for large changes.",
+            "description": "Deprecated for bound targets; edit sourcePath then project_folder_apply. Compatibility-only replace-and-preview for targets without sourcePath. Returns artifactDigest with hasStepExport artifact truth.",
             "inputSchema": with_identity(
                 &[
                     ("threadId", json!({ "type": "string" })),
@@ -2597,7 +3164,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     ("parameterPatch", json!({ "type": "object" })),
                     ("geometryBackend", json!({
                         "type": "string",
-                        "enum": ["freecad", "build123d", "mesh", "native", "eckyRust"],
+                        "enum": ["freecad", "mesh", "native", "eckyRust"],
                         "description": "Optional: Explicitly choose geometry backend for Ecky source. `mesh`/`native` selects Ecky native lowering; `eckyRust` stays as a legacy alias."
                     }))
                 ],
@@ -2607,8 +3174,8 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         json!({
             "name": "macro_preview_render",
             "description": concat!(
-                "Replace macro code and rerender a draft. Returns artifactDigest; check hasStepExport before promising STEP. ",
-                "IMPORTANT: check workspace_overview.agentBrief.summary and rules — if sourceLanguage is `ecky`, macroCode MUST be current `.ecky` source (starting with `(model ...)`). geometryBackend chooses build123d, freecad, or native mesh lowering; source extension does not. ",
+                "Compatibility-only when sourcePath is absent. Bound targets edit sourcePath then call project_folder_apply. Replace macro code and rerender a draft. Returns artifactDigest; check hasStepExport before promising STEP. ",
+                "IMPORTANT: check workspace_overview.agentBrief.summary and rules — if sourceLanguage is `ecky`, macroCode MUST be current `.ecky` source (starting with `(model ...)`). geometryBackend chooses FreeCAD interop or native Ecky lowering; source extension does not. ",
                 "Authoring uses pure lispy Ecky source compiled to internal Core IR or the selected backend. `define`, `lambda`, `let`, `let*`, `if`, and generic helpers like `range`, `map`, `filter`, `reduce`, `zip`, `enumerate`, `linspace`, and `flat-map` are allowed; `set!`, assignment, rebinding, and mutation are not. Current `let` bindings are parallel, so same-frame bindings cannot depend on earlier siblings; use `let*` or nested `let` for sequential dependencies. `(define ...)` is NOT valid inside `(model ...)`; use `let*` inside `(part ...)` for computed values from params, and reserve top-level `(define (fn args) ...)` for reusable helper functions outside `(model ...)`. ",
                 "When workspace_overview.agentBrief.summary reports sourceLanguage `ecky`, uiSpec and parameters are auto-derived from the params block. For existing targets, omit parameters: macro_preview_render preserves current target params. Use params_preview_render for numeric changes. parameters only seeds first versions. ",
                 "uiSpec.fields is an array of control descriptors — each field MUST have: key (string), label (string), type (one of: range|number|select|checkbox|image). ",
@@ -2617,7 +3184,8 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                 "checkbox: no extra fields. ",
                 "image: use for file-picker inputs (e.g. a reference photo) — no extra fields, value is an absolute file path string once chosen by the user. ",
                 "parameters is a flat key→value map matching uiSpec field keys. ",
-                "For image fields, the parameter may be omitted or set to an empty string until the user picks a file in the UI."
+                "For image fields, the parameter may be omitted or set to an empty string until the user picks a file in the UI. ",
+                "If macroCode came from a target_macro_get/macro_buffer_get window read (windowStartLine/windowEndLine/truncated), include sourceWindow with those raw observed/window/full-size details; a truncated window submitted as a full replacement is rejected unless sourceWindow.acknowledgesTruncation is true."
             ),
             "inputSchema": with_identity(
                 &[
@@ -2648,8 +3216,19 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     ("parameters", json!({ "type": "object" })),
                     ("geometryBackend", json!({
                         "type": "string",
-                        "enum": ["freecad", "build123d", "mesh", "native", "eckyRust"],
+                        "enum": ["freecad", "mesh", "native", "eckyRust"],
                         "description": "Optional: Explicitly choose geometry backend for Ecky source. `mesh`/`native` selects Ecky native lowering; `eckyRust` stays as a legacy alias."
+                    })),
+                    ("sourceWindow", json!({
+                        "type": "object",
+                        "description": "Optional acknowledgement linking macroCode to a target_macro_get read window. Required to submit a truncated window as a full replacement: carries the read's raw observed/window/full-size line details and acknowledgesTruncation.",
+                        "properties": {
+                            "fullSizeLineCount": { "type": "number" },
+                            "windowStartLine": { "type": "number" },
+                            "windowEndLine": { "type": "number" },
+                            "observedLineCount": { "type": "number" },
+                            "acknowledgesTruncation": { "type": "boolean" }
+                        }
                     }))
                 ],
                 &["macroCode"],
@@ -2793,7 +3372,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "compare_models",
-            "description": "Compare two STL models using build123d comparison engine. Returns volume and bounding box matching metrics.",
+            "description": "Compare two STL models using volume and bounding-box metrics.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3118,7 +3697,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     ("postProcessing", json!({ "type": "object" })),
                     ("geometryBackend", json!({
                         "type": "string",
-                        "enum": ["freecad", "build123d", "mesh", "native", "eckyRust"],
+                        "enum": ["freecad", "mesh", "native", "eckyRust"],
                         "description": "Optional: Explicitly choose geometry backend for Ecky source."
                     }))
                 ],
@@ -3153,7 +3732,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     ("postProcessing", json!({ "type": "object" })),
                     ("geometryBackend", json!({
                         "type": "string",
-                        "enum": ["freecad", "build123d", "mesh", "native", "eckyRust"],
+                        "enum": ["freecad", "mesh", "native", "eckyRust"],
                         "description": "Optional: Explicitly choose geometry backend for Ecky source."
                     }))
                 ],
@@ -3188,7 +3767,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     ("postProcessing", json!({ "type": "object" })),
                     ("geometryBackend", json!({
                         "type": "string",
-                        "enum": ["freecad", "build123d", "mesh", "native", "eckyRust"]
+                        "enum": ["freecad", "mesh", "native", "eckyRust"]
                     }))
                 ],
                 &["sourceDigest", "path", "expectedNodeDigest", "value"],
@@ -3209,7 +3788,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     ("postProcessing", json!({ "type": "object" })),
                     ("geometryBackend", json!({
                         "type": "string",
-                        "enum": ["freecad", "build123d", "mesh", "native", "eckyRust"]
+                        "enum": ["freecad", "mesh", "native", "eckyRust"]
                     }))
                 ],
                 &["sourceDigest", "path", "expectedNodeDigest", "value"],
@@ -3230,7 +3809,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     ("postProcessing", json!({ "type": "object" })),
                     ("geometryBackend", json!({
                         "type": "string",
-                        "enum": ["freecad", "build123d", "mesh", "native", "eckyRust"]
+                        "enum": ["freecad", "mesh", "native", "eckyRust"]
                     }))
                 ],
                 &["sourceDigest", "path", "expectedNodeDigest", "value"],
@@ -3251,7 +3830,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     ("postProcessing", json!({ "type": "object" })),
                     ("geometryBackend", json!({
                         "type": "string",
-                        "enum": ["freecad", "build123d", "mesh", "native", "eckyRust"]
+                        "enum": ["freecad", "mesh", "native", "eckyRust"]
                     }))
                 ],
                 &["sourceDigest", "path", "expectedNodeDigest", "replacementSource"],
@@ -3273,7 +3852,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     ("postProcessing", json!({ "type": "object" })),
                     ("geometryBackend", json!({
                         "type": "string",
-                        "enum": ["freecad", "build123d", "mesh", "native", "eckyRust"]
+                        "enum": ["freecad", "mesh", "native", "eckyRust"]
                     }))
                 ],
                 &["sourceDigest", "path", "expectedNodeDigest", "bindingSource"],
@@ -3293,7 +3872,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     ("postProcessing", json!({ "type": "object" })),
                     ("geometryBackend", json!({
                         "type": "string",
-                        "enum": ["freecad", "build123d", "mesh", "native", "eckyRust"]
+                        "enum": ["freecad", "mesh", "native", "eckyRust"]
                     }))
                 ],
                 &["sourceDigest", "path", "expectedNodeDigest"],
@@ -3314,7 +3893,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     ("postProcessing", json!({ "type": "object" })),
                     ("geometryBackend", json!({
                         "type": "string",
-                        "enum": ["freecad", "build123d", "mesh", "native", "eckyRust"]
+                        "enum": ["freecad", "mesh", "native", "eckyRust"]
                     }))
                 ],
                 &["sourceDigest", "path", "expectedNodeDigest", "newName"],
@@ -3515,7 +4094,9 @@ async fn handle_http_post(
             json!({
                 "protocolVersion": protocol_version,
                 "capabilities": {
-                    "tools": {},
+                    "tools": {
+                        "listChanged": true
+                    },
                     "resources": {},
                     "prompts": {}
                 },
@@ -3606,24 +4187,25 @@ async fn dispatch_request(
         }
         "tools/list" => {
             let ecky_ast_authoring = server.state.config.lock().unwrap().mcp.ecky_ast_authoring;
-            json_rpc_result(
-                req.id,
-                json!({ "tools": tool_definitions_with_ast_enabled(ecky_ast_authoring) }),
-            )
+            let params: ToolsListParams =
+                serde_json::from_value(req.params.unwrap_or_default()).unwrap_or_default();
+            let (tools, next_cursor) =
+                resolve_tools_list(&server.state, session_id, &params, ecky_ast_authoring).await;
+            let mut result = json!({ "tools": tools });
+            if let Some(cursor) = next_cursor {
+                result["nextCursor"] = json!(cursor);
+            }
+            json_rpc_result(req.id, result)
         }
         "tools/call" => {
             match serde_json::from_value::<CallToolParams>(req.params.unwrap_or_default()) {
                 Ok(params) => {
                     let dispatch_server = server.clone();
                     let dispatch_session_id = session_id.to_string();
-                    let dispatch_result = tauri::async_runtime::spawn(async move {
+                    let dispatch_result = run_on_mcp_tool_dispatch_stack(move || async move {
                         dispatch_tool_call(&dispatch_server, &dispatch_session_id, params).await
                     })
-                    .await
-                    .map_err(|error| {
-                        AppError::internal(format!("MCP tool dispatcher task failed: {error}"))
-                    })
-                    .and_then(|result| result);
+                    .await;
                     match dispatch_result {
                         Ok((value, next_target)) => {
                             if next_target.is_some() {
@@ -3656,7 +4238,11 @@ fn dispatched_tool_names() -> std::collections::BTreeSet<String> {
         .lines()
         .filter_map(|line| {
             let line = line.trim();
-            if !line.starts_with('"') {
+            // A dispatch arm looks like `"name" => …` (optionally several
+            // `"a" | "b" => …`). Require the `=>` on the same line as the name
+            // so inline `json!({ "key": … })` literals and error strings that
+            // happen to start a line are not mistaken for tool arms.
+            if !line.starts_with('"') || !line.contains("=>") {
                 return None;
             }
 
@@ -3807,6 +4393,17 @@ async fn dispatch_workspace_overview(
                 message_id: target.message_id.clone(),
                 model_id: target.model_id.clone(),
             });
+            // openspec thread-source-binding 4.1: expose the bound source
+            // path / folder / state for the agent using the exact stored
+            // binding path.
+            let (source_path, source_folder, source_state) =
+                handlers::resolve_target_source_binding(
+                    &server.state,
+                    server.app.as_ref(),
+                    &conn,
+                    &target.thread_id,
+                    &target.title,
+                );
             (
                 WorkspaceOverviewResponse {
                     agent_brief: workspace_overview_brief(
@@ -3824,6 +4421,9 @@ async fn dispatch_workspace_overview(
                         has_draft: target.has_draft,
                         has_version: true,
                         claim_owner: claim_owners.get(&target.thread_id).cloned(),
+                        source_path,
+                        source_folder,
+                        source_state,
                     },
                     recent_threads,
                     lease_info,
@@ -3839,6 +4439,17 @@ async fn dispatch_workspace_overview(
                 .and_then(|session| session.thread_id);
             let thread_id = live_bound_thread_id.or(stored_thread_id).ok_or(err)?;
             let thread = crate::services::history::get_thread(&conn, &thread_id)?;
+            // openspec thread-source-binding 4.1: even a thread with no
+            // successful versions may already be bound (threads bind on
+            // creation), so expose the bound source view when present.
+            let (source_path, source_folder, source_state) =
+                handlers::resolve_target_source_binding(
+                    &server.state,
+                    server.app.as_ref(),
+                    &conn,
+                    &thread.id,
+                    &thread.title,
+                );
             (
                 WorkspaceOverviewResponse {
                     agent_brief: workspace_overview_brief(&server.state, None, None),
@@ -3852,6 +4463,9 @@ async fn dispatch_workspace_overview(
                         has_draft: false,
                         has_version: false,
                         claim_owner: claim_owners.get(&thread.id).cloned(),
+                        source_path,
+                        source_folder,
+                        source_state,
                     },
                     recent_threads,
                     lease_info: None,
@@ -3881,6 +4495,191 @@ async fn dispatch_project_folder_apply(
     .await?;
     emit_history_updated(server);
     Ok((serde_json::to_value(response).unwrap(), None))
+}
+
+// OpenSpec `agent-context-budgeting` §5.2/§5.3: capability discovery/enable
+// controls for compact managed MCP sessions.
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CapabilitySearchParams {
+    #[serde(default)]
+    query: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CapabilityEnableParams {
+    group: String,
+}
+
+fn dispatch_capability_search(
+    state: &AppState,
+    args: &Value,
+) -> AppResult<(Value, Option<McpTargetRef>)> {
+    let params: CapabilitySearchParams = serde_json::from_value(args.clone()).unwrap_or_default();
+    let ecky_ast_authoring = state.config.lock().unwrap().mcp.ecky_ast_authoring;
+    let tools = tool_definitions_with_ast_enabled(ecky_ast_authoring);
+    let partitioned = partition_tools_by_group(&tools);
+    let query = params.query.as_deref().map(str::trim).unwrap_or("");
+    let lower_query = query.to_ascii_lowercase();
+
+    let matched_groups: Vec<Value> = partitioned
+        .iter()
+        .map(|(group, group_tools)| {
+            let group_hits: Vec<&Value> = if lower_query.is_empty() {
+                group_tools.iter().collect()
+            } else {
+                group_tools
+                    .iter()
+                    .filter(|tool| {
+                        let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
+                        let desc = tool
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        name.to_ascii_lowercase().contains(&lower_query)
+                            || desc.to_ascii_lowercase().contains(&lower_query)
+                    })
+                    .collect()
+            };
+
+            let group_text_matches = lower_query.is_empty()
+                || group.title().to_ascii_lowercase().contains(&lower_query)
+                || group.description().to_ascii_lowercase().contains(&lower_query)
+                || group.id().contains(&lower_query);
+
+            if !lower_query.is_empty() && group_hits.is_empty() && !group_text_matches {
+                return None;
+            }
+
+            let tools_summary: Vec<Value> = group_tools
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "name": tool.get("name").and_then(Value::as_str).unwrap_or(""),
+                        "description": tool.get("description").and_then(Value::as_str).unwrap_or(""),
+                    })
+                })
+                .collect();
+            let matched_tools: Vec<&str> = if lower_query.is_empty() {
+                Vec::new()
+            } else {
+                group_hits
+                    .iter()
+                    .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+                    .collect()
+            };
+            Some(json!({
+                "id": group.id(),
+                "title": group.title(),
+                "description": group.description(),
+                "toolCount": group_tools.len(),
+                "matchedTools": matched_tools,
+                "tools": tools_summary,
+            }))
+        })
+        .flatten()
+        .collect();
+
+    let total_tools: usize = matched_groups
+        .iter()
+        .filter_map(|group| group.get("toolCount").and_then(Value::as_u64))
+        .map(|count| count as usize)
+        .sum();
+
+    Ok((
+        json!({
+            "profile": MCP_PROFILE_COMPACT_MANAGED,
+            "query": query,
+            "groups": matched_groups.clone(),
+            "totalGroups": matched_groups.len(),
+            "totalTools": total_tools,
+            "hint": "Call capability_enable with a group id to load its tool schemas into tools/list for this session."
+        }),
+        None,
+    ))
+}
+
+async fn dispatch_capability_enable(
+    state: &AppState,
+    session_id: &str,
+    args: &Value,
+) -> AppResult<(Value, Option<McpTargetRef>)> {
+    let params: CapabilityEnableParams = serde_json::from_value(args.clone())
+        .map_err(|e| AppError::validation(format!("Invalid capability_enable params: {e}")))?;
+    let group = CapabilityGroup::from_id(params.group.trim()).ok_or_else(|| {
+        AppError::validation(format!(
+            "Unknown capability group: {}. Use capability_search to list valid group ids.",
+            params.group
+        ))
+    })?;
+
+    let mut enabled_groups = state.mcp_session_enabled_groups.lock().await;
+    let session_groups = enabled_groups.entry(session_id.to_string()).or_default();
+    let already_enabled = session_groups.contains(group.id());
+    if !already_enabled {
+        session_groups.insert(group.id().to_string());
+    }
+    drop(enabled_groups);
+
+    // Emit standard `notifications/tools/list_changed` for this session. This
+    // Streamable-HTTP server answers each request with one JSON-RPC object, so
+    // the notification is queued for delivery to managed agents on their next
+    // poll; the next `tools/list` already reflects the enabled group.
+    let notification = json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/tools/list_changed"
+    });
+    state
+        .mcp_session_pending_notifications
+        .lock()
+        .await
+        .entry(session_id.to_string())
+        .or_default()
+        .push(notification);
+
+    let enabled: Vec<String> = state
+        .mcp_session_enabled_groups
+        .lock()
+        .await
+        .get(session_id)
+        .map(|set| {
+            let mut ids: Vec<String> = set.iter().cloned().collect();
+            ids.sort_by_key(|id| {
+                CapabilityGroup::from_id(id)
+                    .and_then(|group| {
+                        CapabilityGroup::all()
+                            .iter()
+                            .position(|candidate| candidate == &group)
+                    })
+                    .unwrap_or(usize::MAX)
+            });
+            ids
+        })
+        .unwrap_or_default();
+
+    Ok((
+        json!({
+            "group": { "id": group.id(), "title": group.title() },
+            "enabledGroups": enabled,
+            "listChanged": true,
+            "alreadyEnabled": already_enabled,
+            "hint": "The session tool list changed; the next tools/list includes this group's schemas."
+        }),
+        None,
+    ))
+}
+
+/// Drain queued MCP server→client notifications for a session (test/probe hook
+/// for the `notifications/tools/list_changed` emission path).
+#[cfg(test)]
+pub(crate) async fn drain_pending_mcp_notifications(
+    state: &AppState,
+    session_id: &str,
+) -> Vec<Value> {
+    let mut notifications = state.mcp_session_pending_notifications.lock().await;
+    notifications.remove(session_id).unwrap_or_default()
 }
 
 async fn dispatch_tool_call(
@@ -3934,6 +4733,8 @@ async fn dispatch_tool_call(
         "workspace_overview" => {
             Box::pin(dispatch_workspace_overview(server, session_id, args)).await
         }
+        "capability_search" => dispatch_capability_search(&server.state, &args),
+        "capability_enable" => dispatch_capability_enable(&server.state, session_id, &args).await,
         "project_folder_export" => {
             let req_args: handlers::ProjectFolderExportRequest =
                 serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
@@ -3976,6 +4777,12 @@ async fn dispatch_tool_call(
             let req_args: handlers::ComponentGetToolRequest =
                 serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
             let response = handlers::handle_component_get(server.app.as_ref(), req_args)?;
+            Ok((serde_json::to_value(response).unwrap(), None))
+        }
+        "component_import" => {
+            let req_args: handlers::ComponentImportToolRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let response = handlers::handle_component_import(server.app.as_ref(), req_args)?;
             Ok((serde_json::to_value(response).unwrap(), None))
         }
         "freecad_library_search" => {
@@ -4073,8 +4880,13 @@ async fn dispatch_tool_call(
             let req_args: ThreadCreateRequest =
                 serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
             let action_ctx = current_ctx.with_override(&req_args.identity);
-            let response =
-                handlers::handle_thread_create(&server.state, req_args, &action_ctx).await?;
+            let response = handlers::handle_thread_create(
+                &server.state,
+                server.app.as_ref(),
+                req_args,
+                &action_ctx,
+            )
+            .await?;
             emit_history_updated(server);
             Ok((serde_json::to_value(response).unwrap(), None))
         }
@@ -4999,6 +5811,10 @@ async fn dispatch_tool_call(
                         "macro_preview_render",
                     )
                     .await?;
+                    crate::mcp::source_window_guard::validate_macro_source_window_replacement(
+                        &req_args.macro_code,
+                        req_args.source_window.as_ref(),
+                    )?;
                     let lease_target = McpTargetRef {
                         thread_id: target.thread_id.clone(),
                         message_id: target.message_id.clone(),
@@ -6057,6 +6873,12 @@ mod tests {
         )
     }
 
+    fn read_surface_manifest_resource(state: &AppState, uri: &str) -> Value {
+        let content = read_resource_content(state, uri).expect("surface JSON resource");
+        assert_eq!(content.mime_type, "application/json");
+        serde_json::from_str(&content.text).expect("valid surface JSON resource")
+    }
+
     #[test]
     fn first_version_macro_context_uses_config_without_content_fallback() {
         let mut config = test_config();
@@ -6072,6 +6894,7 @@ mod tests {
             parameters: None,
             post_processing: None,
             geometry_backend: None,
+            source_window: None,
         };
 
         assert_eq!(
@@ -6175,6 +6998,9 @@ mod tests {
     fn ecky_test_bundle(model_id: &str) -> ArtifactBundle {
         ArtifactBundle {
             geometry_provenance: None,
+            component_dependency_lock: None,
+            component_dependency_lock_digest: None,
+            component_import_origins: Vec::new(),
             schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -6199,6 +7025,7 @@ mod tests {
     fn ecky_test_manifest(model_id: &str) -> ModelManifest {
         ModelManifest {
             geometry_provenance: None,
+            component_import_origins: Vec::new(),
             schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -6342,8 +7169,39 @@ mod tests {
         .await
     }
 
+    #[tokio::test]
+    async fn tool_dispatch_worker_has_headroom_above_default_tokio_stack() {
+        let thread_name = run_on_mcp_tool_dispatch_stack(|| async {
+            let mut stack_probe = [0_u8; 3 * 1024 * 1024];
+            for offset in (0..stack_probe.len()).step_by(4096) {
+                stack_probe[offset] = 1;
+            }
+            std::hint::black_box(&mut stack_probe);
+            Ok(std::thread::current()
+                .name()
+                .unwrap_or_default()
+                .to_string())
+        })
+        .await
+        .expect("dedicated MCP dispatch stack");
+
+        assert_eq!(thread_name, MCP_TOOL_DISPATCH_THREAD_NAME);
+    }
+
     fn parse_mcp_tool_payload(response: &JsonRpcResponse) -> Value {
         let result = response.result.as_ref().expect("json-rpc result");
+        // Ordinary/bounded success: canonical machine output lives in
+        // structuredContent. Large reads nest the payload under `data` alongside
+        // observedCount/continuation metadata; ordinary reads carry the value
+        // directly.
+        if let Some(structured) = result.get("structuredContent") {
+            if structured_content_is_bounded_read(structured) {
+                return structured["data"].clone();
+            }
+            return structured.clone();
+        }
+        // Error (`isError`) or rich-content payloads carry their JSON in
+        // content[0].text.
         let text = result["content"][0]["text"]
             .as_str()
             .expect("tool payload text");
@@ -6466,6 +7324,56 @@ mod tests {
                 .expect("spawn worker-stack test")
                 .join()
                 .expect("join worker-stack test");
+        });
+    }
+
+    // openspec thread-source-binding 4.1: workspace_overview.defaultTarget
+    // exposes the bound source path/folder/state using the exact stored
+    // binding path (camelCase JSON).
+    #[test]
+    fn workspace_overview_default_target_exposes_bound_source_path_folder_state() {
+        run_async_test_with_large_stack(|| async {
+            let session_id = "session-workspace-bound-source";
+            let server = test_dispatch_server("(model (part body (box 8 8 4)))", session_id).await;
+            // Bind thread-1 through the commit-sync flow (the realistic path
+            // for a thread that already has a committed version).
+            let binding = {
+                let conn = server.state.db.lock().await;
+                crate::thread_source_binding::refresh_on_commit(
+                    server.app.as_ref(),
+                    &conn,
+                    server.state.config.lock().unwrap().projects_root.as_deref(),
+                    "thread-1",
+                    "Wrapper Path",
+                    "(model (part body (box 8 8 4)))",
+                    "msg-1",
+                    None,
+                    Some("msg-1"),
+                )
+                .expect("refresh binds on first commit")
+            };
+
+            let response =
+                dispatch_tool_call_jsonrpc(&server, session_id, "workspace_overview", json!({}))
+                    .await;
+            let payload = parse_mcp_tool_payload(&response);
+            let default_target = payload.get("defaultTarget").expect("defaultTarget present");
+            let source_path = default_target
+                .get("sourcePath")
+                .and_then(Value::as_str)
+                .expect("sourcePath present for bound target");
+            let source_folder = default_target
+                .get("sourceFolder")
+                .and_then(Value::as_str)
+                .expect("sourceFolder present for bound target");
+            let source_state = default_target
+                .get("sourceState")
+                .and_then(Value::as_str)
+                .expect("sourceState present for bound target");
+            assert_eq!(source_path, binding.source_path);
+            assert_eq!(source_folder, binding.folder_path);
+            assert!(source_path.ends_with("model.ecky"));
+            assert_eq!(source_state, "clean");
         });
     }
 
@@ -6788,6 +7696,103 @@ mod tests {
         assert_eq!(ecky_node_source_text(&key_nodes[0]), source_slice);
     }
 
+    // BDD dispatch-level RED -> GREEN for checkbox 10.3 (render-snapshot-
+    // authority): a real bounded `target_macro_get` window, when its lines are
+    // submitted back as the full `macroCode` to `macro_preview_render` with
+    // `sourceWindow.acknowledgesTruncation=false`, must be rejected by the
+    // dispatch guard BEFORE a lease is acquired or a render is attempted. The
+    // positive branch (explicit `acknowledgesTruncation=true` passes the guard)
+    // is already proven by the unit guard in `source_window_guard.rs` without
+    // the heavy render infrastructure this dispatch path would require.
+    #[tokio::test]
+    async fn macro_preview_render_rejects_truncated_target_macro_window_before_render() {
+        // 1. Seed a target whose full macro spans several lines.
+        let source = "(model\n  ; line two\n  ; line three\n  ; line four\n  ; line five\n  ; line six\n  (part body (box 1 2 3)))";
+        let session_id = "session-source-window-guard";
+        let server = test_dispatch_server(source, session_id).await;
+
+        // 2. Read a real BOUNDED window from target_macro_get (lines 3..5 of 7).
+        let window_payload = parse_mcp_tool_payload(
+            &dispatch_tool_call_jsonrpc(
+                &server,
+                session_id,
+                "target_macro_get",
+                json!({
+                    "threadId": "thread-1",
+                    "messageId": "msg-1",
+                    "startLine": 3,
+                    "endLine": 5
+                }),
+            )
+            .await,
+        );
+        let full_size_line_count = window_payload["lineCount"].as_u64().expect("lineCount");
+        let window_start_line = window_payload["windowStartLine"]
+            .as_u64()
+            .expect("windowStartLine");
+        let window_end_line = window_payload["windowEndLine"]
+            .as_u64()
+            .expect("windowEndLine");
+        let window_lines = window_payload["lines"]
+            .as_array()
+            .expect("lines array")
+            .iter()
+            .map(|line| {
+                line.get("text")
+                    .and_then(Value::as_str)
+                    .expect("line text")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        let observed_line_count = window_lines.len();
+        let submitted_macro_code = window_lines.join("\n");
+
+        // Sanity: this really is a truncated window (3..5 of 7), so the guard
+        // path is the one under test.
+        assert_eq!(window_start_line, 3);
+        assert_eq!(window_end_line, 5);
+        assert_eq!(full_size_line_count, 7);
+        assert!(window_start_line > 1 || window_end_line < full_size_line_count);
+
+        // 3. Submit that exact window back as a full replacement WITHOUT
+        //    acknowledging the truncation.
+        let response = dispatch_tool_call_jsonrpc(
+            &server,
+            session_id,
+            "macro_preview_render",
+            json!({
+                "threadId": "thread-1",
+                "messageId": "msg-1",
+                "macroCode": submitted_macro_code,
+                "sourceWindow": {
+                    "fullSizeLineCount": full_size_line_count,
+                    "windowStartLine": window_start_line,
+                    "windowEndLine": window_end_line,
+                    "observedLineCount": observed_line_count,
+                    "acknowledgesTruncation": false
+                }
+            }),
+        )
+        .await;
+
+        // 4. The dispatch guard rejects it as a validation error before any
+        //    render/lease work. isError is set and the raw AppError survives.
+        let result = response.result.as_ref().expect("json-rpc result");
+        assert_eq!(result["isError"], true, "truncated window must be rejected");
+        let err_payload = parse_mcp_tool_payload(&response);
+        assert_eq!(err_payload["code"], "validation");
+        let message = err_payload["message"].as_str().expect("error message");
+        assert!(
+            message.contains("truncated target_macro_get window"),
+            "expected truncation rejection, got: {message}"
+        );
+        assert!(message.contains("acknowledgesTruncation"));
+        // The rejection must reference the declared window bounds, proving the
+        // guard consumed the sourceWindow metadata rather than guessing.
+        assert!(message.contains("lines 3..5"));
+        assert!(message.contains("fullSizeLineCount 7"));
+    }
+
     #[test]
     fn api_key_mode_blocks_external_mcp_tools() {
         let config = test_api_key_config();
@@ -6865,6 +7870,7 @@ mod tests {
             "component_extract",
             "component_search",
             "component_get",
+            "component_import",
             "project_folder_export",
             "project_folder_status",
             "project_folder_apply",
@@ -7554,6 +8560,182 @@ mod tests {
         );
     }
 
+    // ── OpenSpec agent-context-budgeting §5.1: capability-group drift ──────
+    #[test]
+    fn capability_group_drift_every_defined_and_dispatched_tool_in_exactly_one_group() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        // The authoritative tool roster is the union of both AST-authoring
+        // configs. The source-scraping `dispatched_tool_names()` helper also
+        // picks up nested match-arm literals (e.g. file-extension arms inside
+        // freecad_library_import), so we intersect it with the defined roster
+        // to recover the real dispatched tools and re-assert defined⊆dispatched.
+        let mut defined_names: BTreeSet<String> = BTreeSet::new();
+        for ast_enabled in [false, true] {
+            for tool in tool_definitions_with_ast_enabled(ast_enabled) {
+                let name = tool
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .expect("tool has a name")
+                    .to_string();
+                defined_names.insert(name);
+            }
+        }
+        let dispatched = dispatched_tool_names();
+        let missing_handler: Vec<String> = defined_names.difference(&dispatched).cloned().collect();
+        assert!(
+            missing_handler.is_empty(),
+            "every defined tool must have a dispatch handler; missing handlers: {missing_handler:?}"
+        );
+
+        let real_dispatched: BTreeSet<String> =
+            dispatched.intersection(&defined_names).cloned().collect();
+        let all_names: BTreeSet<String> = defined_names
+            .iter()
+            .cloned()
+            .chain(real_dispatched.into_iter())
+            .collect();
+
+        // (1) Every defined and dispatched tool must resolve to exactly one
+        //     capability group.
+        let mut unmapped: Vec<String> = Vec::new();
+        for name in &all_names {
+            if tool_capability_group(name).is_none() {
+                unmapped.push(name.clone());
+            }
+        }
+        assert!(
+            unmapped.is_empty(),
+            "every defined/dispatched tool must belong to exactly one capability \
+             group; unmapped tools: {unmapped:?}"
+        );
+
+        // (2) tool_capability_group is a pure name→group function, so a name
+        //     cannot belong to two groups. Verify by counting the partition for
+        //     each AST config: every defined tool lands in exactly one bucket.
+        for ast_enabled in [false, true] {
+            let tools = tool_definitions_with_ast_enabled(ast_enabled);
+            let total = tools.len();
+            let mut grouped = 0usize;
+            let mut by_group: BTreeMap<&'static str, usize> = BTreeMap::new();
+            for tool in &tools {
+                let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
+                let group = tool_capability_group(name).expect("mapped above");
+                *by_group.entry(group.id()).or_insert(0) += 1;
+                grouped += 1;
+            }
+            assert_eq!(
+                grouped, total,
+                "partition dropped tools for ast_enabled={ast_enabled}"
+            );
+            // Every group present in this config owns at least one tool.
+            assert!(
+                by_group.values().all(|count| *count > 0),
+                "empty groups in partition for ast_enabled={ast_enabled}: {by_group:?}"
+            );
+        }
+
+        // (3) The capability discovery/enable controls live in core so compact
+        //     managed sessions can advertise them without loading specialists.
+        assert_eq!(
+            tool_capability_group("capability_search"),
+            Some(CapabilityGroup::Core),
+            "capability_search must belong to the core group"
+        );
+        assert_eq!(
+            tool_capability_group("capability_enable"),
+            Some(CapabilityGroup::Core),
+            "capability_enable must belong to the core group"
+        );
+
+        // (4) No specialist tool (e.g. ecky_ast_get_node) leaks into core, so a
+        //     compact session cannot accidentally advertise it.
+        assert_ne!(
+            tool_capability_group("ecky_ast_get_node"),
+            Some(CapabilityGroup::Core),
+            "specialist AST tools must not belong to core"
+        );
+
+        // (5) Core stays narrow enough for compact discovery (core only, no
+        //     enabled groups).
+        let core_only = compact_managed_tool_definitions(&std::collections::HashSet::new(), true);
+        assert!(
+            core_only.len() <= 15,
+            "compact-managed core must stay narrow (<=15), got {}",
+            core_only.len()
+        );
+
+        // (6) Every advertised capability group has at least one tool across
+        //     the AST configs, so no group id is an empty promise.
+        let every_group_has_tools = CapabilityGroup::all().iter().all(|group| {
+            [false, true]
+                .iter()
+                .any(|ast_enabled| !group_tool_definitions(*group, *ast_enabled).is_empty())
+        });
+        assert!(
+            every_group_has_tools,
+            "every capability group must own at least one tool in some config"
+        );
+    }
+
+    // ── §5.4 full compatibility profile preserves every name + paginates ────
+    #[test]
+    fn full_compatibility_profile_preserves_every_tool_name_and_paginates_with_opaque_cursor() {
+        let all = tool_definitions_with_ast_enabled(true);
+        let all_names: std::collections::BTreeSet<String> = all
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
+            .collect();
+
+        // Page through the full catalogue with a small page size and an opaque
+        // cursor; collect every observed name and confirm no name is renamed or
+        // dropped, and that the final page has no nextCursor.
+        let mut observed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut cursor: Option<String> = None;
+        let mut pages = 0usize;
+        loop {
+            let (page, next) = paginate_tools(&all, cursor.as_deref(), Some(25));
+            pages += 1;
+            for tool in &page {
+                observed.insert(
+                    tool.get("name")
+                        .and_then(Value::as_str)
+                        .expect("tool name")
+                        .to_string(),
+                );
+            }
+            cursor = next;
+            if cursor.is_none() {
+                break;
+            }
+            assert!(pages <= 20, "pagination did not terminate");
+        }
+
+        assert!(
+            pages > 1,
+            "full catalogue spanning pages must produce more than one page"
+        );
+        assert_eq!(
+            observed, all_names,
+            "full compatibility profile must preserve every existing tool name"
+        );
+
+        // Opaque cursor: a client-supplied cursor must be opaque base64 and
+        // round-trip through decode_tools_cursor.
+        let (first_page, first_next) = paginate_tools(&all, None, Some(10));
+        assert_eq!(first_page.len(), 10);
+        let next = first_next.expect("more tools remain");
+        assert!(
+            !next.contains(':'),
+            "cursor must be opaque (no plaintext offset delimiter): {next}"
+        );
+        assert_eq!(
+            decode_tools_cursor(Some(&next)),
+            10,
+            "opaque cursor must decode back to the offset"
+        );
+    }
+
     #[tokio::test]
     async fn ecky_authoring_tools_require_guide_reads_before_source_changes() {
         let state = test_mcp_engine_state("openai", "gpt-5.4");
@@ -7788,142 +8970,6 @@ mod tests {
     }
 
     #[test]
-    fn guidance_prefers_meta_macro_and_detail_over_target_get() {
-        let state = test_state();
-        let workflow = workflow_guide_text(&state);
-        let brief = workspace_overview_brief(
-            &state,
-            Some(crate::contracts::SourceLanguage::EckyIrV0),
-            Some(crate::contracts::GeometryBackend::Build123d),
-        );
-
-        assert!(workflow.contains("ecky://guides/ecky-source"));
-        assert!(workflow.contains("Ecky authoring card"));
-        assert!(workflow.contains("(extrude (polygon"));
-        assert!(workflow.contains("let*"));
-        assert!(workflow.contains("macro_preview_render"));
-        assert!(workflow.contains("thread_create"));
-        assert!(workflow.contains("thread_borrow"));
-        assert!(workflow.contains("resources/read"));
-        assert!(workflow.contains("sourceLanguage=ecky"));
-        assert!(workflow.contains("primaryGuideUri"));
-        assert!(workflow.contains("compatibilityManifestUri"));
-        assert!(workflow.contains("backend is a lowerer"));
-        assert!(workflow.contains("prose backend guide"));
-        assert!(workflow.contains("JSON surface manifests are authoritative"));
-        assert!(workflow.contains("ecky://guides/surface-manifest/build123d"));
-        assert!(workflow.contains("ecky://guides/surface-manifest/freecad"));
-        assert!(workflow.contains("ecky://guides/surface-manifest/ecky-rust"));
-        assert!(workflow.contains("parse -> expand -> typecheck -> lower -> validate"));
-        assert!(workflow.contains("Ecky native backend runs the controlled CAD runtime pipeline"));
-        assert!(workflow.contains("public backend setting is still `mesh`/`native`"));
-        assert!(workflow.contains("Never promise STEP unless artifact truth proves it"));
-        assert!(workflow.contains("`artifact_manifest_get`"));
-        assert!(workflow.contains("`target_detail_get(section=\"artifactBundle\")` first"));
-        assert!(workflow.contains("hasStepExport=true"));
-        assert!(workflow.contains("`exportArtifacts` contains `format=step`"));
-        assert!(workflow.contains("full machine-readable artifactBundle/modelManifest JSON"));
-        assert!(
-            workflow.contains("`target_detail_get(section=\"exportArtifacts\")` for the STEP path")
-        );
-        assert!(workflow.contains("artifactBundle digest exposes `geometryBackend`, `geometryRepresentation`, `facetedStep`, `analyticStep`, `sourceMeshDigests`, `edgeTargetCount`, `faceTargetCount`, `exportFormats`, `hasStepExport`, and `stepExportPath`"));
-        assert!(workflow.contains("formula-generated vertex/triangle lists"));
-        assert!(workflow.contains("Reference images are inferred approximation inputs"));
-        assert!(workflow.contains("`verify_generated_model` first"));
-        assert!(workflow.contains("call `verify_generated_model` before commit"));
-        assert!(workflow.contains("Commit only green verification"));
-        assert!(workflow.contains("do not commit and report capped red honestly"));
-        assert!(workflow.contains("Call verify_generated_model on the preview/render draft"));
-        assert!(
-            workflow.contains("Commit green verified preview drafts with commit_preview_version")
-        );
-        assert!(workflow.contains("target_meta_get"));
-        assert!(workflow.contains("target_macro_get"));
-        assert!(workflow.contains("artifact_manifest_get"));
-        assert!(workflow.contains("target_detail_get(section=...)"));
-        assert!(workflow.contains("Use target_get only when you truly need the full payload"));
-        assert!(workflow.contains("measurement_annotation tools"));
-        assert!(workflow.contains("long_action_notice"));
-        assert!(!workflow.contains("If needed, call target_get or thread_get"));
-        assert!(!workflow.contains("disk"));
-
-        assert!(brief
-            .resources
-            .iter()
-            .any(|resource| resource == "ecky://guides/ecky-source"));
-        assert!(brief
-            .resources
-            .iter()
-            .any(|resource| resource == "ecky://guides/ecky-source/build123d"));
-        assert!(brief
-            .resources
-            .iter()
-            .any(|resource| resource == "ecky://guides/authoring-card"));
-        assert!(brief
-            .resources
-            .iter()
-            .any(|resource| resource == "ecky://guides/ecky-rust"));
-        for uri in [
-            "ecky://guides/surface-manifest/build123d",
-            "ecky://guides/surface-manifest/freecad",
-            "ecky://guides/surface-manifest/ecky-rust",
-        ] {
-            assert!(brief.resources.iter().any(|resource| resource == uri));
-        }
-        assert_eq!(brief.source_language, "ecky");
-        assert_eq!(brief.geometry_backend, "build123d");
-        assert_eq!(
-            brief.primary_guide_uri,
-            "ecky://guides/ecky-source/build123d"
-        );
-        assert_eq!(
-            brief.compatibility_manifest_uri.as_deref(),
-            Some("ecky://guides/surface-manifest/build123d")
-        );
-        assert_eq!(
-            brief.must_read,
-            vec!["ecky://guides/ecky-source/build123d".to_string()]
-        );
-        assert!(brief
-            .read_when_needed
-            .iter()
-            .any(|uri| uri == "ecky://guides/surface-manifest/build123d"));
-        assert!(brief
-            .read_when_needed
-            .iter()
-            .any(|uri| uri == "ecky://guides/build123d"));
-        assert!(brief.summary.contains("fileExtension=.ecky"));
-        assert!(brief.summary.contains("geometryBackend=build123d"));
-        assert!(brief.summary.contains("compatibility manifest on demand"));
-        assert!(!brief.summary.contains("mesh"));
-        assert!(!brief.summary.contains("Compatibility"));
-        assert!(brief
-            .rules
-            .iter()
-            .any(|rule| rule.contains("compatibility manifests are on-demand")));
-        assert!(brief
-            .next_steps
-            .iter()
-            .any(|step| step.contains("geometryBackend=build123d")));
-        let guide_step = brief
-            .next_steps
-            .iter()
-            .find(|step| step.contains("mustRead"))
-            .expect("brief guide step should route to mustRead");
-        assert!(guide_step.contains("normal authoring"));
-        assert!(brief
-            .next_steps
-            .iter()
-            .any(|step| step.contains("compatibilityManifestUri")));
-        assert!(brief
-            .next_steps
-            .iter()
-            .any(|step| step.contains("target_meta_get")));
-        assert!(brief.rules.len() <= 6, "{:?}", brief.rules);
-        assert!(brief.next_steps.len() <= 5, "{:?}", brief.next_steps);
-    }
-
-    #[test]
     fn export_mcp_tool_catalog_lists_core_tools() {
         let catalog = export_mcp_tool_catalog();
         assert!(!catalog.is_empty());
@@ -8018,7 +9064,6 @@ mod tests {
         assert!(text.contains("Commit only green verification"));
         assert!(text.contains("do not commit and report capped red honestly"));
         for uri in [
-            "ecky://guides/surface-manifest/build123d",
             "ecky://guides/surface-manifest/freecad",
             "ecky://guides/surface-manifest/ecky-rust",
         ] {
@@ -8078,14 +9123,6 @@ mod tests {
         assert!(resource_definitions()
             .into_iter()
             .any(|resource| resource.get("uri").and_then(Value::as_str)
-                == Some("ecky://guides/ecky-source/build123d")));
-        assert!(resource_definitions()
-            .into_iter()
-            .any(|resource| resource.get("name").and_then(Value::as_str)
-                == Some("Ecky on build123d")));
-        assert!(resource_definitions()
-            .into_iter()
-            .any(|resource| resource.get("uri").and_then(Value::as_str)
                 == Some("ecky://guides/ecky-rust")));
         assert!(!resource_definitions()
             .into_iter()
@@ -8110,36 +9147,10 @@ mod tests {
     }
 
     #[test]
-    fn backend_specific_ecky_source_resources_do_not_depend_on_config_default() {
-        let state = test_state();
-        state.config.lock().unwrap().default_geometry_backend =
-            crate::contracts::GeometryBackend::Freecad;
-
-        let build123d_guide = read_resource_text(&state, "ecky://guides/ecky-source/build123d")
-            .expect("build123d source guide");
-        let expected = crate::agent_prompt::agent_language_reference(
-            crate::contracts::GeometryBackend::Build123d,
-        );
-
-        assert_eq!(build123d_guide, expected);
-        assert_ne!(
-            build123d_guide,
-            read_resource_text(&state, "ecky://guides/ecky-source").expect("generic source guide")
-        );
-    }
-
-    fn read_surface_manifest_resource(state: &AppState, uri: &str) -> Value {
-        let content = read_resource_content(state, uri).expect("surface manifest resource");
-        assert_eq!(content.mime_type, "application/json");
-        serde_json::from_str(&content.text).expect("surface manifest json")
-    }
-
-    #[test]
     fn mcp_surface_manifest_resources_are_listed_with_json_mime() {
         let resources = resource_definitions();
 
         for uri in [
-            "ecky://guides/surface-manifest/build123d",
             "ecky://guides/surface-manifest/freecad",
             "ecky://guides/surface-manifest/ecky-rust",
         ] {
@@ -8160,7 +9171,6 @@ mod tests {
         let state = test_state();
 
         for (uri, backend) in [
-            ("ecky://guides/surface-manifest/build123d", "build123d"),
             ("ecky://guides/surface-manifest/freecad", "freecad"),
             ("ecky://guides/surface-manifest/ecky-rust", "mesh"),
         ] {
@@ -8185,10 +9195,7 @@ mod tests {
             }
         }
 
-        for uri in [
-            "ecky://guides/surface-manifest/build123d",
-            "ecky://guides/surface-manifest/freecad",
-        ] {
+        for uri in ["ecky://guides/surface-manifest/freecad"] {
             let manifest = read_surface_manifest_resource(&state, uri);
             let cad_ops = manifest
                 .get("cadOps")
@@ -8254,11 +9261,6 @@ mod tests {
         let resources = resource_definitions();
 
         for (uri, backend, wall_expected) in [
-            (
-                "ecky://guides/surface-reference/build123d",
-                "build123d",
-                false,
-            ),
             ("ecky://guides/surface-reference/freecad", "freecad", false),
             ("ecky://guides/surface-reference/ecky-rust", "mesh", true),
         ] {
@@ -8295,29 +9297,6 @@ mod tests {
                 wall_expected
             );
         }
-    }
-
-    #[test]
-    fn build123d_resource_exposes_file_hints_without_python_or_mesh_terms() {
-        let state = test_state();
-        let guide = read_resource_text(&state, "ecky://guides/build123d")
-            .expect("build123d guide resource");
-
-        assert!(guide.contains("Current fileExtension: `.ecky`."));
-        assert!(guide.contains("Current sourceLanguage: `ecky`."));
-        assert!(guide.contains("Target geometryBackend: `build123d`."));
-        assert!(guide.contains("Return one complete `(model ...)` program."));
-        assert!(guide.contains("Backend support is authoritative."));
-        assert!(guide.contains("Write top-level `verify` clauses"));
-        // Canonical Ecky guide must not carry Python source or API examples.
-        assert!(!guide.contains("BuildPart"));
-        assert!(!guide.contains("import build123d"));
-        assert!(!guide.contains("`wall-pattern`"));
-        assert!(!guide.contains("`schwarz-p`"));
-        assert!(!guide.contains("`schwarz-d`"));
-        assert!(!guide.contains("`diamond-field`"));
-        assert!(!guide.contains("`neovius`"));
-        assert!(!guide.contains("`attractor-field`"));
     }
 
     #[test]
@@ -8379,6 +9358,9 @@ mod tests {
     fn compact_test_bundle(model_id: &str) -> crate::contracts::ArtifactBundle {
         crate::contracts::ArtifactBundle {
             geometry_provenance: None,
+            component_dependency_lock: None,
+            component_dependency_lock_digest: None,
+            component_import_origins: Vec::new(),
             schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -8409,6 +9391,7 @@ mod tests {
     fn compact_test_manifest(model_id: &str) -> crate::contracts::ModelManifest {
         crate::contracts::ModelManifest {
             geometry_provenance: None,
+            component_import_origins: Vec::new(),
             schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -8634,14 +9617,670 @@ mod tests {
         assert_eq!(result["structuredContent"]["threadId"], "thread-1");
         assert_eq!(result["structuredContent"]["width"], 1280);
         assert_eq!(result["structuredContent"]["includeOverlays"], true);
-        assert_eq!(
-            result["structuredContent"]["image"]["dataUrl"],
-            "data:image/jpeg;base64,Zm9v"
-        );
+        // 6.4: structured screenshot metadata is byte-free. The base64 payload
+        // lives exactly once in the MCP image content item; structuredContent
+        // carries MIME type/identity/dimensions/camera only — no `dataUrl` and
+        // no duplicate `base64`.
+        assert!(!recursive_has_key(&result["structuredContent"], "dataUrl"));
+        assert!(!recursive_has_key(&result["structuredContent"], "base64"));
         assert_eq!(
             result["structuredContent"]["image"]["mimeType"],
             "image/jpeg"
         );
-        assert_eq!(result["structuredContent"]["image"]["base64"], "Zm9v");
+    }
+
+    // ── OpenSpec agent-context-budgeting section 1: OUTER RED (MCP) ────────
+    //
+    // These pin the MCP discovery/result/screenshot contract before any wiring
+    // lands. They are expected to FAIL today (red) for the missing capability.
+    // No capability grouping, projection, pagination, structured-content, or
+    // screenshot de-duplication is implemented here — only the smallest
+    // protocol assertions at the JSON-RPC envelope seam.
+
+    fn jsonrpc(id: i64, method: &str, params: Value) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: method.to_string(),
+            params: Some(params),
+            id: Some(json!(id)),
+        }
+    }
+
+    // ── 1.3 compact managed MCP discovery / capability controls ────────────
+    #[tokio::test]
+    async fn compact_managed_tools_list_is_narrow_with_capability_controls() {
+        let server =
+            test_dispatch_server("(model (part body (box 1 2 3)))", "session-compact-list").await;
+
+        // Compact managed discovery: tools/list must return only core workflow
+        // tools plus capability discovery/enable controls — specialist group
+        // schemas stay absent until a group is enabled.
+        let compact = dispatch_request(
+            &server,
+            "session-compact-list",
+            jsonrpc(1, "tools/list", json!({ "profile": "compact-managed" })),
+        )
+        .await;
+        let compact_result = compact.result.as_ref().expect("tools/list result");
+        let tools = compact_result["tools"]
+            .as_array()
+            .expect("tools/list returns a tools array");
+        let names: Vec<&str> = tools
+            .iter()
+            .map(|t| t["name"].as_str().expect("tool name"))
+            .collect();
+
+        // RED — today tools/list ignores any profile and returns the full eager
+        // catalogue (~80 tools), so a compact managed session is not narrow.
+        assert!(
+            tools.len() <= 15,
+            "compact-managed tools/list must return core + discovery controls \
+             (<= 15 schemas); today it eagerly returns {} tools",
+            tools.len()
+        );
+
+        // RED — specialist group schemas must be absent until explicitly enabled.
+        assert!(
+            !names.iter().any(|n| *n == "ecky_ast_get_node"),
+            "specialist AST tools must be absent from compact-managed discovery \
+             until a capability group is enabled"
+        );
+
+        // RED — a capability discovery/enable control must be advertised so the
+        // agent can load specialist groups on demand (and, downstream, trigger
+        // `notifications/tools/list_changed`).
+        assert!(
+            names
+                .iter()
+                .any(|n| { n.contains("capability") || n.contains("search_tools") }),
+            "compact-managed discovery must advertise a capability search/enable control; \
+             found {} tools, none named capability/search_tools",
+            names.len()
+        );
+    }
+
+    // ── 1.3 listChanged advertisement + full-compatibility pagination ──────
+    #[tokio::test]
+    async fn mcp_server_advertises_list_changed_and_paginates_full_catalogue() {
+        let server =
+            test_dispatch_server("(model (part body (box 1 2 3)))", "session-full-page").await;
+
+        // (a) RED — initialize capabilities must advertise `tools.listChanged`
+        //     so compact managed clients can react to on-demand capability
+        //     enablement. Today capabilities.tools is an empty object.
+        let init_body = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "clientInfo": { "name": "outer-red-client" }
+            },
+            "id": 1
+        }))
+        .expect("serialize initialize");
+        let response = handle_http_post(
+            axum::extract::State(server.clone()),
+            "/".parse::<axum::http::Uri>().expect("uri"),
+            HeaderMap::new(),
+            init_body,
+        )
+        .await;
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("initialize body bytes");
+        let init_payload: Value =
+            serde_json::from_slice(&bytes).expect("initialize json-rpc payload");
+        assert_eq!(
+            init_payload["result"]["capabilities"]["tools"]["listChanged"],
+            json!(true),
+            "initialize must advertise tools.listChanged so compact managed clients \
+             can react to on-demand capability enablement"
+        );
+
+        // (b) RED — full-compatibility pagination: a large catalogue requested
+        //     with a small page must span pages and report a standard
+        //     continuation cursor. Today tools/list ignores cursor/pageSize and
+        //     returns one unbounded page.
+        let paged = dispatch_request(
+            &server,
+            "session-full-page",
+            jsonrpc(
+                2,
+                "tools/list",
+                json!({ "profile": "full", "cursor": null, "pageSize": 25 }),
+            ),
+        )
+        .await;
+        assert!(
+            paged
+                .result
+                .as_ref()
+                .and_then(|v| v.get("nextCursor"))
+                .is_some(),
+            "full-compatibility tools/list must honor standard cursor pagination and \
+             return nextCursor when the catalogue spans pages; today it returns one page"
+        );
+    }
+
+    // ── §5.2 capability search returns matching groups and tool names ──────
+    #[tokio::test]
+    async fn capability_search_returns_matching_groups_and_tools() {
+        let server =
+            test_dispatch_server("(model (part body (box 1 2 3)))", "session-cap-search").await;
+
+        // (a) No query → lists every group with its tool names, without
+        //     loading specialist schemas into the compact tools/list.
+        let all = dispatch_tool_call_jsonrpc(
+            &server,
+            "session-cap-search",
+            "capability_search",
+            json!({}),
+        )
+        .await;
+        let payload = parse_mcp_tool_payload(&all);
+        let groups = payload["groups"].as_array().expect("groups array");
+        assert!(
+            groups.len() >= 8,
+            "capability_search without a query lists every capability group"
+        );
+        let group_ids: Vec<&str> = groups
+            .iter()
+            .filter_map(|group| group["id"].as_str())
+            .collect();
+        assert!(group_ids.contains(&"core"));
+        assert!(group_ids.contains(&"ast-edits"));
+
+        // (b) Scoped query → only groups/tools matching the term.
+        let scoped = dispatch_tool_call_jsonrpc(
+            &server,
+            "session-cap-search",
+            "capability_search",
+            json!({ "query": "printability" }),
+        )
+        .await;
+        let scoped_payload = parse_mcp_tool_payload(&scoped);
+        let scoped_groups = scoped_payload["groups"].as_array().expect("scoped groups");
+        let scoped_ids: Vec<&str> = scoped_groups
+            .iter()
+            .filter_map(|group| group["id"].as_str())
+            .collect();
+        assert!(
+            scoped_ids.contains(&"verify-printability"),
+            "scoped query returns the matching group: {scoped_ids:?}"
+        );
+        assert!(
+            !scoped_ids.contains(&"components-library"),
+            "scoped query excludes unrelated groups: {scoped_ids:?}"
+        );
+        // The specialist schemas are still absent from the compact tools/list.
+        let compact = dispatch_request(
+            &server,
+            "session-cap-search",
+            jsonrpc(3, "tools/list", json!({ "profile": "compact-managed" })),
+        )
+        .await;
+        let compact_names: Vec<&str> = compact.result.as_ref().expect("result")["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("name"))
+            .collect();
+        assert!(
+            !compact_names
+                .iter()
+                .any(|name| *name == "printability_analyze"),
+            "capability_search must not load specialist schemas into the compact list"
+        );
+    }
+
+    // ── §5.2/§5.3 capability enable: session-scoped group + list_changed ──
+    #[tokio::test]
+    async fn capability_enable_loads_session_group_emits_list_changed_and_updates_tools_list() {
+        let server =
+            test_dispatch_server("(model (part body (box 1 2 3)))", "session-cap-enable").await;
+
+        // Before enable, the compact list is core-only and lacks the AST group.
+        let before = dispatch_request(
+            &server,
+            "session-cap-enable",
+            jsonrpc(1, "tools/list", json!({ "profile": "compact-managed" })),
+        )
+        .await;
+        let before_names: Vec<&str> = before.result.as_ref().expect("result")["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("name"))
+            .collect();
+        assert!(!before_names.iter().any(|name| *name == "ecky_ast_get_node"));
+
+        // Enable the AST group for this session only.
+        let enable = dispatch_tool_call_jsonrpc(
+            &server,
+            "session-cap-enable",
+            "capability_enable",
+            json!({ "group": "ast-edits" }),
+        )
+        .await;
+        let enable_payload = parse_mcp_tool_payload(&enable);
+        assert_eq!(enable_payload["group"]["id"], "ast-edits");
+        assert_eq!(
+            enable_payload["enabledGroups"],
+            json!(["ast-edits"]),
+            "enabledGroups reflects the session-scoped enable"
+        );
+        assert_eq!(
+            enable_payload["listChanged"], true,
+            "capability_enable signals the list changed"
+        );
+
+        // The server emitted a standard notifications/tools/list_changed for
+        // this session (queued for delivery; drained via the probe hook).
+        let notifications =
+            drain_pending_mcp_notifications(&server.state, "session-cap-enable").await;
+        assert_eq!(
+            notifications.len(),
+            1,
+            "exactly one list_changed notification queued"
+        );
+        assert_eq!(
+            notifications[0]["method"], "notifications/tools/list_changed",
+            "queued notification is the standard tools/list_changed method"
+        );
+
+        // The next compact tools/list now includes the enabled group's schemas.
+        let after = dispatch_request(
+            &server,
+            "session-cap-enable",
+            jsonrpc(2, "tools/list", json!({ "profile": "compact-managed" })),
+        )
+        .await;
+        let after_names: Vec<&str> = after.result.as_ref().expect("result")["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("name"))
+            .collect();
+        assert!(
+            after_names.iter().any(|name| *name == "ecky_ast_get_node"),
+            "enabled group schemas appear in the next compact tools/list"
+        );
+
+        // Session scoping: a sibling session on a fresh AppState (no enabled
+        // groups) still has a core-only compact list and does not see this
+        // session's enabled AST group.
+        let sibling_server =
+            test_dispatch_server("(model (part body (box 1 2 3)))", "session-cap-sibling").await;
+        let sibling = dispatch_request(
+            &sibling_server,
+            "session-cap-sibling",
+            jsonrpc(1, "tools/list", json!({ "profile": "compact-managed" })),
+        )
+        .await;
+        let sibling_names: Vec<&str> = sibling.result.as_ref().expect("result")["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("name"))
+            .collect();
+        assert!(
+            !sibling_names
+                .iter()
+                .any(|name| *name == "ecky_ast_get_node"),
+            "enabled groups are session-scoped and do not leak across sessions"
+        );
+    }
+
+    // ── §5.3 managed sessions default to compact discovery ────────────────
+    #[tokio::test]
+    async fn managed_session_defaults_to_compact_managed_discovery() {
+        let (state, resolver) = seed_dispatch_ecky_target("(model (part body (box 1 2 3)))").await;
+        // Override the seed: mark this session as a managed-mcp-http session so
+        // tools/list defaults to compact-managed without an explicit profile.
+        {
+            let mut sessions = state.mcp_sessions.lock().await;
+            sessions.insert(
+                "session-managed-default".to_string(),
+                McpSessionState {
+                    client_kind: "managed-mcp-http".to_string(),
+                    host_label: "ManagedAgent".to_string(),
+                    agent_label: "managed".to_string(),
+                    llm_model_id: None,
+                    llm_model_label: Some("gpt-5.4".to_string()),
+                    bound_thread_id: Some("thread-1".to_string()),
+                    last_target: Some(McpTargetRef {
+                        thread_id: "thread-1".to_string(),
+                        message_id: "msg-1".to_string(),
+                        model_id: Some("model-base".to_string()),
+                    }),
+                    phase: Some("idle".to_string()),
+                    status_text: Some("ready".to_string()),
+                    busy: false,
+                    activity_label: None,
+                    activity_started_at: None,
+                    attention_kind: None,
+                    waiting_on_prompt: false,
+                    current_turn_id: None,
+                    current_turn_thread_id: None,
+                    current_turn_working_message_ids: Vec::new(),
+                    current_turn_working_version_message_id: None,
+                    updated_at: now_secs(),
+                },
+            );
+        }
+        let server = HttpServerState {
+            state,
+            app: resolver,
+            handle: None,
+        };
+
+        let compact = dispatch_request(
+            &server,
+            "session-managed-default",
+            jsonrpc(1, "tools/list", json!({})),
+        )
+        .await;
+        let tools = compact.result.as_ref().expect("result")["tools"]
+            .as_array()
+            .expect("tools");
+        assert!(
+            tools.len() <= 15,
+            "managed session defaults to compact discovery (<=15 tools), got {}",
+            tools.len()
+        );
+        let names: Vec<&str> = tools
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("name"))
+            .collect();
+        assert!(
+            names.iter().any(|n| n.contains("capability")),
+            "managed compact default advertises a capability control"
+        );
+    }
+
+    // ── 1.4 screenshot single image payload, byte-free metadata ────────────
+    fn recursive_has_key(value: &Value, key: &str) -> bool {
+        match value {
+            Value::Object(map) => {
+                map.contains_key(key) || map.values().any(|v| recursive_has_key(v, key))
+            }
+            Value::Array(items) => items.iter().any(|v| recursive_has_key(v, key)),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn screenshot_payload_carries_image_bytes_once_with_byte_free_metadata() {
+        let requested_target = ResolvedTargetRef {
+            thread_id: "thread-1".to_string(),
+            message_id: "message-1".to_string(),
+            model_id: Some("model-1".to_string()),
+            source_language: crate::contracts::SourceLanguage::LegacyPython,
+            geometry_backend: crate::contracts::GeometryBackend::EckyRust,
+            preview_stl_path: Some("/tmp/model.stl".to_string()),
+            viewer_assets: vec![],
+            title: "Widget".to_string(),
+            version_name: "V1".to_string(),
+            has_draft: false,
+            ui_field_count: 0,
+            range_count: 0,
+            number_count: 0,
+            select_count: 0,
+            checkbox_count: 0,
+            parameter_count: 0,
+            has_semantic_manifest: false,
+            control_primitive_count: 0,
+            control_relation_count: 0,
+            control_view_count: 0,
+        };
+        let capture = ViewportScreenshotCapture {
+            data_url: "data:image/png;base64,QUJDREVG=".to_string(),
+            width: 640,
+            height: 480,
+            camera: crate::contracts::ViewportCameraState {
+                position: [0.0, 0.0, 5.0],
+                target: [0.0, 0.0, 0.0],
+                zoom: None,
+                fov: Some(50.0),
+            },
+            source: "visible-live".to_string(),
+            thread_id: "thread-1".to_string(),
+            message_id: "message-1".to_string(),
+            model_id: Some("model-1".to_string()),
+            include_overlays: false,
+        };
+
+        let result = build_model_screenshot_result(&requested_target, &capture)
+            .expect("screenshot payload should be valid");
+
+        // (1) GREEN evidence — image bytes appear exactly once, in a single MCP
+        //     image content item.
+        let image_items = result["content"]
+            .as_array()
+            .expect("content array")
+            .iter()
+            .filter(|item| item["type"] == "image")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            image_items.len(),
+            1,
+            "screenshot bytes live in one image content item"
+        );
+        assert_eq!(image_items[0]["data"], "QUJDREVG=");
+        assert_eq!(image_items[0]["mimeType"], "image/png");
+
+        // (2) RED — structured metadata must be byte-free: no `dataUrl` and no
+        //     `base64` field anywhere under structuredContent. Today both are
+        //     present (structuredContent.image.dataUrl and .base64), duplicating
+        //     the image bytes a second and third time.
+        let structured = result
+            .get("structuredContent")
+            .expect("structuredContent present");
+        assert!(
+            !recursive_has_key(structured, "dataUrl"),
+            "structuredContent must not carry a dataUrl (duplicate bytes)"
+        );
+        assert!(
+            !recursive_has_key(structured, "base64"),
+            "structuredContent must not carry a base64 field (duplicate bytes)"
+        );
+
+        // (3) GREEN evidence — byte-free identity/dimensions/camera/source/
+        //     capture metadata is still carried alongside the single image.
+        assert_eq!(structured["threadId"], "thread-1");
+        assert_eq!(structured["modelId"], "model-1");
+        assert_eq!(structured["width"], 640);
+        assert_eq!(structured["height"], 480);
+        assert_eq!(structured["source"], "visible-live");
+        assert!(structured.get("camera").is_some());
+        assert!(structured.get("capturedAt").is_some());
+        assert!(
+            recursive_has_key(structured, "mimeType"),
+            "MIME type carried as byte-free metadata"
+        );
+    }
+
+    // ── 1.5 large tool result: structuredContent / concise text / truncation / continuation ──
+    #[test]
+    fn large_tool_result_uses_structured_content_concise_text_truncation_and_continuation() {
+        // A large structured tool result carrying NO pre-built `content` array,
+        // so it flows through the generic `mcp_tool_success` envelope.
+        let rows = (0..2000)
+            .map(|i| json!({ "index": i, "label": format!("row-{i}") }))
+            .collect::<Vec<_>>();
+        let large: Value = json!({
+            "threadId": "thread-1",
+            "messageId": "msg-1",
+            "rows": rows,
+            "totalCount": 2000
+        });
+
+        let response = mcp_tool_success(Some(json!(1)), &large);
+        let result = response.result.expect("json-rpc result");
+
+        // (1) RED — canonical machine output must live in `structuredContent`.
+        //     Today the generic envelope pretty-prints the whole value into text
+        //     and emits no structuredContent.
+        assert!(
+            result.get("structuredContent").is_some(),
+            "large tool result must expose canonical JSON in structuredContent, \
+             not pretty-print the whole payload into text"
+        );
+
+        // (2) RED — text content must be a concise summary and must NOT repeat
+        //     the full JSON payload.
+        let text = result["content"]
+            .as_array()
+            .and_then(|items| items.first())
+            .and_then(|item| item["text"].as_str())
+            .unwrap_or("");
+        assert!(
+            text.chars().count() <= 2_000,
+            "text content must be a concise summary, not a full pretty-printed JSON copy \
+             ({} chars today)",
+            text.chars().count()
+        );
+        assert!(
+            !text.contains("row-1999"),
+            "text summary must not repeat the full payload"
+        );
+
+        // (3) RED — large reads must report observed/returned/total truncation
+        //     counts.
+        assert!(
+            result.get("observedCount").is_some()
+                || result["structuredContent"].get("observedCount").is_some(),
+            "large read must report observed/returned/total truncation counts"
+        );
+
+        // (4) RED — large reads must report continuation metadata.
+        assert!(
+            result.get("nextCursor").is_some()
+                || result["structuredContent"].get("continuation").is_some()
+                || result["structuredContent"].get("nextCursor").is_some(),
+            "large read must report continuation metadata (cursor / next read)"
+        );
+    }
+
+    // ── 6.1 compatibility: ordinary success → structuredContent + concise text ──
+    #[test]
+    fn ordinary_tool_success_exposes_canonical_structured_content_and_concise_text() {
+        // An ordinary structured tool result (no pre-built `content` array).
+        let value = json!({
+            "threadId": "thread-1",
+            "messageId": "msg-1",
+            "modelId": "model-1",
+            "applied": true,
+            "tokens": ["a", "b", "c"],
+        });
+        let response = mcp_tool_success(Some(json!(1)), &value);
+        let result = response.result.expect("json-rpc result");
+
+        // Canonical machine output lives in structuredContent verbatim.
+        assert_eq!(result["structuredContent"], value);
+
+        // content carries a concise text summary, not a pretty-printed JSON copy.
+        let text = result["content"][0]["text"].as_str().expect("summary text");
+        assert!(text.chars().count() <= 2_000, "summary must be concise");
+        assert!(
+            text != serde_json::to_string_pretty(&value).unwrap(),
+            "text must not duplicate the canonical JSON"
+        );
+        assert!(text.contains("thread-1"), "summary carries identity");
+        assert!(
+            text.contains("tokens[3]"),
+            "summary carries key/array shape"
+        );
+    }
+
+    // ── 6.2 compatibility: large read keeps complete data + shared metadata ──
+    #[test]
+    fn bounded_large_read_keeps_complete_data_and_reports_size_and_continuation() {
+        // A payload above the response budget: full data must remain available.
+        let rows = (0..2000)
+            .map(|i| json!({ "index": i, "label": format!("row-{i}") }))
+            .collect::<Vec<_>>();
+        let large = json!({ "threadId": "thread-1", "rows": rows, "totalCount": 2000 });
+
+        let response = mcp_tool_success(Some(json!(1)), &large);
+        let result = response.result.expect("json-rpc result");
+        let structured = &result["structuredContent"];
+
+        // Complete canonical data remains available under `data` (no loss).
+        assert_eq!(structured["data"], large);
+        // Shared observed/returned/total counts are reported, byte-free.
+        let observed = structured["observedCount"].as_u64().expect("observedCount");
+        assert!(observed > 0);
+        assert_eq!(structured["returnedCount"], structured["observedCount"]);
+        assert_eq!(structured["totalCount"], structured["observedCount"]);
+        assert_eq!(structured["truncated"], false);
+        // Continuation metadata is present and carries no payload bytes.
+        assert!(structured.get("continuation").is_some());
+        let continuation_str = serde_json::to_string(&structured["continuation"]).unwrap();
+        assert!(!continuation_str.contains("row-1999"));
+    }
+
+    // ── 6.5 compatibility: tool-origin errors → MCP isError + raw details ──
+    #[test]
+    fn mcp_tool_error_uses_is_error_with_raw_details_not_generic_advice() {
+        // A tool-origin error carrying raw, actionable provider details.
+        let error = AppError::with_details(
+            AppErrorCode::Provider,
+            "Provider rejected the request.",
+            "HTTP 429: rate_limit_exceeded for model=gpt-x (req_abc). Retry after 30s.",
+        );
+
+        let response = mcp_tool_error(Some(json!(1)), &error);
+        let result = response.result.expect("json-rpc result");
+
+        // MCP `isError` is set.
+        assert_eq!(result["isError"], true);
+
+        // The raw, actionable details are preserved verbatim in the text payload.
+        let text = result["content"][0]["text"].as_str().expect("error text");
+        let parsed: Value = serde_json::from_str(text).expect("error payload is JSON");
+        assert_eq!(parsed["message"], "Provider rejected the request.");
+        assert_eq!(parsed["code"], "provider");
+        assert!(parsed["details"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("HTTP 429: rate_limit_exceeded"));
+
+        // No generic credential/API-key advice replaces the raw error.
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            !lower.contains("check your api key")
+                && !lower.contains("verify your credentials")
+                && !lower.contains("invalid api key"),
+            "tool-origin errors must not be replaced with generic credential advice: {text}"
+        );
+    }
+
+    // ── 6.3 compatibility: explicit full reads fail honestly at the transport limit ──
+    #[test]
+    fn transport_limit_failure_is_honest_with_observed_and_allowed_sizes() {
+        // A pathological payload exceeding the transport safety ceiling. Full
+        // reads stay explicit up to this ceiling; past it the envelope fails
+        // honestly instead of silently truncating authoritative state.
+        let huge = "x".repeat(MCP_TRANSPORT_LIMIT_CHARS + 1);
+        let value = json!({ "threadId": "thread-1", "blob": huge });
+
+        let response = mcp_tool_success(Some(json!(1)), &value);
+        let result = response.result.expect("json-rpc result");
+
+        // Fails as an MCP error (isError), not a silent truncation.
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().expect("error text");
+        let parsed: Value = serde_json::from_str(text).expect("error JSON");
+        // Reports observed and allowed sizes honestly.
+        let details = parsed["details"].as_str().unwrap_or_default();
+        assert!(
+            details.contains("observedCount="),
+            "transport-limit failure must report the observed size: {details}"
+        );
+        assert!(
+            details.contains(&format!("allowedCount={MCP_TRANSPORT_LIMIT_CHARS}")),
+            "transport-limit failure must report the allowed size: {details}"
+        );
     }
 }

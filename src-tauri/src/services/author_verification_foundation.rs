@@ -159,6 +159,134 @@ pub(crate) fn collect_author_verification_metrics(
     }
 }
 
+/// Canonical four-clause proof carried by printable thread authoring helpers.
+/// `flank_degrees` is measured from horizontal; its FDM overhang is therefore
+/// the complementary angle from vertical.
+pub(crate) fn printed_thread_verify_clauses(
+    pitch: f64,
+    base_width: f64,
+    flank_degrees: f64,
+    max_overhang_degrees: f64,
+) -> Vec<CoreVerifyClause> {
+    fn clause(
+        tag: &str,
+        alias: &str,
+        metric: CoreVerifyValue,
+        operator: &str,
+        expected: f64,
+    ) -> CoreVerifyClause {
+        CoreVerifyClause {
+            tag: crate::ecky_core_ir::CoreVerifySection {
+                items: vec![CoreVerifyValue::Symbol(tag.to_string())],
+            },
+            metric: crate::ecky_core_ir::CoreVerifySection {
+                items: vec![CoreVerifyValue::Symbol(alias.to_string()), metric],
+            },
+            expect: crate::ecky_core_ir::CoreVerifySection {
+                items: vec![
+                    CoreVerifyValue::Symbol(alias.to_string()),
+                    CoreVerifyValue::List(vec![
+                        CoreVerifyValue::Symbol(operator.to_string()),
+                        CoreVerifyValue::Number(expected),
+                    ]),
+                ],
+            },
+        }
+    }
+
+    let metric = |source: &str, key: &str, args: Vec<CoreVerifyValue>| {
+        let mut items = vec![
+            CoreVerifyValue::Symbol(source.to_string()),
+            CoreVerifyValue::Symbol(key.to_string()),
+        ];
+        items.extend(args);
+        CoreVerifyValue::List(items)
+    };
+
+    vec![
+        clause(
+            "printed_thread_single_solid",
+            "components",
+            metric("stl", "connected-component-count", vec![]),
+            "=",
+            1.0,
+        ),
+        clause(
+            "printed_thread_manifold",
+            "bad_edges",
+            metric("stl", "non-manifold-edge-count", vec![]),
+            "=",
+            0.0,
+        ),
+        clause(
+            "printed_thread_overhang",
+            "overhang",
+            metric(
+                "thread",
+                "overhang-degrees",
+                vec![CoreVerifyValue::Number(flank_degrees)],
+            ),
+            "<=",
+            max_overhang_degrees,
+        ),
+        clause(
+            "printed_thread_turn_clearance",
+            "pitch_margin",
+            metric(
+                "thread",
+                "pitch-base-margin",
+                vec![
+                    CoreVerifyValue::Number(pitch),
+                    CoreVerifyValue::Number(base_width),
+                ],
+            ),
+            ">",
+            0.0,
+        ),
+    ]
+}
+
+fn expand_printed_thread_verify_sets(
+    clauses: &[CoreVerifyClause],
+) -> Result<Vec<CoreVerifyClause>, String> {
+    let mut expanded = Vec::new();
+    for clause in clauses {
+        let Some(metric_value) = clause.metric.items.get(1) else {
+            expanded.push(clause.clone());
+            continue;
+        };
+        let metric = parse_metric_ref(metric_value)?;
+        if metric.source != "thread" || metric.key != "printed-thread-set" {
+            expanded.push(clause.clone());
+            continue;
+        }
+        let values = metric
+            .args
+            .iter()
+            .map(|value| match value {
+                CoreVerifyValue::Number(number) if number.is_finite() => Ok(*number),
+                _ => Err(
+                    "`(thread printed-thread-set ...)` expects four finite numbers: pitch, base width, flank degrees, max overhang degrees."
+                        .to_string(),
+                ),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let [pitch, base_width, flank_degrees, max_overhang_degrees] = values.as_slice() else {
+            return Err(
+                "`(thread printed-thread-set ...)` expects four numbers: pitch, base width, flank degrees, max overhang degrees."
+                    .to_string(),
+            );
+        };
+        expanded.extend(printed_thread_verify_clauses(
+            *pitch,
+            *base_width,
+            *flank_degrees,
+            *max_overhang_degrees,
+        ));
+    }
+    Ok(expanded)
+}
+
 pub(crate) fn evaluate_author_verify_clauses(
     clauses: &[CoreVerifyClause],
     bundle: &ArtifactBundle,
@@ -252,17 +380,28 @@ pub(crate) fn merge_author_verification_into_structural_result(
         return result;
     }
 
-    let evaluation = evaluate_author_verify_clauses(
-        &program.constraints.verify_clauses,
-        bundle,
-        manifest,
-        Some(&result),
-    );
+    let verify_clauses =
+        match expand_printed_thread_verify_sets(&program.constraints.verify_clauses) {
+            Ok(clauses) => clauses,
+            Err(message) => {
+                result.issues.push(StructuralIssue {
+                    code: "AUTHORED_VERIFY_ERROR".to_string(),
+                    message,
+                    part_id: None,
+                    numeric_payload: None,
+                    diagnostic_context: None,
+                });
+                return finalize_structural_verification_result(result);
+            }
+        };
+
+    let evaluation =
+        evaluate_author_verify_clauses(&verify_clauses, bundle, manifest, Some(&result));
     result.authored_verify_checks = evaluation
         .checks
         .iter()
         .map(|check| {
-            let clause = program.constraints.verify_clauses.get(check.clause_index);
+            let clause = verify_clauses.get(check.clause_index);
             authored_verify_check_contract(check, clause)
         })
         .collect();
@@ -563,16 +702,20 @@ fn parse_expected_comparison(
     let CoreVerifyValue::List(items) = value else {
         return Err("Verify expect expression must be a list like `(> 3)`.".to_string());
     };
-    if items.len() != 2 {
-        return Err("Verify expect expression must contain operator and literal.".to_string());
-    }
+    let expected_value = match items.as_slice() {
+        [_, literal] => literal,
+        // Accept the documented `value` placeholder form as sugar for the
+        // metric alias supplied by the surrounding `(expect alias ...)`.
+        [_, placeholder, literal] if verify_symbol_like(placeholder) == Some("value") => literal,
+        _ => return Err("Verify expect expression must contain operator and literal.".to_string()),
+    };
     let op = verify_symbol_like(&items[0])
         .ok_or_else(|| "Verify comparison operator must be symbol or text.".to_string())?;
     let op = match op {
         "=" | "!=" | ">" | ">=" | "<" | "<=" => op,
         other => return Err(format!("Unsupported verify comparison operator `{other}`.")),
     };
-    let expected = resolve_literal(&items[1])
+    let expected = resolve_literal(expected_value)
         .ok_or_else(|| "Verify expect literal must be boolean, number, or text.".to_string())?;
     Ok((
         match op {
@@ -612,7 +755,54 @@ fn resolve_metric_value(
         "clearance" => resolve_clearance_metric_value(key, args, bundle, manifest),
         "selector" => resolve_selector_metric_value(key, args, bundle, manifest),
         "relation" => resolve_relation_metric_value(key, args, bundle, manifest),
+        "thread" => resolve_thread_metric_value(key, args, metrics),
         other => Err(format!("Unsupported verify metric namespace `{other}`.")),
+    }
+}
+
+fn resolve_thread_metric_value(
+    key: &str,
+    args: &[CoreVerifyValue],
+    metrics: &AuthorVerificationMetrics,
+) -> Result<AuthorVerifyResolvedValue, String> {
+    let number = |index: usize| {
+        args.get(index)
+            .and_then(|value| match value {
+                CoreVerifyValue::Number(number) if number.is_finite() => Some(*number),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                format!("Thread verify metric `{key}` expects finite numeric arguments.")
+            })
+    };
+    match key {
+        "overhang-degrees" if args.len() == 1 => Ok(AuthorVerifyResolvedValue::Number(
+            (90.0 - number(0)?).max(0.0),
+        )),
+        "pitch-base-margin" if args.len() == 2 => {
+            Ok(AuthorVerifyResolvedValue::Number(number(0)? - number(1)?))
+        }
+        "core-volume-ratio" if args.len() == 2 => {
+            let radius = number(0)?;
+            let length = number(1)?;
+            if radius <= 0.0 || length <= 0.0 {
+                return Err(
+                    "Thread verify metric `core-volume-ratio` expects positive radius and length."
+                        .to_string(),
+                );
+            }
+            let actual_volume = metrics.manifest.total_volume_mm3.ok_or_else(|| {
+                "Thread core-volume sanity requires manifest volume evidence.".to_string()
+            })?;
+            let expected_core_volume = std::f64::consts::PI * radius * radius * length;
+            Ok(AuthorVerifyResolvedValue::Number(
+                actual_volume / expected_core_volume,
+            ))
+        }
+        "overhang-degrees" | "pitch-base-margin" | "core-volume-ratio" => Err(format!(
+            "Thread verify metric `{key}` received the wrong argument count."
+        )),
+        other => Err(format!("Unsupported thread verify metric `{other}`.")),
     }
 }
 
@@ -1656,6 +1846,7 @@ mod tests {
     fn sample_manifest() -> ModelManifest {
         ModelManifest {
             geometry_provenance: None,
+            component_import_origins: Vec::new(),
             schema_version: 1,
             model_id: "model-1".to_string(),
             source_kind: ModelSourceKind::Generated,
@@ -1757,6 +1948,9 @@ mod tests {
     fn sample_bundle() -> ArtifactBundle {
         ArtifactBundle {
             geometry_provenance: None,
+            component_dependency_lock: None,
+            component_dependency_lock_digest: None,
+            component_import_origins: Vec::new(),
             schema_version: 1,
             model_id: "model-1".to_string(),
             source_kind: ModelSourceKind::Generated,
@@ -2204,6 +2398,63 @@ mod tests {
     }
 
     #[test]
+    fn printed_thread_verify_set_is_reusable_and_covers_all_four_printability_checks() {
+        let clauses = printed_thread_verify_clauses(2.0, 1.4, 45.0, 45.0);
+        assert_eq!(clauses.len(), 4);
+        let tags = clauses.iter().map(authored_verify_tag).collect::<Vec<_>>();
+        assert_eq!(
+            tags,
+            vec![
+                "printed_thread_single_solid",
+                "printed_thread_manifold",
+                "printed_thread_overhang",
+                "printed_thread_turn_clearance",
+            ]
+        );
+
+        let evaluation = evaluate_author_verify_clauses(
+            &clauses,
+            &sample_bundle(),
+            &sample_manifest(),
+            Some(&sample_structural_result(true)),
+        );
+        assert!(evaluation.passed, "{}", evaluation.summary);
+    }
+
+    #[test]
+    fn printed_thread_overhang_clause_fails_shallow_flank_and_passes_looser_flank() {
+        let shallow = printed_thread_verify_clauses(2.0, 1.4, 30.0, 45.0);
+        let shallow_result = evaluate_author_verify_clauses(
+            &shallow,
+            &sample_bundle(),
+            &sample_manifest(),
+            Some(&sample_structural_result(true)),
+        );
+        assert!(!shallow_result.passed);
+        assert_eq!(
+            shallow_result.checks[2].status,
+            AuthorVerifyCheckStatus::Failed
+        );
+        assert_eq!(
+            shallow_result.checks[2].actual,
+            Some(AuthorVerifyResolvedValue::Number(60.0))
+        );
+
+        let printable = printed_thread_verify_clauses(2.0, 1.4, 45.0, 45.0);
+        let printable_result = evaluate_author_verify_clauses(
+            &printable,
+            &sample_bundle(),
+            &sample_manifest(),
+            Some(&sample_structural_result(true)),
+        );
+        assert!(printable_result.passed, "{}", printable_result.summary);
+        assert_eq!(
+            printable_result.checks[2].status,
+            AuthorVerifyCheckStatus::Passed
+        );
+    }
+
+    #[test]
     fn authored_verify_errors_when_clearance_selector_missing() {
         let result = evaluate_author_verify_clauses(
             &[verify_clause(
@@ -2378,6 +2629,78 @@ mod tests {
             .issues
             .iter()
             .any(|issue| issue.code == "AUTHORED_VERIFY_FAILED"));
+    }
+
+    #[test]
+    fn merge_author_verification_expands_reusable_printed_thread_set() {
+        let bundle = authored_bundle_with_source(
+            r#"
+            (model
+              (verify
+                (tag printed_thread)
+                (metric checks (thread printed-thread-set 2 1.4 45 45))
+                (expect checks (= true)))
+              (part screw
+                (thread :radius 8 :pitch 2 :length 16 :depth 0.8 :crest 0.2 :flank 45deg)))
+            "#,
+        );
+
+        let result = merge_author_verification_into_structural_result(
+            &bundle,
+            &sample_manifest(),
+            sample_structural_result(true),
+        );
+
+        assert!(result.passed, "{}", result.summary);
+        assert_eq!(result.authored_verify_checks.len(), 4);
+        assert_eq!(
+            result.authored_verify_checks[0].tag,
+            "printed_thread_single_solid"
+        );
+        assert_eq!(
+            result.authored_verify_checks[3].tag,
+            "printed_thread_turn_clearance"
+        );
+    }
+
+    #[test]
+    fn authored_thread_core_volume_sanity_rejects_valid_but_hollow_result() {
+        let bundle = authored_bundle_with_source(
+            r#"
+            (model
+              (verify
+                (tag thread_core_present)
+                (metric ratio (thread core-volume-ratio 6 10))
+                (expect ratio (>= 0.9)))
+              (part screw
+                (thread :radius 6 :pitch 3 :length 10 :depth 1.2)))
+            "#,
+        );
+        let structural = sample_structural_result(true);
+        assert_eq!(structural.metrics.preview_stl_component_count, Some(1));
+        assert_eq!(
+            structural.metrics.preview_stl_non_manifold_edge_count,
+            Some(0)
+        );
+
+        let result = merge_author_verification_into_structural_result(
+            &bundle,
+            &sample_manifest(),
+            structural,
+        );
+
+        assert!(!result.passed, "hollow result must fail geometric sanity");
+        assert_eq!(result.authored_verify_checks.len(), 1);
+        assert_eq!(result.authored_verify_checks[0].tag, "thread_core_present");
+        assert_eq!(
+            result.authored_verify_checks[0].status,
+            crate::contracts::AuthoredVerifyCheckStatus::Failed
+        );
+        let ratio = match result.authored_verify_checks[0].actual {
+            Some(crate::contracts::AuthoredVerifyValue::Number(value)) => value,
+            ref other => panic!("expected numeric core-volume ratio, got {other:?}"),
+        };
+        assert!(ratio < 0.9, "hollow ratio unexpectedly passed: {ratio}");
     }
 
     #[test]

@@ -4,9 +4,9 @@ use std::collections::HashSet;
 
 use super::{
     default_engine_kind, default_geometry_backend, default_model_runtime_schema_version,
-    default_source_language, AppError, AppResult, DesignParams, EngineKind, GeometryBackend,
-    ModelManifest, ModelSourceKind, PortFrame, PostProcessingSpec, SourceLanguage, VerifierSource,
-    VerifierStatus,
+    default_source_language, AppError, AppResult, ComponentDependencyLock, ComponentImportOrigin,
+    DesignParams, EngineKind, GeometryBackend, ModelManifest, ModelSourceKind, PortFrame,
+    PostProcessingSpec, SourceLanguage, VerifierSource, VerifierStatus,
 };
 
 /// Stable, explicit identity for saved and draft authoring authorities.
@@ -190,6 +190,14 @@ pub struct ArtifactBundle {
     pub export_artifacts: Vec<ExportArtifact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geometry_provenance: Option<GeometryProvenance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_dependency_lock: Option<ComponentDependencyLock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_dependency_lock_digest: Option<String>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[specta(optional)]
+    pub component_import_origins: Vec<ComponentImportOrigin>,
 }
 
 /// Immutable render input/output authority. Construct only through
@@ -213,6 +221,8 @@ pub struct RenderSnapshot {
     pub artifact_digest: String,
     pub model_manifest: ModelManifest,
     pub manifest_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_dependency_lock_digest: Option<String>,
 }
 
 /// Immutable verification evidence. A green record is valid only for the
@@ -260,6 +270,13 @@ fn default_artifact_version() -> u32 {
 }
 
 pub fn validate_artifact_bundle(bundle: &ArtifactBundle) -> AppResult<()> {
+    super::validate_component_import_evidence(
+        bundle.component_dependency_lock.as_ref(),
+        bundle.component_dependency_lock_digest.as_deref(),
+        &bundle.component_import_origins,
+        &bundle.component_import_origins,
+    )?;
+
     let mut anchor_ids = HashSet::new();
     for anchor in &bundle.callout_anchors {
         if anchor.anchor_id.trim().is_empty() {

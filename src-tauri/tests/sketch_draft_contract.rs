@@ -863,6 +863,9 @@ fn accepted_brep_candidate_source_rejects_unknown_solution() {
 fn accepted_brep_step_gate_rejects_mesh_only_bundle() {
     let bundle = ecky_cad_lib::contracts::ArtifactBundle {
         geometry_provenance: None,
+        component_dependency_lock: None,
+        component_dependency_lock_digest: None,
+        component_import_origins: Vec::new(),
         schema_version: 1,
         model_id: "mesh-only".to_string(),
         source_kind: ecky_cad_lib::contracts::ModelSourceKind::Generated,
@@ -897,6 +900,9 @@ fn accepted_step_bundle_with_edge_target(target_id: &str) -> ArtifactBundle {
     let manifest_path = write_accepted_test_manifest("edge", &public_target_id, &alias_ids);
     ArtifactBundle {
         geometry_provenance: None,
+        component_dependency_lock: None,
+        component_dependency_lock_digest: None,
+        component_import_origins: Vec::new(),
         schema_version: 1,
         model_id: "accepted-step".to_string(),
         source_kind: ModelSourceKind::Generated,
@@ -949,6 +955,9 @@ fn accepted_step_bundle_with_face_target(target_id: &str) -> ArtifactBundle {
     let manifest_path = write_accepted_test_manifest("face", &public_target_id, &alias_ids);
     ArtifactBundle {
         geometry_provenance: None,
+        component_dependency_lock: None,
+        component_dependency_lock_digest: None,
+        component_import_origins: Vec::new(),
         schema_version: 1,
         model_id: "accepted-step".to_string(),
         source_kind: ModelSourceKind::Generated,

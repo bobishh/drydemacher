@@ -468,6 +468,7 @@ mod tests {
     fn manifest(model_id: &str, source_kind: ModelSourceKind) -> ModelManifest {
         ModelManifest {
             geometry_provenance: None,
+            component_import_origins: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind,
@@ -520,6 +521,9 @@ mod tests {
     fn bundle(model_id: &str, source_kind: ModelSourceKind) -> ArtifactBundle {
         ArtifactBundle {
             geometry_provenance: None,
+            component_dependency_lock: None,
+            component_dependency_lock_digest: None,
+            component_import_origins: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind,

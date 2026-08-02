@@ -99,6 +99,7 @@ pub const CAD_OPS_PORTABLE: &[&str] = &[
     "sweep",
     "helical-ridge",
     "thread",
+    "tapped-hole",
     "rib",
     "groove",
     "torus",
@@ -153,8 +154,8 @@ pub const CAD_OPS_PORTABLE: &[&str] = &[
 // the compiler/runtime actually exports and lowers them.
 pub const ECKY_RUST_ONLY_CAD_OPS: &[&str] = &["mesh", "polyhedron", "heightfield", "wall-pattern"];
 // EckyRust direct-OCCT-only surface: rendered natively (no mesh path) and
-// rejected by the build123d/FreeCAD exact lowerings. Unlike `wall-pattern`
-// (mesh) these are BREP ops the exact backends cannot express.
+// rejected by FreeCAD interop. Unlike `wall-pattern` (mesh), these are BREP
+// ops the interop backend cannot express.
 pub const ECKY_RUST_DIRECT_ONLY_CAD_OPS: &[&str] = &["hull"];
 pub const WALL_PATTERN_MODES: &[&str] = &[
     "ribs",
@@ -288,7 +289,7 @@ pub fn supported_surface_reference(backend: GeometryBackend) -> EckySupportedSur
 
 fn backend_support(backend: GeometryBackend) -> &'static str {
     match backend {
-        GeometryBackend::Build123d => ".ecky with geometryBackend=build123d",
+        GeometryBackend::Build123d => ".ecky; legacy build123d metadata migrates to Ecky Native",
         GeometryBackend::Freecad => ".ecky with geometryBackend=freecad",
         GeometryBackend::EckyRust => ".ecky with geometryBackend=mesh/eckyRust",
     }
@@ -846,7 +847,7 @@ fn numeric_reference(name: &str) -> SurfaceReferenceEntry {
             true,
             "all .ecky backends",
             "(noise2 (* x 0.1) (* y 0.1) seed)",
-            &["Portable helper lowered into build123d/freecad runtime code."],
+            &["Deterministic helper shared by native and FreeCAD interop."],
         ),
         "fbm2" => ref_entry(
             name,
@@ -1036,11 +1037,11 @@ fn boolean_reference(name: &str) -> SurfaceReferenceEntry {
 
 fn cad_op_reference(name: &str, backend: GeometryBackend) -> SurfaceReferenceEntry {
     let support = if matches!(name, "mesh" | "polyhedron" | "heightfield" | "wall-pattern") {
-        "mesh/eckyRust only; rejected by build123d/freecad lowerers"
+        "native mesh only; rejected by FreeCAD interop"
     } else if name == "hull" {
-        "eckyRust direct OCCT only; rejected by build123d/freecad lowerers"
+        "native direct OCCT only; rejected by FreeCAD interop"
     } else if matches!(name, "sampled-radial-loft") {
-        "eckyRust direct OCCT, build123d, freecad; not the mesh runtime"
+        "native direct OCCT and FreeCAD interop; not the mesh runtime"
     } else {
         backend_support(backend)
     };
@@ -1079,8 +1080,8 @@ fn cad_op_reference(name: &str, backend: GeometryBackend) -> SurfaceReferenceEnt
         "chamfer" => ref_entry(name, "cadOp", "(chamfer distance [:edges selector] solid)", "solid", "Bevels edges of a solid. `:edges` accepts coarse selectors like `bottom`, `front`, `axis-z`, `y-max`, or `x-min+z-max`; exact backends also accept `target-id:<id>` and `target-ids:<id>|<id>`.", true, support, "(chamfer 1 :edges \"bottom\" body)", &["Topology-sensitive post-op: if the selector matches no edges after one smaller-distance retry and one selector retry, stop retrying chamfer. Rebuild with source bevel/rounding geometry such as explicit profiles, `loft`, `taper`, `cone`, `rounded-polygon`, or `offset-rounded`."]),
         "taper" => ref_entry(name, "cadOp", "(taper height scale sketch) or (taper height scale-x scale-y sketch)", "solid", "Extrudes a sketch while scaling the top section.", true, support, "(taper 30 0.7 0.7 (circle 12 32))", &[]),
         "twist" => ref_entry(name, "cadOp", "(twist height angle sketch)", "solid", "Extrudes a sketch while rotating sections along height.", true, support, "(twist 40 90 profile)", &[]),
-        "sampled-radial-loft" => ref_entry(name, "cadOp", "(sampled-radial-loft (theta z fz) :height h :z-steps n :theta-steps n :radius expr :z-map expr?)", "solid", "Samples radial sections across height, then lofts the wires/faces into a solid.", true, support, "(sampled-radial-loft (theta z fz) :height 40 :z-steps 24 :theta-steps 72 :radius (+ 18 (* 2 (sin (+ (* theta 6) (* fz 3.141592653589793))))))", &["Binders expose per-sample `theta`, absolute `z`, and normalized `fz` in `[0,1]`.", "Renders on all backends (native direct OCCT, build123d, FreeCAD) for formula-driven dome/pot families."]),
-        "hull" => ref_entry(name, "cadOp", "(hull solid...)", "solid", "Convex hull of the child solids as a single closed BREP solid.", true, support, "(hull (sphere 6) (translate 30 0 0 (sphere 6)))", &["Native direct OCCT only; build123d/FreeCAD reject it.", "Great for organic blends/bridges (slipper lasts, fairings) without hand-lofting sections."]),
+        "sampled-radial-loft" => ref_entry(name, "cadOp", "(sampled-radial-loft (theta z fz) :height h :z-steps n :theta-steps n :radius expr :z-map expr?)", "solid", "Samples radial sections across height, then lofts the wires/faces into a solid.", true, support, "(sampled-radial-loft (theta z fz) :height 40 :z-steps 24 :theta-steps 72 :radius (+ 18 (* 2 (sin (+ (* theta 6) (* fz 3.141592653589793))))))", &["Binders expose per-sample `theta`, absolute `z`, and normalized `fz` in `[0,1]`.", "Renders through native direct OCCT and FreeCAD interop for formula-driven dome/pot families."]),
+        "hull" => ref_entry(name, "cadOp", "(hull solid...)", "solid", "Convex hull of the child solids as a single closed BREP solid.", true, support, "(hull (sphere 6) (translate 30 0 0 (sphere 6)))", &["Native direct OCCT only; FreeCAD interop rejects it.", "Great for organic blends/bridges (slipper lasts, fairings) without hand-lofting sections."]),
         "union" | "fuse" => ref_entry(name, "cadOp", &format!("({name} solid...)"), "solid", "Boolean union/fuse of solids.", true, support, &format!("({name} a b c)"), &[]),
         "difference" | "cut" => ref_entry(name, "cadOp", &format!("({name} base cutter...)"), "solid", "Subtracts cutter solids from a base solid.", true, support, &format!("({name} body hole)"), &[]),
         "intersection" | "common" => ref_entry(name, "cadOp", &format!("({name} solid...)"), "solid", "Keeps shared volume of solids.", true, support, &format!("({name} a b)"), &[]),
@@ -1118,6 +1119,7 @@ fn cad_op_reference(name: &str, backend: GeometryBackend) -> SurfaceReferenceEnt
         "rib" => ref_entry(name, "cadOp", "(rib solid profile path)", "solid", "Adds material: sweeps `profile` along `path` and unions it onto `solid`.", true, support, "(rib (box 20 20 20) (circle 3) (path (0 0 0) (0 0 30)))", &[]),
         "groove" => ref_entry(name, "cadOp", "(groove solid profile path)", "solid", "Removes material: sweeps `profile` along `path` and subtracts it from `solid`.", true, support, "(groove (box 20 20 20) (circle 3) (path (0 0 0) (0 0 30)))", &[]),
         "thread" => ref_entry(name, "cadOp", "(thread :radius r :pitch p :length len :depth d [:base-width w] [:crest-width w] [:female #t] [:clearance c] [:lefthand #t] [:iso \"M4\"])", "solid", "Parametric helical thread: a core cylinder plus a `helical-ridge` (male), or a ridge cutter (`:female`). `:iso \"M4\"` decodes a metric designation into pitch/radius.", true, support, "(thread :radius 8 :pitch 2 :length 16 :depth 1)", &["Female threads are cut with `difference`; pair male/female with matching `:radius`/`:pitch` and add `:clearance`."]),
+        "tapped-hole" => ref_entry(name, "cadOp", "(tapped-hole :iso \"M8\" :length len [:radius r] [:pitch p] [:depth d] [:base-width w] [:crest-width w] [:lefthand #t])", "solid", "A tapped (internal female) thread cut as a positive cavity: a named-radius bore cylinder at the ISO minor diameter unioned with a helical relief ridge whose crest reaches the major diameter. `:iso \"M8\"` decodes a metric designation; an equal-nominal `thread` mates with it.", true, support, "(tapped-hole :iso \"M8\" :length 14)", &["Subtract from a part with `difference` to cut the tapped hole.", "Pair with a matching `:iso` `thread`; both decode the same minor radius so the bolt core seats in the bore."]),
         _ => generic_reference(name, "cadOp", "geometry"),
     }
 }
@@ -1147,9 +1149,9 @@ fn wall_pattern_mode_reference(name: &str) -> SurfaceReferenceEntry {
         "wall-pattern :mode value",
         description,
         true,
-        "mesh/eckyRust only",
+        "native mesh only",
         &format!("(wall-pattern (:mode {name} :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)"),
-        &["Use only when current geometryBackend is mesh/eckyRust."],
+        &["Use only when current geometryBackend is mesh."],
     )
 }
 
@@ -1400,7 +1402,7 @@ mod tests {
         let wall = lookup("wall-pattern");
         assert_eq!(
             wall.backend_support,
-            "mesh/eckyRust only; rejected by build123d/freecad lowerers"
+            "native mesh only; rejected by FreeCAD interop"
         );
 
         let gyroid = lookup("gyroid");
@@ -1419,7 +1421,7 @@ mod tests {
 
         assert_eq!(
             radial.backend_support,
-            "eckyRust direct OCCT, build123d, freecad; not the mesh runtime"
+            "native direct OCCT and FreeCAD interop; not the mesh runtime"
         );
         assert!(radial.description.contains("Samples radial sections"));
         assert!(radial.notes.iter().any(|note| note.contains("theta")));

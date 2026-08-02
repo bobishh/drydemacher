@@ -93,6 +93,7 @@ impl KernelPlanner for PortableKernelPlanner {
             schema_version: RENDER_SCHEMA_VERSION,
             plan_id: plan_digest(&parts)?,
             parts,
+            partial_boolean_groups: Vec::new(),
         })
     }
 }

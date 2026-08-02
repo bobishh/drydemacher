@@ -96,6 +96,39 @@ OCCT operation.
 - WHEN a `fuse` boolean is executed
 - THEN the result is a single solid containing both exact and poly faces
 
+### Requirement: Direct OCCT surface operation authority
+
+The system SHALL execute supported BRep surface operations in Direct OCCT
+whenever the operand is analytic BRep or solidified poly BRep. The system MUST
+NOT route analytic `chamfer` or `fillet` through the Rust mesh evaluator as a
+silent fallback.
+
+#### Scenario: Analytic chamfer
+
+- GIVEN an analytic BRep shape and a supported `chamfer` operation
+- WHEN the Direct OCCT runtime executes the plan
+- THEN `BRepFilletAPI_MakeChamfer` is used
+- AND the generated preview STL is only a tessellation of the analytic result
+- AND the STEP export remains analytic BRep
+
+#### Scenario: Solidified mesh-origin chamfer
+
+- GIVEN a validated mesh-origin island has been converted through
+  `solidify(import-stl(...))`
+- AND the selected edge set passes mesh-origin surface-op admission
+- WHEN a supported `chamfer` operation consumes that island
+- THEN Direct OCCT applies the chamfer to the solidified poly BRep
+- AND the STEP export is marked as faceted poly BRep
+
+#### Scenario: Dense poly BRep chamfer rejected
+
+- GIVEN a solidified mesh-origin poly BRep with a broad chamfer selector
+- AND the selector resolves above the configured selected-edge limit
+- WHEN Direct OCCT plan validation runs
+- THEN the plan is rejected before `BRepFilletAPI_MakeChamfer`
+- AND the error includes selected-edge count, limit, and selector
+- AND no alternate mesh evaluator route is attempted
+
 ### Requirement: Tessellation at partition boundary
 
 The system SHALL tessellate OCCT exact solids into triangle meshes when
@@ -204,3 +237,78 @@ UI status paths.
 - GIVEN native execution exits unsuccessfully
 - WHEN render reports failure
 - THEN the error includes native stdout/stderr and exit status.
+
+### Requirement: Native STEP shape import
+
+Direct OCCT SHALL import host-resolved STEP component bytes through
+`STEPControl_Reader` and validate transfer status, roots, shape kind, and BRep
+validity before publishing a shape slot.
+
+#### Scenario: Valid STEP solid enters plan
+
+- **WHEN** `import-step` receives a readable valid solid
+- **THEN** Direct OCCT publishes a shape slot
+- **AND** native placement, booleans, topology, STL, and STEP export can consume
+  it
+
+#### Scenario: Multiple solid roots remain compound
+
+- **WHEN** transfer yields multiple solids
+- **THEN** Direct OCCT preserves a solid-containing compound
+- **AND** does not fuse roots implicitly
+
+#### Scenario: Invalid transfer publishes nothing
+
+- **WHEN** read fails, zero roots transfer, output is null, BRep is invalid, or
+  payload is shell-only
+- **THEN** native execution fails with exact import/validation stage cause
+- **AND** publishes no partial slot or export
+
+### Requirement: Native STEP path has no compatibility fallback
+
+The package component STEP path MUST NOT invoke FreeCAD, convert STEP to STL,
+or call `solidify`.
+
+#### Scenario: STEP uses reader directly
+
+- **WHEN** a STEP-backed live component renders
+- **THEN** generated execution uses `STEPControl_Reader`
+- **AND** no FreeCAD process, `StlAPI_Reader`, or `solidify` runs
+
+#### Scenario: STL bridge remains separate
+
+- **WHEN** an STL mesh enters downstream BRep operations
+- **THEN** its path remains `solidify(import-stl(path))`
+- **AND** STEP import does not share that step
+
+### Requirement: STEP representation truth
+
+Direct runtime SHALL propagate locked package representation evidence and
+merge all contributor representations conservatively.
+
+#### Scenario: Analytic placement remains analytic
+
+- **WHEN** trusted analytic STEP is only placed with analytic authored geometry
+- **THEN** bundle, manifest, and STEP export report `analyticBrep`
+
+#### Scenario: Faceted input is never relabeled analytic
+
+- **WHEN** STEP payload declares `facetedPolyBrep`
+- **THEN** output reports `facetedPolyBrep` or `hybrid`
+- **AND** never reports `analyticBrep`
+
+#### Scenario: Mixed composition is hybrid
+
+- **WHEN** analytic authored geometry combines with faceted/mixed STEP
+- **THEN** bundle, manifest, and STEP export report `hybrid`
+
+### Requirement: Imported STEP topology remains native
+
+Imported STEP faces and edges SHALL flow through the existing Direct OCCT
+topology reporter with component-origin evidence.
+
+#### Scenario: Package ports resolve without FreeCAD
+
+- **WHEN** package ports target locked imported face/edge evidence
+- **THEN** Direct OCCT topology contains resolvable targets
+- **AND** port validation uses no FreeCAD-generated topology

@@ -1,7 +1,5 @@
-use super::{
-    handle_commit_preview_version, handle_macro_preview_render, handle_verify_generated_model,
-    now_secs, AgentContext,
-};
+use super::version_write::handle_commit_preview_version_from_external_source;
+use super::{handle_macro_preview_render, handle_verify_generated_model, now_secs, AgentContext};
 use crate::contracts::{AppError, AppResult};
 use crate::db;
 use crate::mcp::contracts::{AgentIdentityOverride, MacroReplaceRequest, VersionSaveRequest};
@@ -49,7 +47,7 @@ pub struct ProjectFolderApplyRequest {
     pub version_name: Option<String>,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectFolderApplyResponse {
     pub state_before: crate::project_mirror::ProjectSyncState,
@@ -89,7 +87,54 @@ pub async fn handle_project_folder_export(
         .as_ref()
         .map(|bundle| bundle.model_id.clone());
     let projects_root = configured_projects_root(state);
-    let (dir, manifest) = crate::project_mirror::export_project(
+    let stored_binding = {
+        let conn = state.db.lock().await;
+        crate::thread_source_binding::get_binding(&conn, &target.thread_id)
+            .map_err(|err| AppError::persistence(err.to_string()))?
+    };
+    if stored_binding.is_some() {
+        let binding = {
+            let conn = state.db.lock().await;
+            crate::thread_source_binding::prepare_editor_source(
+                app,
+                &conn,
+                projects_root.as_deref(),
+                &target.thread_id,
+                &target.design_output.title,
+                &target.design_output.macro_code,
+                &target.message_id,
+                model_id.as_deref(),
+            )?
+        };
+        let dir = std::path::PathBuf::from(&binding.folder_path);
+        let (_, slug) = crate::thread_source_binding::stored_folder_export_args(&dir)?;
+        let manifest = crate::project_mirror::read_manifest(&dir)?.ok_or_else(|| {
+            AppError::persistence(format!(
+                "Bound project folder '{}' lost its manifest.",
+                dir.display()
+            ))
+        })?;
+        match target
+            .artifact_bundle
+            .as_ref()
+            .and_then(|bundle| bundle.component_dependency_lock.as_ref())
+        {
+            Some(lock) => crate::project_mirror::write_project_lock(&dir, lock)?,
+            None => {
+                let lock_path = dir.join(crate::project_mirror::PROJECT_LOCK_FILE_NAME);
+                if lock_path.exists() {
+                    std::fs::remove_file(&lock_path)
+                        .map_err(|error| AppError::persistence(error.to_string()))?;
+                }
+            }
+        }
+        return Ok(ProjectFolderExportResponse {
+            slug,
+            folder: binding.folder_path,
+            manifest,
+        });
+    }
+    let (dir, manifest) = crate::project_mirror::export_project_with_lock(
         app,
         &crate::project_mirror::ExportProjectRequest {
             slug: &slug,
@@ -99,7 +144,24 @@ pub async fn handle_project_folder_export(
             source: &target.design_output.macro_code,
             projects_root: projects_root.as_deref(),
         },
+        target
+            .artifact_bundle
+            .as_ref()
+            .and_then(|bundle| bundle.component_dependency_lock.as_ref()),
     )?;
+
+    // Index the export as this thread's bound source folder (digest-safe:
+    // binding row digest == on-disk file digest == manifest digest).
+    {
+        let conn = state.db.lock().await;
+        crate::thread_source_binding::index_export(
+            &conn,
+            &target.thread_id,
+            &dir,
+            &manifest.source_digest,
+        )?;
+    }
+
     Ok(ProjectFolderExportResponse {
         slug,
         folder: dir.to_string_lossy().to_string(),
@@ -112,13 +174,29 @@ fn configured_projects_root(state: &AppState) -> Option<String> {
     state.config.lock().unwrap().projects_root.clone()
 }
 
+async fn project_folder_path(
+    state: &AppState,
+    slug: &str,
+    app: &dyn PathResolver,
+) -> AppResult<std::path::PathBuf> {
+    let binding = {
+        let conn = state.db.lock().await;
+        crate::thread_source_binding::get_binding_by_folder_name(&conn, slug)
+            .map_err(|err| AppError::persistence(err.to_string()))?
+    };
+    if let Some(binding) = binding {
+        return Ok(std::path::PathBuf::from(binding.folder_path));
+    }
+    let root = configured_projects_root(state);
+    crate::project_mirror::project_dir(app, root.as_deref(), slug)
+}
+
 async fn project_thread_head(
     state: &AppState,
     slug: &str,
     app: &dyn PathResolver,
 ) -> AppResult<Option<String>> {
-    let root = configured_projects_root(state);
-    let dir = crate::project_mirror::project_dir(app, root.as_deref(), slug)?;
+    let dir = project_folder_path(state, slug, app).await?;
     let Some(manifest) = crate::project_mirror::read_manifest(&dir)? else {
         return Ok(None);
     };
@@ -133,8 +211,9 @@ pub async fn handle_project_folder_status(
     req: ProjectFolderStatusRequest,
 ) -> AppResult<crate::project_mirror::ProjectFolderStatus> {
     let head = project_thread_head(state, &req.slug, app).await?;
-    let root = configured_projects_root(state);
-    crate::project_mirror::folder_status(app, root.as_deref(), &req.slug, head.as_deref())
+    let dir = project_folder_path(state, &req.slug, app).await?;
+    let (root, slug) = crate::thread_source_binding::stored_folder_export_args(&dir)?;
+    crate::project_mirror::folder_status(app, root.as_deref(), &slug, head.as_deref())
 }
 
 pub async fn handle_project_folder_apply(
@@ -192,14 +271,14 @@ pub async fn handle_project_folder_apply(
         _ => {}
     }
 
-    let root = configured_projects_root(state);
-    let dir = crate::project_mirror::project_dir(app, root.as_deref(), &req.slug)?;
-    let source = crate::project_mirror::read_project_source(&dir)?.ok_or_else(|| {
-        AppError::validation(format!(
-            "Project folder `{}` lost its model.ecky during apply.",
-            req.slug
-        ))
-    })?;
+    let dir = std::path::PathBuf::from(&status.folder);
+    let (source, expected_lock) = crate::project_mirror::read_project_apply_input(&dir)?
+        .ok_or_else(|| {
+            AppError::validation(format!(
+                "Project folder `{}` lost its model.ecky during apply.",
+                req.slug
+            ))
+        })?;
     let state_before = status.state;
 
     let preview = Box::pin(handle_macro_preview_render(
@@ -215,10 +294,17 @@ pub async fn handle_project_folder_apply(
             parameters: None,
             post_processing: None,
             geometry_backend: None,
+            source_window: None,
         },
         ctx,
     ))
     .await?;
+    if preview.artifact_bundle.component_dependency_lock != expected_lock {
+        return Err(AppError::validation(format!(
+            "Project folder `{}` preview dependency lock differs from canonical ecky.lock.json; apply refused.",
+            req.slug
+        )));
+    }
     let verification = Box::pin(handle_verify_generated_model(
         state,
         app,
@@ -234,7 +320,10 @@ pub async fn handle_project_folder_apply(
             req.slug, verification.result.summary
         )));
     }
-    let commit = Box::pin(handle_commit_preview_version(
+    // File->version direction: commit without the Ecky->file overwrite guard
+    // or refresh. The pending external bytes stay untouched; only after the
+    // version succeeds do we rebase manifest + binding digest below.
+    let commit = Box::pin(handle_commit_preview_version_from_external_source(
         state,
         app,
         VersionSaveRequest {
@@ -258,6 +347,15 @@ pub async fn handle_project_folder_apply(
         ..manifest
     };
     crate::project_mirror::write_manifest(&dir, &rebased)?;
+    {
+        let conn = state.db.lock().await;
+        crate::thread_source_binding::index_export(
+            &conn,
+            &rebased.thread_id,
+            &dir,
+            &rebased.source_digest,
+        )?;
+    }
 
     Ok(ProjectFolderApplyResponse {
         state_before,
@@ -313,13 +411,31 @@ impl ProjectFolderWatcher {
     ) -> Vec<ProjectFolderWatchEvent> {
         let mut events = Vec::new();
         let root = configured_projects_root(state);
-        let Ok(slugs) = crate::project_mirror::list_project_slugs(app, root.as_deref()) else {
-            return events;
+        let mut folders = std::collections::BTreeMap::new();
+        if let Ok(slugs) = crate::project_mirror::list_project_slugs(app, root.as_deref()) {
+            for slug in slugs {
+                if let Ok(dir) = crate::project_mirror::project_dir(app, root.as_deref(), &slug) {
+                    folders.insert(slug, dir);
+                }
+            }
+        }
+        let bindings = {
+            let conn = state.db.lock().await;
+            crate::thread_source_binding::list_bindings(&conn).unwrap_or_default()
         };
-        for slug in slugs {
-            let Ok(dir) = crate::project_mirror::project_dir(app, root.as_deref(), &slug) else {
-                continue;
-            };
+        for binding in bindings {
+            let dir = std::path::PathBuf::from(binding.folder_path);
+            if let Some(slug) = dir
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(str::to_string)
+            {
+                // Stored binding wins over a same-name folder under the
+                // currently configured root.
+                folders.insert(slug, dir);
+            }
+        }
+        for (slug, dir) in folders {
             let Ok(Some(manifest)) = crate::project_mirror::read_manifest(&dir) else {
                 continue;
             };

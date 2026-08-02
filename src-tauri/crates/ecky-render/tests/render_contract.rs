@@ -74,6 +74,7 @@ fn kernel_plan_is_a_public_versioned_protocol() {
                 keywords: Vec::new(),
             }],
         }],
+        partial_boolean_groups: Vec::new(),
     };
 
     let encoded = serde_json::to_value(&plan).expect("plan serializes");

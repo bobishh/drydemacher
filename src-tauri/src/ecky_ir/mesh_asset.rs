@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::contracts::{AppError, AppResult};
+use crate::contracts::{AppError, AppResult, GeometryRepresentation};
 use crate::ecky_core_ir::NodeId;
 
 use super::shared::IrMesh;
@@ -27,6 +27,22 @@ pub enum MeshAssetSource {
         provider: String,
         model: Option<String>,
     },
+}
+
+impl MeshAssetSource {
+    /// Stable provenance tag that contributes to deterministic multipart
+    /// bundle identity without leaking engine internals to consumers.
+    fn provenance_tag(&self) -> String {
+        match self {
+            MeshAssetSource::EckyMeshPhase { part_id, node_id } => {
+                format!("ecky-mesh-phase:{part_id}:{}", node_id.raw())
+            }
+            MeshAssetSource::Imported => "imported".to_string(),
+            MeshAssetSource::Generated { provider, model } => {
+                format!("generated:{provider}:{}", model.as_deref().unwrap_or("-"))
+            }
+        }
+    }
 }
 
 /// Engine-independent triangle-mesh handoff into the poly-BRep bridge.
@@ -57,10 +73,62 @@ pub struct IndexedMeshTopology {
     pub closed: bool,
 }
 
+/// Serialized mirror of [`MeshAssetSource`] stored in the indexed-mesh
+/// sidecar. The DTO is required (no `Option`, no default) so a cache that
+/// predates provenance storage fails deserialization honestly and is
+/// regenerated rather than silently reconstructed as a guessed source.
+///
+/// `NodeId` is a non-serializable opaque id, so it is stored as its raw
+/// `u64` and rebuilt via `NodeId::new`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+enum IndexedMeshCacheSource {
+    EckyMeshPhase {
+        part_id: String,
+        node_id: u64,
+    },
+    Imported,
+    Generated {
+        provider: String,
+        model: Option<String>,
+    },
+}
+
+impl IndexedMeshCacheSource {
+    fn from_source(source: &MeshAssetSource) -> Self {
+        match source {
+            MeshAssetSource::EckyMeshPhase { part_id, node_id } => Self::EckyMeshPhase {
+                part_id: part_id.clone(),
+                node_id: node_id.raw(),
+            },
+            MeshAssetSource::Imported => Self::Imported,
+            MeshAssetSource::Generated { provider, model } => Self::Generated {
+                provider: provider.clone(),
+                model: model.clone(),
+            },
+        }
+    }
+
+    fn to_source(&self) -> MeshAssetSource {
+        match self {
+            Self::EckyMeshPhase { part_id, node_id } => MeshAssetSource::EckyMeshPhase {
+                part_id: part_id.clone(),
+                node_id: NodeId::new(*node_id),
+            },
+            Self::Imported => MeshAssetSource::Imported,
+            Self::Generated { provider, model } => MeshAssetSource::Generated {
+                provider: provider.clone(),
+                model: model.clone(),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct IndexedMeshCacheArtifact {
     schema_version: u32,
+    source: IndexedMeshCacheSource,
     vertex_bits: Vec<[u64; 3]>,
     triangles: Vec<[u32; 3]>,
     content_digest: String,
@@ -110,6 +178,85 @@ impl IndexedMeshAsset {
         Self::new(source, vertices, indexed_triangles)
     }
 
+    /// Decode a standalone imported STL asset (binary or ASCII) into the
+    /// canonical indexed mesh. STL is the import boundary only; the canonical
+    /// handoff and cache representation remains the indexed sidecar, never STL.
+    ///
+    /// Authored vertex coordinates are preserved exactly: shared STL vertices
+    /// merge only when their stored IEEE-754 representations are identical, so
+    /// imported geometry is never silently welded. This differs from
+    /// [`IndexedMeshAsset::from_ir_mesh`], which applies the named 1e-6 mm seam
+    /// weld for evaluated CAD meshes.
+    pub(crate) fn from_stl(source: MeshAssetSource, path: &Path) -> AppResult<Self> {
+        let bytes = std::fs::read(path).map_err(|err| {
+            AppError::validation(format!("Failed to read STL '{}': {err}", path.display()))
+        })?;
+        let raw_triangles = import_decode::decode_stl_triangles(&bytes, path)?;
+        if raw_triangles
+            .iter()
+            .flatten()
+            .flatten()
+            .any(|coordinate| !coordinate.is_finite())
+        {
+            return Err(AppError::validation(format!(
+                "STL '{}' contains a non-finite vertex coordinate.",
+                path.display()
+            )));
+        }
+        let (vertices, triangles) =
+            import_decode::index_stl_triangles_preserving_authored_coordinates(&raw_triangles)?;
+        if triangles.is_empty() {
+            return Err(AppError::validation(format!(
+                "STL '{}' contains no triangles.",
+                path.display()
+            )));
+        }
+        Self::new(source, vertices, triangles)
+    }
+
+    /// Decode a standalone imported 3MF core asset into the canonical indexed
+    /// mesh. 3MF is already an explicit indexed format, so authored vertex
+    /// coordinates and authored triangle indices are retained as supplied; no
+    /// seam weld is applied. Each `<mesh>` block is aggregated with a per-block
+    /// vertex base so multi-object packages preserve their authored indexing.
+    pub(crate) fn from_3mf(source: MeshAssetSource, path: &Path) -> AppResult<Self> {
+        let model_xml = import_decode::read_3mf_model_xml(path)?;
+        let (vertices, triangles) = import_decode::parse_3mf_core_mesh(&model_xml, path)?;
+        if triangles.is_empty() {
+            return Err(AppError::validation(format!(
+                "3MF '{}' contains no triangles.",
+                path.display()
+            )));
+        }
+        Self::new(source, vertices, triangles)
+    }
+
+    /// Decode a standalone imported mesh asset into the canonical indexed mesh,
+    /// dispatching by file extension. This is the single authored-decode entry
+    /// point for standalone imports, so runtime sidecar generation and runner
+    /// consumption stay consistent and no welded-vs-authored split can open
+    /// between them.
+    ///
+    /// Both admitted formats preserve authored coordinates verbatim: STL
+    /// vertices merge only by exact IEEE-754 bit-equality and 3MF retains its
+    /// explicit indexing; neither applies the evaluated-CAD seam weld. An
+    /// unsupported format is a hard rejection, never a silent fallback to a
+    /// welded or faceted path.
+    pub(crate) fn from_imported_file(source: MeshAssetSource, path: &Path) -> AppResult<Self> {
+        match path.extension().and_then(|extension| extension.to_str()) {
+            Some(extension) if extension.eq_ignore_ascii_case("stl") => {
+                Self::from_stl(source, path)
+            }
+            Some(extension) if extension.eq_ignore_ascii_case("3mf") => {
+                Self::from_3mf(source, path)
+            }
+            _ => Err(AppError::validation(format!(
+                "Imported mesh '{}' uses an unsupported standalone format; only STL and 3MF are admitted to the indexed mesh path.",
+                path.display()
+            ))),
+        }
+    }
+
     pub fn new(
         source: MeshAssetSource,
         vertices: Vec<[f64; 3]>,
@@ -150,6 +297,7 @@ impl IndexedMeshAsset {
     pub(crate) fn write_cache(&self, path: &Path) -> AppResult<()> {
         let artifact = IndexedMeshCacheArtifact {
             schema_version: 2,
+            source: IndexedMeshCacheSource::from_source(&self.source),
             vertex_bits: self
                 .vertices
                 .iter()
@@ -169,7 +317,7 @@ impl IndexedMeshAsset {
         })
     }
 
-    pub(crate) fn read_cache(source: MeshAssetSource, path: &Path) -> AppResult<Self> {
+    pub(crate) fn read_cache(path: &Path) -> AppResult<Self> {
         let bytes = std::fs::read(path).map_err(|err| {
             AppError::persistence(format!(
                 "Failed to read indexed mesh cache '{}': {err}",
@@ -189,6 +337,7 @@ impl IndexedMeshAsset {
                 artifact.schema_version
             )));
         }
+        let source = artifact.source.to_source();
         let vertices = artifact
             .vertex_bits
             .into_iter()
@@ -226,6 +375,112 @@ impl IndexedMeshAsset {
     }
 }
 
+/// One authored component inside a mesh-native multipart bundle. The canonical
+/// geometry is the [`IndexedMeshAsset`]; identity is deterministic (authored
+/// index plus content digest) and provenance is the original
+/// [`MeshAssetSource`]. No STEP is ever attached.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultipartMeshComponent {
+    component_id: String,
+    label: String,
+    asset: IndexedMeshAsset,
+}
+
+impl MultipartMeshComponent {
+    pub fn new(index: usize, label: impl Into<String>, asset: IndexedMeshAsset) -> Self {
+        let digest = asset.content_digest();
+        let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+        let prefix = &hex[..hex.len().min(12)];
+        Self {
+            component_id: format!("component-{index}-{prefix}"),
+            label: label.into(),
+            asset,
+        }
+    }
+
+    pub fn component_id(&self) -> &str {
+        &self.component_id
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn asset(&self) -> &IndexedMeshAsset {
+        &self.asset
+    }
+
+    pub fn content_digest(&self) -> &str {
+        self.asset.content_digest()
+    }
+
+    pub fn source(&self) -> &MeshAssetSource {
+        self.asset.source()
+    }
+}
+
+/// Mesh-native multipart bundle: one canonical indexed-mesh artifact per
+/// authored component, each with deterministic identity and provenance, under
+/// one deterministic, order-sensitive bundle identity. This is the
+/// representation-preserving export contract for mesh islands targeting STL or
+/// 3MF; the indexed manifold mesh is retained and no faceted-BRep conversion
+/// or fabricated STEP occurs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultipartMeshNativeBundle {
+    components: Vec<MultipartMeshComponent>,
+    bundle_digest: String,
+}
+
+impl MultipartMeshNativeBundle {
+    pub fn new(components: Vec<MultipartMeshComponent>) -> AppResult<Self> {
+        if components.is_empty() {
+            return Err(AppError::validation(
+                "Multipart mesh-native bundle requires at least one component.",
+            ));
+        }
+        let bundle_digest = multipart_mesh_bundle_digest(&components);
+        Ok(Self {
+            components,
+            bundle_digest,
+        })
+    }
+
+    pub fn components(&self) -> &[MultipartMeshComponent] {
+        &self.components
+    }
+
+    pub fn bundle_digest(&self) -> &str {
+        &self.bundle_digest
+    }
+
+    /// Representation marker for this export contract. Always mesh-native: the
+    /// canonical indexed mesh is preserved and no faceted-BRep conversion runs.
+    pub fn representation(&self) -> GeometryRepresentation {
+        GeometryRepresentation::MeshNative
+    }
+
+    /// No-fabricated-STEP proof hook. A mesh-native bundle never emits STEP; if
+    /// a STEP contract is required the caller must use the OCCT path instead.
+    pub fn has_step_artifact(&self) -> bool {
+        false
+    }
+}
+
+fn multipart_mesh_bundle_digest(components: &[MultipartMeshComponent]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"ecky-multipart-mesh-native-v1\0");
+    hasher.update((components.len() as u64).to_le_bytes());
+    for component in components {
+        hasher.update(component.component_id().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(component.content_digest().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(component.source().provenance_tag().as_bytes());
+        hasher.update(b"\0");
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
 fn compact_indexed_geometry(
     vertices: Vec<[f64; 3]>,
     mut triangles: Vec<[u32; 3]>,
@@ -248,6 +503,270 @@ fn compact_indexed_geometry(
     }
     (compact_vertices, triangles)
 }
+
+// --- Standalone STL/3MF indexed decoders (task 6) ----------------------------
+// Canonical authored decoders for imported assets. `from_imported_file`
+// dispatches to these by extension from the runner admission path so authored
+// coordinates are effective at runtime, not an additive dead API.
+mod import_decode {
+    use std::collections::BTreeMap;
+    use std::io::Read;
+    use std::path::Path;
+
+    use crate::contracts::{AppError, AppResult};
+
+    use super::canonical_float_bits;
+
+    const STL_FACET_SIZE: usize = 50;
+    const STL_BINARY_HEADER_SIZE: usize = 84;
+
+    pub(super) fn decode_stl_triangles(bytes: &[u8], path: &Path) -> AppResult<Vec<[[f64; 3]; 3]>> {
+        if bytes.len() >= STL_BINARY_HEADER_SIZE {
+            let count = u32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]) as usize;
+            if STL_BINARY_HEADER_SIZE.checked_add(count.saturating_mul(STL_FACET_SIZE))
+                == Some(bytes.len())
+            {
+                return decode_binary_stl_triangles(bytes, count, path);
+            }
+        }
+        decode_ascii_stl_triangles(bytes, path)
+    }
+
+    fn decode_binary_stl_triangles(
+        bytes: &[u8],
+        count: usize,
+        path: &Path,
+    ) -> AppResult<Vec<[[f64; 3]; 3]>> {
+        let mut triangles = Vec::with_capacity(count);
+        for index in 0..count {
+            let facet_base = STL_BINARY_HEADER_SIZE + index * STL_FACET_SIZE;
+            // Skip the 12-byte facet normal at facet_base..facet_base+12.
+            let mut triangle = [[0.0_f64; 3]; 3];
+            for vertex in 0..3 {
+                for coordinate in 0..3 {
+                    let offset = facet_base + 12 + (vertex * 3 + coordinate) * 4;
+                    let value = f32::from_le_bytes(
+                        bytes[offset..offset + 4]
+                            .try_into()
+                            .expect("checked binary STL facet layout"),
+                    ) as f64;
+                    triangle[vertex][coordinate] = value;
+                }
+            }
+            triangles.push(triangle);
+        }
+        let _ = path;
+        Ok(triangles)
+    }
+
+    fn decode_ascii_stl_triangles(bytes: &[u8], path: &Path) -> AppResult<Vec<[[f64; 3]; 3]>> {
+        let text = std::str::from_utf8(bytes).map_err(|err| {
+            AppError::validation(format!("STL '{}' is invalid: {err}", path.display()))
+        })?;
+        let mut flat_vertices = Vec::new();
+        for line in text.lines() {
+            let mut parts = line.split_whitespace();
+            if !parts
+                .next()
+                .is_some_and(|token| token.eq_ignore_ascii_case("vertex"))
+            {
+                continue;
+            }
+            let parsed = [
+                parts.next().and_then(|value| value.parse::<f64>().ok()),
+                parts.next().and_then(|value| value.parse::<f64>().ok()),
+                parts.next().and_then(|value| value.parse::<f64>().ok()),
+            ];
+            let [Some(x), Some(y), Some(z)] = parsed else {
+                return Err(AppError::validation(format!(
+                    "STL '{}' contains an invalid vertex.",
+                    path.display()
+                )));
+            };
+            flat_vertices.push([x, y, z]);
+        }
+        if flat_vertices.len() % 3 != 0 {
+            return Err(AppError::validation(format!(
+                "STL '{}' contains an incomplete facet.",
+                path.display()
+            )));
+        }
+        Ok(flat_vertices
+            .chunks_exact(3)
+            .map(|chunk| [chunk[0], chunk[1], chunk[2]])
+            .collect())
+    }
+
+    /// Index unindexed STL triangle soup by exact IEEE-754 bit-equality so authored
+    /// coordinates are preserved verbatim. Vertices merge only when their stored
+    /// representations are identical; no tolerance weld is applied.
+    pub(super) fn index_stl_triangles_preserving_authored_coordinates(
+        raw_triangles: &[[[f64; 3]; 3]],
+    ) -> AppResult<(Vec<[f64; 3]>, Vec<[u32; 3]>)> {
+        let mut vertices: Vec<[f64; 3]> = Vec::new();
+        let mut index_by_bits: BTreeMap<[u64; 3], u32> = BTreeMap::new();
+        let mut triangles: Vec<[u32; 3]> = Vec::with_capacity(raw_triangles.len());
+        for raw_triangle in raw_triangles {
+            let mut triangle = [0_u32; 3];
+            for (slot, position) in raw_triangle.iter().enumerate() {
+                let key = position.map(canonical_float_bits);
+                let entry = match index_by_bits.get(&key) {
+                    Some(existing) => *existing,
+                    None => {
+                        let next = u32::try_from(vertices.len()).map_err(|_| {
+                            AppError::validation("STL import exceeds the u32 vertex-index limit.")
+                        })?;
+                        vertices.push(*position);
+                        index_by_bits.insert(key, next);
+                        next
+                    }
+                };
+                triangle[slot] = entry;
+            }
+            triangles.push(triangle);
+        }
+        Ok((vertices, triangles))
+    }
+
+    pub(super) fn read_3mf_model_xml(path: &Path) -> AppResult<String> {
+        let file = std::fs::File::open(path).map_err(|err| {
+            AppError::validation(format!("Failed to open 3MF '{}': {err}", path.display()))
+        })?;
+        let mut archive = zip::ZipArchive::new(file).map_err(|err| {
+            AppError::validation(format!(
+                "3MF '{}' is not a valid package: {err}",
+                path.display()
+            ))
+        })?;
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).map_err(|err| {
+                AppError::validation(format!(
+                    "3MF '{}' could not read package entry: {err}",
+                    path.display()
+                ))
+            })?;
+            if entry.name() == "3D/3dmodel.model" {
+                let mut model = String::new();
+                entry.read_to_string(&mut model).map_err(|err| {
+                    AppError::validation(format!(
+                        "3MF '{}' model is invalid: {err}",
+                        path.display()
+                    ))
+                })?;
+                return Ok(model);
+            }
+        }
+        Err(AppError::validation(format!(
+            "3MF '{}' is missing the 3D/3dmodel.model part.",
+            path.display()
+        )))
+    }
+
+    /// Parse the 3MF core `<mesh>` blocks into one aggregated indexed mesh. Authored
+    /// vertex coordinates and triangle indices are retained; each `<mesh>` block
+    /// offsets its triangle indices by the running vertex base so multi-object
+    /// packages preserve their authored indexing.
+    pub(super) fn parse_3mf_core_mesh(
+        model_xml: &str,
+        path: &Path,
+    ) -> AppResult<(Vec<[f64; 3]>, Vec<[u32; 3]>)> {
+        let mesh_block_re = regex::Regex::new(r"(?s)<mesh\b.*?</mesh>").expect("static mesh regex");
+        let vertex_tag_re = regex::Regex::new(r"<vertex\b[^>]*>").expect("static vertex regex");
+        let triangle_tag_re =
+            regex::Regex::new(r"<triangle\b[^>]*>").expect("static triangle regex");
+        let attribute_re =
+            regex::Regex::new(r#"(\w+)\s*=\s*["']([^"']*)["']"#).expect("static attribute regex");
+
+        let mut vertices: Vec<[f64; 3]> = Vec::new();
+        let mut triangles: Vec<[u32; 3]> = Vec::new();
+
+        for mesh_block in mesh_block_re.find_iter(model_xml) {
+            let block = mesh_block.as_str();
+            let vertex_base = vertices.len();
+            for tag in vertex_tag_re.find_iter(block) {
+                let attributes = capture_xml_attributes(tag.as_str(), &attribute_re);
+                let x = require_3mf_scalar(&attributes, "x", path)?;
+                let y = require_3mf_scalar(&attributes, "y", path)?;
+                let z = require_3mf_scalar(&attributes, "z", path)?;
+                vertices.push([x, y, z]);
+            }
+            for tag in triangle_tag_re.find_iter(block) {
+                let attributes = capture_xml_attributes(tag.as_str(), &attribute_re);
+                let v1 = require_3mf_index(&attributes, "v1", vertex_base, path)?;
+                let v2 = require_3mf_index(&attributes, "v2", vertex_base, path)?;
+                let v3 = require_3mf_index(&attributes, "v3", vertex_base, path)?;
+                triangles.push([v1, v2, v3]);
+            }
+        }
+
+        Ok((vertices, triangles))
+    }
+
+    fn capture_xml_attributes(tag: &str, attribute_re: &regex::Regex) -> BTreeMap<String, String> {
+        let mut attributes = BTreeMap::new();
+        for capture in attribute_re.captures_iter(tag) {
+            if let (Some(name), Some(value)) = (capture.get(1), capture.get(2)) {
+                attributes.insert(name.as_str().to_string(), value.as_str().to_string());
+            }
+        }
+        attributes
+    }
+
+    fn require_3mf_scalar(
+        attributes: &BTreeMap<String, String>,
+        name: &str,
+        path: &Path,
+    ) -> AppResult<f64> {
+        let raw = attributes.get(name).ok_or_else(|| {
+            AppError::validation(format!(
+                "3MF '{}' is missing a required mesh attribute '{name}'.",
+                path.display()
+            ))
+        })?;
+        let value = raw.parse::<f64>().map_err(|_| {
+            AppError::validation(format!(
+                "3MF '{}' contains an invalid mesh attribute '{name}'.",
+                path.display()
+            ))
+        })?;
+        if !value.is_finite() {
+            return Err(AppError::validation(format!(
+                "3MF '{}' contains a non-finite mesh attribute '{name}'.",
+                path.display()
+            )));
+        }
+        Ok(value)
+    }
+
+    fn require_3mf_index(
+        attributes: &BTreeMap<String, String>,
+        name: &str,
+        vertex_base: usize,
+        path: &Path,
+    ) -> AppResult<u32> {
+        let raw = attributes.get(name).ok_or_else(|| {
+            AppError::validation(format!(
+                "3MF '{}' is missing a required mesh attribute '{name}'.",
+                path.display()
+            ))
+        })?;
+        let local = raw.parse::<u32>().map_err(|_| {
+            AppError::validation(format!(
+                "3MF '{}' contains an invalid mesh attribute '{name}'.",
+                path.display()
+            ))
+        })?;
+        vertex_base
+            .checked_add(local as usize)
+            .and_then(|absolute| u32::try_from(absolute).ok())
+            .ok_or_else(|| {
+                AppError::validation(format!(
+                    "3MF '{}' triangle vertex index is out of range.",
+                    path.display()
+                ))
+            })
+    }
+} // end import_decode
 
 #[allow(dead_code)]
 fn index_vertex(
@@ -719,8 +1238,7 @@ mod tests {
         .expect("indexed asset");
         asset.write_cache(&path).expect("write cache");
 
-        let restored =
-            IndexedMeshAsset::read_cache(MeshAssetSource::Imported, &path).expect("read cache");
+        let restored = IndexedMeshAsset::read_cache(&path).expect("read cache");
         assert_eq!(restored.content_digest(), asset.content_digest());
         assert_eq!(restored.vertices(), asset.vertices());
         assert_eq!(restored.triangles(), asset.triangles());
@@ -728,13 +1246,782 @@ mod tests {
         let raw = std::fs::read_to_string(&path).expect("cache text");
         let tampered = raw.replacen("sha256:", "sha256:tampered-", 1);
         std::fs::write(&path, tampered).expect("tamper cache");
+        assert!(IndexedMeshAsset::read_cache(&path)
+            .expect_err("tampered digest")
+            .to_string()
+            .contains("digest mismatch"));
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    // --- Indexed mesh source provenance round-trip (sidecar source DTO) ---
+
+    #[test]
+    fn indexed_mesh_cache_round_trips_exact_source_for_every_variant() {
+        let root =
+            std::env::temp_dir().join(format!("ecky-indexed-mesh-source-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("temp dir");
+
+        let sources = vec![
+            MeshAssetSource::EckyMeshPhase {
+                part_id: "body".to_string(),
+                node_id: NodeId::new(7),
+            },
+            MeshAssetSource::Imported,
+            MeshAssetSource::Generated {
+                provider: "meshy".to_string(),
+                model: Some("model-42".to_string()),
+            },
+            MeshAssetSource::Generated {
+                provider: "tri".to_string(),
+                model: None,
+            },
+        ];
+
+        for (index, source) in sources.iter().enumerate() {
+            let path = root.join(format!("part-{index}.indexed-mesh.json"));
+            let asset = IndexedMeshAsset::from_ir_mesh(
+                source.clone(),
+                &IrMesh::cuboid(2.0, 2.0, 2.0, None),
+            )
+            .expect("indexed asset");
+            asset.write_cache(&path).expect("write cache");
+
+            let restored = IndexedMeshAsset::read_cache(&path).expect("read cache");
+            assert_eq!(restored.source(), source, "source must round-trip exactly");
+            assert_eq!(restored.content_digest(), asset.content_digest());
+            assert_eq!(restored.vertices(), asset.vertices());
+            assert_eq!(restored.triangles(), asset.triangles());
+        }
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn indexed_mesh_sidecar_round_trip_preserves_multipart_bundle_digest() {
+        let root = std::env::temp_dir().join(format!(
+            "ecky-indexed-mesh-bundle-digest-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("temp dir");
+
+        let original = MultipartMeshNativeBundle::new(vec![
+            MultipartMeshComponent::new(
+                0,
+                "body",
+                closed_tetrahedron_indexed_asset(
+                    MeshAssetSource::EckyMeshPhase {
+                        part_id: "body".to_string(),
+                        node_id: NodeId::new(7),
+                    },
+                    [0.0, 0.0, 0.0],
+                ),
+            ),
+            MultipartMeshComponent::new(
+                1,
+                "imported-island",
+                closed_tetrahedron_indexed_asset(
+                    MeshAssetSource::Generated {
+                        provider: "meshy".to_string(),
+                        model: Some("model-42".to_string()),
+                    },
+                    [10.0, 0.0, 0.0],
+                ),
+            ),
+        ])
+        .expect("original bundle");
+
+        // Persist each component through the canonical indexed sidecar and
+        // rebuild the bundle from the round-tripped assets. The caller supplies
+        // no source: it is read back from the sidecar.
+        let rebuilt_components: Vec<MultipartMeshComponent> = original
+            .components()
+            .iter()
+            .enumerate()
+            .map(|(index, component)| {
+                let sidecar = root.join(format!("part-{index}.indexed-mesh.json"));
+                component
+                    .asset()
+                    .write_cache(&sidecar)
+                    .expect("write sidecar");
+                let restored = IndexedMeshAsset::read_cache(&sidecar).expect("read sidecar");
+                assert_eq!(restored.source(), component.source());
+                MultipartMeshComponent::new(index, component.label(), restored)
+            })
+            .collect();
+
+        let rebuilt = MultipartMeshNativeBundle::new(rebuilt_components).expect("rebuilt bundle");
+
+        assert_eq!(
+            rebuilt.bundle_digest(),
+            original.bundle_digest(),
+            "bundle identity must be byte-identical after a source-preserving sidecar round-trip",
+        );
+        for (original_component, rebuilt_component) in original
+            .components()
+            .iter()
+            .zip(rebuilt.components().iter())
+        {
+            assert_eq!(
+                rebuilt_component.component_id(),
+                original_component.component_id(),
+            );
+        }
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn indexed_mesh_cache_without_source_field_is_rejected() {
+        let root = std::env::temp_dir().join(format!(
+            "ecky-indexed-mesh-no-source-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("temp dir");
+        let path = root.join("part.indexed-mesh.json");
+
+        // Write a valid cache, then strip the required `source` field to model
+        // a cache that predates provenance storage. Deserialization must fail
+        // honestly so the caller regenerates instead of guessing a source.
+        let asset = IndexedMeshAsset::from_ir_mesh(
+            MeshAssetSource::Imported,
+            &IrMesh::cuboid(2.0, 2.0, 2.0, None),
+        )
+        .expect("indexed asset");
+        asset.write_cache(&path).expect("write cache");
+
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read cache"))
+                .expect("cache is json");
+        let object = value.as_object_mut().expect("cache is object");
         assert!(
-            IndexedMeshAsset::read_cache(MeshAssetSource::Imported, &path)
-                .expect_err("tampered digest")
-                .to_string()
-                .contains("digest mismatch")
+            object.remove("source").is_some(),
+            "fixture must carry source"
+        );
+        std::fs::write(&path, serde_json::to_vec(&value).expect("encode"))
+            .expect("write sourceless cache");
+
+        let err =
+            IndexedMeshAsset::read_cache(&path).expect_err("cache without source must be rejected");
+        assert!(
+            err.to_string().contains("invalid"),
+            "missing source must surface as an invalid-cache validation error, not a fallback: {err}",
         );
 
         std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    // --- Standalone STL/3MF indexed decoders (task 6) -----------------------
+
+    /// Closed, consistently-wound tetrahedron used as the golden indexed mesh.
+    /// Coordinates are exactly representable in both f32 and f64 so binary STL
+    /// round-trip is bit-exact.
+    fn golden_tetrahedron_indexed() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
+        (
+            vec![
+                [0.0, 0.0, 0.0],
+                [4.0, 0.0, 0.0],
+                [1.0, 3.0, 0.0],
+                [1.0, 1.0, 3.0],
+            ],
+            vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
+        )
+    }
+
+    fn golden_tetrahedron_triangles() -> Vec<[[f64; 3]; 3]> {
+        let (vertices, triangles) = golden_tetrahedron_indexed();
+        triangles
+            .iter()
+            .map(|triangle| {
+                [
+                    vertices[triangle[0] as usize],
+                    vertices[triangle[1] as usize],
+                    vertices[triangle[2] as usize],
+                ]
+            })
+            .collect()
+    }
+
+    fn mesh_temp_dir(label: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "ecky-mesh-decoder-{label}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("temp dir");
+        root
+    }
+
+    fn write_binary_stl(path: &std::path::Path, triangles: &[[[f64; 3]; 3]]) {
+        let mut buf = Vec::with_capacity(84 + triangles.len() * 50);
+        buf.extend_from_slice(&[0u8; 80]);
+        buf.extend_from_slice(&(triangles.len() as u32).to_le_bytes());
+        for triangle in triangles {
+            buf.extend_from_slice(&[0u8; 12]); // unused facet normal
+            for vertex in triangle {
+                for coordinate in vertex {
+                    buf.extend_from_slice(&(*coordinate as f32).to_le_bytes());
+                }
+            }
+            buf.extend_from_slice(&[0u8; 2]); // attribute byte count
+        }
+        std::fs::write(path, buf).expect("write binary stl");
+    }
+
+    fn write_ascii_stl(path: &std::path::Path, triangles: &[[[f64; 3]; 3]]) {
+        let mut text = String::from("solid fixture\n");
+        for triangle in triangles {
+            text.push_str("  facet normal 0 0 0\n    outer loop\n");
+            for vertex in triangle {
+                text.push_str(&format!(
+                    "      vertex {} {} {}\n",
+                    vertex[0], vertex[1], vertex[2]
+                ));
+            }
+            text.push_str("    endloop\n  endfacet\n");
+        }
+        text.push_str("endsolid fixture\n");
+        std::fs::write(path, text).expect("write ascii stl");
+    }
+
+    fn sorted_vertex_set(vertices: &[[f64; 3]]) -> Vec<[u64; 3]> {
+        let mut bits: Vec<[u64; 3]> = vertices
+            .iter()
+            .map(|vertex| vertex.map(canonical_float_bits))
+            .collect();
+        bits.sort();
+        bits
+    }
+
+    fn write_3mf(path: &std::path::Path, vertices: &[[f64; 3]], triangles: &[[u32; 3]]) {
+        use std::io::Write as _;
+        let file = std::fs::File::create(path).expect("create 3mf");
+        let mut zip = zip::ZipWriter::new(file);
+        let options =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("[Content_Types].xml", options)
+            .expect("content types");
+        zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/></Types>"#).expect("content types body");
+        zip.add_directory("_rels/", options).expect("rels dir");
+        zip.start_file("_rels/.rels", options).expect("rels");
+        zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>"#).expect("rels body");
+        zip.add_directory("3D/", options).expect("3d dir");
+        zip.start_file("3D/3dmodel.model", options).expect("model");
+        let mut xml = String::new();
+        xml.push_str(r#"<?xml version="1.0" encoding="UTF-8"?><model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources><object id="1" type="model"><mesh><vertices>"#);
+        for vertex in vertices {
+            xml.push_str(&format!(
+                r#"<vertex x="{}" y="{}" z="{}"/>"#,
+                vertex[0], vertex[1], vertex[2]
+            ));
+        }
+        xml.push_str("</vertices><triangles>");
+        for triangle in triangles {
+            xml.push_str(&format!(
+                r#"<triangle v1="{}" v2="{}" v3="{}"/>"#,
+                triangle[0], triangle[1], triangle[2]
+            ));
+        }
+        xml.push_str("</triangles></mesh></object></resources><build></build></model>");
+        zip.write_all(xml.as_bytes()).expect("model body");
+        zip.finish().expect("finish 3mf");
+    }
+
+    fn write_3mf_without_model(path: &std::path::Path) {
+        use std::io::Write as _;
+        let file = std::fs::File::create(path).expect("create 3mf");
+        let mut zip = zip::ZipWriter::new(file);
+        let options =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("[Content_Types].xml", options)
+            .expect("content types");
+        zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>"#).expect("body");
+        zip.finish().expect("finish");
+    }
+
+    #[test]
+    fn indexed_mesh_asset_from_binary_stl_preserves_authored_coordinates() {
+        let root = mesh_temp_dir("stl-binary");
+        let path = root.join("tetra.stl");
+        write_binary_stl(&path, &golden_tetrahedron_triangles());
+
+        let asset = IndexedMeshAsset::from_stl(MeshAssetSource::Imported, &path)
+            .expect("binary stl decode");
+
+        let (golden_vertices, _) = golden_tetrahedron_indexed();
+        assert_eq!(asset.vertices().len(), 4);
+        assert_eq!(asset.triangles().len(), 4);
+        assert_eq!(
+            sorted_vertex_set(asset.vertices()),
+            sorted_vertex_set(&golden_vertices)
+        );
+        assert_eq!(asset.topology().boundary_edge_count, 0);
+        assert_eq!(asset.topology().non_manifold_edge_count, 0);
+        assert_eq!(asset.topology().winding_mismatch_count, 0);
+        assert_eq!(asset.topology().component_count, 1);
+        assert!(asset.topology().closed);
+        assert!(asset.content_digest().starts_with("sha256:"));
+        asset
+            .validate_for_boolean()
+            .expect("closed manifold tetrahedron");
+    }
+
+    #[test]
+    fn indexed_mesh_asset_from_ascii_stl_preserves_authored_coordinates() {
+        let root = mesh_temp_dir("stl-ascii");
+        let path = root.join("tetra.stl");
+        write_ascii_stl(&path, &golden_tetrahedron_triangles());
+
+        let asset =
+            IndexedMeshAsset::from_stl(MeshAssetSource::Imported, &path).expect("ascii stl decode");
+
+        let (golden_vertices, _) = golden_tetrahedron_indexed();
+        assert_eq!(asset.vertices().len(), 4);
+        assert_eq!(asset.triangles().len(), 4);
+        assert_eq!(
+            sorted_vertex_set(asset.vertices()),
+            sorted_vertex_set(&golden_vertices)
+        );
+        assert_eq!(asset.topology().boundary_edge_count, 0);
+        assert!(asset.topology().closed);
+        asset
+            .validate_for_boolean()
+            .expect("closed manifold tetrahedron");
+    }
+
+    #[test]
+    fn indexed_mesh_asset_from_stl_does_not_weld_explicit_seam() {
+        // Explicit imported assets retain supplied coordinates. A 1e-9 seam that
+        // the evaluated-CAD weld would collapse must stay open here, so Boolean
+        // admission is rejected and both authored coordinates survive.
+        let root = mesh_temp_dir("stl-no-weld");
+        let path = root.join("seam.stl");
+        let triangles = [
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            [[0.0, 1.0e-9, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        ];
+        write_binary_stl(&path, &triangles);
+
+        let asset = IndexedMeshAsset::from_stl(MeshAssetSource::Imported, &path)
+            .expect("open mesh decodes");
+
+        // The two shared edge vertices merge (byte-identical), but the 1e-9 seam
+        // vertex stays distinct → 4 vertices, not the 3 a weld would produce.
+        assert_eq!(asset.vertices().len(), 4);
+        assert!(asset.topology().boundary_edge_count > 0);
+        assert!(!asset.topology().closed);
+        assert!(asset
+            .validate_for_boolean()
+            .expect_err("unwelded seam must block Boolean admission")
+            .to_string()
+            .contains("boundary edges"));
+    }
+
+    #[test]
+    fn indexed_mesh_asset_from_stl_rejects_malformed_input() {
+        let root = mesh_temp_dir("stl-malformed");
+
+        let empty = root.join("empty.stl");
+        std::fs::write(&empty, b"").expect("write");
+        IndexedMeshAsset::from_stl(MeshAssetSource::Imported, &empty)
+            .expect_err("empty stl must fail");
+
+        let bad_ascii = root.join("bad.stl");
+        std::fs::write(
+            &bad_ascii,
+            b"solid bad\n  facet normal 0 0 0\n    outer loop\n      vertex foo 0 0\n    endloop\n  endfacet\nendsolid bad\n",
+        )
+        .expect("write");
+        assert!(
+            IndexedMeshAsset::from_stl(MeshAssetSource::Imported, &bad_ascii)
+                .expect_err("non-numeric vertex must fail")
+                .to_string()
+                .to_lowercase()
+                .contains("stl")
+        );
+
+        let no_triangles = root.join("none.stl");
+        std::fs::write(&no_triangles, b"solid none\nendsolid none\n").expect("write");
+        assert!(
+            IndexedMeshAsset::from_stl(MeshAssetSource::Imported, &no_triangles)
+                .expect_err("triangle-free stl must fail")
+                .to_string()
+                .contains("no triangles")
+        );
+
+        // Binary header claims one triangle but supplies no triangle bytes.
+        let mut truncated = vec![0u8; 84];
+        truncated[80..84].copy_from_slice(&1u32.to_le_bytes());
+        let truncated_path = root.join("trunc.stl");
+        std::fs::write(&truncated_path, &truncated).expect("write");
+        IndexedMeshAsset::from_stl(MeshAssetSource::Imported, &truncated_path)
+            .expect_err("truncated binary stl must fail");
+    }
+
+    #[test]
+    fn indexed_mesh_asset_from_stl_avoids_stl_as_cache_representation() {
+        // The decoder produces the canonical indexed sidecar, never an STL
+        // cache. Round-tripping the decoded asset through the indexed cache
+        // preserves authored coordinates and digest without touching STL.
+        let root = mesh_temp_dir("stl-cache");
+        let stl_path = root.join("tetra.stl");
+        write_binary_stl(&stl_path, &golden_tetrahedron_triangles());
+        let asset =
+            IndexedMeshAsset::from_stl(MeshAssetSource::Imported, &stl_path).expect("decode");
+
+        let sidecar = root.join("tetra.indexed-mesh.json");
+        asset.write_cache(&sidecar).expect("write sidecar");
+        assert_eq!(sidecar.extension().and_then(|e| e.to_str()), Some("json"));
+
+        let restored = IndexedMeshAsset::read_cache(&sidecar).expect("read sidecar");
+        assert_eq!(restored.content_digest(), asset.content_digest());
+        assert_eq!(restored.vertices(), asset.vertices());
+        assert_eq!(restored.triangles(), asset.triangles());
+        restored
+            .validate_for_boolean()
+            .expect("still Boolean-ready");
+    }
+
+    #[test]
+    fn indexed_mesh_asset_from_3mf_preserves_authored_indexing() {
+        let root = mesh_temp_dir("3mf-valid");
+        let path = root.join("tetra.3mf");
+        let (vertices, triangles) = golden_tetrahedron_indexed();
+        write_3mf(&path, &vertices, &triangles);
+
+        let asset =
+            IndexedMeshAsset::from_3mf(MeshAssetSource::Imported, &path).expect("3mf decode");
+
+        // 3MF is already explicitly indexed; authored order is retained as-is.
+        assert_eq!(asset.vertices(), vertices.as_slice());
+        assert_eq!(asset.triangles(), triangles.as_slice());
+        assert_eq!(asset.topology().boundary_edge_count, 0);
+        assert_eq!(asset.topology().non_manifold_edge_count, 0);
+        assert_eq!(asset.topology().winding_mismatch_count, 0);
+        assert_eq!(asset.topology().component_count, 1);
+        assert!(asset.topology().closed);
+        assert!(asset.content_digest().starts_with("sha256:"));
+        asset
+            .validate_for_boolean()
+            .expect("closed manifold tetrahedron");
+    }
+
+    #[test]
+    fn indexed_mesh_asset_from_3mf_aggregates_multiple_objects() {
+        // Two disjoint tetrahedra as separate 3MF objects aggregate into one
+        // indexed asset with two closed components.
+        let root = mesh_temp_dir("3mf-multi");
+        let path = root.join("two.3mf");
+        let (first_vertices, first_triangles) = golden_tetrahedron_indexed();
+        let second_vertices: Vec<[f64; 3]> = first_vertices
+            .iter()
+            .map(|v| [v[0] + 10.0, v[1], v[2]])
+            .collect();
+        // 3MF triangle indices are local to each object's vertex list; the
+        // decoder applies the per-object vertex base when aggregating.
+        let second_triangles: Vec<[u32; 3]> = first_triangles.clone();
+
+        use std::io::Write as _;
+        let file = std::fs::File::create(&path).expect("create");
+        let mut zip = zip::ZipWriter::new(file);
+        let options =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("[Content_Types].xml", options).expect("ct");
+        zip.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/></Types>"#).expect("ct body");
+        zip.start_file("3D/3dmodel.model", options).expect("model");
+        let mut xml = String::from(
+            r#"<?xml version="1.0" encoding="UTF-8"?><model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources>"#,
+        );
+        for (object_id, (verts, tris)) in [
+            (1, (&first_vertices, &first_triangles)),
+            (2, (&second_vertices, &second_triangles)),
+        ] {
+            xml.push_str(&format!(
+                r#"<object id="{object_id}" type="model"><mesh><vertices>"#
+            ));
+            for v in verts {
+                xml.push_str(&format!(
+                    r#"<vertex x="{}" y="{}" z="{}"/>"#,
+                    v[0], v[1], v[2]
+                ));
+            }
+            xml.push_str("</vertices><triangles>");
+            for t in tris {
+                xml.push_str(&format!(
+                    r#"<triangle v1="{}" v2="{}" v3="{}"/>"#,
+                    t[0], t[1], t[2]
+                ));
+            }
+            xml.push_str("</triangles></mesh></object>");
+        }
+        xml.push_str("</resources><build></build></model>");
+        zip.write_all(xml.as_bytes()).expect("body");
+        zip.finish().expect("finish");
+
+        let asset =
+            IndexedMeshAsset::from_3mf(MeshAssetSource::Imported, &path).expect("3mf decode");
+
+        assert_eq!(asset.vertices().len(), 8);
+        assert_eq!(asset.triangles().len(), 8);
+        assert_eq!(asset.topology().component_count, 2);
+        assert_eq!(asset.topology().boundary_edge_count, 0);
+        assert!(asset.topology().closed);
+        asset
+            .validate_for_boolean()
+            .expect("two disjoint closed components");
+    }
+
+    #[test]
+    fn indexed_mesh_asset_from_3mf_rejects_malformed_input() {
+        let root = mesh_temp_dir("3mf-malformed");
+
+        let not_zip = root.join("notzip.3mf");
+        std::fs::write(&not_zip, b"<not a zip>").expect("write");
+        assert!(
+            IndexedMeshAsset::from_3mf(MeshAssetSource::Imported, &not_zip)
+                .expect_err("non-zip must fail")
+                .to_string()
+                .to_lowercase()
+                .contains("3mf")
+        );
+
+        let no_model = root.join("nomodel.3mf");
+        write_3mf_without_model(&no_model);
+        assert!(
+            IndexedMeshAsset::from_3mf(MeshAssetSource::Imported, &no_model)
+                .expect_err("missing model part must fail")
+                .to_string()
+                .to_lowercase()
+                .contains("3mf")
+        );
+
+        let empty_mesh = root.join("empty.3mf");
+        write_3mf(&empty_mesh, &[], &[]);
+        assert!(
+            IndexedMeshAsset::from_3mf(MeshAssetSource::Imported, &empty_mesh)
+                .expect_err("triangle-free 3mf must fail")
+                .to_string()
+                .contains("no triangles")
+        );
+
+        let bad_index = root.join("badidx.3mf");
+        write_3mf(&bad_index, &[[0.0, 0.0, 0.0]], &[[0, 1, 2]]);
+        assert!(
+            IndexedMeshAsset::from_3mf(MeshAssetSource::Imported, &bad_index)
+                .expect_err("out-of-range index must fail")
+                .to_string()
+                .contains("out-of-bounds")
+        );
+    }
+
+    // --- Multipart mesh-native bundle export (task 6) ----------------------
+
+    fn closed_tetrahedron_indexed_asset(
+        source: MeshAssetSource,
+        offset: [f64; 3],
+    ) -> IndexedMeshAsset {
+        let (mut vertices, triangles) = golden_tetrahedron_indexed();
+        for vertex in vertices.iter_mut() {
+            vertex[0] += offset[0];
+            vertex[1] += offset[1];
+            vertex[2] += offset[2];
+        }
+        IndexedMeshAsset::new(source, vertices, triangles).expect("closed tetrahedron asset")
+    }
+
+    #[test]
+    fn multipart_mesh_native_bundle_exports_each_component_with_identity_and_provenance_without_step(
+    ) {
+        let component_a_asset = closed_tetrahedron_indexed_asset(
+            MeshAssetSource::EckyMeshPhase {
+                part_id: "body".to_string(),
+                node_id: NodeId::new(7),
+            },
+            [0.0, 0.0, 0.0],
+        );
+        let component_b_asset =
+            closed_tetrahedron_indexed_asset(MeshAssetSource::Imported, [10.0, 0.0, 0.0]);
+        assert_ne!(
+            component_a_asset.content_digest(),
+            component_b_asset.content_digest(),
+            "fixture components must be geometrically distinct",
+        );
+
+        let bundle = MultipartMeshNativeBundle::new(vec![
+            MultipartMeshComponent::new(0, "body", component_a_asset.clone()),
+            MultipartMeshComponent::new(1, "imported-island", component_b_asset.clone()),
+        ])
+        .expect("mesh-native multipart bundle");
+
+        // Every component is exported with deterministic identity and provenance.
+        let components = bundle.components();
+        assert_eq!(components.len(), 2);
+        assert!(
+            matches!(components[0].source(), MeshAssetSource::EckyMeshPhase { part_id, node_id }
+                if part_id == "body" && node_id.raw() == 7)
+        );
+        assert!(matches!(components[1].source(), MeshAssetSource::Imported));
+        assert_eq!(
+            components[0].content_digest(),
+            component_a_asset.content_digest()
+        );
+        assert_eq!(
+            components[1].content_digest(),
+            component_b_asset.content_digest()
+        );
+        assert_eq!(components[0].label(), "body");
+        assert_eq!(components[1].label(), "imported-island");
+
+        // Identity is deterministic and order-stable: the id encodes the
+        // authored index and the content digest, so the same authored bundle
+        // always reconstructs identical ids.
+        let id_a_first = components[0].component_id().to_string();
+        let id_b_first = components[1].component_id().to_string();
+        assert!(id_a_first.starts_with("component-0-"));
+        assert!(id_b_first.starts_with("component-1-"));
+        let hex_a = component_a_asset
+            .content_digest()
+            .strip_prefix("sha256:")
+            .expect("sha256 digest");
+        let hex_b = component_b_asset
+            .content_digest()
+            .strip_prefix("sha256:")
+            .expect("sha256 digest");
+        assert!(id_a_first.contains(&hex_a[..hex_a.len().min(12)]));
+        assert!(id_b_first.contains(&hex_b[..hex_b.len().min(12)]));
+
+        let rebuilt = MultipartMeshNativeBundle::new(vec![
+            MultipartMeshComponent::new(0, "body", component_a_asset.clone()),
+            MultipartMeshComponent::new(1, "imported-island", component_b_asset.clone()),
+        ])
+        .expect("rebuilt bundle");
+        assert_eq!(rebuilt.components()[0].component_id(), id_a_first);
+        assert_eq!(rebuilt.components()[1].component_id(), id_b_first);
+        assert_eq!(
+            rebuilt.bundle_digest(),
+            bundle.bundle_digest(),
+            "bundle identity is deterministic for identical ordered components",
+        );
+
+        // Authored operand order participates in identity: swapping components
+        // changes the bundle digest.
+        let swapped = MultipartMeshNativeBundle::new(vec![
+            MultipartMeshComponent::new(0, "imported-island", component_b_asset.clone()),
+            MultipartMeshComponent::new(1, "body", component_a_asset.clone()),
+        ])
+        .expect("swapped bundle");
+        assert_ne!(
+            swapped.bundle_digest(),
+            bundle.bundle_digest(),
+            "authored component order must participate in bundle identity",
+        );
+
+        // Representation is mesh-native and no STEP is fabricated.
+        assert_eq!(
+            bundle.representation(),
+            crate::contracts::GeometryRepresentation::MeshNative
+        );
+        assert!(
+            !bundle.has_step_artifact(),
+            "mesh-native multipart export must never fabricate STEP",
+        );
+
+        // Exported components remain Boolean-ready indexed manifold meshes.
+        for component in bundle.components() {
+            component
+                .asset()
+                .validate_for_boolean()
+                .expect("Boolean-ready mesh-native component");
+        }
+
+        assert!(bundle.bundle_digest().starts_with("sha256:"));
+    }
+
+    #[test]
+    fn multipart_mesh_native_bundle_rejects_empty_component_set() {
+        let err =
+            MultipartMeshNativeBundle::new(Vec::new()).expect_err("empty bundle must be rejected");
+        assert!(
+            err.to_string().contains("at least one component"),
+            "empty rejection must name the missing component requirement"
+        );
+    }
+
+    #[test]
+    fn multipart_bundle_identity_is_label_independent_but_provenance_sensitive() {
+        // Geometry and provenance define identity; the human label does not.
+        let same_geometry_a = closed_tetrahedron_indexed_asset(
+            MeshAssetSource::EckyMeshPhase {
+                part_id: "body".to_string(),
+                node_id: NodeId::new(7),
+            },
+            [0.0, 0.0, 0.0],
+        );
+        let same_geometry_b = closed_tetrahedron_indexed_asset(
+            MeshAssetSource::EckyMeshPhase {
+                part_id: "body".to_string(),
+                node_id: NodeId::new(7),
+            },
+            [0.0, 0.0, 0.0],
+        );
+        assert_eq!(
+            same_geometry_a.content_digest(),
+            same_geometry_b.content_digest()
+        );
+
+        let relabeled = MultipartMeshNativeBundle::new(vec![MultipartMeshComponent::new(
+            0,
+            "renamed-label",
+            same_geometry_a.clone(),
+        )])
+        .expect("relabeled bundle");
+        let original = MultipartMeshNativeBundle::new(vec![MultipartMeshComponent::new(
+            0,
+            "original-label",
+            same_geometry_b.clone(),
+        )])
+        .expect("original bundle");
+        assert_eq!(
+            relabeled.bundle_digest(),
+            original.bundle_digest(),
+            "label is presentation metadata and must not affect bundle identity",
+        );
+        assert_ne!(
+            relabeled.components()[0].label(),
+            original.components()[0].label()
+        );
+
+        // Distinct provenance for identical geometry changes identity.
+        let other_node = closed_tetrahedron_indexed_asset(
+            MeshAssetSource::EckyMeshPhase {
+                part_id: "body".to_string(),
+                node_id: NodeId::new(8),
+            },
+            [0.0, 0.0, 0.0],
+        );
+        assert_eq!(
+            other_node.content_digest(),
+            same_geometry_a.content_digest(),
+            "same geometry must share a mesh digest",
+        );
+        let other_bundle = MultipartMeshNativeBundle::new(vec![MultipartMeshComponent::new(
+            0, "body", other_node,
+        )])
+        .expect("other-provenance bundle");
+        assert_ne!(
+            other_bundle.bundle_digest(),
+            original.bundle_digest(),
+            "provenance must participate in bundle identity",
+        );
+    }
+
+    #[test]
+    fn multipart_component_id_is_unique_per_authored_index() {
+        let asset = closed_tetrahedron_indexed_asset(MeshAssetSource::Imported, [0.0, 0.0, 0.0]);
+        // The same placed asset appears at two authored positions; identity is
+        // disambiguated by index, so ids never collide.
+        let first = MultipartMeshComponent::new(0, "a", asset.clone());
+        let second = MultipartMeshComponent::new(1, "b", asset.clone());
+        assert_ne!(first.component_id(), second.component_id());
+        assert_eq!(first.content_digest(), second.content_digest());
     }
 }

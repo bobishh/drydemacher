@@ -1,11 +1,15 @@
 pub mod assets;
-pub mod catalog;
+pub mod authoring_graph;
+pub mod campaign_definition;
+pub mod campaign_projects;
 pub mod component_package;
 pub mod config;
 pub mod design;
 pub mod generation;
 pub mod history;
 pub mod macro_ast;
+pub mod mission_evaluation;
+pub mod project_mirror;
 pub mod render;
 pub mod session;
 pub mod sketch;

@@ -59,6 +59,16 @@ pub fn validate_user_source(source: &str) -> Result<(), String> {
         return Err("Steel modeling surface forbids `set!`.".to_string());
     }
 
+    // Live package references (`(import-component ...)`) require host-owned
+    // pre-resolution before the pure, source-only compiler runs. The raw
+    // compiler performs no package filesystem access and must reject unresolved
+    // imports explicitly so callers route through the component import runtime.
+    let import_component_re =
+        Regex::new(r"\(\s*import-component\b").map_err(|err| err.to_string())?;
+    if import_component_re.is_match(source) {
+        return Err("`import-component` requires host pre-resolution before compilation; pass authored source through the component import runtime.".to_string());
+    }
+
     Ok(())
 }
 
@@ -126,5 +136,17 @@ mod steel_tests {
     fn blocks_foreign_requires() {
         let err = validate_user_source(r#"(require "steel/fs/fs.scm")"#).expect_err("blocked");
         assert!(err.contains("Blocked"));
+    }
+
+    #[test]
+    fn rejects_unresolved_import_component_forms() {
+        let err = validate_user_source(
+            r#"(import-component "bike.kit" :version "1.2.0" :component "cage" :as cage)"#,
+        )
+        .expect_err("import-component must require host pre-resolution");
+        assert!(
+            err.contains("host pre-resolution"),
+            "unexpected message: {err}"
+        );
     }
 }
