@@ -1064,7 +1064,7 @@ async fn resolve_installed_component_controls_merges_package_initial_params_with
                 display_name: "Parametric Body".to_string(),
                 source_ref: Some("components/parametric-body/source.ecky".to_string()),
                 source_language: Some(SourceLanguage::EckyIrV0),
-                geometry_backend: Some(GeometryBackend::Build123d),
+                geometry_backend: Some(GeometryBackend::EckyRust),
                 macro_dialect: Some(MacroDialect::EckyIrV0),
                 geometry_provenance: None,
                 entry_symbol: None,
@@ -1230,7 +1230,7 @@ async fn render_installed_component_source_merges_package_initial_params_with_ov
         root: temp_root.clone(),
     };
     let state = test_state(&temp_root);
-    let capability = ecky_cad_lib::runtime_capabilities::probe_build123d_runtime(&resolver);
+    let capability = ecky_cad_lib::runtime_capabilities::probe_direct_occt_runtime(&resolver);
     if !capability.available {
         fs::remove_dir_all(temp_root).ok();
         return;
@@ -1262,7 +1262,7 @@ async fn render_installed_component_source_merges_package_initial_params_with_ov
                 display_name: "Parametric Body".to_string(),
                 source_ref: Some("components/parametric-body/source.ecky".to_string()),
                 source_language: Some(SourceLanguage::EckyIrV0),
-                geometry_backend: Some(GeometryBackend::Build123d),
+                geometry_backend: Some(GeometryBackend::EckyRust),
                 macro_dialect: Some(MacroDialect::EckyIrV0),
                 geometry_provenance: None,
                 entry_symbol: None,
@@ -1439,7 +1439,7 @@ async fn runtime_bundle_component_package_project_preserves_exact_source_and_rer
         root: temp_root.clone(),
     };
     let state = test_state(&temp_root);
-    let capability = ecky_cad_lib::runtime_capabilities::probe_build123d_runtime(&resolver);
+    let capability = ecky_cad_lib::runtime_capabilities::probe_direct_occt_runtime(&resolver);
     if !capability.available {
         fs::remove_dir_all(temp_root).ok();
         return;
@@ -1457,7 +1457,7 @@ async fn runtime_bundle_component_package_project_preserves_exact_source_and_rer
                 :z-map (+ z (* fz 2)))))"#,
         &Default::default(),
         Some(MacroDialect::EckyIrV0),
-        Some(GeometryBackend::Build123d),
+        Some(GeometryBackend::EckyRust),
         None,
         &state,
         &resolver,
@@ -1474,7 +1474,7 @@ async fn runtime_bundle_component_package_project_preserves_exact_source_and_rer
                 .first()
                 .and_then(|target| target.durable_target_id.clone())
         })
-        .expect("build123d source-backed bundle durable topology target");
+        .expect("direct OCCT source-backed bundle durable topology target");
     let chosen_target_id = bundle
         .face_targets
         .first()
@@ -1550,7 +1550,7 @@ async fn runtime_bundle_component_package_project_preserves_exact_source_and_rer
     );
     assert_eq!(
         package.components[0].geometry_backend,
-        Some(GeometryBackend::Build123d)
+        Some(GeometryBackend::EckyRust)
     );
     assert_eq!(
         package.components[0].macro_dialect,
@@ -1591,7 +1591,7 @@ async fn runtime_bundle_component_package_project_preserves_exact_source_and_rer
     );
     assert_eq!(
         rendered.installed_source.component.geometry_backend,
-        Some(GeometryBackend::Build123d)
+        Some(GeometryBackend::EckyRust)
     );
     assert!(rendered
         .installed_source
@@ -1603,7 +1603,7 @@ async fn runtime_bundle_component_package_project_preserves_exact_source_and_rer
     );
     assert_eq!(
         rendered.artifact_bundle.geometry_backend,
-        GeometryBackend::Build123d
+        GeometryBackend::EckyRust
     );
     assert_eq!(
         rendered.installed_source.component.ports[0].target_ids,
@@ -1790,7 +1790,7 @@ async fn runtime_bundle_component_package_project_derives_component_params_from_
         root: temp_root.clone(),
     };
     let state = test_state(&temp_root);
-    let capability = ecky_cad_lib::runtime_capabilities::probe_build123d_runtime(&resolver);
+    let capability = ecky_cad_lib::runtime_capabilities::probe_direct_occt_runtime(&resolver);
     if !capability.available {
         fs::remove_dir_all(temp_root).ok();
         return;
@@ -1814,7 +1814,7 @@ async fn runtime_bundle_component_package_project_derives_component_params_from_
                 :z-map (+ z (* fz 2)))))"#,
         &Default::default(),
         Some(MacroDialect::EckyIrV0),
-        Some(GeometryBackend::Build123d),
+        Some(GeometryBackend::EckyRust),
         None,
         &state,
         &resolver,
@@ -1915,7 +1915,7 @@ async fn runtime_bundle_component_package_project_allows_zero_port_geometry_comp
         root: temp_root.clone(),
     };
     let state = test_state(&temp_root);
-    let capability = ecky_cad_lib::runtime_capabilities::probe_build123d_runtime(&resolver);
+    let capability = ecky_cad_lib::runtime_capabilities::probe_direct_occt_runtime(&resolver);
     if !capability.available {
         fs::remove_dir_all(temp_root).ok();
         return;
@@ -1935,7 +1935,7 @@ async fn runtime_bundle_component_package_project_allows_zero_port_geometry_comp
                 :z-map (+ z (* fz 2)))))"#,
         &Default::default(),
         Some(MacroDialect::EckyIrV0),
-        Some(GeometryBackend::Build123d),
+        Some(GeometryBackend::EckyRust),
         None,
         &state,
         &resolver,
@@ -2241,7 +2241,7 @@ async fn resolve_installed_component_source_backfills_params_from_source_when_ma
                 display_name: "Sampled Body".to_string(),
                 source_ref: Some("components/sampled-body/source.ecky".to_string()),
                 source_language: Some(SourceLanguage::EckyIrV0),
-                geometry_backend: Some(GeometryBackend::Build123d),
+                geometry_backend: Some(GeometryBackend::EckyRust),
                 macro_dialect: Some(MacroDialect::EckyIrV0),
                 geometry_provenance: None,
                 entry_symbol: None,
@@ -2326,7 +2326,7 @@ async fn runtime_bundle_component_package_project_rejects_unknown_runtime_target
             ast_schema_version: None,
             engine_kind: EngineKind::EckyIrV0,
             source_language: SourceLanguage::EckyIrV0,
-            geometry_backend: GeometryBackend::Build123d,
+            geometry_backend: GeometryBackend::EckyRust,
             document: ecky_cad_lib::contracts::DocumentMetadata {
                 document_name: "Fake".to_string(),
                 document_label: "Fake".to_string(),
@@ -2379,7 +2379,7 @@ async fn runtime_bundle_component_package_project_rejects_unknown_runtime_target
                 source_kind: ModelSourceKind::Generated,
                 engine_kind: EngineKind::EckyIrV0,
                 source_language: SourceLanguage::EckyIrV0,
-                geometry_backend: GeometryBackend::Build123d,
+                geometry_backend: GeometryBackend::EckyRust,
                 content_hash: "fake-hash".to_string(),
                 artifact_version: 1,
                 fcstd_path: String::new(),
@@ -3067,7 +3067,7 @@ async fn render_installed_assembly_merges_component_initial_params_per_instance(
     let mut package = sample_package();
     for component in &mut package.components {
         component.source_language = Some(SourceLanguage::EckyIrV0);
-        component.geometry_backend = Some(GeometryBackend::Build123d);
+        component.geometry_backend = Some(GeometryBackend::EckyRust);
         component.macro_dialect = Some(MacroDialect::EckyIrV0);
     }
 
@@ -3079,7 +3079,7 @@ async fn render_installed_assembly_merges_component_initial_params_per_instance(
         root: temp_root.clone(),
     };
     let state = test_state(&temp_root);
-    let capability = ecky_cad_lib::runtime_capabilities::probe_build123d_runtime(&resolver);
+    let capability = ecky_cad_lib::runtime_capabilities::probe_direct_occt_runtime(&resolver);
     if !capability.available {
         fs::remove_dir_all(temp_root).ok();
         return;

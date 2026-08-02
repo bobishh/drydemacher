@@ -2558,7 +2558,6 @@ mod tests {
         ViewerEdgePoint, ViewerEdgeTarget, ViewerFaceTarget,
     };
     use std::fs;
-    use std::path::PathBuf;
 
     fn sample_manifest_value(alias_ids: &[&str]) -> serde_json::Value {
         serde_json::json!({

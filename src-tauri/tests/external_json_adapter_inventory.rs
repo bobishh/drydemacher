@@ -28,11 +28,6 @@ fn external_json_adapter_inventory_covers_protocol_boundaries_not_config_persist
             evidence: "serde_json::from_str",
         },
         Boundary {
-            name: "Build123d report",
-            source: include_str!("../src/build123d.rs"),
-            evidence: "RunnerReport",
-        },
-        Boundary {
             name: "FreeCAD report",
             source: include_str!("../src/freecad.rs"),
             evidence: "RunnerReport",
