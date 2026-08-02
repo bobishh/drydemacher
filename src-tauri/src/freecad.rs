@@ -892,6 +892,9 @@ fn build_bundle(
         .ok_or_else(|| AppError::internal("Manifest path missing parent."))?;
     Ok(ArtifactBundle {
         geometry_provenance: None,
+        component_dependency_lock: None,
+        component_dependency_lock_digest: None,
+        component_import_origins: Vec::new(),
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind,
@@ -1653,6 +1656,7 @@ fn build_manifest_with_stable_node_keys(
 
     let manifest = ModelManifest {
         geometry_provenance: None,
+        component_import_origins: Vec::new(),
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind,
@@ -2991,6 +2995,7 @@ mod tests {
         let part = sample_part_binding("part-shell", "OuterShell", asset_path);
         ModelManifest {
             geometry_provenance: None,
+            component_import_origins: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind,
@@ -3043,6 +3048,9 @@ mod tests {
     fn sample_bundle(model_id: &str, source_kind: ModelSourceKind) -> ArtifactBundle {
         ArtifactBundle {
             geometry_provenance: None,
+            component_dependency_lock: None,
+            component_dependency_lock_digest: None,
+            component_import_origins: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind,

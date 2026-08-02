@@ -619,6 +619,7 @@ mod tests {
     fn test_manifest() -> ModelManifest {
         ModelManifest {
             geometry_provenance: None,
+            component_import_origins: Vec::new(),
             schema_version: 2,
             model_id: "model-1".to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,

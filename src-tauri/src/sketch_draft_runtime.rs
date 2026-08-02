@@ -426,6 +426,8 @@ pub fn accepted_brep_candidate_to_component_package(
             source_language: None,
             geometry_backend: None,
             macro_dialect: None,
+            geometry_provenance: None,
+            entry_symbol: None,
             sketches: request.document.sketches,
             keepouts: Vec::new(),
             fusion_zones: Vec::new(),
@@ -2807,6 +2809,9 @@ mod tests {
     fn sample_artifact_bundle(manifest_path: &str) -> ArtifactBundle {
         ArtifactBundle {
             geometry_provenance: None,
+            component_dependency_lock: None,
+            component_dependency_lock_digest: None,
+            component_import_origins: Vec::new(),
             schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: "generated-abc123".to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -3067,15 +3072,12 @@ mod tests {
             .parent()
             .expect("repo root");
         let runtime_root =
-            crate::ecky_cad_host::direct_occt_sdk::bundled_build123d_runtime_root_from_repo(
-                repo_root,
-            );
+            crate::ecky_cad_host::direct_occt_sdk::bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout =
-            crate::ecky_cad_host::direct_occt_sdk::inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = crate::ecky_cad_host::direct_occt_sdk::inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 
@@ -3147,15 +3149,12 @@ mod tests {
             .parent()
             .expect("repo root");
         let runtime_root =
-            crate::ecky_cad_host::direct_occt_sdk::bundled_build123d_runtime_root_from_repo(
-                repo_root,
-            );
+            crate::ecky_cad_host::direct_occt_sdk::bundled_occt_runtime_root_from_repo(repo_root);
         if !runtime_root.exists() {
             return;
         }
-        let layout =
-            crate::ecky_cad_host::direct_occt_sdk::inspect_build123d_ocp_runtime(&runtime_root);
-        if !layout.can_compile_native_shim() {
+        let layout = crate::ecky_cad_host::direct_occt_sdk::inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
             return;
         }
 

@@ -1,3 +1,8 @@
+use crate::context_envelope::{
+    approx_tokens, assemble_envelope, measure_chars, project_sections, section_id,
+    ContextBudgetError, ContextEnvelope, ContextInputs, ContextSection, EnvelopeStage,
+    InclusionDecision, ProjectionIntent, SectionPriority, Sensitivity,
+};
 use crate::contracts::{
     infer_macro_dialect_from_code, ArtifactBundle, DesignOutput, EngineKind, GeometryBackend,
     InteractionMode, Message, MessageRole, ModelManifest, SourceLanguage, ThreadReference, UiSpec,
@@ -287,14 +292,14 @@ fn source_language_label(source_language: SourceLanguage) -> &'static str {
     match source_language {
         SourceLanguage::LegacyPython => "legacyPython",
         SourceLanguage::EckyIrV0 => "ecky",
-        SourceLanguage::Build123d => "build123d",
+        SourceLanguage::Build123d => "ecky",
     }
 }
 
 fn geometry_backend_label(geometry_backend: GeometryBackend) -> &'static str {
     match geometry_backend {
         GeometryBackend::Freecad => "freecad",
-        GeometryBackend::Build123d => "build123d",
+        GeometryBackend::Build123d => "eckyRust",
         GeometryBackend::EckyRust => "eckyRust",
     }
 }
@@ -302,7 +307,8 @@ fn geometry_backend_label(geometry_backend: GeometryBackend) -> &'static str {
 fn source_fence_label(source_language: SourceLanguage) -> &'static str {
     match source_language {
         SourceLanguage::EckyIrV0 => "scheme",
-        SourceLanguage::LegacyPython | SourceLanguage::Build123d => "python",
+        SourceLanguage::LegacyPython => "python",
+        SourceLanguage::Build123d => "scheme",
     }
 }
 
@@ -468,28 +474,282 @@ pub fn assemble_context(
     }
 }
 
-pub fn format_contextual_prompt(
+// ── 2.6: legacy optional sections behind the typed envelope ───────────────
+//
+// Compatibility bridge that routes the already-formatted legacy summary /
+// dialogue / reference / asset strings through the typed `ContextEnvelope`
+// (OpenSpec `agent-context-budgeting`, section 2.6). The envelope becomes the
+// decision/audit layer for these four optional sections while the visible
+// provider text stays byte-identical to the pre-envelope path: each legacy
+// string is carried verbatim with no per-section budget, so the envelope
+// records every populated section as `Included` with `returned == observed`.
+//
+// Re-projecting raw message/reference items through `project_sections` (with
+// its own 4×200 / 2×1200 budgets) would change visible content and is deferred
+// to section 3.4. System-prefix assembly, telemetry, and classification
+// rewiring are likewise out of scope here.
+
+/// Stable section ids for the four legacy optional sections routed behind the
+/// envelope. They key the typed records so later stages (telemetry, full
+/// routing) can refer to the same legacy slots.
+pub mod legacy_section_id {
+    pub const THREAD_SUMMARY: &str = "thread-summary";
+    pub const RECENT_DIALOGUE: &str = "recent-dialogue";
+    pub const PINNED_REFERENCES: &str = "pinned-references";
+    pub const AVAILABLE_ASSETS: &str = "available-assets";
+}
+
+/// Build the four legacy optional sections from a [`PromptContext`], carrying
+/// the legacy formatted strings verbatim. Empty sections are skipped (the
+/// renderer substitutes `[none]`), matching the historical behaviour.
+pub fn legacy_optional_sections(ctx: &PromptContext) -> Vec<ContextSection> {
+    let mut sections = Vec::new();
+    push_legacy_section(
+        &mut sections,
+        legacy_section_id::THREAD_SUMMARY,
+        &ctx.summary,
+        SectionPriority::Relevant,
+        Sensitivity::Sensitive,
+    );
+    push_legacy_section(
+        &mut sections,
+        legacy_section_id::RECENT_DIALOGUE,
+        &ctx.recent_dialogue,
+        SectionPriority::Optional,
+        Sensitivity::Sensitive,
+    );
+    push_legacy_section(
+        &mut sections,
+        legacy_section_id::PINNED_REFERENCES,
+        &ctx.pinned_references,
+        SectionPriority::Optional,
+        Sensitivity::Sensitive,
+    );
+    push_legacy_section(
+        &mut sections,
+        legacy_section_id::AVAILABLE_ASSETS,
+        &ctx.available_assets,
+        SectionPriority::Optional,
+        Sensitivity::Safe,
+    );
+    sections
+}
+
+fn push_legacy_section(
+    out: &mut Vec<ContextSection>,
+    id: &str,
+    content: &str,
+    priority: SectionPriority,
+    sensitivity: Sensitivity,
+) {
+    if !content.trim().is_empty() {
+        out.push(ContextSection::new(id, priority, sensitivity, content));
+    }
+}
+
+/// Assemble the four legacy optional sections under the generation ceiling.
+/// Because every legacy section is Relevant/Optional (truncatable) and carries
+/// no per-section budget, exact content cannot overflow, so this never returns
+/// a budget error for the legacy inputs.
+pub fn assemble_legacy_optional_envelope(ctx: &PromptContext) -> ContextEnvelope {
+    let sections = legacy_optional_sections(ctx);
+    assemble_envelope(EnvelopeStage::Generation, sections)
+        .expect("legacy optional sections are truncatable; exact content cannot overflow")
+}
+
+/// Visible value for one legacy optional slot: its verbatim content when the
+/// envelope kept it, or `[none]` when it was absent (empty source) or omitted
+/// by the budget. Consults the typed envelope decision so prompt formatting
+/// sits behind the envelope.
+pub fn legacy_optional_section_value(
+    env: &ContextEnvelope,
+    id: &str,
+    fallback_content: &str,
+) -> String {
+    match env.record(id) {
+        Some(record) if record.decision == InclusionDecision::Included => {
+            fallback_content.to_string()
+        }
+        _ => "[none]".to_string(),
+    }
+}
+
+/// Render the four legacy optional sections as the generation-prompt block
+/// (THREAD SUMMARY / RECENT DIALOGUE / PINNED REFERENCES / AVAILABLE LOCAL
+/// ASSETS), consulting the typed envelope for each slot's visible value.
+/// Byte-identical to the historical `format_contextual_prompt` interpolation
+/// for representative inputs.
+pub fn render_legacy_generation_block(ctx: &PromptContext, env: &ContextEnvelope) -> String {
+    let summary =
+        legacy_optional_section_value(env, legacy_section_id::THREAD_SUMMARY, &ctx.summary);
+    let dialogue = legacy_optional_section_value(
+        env,
+        legacy_section_id::RECENT_DIALOGUE,
+        &ctx.recent_dialogue,
+    );
+    let references = legacy_optional_section_value(
+        env,
+        legacy_section_id::PINNED_REFERENCES,
+        &ctx.pinned_references,
+    );
+    let assets = legacy_optional_section_value(
+        env,
+        legacy_section_id::AVAILABLE_ASSETS,
+        &ctx.available_assets,
+    );
+    format!(
+        "THREAD SUMMARY\n{summary}\n\nRECENT DIALOGUE\n{dialogue}\n\nPINNED REFERENCES (historical/supplemental; do not override ACTUAL CURRENT state unless the user asks)\n{references}\n\nAVAILABLE LOCAL ASSETS (AUTHORITATIVE; use absolute paths directly for image controls when relevant)\n{assets}"
+    )
+}
+
+// ── 3.x: full generation context routed through the typed envelope ───────
+//
+// OpenSpec `agent-context-budgeting`, section 3. The generation user content is
+// now assembled behind one typed `ContextEnvelope` covering the request, the
+// exact current source/params (authoritative), the digests, and the four legacy
+// optional sections. Static policy — the output contract, the shared language
+// body, and the applicable CAD-framework rules — is NOT part of this envelope:
+// it lives once in the stable system prefix (`design_system_prompt`). User
+// content therefore carries current state and the current ask once, with no
+// duplicate `EXECUTION RULES` block.
+//
+// Budget is enforced as a deterministic Unicode-character count under the 64K
+// generation ceiling. Mandatory/authoritative (exact) state that cannot fit
+// returns a raw `ContextBudgetError` (observed/allowed section sizes) so the
+// command fails pre-dispatch instead of sending a lossy request. The envelope
+// also carries total-size metadata covering the FULL rendered user content
+// (sections plus the structural wrapper), so telemetry reflects the actual
+// dispatched payload size.
+
+/// Budgeted generation payload: the typed envelope (shape/decisions only) plus
+/// the rendered, ceiling-validated user content ready for provider dispatch.
+#[derive(Debug, Clone)]
+pub struct GenerationPayload {
+    pub envelope: ContextEnvelope,
+    pub user_content: String,
+}
+
+/// Project the full variable generation context (request + exact current
+/// source/params + digests + the four legacy optional sections) into budgeted
+/// candidate sections. Static policy/framework are intentionally absent — they
+/// belong to the stable system prefix.
+pub fn generation_sections(
     ctx: &PromptContext,
     base_prompt: &str,
-    system_prompt: &str,
-    intent_mode: &str,
-    framework_contract: Option<&str>,
-    target_authoring: ResolvedAuthoringContext,
-) -> String {
-    let framework_block = framework_contract
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .map(|value| {
-            format!(
-                "ACTUAL CURRENT CAD FRAMEWORK (AUTHORITATIVE):\n```text\n{}\n```\n\n",
-                value
-            )
-        })
-        .unwrap_or_default();
+    target: ResolvedAuthoringContext,
+) -> Vec<ContextSection> {
+    let mut sections = Vec::new();
 
+    // Mandatory: the actual user request.
+    sections.push(ContextSection::new(
+        section_id::REQUEST,
+        SectionPriority::Mandatory,
+        Sensitivity::Sensitive,
+        base_prompt,
+    ));
+
+    // Mandatory: current/target authoring context + migration policy. Small but
+    // authoritative; carried verbatim so it never competes with optional state.
+    let current = ctx.last_output.as_ref().map(resolved_context_from_design);
+    let mut authoring = String::new();
+    authoring.push_str(&format_authoring_context_lines(
+        "current",
+        current.unwrap_or(target),
+    ));
+    authoring.push('\n');
+    authoring.push_str(&format_authoring_context_lines("target", target));
+    authoring.push('\n');
+    authoring.push_str(&format_migration_policy(current, target));
+    sections.push(ContextSection::new(
+        section_id::AUTHORING_CONTEXT,
+        SectionPriority::Mandatory,
+        Sensitivity::Sensitive,
+        authoring,
+    ));
+
+    // Authoritative: exact current source + params. Never silently truncated;
+    // overflow is a pre-dispatch error.
+    if let Some(previous) = &ctx.last_output {
+        sections.push(ContextSection::new(
+            section_id::CURRENT_SOURCE,
+            SectionPriority::Authoritative,
+            Sensitivity::Sensitive,
+            &previous.macro_code,
+        ));
+        sections.push(ContextSection::new(
+            section_id::CURRENT_PARAMS,
+            SectionPriority::Authoritative,
+            Sensitivity::Sensitive,
+            format_full_params_json(previous),
+        ));
+    }
+
+    // Relevant: digests (shape only for telemetry).
+    push_legacy_section(
+        &mut sections,
+        section_id::DESIGN_DIGEST,
+        &ctx.design_digest,
+        SectionPriority::Relevant,
+        Sensitivity::Safe,
+    );
+    push_legacy_section(
+        &mut sections,
+        section_id::ARTIFACT_DIGEST,
+        &ctx.artifact_digest,
+        SectionPriority::Relevant,
+        Sensitivity::Safe,
+    );
+
+    // Optional: the four legacy optional sections, carried verbatim with their
+    // historical priority/sensitivity and legacy stable ids (the renderer and
+    // the 2.6 tests query these ids).
+    sections.extend(legacy_optional_sections(ctx));
+
+    sections
+}
+
+/// Assemble the generation user content behind the typed envelope. On mandatory
+/// overflow returns a raw [`ContextBudgetError`]; on success returns the budget
+/// envelope plus the rendered user content. The envelope's total-size metadata
+/// is set to the rendered user-content length so it covers the full dispatched
+/// payload (sections plus structural wrapper).
+pub fn assemble_generation_payload(
+    ctx: &PromptContext,
+    base_prompt: &str,
+    intent_mode: &str,
+    target_authoring: ResolvedAuthoringContext,
+) -> Result<GenerationPayload, ContextBudgetError> {
+    let sections = generation_sections(ctx, base_prompt, target_authoring);
+    let mut envelope = assemble_envelope(EnvelopeStage::Generation, sections)?;
+    let user_content =
+        render_generation_user_content(ctx, base_prompt, intent_mode, target_authoring, &envelope);
+    let rendered_chars = measure_chars(&user_content);
+    envelope.total_returned_chars = rendered_chars;
+    envelope.total_approx_returned_tokens = approx_tokens(rendered_chars);
+    if envelope.total_observed_chars < rendered_chars {
+        envelope.total_observed_chars = rendered_chars;
+    }
+    Ok(GenerationPayload {
+        envelope,
+        user_content,
+    })
+}
+
+/// Render the generation user content from a budgeted envelope. Static policy
+/// (output contract / language / framework) is absent — it lives in the system
+/// prefix — so this carries current state and the current ask once, with no
+/// `EXECUTION RULES` duplicate. The four legacy optional sections consult the
+/// envelope for their visible values.
+fn render_generation_user_content(
+    ctx: &PromptContext,
+    base_prompt: &str,
+    intent_mode: &str,
+    target_authoring: ResolvedAuthoringContext,
+    envelope: &ContextEnvelope,
+) -> String {
     let full_prompt = format!(
-        "USER REQUEST (ACTUAL)\n{}\n\nEXECUTION RULES (MANDATORY)\n{}\n\nUSER_INTENT_MODE: {}",
-        base_prompt, system_prompt, intent_mode
+        "USER REQUEST (ACTUAL)\n{}\n\nUSER_INTENT_MODE: {}",
+        base_prompt, intent_mode
     );
     let available_assets_block = if ctx.available_assets.trim().is_empty() {
         "[none]".to_string()
@@ -505,18 +765,41 @@ pub fn format_contextual_prompt(
 
     if let Some(previous) = &ctx.last_output {
         let source_fence = source_fence_label(previous.source_language);
+        // 3.4: the four legacy optional sections consult the budgeted generation
+        // envelope (same stable ids as 2.6), so visible values sit behind the
+        // typed budget decision.
+        let summary_value = legacy_optional_section_value(
+            envelope,
+            legacy_section_id::THREAD_SUMMARY,
+            &ctx.summary,
+        );
+        let dialogue_value = legacy_optional_section_value(
+            envelope,
+            legacy_section_id::RECENT_DIALOGUE,
+            &ctx.recent_dialogue,
+        );
+        let references_value = legacy_optional_section_value(
+            envelope,
+            legacy_section_id::PINNED_REFERENCES,
+            &ctx.pinned_references,
+        );
+        let assets_value = legacy_optional_section_value(
+            envelope,
+            legacy_section_id::AVAILABLE_ASSETS,
+            &ctx.available_assets,
+        );
         format!(
-            "CURRENT DESIGN CONTEXT\nThread Title: {}\nCurrent Title: {}\nVersion: {}\n\nCURRENT AUTHORING CONTEXT (AUTHORITATIVE)\n{}\n\nTARGET AUTHORING CONTEXT (AUTHORITATIVE FOR THIS TURN)\n{}\n\nMIGRATION POLICY (AUTHORITATIVE)\n{}\n\nTHREAD SUMMARY\n{}\n\nRECENT DIALOGUE\n{}\n\nPINNED REFERENCES (historical/supplemental; do not override ACTUAL CURRENT state unless the user asks)\n{}\n\nAVAILABLE LOCAL ASSETS (AUTHORITATIVE; use absolute paths directly for image controls when relevant)\n{}\n\nACTUAL CURRENT DESIGN DIGEST (AUTHORITATIVE)\n{}\n\nACTUAL CURRENT ARTIFACT DIGEST (AUTHORITATIVE)\n{}\n\nACTUAL CURRENT PARAMS JSON (AUTHORITATIVE)\n```json\n{}\n```\n\nACTUAL CURRENT SOURCE (AUTHORITATIVE, NOT A SAMPLE):\nsourceLanguage: {}\nsourceFence: {}\n```{}\n{}\n```\n\n{}{}",
+            "CURRENT DESIGN CONTEXT\nThread Title: {}\nCurrent Title: {}\nVersion: {}\n\nCURRENT AUTHORING CONTEXT (AUTHORITATIVE)\n{}\n\nTARGET AUTHORING CONTEXT (AUTHORITATIVE FOR THIS TURN)\n{}\n\nMIGRATION POLICY (AUTHORITATIVE)\n{}\n\nTHREAD SUMMARY\n{}\n\nRECENT DIALOGUE\n{}\n\nPINNED REFERENCES (historical/supplemental; do not override ACTUAL CURRENT state unless the user asks)\n{}\n\nAVAILABLE LOCAL ASSETS (AUTHORITATIVE; use absolute paths directly for image controls when relevant)\n{}\n\nACTUAL CURRENT DESIGN DIGEST (AUTHORITATIVE)\n{}\n\nACTUAL CURRENT ARTIFACT DIGEST (AUTHORITATIVE)\n{}\n\nACTUAL CURRENT PARAMS JSON (AUTHORITATIVE)\n```json\n{}\n```\n\nACTUAL CURRENT SOURCE (AUTHORITATIVE, NOT A SAMPLE):\nsourceLanguage: {}\nsourceFence: {}\n```{}\n{}\n```\n\n{}",
             ctx.thread_title,
             previous.title,
             previous.version_name,
             current_authoring_block,
             target_authoring_block,
             migration_policy_block,
-            if ctx.summary.trim().is_empty() { "[none]" } else { &ctx.summary },
-            if ctx.recent_dialogue.trim().is_empty() { "[none]" } else { &ctx.recent_dialogue },
-            if ctx.pinned_references.trim().is_empty() { "[none]" } else { &ctx.pinned_references },
-            available_assets_block,
+            &summary_value,
+            &dialogue_value,
+            &references_value,
+            &assets_value,
             if ctx.design_digest.trim().is_empty() { "[none]" } else { &ctx.design_digest },
             if ctx.artifact_digest.trim().is_empty() { "[none]" } else { &ctx.artifact_digest },
             format_full_params_json(previous),
@@ -524,20 +807,143 @@ pub fn format_contextual_prompt(
             source_fence,
             source_fence,
             previous.macro_code,
-            framework_block,
             full_prompt
         )
     } else {
         format!(
-            "CURRENT AUTHORING CONTEXT (AUTHORITATIVE)\n{}\n\nTARGET AUTHORING CONTEXT (AUTHORITATIVE FOR THIS TURN)\n{}\n\nMIGRATION POLICY (AUTHORITATIVE)\n{}\n\nAVAILABLE LOCAL ASSETS (AUTHORITATIVE; use absolute paths directly for image controls when relevant)\n{}\n\n{}{}",
+            "CURRENT AUTHORING CONTEXT (AUTHORITATIVE)\n{}\n\nTARGET AUTHORING CONTEXT (AUTHORITATIVE FOR THIS TURN)\n{}\n\nMIGRATION POLICY (AUTHORITATIVE)\n{}\n\nAVAILABLE LOCAL ASSETS (AUTHORITATIVE; use absolute paths directly for image controls when relevant)\n{}\n\n{}",
             current_authoring_block,
             target_authoring_block,
             migration_policy_block,
             available_assets_block,
-            framework_block,
             full_prompt
         )
     }
+}
+
+/// Assemble the generation user content behind the typed envelope. Returns the
+/// rendered user content on success, or a raw [`ContextBudgetError`] when exact
+/// mandatory/authoritative state cannot fit the generation ceiling (pre-dispatch
+/// failure). Thin wrapper over [`assemble_generation_payload`].
+pub fn format_contextual_prompt(
+    ctx: &PromptContext,
+    base_prompt: &str,
+    intent_mode: &str,
+    target_authoring: ResolvedAuthoringContext,
+) -> Result<String, ContextBudgetError> {
+    let payload = assemble_generation_payload(ctx, base_prompt, intent_mode, target_authoring)?;
+    Ok(payload.user_content)
+}
+
+// ── 3.4: classification routed through its own compact typed envelope ───────
+//
+// OpenSpec `agent-context-budgeting`, decision 4. Intent classification uses its
+// own 8,000-character projection: the design digest, the latest dialogue turn,
+// and the frontend working snapshot. Full source/params/authoring policy never
+// enter it, and pinned references enter only when attachment or reference
+// intent is present. The actual user request travels separately to the
+// classifier call, so it is not duplicated inside this context.
+
+/// Assemble the classifier context behind its compact typed envelope. Returns
+/// the rendered context string on success, or a [`ContextBudgetError`] when the
+/// projected sections cannot fit the 8K classifier ceiling. `include_references`
+/// is `true` only when attachment or reference intent is present.
+pub fn assemble_classifier_context(
+    ctx: &PromptContext,
+    frontend_snapshot: Option<&str>,
+    include_references: bool,
+) -> Result<String, ContextBudgetError> {
+    let inputs = ContextInputs {
+        // The request travels separately to the classifier call; it is not part
+        // of the thread context envelope.
+        request: String::new(),
+        digest: non_empty(ctx.design_digest.clone()),
+        frontend_snapshot: frontend_snapshot
+            .map(str::to_string)
+            .filter(|value| !value.trim().is_empty()),
+        // Latest dialogue turn only: split the formatted dialogue into lines so
+        // the projection can take the last turn.
+        dialogue: ctx
+            .recent_dialogue
+            .lines()
+            .map(str::to_string)
+            .filter(|line| !line.trim().is_empty())
+            .collect(),
+        references: if include_references {
+            non_empty(ctx.pinned_references.clone())
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        },
+        ..Default::default()
+    };
+    let (_stage, sections) =
+        project_sections(ProjectionIntent::Classifier { include_references }, &inputs);
+    let envelope = assemble_envelope(EnvelopeStage::Classifier, sections)?;
+    Ok(render_classifier_context(&envelope, &inputs))
+}
+
+fn non_empty(value: String) -> Option<String> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+/// Render the budgeted classifier context. Only included, non-empty sections are
+/// emitted; the request section is skipped (it travels separately).
+fn render_classifier_context(envelope: &ContextEnvelope, inputs: &ContextInputs) -> String {
+    let mut blocks: Vec<String> = Vec::new();
+
+    if let Some(digest) = included_content(
+        envelope,
+        section_id::DESIGN_DIGEST,
+        inputs.digest.as_deref(),
+    ) {
+        blocks.push(format!(
+            "ACTUAL LIVE DESIGN DIGEST (AUTHORITATIVE)\n{digest}"
+        ));
+    }
+    if let Some(snapshot) = included_content(
+        envelope,
+        section_id::FRONTEND_SNAPSHOT,
+        inputs.frontend_snapshot.as_deref(),
+    ) {
+        blocks.push(format!(
+            "ACTUAL LIVE WORKING SNAPSHOT (FRONTEND)\n{snapshot}"
+        ));
+    }
+    // Latest dialogue turn only.
+    if let Some(record) = envelope.record(&section_id::dialogue(0)) {
+        if record.decision == InclusionDecision::Included {
+            if let Some(latest) = inputs.dialogue.last() {
+                blocks.push(format!("RECENT DIALOGUE\n{latest}"));
+            }
+        }
+    }
+    if let Some(reference) = included_content(
+        envelope,
+        &section_id::reference(0),
+        inputs.references.first().map(String::as_str),
+    ) {
+        blocks.push(format!("PINNED REFERENCES\n{reference}"));
+    }
+
+    blocks.join("\n\n")
+}
+
+fn included_content(envelope: &ContextEnvelope, id: &str, content: Option<&str>) -> Option<String> {
+    let record = envelope.record(id)?;
+    if record.decision != InclusionDecision::Included {
+        return None;
+    }
+    let content = content?.trim();
+    if content.is_empty() {
+        return None;
+    }
+    Some(content.to_string())
 }
 
 #[cfg(test)]
@@ -591,6 +997,9 @@ mod tests {
     ) -> ArtifactBundle {
         ArtifactBundle {
             geometry_provenance: None,
+            component_dependency_lock: None,
+            component_dependency_lock_digest: None,
+            component_import_origins: Vec::new(),
             schema_version: 1,
             model_id: model_id.to_string(),
             source_kind: ModelSourceKind::Generated,
@@ -615,6 +1024,7 @@ mod tests {
     fn mock_manifest(model_id: &str) -> ModelManifest {
         ModelManifest {
             geometry_provenance: None,
+            component_import_origins: Vec::new(),
             schema_version: 1,
             model_id: model_id.to_string(),
             source_kind: ModelSourceKind::Generated,
@@ -960,15 +1370,14 @@ mod tests {
         let result = format_contextual_prompt(
             &ctx,
             "increase throat diameter",
-            "rule block",
             "DESIGN_EDIT",
-            Some("framework contract"),
             ResolvedAuthoringContext {
                 engine_kind: EngineKind::Freecad,
                 source_language: SourceLanguage::LegacyPython,
                 geometry_backend: GeometryBackend::Freecad,
             },
-        );
+        )
+        .expect("normal-sized context assembles without overflow");
 
         assert!(result.contains("CURRENT AUTHORING CONTEXT (AUTHORITATIVE)"));
         assert!(result.contains("TARGET AUTHORING CONTEXT (AUTHORITATIVE FOR THIS TURN)"));
@@ -979,10 +1388,15 @@ mod tests {
         assert!(result.contains("ACTUAL CURRENT ARTIFACT DIGEST (AUTHORITATIVE)"));
         assert!(result.contains("hasStepExport: true"));
         assert!(result.contains("stepExportPath: /tmp/lens-runtime/model.step"));
-        assert!(result.contains("ACTUAL CURRENT CAD FRAMEWORK (AUTHORITATIVE):"));
         assert!(result.contains("AVAILABLE LOCAL ASSETS"));
         assert!(result.contains("USER REQUEST (ACTUAL)"));
-        assert!(result.contains("EXECUTION RULES (MANDATORY)"));
+        assert!(result.contains("USER_INTENT_MODE: DESIGN_EDIT"));
+        // 3.2: static output policy lives once in the system prefix; the user
+        // content no longer re-embeds it as an EXECUTION RULES block, and the
+        // CAD-framework contract moved to the system prefix (see
+        // `design_system_prompt`), so neither appears here.
+        assert!(!result.contains("EXECUTION RULES"));
+        assert!(!result.contains("ACTUAL CURRENT CAD FRAMEWORK"));
     }
 
     #[test]
@@ -1008,15 +1422,14 @@ mod tests {
         let result = format_contextual_prompt(
             &ctx,
             "make wall thicker",
-            "rule block",
             "DESIGN_EDIT",
-            None,
             ResolvedAuthoringContext {
                 engine_kind: EngineKind::EckyIrV0,
                 source_language: SourceLanguage::EckyIrV0,
                 geometry_backend: GeometryBackend::Build123d,
             },
-        );
+        )
+        .expect("normal-sized context assembles without overflow");
 
         assert!(result.contains("currentSourceLanguage: legacyPython"));
         assert!(result.contains("targetSourceLanguage: ecky"));
@@ -1052,18 +1465,287 @@ mod tests {
         let result = format_contextual_prompt(
             &ctx,
             "keep editing",
-            "rule block",
             "DESIGN_EDIT",
-            None,
             ResolvedAuthoringContext {
                 engine_kind: EngineKind::Freecad,
                 source_language: SourceLanguage::Build123d,
                 geometry_backend: GeometryBackend::Build123d,
             },
-        );
+        )
+        .expect("normal-sized context assembles without overflow");
 
         assert!(result.contains("\"p1\": 1.0"));
         assert!(result.contains("\"p14\": 14.0"));
         assert!(result.contains("sourceFence: python"));
+    }
+
+    // --- 2.6: legacy optional sections routed behind the typed envelope ---
+
+    use crate::context_envelope::{
+        measure_chars, section_id, InclusionDecision, SectionPriority, Sensitivity,
+        GENERATION_CEILING_CHARS,
+    };
+
+    fn legacy_optional_prompt_context() -> PromptContext {
+        PromptContext {
+            thread_id: "t1".to_string(),
+            thread_title: "Thread A".to_string(),
+            summary: "Thread: Box Project\n\nRecent user intents:\n- make a box".to_string(),
+            recent_dialogue: "USER: make a box\nECKY EINACS: done".to_string(),
+            pinned_references: "- macro [python_macro]\nimport FreeCAD\n".to_string(),
+            available_assets: "- Ecky Family [PNG] path: /tmp/ecky.png".to_string(),
+            last_output: Some(mock_design("Lens")),
+            design_digest: "Current working snapshot\nLens [V1] (legacyPython)".to_string(),
+            artifact_digest: String::new(),
+        }
+    }
+
+    #[test]
+    fn legacy_optional_sections_route_through_typed_envelope_without_changing_visible_content() {
+        let ctx = legacy_optional_prompt_context();
+
+        // 1. The four legacy sections are routed through the typed envelope with
+        //    their historical priority/sensitivity and carried verbatim.
+        let env = assemble_legacy_optional_envelope(&ctx);
+
+        let summary = env
+            .record(legacy_section_id::THREAD_SUMMARY)
+            .expect("summary section must be projected");
+        assert_eq!(summary.priority, SectionPriority::Relevant);
+        assert_eq!(summary.sensitivity, Sensitivity::Sensitive);
+        assert_eq!(summary.decision, InclusionDecision::Included);
+        assert_eq!(summary.returned_chars, summary.observed_chars);
+        assert_eq!(summary.observed_chars, measure_chars(&ctx.summary));
+
+        let dialogue = env
+            .record(legacy_section_id::RECENT_DIALOGUE)
+            .expect("dialogue section must be projected");
+        assert_eq!(dialogue.priority, SectionPriority::Optional);
+        assert_eq!(dialogue.sensitivity, Sensitivity::Sensitive);
+        assert_eq!(dialogue.decision, InclusionDecision::Included);
+        assert_eq!(dialogue.observed_chars, measure_chars(&ctx.recent_dialogue));
+
+        let references = env
+            .record(legacy_section_id::PINNED_REFERENCES)
+            .expect("references section must be projected");
+        assert_eq!(references.priority, SectionPriority::Optional);
+        assert_eq!(references.decision, InclusionDecision::Included);
+
+        let assets = env
+            .record(legacy_section_id::AVAILABLE_ASSETS)
+            .expect("assets section must be projected");
+        assert_eq!(assets.priority, SectionPriority::Optional);
+        assert_eq!(assets.sensitivity, Sensitivity::Safe);
+        assert_eq!(assets.decision, InclusionDecision::Included);
+
+        // 2. Visible provider content is unchanged: the envelope-routed block is
+        //    byte-identical to the historical format_contextual_prompt formula.
+        let expected_block = format!(
+            "THREAD SUMMARY\n{summary}\n\nRECENT DIALOGUE\n{dialogue}\n\nPINNED REFERENCES (historical/supplemental; do not override ACTUAL CURRENT state unless the user asks)\n{refs}\n\nAVAILABLE LOCAL ASSETS (AUTHORITATIVE; use absolute paths directly for image controls when relevant)\n{assets}",
+            summary = ctx.summary,
+            dialogue = ctx.recent_dialogue,
+            refs = ctx.pinned_references,
+            assets = ctx.available_assets,
+        );
+        let rendered_block = render_legacy_generation_block(&ctx, &env);
+        assert_eq!(rendered_block, expected_block);
+
+        // 3. That exact block appears verbatim inside the full generation prompt.
+        let prompt = format_contextual_prompt(
+            &ctx,
+            "increase throat diameter",
+            "DESIGN_EDIT",
+            ResolvedAuthoringContext {
+                engine_kind: EngineKind::Freecad,
+                source_language: SourceLanguage::LegacyPython,
+                geometry_backend: GeometryBackend::Freecad,
+            },
+        )
+        .expect("normal-sized context assembles without overflow");
+        assert!(
+            prompt.contains(&rendered_block),
+            "generation prompt must carry the envelope-routed legacy block verbatim"
+        );
+    }
+
+    #[test]
+    fn legacy_optional_envelope_substitutes_none_for_empty_sections() {
+        let ctx = PromptContext {
+            thread_id: "t1".to_string(),
+            thread_title: "Thread A".to_string(),
+            summary: String::new(),
+            recent_dialogue: String::new(),
+            pinned_references: String::new(),
+            available_assets: String::new(),
+            last_output: Some(mock_design("Lens")),
+            design_digest: "digest".to_string(),
+            artifact_digest: String::new(),
+        };
+
+        let env = assemble_legacy_optional_envelope(&ctx);
+
+        // Empty source strings project no sections (the renderer substitutes
+        // `[none]`), matching the historical format_contextual_prompt behaviour.
+        assert!(env.record(legacy_section_id::THREAD_SUMMARY).is_none());
+        assert!(env.record(legacy_section_id::RECENT_DIALOGUE).is_none());
+        assert!(env.record(legacy_section_id::PINNED_REFERENCES).is_none());
+        assert!(env.record(legacy_section_id::AVAILABLE_ASSETS).is_none());
+
+        let block = render_legacy_generation_block(&ctx, &env);
+        assert!(block.contains("THREAD SUMMARY\n[none]"));
+        assert!(block.contains("RECENT DIALOGUE\n[none]"));
+        assert!(
+            block.contains("do not override ACTUAL CURRENT state unless the user asks)\n[none]")
+        );
+        assert!(block.contains(
+            "AVAILABLE LOCAL ASSETS (AUTHORITATIVE; use absolute paths directly for image controls when relevant)\n[none]"
+        ));
+    }
+
+    // ── 3.x: generation routed through the typed envelope ──────────────────
+
+    fn generation_prompt_context(macro_code: &str) -> PromptContext {
+        PromptContext {
+            thread_id: "t1".to_string(),
+            thread_title: "Thread A".to_string(),
+            summary: "Thread summary".to_string(),
+            recent_dialogue: "USER: hi\nECKY EINACS: hello".to_string(),
+            pinned_references: String::new(),
+            available_assets: String::new(),
+            last_output: Some(mock_design_with_authoring(
+                "Bracket",
+                SourceLanguage::LegacyPython,
+                GeometryBackend::Freecad,
+                macro_code,
+                Default::default(),
+            )),
+            design_digest: "Current working snapshot\nBracket [V1] (legacyPython)".to_string(),
+            artifact_digest: String::new(),
+        }
+    }
+
+    fn freecad_resolved() -> ResolvedAuthoringContext {
+        ResolvedAuthoringContext {
+            engine_kind: EngineKind::Freecad,
+            source_language: SourceLanguage::LegacyPython,
+            geometry_backend: GeometryBackend::Freecad,
+        }
+    }
+
+    #[test]
+    fn generation_sections_project_exact_source_and_params_as_authoritative() {
+        let ctx = generation_prompt_context("import FreeCAD\nbox = Part.makeBox(1, 1, 1)\n");
+        let sections = generation_sections(&ctx, "make it bigger", freecad_resolved());
+
+        let request = sections
+            .iter()
+            .find(|s| s.id == section_id::REQUEST)
+            .expect("request section projected");
+        assert_eq!(request.priority, SectionPriority::Mandatory);
+
+        let source = sections
+            .iter()
+            .find(|s| s.id == section_id::CURRENT_SOURCE)
+            .expect("current-source section projected");
+        assert_eq!(source.priority, SectionPriority::Authoritative);
+        assert_eq!(source.sensitivity, Sensitivity::Sensitive);
+
+        let params = sections
+            .iter()
+            .find(|s| s.id == section_id::CURRENT_PARAMS)
+            .expect("current-params section projected");
+        assert_eq!(params.priority, SectionPriority::Authoritative);
+    }
+
+    #[test]
+    fn assemble_generation_payload_total_size_covers_rendered_user_content() {
+        let ctx = generation_prompt_context("import FreeCAD\nbox = Part.makeBox(1, 1, 1)\n");
+        let payload = assemble_generation_payload(
+            &ctx,
+            "increase the fillet radius",
+            "DESIGN_EDIT",
+            freecad_resolved(),
+        )
+        .expect("normal-sized context assembles without overflow");
+
+        // Total-size metadata covers the FULL rendered user content (sections
+        // plus the structural wrapper).
+        assert_eq!(
+            payload.envelope.total_returned_chars,
+            measure_chars(&payload.user_content)
+        );
+        assert!(payload.envelope.total_returned_chars > 0);
+    }
+
+    #[test]
+    fn assemble_generation_payload_fails_pre_dispatch_on_mandatory_overflow() {
+        // Authoritative current source larger than the 64K generation ceiling.
+        let overflow_source = "x".repeat(GENERATION_CEILING_CHARS + 6_000);
+        let ctx = generation_prompt_context(&overflow_source);
+
+        let result = assemble_generation_payload(
+            &ctx,
+            "edit the oversized model",
+            "DESIGN_EDIT",
+            freecad_resolved(),
+        );
+        let budget_err = result.expect_err("oversized authoritative source must overflow");
+
+        assert_eq!(budget_err.allowed_chars, GENERATION_CEILING_CHARS);
+        assert!(budget_err.observed_chars > GENERATION_CEILING_CHARS);
+        // The raw error names the overflowing section and its observed size.
+        let overflow_ids: Vec<&str> = budget_err
+            .overflow_sections
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert!(overflow_ids.contains(&section_id::CURRENT_SOURCE));
+    }
+
+    #[test]
+    fn assemble_generation_payload_drops_no_duplicate_execution_rules() {
+        let ctx = generation_prompt_context("import FreeCAD\nbox = Part.makeBox(1, 1, 1)\n");
+        let payload =
+            assemble_generation_payload(&ctx, "add a fillet", "DESIGN_EDIT", freecad_resolved())
+                .expect("normal-sized context assembles without overflow");
+        // The static output contract lives in the system prefix only; user
+        // content no longer re-embeds it.
+        assert!(!payload.user_content.contains("EXECUTION RULES"));
+        assert!(payload
+            .user_content
+            .contains("USER_INTENT_MODE: DESIGN_EDIT"));
+    }
+
+    // ── 3.4: classifier context routed through its compact envelope ───────
+
+    #[test]
+    fn classifier_context_excludes_source_and_summary_and_includes_compact_state() {
+        let ctx = generation_prompt_context("SECRET-CURRENT-SOURCE");
+        let rendered = assemble_classifier_context(&ctx, Some("front snapshot"), false)
+            .expect("classifier context assembles without overflow");
+
+        // Design digest + latest dialogue + frontend snapshot are included.
+        assert!(rendered.contains("ACTUAL LIVE DESIGN DIGEST (AUTHORITATIVE)"));
+        assert!(rendered.contains("ACTUAL LIVE WORKING SNAPSHOT (FRONTEND)\nfront snapshot"));
+        assert!(rendered.contains("RECENT DIALOGUE\nECKY EINACS: hello"));
+        // Full source, params, thread summary, and authoring policy are excluded.
+        assert!(!rendered.contains("SECRET-CURRENT-SOURCE"));
+        assert!(!rendered.contains("THREAD SUMMARY"));
+        // References excluded without reference intent.
+        assert!(!rendered.contains("PINNED REFERENCES"));
+    }
+
+    #[test]
+    fn classifier_context_includes_references_only_with_intent() {
+        let mut ctx = generation_prompt_context("src");
+        ctx.pinned_references = "- macro [python_macro]\nimport FreeCAD\n".to_string();
+
+        let with_refs = assemble_classifier_context(&ctx, None, true)
+            .expect("classifier context assembles without overflow");
+        assert!(with_refs.contains("PINNED REFERENCES"));
+
+        let without_refs = assemble_classifier_context(&ctx, None, false)
+            .expect("classifier context assembles without overflow");
+        assert!(!without_refs.contains("PINNED REFERENCES"));
     }
 }

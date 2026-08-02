@@ -158,6 +158,7 @@ pub fn import_mesh_from_request(
             .to_string();
     let manifest = ModelManifest {
         geometry_provenance: None,
+        component_import_origins: Vec::new(),
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.clone(),
         source_kind: ModelSourceKind::ImportedMesh,
@@ -215,6 +216,9 @@ pub fn import_mesh_from_request(
     };
     let bundle = ArtifactBundle {
         geometry_provenance: None,
+        component_dependency_lock: None,
+        component_dependency_lock_digest: None,
+        component_import_origins: Vec::new(),
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id,
         source_kind: ModelSourceKind::ImportedMesh,

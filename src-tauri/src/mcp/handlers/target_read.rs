@@ -285,6 +285,12 @@ fn build_target_meta_response(
             target.model_manifest.as_ref(),
             false,
         ),
+        // This helper lacks AppState/PathResolver/connection context, so it
+        // cannot resolve a binding; the live `handle_target_meta_get` path
+        // populates the bound source view.
+        source_path: None,
+        source_folder: None,
+        source_state: None,
     }
 }
 
@@ -406,6 +412,16 @@ pub async fn handle_target_meta_get(
             has_draft,
         );
 
+        // openspec thread-source-binding 4.1: expose the bound source path /
+        // folder / state for the agent using the exact stored binding path.
+        let (source_path, source_folder, source_state) = super::resolve_target_source_binding(
+            state,
+            app,
+            &conn,
+            &target_thread_id,
+            &design_output.title,
+        );
+
         Ok(TargetMetaResponse {
             thread_id: target_thread_id,
             message_id: target_message_id,
@@ -447,6 +463,9 @@ pub async fn handle_target_meta_get(
                 .map(|manifest| manifest.control_views.len())
                 .unwrap_or(0),
             scene_packet,
+            source_path,
+            source_folder,
+            source_state,
         })
     })();
 

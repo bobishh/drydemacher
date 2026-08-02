@@ -1,9 +1,15 @@
-use super::AgentContext;
 use crate::contracts::{AppError, AppResult};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{Mutex, OwnedMutexGuard};
+
+/// Process-wide monotonic generation counter. Shared across **all** registries
+/// so a freshly created actor is always distinguishable from any older actor,
+/// even after a registry is dropped and recreated or an actor is invalidated.
+/// Keeping this global is what lets an invalidated/superseded revision token
+/// reliably fail to publish regardless of which `AppState` owns it.
+static NEXT_ACTOR_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct AuthoringActorKey {
@@ -18,131 +24,139 @@ struct AuthoringActorState {
     published_revision: Option<u64>,
 }
 
+/// AppState-scoped authoring actor registry.
+///
+/// Each `AppState` owns its own `Arc<AuthoringActorRegistry>`, so independent
+/// `AppState` instances never share or invalidate each other's authoring actor
+/// state — even when they reuse identical `session_id`/`thread_id` strings (as
+/// parallel test harnesses and concurrent agent sessions routinely do). Within
+/// a single `AppState`/registry, a UI mutation still invalidates **every**
+/// session's actor for that thread (same-app behavior preserved). The actor
+/// generation counter remains process-global (`NEXT_ACTOR_GENERATION`) so a
+/// recreated actor is always newer than any superseded one.
+#[derive(Debug, Default)]
+pub struct AuthoringActorRegistry {
+    actors: StdMutex<HashMap<AuthoringActorKey, Arc<Mutex<AuthoringActorState>>>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct AuthoringActorRevision {
+pub struct AuthoringActorRevision {
     generation: u64,
     revision: u64,
 }
 
-pub(super) struct AuthoringActorPublishPermit {
+pub struct AuthoringActorPublishPermit {
     token: AuthoringActorRevision,
     state: OwnedMutexGuard<AuthoringActorState>,
 }
 
 impl AuthoringActorPublishPermit {
-    pub(super) fn mark_published(&mut self) {
+    pub(crate) fn mark_published(&mut self) {
         self.state.published_revision = Some(self.token.revision);
     }
 }
 
-static NEXT_ACTOR_GENERATION: AtomicU64 = AtomicU64::new(1);
-
-static AUTHORING_ACTORS: OnceLock<
-    StdMutex<HashMap<AuthoringActorKey, Arc<Mutex<AuthoringActorState>>>>,
-> = OnceLock::new();
-
-fn authoring_actors(
-) -> &'static StdMutex<HashMap<AuthoringActorKey, Arc<Mutex<AuthoringActorState>>>> {
-    AUTHORING_ACTORS.get_or_init(|| StdMutex::new(HashMap::new()))
-}
-
-fn actor_key(ctx: &AgentContext, thread_id: &str) -> AuthoringActorKey {
-    AuthoringActorKey {
-        session_id: ctx.session_id.clone(),
-        thread_id: thread_id.to_string(),
-    }
-}
-
-fn actor_state(ctx: &AgentContext, thread_id: &str) -> Arc<Mutex<AuthoringActorState>> {
-    let key = actor_key(ctx, thread_id);
-    authoring_actors()
-        .lock()
-        .unwrap()
-        .entry(key)
-        .or_insert_with(|| {
-            Arc::new(Mutex::new(AuthoringActorState {
-                generation: NEXT_ACTOR_GENERATION.fetch_add(1, Ordering::Relaxed),
-                current_revision: 0,
-                published_revision: None,
-            }))
-        })
-        .clone()
-}
-
-pub(super) async fn reserve_authoring_actor_revision(
-    ctx: &AgentContext,
-    thread_id: &str,
-) -> AuthoringActorRevision {
-    let state = actor_state(ctx, thread_id);
-    let mut state = state.lock().await;
-    state.current_revision = state.current_revision.saturating_add(1).max(1);
-    AuthoringActorRevision {
-        generation: state.generation,
-        revision: state.current_revision,
-    }
-}
-
-pub(super) async fn acquire_authoring_actor_publish_permit(
-    ctx: &AgentContext,
-    thread_id: &str,
-    token: AuthoringActorRevision,
-) -> AppResult<AuthoringActorPublishPermit> {
-    let actor_id = format!("{}:{}", ctx.session_id, thread_id);
-    let state = actor_state(ctx, thread_id);
-    let state = state.lock_owned().await;
-    let current_revision = state.current_revision;
-    let current_generation = state.generation;
-    let already_published = state.published_revision == Some(token.revision);
-    if token.generation != current_generation
-        || token.revision != current_revision
-        || already_published
-    {
-        let reason = if already_published {
-            "already published"
-        } else {
-            "superseded"
+impl AuthoringActorRegistry {
+    fn actor_state(&self, session_id: &str, thread_id: &str) -> Arc<Mutex<AuthoringActorState>> {
+        let key = AuthoringActorKey {
+            session_id: session_id.to_string(),
+            thread_id: thread_id.to_string(),
         };
-        return Err(AppError::with_details(
-            crate::contracts::AppErrorCode::Conflict,
-            format!(
-                "Authoring actor render result {reason}: requested revision {}, current revision {current_revision}.",
-                token.revision
-            ),
-            format!(
-                "actorId={actor_id} requestedGeneration={} currentGeneration={current_generation} requestedRevision={} currentRevision={current_revision}",
-                token.generation, token.revision
-            ),
-        )
-        .with_operation("authoring_actor_publish"));
+        self.actors
+            .lock()
+            .unwrap()
+            .entry(key)
+            .or_insert_with(|| {
+                Arc::new(Mutex::new(AuthoringActorState {
+                    generation: NEXT_ACTOR_GENERATION.fetch_add(1, Ordering::Relaxed),
+                    current_revision: 0,
+                    published_revision: None,
+                }))
+            })
+            .clone()
     }
 
-    Ok(AuthoringActorPublishPermit { token, state })
-}
-
-pub(super) fn forget_authoring_actors_for_session(session_id: &str) {
-    authoring_actors()
-        .lock()
-        .unwrap()
-        .retain(|key, _| key.session_id != session_id);
-}
-
-pub(crate) async fn invalidate_authoring_actors_for_thread(thread_id: &str) {
-    let states = {
-        let mut actors = authoring_actors().lock().unwrap();
-        let states = actors
-            .iter()
-            .filter(|(key, _)| key.thread_id == thread_id)
-            .map(|(_, state)| state.clone())
-            .collect::<Vec<_>>();
-        actors.retain(|key, _| key.thread_id != thread_id);
-        states
-    };
-
-    for state in states {
+    pub(crate) async fn reserve_authoring_actor_revision(
+        &self,
+        session_id: &str,
+        thread_id: &str,
+    ) -> AuthoringActorRevision {
+        let state = self.actor_state(session_id, thread_id);
         let mut state = state.lock().await;
-        state.generation = NEXT_ACTOR_GENERATION.fetch_add(1, Ordering::Relaxed);
-        state.current_revision = 0;
-        state.published_revision = None;
+        state.current_revision = state.current_revision.saturating_add(1).max(1);
+        AuthoringActorRevision {
+            generation: state.generation,
+            revision: state.current_revision,
+        }
+    }
+
+    pub(crate) async fn acquire_authoring_actor_publish_permit(
+        &self,
+        session_id: &str,
+        thread_id: &str,
+        token: AuthoringActorRevision,
+    ) -> AppResult<AuthoringActorPublishPermit> {
+        let actor_id = format!("{}:{}", session_id, thread_id);
+        let state = self.actor_state(session_id, thread_id);
+        let state = state.lock_owned().await;
+        let current_revision = state.current_revision;
+        let current_generation = state.generation;
+        let already_published = state.published_revision == Some(token.revision);
+        if token.generation != current_generation
+            || token.revision != current_revision
+            || already_published
+        {
+            let reason = if already_published {
+                "already published"
+            } else {
+                "superseded"
+            };
+            return Err(AppError::with_details(
+                crate::contracts::AppErrorCode::Conflict,
+                format!(
+                    "Authoring actor render result {reason}: requested revision {}, current revision {current_revision}.",
+                    token.revision
+                ),
+                format!(
+                    "actorId={actor_id} requestedGeneration={} currentGeneration={current_generation} requestedRevision={} currentRevision={current_revision}",
+                    token.generation, token.revision
+                ),
+            )
+            .with_operation("authoring_actor_publish"));
+        }
+
+        Ok(AuthoringActorPublishPermit { token, state })
+    }
+
+    pub(crate) fn forget_authoring_actors_for_session(&self, session_id: &str) {
+        self.actors
+            .lock()
+            .unwrap()
+            .retain(|key, _| key.session_id != session_id);
+    }
+
+    /// Invalidate every authoring actor for `thread_id` across **all** sessions
+    /// in this registry. Because the registry is AppState-scoped, this only
+    /// affects the owning `AppState`'s actors — never an independent
+    /// `AppState`'s registry, even if it reuses the same `thread_id` string.
+    pub(crate) async fn invalidate_authoring_actors_for_thread(&self, thread_id: &str) {
+        let states = {
+            let mut actors = self.actors.lock().unwrap();
+            let states = actors
+                .iter()
+                .filter(|(key, _)| key.thread_id == thread_id)
+                .map(|(_, state)| state.clone())
+                .collect::<Vec<_>>();
+            actors.retain(|key, _| key.thread_id != thread_id);
+            states
+        };
+
+        for state in states {
+            let mut state = state.lock().await;
+            state.generation = NEXT_ACTOR_GENERATION.fetch_add(1, Ordering::Relaxed);
+            state.current_revision = 0;
+            state.published_revision = None;
+        }
     }
 }
 
@@ -151,46 +165,47 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    fn context(session_id: &str) -> AgentContext {
-        AgentContext {
-            session_id: session_id.to_string(),
-            client_kind: "test".to_string(),
-            host_label: "test".to_string(),
-            agent_label: "test".to_string(),
-            llm_model_id: None,
-            llm_model_label: None,
-        }
-    }
-
     #[tokio::test]
     async fn separate_authoring_actors_do_not_share_publish_lock() {
-        let ctx = context("parallel-actor-session");
-        let revision_a = reserve_authoring_actor_revision(&ctx, "thread-a").await;
-        let revision_b = reserve_authoring_actor_revision(&ctx, "thread-b").await;
-        let _permit_a = acquire_authoring_actor_publish_permit(&ctx, "thread-a", revision_a)
+        let registry = AuthoringActorRegistry::default();
+        let revision_a = registry
+            .reserve_authoring_actor_revision("session-1", "thread-a")
+            .await;
+        let revision_b = registry
+            .reserve_authoring_actor_revision("session-1", "thread-b")
+            .await;
+        let _permit_a = registry
+            .acquire_authoring_actor_publish_permit("session-1", "thread-a", revision_a)
             .await
             .expect("actor A permit");
 
         let permit_b = tokio::time::timeout(
             Duration::from_millis(50),
-            acquire_authoring_actor_publish_permit(&ctx, "thread-b", revision_b),
+            registry.acquire_authoring_actor_publish_permit("session-1", "thread-b", revision_b),
         )
         .await
         .expect("actor B lock is independent")
         .expect("actor B permit");
 
         drop(permit_b);
-        forget_authoring_actors_for_session(&ctx.session_id);
+        registry.forget_authoring_actors_for_session("session-1");
     }
 
     #[tokio::test]
     async fn old_actor_generation_cannot_publish_after_registry_recovery() {
-        let ctx = context("actor-generation-session");
-        let old = reserve_authoring_actor_revision(&ctx, "thread-a").await;
-        forget_authoring_actors_for_session(&ctx.session_id);
-        let current = reserve_authoring_actor_revision(&ctx, "thread-a").await;
+        let registry = AuthoringActorRegistry::default();
+        let old = registry
+            .reserve_authoring_actor_revision("session-1", "thread-a")
+            .await;
+        registry.forget_authoring_actors_for_session("session-1");
+        let current = registry
+            .reserve_authoring_actor_revision("session-1", "thread-a")
+            .await;
 
-        let error = match acquire_authoring_actor_publish_permit(&ctx, "thread-a", old).await {
+        let error = match registry
+            .acquire_authoring_actor_publish_permit("session-1", "thread-a", old)
+            .await
+        {
             Ok(_) => panic!("old actor generation published"),
             Err(error) => error,
         };
@@ -201,37 +216,102 @@ mod tests {
             .unwrap_or_default()
             .contains("requestedGeneration"));
 
-        acquire_authoring_actor_publish_permit(&ctx, "thread-a", current)
+        registry
+            .acquire_authoring_actor_publish_permit("session-1", "thread-a", current)
             .await
             .expect("current actor generation publishes");
-        forget_authoring_actors_for_session(&ctx.session_id);
     }
 
     #[tokio::test]
     async fn ui_mutation_invalidates_every_session_actor_for_only_its_thread() {
-        let ctx_a = context("ui-invalidation-session-a");
-        let ctx_b = context("ui-invalidation-session-b");
-        let stale_a = reserve_authoring_actor_revision(&ctx_a, "thread-a").await;
-        let stale_b = reserve_authoring_actor_revision(&ctx_b, "thread-a").await;
-        let other_thread = reserve_authoring_actor_revision(&ctx_a, "thread-b").await;
+        let registry = AuthoringActorRegistry::default();
+        let stale_a = registry
+            .reserve_authoring_actor_revision("session-a", "thread-a")
+            .await;
+        let stale_b = registry
+            .reserve_authoring_actor_revision("session-b", "thread-a")
+            .await;
+        let other_thread = registry
+            .reserve_authoring_actor_revision("session-a", "thread-b")
+            .await;
 
-        invalidate_authoring_actors_for_thread("thread-a").await;
+        registry
+            .invalidate_authoring_actors_for_thread("thread-a")
+            .await;
 
-        assert!(
-            acquire_authoring_actor_publish_permit(&ctx_a, "thread-a", stale_a)
-                .await
-                .is_err()
-        );
-        assert!(
-            acquire_authoring_actor_publish_permit(&ctx_b, "thread-a", stale_b)
-                .await
-                .is_err()
-        );
-        acquire_authoring_actor_publish_permit(&ctx_a, "thread-b", other_thread)
+        assert!(registry
+            .acquire_authoring_actor_publish_permit("session-a", "thread-a", stale_a)
+            .await
+            .is_err());
+        assert!(registry
+            .acquire_authoring_actor_publish_permit("session-b", "thread-a", stale_b)
+            .await
+            .is_err());
+        registry
+            .acquire_authoring_actor_publish_permit("session-a", "thread-b", other_thread)
             .await
             .expect("other thread remains publishable");
+    }
 
-        forget_authoring_actors_for_session(&ctx_a.session_id);
-        forget_authoring_actors_for_session(&ctx_b.session_id);
+    /// Independent `AppState` instances own distinct registries. Even when they
+    /// reuse identical `(session_id, thread_id)` strings, a UI mutation (thread
+    /// invalidation) in one AppState's registry never reaches the other
+    /// registry's actors. This is the production-safe isolation the old
+    /// process-global registry could not provide, because it keyed actors only
+    /// by `thread_id` and a thread-id collision across AppStates cross-fired.
+    #[tokio::test]
+    async fn independent_registries_do_not_invalidate_each_other_for_same_thread() {
+        let app_a = AuthoringActorRegistry::default();
+        let app_b = AuthoringActorRegistry::default();
+        let revision_a = app_a
+            .reserve_authoring_actor_revision("session-1", "thread-1")
+            .await;
+
+        // App B is an unrelated AppState, but performs a UI mutation that
+        // invalidates its own thread-1 authoring actors.
+        app_b
+            .invalidate_authoring_actors_for_thread("thread-1")
+            .await;
+
+        let outcome = app_a
+            .acquire_authoring_actor_publish_permit("session-1", "thread-1", revision_a)
+            .await;
+        assert!(
+            outcome.is_ok(),
+            "independent AppState registries must not invalidate each other's \
+             authoring actors for the same thread id, but app A's reserved revision \
+             was invalidated by app B's UI mutation: {:?}",
+            outcome.err()
+        );
+    }
+
+    /// Independent `AppState` registries must not collide even with identical
+    /// `(session_id, thread_id)` strings: app B's later reservation must not
+    /// supersede app A's in-flight render. The old process-global registry
+    /// failed this because two AppStates sharing the same strings keyed to one
+    /// actor and B's reservation bumped the revision out from under A.
+    #[tokio::test]
+    async fn independent_registries_isolate_authoring_actor_state_for_identical_keys() {
+        let app_a = AuthoringActorRegistry::default();
+        let app_b = AuthoringActorRegistry::default();
+
+        let revision_a = app_a
+            .reserve_authoring_actor_revision("session-1", "thread-1")
+            .await;
+        // App B is an unrelated AppState, but reuses the same (session, thread).
+        let _revision_b = app_b
+            .reserve_authoring_actor_revision("session-1", "thread-1")
+            .await;
+
+        let outcome = app_a
+            .acquire_authoring_actor_publish_permit("session-1", "thread-1", revision_a)
+            .await;
+        assert!(
+            outcome.is_ok(),
+            "independent AppState must isolate its authoring actor registry, but \
+             app A's reserved revision was superseded by app B sharing the same \
+             (session_id, thread_id) string: {:?}",
+            outcome.err()
+        );
     }
 }

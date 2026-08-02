@@ -486,9 +486,11 @@ fn normalize_node_for_direct_occt(
                     }
                     CoreOperation::Custom(name)
                         if name == "helical-ridge"
+                            || name == "import-step"
                             || name == "hull"
                             || name == "solidify"
                             || name == "thread"
+                            || name == "tapped-hole"
                             || name == "rib"
                             || name == "groove"
                             || name == "regular-polygon"
@@ -529,9 +531,14 @@ fn normalize_node_for_direct_occt(
                             },
                         ))
                     }
-                    CoreOperation::Custom(name) => Err(AppError::validation(format!(
-                        "Direct OCCT normalizer does not support custom operation `{name}`."
-                    ))),
+                    CoreOperation::Custom(_) => Ok(rebuild_node(
+                        node,
+                        CoreNodeKind::Call {
+                            op: op.clone(),
+                            args: normalized_args,
+                            keywords: normalized_keywords,
+                        },
+                    )),
                     CoreOperation::Boolean(crate::ecky_core_ir::CoreBooleanOp::Xor) => {
                         normalize_xor_node(node, normalized_args, next_node_id)
                     }

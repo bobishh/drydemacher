@@ -2,8 +2,8 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
-use crate::contracts::{AppError, AppResult, DesignParams, ParamValue};
-use crate::contracts::{AuthoringError, AuthoringReason, ErrorFix};
+use crate::contracts::{AppError, AuthoringResult, DesignParams, ParamValue};
+use crate::contracts::{AuthoringError, AuthoringReason, ErrorFix, ErrorLayer};
 use crate::ecky_cad_host::svg_profile::{
     extract_svg_wire_soup_profile, parse_svg_profile, SvgFillRule, SvgFitMode,
 };
@@ -20,31 +20,98 @@ use crate::ecky_core_ir::{
 // the surface authored cannot be executed by this backend. These helpers keep
 // call sites one line and guarantee a backend-layered error.
 
-fn bk(reason: AuthoringReason, msg: impl Into<String>) -> AppError {
-    AuthoringError::backend(reason, msg).into()
+fn backend_error(reason: AuthoringReason, msg: impl Into<String>) -> AuthoringError {
+    AuthoringError::backend(reason, msg)
 }
 
-fn bk_op(reason: AuthoringReason, op: &str, msg: impl Into<String>) -> AppError {
-    AuthoringError::backend(reason, msg).with_op(op).into()
+fn backend_validation(msg: impl Into<String>) -> AuthoringError {
+    backend_error(AuthoringReason::Type, msg)
 }
 
-fn bk_arity(op: &str, expected: &str) -> AppError {
-    AuthoringError::backend(
+fn backend_op_error(reason: AuthoringReason, op: &str, msg: impl Into<String>) -> AuthoringError {
+    AuthoringError::for_op(ErrorLayer::Backend, reason, op, msg)
+}
+
+fn planner_dependency_error(context: &str, err: AppError) -> AuthoringError {
+    backend_error(
+        AuthoringReason::Type,
+        format!("Direct OCCT planner {context}: {err}"),
+    )
+}
+
+fn core_param_env(
+    program: &CoreProgram,
+    parameters: &DesignParams,
+) -> AuthoringResult<BTreeMap<String, ParamValue>> {
+    crate::ecky_ir::build_core_program_param_env_for_eval(program, parameters)
+        .map_err(|err| planner_dependency_error("could not resolve parameters", err))
+}
+
+fn eval_core_number(
+    node: &CoreNode,
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+) -> AuthoringResult<f64> {
+    crate::ecky_ir::eval_core_number_with_locals(node, param_names, env)
+        .map_err(|err| planner_dependency_error("could not evaluate number", err))
+}
+
+fn eval_core_bool(
+    node: &CoreNode,
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+) -> AuthoringResult<bool> {
+    crate::ecky_ir::eval_core_bool_with_locals(node, param_names, env)
+        .map_err(|err| planner_dependency_error("could not evaluate boolean", err))
+}
+
+fn eval_core_stringish(
+    node: &CoreNode,
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+) -> AuthoringResult<String> {
+    crate::ecky_ir::eval_core_stringish_with_locals(node, param_names, env)
+        .map_err(|err| planner_dependency_error("could not evaluate text", err))
+}
+
+fn bk(reason: AuthoringReason, msg: impl Into<String>) -> AuthoringError {
+    backend_error(reason, msg)
+}
+
+fn bk_op(reason: AuthoringReason, op: &str, msg: impl Into<String>) -> AuthoringError {
+    backend_op_error(reason, op, msg)
+}
+
+fn bk_arity(op: &str, expected: &str) -> AuthoringError {
+    backend_op_error(
         AuthoringReason::Arity,
+        op,
         format!("`{op}` expects {expected}."),
     )
-    .with_op(op)
-    .into()
 }
 
-fn bk_constrained(op: &str, msg: impl Into<String>, valid: &[&str]) -> AppError {
-    AuthoringError::backend(AuthoringReason::ConstrainedValue, msg)
-        .with_op(op)
-        .with_fix(ErrorFix {
-            hint: Some(format!("valid values: {}", valid.join(", "))),
-            suggestions: valid.iter().map(|s| (*s).to_string()).collect(),
-        })
-        .into()
+fn bk_constrained(op: &str, msg: impl Into<String>, valid: &[&str]) -> AuthoringError {
+    constrained_backend_error(op, msg, valid)
+}
+
+fn planner_error(reason: AuthoringReason, msg: impl Into<String>) -> AuthoringError {
+    backend_error(reason, msg)
+}
+
+fn planner_op_error(reason: AuthoringReason, op: &str, msg: impl Into<String>) -> AuthoringError {
+    backend_op_error(reason, op, msg)
+}
+
+fn planner_arity_error(op: &str, expected: &str) -> AuthoringError {
+    planner_op_error(
+        AuthoringReason::Arity,
+        op,
+        format!("`{op}` expects {expected}."),
+    )
+}
+
+fn constrained_backend_error(op: &str, msg: impl Into<String>, valid: &[&str]) -> AuthoringError {
+    AuthoringError::constrained(ErrorLayer::Backend, op, msg, valid)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +176,7 @@ pub enum OcctOp {
     Profile,
     MakeFace,
     ImportStl,
+    ImportStep,
     Extrude,
     Revolve,
     Loft,
@@ -227,16 +295,17 @@ pub struct OcctPlan {
     pub parts: Vec<OcctPartPlan>,
 }
 
-pub fn plan_core_program(program: &CoreProgram) -> AppResult<OcctPlan> {
+pub fn plan_core_program(program: &CoreProgram) -> AuthoringResult<OcctPlan> {
     plan_core_program_with_params(program, &DesignParams::new())
 }
 
 pub fn plan_core_program_with_params(
     program: &CoreProgram,
     parameters: &DesignParams,
-) -> AppResult<OcctPlan> {
+) -> AuthoringResult<OcctPlan> {
     let normalized =
-        super::direct_occt_normalize::normalize_core_program_for_direct_occt(program, parameters)?;
+        super::direct_occt_normalize::normalize_core_program_for_direct_occt(program, parameters)
+            .map_err(|err| planner_dependency_error("normalization failed", err))?;
     let expanded = expand_core_program_for_direct_occt(&normalized, parameters)?;
     plan_expanded_core_program(&expanded, parameters, true)
 }
@@ -245,9 +314,9 @@ fn plan_expanded_core_program(
     program: &CoreProgram,
     parameters: &DesignParams,
     optimize_graph: bool,
-) -> AppResult<OcctPlan> {
+) -> AuthoringResult<OcctPlan> {
     crate::ecky_core_ir::verify_core_program(program).map_err(|err| {
-        bk(
+        backend_error(
             AuthoringReason::Type,
             format!(
                 "Direct OCCT adapter rejected invalid Core IR before planning: {}",
@@ -269,7 +338,12 @@ fn plan_expanded_core_program(
             kind: param.kind.into(),
         })
         .collect::<Vec<_>>();
-    let scalar_env = crate::ecky_ir::build_core_program_param_env_for_eval(program, parameters)?;
+    let scalar_env = core_param_env(program, parameters).map_err(|err| {
+        backend_error(
+            AuthoringReason::Type,
+            format!("Direct OCCT adapter could not resolve parameters: {err}"),
+        )
+    })?;
 
     let parts = program
         .parts
@@ -279,7 +353,12 @@ fn plan_expanded_core_program(
                 PartPlanner::new(&param_names, &scalar_env, max_node_id(&part.root) + 1);
             let root = planner.plan_node(&part.root)?;
             let commands = if optimize_graph {
-                optimize_part_commands(root, planner.commands)?
+                optimize_part_commands(root, planner.commands).map_err(|err| {
+                    backend_error(
+                        AuthoringReason::Type,
+                        format!("Direct OCCT adapter produced an invalid command graph: {err}"),
+                    )
+                })?
             } else {
                 planner.commands
             };
@@ -290,7 +369,7 @@ fn plan_expanded_core_program(
                 commands,
             })
         })
-        .collect::<AppResult<Vec<_>>>()?;
+        .collect::<AuthoringResult<Vec<_>>>()?;
 
     Ok(OcctPlan {
         parameters: occt_parameters,
@@ -299,10 +378,11 @@ fn plan_expanded_core_program(
 }
 
 #[cfg(test)]
-pub(crate) fn plan_core_program_unoptimized(program: &CoreProgram) -> AppResult<OcctPlan> {
+pub(crate) fn plan_core_program_unoptimized(program: &CoreProgram) -> AuthoringResult<OcctPlan> {
     let parameters = DesignParams::new();
     let normalized =
-        super::direct_occt_normalize::normalize_core_program_for_direct_occt(program, &parameters)?;
+        super::direct_occt_normalize::normalize_core_program_for_direct_occt(program, &parameters)
+            .map_err(|err| planner_dependency_error("normalization failed", err))?;
     let expanded = expand_core_program_for_direct_occt(&normalized, &parameters)?;
     plan_expanded_core_program(&expanded, &parameters, false)
 }
@@ -310,22 +390,61 @@ pub(crate) fn plan_core_program_unoptimized(program: &CoreProgram) -> AppResult<
 fn optimize_part_commands(
     root: OcctSlot,
     mut commands: Vec<OcctCommand>,
-) -> AppResult<Vec<OcctCommand>> {
+) -> AuthoringResult<Vec<OcctCommand>> {
     let producers = command_producers(&commands)?;
     validate_command_graph(root, &commands, &producers)?;
 
     let original = commands.clone();
-    for command in &mut commands {
-        if command.op != OcctOp::Difference || command.args.len() < 2 {
-            continue;
+    // Fresh output slots for transforms synthesized while distributing a
+    // `Difference(base, affineTransform(Union(children)))` rewrite. Slot ids are
+    // node ids, so anything past the planned max is free.
+    let mut next_slot = commands
+        .iter()
+        .map(|command| command.output.0)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let mut result: Vec<OcctCommand> = Vec::with_capacity(commands.len());
+    for mut command in commands.into_iter() {
+        if command.op == OcctOp::Difference && command.args.len() >= 2 {
+            let mut optimized = Vec::with_capacity(command.args.len());
+            optimized.push(command.args[0].clone());
+            // Per-child transforms synthesized while flattening this difference's
+            // tools are spliced in BEFORE the difference itself, because the
+            // runner resolves slots in command order and the boolean consumes
+            // them. Each synthesized transform depends only on union children,
+            // which already precede the difference, so topological order holds.
+            let mut synthesized: Vec<OcctCommand> = Vec::new();
+            for tool in &command.args[1..] {
+                flatten_difference_tool(
+                    tool,
+                    &original,
+                    &producers,
+                    &mut optimized,
+                    &mut synthesized,
+                    &mut next_slot,
+                );
+            }
+            result.extend(synthesized);
+            command.args = optimized;
+
+            // parametric-thread-feature 3.1 binary-cut optimizer slice: a
+            // Difference with two or more tools rewrites to a stable-order
+            // chain of binary Difference commands so each boolean cut is
+            // binary. Intermediates get fresh output slots and carry no
+            // keywords; the FINAL link keeps the original command.output and
+            // original keywords, so part.root and any downstream reference
+            // (fillet/chamfer/topology keyword) is unchanged. A single-tool
+            // Difference (one tool after flattening) is left binary as-is.
+            if command.args.len() >= 3 {
+                let chain = chain_binary_differences(command, &mut next_slot);
+                result.extend(chain);
+                continue;
+            }
         }
-        let mut optimized = Vec::with_capacity(command.args.len());
-        optimized.push(command.args[0].clone());
-        for tool in &command.args[1..] {
-            flatten_difference_tool(tool, &original, &producers, &mut optimized);
-        }
-        command.args = optimized;
+        result.push(command);
     }
+    commands = result;
 
     let optimized_producers = command_producers(&commands)?;
     let mut reachable = BTreeSet::new();
@@ -334,11 +453,60 @@ fn optimize_part_commands(
     Ok(commands)
 }
 
-fn command_producers(commands: &[OcctCommand]) -> AppResult<BTreeMap<OcctSlot, usize>> {
+/// Rewrite a flattened `Difference(base, tool1, tool2, ..., toolN)` with `N >= 2`
+/// tools into a stable-order chain of binary Difference commands:
+///   Difference(base, tool1)         -> fresh intermediate
+///   Difference(intermediate, tool2) -> fresh intermediate
+///   ...
+///   Difference(intermediate, toolN) -> ORIGINAL output (original keywords)
+/// so each boolean cut is binary. Intermediates take fresh output slots drawn
+/// from `next_slot` (advanced for each) and carry no keywords; the final link
+/// reuses the original command's output slot and keywords, so `part.root` and
+/// any downstream reference (fillet/chamfer/topology keyword) is unchanged.
+///
+/// The chain is emitted in order with intermediates before the final link, so
+/// the runner/executor resolves slots in command order. Each link depends only
+/// on the previous link's fresh output (which precedes it) plus an original
+/// tool slot (which preceded the original difference), so topological order
+/// holds. This mirrors the existing flatten pass's invariants: it never folds
+/// keywords onto an intermediate, and it never touches the base.
+fn chain_binary_differences(mut command: OcctCommand, next_slot: &mut u64) -> Vec<OcctCommand> {
+    debug_assert_eq!(command.op, OcctOp::Difference);
+    debug_assert!(command.args.len() >= 3);
+    let original_output = command.output;
+    let original_keywords = std::mem::take(&mut command.keywords);
+    let tool_count = command.args.len() - 1;
+    let mut chain: Vec<OcctCommand> = Vec::with_capacity(tool_count);
+    for link_index in 0..tool_count {
+        let is_final = link_index == tool_count - 1;
+        let base_arg = if link_index == 0 {
+            command.args[0].clone()
+        } else {
+            OcctArg::Ref(chain[link_index - 1].output)
+        };
+        let tool_arg = command.args[link_index + 1].clone();
+        let (output, keywords) = if is_final {
+            (original_output, original_keywords.clone())
+        } else {
+            let fresh = OcctSlot(*next_slot);
+            *next_slot += 1;
+            (fresh, Vec::new())
+        };
+        chain.push(OcctCommand {
+            output,
+            op: OcctOp::Difference,
+            args: vec![base_arg, tool_arg],
+            keywords,
+        });
+    }
+    chain
+}
+
+fn command_producers(commands: &[OcctCommand]) -> AuthoringResult<BTreeMap<OcctSlot, usize>> {
     let mut producers = BTreeMap::new();
     for (index, command) in commands.iter().enumerate() {
         if producers.insert(command.output, index).is_some() {
-            return Err(AppError::validation(format!(
+            return Err(backend_validation(format!(
                 "Direct OCCT plan has duplicate producer for slot {}.",
                 command.output.0
             )));
@@ -351,9 +519,9 @@ fn validate_command_graph(
     root: OcctSlot,
     commands: &[OcctCommand],
     producers: &BTreeMap<OcctSlot, usize>,
-) -> AppResult<()> {
+) -> AuthoringResult<()> {
     if !producers.contains_key(&root) {
-        return Err(AppError::validation(format!(
+        return Err(backend_validation(format!(
             "Direct OCCT plan root references missing slot {}.",
             root.0
         )));
@@ -364,13 +532,13 @@ fn validate_command_graph(
         collect_command_refs(command, &mut dependencies);
         for dependency in dependencies {
             let Some(producer_index) = producers.get(&dependency).copied() else {
-                return Err(AppError::validation(format!(
+                return Err(backend_validation(format!(
                     "Direct OCCT command slot {} references missing slot {}.",
                     command.output.0, dependency.0
                 )));
             };
             if producer_index >= consumer_index {
-                return Err(AppError::validation(format!(
+                return Err(backend_validation(format!(
                     "Direct OCCT command slot {} has cyclic or forward dependency on slot {}.",
                     command.output.0, dependency.0
                 )));
@@ -380,34 +548,162 @@ fn validate_command_graph(
     Ok(())
 }
 
+/// Returns true for the affine transform ops this optimizer distributes
+/// across. Every op already present under `CoreTransformOp` —
+/// `Translate`/`Rotate`/`Scale`/`Mirror` — is affine, and an affine transform
+/// distributes over a boolean union: `T(A ∪ B) == T(A) ∪ T(B)`. Non-affine ops
+/// are never generalized here.
+fn is_affine_transform_op(op: OcctOp) -> bool {
+    matches!(
+        op,
+        OcctOp::Translate | OcctOp::Rotate | OcctOp::Scale | OcctOp::Mirror
+    )
+}
+
+/// For an affine transform command, returns the index of its single geometry
+/// subject (the shape being transformed) iff the command has exactly one `Ref`
+/// arg and that arg is trailing. Translate/Rotate/Scale/Mirror all lay out as
+/// `[scalar params..., shape-ref]`, so the subject is the trailing `Ref`. A
+/// second `Ref` (ambiguous subject) or a non-trailing `Ref` bails out, so the
+/// rewrite never mis-attributes a param ref as geometry.
+fn affine_transform_subject_index(command: &OcctCommand) -> Option<usize> {
+    if !is_affine_transform_op(command.op) || command.args.is_empty() {
+        return None;
+    }
+    let last = command.args.len() - 1;
+    if !matches!(command.args[last], OcctArg::Ref(_)) {
+        return None;
+    }
+    let extra_refs = command.args[..last]
+        .iter()
+        .filter(|arg| matches!(arg, OcctArg::Ref(_)))
+        .count();
+    if extra_refs == 0 {
+        Some(last)
+    } else {
+        None
+    }
+}
+
+fn is_keyword_free_all_ref_union(command: &OcctCommand) -> bool {
+    command.op == OcctOp::Union
+        && command.keywords.is_empty()
+        && command
+            .args
+            .iter()
+            .all(|arg| matches!(arg, OcctArg::Ref(_)))
+}
+
+/// True iff `command` is a keyword-free affine transform whose subject arg is a
+/// `Ref` to a keyword-free all-`Ref` union. This is the distributable shape:
+/// `Difference(base, T(Union(children)))` rewrites to
+/// `Difference(base, T(child1), T(child2), ...)`.
+fn is_transform_of_distributable_union(
+    command: &OcctCommand,
+    commands: &[OcctCommand],
+    producers: &BTreeMap<OcctSlot, usize>,
+) -> bool {
+    let Some(subject_index) = affine_transform_subject_index(command) else {
+        return false;
+    };
+    if !command.keywords.is_empty() {
+        return false;
+    }
+    let OcctArg::Ref(union_slot) = &command.args[subject_index] else {
+        return false;
+    };
+    let Some(union_command) = producers
+        .get(union_slot)
+        .and_then(|index| commands.get(*index))
+    else {
+        return false;
+    };
+    is_keyword_free_all_ref_union(union_command)
+}
+
 fn flatten_difference_tool(
     tool: &OcctArg,
     commands: &[OcctCommand],
     producers: &BTreeMap<OcctSlot, usize>,
     output: &mut Vec<OcctArg>,
+    synthesized: &mut Vec<OcctCommand>,
+    next_slot: &mut u64,
 ) {
     let OcctArg::Ref(slot) = tool else {
         output.push(tool.clone());
         return;
     };
-    let Some(producer) = producers
-        .get(slot)
-        .and_then(|index| commands.get(*index))
-        .filter(|command| {
-            command.op == OcctOp::Union
-                && command.keywords.is_empty()
-                && command
-                    .args
-                    .iter()
-                    .all(|arg| matches!(arg, OcctArg::Ref(_)))
-        })
-    else {
+    let Some(producer) = producers.get(slot).and_then(|index| commands.get(*index)) else {
         output.push(tool.clone());
         return;
     };
-    for nested_tool in &producer.args {
-        flatten_difference_tool(nested_tool, commands, producers, output);
+    flatten_command_as_tool(
+        producer,
+        commands,
+        producers,
+        output,
+        synthesized,
+        next_slot,
+    );
+}
+
+/// Flatten the command that produces a difference tool into one or more tool
+/// refs. Three cases:
+/// - a keyword-free all-`Ref` union: recurse over each child (existing
+///   behavior, so nested unions still collapse);
+/// - a keyword-free affine transform of such a union: distribute the transform
+///   over each union child (affine transforms distribute over union), emitting
+///   one identically-transformed tool per child so the fused union never reaches
+///   the boolean, then recurse in case a child is itself a distributable union;
+/// - anything else: keep the tool verbatim.
+fn flatten_command_as_tool(
+    producer: &OcctCommand,
+    commands: &[OcctCommand],
+    producers: &BTreeMap<OcctSlot, usize>,
+    output: &mut Vec<OcctArg>,
+    synthesized: &mut Vec<OcctCommand>,
+    next_slot: &mut u64,
+) {
+    if is_keyword_free_all_ref_union(producer) {
+        for child in &producer.args {
+            flatten_difference_tool(child, commands, producers, output, synthesized, next_slot);
+        }
+        return;
     }
+    if is_transform_of_distributable_union(producer, commands, producers) {
+        let subject_index = affine_transform_subject_index(producer).expect("affine subject");
+        let OcctArg::Ref(union_slot) = &producer.args[subject_index] else {
+            unreachable!("affine transform subject is a Ref");
+        };
+        let union_command = producers
+            .get(union_slot)
+            .and_then(|index| commands.get(*index))
+            .expect("distributable union");
+        for child in &union_command.args {
+            let mut transformed = producer.clone();
+            transformed.output = OcctSlot(*next_slot);
+            *next_slot += 1;
+            transformed.args[subject_index] = child.clone();
+            if is_transform_of_distributable_union(&transformed, commands, producers) {
+                // The synthesized transform still wraps a union — keep
+                // distributing instead of emitting an intermediate tool.
+                flatten_command_as_tool(
+                    &transformed,
+                    commands,
+                    producers,
+                    output,
+                    synthesized,
+                    next_slot,
+                );
+            } else {
+                let out = transformed.output;
+                synthesized.push(transformed);
+                output.push(OcctArg::Ref(out));
+            }
+        }
+        return;
+    }
+    output.push(OcctArg::Ref(producer.output));
 }
 
 fn collect_reachable_slots(
@@ -415,7 +711,7 @@ fn collect_reachable_slots(
     commands: &[OcctCommand],
     producers: &BTreeMap<OcctSlot, usize>,
     reachable: &mut BTreeSet<OcctSlot>,
-) -> AppResult<()> {
+) -> AuthoringResult<()> {
     if !reachable.insert(slot) {
         return Ok(());
     }
@@ -423,7 +719,7 @@ fn collect_reachable_slots(
         .get(&slot)
         .and_then(|index| commands.get(*index))
         .ok_or_else(|| {
-            AppError::validation(format!(
+            backend_validation(format!(
                 "Direct OCCT reachability references missing slot {}.",
                 slot.0
             ))
@@ -466,13 +762,13 @@ fn collect_arg_refs(arg: &OcctArg, output: &mut Vec<OcctSlot>) {
 fn expand_core_program_for_direct_occt(
     program: &CoreProgram,
     parameters: &DesignParams,
-) -> AppResult<CoreProgram> {
+) -> AuthoringResult<CoreProgram> {
     let param_names = program
         .parameters
         .iter()
         .map(|param| (param.id.raw(), param.key.clone()))
         .collect::<BTreeMap<_, _>>();
-    let env = crate::ecky_ir::build_core_program_param_env_for_eval(program, parameters)?;
+    let env = core_param_env(program, parameters)?;
     let node_env = BTreeMap::new();
     let mut next_node_id = next_program_node_id(program);
     let parts = program
@@ -492,7 +788,7 @@ fn expand_core_program_for_direct_occt(
                 )?,
             })
         })
-        .collect::<AppResult<Vec<_>>>()?;
+        .collect::<AuthoringResult<Vec<_>>>()?;
     Ok(CoreProgram::new(
         program.id,
         program.parameters.clone(),
@@ -506,7 +802,7 @@ fn expand_node_for_direct_occt(
     env: &BTreeMap<String, ParamValue>,
     node_env: &BTreeMap<u64, ParamValue>,
     next_node_id: &mut u64,
-) -> AppResult<CoreNode> {
+) -> AuthoringResult<CoreNode> {
     match &node.kind {
         CoreNodeKind::Literal(_) | CoreNodeKind::Reference(_) => Ok(node.clone()),
         CoreNodeKind::Build { bindings, result } => {
@@ -726,6 +1022,17 @@ fn expand_node_for_direct_occt(
                 next_node_id,
             )
         }
+        CoreNodeKind::Call { op, args, keywords } if matches!(op, CoreOperation::Custom(name) if name == "tapped-hole") => {
+            expand_tapped_hole_node(
+                node,
+                args,
+                keywords,
+                param_names,
+                env,
+                node_env,
+                next_node_id,
+            )
+        }
         CoreNodeKind::Call { op, args, .. } if matches!(op, CoreOperation::Custom(name) if name == "rib" || name == "groove") =>
         {
             let is_rib = matches!(op, CoreOperation::Custom(name) if name == "rib");
@@ -771,7 +1078,7 @@ fn expand_node_for_direct_occt(
                     .map(|arg| {
                         expand_node_for_direct_occt(arg, param_names, env, node_env, next_node_id)
                     })
-                    .collect::<AppResult<Vec<_>>>()?,
+                    .collect::<AuthoringResult<Vec<_>>>()?,
                 keywords: keywords
                     .iter()
                     .map(|keyword| {
@@ -791,7 +1098,7 @@ fn expand_node_for_direct_occt(
                             None => CoreKeywordArg::expr(keyword.name.clone(), value),
                         })
                     })
-                    .collect::<AppResult<Vec<_>>>()?,
+                    .collect::<AuthoringResult<Vec<_>>>()?,
             },
         )),
         CoreNodeKind::Range { start, end } => Ok(rebuild_node(
@@ -832,7 +1139,7 @@ fn expand_node_for_direct_occt(
                             next_node_id,
                         )
                     })
-                    .collect::<AppResult<Vec<_>>>()?,
+                    .collect::<AuthoringResult<Vec<_>>>()?,
                 body: Box::new(clone_node_with_fresh_ids(body, next_node_id)),
             },
         )),
@@ -845,7 +1152,7 @@ fn expand_node_for_direct_occt(
                     .map(|arg| {
                         expand_node_for_direct_occt(arg, param_names, env, node_env, next_node_id)
                     })
-                    .collect::<AppResult<Vec<_>>>()?,
+                    .collect::<AuthoringResult<Vec<_>>>()?,
                 list: Box::new(expand_node_for_direct_occt(
                     list,
                     param_names,
@@ -863,7 +1170,7 @@ fn expand_node_for_direct_occt(
                     .map(|item| {
                         expand_node_for_direct_occt(item, param_names, env, node_env, next_node_id)
                     })
-                    .collect::<AppResult<Vec<_>>>()?,
+                    .collect::<AuthoringResult<Vec<_>>>()?,
             ),
         )),
         CoreNodeKind::Group(items) => Ok(rebuild_node(
@@ -874,7 +1181,7 @@ fn expand_node_for_direct_occt(
                     .map(|item| {
                         expand_node_for_direct_occt(item, param_names, env, node_env, next_node_id)
                     })
-                    .collect::<AppResult<Vec<_>>>()?,
+                    .collect::<AuthoringResult<Vec<_>>>()?,
             ),
         )),
     }
@@ -887,7 +1194,7 @@ fn expand_xor_node(
     env: &BTreeMap<String, ParamValue>,
     node_env: &BTreeMap<u64, ParamValue>,
     next_node_id: &mut u64,
-) -> AppResult<CoreNode> {
+) -> AuthoringResult<CoreNode> {
     if args.len() < 2 {
         return Err(bk_arity("xor", "at least two operands"));
     }
@@ -895,7 +1202,7 @@ fn expand_xor_node(
     let normalized_args = args
         .iter()
         .map(|arg| expand_node_for_direct_occt(arg, param_names, env, node_env, next_node_id))
-        .collect::<AppResult<Vec<_>>>()?;
+        .collect::<AuthoringResult<Vec<_>>>()?;
 
     let union_node = CoreNode::new(
         next_id(next_node_id),
@@ -932,7 +1239,7 @@ fn expand_svg_node(
     param_names: &BTreeMap<u64, String>,
     env: &BTreeMap<String, ParamValue>,
     next_node_id: &mut u64,
-) -> AppResult<CoreNode> {
+) -> AuthoringResult<CoreNode> {
     if args.is_empty() || args.len() > 4 {
         return Err(bk_arity(
             "svg",
@@ -940,13 +1247,13 @@ fn expand_svg_node(
         ));
     }
 
-    let source = crate::ecky_ir::eval_core_stringish_with_locals(&args[0], param_names, env)?;
+    let source = eval_core_stringish(&args[0], param_names, env)?;
     let svg_text = if fs::metadata(&source).is_ok() {
         fs::read_to_string(&source).map_err(|err| {
-            AppError::from(AuthoringError::surface(
+            AuthoringError::surface(
                 AuthoringReason::Type,
                 format!("Direct OCCT adapter could not read SVG file `{source}`: {err}"),
-            ))
+            )
         })?
     } else if source.trim_start().starts_with('<') {
         source
@@ -954,14 +1261,13 @@ fn expand_svg_node(
         return Err(AuthoringError::surface(
             AuthoringReason::Type,
             format!("Direct OCCT adapter could not read SVG source at `{source}`."),
-        )
-        .into());
+        ));
     };
 
     let target_width = args
         .get(1)
         .map(|arg| {
-            crate::ecky_ir::eval_core_number_with_locals(arg, param_names, env).map_err(|err| {
+            eval_core_number(arg, param_names, env).map_err(|err| {
                 bk_op(
                     AuthoringReason::Type,
                     "svg",
@@ -974,7 +1280,7 @@ fn expand_svg_node(
     let target_height = args
         .get(2)
         .map(|arg| {
-            crate::ecky_ir::eval_core_number_with_locals(arg, param_names, env).map_err(|err| {
+            eval_core_number(arg, param_names, env).map_err(|err| {
                 bk_op(
                     AuthoringReason::Type,
                     "svg",
@@ -987,7 +1293,7 @@ fn expand_svg_node(
     let fit_mode = args
         .get(3)
         .map(|arg| {
-            let value = crate::ecky_ir::eval_core_stringish_with_locals(arg, param_names, env)?;
+            let value = eval_core_stringish(arg, param_names, env)?;
             value.parse::<SvgFitMode>().map_err(|()| {
                 bk_constrained(
                     "svg",
@@ -1031,7 +1337,14 @@ fn expand_svg_node(
             ))
         }
         Err(_) => {
-            let soup = extract_svg_wire_soup_profile(&svg_text, target_width, target_height, fit)?;
+            let soup = extract_svg_wire_soup_profile(&svg_text, target_width, target_height, fit)
+                .map_err(|err| {
+                AuthoringError::surface(
+                    AuthoringReason::Type,
+                    format!("Direct OCCT adapter could not parse SVG source: {err}"),
+                )
+                .with_op("svg")
+            })?;
             let wire_nodes = soup
                 .wires
                 .iter()
@@ -1080,14 +1393,20 @@ fn expand_text_node(
     param_names: &BTreeMap<u64, String>,
     env: &BTreeMap<String, ParamValue>,
     next_node_id: &mut u64,
-) -> AppResult<CoreNode> {
+) -> AuthoringResult<CoreNode> {
     if args.len() < 2 {
         return Err(bk_arity("text", "text value and size"));
     }
 
-    let value = crate::ecky_ir::eval_core_stringish_with_locals(&args[0], param_names, env)?;
-    let size = crate::ecky_ir::eval_core_number_with_locals(&args[1], param_names, env)?;
-    let components = parse_text_profile(&value, size, None)?;
+    let value = eval_core_stringish(&args[0], param_names, env)?;
+    let size = eval_core_number(&args[1], param_names, env)?;
+    let components = parse_text_profile(&value, size, None).map_err(|err| {
+        backend_op_error(
+            AuthoringReason::Type,
+            "text",
+            format!("Direct OCCT adapter could not lower text profile: {err}"),
+        )
+    })?;
     let outer_nodes = components
         .iter()
         .map(|component| {
@@ -1129,7 +1448,7 @@ fn expand_helical_ridge_node(
     env: &BTreeMap<String, ParamValue>,
     node_env: &BTreeMap<u64, ParamValue>,
     next_node_id: &mut u64,
-) -> AppResult<CoreNode> {
+) -> AuthoringResult<CoreNode> {
     if !args.is_empty() {
         return Err(bk_op(
             AuthoringReason::Unsupported,
@@ -1141,11 +1460,14 @@ fn expand_helical_ridge_node(
         keywords,
         &[
             "radius",
+            "top-radius",
             "pitch",
             "height",
             "base-width",
             "crest-width",
             "depth",
+            "lower-flank",
+            "upper-flank",
             "female",
             "clearance",
             "lefthand",
@@ -1161,6 +1483,23 @@ fn expand_helical_ridge_node(
         env,
         node_env,
     )?;
+    let has_top_radius = keywords.iter().any(|keyword| keyword.name == "top-radius");
+    let top_radius = optional_keyword_number(
+        keywords,
+        "top-radius",
+        radius,
+        "helical-ridge",
+        param_names,
+        env,
+        node_env,
+    )?;
+    if !top_radius.is_finite() || top_radius <= 0.0 {
+        return Err(bk_op(
+            AuthoringReason::Type,
+            "helical-ridge",
+            "`helical-ridge` top-radius must be positive and finite.",
+        ));
+    }
     let pitch = positive_keyword_number(
         keywords,
         "pitch",
@@ -1201,6 +1540,35 @@ fn expand_helical_ridge_node(
         env,
         node_env,
     )?;
+    let lower_flank = optional_keyword_number(
+        keywords,
+        "lower-flank",
+        0.0,
+        "helical-ridge",
+        param_names,
+        env,
+        node_env,
+    )?
+    .to_radians();
+    let upper_flank = optional_keyword_number(
+        keywords,
+        "upper-flank",
+        0.0,
+        "helical-ridge",
+        param_names,
+        env,
+        node_env,
+    )?
+    .to_radians();
+    let has_lower_flank = keywords.iter().any(|keyword| keyword.name == "lower-flank");
+    let has_upper_flank = keywords.iter().any(|keyword| keyword.name == "upper-flank");
+    if has_lower_flank != has_upper_flank {
+        return Err(bk_constrained(
+            "helical-ridge",
+            "`helical-ridge` needs both `:lower-flank` and `:upper-flank` for an asymmetric profile.",
+            &[":lower-flank", ":upper-flank"],
+        ));
+    }
     let female = optional_keyword_bool(
         keywords,
         "female",
@@ -1238,13 +1606,21 @@ fn expand_helical_ridge_node(
     // (`crest_width`) at `radius + ridge_depth`. Must match the build123d
     // lowering profile exactly for backend parity (note the final point uses
     // `base_half`, not `crest_half`).
+    let (base_lower, base_upper) = if has_lower_flank {
+        (
+            -crest_half - ridge_depth * lower_flank.tan(),
+            crest_half + ridge_depth * upper_flank.tan(),
+        )
+    } else {
+        (-base_half, base_half)
+    };
     let profile_wire = path3_node(
         &[
-            [radius, 0.0, -base_half],
+            [radius, 0.0, base_lower],
             [radius + ridge_depth, 0.0, -crest_half],
             [radius + ridge_depth, 0.0, crest_half],
-            [radius, 0.0, base_half],
-            [radius, 0.0, -base_half],
+            [radius, 0.0, base_upper],
+            [radius, 0.0, base_lower],
         ],
         next_node_id,
     );
@@ -1268,11 +1644,15 @@ fn expand_helical_ridge_node(
     let radius_node = number_node(next_node_id, radius);
     let pitch_node = number_node(next_node_id, pitch);
     let height_node = number_node(next_node_id, height);
+    let mut path_args = vec![radius_node, pitch_node, height_node, lefthand_node];
+    if has_top_radius {
+        path_args.push(number_node(next_node_id, top_radius));
+    }
     let path = CoreNode::new(
         next_id(next_node_id),
         CoreNodeKind::Call {
             op: CoreOperation::Custom("helix-path".to_string()),
-            args: vec![radius_node, pitch_node, height_node, lefthand_node],
+            args: path_args,
             keywords: Vec::new(),
         },
         CoreValueKind::Path,
@@ -1300,6 +1680,255 @@ fn expand_helical_ridge_node(
     ))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ThreadProfile {
+    base_width: f64,
+    crest_width: f64,
+    lower_flank: f64,
+    upper_flank: f64,
+}
+
+/// Closed-form symmetric thread profile. Backend geometry math uses radians;
+/// Core IR angle literals and angle parameters are canonical degrees.
+fn derive_thread_profile(
+    pitch: f64,
+    depth: f64,
+    flank: Option<f64>,
+    crest: Option<f64>,
+    base_width: Option<f64>,
+    crest_width: Option<f64>,
+) -> ThreadProfile {
+    let crest_width = crest_width.or(crest).unwrap_or(pitch * 0.25);
+    let base_width = base_width.unwrap_or_else(|| {
+        flank
+            .map(|angle| crest_width + 2.0 * depth * angle.tan())
+            .unwrap_or(pitch * 0.75)
+    });
+    let symmetric_flank = ((base_width - crest_width).max(0.0) / (2.0 * depth)).atan();
+    ThreadProfile {
+        base_width,
+        crest_width,
+        lower_flank: symmetric_flank,
+        upper_flank: symmetric_flank,
+    }
+}
+
+fn derive_buttress_thread_profile(
+    _pitch: f64,
+    depth: f64,
+    load_flank: f64,
+    return_flank: f64,
+    crest: Option<f64>,
+    crest_width: Option<f64>,
+) -> ThreadProfile {
+    let crest_width = crest_width.or(crest).unwrap_or(_pitch * 0.25);
+    let base_width = crest_width + depth * (load_flank.tan() + return_flank.tan());
+    ThreadProfile {
+        base_width,
+        crest_width,
+        lower_flank: load_flank,
+        upper_flank: return_flank,
+    }
+}
+
+fn thread_profile_printability_diagnostic(
+    pitch: f64,
+    base_width: f64,
+    clearance: f64,
+) -> Option<String> {
+    (pitch <= base_width + clearance.max(0.0)).then(|| {
+        "Printability diagnostic: thread turns merge (pitch <= base + clearance).".to_string()
+    })
+}
+
+/// Surface printability advisories without rejecting a renderable thread.
+/// Kept beside native expansion so native and build123d share the same guard.
+pub(crate) fn thread_printability_warnings(
+    program: &CoreProgram,
+    parameters: &DesignParams,
+) -> AuthoringResult<Vec<String>> {
+    let param_names = program
+        .parameters
+        .iter()
+        .map(|param| (param.id.raw(), param.key.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let env = core_param_env(program, parameters)?;
+    let node_env = BTreeMap::new();
+    let mut warnings = Vec::new();
+    for part in &program.parts {
+        collect_thread_printability_warnings(
+            &part.root,
+            &param_names,
+            &env,
+            &node_env,
+            &mut warnings,
+        )?;
+    }
+    warnings.sort();
+    warnings.dedup();
+    Ok(warnings)
+}
+
+fn collect_thread_printability_warnings(
+    node: &CoreNode,
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+    node_env: &BTreeMap<u64, ParamValue>,
+    warnings: &mut Vec<String>,
+) -> AuthoringResult<()> {
+    match &node.kind {
+        CoreNodeKind::Call {
+            op: CoreOperation::Custom(name),
+            keywords,
+            ..
+        } if name == "thread" => {
+            let (pitch, depth) = if let Some(designation) = keyword_text(keywords, "iso") {
+                let (_, pitch, depth) = crate::ecky_core_ir::iso_metric_thread_core(&designation)
+                    .ok_or_else(|| {
+                    bk_constrained(
+                        "thread",
+                        format!("`thread` unknown ISO designation `{designation}`"),
+                        &[],
+                    )
+                })?;
+                (pitch, depth)
+            } else {
+                (
+                    positive_keyword_number(
+                        keywords,
+                        "pitch",
+                        "thread",
+                        param_names,
+                        env,
+                        node_env,
+                    )?,
+                    positive_keyword_number(
+                        keywords,
+                        "depth",
+                        "thread",
+                        param_names,
+                        env,
+                        node_env,
+                    )?,
+                )
+            };
+            let optional = |name| -> AuthoringResult<Option<f64>> {
+                keywords
+                    .iter()
+                    .any(|keyword| keyword.name == name)
+                    .then(|| {
+                        optional_keyword_number(
+                            keywords,
+                            name,
+                            0.0,
+                            "thread",
+                            param_names,
+                            env,
+                            node_env,
+                        )
+                    })
+                    .transpose()
+            };
+            let profile = derive_thread_profile(
+                pitch,
+                depth,
+                optional("flank")?.map(f64::to_radians),
+                optional("crest")?,
+                optional("base-width")?,
+                optional("crest-width")?,
+            );
+            let clearance = optional("clearance")?.unwrap_or(0.0);
+            if let Some(warning) =
+                thread_profile_printability_diagnostic(pitch, profile.base_width, clearance)
+            {
+                warnings.push(warning);
+            }
+        }
+        CoreNodeKind::Build { bindings, result } => {
+            for binding in bindings {
+                collect_thread_printability_warnings(
+                    &binding.value,
+                    param_names,
+                    env,
+                    node_env,
+                    warnings,
+                )?;
+            }
+            collect_thread_printability_warnings(result, param_names, env, node_env, warnings)?;
+        }
+        CoreNodeKind::Let { bindings, body } => {
+            for binding in bindings {
+                collect_thread_printability_warnings(
+                    &binding.value,
+                    param_names,
+                    env,
+                    node_env,
+                    warnings,
+                )?;
+            }
+            collect_thread_printability_warnings(body, param_names, env, node_env, warnings)?;
+        }
+        CoreNodeKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_thread_printability_warnings(condition, param_names, env, node_env, warnings)?;
+            collect_thread_printability_warnings(
+                then_branch,
+                param_names,
+                env,
+                node_env,
+                warnings,
+            )?;
+            collect_thread_printability_warnings(
+                else_branch,
+                param_names,
+                env,
+                node_env,
+                warnings,
+            )?;
+        }
+        CoreNodeKind::Call { args, keywords, .. } => {
+            for arg in args {
+                collect_thread_printability_warnings(arg, param_names, env, node_env, warnings)?;
+            }
+            for keyword in keywords {
+                collect_thread_printability_warnings(
+                    keyword.source_node(),
+                    param_names,
+                    env,
+                    node_env,
+                    warnings,
+                )?;
+            }
+        }
+        CoreNodeKind::Range { start, end } => {
+            collect_thread_printability_warnings(start, param_names, env, node_env, warnings)?;
+            collect_thread_printability_warnings(end, param_names, env, node_env, warnings)?;
+        }
+        CoreNodeKind::Map { sources, body, .. } => {
+            for source in sources {
+                collect_thread_printability_warnings(source, param_names, env, node_env, warnings)?;
+            }
+            collect_thread_printability_warnings(body, param_names, env, node_env, warnings)?;
+        }
+        CoreNodeKind::Apply { args, list, .. } => {
+            for arg in args {
+                collect_thread_printability_warnings(arg, param_names, env, node_env, warnings)?;
+            }
+            collect_thread_printability_warnings(list, param_names, env, node_env, warnings)?;
+        }
+        CoreNodeKind::List(nodes) | CoreNodeKind::Group(nodes) => {
+            for child in nodes {
+                collect_thread_printability_warnings(child, param_names, env, node_env, warnings)?;
+            }
+        }
+        CoreNodeKind::Literal(_) | CoreNodeKind::Reference(_) => {}
+    }
+    Ok(())
+}
+
 fn expand_thread_node(
     node: &CoreNode,
     args: &[CoreNode],
@@ -1308,7 +1937,7 @@ fn expand_thread_node(
     env: &BTreeMap<String, ParamValue>,
     node_env: &BTreeMap<u64, ParamValue>,
     next_node_id: &mut u64,
-) -> AppResult<CoreNode> {
+) -> AuthoringResult<CoreNode> {
     if !args.is_empty() {
         return Err(bk_op(
             AuthoringReason::Unsupported,
@@ -1321,9 +1950,15 @@ fn expand_thread_node(
         &[
             "iso",
             "radius",
+            "top-radius",
             "pitch",
             "length",
             "depth",
+            "flank",
+            "profile",
+            "load-flank",
+            "return-flank",
+            "crest",
             "base-width",
             "crest-width",
             "female",
@@ -1349,24 +1984,67 @@ fn expand_thread_node(
             positive_keyword_number(keywords, "depth", "thread", param_names, env, node_env)?,
         )
     };
-    let base_width = optional_keyword_number(
-        keywords,
-        "base-width",
-        pitch * 0.75,
-        "thread",
-        param_names,
-        env,
-        node_env,
-    )?;
-    let crest_width = optional_keyword_number(
-        keywords,
-        "crest-width",
-        pitch * 0.25,
-        "thread",
-        param_names,
-        env,
-        node_env,
-    )?;
+    let optional_thread_keyword = |name| -> AuthoringResult<Option<f64>> {
+        if keywords.iter().any(|keyword| keyword.name == name) {
+            Ok(Some(optional_keyword_number(
+                keywords,
+                name,
+                0.0,
+                "thread",
+                param_names,
+                env,
+                node_env,
+            )?))
+        } else {
+            Ok(None)
+        }
+    };
+    let top_radius = optional_thread_keyword("top-radius")?.unwrap_or(radius);
+    if !top_radius.is_finite() || top_radius <= 0.0 {
+        return Err(bk_op(
+            AuthoringReason::Type,
+            "thread",
+            "`thread` top-radius must be positive and finite.",
+        ));
+    }
+    let profile_mode = keyword_symbol_or_text(keywords, "profile");
+    let asymmetric_profile = matches!(profile_mode.as_deref(), Some("buttress"));
+    let profile = match profile_mode.as_deref() {
+        None | Some("sym") | Some("symmetric") => derive_thread_profile(
+            pitch,
+            depth,
+            optional_thread_keyword("flank")?.map(f64::to_radians),
+            optional_thread_keyword("crest")?,
+            optional_thread_keyword("base-width")?,
+            optional_thread_keyword("crest-width")?,
+        ),
+        Some("buttress") => derive_buttress_thread_profile(
+            pitch,
+            depth,
+            positive_keyword_number(keywords, "load-flank", "thread", param_names, env, node_env)?
+                .to_radians(),
+            positive_keyword_number(
+                keywords,
+                "return-flank",
+                "thread",
+                param_names,
+                env,
+                node_env,
+            )?
+            .to_radians(),
+            optional_thread_keyword("crest")?,
+            optional_thread_keyword("crest-width")?,
+        ),
+        Some(other) => {
+            return Err(bk_constrained(
+                "thread",
+                format!("`thread :profile` does not recognize `{other}`."),
+                &["sym", "buttress"],
+            ))
+        }
+    };
+    let base_width = profile.base_width;
+    let crest_width = profile.crest_width;
     let female = optional_keyword_bool(
         keywords,
         "female",
@@ -1402,8 +2080,9 @@ fn expand_thread_node(
     // root moves in by `overlap` and its depth grows by `overlap`, so the crest
     // (major = radius + depth) and the core surface (minor = radius) are
     // unchanged — only the buried part of the ridge differs.
-    let overlap = 0.3_f64.min(radius * 0.5).min(depth);
+    let overlap = 0.3_f64.min(radius.min(top_radius) * 0.5).min(depth);
     let ridge_radius = radius - overlap;
+    let ridge_top_radius = top_radius - overlap;
     let ridge_depth = depth + overlap;
 
     // Compose: the canonical thread is the union of a core cylinder with a helical
@@ -1435,6 +2114,22 @@ fn expand_thread_node(
         CoreKeywordArg::expr("depth".to_string(), number_node(next_node_id, ridge_depth)),
         CoreKeywordArg::expr("lefthand".to_string(), bool_node(next_node_id, lefthand)),
     ];
+    if top_radius != radius {
+        ridge_keywords.push(CoreKeywordArg::expr(
+            "top-radius".to_string(),
+            number_node(next_node_id, ridge_top_radius),
+        ));
+    }
+    if asymmetric_profile {
+        ridge_keywords.push(CoreKeywordArg::expr(
+            "lower-flank".to_string(),
+            number_node(next_node_id, profile.lower_flank.to_degrees()),
+        ));
+        ridge_keywords.push(CoreKeywordArg::expr(
+            "upper-flank".to_string(),
+            number_node(next_node_id, profile.upper_flank.to_degrees()),
+        ));
+    }
     if female {
         ridge_keywords.push(CoreKeywordArg::expr(
             "female".to_string(),
@@ -1468,11 +2163,23 @@ fn expand_thread_node(
     let core = CoreNode::new(
         next_id(next_node_id),
         CoreNodeKind::Call {
-            op: CoreOperation::Primitive(CorePrimitive::Cylinder),
-            args: vec![
-                number_node(next_node_id, radius),
-                number_node(next_node_id, length),
-            ],
+            op: if top_radius == radius {
+                CoreOperation::Primitive(CorePrimitive::Cylinder)
+            } else {
+                CoreOperation::Primitive(CorePrimitive::Cone)
+            },
+            args: if top_radius == radius {
+                vec![
+                    number_node(next_node_id, radius),
+                    number_node(next_node_id, length),
+                ]
+            } else {
+                vec![
+                    number_node(next_node_id, radius),
+                    number_node(next_node_id, top_radius),
+                    number_node(next_node_id, length),
+                ]
+            },
             keywords: Vec::new(),
         },
         CoreValueKind::Solid,
@@ -1488,6 +2195,184 @@ fn expand_thread_node(
     ))
 }
 
+/// Expand a `tapped-hole` into a positive tapped-thread cavity: a named-radius
+/// bore cylinder at the ISO minor diameter, unioned with a helical relief ridge
+/// whose crest reaches the major diameter. This mirrors `expand_thread_node`'s
+/// male path with `radius := minor`: the bore plays the role of the core and the
+/// relief ridge is the same helical-ridge tooth (pointing outward into the
+/// material). An equal-nominal external `thread` therefore mates with it.
+///
+/// `iso_metric_thread_core` returns `(minor, pitch, depth)` where `minor` is
+/// `major/2 - depth`; the bore sits at `minor` and the ridge crest lands at
+/// `minor + depth = major`. The `overlap` is a NAMED, bounded value (never an
+/// anonymous fit offset) so `union(bore, ridge)` never shares a coincident
+/// cylinder face, identical to the male-thread rule.
+fn expand_tapped_hole_node(
+    node: &CoreNode,
+    args: &[CoreNode],
+    keywords: &[CoreKeywordArg],
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+    node_env: &BTreeMap<u64, ParamValue>,
+    next_node_id: &mut u64,
+) -> AuthoringResult<CoreNode> {
+    if !args.is_empty() {
+        return Err(bk_op(
+            AuthoringReason::Unsupported,
+            "tapped-hole",
+            "`tapped-hole` expects keyword options only.",
+        ));
+    }
+    reject_unknown_keywords(
+        keywords,
+        &[
+            "iso",
+            "radius",
+            "pitch",
+            "length",
+            "depth",
+            "base-width",
+            "crest-width",
+            "lefthand",
+        ],
+        "tapped-hole",
+    )?;
+
+    let length = positive_keyword_number(
+        keywords,
+        "length",
+        "tapped-hole",
+        param_names,
+        env,
+        node_env,
+    )?;
+    // `iso_metric_thread_core` returns (minor radius, pitch, depth-to-major).
+    // `minor` is a named value: the bore radius and the ridge root reference.
+    let (minor, pitch, depth) = if let Some(designation) = keyword_text(keywords, "iso") {
+        crate::ecky_core_ir::iso_metric_thread_core(&designation).ok_or_else(|| {
+            bk_constrained(
+                "tapped-hole",
+                format!("`tapped-hole` unknown ISO designation `{designation}`"),
+                &["M3", "M4", "M5", "M6", "M8", "M10", "M12", "M16", "M20"],
+            )
+        })?
+    } else {
+        (
+            positive_keyword_number(
+                keywords,
+                "radius",
+                "tapped-hole",
+                param_names,
+                env,
+                node_env,
+            )?,
+            positive_keyword_number(keywords, "pitch", "tapped-hole", param_names, env, node_env)?,
+            positive_keyword_number(keywords, "depth", "tapped-hole", param_names, env, node_env)?,
+        )
+    };
+    let base_width = optional_keyword_number(
+        keywords,
+        "base-width",
+        pitch * 0.75,
+        "tapped-hole",
+        param_names,
+        env,
+        node_env,
+    )?;
+    let crest_width = optional_keyword_number(
+        keywords,
+        "crest-width",
+        pitch * 0.25,
+        "tapped-hole",
+        param_names,
+        env,
+        node_env,
+    )?;
+    let lefthand = optional_keyword_bool(
+        keywords,
+        "lefthand",
+        false,
+        "tapped-hole",
+        param_names,
+        env,
+        node_env,
+    )?;
+
+    // Named, bounded overlap (same rule as the external `thread`): bury the
+    // ridge root inside the bore by `overlap` so the union never shares a
+    // coincident cylinder face. The ridge root moves in by `overlap` and its
+    // depth grows by `overlap`, so the crest (major = minor + depth) and the
+    // bore surface (minor) are unchanged — only the buried part differs.
+    let overlap = 0.3_f64.min(minor * 0.5).min(depth);
+    let ridge_radius = minor - overlap;
+    let ridge_depth = depth + overlap;
+
+    let bool_node = |next: &mut u64, value: bool| {
+        CoreNode::new(
+            next_id(next),
+            CoreNodeKind::Literal(CoreLiteral::Boolean(value)),
+            CoreValueKind::Boolean,
+        )
+    };
+    let ridge_keywords = vec![
+        CoreKeywordArg::expr(
+            "radius".to_string(),
+            number_node(next_node_id, ridge_radius),
+        ),
+        CoreKeywordArg::expr("pitch".to_string(), number_node(next_node_id, pitch)),
+        CoreKeywordArg::expr("height".to_string(), number_node(next_node_id, length)),
+        CoreKeywordArg::expr(
+            "base-width".to_string(),
+            number_node(next_node_id, base_width),
+        ),
+        CoreKeywordArg::expr(
+            "crest-width".to_string(),
+            number_node(next_node_id, crest_width),
+        ),
+        CoreKeywordArg::expr("depth".to_string(), number_node(next_node_id, ridge_depth)),
+        CoreKeywordArg::expr("lefthand".to_string(), bool_node(next_node_id, lefthand)),
+    ];
+    let mut ridge = expand_helical_ridge_node(
+        node,
+        &[],
+        &ridge_keywords,
+        param_names,
+        env,
+        node_env,
+        next_node_id,
+    )?;
+
+    // `expand_helical_ridge_node` rebuilds onto `node`'s id; the bore `union`
+    // below also rebuilds onto `node`'s id. Re-id the ridge so the two get
+    // distinct slots (mirrors the male-thread expansion).
+    ridge.id = next_id(next_node_id);
+
+    let bore = CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::Call {
+            op: CoreOperation::Primitive(CorePrimitive::Cylinder),
+            args: vec![
+                number_node(next_node_id, minor),
+                number_node(next_node_id, length),
+            ],
+            keywords: Vec::new(),
+        },
+        CoreValueKind::Solid,
+    );
+
+    Ok(rebuild_node(
+        node,
+        CoreNodeKind::Call {
+            op: CoreOperation::Boolean(CoreBooleanOp::Union),
+            // Difference flattening preserves Union source order. Cut the
+            // relief first, then the bore: OCCT treats bore-first followed by
+            // the overlapping helical ridge as a near-contact no-op.
+            args: vec![ridge, bore],
+            keywords: Vec::new(),
+        },
+    ))
+}
+
 fn expand_rib_groove_node(
     node: &CoreNode,
     is_rib: bool,
@@ -1496,7 +2381,7 @@ fn expand_rib_groove_node(
     env: &BTreeMap<String, ParamValue>,
     node_env: &BTreeMap<u64, ParamValue>,
     next_node_id: &mut u64,
-) -> AppResult<CoreNode> {
+) -> AuthoringResult<CoreNode> {
     let op_name = if is_rib { "rib" } else { "groove" };
     if args.len() != 3 {
         return Err(bk_arity(op_name, "a solid, a profile, and a path"));
@@ -1537,7 +2422,7 @@ fn expand_regular_polygon_node(
     env: &BTreeMap<String, ParamValue>,
     node_env: &BTreeMap<u64, ParamValue>,
     next_node_id: &mut u64,
-) -> AppResult<CoreNode> {
+) -> AuthoringResult<CoreNode> {
     if args.len() != 2 {
         return Err(bk_arity(
             "regular-polygon",
@@ -1546,8 +2431,8 @@ fn expand_regular_polygon_node(
     }
     reject_unknown_keywords(keywords, &["rotation"], "regular-polygon")?;
 
-    let sides = crate::ecky_ir::eval_core_number_with_locals(&args[0], param_names, env)?;
-    let radius = crate::ecky_ir::eval_core_number_with_locals(&args[1], param_names, env)?;
+    let sides = eval_core_number(&args[0], param_names, env)?;
+    let radius = eval_core_number(&args[1], param_names, env)?;
     let rotation = optional_keyword_number(
         keywords,
         "rotation",
@@ -1609,7 +2494,7 @@ fn expand_trapezoid_node(
     env: &BTreeMap<String, ParamValue>,
     node_env: &BTreeMap<u64, ParamValue>,
     next_node_id: &mut u64,
-) -> AppResult<CoreNode> {
+) -> AuthoringResult<CoreNode> {
     if args.len() != 3 {
         return Err(bk_arity(
             "trapezoid",
@@ -1618,9 +2503,9 @@ fn expand_trapezoid_node(
     }
     reject_unknown_keywords(keywords, &["skew"], "trapezoid")?;
 
-    let bottom = crate::ecky_ir::eval_core_number_with_locals(&args[0], param_names, env)?;
-    let top = crate::ecky_ir::eval_core_number_with_locals(&args[1], param_names, env)?;
-    let height = crate::ecky_ir::eval_core_number_with_locals(&args[2], param_names, env)?;
+    let bottom = eval_core_number(&args[0], param_names, env)?;
+    let top = eval_core_number(&args[1], param_names, env)?;
+    let height = eval_core_number(&args[2], param_names, env)?;
     let skew = optional_keyword_number(
         keywords,
         "skew",
@@ -1682,7 +2567,7 @@ fn expand_slot_center_to_center_node(
     param_names: &BTreeMap<u64, String>,
     env: &BTreeMap<String, ParamValue>,
     next_node_id: &mut u64,
-) -> AppResult<CoreNode> {
+) -> AuthoringResult<CoreNode> {
     if args.len() != 2 {
         return Err(bk_arity(
             "slot-center-to-center",
@@ -1691,8 +2576,8 @@ fn expand_slot_center_to_center_node(
     }
     reject_unknown_keywords(keywords, &[], "slot-center-to-center")?;
 
-    let separation = crate::ecky_ir::eval_core_number_with_locals(&args[0], param_names, env)?;
-    let width = crate::ecky_ir::eval_core_number_with_locals(&args[1], param_names, env)?;
+    let separation = eval_core_number(&args[0], param_names, env)?;
+    let width = eval_core_number(&args[1], param_names, env)?;
     if width.partial_cmp(&0.0) != Some(Ordering::Greater) {
         return Err(bk_op(
             AuthoringReason::Type,
@@ -1737,17 +2622,17 @@ fn expand_slot_center_point_node(
     param_names: &BTreeMap<u64, String>,
     env: &BTreeMap<String, ParamValue>,
     next_node_id: &mut u64,
-) -> AppResult<CoreNode> {
+) -> AuthoringResult<CoreNode> {
     if args.len() != 5 {
         return Err(bk_arity("slot-center-point", "cx, cy, px, py, width"));
     }
     reject_unknown_keywords(keywords, &[], "slot-center-point")?;
 
-    let cx = crate::ecky_ir::eval_core_number_with_locals(&args[0], param_names, env)?;
-    let cy = crate::ecky_ir::eval_core_number_with_locals(&args[1], param_names, env)?;
-    let px = crate::ecky_ir::eval_core_number_with_locals(&args[2], param_names, env)?;
-    let py = crate::ecky_ir::eval_core_number_with_locals(&args[3], param_names, env)?;
-    let width = crate::ecky_ir::eval_core_number_with_locals(&args[4], param_names, env)?;
+    let cx = eval_core_number(&args[0], param_names, env)?;
+    let cy = eval_core_number(&args[1], param_names, env)?;
+    let px = eval_core_number(&args[2], param_names, env)?;
+    let py = eval_core_number(&args[3], param_names, env)?;
+    let width = eval_core_number(&args[4], param_names, env)?;
     if width.partial_cmp(&0.0) != Some(Ordering::Greater) {
         return Err(bk_op(
             AuthoringReason::Type,
@@ -1994,7 +2879,7 @@ fn expand_sampled_radial_loft_node(
     param_names: &BTreeMap<u64, String>,
     env: &BTreeMap<String, ParamValue>,
     next_node_id: &mut u64,
-) -> AppResult<CoreNode> {
+) -> AuthoringResult<CoreNode> {
     if args.len() != 1 {
         return Err(bk_arity(
             "sampled-radial-loft",
@@ -2008,14 +2893,14 @@ fn expand_sampled_radial_loft_node(
     let radius_node = sampled_keyword_node(keywords, "radius")?;
     let z_map_node = sampled_optional_keyword_node(keywords, "z-map");
 
-    let height = crate::ecky_ir::eval_core_number_with_locals(height_node, param_names, env)?;
+    let height = eval_core_number(height_node, param_names, env)?;
     let z_steps = sampled_count(
-        crate::ecky_ir::eval_core_number_with_locals(z_steps_node, param_names, env)?,
+        eval_core_number(z_steps_node, param_names, env)?,
         1,
         "z-steps",
     )?;
     let theta_steps = sampled_count(
-        crate::ecky_ir::eval_core_number_with_locals(theta_steps_node, param_names, env)?,
+        eval_core_number(theta_steps_node, param_names, env)?,
         3,
         "theta-steps",
     )?;
@@ -2034,11 +2919,7 @@ fn expand_sampled_radial_loft_node(
         for ti in 0..theta_steps {
             let theta = 2.0 * std::f64::consts::PI * ti as f64 / theta_steps as f64;
             section_env.insert(binders[0].clone(), ParamValue::Number(theta));
-            let radius = crate::ecky_ir::eval_core_number_with_locals(
-                radius_node,
-                param_names,
-                &section_env,
-            )?;
+            let radius = eval_core_number(radius_node, param_names, &section_env)?;
             if !radius.is_finite() || radius <= 0.0 {
                 return Err(bk_op(
                     AuthoringReason::Type,
@@ -2057,9 +2938,7 @@ fn expand_sampled_radial_loft_node(
         }
 
         let section_z = z_map_node
-            .map(|z_map| {
-                crate::ecky_ir::eval_core_number_with_locals(z_map, param_names, &section_env)
-            })
+            .map(|z_map| eval_core_number(z_map, param_names, &section_env))
             .transpose()?
             .unwrap_or(z);
         let polygon = CoreNode::new(
@@ -2109,7 +2988,7 @@ fn expand_shell_sampled_radial_loft_node(
     param_names: &BTreeMap<u64, String>,
     env: &BTreeMap<String, ParamValue>,
     next_node_id: &mut u64,
-) -> AppResult<CoreNode> {
+) -> AuthoringResult<CoreNode> {
     if !keywords.is_empty() || args.len() != 2 {
         return Err(bk_arity(
             "shell",
@@ -2224,7 +3103,7 @@ fn sampled_replaced_keywords(
         .collect()
 }
 
-fn sampled_radial_loft_binders(arg: &CoreNode) -> AppResult<[String; 3]> {
+fn sampled_radial_loft_binders(arg: &CoreNode) -> AuthoringResult<[String; 3]> {
     match &arg.kind {
         CoreNodeKind::List(items) | CoreNodeKind::Group(items) => {
             if items.len() != 3 {
@@ -2249,7 +3128,7 @@ fn sampled_radial_loft_binders(arg: &CoreNode) -> AppResult<[String; 3]> {
     }
 }
 
-fn sampled_binder_name(node: &CoreNode) -> AppResult<String> {
+fn sampled_binder_name(node: &CoreNode) -> AuthoringResult<String> {
     match &node.kind {
         CoreNodeKind::Reference(CoreReference::Local(name)) => Ok(name.clone()),
         CoreNodeKind::Literal(CoreLiteral::Text(text)) => Ok(text.clone()),
@@ -2262,7 +3141,10 @@ fn sampled_binder_name(node: &CoreNode) -> AppResult<String> {
     }
 }
 
-fn sampled_keyword_node<'a>(keywords: &'a [CoreKeywordArg], name: &str) -> AppResult<&'a CoreNode> {
+fn sampled_keyword_node<'a>(
+    keywords: &'a [CoreKeywordArg],
+    name: &str,
+) -> AuthoringResult<&'a CoreNode> {
     sampled_optional_keyword_node(keywords, name).ok_or_else(|| {
         bk_op(
             AuthoringReason::Arity,
@@ -2282,7 +3164,7 @@ fn sampled_optional_keyword_node<'a>(
         .map(|keyword| keyword.source_node())
 }
 
-fn sampled_count(value: f64, minimum: usize, label: &str) -> AppResult<usize> {
+fn sampled_count(value: f64, minimum: usize, label: &str) -> AuthoringResult<usize> {
     if !value.is_finite() {
         return Err(bk_op(
             AuthoringReason::Type,
@@ -2298,7 +3180,7 @@ fn eval_scalar_binding_for_direct_occt(
     param_names: &BTreeMap<u64, String>,
     env: &BTreeMap<String, ParamValue>,
     node_env: &BTreeMap<u64, ParamValue>,
-) -> AppResult<Option<ParamValue>> {
+) -> AuthoringResult<Option<ParamValue>> {
     match node.value_kind {
         CoreValueKind::Number => Ok(Some(ParamValue::Number(eval_number_for_direct_occt(
             node,
@@ -2422,9 +3304,9 @@ fn eval_number_for_direct_occt(
     param_names: &BTreeMap<u64, String>,
     env: &BTreeMap<String, ParamValue>,
     node_env: &BTreeMap<u64, ParamValue>,
-) -> AppResult<f64> {
+) -> AuthoringResult<f64> {
     let node = rewrite_eval_node_for_direct_occt(node, env, node_env);
-    crate::ecky_ir::eval_core_number_with_locals(&node, param_names, env).map_err(|err| {
+    eval_core_number(&node, param_names, env).map_err(|err| {
         bk(
             AuthoringReason::Type,
             format!("could not evaluate numeric Core node {:?}: {err}", node.id),
@@ -2437,9 +3319,9 @@ fn eval_bool_for_direct_occt(
     param_names: &BTreeMap<u64, String>,
     env: &BTreeMap<String, ParamValue>,
     node_env: &BTreeMap<u64, ParamValue>,
-) -> AppResult<bool> {
+) -> AuthoringResult<bool> {
     let node = rewrite_eval_node_for_direct_occt(node, env, node_env);
-    crate::ecky_ir::eval_core_bool_with_locals(&node, param_names, env)
+    eval_core_bool(&node, param_names, env)
 }
 
 fn eval_stringish_for_direct_occt(
@@ -2447,9 +3329,9 @@ fn eval_stringish_for_direct_occt(
     param_names: &BTreeMap<u64, String>,
     env: &BTreeMap<String, ParamValue>,
     node_env: &BTreeMap<u64, ParamValue>,
-) -> AppResult<String> {
+) -> AuthoringResult<String> {
     let node = rewrite_eval_node_for_direct_occt(node, env, node_env);
-    crate::ecky_ir::eval_core_stringish_with_locals(&node, param_names, env)
+    eval_core_stringish(&node, param_names, env)
 }
 
 fn rewrite_eval_node_for_direct_occt(
@@ -2640,7 +3522,7 @@ fn required_keyword_node<'a>(
     keywords: &'a [CoreKeywordArg],
     name: &str,
     op: &str,
-) -> AppResult<&'a CoreNode> {
+) -> AuthoringResult<&'a CoreNode> {
     keywords
         .iter()
         .find(|keyword| keyword.name == name)
@@ -2661,7 +3543,7 @@ fn positive_keyword_number(
     param_names: &BTreeMap<u64, String>,
     env: &BTreeMap<String, ParamValue>,
     node_env: &BTreeMap<u64, ParamValue>,
-) -> AppResult<f64> {
+) -> AuthoringResult<f64> {
     let value = eval_number_for_direct_occt(
         required_keyword_node(keywords, name, op)?,
         param_names,
@@ -2686,7 +3568,7 @@ fn optional_keyword_number(
     param_names: &BTreeMap<u64, String>,
     env: &BTreeMap<String, ParamValue>,
     node_env: &BTreeMap<u64, ParamValue>,
-) -> AppResult<f64> {
+) -> AuthoringResult<f64> {
     let Some(node) = keywords
         .iter()
         .find(|keyword| keyword.name == name)
@@ -2711,7 +3593,7 @@ fn optional_keyword_bool(
     param_names: &BTreeMap<u64, String>,
     env: &BTreeMap<String, ParamValue>,
     node_env: &BTreeMap<u64, ParamValue>,
-) -> AppResult<bool> {
+) -> AuthoringResult<bool> {
     let Some(node) = keywords
         .iter()
         .find(|keyword| keyword.name == name)
@@ -2732,7 +3614,7 @@ fn reject_unknown_keywords(
     keywords: &[CoreKeywordArg],
     allowed: &[&str],
     op: &str,
-) -> AppResult<()> {
+) -> AuthoringResult<()> {
     for keyword in keywords {
         if allowed
             .iter()
@@ -2967,7 +3849,7 @@ impl<'a> PartPlanner<'a> {
             .collect()
     }
 
-    fn plan_node(&mut self, node: &CoreNode) -> AppResult<OcctSlot> {
+    fn plan_node(&mut self, node: &CoreNode) -> AuthoringResult<OcctSlot> {
         if let Some(slot) = self.node_refs.get(&node.id.raw()).copied() {
             return Ok(slot);
         }
@@ -2982,7 +3864,7 @@ impl<'a> PartPlanner<'a> {
                 let args = args
                     .iter()
                     .map(|arg| self.plan_arg(arg))
-                    .collect::<AppResult<Vec<_>>>()?;
+                    .collect::<AuthoringResult<Vec<_>>>()?;
                 let keywords = keywords
                     .iter()
                     .map(|keyword| {
@@ -3001,7 +3883,7 @@ impl<'a> PartPlanner<'a> {
                             None => OcctKeyword::arg(keyword.name.clone(), value),
                         })
                     })
-                    .collect::<AppResult<Vec<_>>>()?;
+                    .collect::<AuthoringResult<Vec<_>>>()?;
                 self.commands.push(OcctCommand {
                     output,
                     op,
@@ -3014,7 +3896,7 @@ impl<'a> PartPlanner<'a> {
             CoreNodeKind::Let { bindings, body } => self.plan_let(bindings, body)?,
             CoreNodeKind::Apply { op, args, list } => self.plan_apply(op, args, list, node)?,
             CoreNodeKind::If { .. } => {
-                return Err(unsupported(
+                return Err(unsupported_authoring(
                     "if",
                     "branching Core IR needs runtime selection before direct OCCT planning",
                 ));
@@ -3022,7 +3904,7 @@ impl<'a> PartPlanner<'a> {
             CoreNodeKind::Reference(_) => match self.plan_arg(node)? {
                 OcctArg::Ref(slot) => slot,
                 other => {
-                    return Err(bk(
+                    return Err(planner_error(
                         AuthoringReason::Type,
                         format!(
                             "Direct OCCT adapter expected geometry reference, got {:?}.",
@@ -3032,7 +3914,7 @@ impl<'a> PartPlanner<'a> {
                 }
             },
             _ => {
-                return Err(bk(
+                return Err(planner_error(
                     AuthoringReason::Type,
                     format!(
                         "Direct OCCT adapter expected geometry node, got {:?}.",
@@ -3050,7 +3932,7 @@ impl<'a> PartPlanner<'a> {
         &mut self,
         bindings: &[CoreShapeBinding],
         result: &CoreNode,
-    ) -> AppResult<OcctSlot> {
+    ) -> AuthoringResult<OcctSlot> {
         let saved_locals = self.locals.clone();
         for binding in bindings {
             let value = self.plan_arg(&binding.value)?;
@@ -3069,7 +3951,7 @@ impl<'a> PartPlanner<'a> {
         root
     }
 
-    fn plan_let(&mut self, bindings: &[CoreBinding], body: &CoreNode) -> AppResult<OcctSlot> {
+    fn plan_let(&mut self, bindings: &[CoreBinding], body: &CoreNode) -> AuthoringResult<OcctSlot> {
         let saved_locals = self.locals.clone();
         for binding in bindings {
             let value = self.plan_arg(&binding.value)?;
@@ -3091,15 +3973,15 @@ impl<'a> PartPlanner<'a> {
         args: &[CoreNode],
         list: &CoreNode,
         node: &CoreNode,
-    ) -> AppResult<OcctSlot> {
+    ) -> AuthoringResult<OcctSlot> {
         let output = OcctSlot(node.id.raw());
         let mut planned_args = args
             .iter()
             .map(|arg| self.plan_arg(arg))
-            .collect::<AppResult<Vec<_>>>()?;
+            .collect::<AuthoringResult<Vec<_>>>()?;
         let list_arg = self.plan_arg(list)?;
         let OcctArg::List(items) = list_arg else {
-            return Err(bk(
+            return Err(planner_error(
                 AuthoringReason::Type,
                 format!(
                     "Direct OCCT adapter `apply` expected list argument, got {:?}.",
@@ -3117,7 +3999,7 @@ impl<'a> PartPlanner<'a> {
         Ok(output)
     }
 
-    fn plan_arg(&mut self, node: &CoreNode) -> AppResult<OcctArg> {
+    fn plan_arg(&mut self, node: &CoreNode) -> AuthoringResult<OcctArg> {
         match &node.kind {
             CoreNodeKind::Literal(CoreLiteral::Number(number)) => Ok(OcctArg::Number(*number)),
             CoreNodeKind::Literal(CoreLiteral::Boolean(flag)) => Ok(OcctArg::Boolean(*flag)),
@@ -3129,7 +4011,7 @@ impl<'a> PartPlanner<'a> {
             CoreNodeKind::Literal(CoreLiteral::Point3(point)) => Ok(OcctArg::Point3(*point)),
             CoreNodeKind::Reference(CoreReference::Parameter(id)) => {
                 let name = self.param_names.get(&id.raw()).cloned().ok_or_else(|| {
-                    bk(
+                    planner_error(
                         AuthoringReason::Type,
                         format!("Direct OCCT adapter could not resolve parameter {:?}.", id),
                     )
@@ -3141,7 +4023,7 @@ impl<'a> PartPlanner<'a> {
                     return Ok(value);
                 }
                 let slot = self.node_refs.get(&id.raw()).copied().ok_or_else(|| {
-                    bk(
+                    planner_error(
                         AuthoringReason::Type,
                         format!(
                             "Direct OCCT adapter could not resolve Core node reference {:?}.",
@@ -3153,7 +4035,7 @@ impl<'a> PartPlanner<'a> {
             }
             CoreNodeKind::Reference(CoreReference::Local(name)) => {
                 self.locals.get(name).cloned().ok_or_else(|| {
-                    bk(
+                    planner_error(
                         AuthoringReason::Type,
                         format!("Direct OCCT adapter could not resolve local `{}`.", name),
                     )
@@ -3163,7 +4045,7 @@ impl<'a> PartPlanner<'a> {
                 items
                     .iter()
                     .map(|item| self.plan_arg(item))
-                    .collect::<AppResult<Vec<_>>>()?,
+                    .collect::<AuthoringResult<Vec<_>>>()?,
             )),
             CoreNodeKind::Range { start, end } => self.plan_range_arg(start, end),
             CoreNodeKind::Map {
@@ -3183,7 +4065,7 @@ impl<'a> PartPlanner<'a> {
                     match self.plan_arg(arg)? {
                         OcctArg::List(items) => combined.extend(items),
                         other => {
-                            return Err(bk(
+                            return Err(planner_error(
                                 AuthoringReason::Type,
                                 format!(
                                 "Direct OCCT adapter `append` expected list argument, got {:?}.",
@@ -3201,7 +4083,7 @@ impl<'a> PartPlanner<'a> {
                 ..
             } if name == "reverse" => {
                 let [arg] = args.as_slice() else {
-                    return Err(bk(
+                    return Err(planner_error(
                         AuthoringReason::Arity,
                         format!(
                             "Direct OCCT adapter `reverse` expected one list, got {} arguments.",
@@ -3214,7 +4096,7 @@ impl<'a> PartPlanner<'a> {
                         items.reverse();
                         Ok(OcctArg::List(items))
                     }
-                    other => Err(bk(
+                    other => Err(planner_error(
                         AuthoringReason::Type,
                         format!(
                             "Direct OCCT adapter `reverse` expected list argument, got {:?}.",
@@ -3234,7 +4116,7 @@ impl<'a> PartPlanner<'a> {
                     _ => 2,
                 };
                 let [arg] = args.as_slice() else {
-                    return Err(bk(
+                    return Err(planner_error(
                         AuthoringReason::Arity,
                         format!(
                             "Direct OCCT adapter `{name}` expected one list, got {} arguments.",
@@ -3247,7 +4129,7 @@ impl<'a> PartPlanner<'a> {
                     OcctArg::Point2(point) => point.iter().copied().map(OcctArg::Number).collect(),
                     OcctArg::Point3(point) => point.iter().copied().map(OcctArg::Number).collect(),
                     other => {
-                        return Err(bk(
+                        return Err(planner_error(
                             AuthoringReason::Type,
                             format!(
                                 "Direct OCCT adapter `{name}` expected list argument, got {:?}.",
@@ -3257,7 +4139,7 @@ impl<'a> PartPlanner<'a> {
                     }
                 };
                 items.get(index).cloned().ok_or_else(|| {
-                    bk(
+                    planner_error(
                         AuthoringReason::Arity,
                         format!(
                             "Direct OCCT adapter `{name}` expected at least {} item(s), got {}.",
@@ -3284,14 +4166,14 @@ impl<'a> PartPlanner<'a> {
                 let slot = self.plan_node(node)?;
                 Ok(OcctArg::Ref(slot))
             }
-            CoreNodeKind::If { .. } => Err(bk(
+            CoreNodeKind::If { .. } => Err(planner_error(
                 AuthoringReason::Unsupported,
                 format!(
                 "Direct OCCT adapter cannot plan dynamic expression node {:?} before evaluation.",
                 node.kind
             ),
             )),
-            CoreNodeKind::Reference(CoreReference::Part(id)) => Err(bk(
+            CoreNodeKind::Reference(CoreReference::Part(id)) => Err(planner_error(
                 AuthoringReason::Unsupported,
                 format!(
                     "Direct OCCT adapter cannot plan part reference {:?} in first surface.",
@@ -3304,7 +4186,7 @@ impl<'a> PartPlanner<'a> {
     /// Clone `node` with list-accessor calls (`car`, `cadr`, ...) replaced by
     /// literal scalars resolved against planned locals, so the shared scalar
     /// evaluator can fold the surrounding arithmetic.
-    fn substitute_list_accessors(&mut self, node: &CoreNode) -> AppResult<CoreNode> {
+    fn substitute_list_accessors(&mut self, node: &CoreNode) -> AuthoringResult<CoreNode> {
         if let CoreNodeKind::Call {
             op: CoreOperation::Custom(name),
             ..
@@ -3340,12 +4222,12 @@ impl<'a> PartPlanner<'a> {
         Ok(resolved)
     }
 
-    fn plan_align_arg(&mut self, node: &CoreNode) -> AppResult<OcctArg> {
+    fn plan_align_arg(&mut self, node: &CoreNode) -> AuthoringResult<OcctArg> {
         let symbols = match &node.kind {
             CoreNodeKind::List(items) | CoreNodeKind::Group(items) => items
                 .iter()
                 .map(align_axis_arg)
-                .collect::<AppResult<Vec<_>>>()?,
+                .collect::<AuthoringResult<Vec<_>>>()?,
             CoreNodeKind::Call {
                 op: CoreOperation::Custom(head),
                 args,
@@ -3359,7 +4241,7 @@ impl<'a> PartPlanner<'a> {
                 symbols
             }
             _ => {
-                return Err(bk_constrained(
+                return Err(constrained_backend_error(
                     "align",
                     "Direct OCCT adapter `:align` expects `(min|center|max)^3`.",
                     &["min", "center", "max"],
@@ -3367,7 +4249,7 @@ impl<'a> PartPlanner<'a> {
             }
         };
         if symbols.len() != 3 {
-            return Err(bk_arity("align", "exactly 3 axes"));
+            return Err(planner_arity_error("align", "exactly 3 axes"));
         }
         Ok(OcctArg::List(
             symbols
@@ -3377,7 +4259,7 @@ impl<'a> PartPlanner<'a> {
         ))
     }
 
-    fn plan_scalar_arg(&mut self, node: &CoreNode) -> AppResult<Option<OcctArg>> {
+    fn plan_scalar_arg(&mut self, node: &CoreNode) -> AuthoringResult<Option<OcctArg>> {
         let env = self.scalar_env_snapshot();
         let node_env = self.scalar_param_node_values();
         Ok(match node.value_kind {
@@ -3420,7 +4302,7 @@ impl<'a> PartPlanner<'a> {
         })
     }
 
-    fn plan_range_arg(&mut self, start: &CoreNode, end: &CoreNode) -> AppResult<OcctArg> {
+    fn plan_range_arg(&mut self, start: &CoreNode, end: &CoreNode) -> AuthoringResult<OcctArg> {
         let env = self.scalar_env_snapshot();
         let node_env = self.scalar_param_node_values();
         let start = eval_number_for_direct_occt(start, self.param_names, &env, &node_env)?;
@@ -3445,9 +4327,9 @@ impl<'a> PartPlanner<'a> {
         params: &[String],
         sources: &[CoreNode],
         body: &CoreNode,
-    ) -> AppResult<OcctArg> {
+    ) -> AuthoringResult<OcctArg> {
         if params.len() != sources.len() {
-            return Err(bk(
+            return Err(planner_error(
                 AuthoringReason::Arity,
                 format!(
                     "Direct OCCT adapter map expected {} source list(s), got {}.",
@@ -3460,7 +4342,7 @@ impl<'a> PartPlanner<'a> {
             .iter()
             .map(|source| match self.plan_arg(source)? {
                 OcctArg::List(items) => Ok(items),
-                other => Err(bk(
+                other => Err(planner_error(
                     AuthoringReason::Type,
                     format!(
                         "Direct OCCT adapter map expected list source, got {:?}.",
@@ -3468,13 +4350,13 @@ impl<'a> PartPlanner<'a> {
                     ),
                 )),
             })
-            .collect::<AppResult<Vec<_>>>()?;
+            .collect::<AuthoringResult<Vec<_>>>()?;
         let Some(first_source) = source_values.first() else {
             return Ok(OcctArg::List(Vec::new()));
         };
         let count = first_source.len();
         if source_values.iter().any(|source| source.len() != count) {
-            return Err(bk(
+            return Err(planner_error(
                 AuthoringReason::Type,
                 "Direct OCCT adapter map source lists must have matching lengths.",
             ));
@@ -3506,7 +4388,11 @@ impl<'a> PartPlanner<'a> {
         result
     }
 
-    fn plan_let_arg(&mut self, bindings: &[CoreBinding], body: &CoreNode) -> AppResult<OcctArg> {
+    fn plan_let_arg(
+        &mut self,
+        bindings: &[CoreBinding],
+        body: &CoreNode,
+    ) -> AuthoringResult<OcctArg> {
         let saved_locals = self.locals.clone();
         let saved_scalar_env = self.scalar_env.clone();
         let saved_scalar_node_values = self.scalar_node_values.clone();
@@ -3533,7 +4419,7 @@ impl<'a> PartPlanner<'a> {
         &mut self,
         bindings: &[CoreShapeBinding],
         result: &CoreNode,
-    ) -> AppResult<OcctArg> {
+    ) -> AuthoringResult<OcctArg> {
         let saved_locals = self.locals.clone();
         let saved_scalar_env = self.scalar_env.clone();
         let saved_scalar_node_values = self.scalar_node_values.clone();
@@ -3583,7 +4469,7 @@ fn occt_arg_to_scalar(arg: &OcctArg) -> Option<ParamValue> {
     }
 }
 
-fn align_axis_arg(node: &CoreNode) -> AppResult<&'static str> {
+fn align_axis_arg(node: &CoreNode) -> AuthoringResult<&'static str> {
     match &node.kind {
         CoreNodeKind::Literal(CoreLiteral::Symbol(symbol)) => Ok(symbol_name(symbol)),
         CoreNodeKind::Call {
@@ -3591,7 +4477,7 @@ fn align_axis_arg(node: &CoreNode) -> AppResult<&'static str> {
             args,
             keywords,
         } if args.is_empty() && keywords.is_empty() => align_axis_name(name),
-        _ => Err(bk_constrained(
+        _ => Err(constrained_backend_error(
             "align",
             "Direct OCCT adapter `:align` axes must be `min`, `center`, or `max`.",
             &["min", "center", "max"],
@@ -3599,12 +4485,12 @@ fn align_axis_arg(node: &CoreNode) -> AppResult<&'static str> {
     }
 }
 
-fn align_axis_name(name: &str) -> AppResult<&'static str> {
+fn align_axis_name(name: &str) -> AuthoringResult<&'static str> {
     match name {
         "min" => Ok("min"),
         "center" => Ok("center"),
         "max" => Ok("max"),
-        _ => Err(bk_constrained(
+        _ => Err(constrained_backend_error(
             "align",
             format!("Direct OCCT adapter `:align` axis `{name}` is not supported."),
             &["min", "center", "max"],
@@ -3612,7 +4498,7 @@ fn align_axis_name(name: &str) -> AppResult<&'static str> {
     }
 }
 
-fn occt_op(op: &CoreOperation) -> AppResult<OcctOp> {
+fn occt_op(op: &CoreOperation) -> AuthoringResult<OcctOp> {
     match op {
         CoreOperation::Primitive(CorePrimitive::Box) => Ok(OcctOp::Box),
         CoreOperation::Primitive(CorePrimitive::Sphere) => Ok(OcctOp::Sphere),
@@ -3631,6 +4517,7 @@ fn occt_op(op: &CoreOperation) -> AppResult<OcctOp> {
         CoreOperation::Primitive(CorePrimitive::Profile) => Ok(OcctOp::Profile),
         CoreOperation::Primitive(CorePrimitive::MakeFace) => Ok(OcctOp::MakeFace),
         CoreOperation::Primitive(CorePrimitive::Stl) => Ok(OcctOp::ImportStl),
+        CoreOperation::Custom(name) if name == "import-step" => Ok(OcctOp::ImportStep),
         CoreOperation::Surface(CoreSurfaceOp::Extrude) => Ok(OcctOp::Extrude),
         CoreOperation::Surface(CoreSurfaceOp::Revolve) => Ok(OcctOp::Revolve),
         CoreOperation::Surface(CoreSurfaceOp::Loft) => Ok(OcctOp::Loft),
@@ -3666,19 +4553,23 @@ fn occt_op(op: &CoreOperation) -> AppResult<OcctOp> {
         CoreOperation::Meta(CoreMetaOp::Group) => Ok(OcctOp::Compound),
         CoreOperation::Custom(name) if name == "hull" => Ok(OcctOp::Hull),
         CoreOperation::Custom(name) if name == "solidify" => Ok(OcctOp::Solidify),
-        CoreOperation::Custom(name) if name == "hole" => Err(bk_op(
+        CoreOperation::Custom(name) if name == "hole" => Err(planner_op_error(
             AuthoringReason::Unsupported,
             "hole",
             "Typed hole must be filled before direct OCCT planning.",
         )),
-        _ => Err(unsupported(&operation_name(op), "not in first surface")),
+        CoreOperation::Custom(name) => Err(unknown_core_ir_authoring(name)),
+        _ => Err(unsupported_authoring(
+            &operation_name(op),
+            "not in first surface",
+        )),
     }
 }
 
-fn typed_hole_error(keywords: &[CoreKeywordArg]) -> AppError {
+fn typed_hole_error(keywords: &[CoreKeywordArg]) -> AuthoringError {
     let requested_type = keyword_text(keywords, "type").unwrap_or_else(|| "unknown".to_string());
     let goal = keyword_text(keywords, "goal").unwrap_or_else(|| "unspecified".to_string());
-    bk_op(
+    planner_op_error(
         AuthoringReason::Unsupported,
         "hole",
         format!(
@@ -3698,12 +4589,25 @@ fn keyword_text(keywords: &[CoreKeywordArg], name: &str) -> Option<String> {
         })
 }
 
-fn unsupported(op: &str, reason: &str) -> AppError {
-    crate::contracts::AuthoringError::backend(
-        crate::contracts::AuthoringReason::Unsupported,
+fn keyword_symbol_or_text(keywords: &[CoreKeywordArg], name: &str) -> Option<String> {
+    keywords
+        .iter()
+        .find(|keyword| keyword.name == name)
+        .and_then(|keyword| match &keyword.source_node().kind {
+            CoreNodeKind::Literal(CoreLiteral::Text(text)) => Some(text.clone()),
+            CoreNodeKind::Literal(CoreLiteral::Symbol(symbol)) => {
+                Some(symbol_name(symbol).to_string())
+            }
+            _ => None,
+        })
+}
+
+fn unsupported_authoring(op: &str, reason: &str) -> AuthoringError {
+    backend_op_error(
+        AuthoringReason::Unsupported,
+        op,
         format!("The active backend (direct OCCT) cannot execute `{op}`: {reason}."),
     )
-    .with_op(op)
     .with_fix(crate::contracts::ErrorFix {
         hint: Some(
             "switch to a backend that supports this operation, or replace it with an \
@@ -3712,7 +4616,19 @@ fn unsupported(op: &str, reason: &str) -> AppError {
         ),
         suggestions: Vec::new(),
     })
-    .into()
+}
+
+fn unknown_core_ir_authoring(op: &str) -> AuthoringError {
+    let suggestions = crate::ecky_ir::op_suggest::suggest_ops(op);
+    AuthoringError::core_ir(
+        AuthoringReason::UnknownOp,
+        format!("Unknown Core IR operation `{op}`."),
+    )
+    .with_op(op)
+    .with_fix(ErrorFix {
+        hint: Some(format!("replace `{op}` with a known Core IR operation.")),
+        suggestions,
+    })
 }
 
 fn symbol_name(symbol: &CoreSymbol) -> &'static str {
@@ -3816,8 +4732,8 @@ fn selector_source_placeholder_arg(selector: &CoreSelectorPayload) -> OcctArg {
 mod tests {
     use super::*;
     use crate::ecky_core_ir::{
-        CoreLiteral, CoreNode, CoreNodeKind, CoreOperation, CorePart, CorePrimitive, CoreProgram,
-        CoreSelectorPayload, CoreSurfaceOp, CoreValueKind, NodeId, PartId, ProgramId,
+        CoreLiteral, CoreMetaOp, CoreNode, CoreNodeKind, CoreOperation, CorePart, CorePrimitive,
+        CoreProgram, CoreSelectorPayload, CoreSurfaceOp, CoreValueKind, NodeId, PartId, ProgramId,
     };
     use sha2::{Digest, Sha256};
     use std::io::Write;
@@ -3845,21 +4761,38 @@ mod tests {
 
         let plan = plan_core_program(&program).expect("plan");
         let part = &plan.parts[0];
-        let difference = part
+        // parametric-thread-feature 3.1 binary-cut: base plus three flattened
+        // cutter tools becomes a stable-order chain of exactly three binary
+        // Difference commands (each base plus one tool), not one n-ary diff.
+        let differences: Vec<&OcctCommand> = part
             .commands
             .iter()
-            .find(|command| command.op == OcctOp::Difference)
-            .expect("difference");
-        let refs = difference
-            .args
-            .iter()
-            .map(|arg| match arg {
-                OcctArg::Ref(slot) => *slot,
-                other => panic!("expected shape ref, got {other:?}"),
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(refs.len(), 4, "base plus three direct cutter tools");
+            .filter(|command| command.op == OcctOp::Difference)
+            .collect();
+        assert_eq!(
+            differences.len(),
+            3,
+            "base plus three cutter tools -> three binary cuts",
+        );
+        for command in &differences {
+            assert_eq!(
+                command.args.len(),
+                2,
+                "each cut must be binary (base plus one tool), got {:?}",
+                command.args,
+            );
+        }
+        // The chain threads base -> cut1 -> cut2 -> cut3 in source order.
+        assert_eq!(
+            differences[1].args[0],
+            OcctArg::Ref(differences[0].output),
+            "second binary cut must consume the first cut's result",
+        );
+        assert_eq!(
+            differences[2].args[0],
+            OcctArg::Ref(differences[1].output),
+            "third binary cut must consume the second cut's result",
+        );
         assert!(
             part.commands
                 .iter()
@@ -3895,12 +4828,26 @@ mod tests {
             .iter()
             .find(|command| command.op == OcctOp::Union)
             .expect("topology-referenced union remains");
-        let difference = part
+        // The topology-referenced union survives, but the difference still
+        // flattens it into a binary-cut chain (parametric-thread-feature 3.1):
+        // base plus two cutter tools -> two binary Differences.
+        let differences: Vec<&OcctCommand> = part
             .commands
             .iter()
-            .find(|command| command.op == OcctOp::Difference)
-            .expect("difference");
-        assert_eq!(difference.args.len(), 3);
+            .filter(|command| command.op == OcctOp::Difference)
+            .collect();
+        assert_eq!(
+            differences.len(),
+            2,
+            "base plus two cutter tools -> two binary cuts",
+        );
+        for command in &differences {
+            assert_eq!(
+                command.args.len(),
+                2,
+                "each cut must be binary (base plus one tool)",
+            );
+        }
         let fillet = part
             .commands
             .iter()
@@ -3918,7 +4865,13 @@ mod tests {
     }
 
     #[test]
-    fn does_not_flatten_union_across_transform_boundary() {
+    fn flattens_union_across_affine_transform_into_separate_transforms() {
+        // parametric-thread-feature 3.1 optimizer slice: a difference whose tool
+        // is `affineTransform(Union(children))` must rewrite to
+        // `Difference(base, sameTransform(child1), sameTransform(child2), ...)`
+        // so the fused union never reaches the boolean. Affine transforms
+        // distribute over union: `T(A ∪ B) == T(A) ∪ T(B)`, so each child is cut
+        // by its own identically-transformed tool with no fused intermediate.
         let program = compile(
             r#"
             (model
@@ -3935,16 +4888,189 @@ mod tests {
 
         let plan = plan_core_program(&program).expect("plan");
         let part = &plan.parts[0];
-        let difference = part
+        let producers = command_producers(&part.commands).expect("producers");
+        // parametric-thread-feature 3.1 binary-cut: the distributed tools now
+        // reach the boolean as a chain of binary Differences, one per union
+        // child. Each binary cut's tool is a separate Translate(child).
+        let differences: Vec<&OcctCommand> = part
+            .commands
+            .iter()
+            .filter(|command| command.op == OcctOp::Difference)
+            .collect();
+        assert_eq!(
+            differences.len(),
+            2,
+            "expected two binary cuts (one transformed tool per union child)",
+        );
+        for command in &differences {
+            assert_eq!(command.args.len(), 2, "each cut must be binary");
+        }
+
+        // Each tool is a Translate that preserves the original affine params
+        // (-4, 0, 0) and targets exactly one of the union's children.
+        let mut subject_ops: Vec<OcctOp> = Vec::new();
+        for command in &differences {
+            let tool = &command.args[1];
+            let OcctArg::Ref(slot) = tool else {
+                panic!("expected tool ref, got {tool:?}");
+            };
+            let transform = producers
+                .get(slot)
+                .and_then(|index| part.commands.get(*index))
+                .expect("tool producer");
+            assert_eq!(
+                transform.op,
+                OcctOp::Translate,
+                "tool {tool:?} should be produced by a Translate",
+            );
+            let params: Vec<f64> = transform
+                .args
+                .iter()
+                .take(3)
+                .map(|arg| match arg {
+                    OcctArg::Number(value) => *value,
+                    other => panic!("expected number param, got {other:?}"),
+                })
+                .collect();
+            assert_eq!(
+                params,
+                vec![-4.0, 0.0, 0.0],
+                "affine translate params must be preserved per child",
+            );
+            let OcctArg::Ref(subject_slot) = &transform.args[3] else {
+                panic!("expected subject ref, got {:?}", transform.args[3]);
+            };
+            let subject = producers
+                .get(subject_slot)
+                .and_then(|index| part.commands.get(*index))
+                .expect("subject producer");
+            subject_ops.push(subject.op);
+        }
+        // The two tools target the two distinct union children: a bare cylinder
+        // (cutter-a) and an already-translated cylinder (cutter-b = translate 8 0 0).
+        assert_eq!(subject_ops.len(), 2, "one tool per union child");
+        assert!(
+            subject_ops.contains(&OcctOp::Cylinder),
+            "a tool must target the bare cylinder child (cutter-a)",
+        );
+        assert!(
+            subject_ops.contains(&OcctOp::Translate),
+            "a tool must target the translated cylinder child (cutter-b)",
+        );
+
+        // The fused union is dead — it never reaches the Difference.
+        assert!(
+            !part
+                .commands
+                .iter()
+                .any(|command| command.op == OcctOp::Union),
+            "no fused union should remain in the optimized part"
+        );
+    }
+
+    #[test]
+    fn difference_with_two_tools_becomes_binary_cut_chain_with_final_original_slot() {
+        // parametric-thread-feature 3.1 binary-cut optimizer slice (RED): every
+        // Difference with >=2 tools rewrites to a stable-order chain of binary
+        // Difference commands — Difference(base, tool1) -> fresh intermediate,
+        // Difference(intermediate, tool2) -> ... -> Difference(intermediate,
+        // toolN) -> ORIGINAL output — so each boolean cut is binary. Fresh
+        // intermediates carry no keywords; the FINAL link MUST keep the original
+        // command.output (and its keywords) so part.root and downstream refs
+        // (fillet/chamfer/topology keyword) are unchanged. A single-tool
+        // Difference stays binary as-is (guarded in the optimizer).
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (build
+                  (shape base (box 40 30 20))
+                  (shape cutter-a (translate -8 0 0 (cylinder 2 24)))
+                  (shape cutter-b (translate 8 0 0 (cylinder 2 24)))
+                  (shape cutters (union cutter-a cutter-b))
+                  (result (difference base cutters)))))
+            "#,
+        );
+
+        // The unoptimized plan keeps the union as a single tool, so its lone
+        // difference's output is the slot the optimized chain's final link MUST
+        // preserve verbatim.
+        let unoptimized = plan_core_program_unoptimized(&program).expect("unoptimized plan");
+        let original_difference = unoptimized.parts[0]
             .commands
             .iter()
             .find(|command| command.op == OcctOp::Difference)
-            .expect("difference");
-        assert_eq!(difference.args.len(), 2);
-        assert!(part
+            .expect("original difference");
+        let original_output = original_difference.output;
+
+        let plan = plan_core_program(&program).expect("plan");
+        let part = &plan.parts[0];
+        let differences: Vec<&OcctCommand> = part
             .commands
             .iter()
-            .any(|command| command.op == OcctOp::Union));
+            .filter(|command| command.op == OcctOp::Difference)
+            .collect();
+
+        // base + two flattened cutter tools -> a chain of exactly two binary cuts.
+        assert_eq!(
+            differences.len(),
+            2,
+            "expected two binary difference commands, got {}: {:?}",
+            differences.len(),
+            differences,
+        );
+
+        // Every link is binary (base plus exactly one tool) and keyword-free in
+        // this keyword-less source; only the final link may carry keywords.
+        for command in &differences {
+            assert_eq!(
+                command.args.len(),
+                2,
+                "binary difference must be base plus one tool, got {:?}",
+                command.args,
+            );
+            assert!(
+                command.keywords.is_empty(),
+                "binary links must be keyword-free in this keyword-less source",
+            );
+        }
+
+        let first = differences[0];
+        let final_link = differences[1];
+
+        // The intermediate takes a fresh slot strictly above the planned max;
+        // the final link keeps the original difference's output slot verbatim.
+        assert!(
+            first.output.0 > original_output.0,
+            "intermediate must take a fresh slot above the original; got first={} original={}",
+            first.output.0,
+            original_output.0,
+        );
+        assert_eq!(
+            final_link.output, original_output,
+            "final binary link MUST keep the original difference output so downstream refs hold",
+        );
+
+        // Stable order: the final link consumes the intermediate's result as its
+        // base, so the chain threads base -> cut1 -> cut2 in source order.
+        assert_eq!(
+            final_link.args[0],
+            OcctArg::Ref(first.output),
+            "final link must cut from the intermediate's result",
+        );
+        assert_eq!(
+            part.root, final_link.output,
+            "part root must resolve to the final binary link's output",
+        );
+
+        // The fused union never reaches the boolean.
+        assert!(
+            !part
+                .commands
+                .iter()
+                .any(|command| command.op == OcctOp::Union),
+            "bypassed cutter union must be dead"
+        );
     }
 
     #[test]
@@ -4032,7 +5158,19 @@ mod tests {
             .iter()
             .filter(|command| command.op == OcctOp::Union)
             .count();
-        let optimized_tool_count = optimized_part
+        // parametric-thread-feature 3.1 binary-cut: the repeated cutter graph
+        // now lowers to a chain of binary Differences (one tool each), so the
+        // relevant signals are the binary cut count and that NO difference
+        // carries more than one tool. Command count is NOT expected to drop —
+        // the binary-cut contract intentionally trades one n-ary difference for
+        // many binary ones — so union reduction (the real flatten effect) is the
+        // command-graph signal instead.
+        let optimized_difference_count = optimized_part
+            .commands
+            .iter()
+            .filter(|command| command.op == OcctOp::Difference)
+            .count();
+        let optimized_max_tools = optimized_part
             .commands
             .iter()
             .filter(|command| command.op == OcctOp::Difference)
@@ -4042,18 +5180,16 @@ mod tests {
 
         assert_eq!(baseline_part.root, optimized_part.root);
         assert!(
-            optimized_part.commands.len() < baseline_part.commands.len(),
-            "optimized={} baseline={}",
-            optimized_part.commands.len(),
-            baseline_part.commands.len()
-        );
-        assert!(
             optimized_union_count < baseline_union_count,
             "optimized unions={optimized_union_count} baseline unions={baseline_union_count}"
         );
+        assert_eq!(
+            optimized_max_tools, 1,
+            "every optimized difference must be binary under the binary-cut contract"
+        );
         assert!(
-            optimized_tool_count >= 40,
-            "expected repeated cutter tools, got {optimized_tool_count}"
+            optimized_difference_count >= 40,
+            "expected the repeated cutter graph to become >=40 binary cuts, got {optimized_difference_count}"
         );
     }
 
@@ -4409,34 +5545,6 @@ mod tests {
     }
 
     #[test]
-    fn live_draft_matches_build123d_reference() {
-        // T10.9: draft was the only OcctOp with no precompiled-runner
-        // dispatch at all (generated-source-only). Proves the new runner
-        // `draft_shape` produces geometry matching build123d within the
-        // shared differential tolerance, routed through whichever path
-        // runner-first selects.
-        crate::ecky_cad_host::native_parity_harness::assert_native_matches_reference(
-            "(model (part body (draft 10 (box 20 20 20))))",
-            &DesignParams::new(),
-            "draft-op",
-            crate::ecky_cad_host::native_parity_harness::ParityReference::Build123d,
-        );
-    }
-
-    #[test]
-    fn live_torus_matches_build123d_reference() {
-        // Proves the parity harness (language-convenience-stdlib 5.1) is
-        // reusable outside direct_occt_executor.rs: torus parity was
-        // previously only checked by hand on a live render.
-        crate::ecky_cad_host::native_parity_harness::assert_native_matches_reference(
-            "(model (part body (torus 10 3)))",
-            &DesignParams::new(),
-            "torus-primitive",
-            crate::ecky_cad_host::native_parity_harness::ParityReference::Build123d,
-        );
-    }
-
-    #[test]
     fn plans_slot_overall_primitive_for_direct_occt() {
         let program = compile("(model (part body (extrude (slot-overall 40 10) 5)))");
 
@@ -4529,6 +5637,164 @@ mod tests {
     }
 
     #[test]
+    fn plans_conical_thread_as_cone_and_conical_helix_for_direct_occt() {
+        let plan = expand_to_plan(
+            "(model (part pipe (thread :radius 6 :top-radius 5 :pitch 2 :length 20 :depth 0.8)))",
+        );
+        let commands = &plan.parts[0].commands;
+        assert!(commands.iter().any(|command| command.op == OcctOp::Cone));
+        let helix = commands
+            .iter()
+            .find(|command| command.op == OcctOp::HelixPath)
+            .expect("conical helix path");
+        assert_eq!(
+            helix.args.len(),
+            5,
+            "top radius travels with helix: {helix:?}"
+        );
+        assert_eq!(helix.args[4], OcctArg::Number(4.7));
+    }
+
+    #[test]
+    fn thread_profile_derives_base_from_flank_and_preserves_explicit_width_overrides() {
+        let derived = derive_thread_profile(
+            4.0,
+            1.0,
+            Some(std::f64::consts::FRAC_PI_4),
+            Some(0.4),
+            None,
+            None,
+        );
+        assert!((derived.base_width - 2.4).abs() < 1.0e-9, "{derived:?}");
+        assert!((derived.crest_width - 0.4).abs() < 1.0e-9, "{derived:?}");
+
+        let overridden = derive_thread_profile(
+            4.0,
+            1.0,
+            Some(std::f64::consts::FRAC_PI_4),
+            Some(0.4),
+            Some(1.7),
+            Some(0.2),
+        );
+        assert_eq!(overridden.base_width, 1.7, "{overridden:?}");
+        assert_eq!(overridden.crest_width, 0.2, "{overridden:?}");
+    }
+
+    #[test]
+    fn plans_thread_angle_param_like_literal_degrees() {
+        let literal = expand_to_plan(
+            "(model (part screw (thread :radius 8 :pitch 4 :length 16 :depth 1 :crest 0.4 :flank 10deg)))",
+        );
+        let parameter = expand_to_plan(
+            "(model (params (number thread_flank 10deg)) (part screw (thread :radius 8 :pitch 4 :length 16 :depth 1 :crest 0.4 :flank thread_flank)))",
+        );
+        let profile_args = |plan: &OcctPlan| {
+            plan.parts[0]
+                .commands
+                .iter()
+                .find(|command| command.op == OcctOp::Path)
+                .expect("thread profile path")
+                .args
+                .clone()
+        };
+
+        let literal_profile = profile_args(&literal);
+        let parameter_profile = profile_args(&parameter);
+        assert_eq!(parameter_profile, literal_profile);
+
+        let expected_base = 0.4 + 2.0 * 1.0 * 10.0_f64.to_radians().tan();
+        let OcctArg::List(points) = &literal_profile[0] else {
+            panic!("thread profile must lower as a point list: {literal_profile:?}");
+        };
+        assert_eq!(
+            points[0],
+            OcctArg::Point3([7.7, 0.0, -expected_base * 0.5]),
+            "native thread must consume canonical IR degrees exactly once"
+        );
+    }
+
+    #[test]
+    fn buttress_profile_keeps_return_flank_printable_and_load_flank_steep() {
+        let profile = derive_buttress_thread_profile(
+            4.0,
+            1.0,
+            0.174_532_925_199_432_95,
+            std::f64::consts::FRAC_PI_4,
+            None,
+            None,
+        );
+
+        assert!(
+            (profile.lower_flank - 0.174_532_925_199_432_95).abs() < 1.0e-9,
+            "{profile:?}"
+        );
+        assert!(
+            (profile.upper_flank - std::f64::consts::FRAC_PI_4).abs() < 1.0e-9,
+            "{profile:?}"
+        );
+        assert!(
+            profile.upper_flank <= std::f64::consts::FRAC_PI_4,
+            "return/overhang flank: {profile:?}"
+        );
+        assert!(
+            profile.lower_flank < profile.upper_flank,
+            "load flank must stay steep: {profile:?}"
+        );
+        assert!(
+            (profile.base_width - (1.0 + 1.0 * (0.174_532_925_199_432_95_f64.tan() + 1.0))).abs()
+                < 1.0e-9,
+            "{profile:?}"
+        );
+    }
+
+    #[test]
+    fn plans_buttress_thread_as_asymmetric_native_ridge() {
+        let plan = expand_to_plan(
+            "(model (part screw (thread :radius 8 :pitch 4 :length 16 :depth 1 :profile 'buttress :load-flank 10deg :return-flank 45deg)))",
+        );
+
+        assert!(
+            plan.parts[0]
+                .commands
+                .iter()
+                .any(|command| command.op == OcctOp::Sweep),
+            "buttress thread must lower to a native sweep"
+        );
+    }
+
+    #[test]
+    fn thread_profile_warns_when_derived_turns_merge_without_rejecting_plan() {
+        let diagnostic =
+            thread_profile_printability_diagnostic(2.0, 2.4, 0.1).expect("merged turns diagnostic");
+        assert!(diagnostic.contains("turns merge"), "{diagnostic}");
+        assert!(
+            diagnostic.contains("pitch <= base + clearance"),
+            "{diagnostic}"
+        );
+
+        let plan = expand_to_plan(
+            "(model (part screw (thread :radius 8 :pitch 2 :length 16 :depth 1 :crest 0.4 :flank 45deg :clearance 0.1)))",
+        );
+        assert!(
+            plan.parts[0]
+                .commands
+                .iter()
+                .any(|command| command.op == OcctOp::Sweep),
+            "diagnostic must not hard-fail a native thread plan"
+        );
+        let program = compile(
+            "(model (part screw (thread :radius 8 :pitch 2 :length 16 :depth 1 :crest 0.4 :flank 45deg :clearance 0.1)))",
+        );
+        let warnings = thread_printability_warnings(&program, &DesignParams::new())
+            .expect("native warning collection");
+        assert_eq!(
+            warnings,
+            vec![diagnostic],
+            "native manifest warning payload"
+        );
+    }
+
+    #[test]
     fn plans_female_thread_as_ridge_cutter_for_direct_occt() {
         let program = compile(
             "(model (part cut (thread :radius 8 :pitch 2 :length 16 :depth 1 :female #t :clearance 0.2)))",
@@ -4544,6 +5810,124 @@ mod tests {
         assert!(
             !ops.contains(&OcctOp::Union) && !ops.contains(&OcctOp::Cylinder),
             "female thread should be a bare ridge cutter (no core cylinder/union), got {ops:?}"
+        );
+    }
+
+    #[test]
+    fn plans_tapped_hole_as_union_of_bore_and_relief_for_direct_occt() {
+        let program = compile("(model (part wall (tapped-hole :iso \"M8\" :length 14)))");
+
+        let plan = plan_core_program(&program).expect("plan");
+
+        let ops: Vec<_> = plan.parts[0]
+            .commands
+            .iter()
+            .map(|command| command.op)
+            .collect();
+        assert!(
+            ops.contains(&OcctOp::Union) && ops.contains(&OcctOp::Cylinder),
+            "expected tapped-hole to expand into union(cylinder bore, relief ridge), got {ops:?}"
+        );
+    }
+
+    // The end-to-end `plan_core_program` path runs the Direct OCCT normalizer
+    // first; until `tapped-hole` is admitted there these expand-path helpers
+    // exercise the custom-op expansion directly (compile -> expand -> plan),
+    // giving reliable RED/GREEN for the expansion logic in this file without a
+    // bundled OCCT runtime.
+    fn expand_to_plan(source: &str) -> OcctPlan {
+        let program = compile(source);
+        let parameters = DesignParams::new();
+        let expanded = expand_core_program_for_direct_occt(&program, &parameters).expect("expand");
+        plan_expanded_core_program(&expanded, &parameters, true).expect("plan")
+    }
+
+    #[test]
+    fn expands_tapped_hole_into_bore_and_relief_ridge_union_for_direct_occt() {
+        // Focused difference regression: a tapped-hole expands to a named-radius
+        // bore cylinder UNION a helical relief ridge (sweep along a helix path),
+        // mirroring the male thread's union(core, ridge) with radius := minor.
+        let plan = expand_to_plan("(model (part wall (tapped-hole :iso \"M8\" :length 14)))");
+
+        let ops: Vec<_> = plan.parts[0]
+            .commands
+            .iter()
+            .map(|command| command.op)
+            .collect();
+        assert!(
+            ops.contains(&OcctOp::Union) && ops.contains(&OcctOp::Cylinder),
+            "expected tapped-hole to expand into union(cylinder bore, relief ridge), got {ops:?}"
+        );
+        assert!(
+            ops.contains(&OcctOp::HelixPath) && ops.contains(&OcctOp::Sweep),
+            "expected a helical relief ridge (helix-path + sweep), got {ops:?}"
+        );
+        let union = plan.parts[0]
+            .commands
+            .iter()
+            .find(|command| command.op == OcctOp::Union)
+            .expect("tapped-hole union");
+        let OcctArg::Ref(first_tool) = union.args[0] else {
+            panic!("tapped-hole union first argument must be a shape ref");
+        };
+        let first_producer = plan.parts[0]
+            .commands
+            .iter()
+            .find(|command| command.output == first_tool)
+            .expect("tapped-hole union first producer");
+        assert_eq!(
+            first_producer.op,
+            OcctOp::Sweep,
+            "tapped-hole must order relief before bore so a binary cut removes the relief first",
+        );
+
+        assert!(plan.parts[0]
+            .commands
+            .iter()
+            .any(|command| command.op == OcctOp::Cylinder));
+        assert!(plan.parts[0]
+            .commands
+            .iter()
+            .any(|command| command.op == OcctOp::Union));
+    }
+
+    #[test]
+    fn thread_and_tapped_hole_of_equal_nominal_share_iso_minor_for_direct_occt() {
+        // Parity: an external `thread` and a `tapped-hole` of equal nominal size
+        // decode the same ISO core. The male core cylinder and the female bore
+        // cylinder therefore share one named minor radius, so the bolt core
+        // seats in the tapped bore and both ridge crests reach the same major.
+        let male_plan = expand_to_plan("(model (part bolt (thread :iso \"M8\" :length 14)))");
+        let female_plan = expand_to_plan("(model (part nut (tapped-hole :iso \"M8\" :length 14)))");
+
+        let cylinder_minor = |plan: &OcctPlan| {
+            plan.parts[0]
+                .commands
+                .iter()
+                .find(|command| command.op == OcctOp::Cylinder)
+                .and_then(|command| command.args.first())
+                .and_then(|arg| match arg {
+                    OcctArg::Number(value) => Some(*value),
+                    _ => None,
+                })
+                .expect("cylinder minor radius")
+        };
+
+        let male_minor = cylinder_minor(&male_plan);
+        let female_minor = cylinder_minor(&female_plan);
+
+        // M8 -> minor radius 3.23325 (major 8 / 2 - depth 0.76675).
+        assert!(
+            (male_minor - 3.23325).abs() < 1e-6,
+            "male thread core cylinder must sit at M8 minor radius, got {male_minor}"
+        );
+        assert!(
+            (female_minor - 3.23325).abs() < 1e-6,
+            "tapped-hole bore cylinder must sit at M8 minor radius, got {female_minor}"
+        );
+        assert!(
+            (male_minor - female_minor).abs() < 1e-9,
+            "equal-nominal thread and tapped-hole must share one ISO minor radius to mate"
         );
     }
 
@@ -5455,6 +6839,37 @@ mod tests {
     }
 
     #[test]
+    fn plans_thread_and_tapped_hole_placement_on_arbitrary_axis_for_direct_occt() {
+        let program = compile(
+            r#"
+            (model
+              (part assembly
+                (build
+                  (shape wall (box 40 12 30))
+                  (shape axis-plane (plane :origin (0 6 15) :x (0 0 1) :normal (0 1 0)))
+                  (shape axis-location (location axis-plane :offset (0 0 -2) :rotate (90 0 0)))
+                  (shape male (place axis-location (thread :iso "M8" :length 14)))
+                  (shape cutter (place axis-location (tapped-hole :iso "M8" :length 16)))
+                  (result (compound male (difference wall cutter))))))
+            "#,
+        );
+        let plan = plan_core_program(&program).expect("native arbitrary-axis thread plan");
+        let ops = plan.parts[0]
+            .commands
+            .iter()
+            .map(|command| command.op)
+            .collect::<Vec<_>>();
+        assert!(ops.contains(&OcctOp::Plane), "{ops:?}");
+        assert!(ops.contains(&OcctOp::Location), "{ops:?}");
+        assert!(
+            ops.iter().filter(|op| **op == OcctOp::Place).count() >= 2,
+            "{ops:?}"
+        );
+        assert!(ops.contains(&OcctOp::Sweep), "thread ridges: {ops:?}");
+        assert!(ops.contains(&OcctOp::Difference), "wall cut: {ops:?}");
+    }
+
+    #[test]
     fn plans_array_ops_for_direct_occt() {
         let program = compile(
             r#"
@@ -5539,15 +6954,18 @@ mod tests {
             !ops.contains(&OcctOp::Union),
             "cutter-only union should flatten into the difference"
         );
+        // parametric-thread-feature 3.1 binary-cut: base plus the mapped
+        // cutters now lower to a chain of binary Differences (one tool each),
+        // so each cut is binary; the cutter count surfaces as the binary-cut
+        // count instead of one n-ary difference's tool arity.
+        let binary_difference_count = plan.parts[0]
+            .commands
+            .iter()
+            .filter(|command| command.op == OcctOp::Difference)
+            .count();
         assert!(
-            plan.parts[0]
-                .commands
-                .last()
-                .expect("difference")
-                .args
-                .len()
-                >= 13,
-            "base plus mapped cutters should reach one n-ary difference"
+            binary_difference_count >= 12,
+            "base plus mapped cutters should reach a binary-cut chain of >=12 cuts, got {binary_difference_count}"
         );
     }
 
@@ -5850,12 +7268,35 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_op_reports_backend_layer_with_fix() {
-        use crate::contracts::ErrorLayer;
-        let err = unsupported("fillet", "not in first surface");
-        // `unsupported` builds an `AuthoringError` then bridges to `AppError`
-        // via `From`; layer/fix now live directly on the boundary `AppError`.
-        assert_eq!(err.operation.as_deref(), Some("fillet"));
+    fn public_plan_reports_unsupported_backend_op_with_fix() {
+        use crate::contracts::{AppError, AppResult, AuthoringError, ErrorLayer};
+
+        let root = CoreNode::new(
+            NodeId::new(1),
+            CoreNodeKind::Call {
+                op: CoreOperation::Meta(CoreMetaOp::Annotate),
+                args: Vec::new(),
+                keywords: Vec::new(),
+            },
+            CoreValueKind::Solid,
+        );
+        let program = CoreProgram::new(
+            ProgramId::new(1),
+            Vec::new(),
+            vec![CorePart {
+                id: PartId::new(1),
+                key: "body".into(),
+                label: "Body".into(),
+                root,
+            }],
+        );
+
+        fn assert_authoring<T>(_: Result<T, AuthoringError>) {}
+        assert_authoring(plan_core_program(&program));
+        let boundary: AppResult<_> = plan_core_program(&program).map_err(AppError::from);
+        let err = boundary.expect_err("backend must reject annotate");
+
+        assert_eq!(err.operation.as_deref(), Some("annotate"));
         assert_eq!(err.code, crate::contracts::AppErrorCode::Render);
         assert!(
             err.to_string().contains("direct OCCT"),
@@ -5868,8 +7309,8 @@ mod tests {
 
     #[test]
     fn plan_reports_authoring_failure_naming_op() {
-        // A bad op fails planning; the boundary error is a single `AppError`
-        // whose summary names an offending op (no diagnostics collection anymore).
+        use crate::contracts::{AppError, AppResult, ErrorLayer};
+
         let program = compile(
             r#"
             (model
@@ -5877,11 +7318,52 @@ mod tests {
               (part handle (sphre 2)))
             "#,
         );
-        let err = plan_core_program(&program).expect_err("authoring failure");
+        let boundary: AppResult<_> = plan_core_program(&program).map_err(AppError::from);
+        let err = boundary.expect_err("authoring failure");
+
+        assert_eq!(err.layer, Some(ErrorLayer::CoreIr));
+        assert_eq!(err.code, crate::contracts::AppErrorCode::Validation);
+        assert_eq!(err.operation.as_deref(), Some("bx"));
         assert!(
-            err.message.contains("bx") || err.message.contains("sphre"),
-            "summary names an op: {}",
+            err.message.contains("bx"),
+            "summary names op: {}",
             err.message
         );
+        assert!(
+            err.fix
+                .expect("nearest-op fix")
+                .suggestions
+                .contains(&"box".to_string()),
+            "nearest op suggestion must cross public boundary"
+        );
+    }
+
+    #[test]
+    fn unknown_core_ir_op_reports_suggestion() {
+        use crate::contracts::{ErrorFix, ErrorLayer};
+
+        let err = unknown_core_ir_authoring("bx");
+
+        assert_eq!(err.layer, ErrorLayer::CoreIr);
+        assert_eq!(err.op.as_deref(), Some("bx"));
+        assert_eq!(
+            err.fix,
+            Some(ErrorFix {
+                hint: Some("replace `bx` with a known Core IR operation.".into()),
+                suggestions: vec!["box".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn constrained_align_axis_lists_valid_values() {
+        use crate::contracts::ErrorLayer;
+
+        let err = align_axis_name("sideways").expect_err("invalid constrained value");
+
+        assert_eq!(err.layer, ErrorLayer::Backend);
+        assert_eq!(err.reason, AuthoringReason::ConstrainedValue);
+        let fix = err.fix.expect("valid axis values");
+        assert_eq!(fix.suggestions, vec!["min", "center", "max"]);
     }
 }

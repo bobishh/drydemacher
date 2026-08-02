@@ -11,7 +11,7 @@ use crate::contracts::{AppError, AppResult};
 use crate::db;
 use crate::mcp::contracts::*;
 use crate::mcp::runtime;
-use crate::models::AppState;
+use crate::models::{AppState, PathResolver};
 use crate::services::{agent_dialogue, history};
 use tauri::Emitter;
 use tokio::sync::oneshot;
@@ -1042,6 +1042,7 @@ async fn mark_live_session_thread_idle(
 
 pub async fn handle_thread_create(
     state: &AppState,
+    app: &dyn PathResolver,
     req: ThreadCreateRequest,
     ctx: &AgentContext,
 ) -> AppResult<ThreadCreateResponse> {
@@ -1049,6 +1050,7 @@ pub async fn handle_thread_create(
     let title = normalize_created_thread_title(req.title);
     let thread_id = Uuid::new_v4().to_string();
     let now = now_secs();
+    let configured_root = state.config.lock().unwrap().projects_root.clone();
 
     {
         let conn = state.db.lock().await;
@@ -1062,6 +1064,16 @@ pub async fn handle_thread_create(
             None,
             "idle",
             format!("Created new thread '{}'.", title),
+        )?;
+        // Bind the source folder immediately at the thread lifecycle
+        // boundary (openspec thread-source-binding): every thread owns a
+        // default `model.ecky` + manifest the moment it exists.
+        crate::thread_source_binding::bind_new_thread(
+            app,
+            &conn,
+            configured_root.as_deref(),
+            &thread_id,
+            &title,
         )?;
     }
 

@@ -2,8 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::contracts::AppResult;
-use crate::contracts::ParamValue;
+use crate::contracts::{AuthoringError, AuthoringReason, AuthoringResult, ParamValue};
 use crate::ecky_core_ir::{
     CoreArrayOp, CoreBooleanOp, CoreFrameOp, CoreLiteral, CoreMetaOp, CoreNode, CoreNodeKind,
     CoreOperation, CorePathOp, CorePrimitive, CoreProgram, CoreReference, CoreSelectorPayload,
@@ -11,22 +10,110 @@ use crate::ecky_core_ir::{
 };
 
 use super::edge_ops::{
-    edge_selector_spec_from_core_payload, face_selector_spec_from_core_payload,
-    parse_edge_selector_spec,
+    edge_selector_spec_from_core_payload as edge_selector_spec_from_core_payload_app,
+    face_selector_spec_from_core_payload as face_selector_spec_from_core_payload_app,
+    parse_edge_selector_spec as parse_edge_selector_spec_app, EdgeSelectorSpec, FaceSelectorSpec,
 };
 use super::model::{
-    allocate_legacy_local_name, core_program_param_defaults, expr_head_symbol, expr_keyword_name,
-    expr_list_items, expr_parse_edge_selector_spec, expr_parse_face_selector_spec,
-    expr_parse_stringish, materialize_selector_nodes, parse_value_kind_tag, IrExpr, IrModel,
+    allocate_legacy_local_name, core_program_param_defaults as core_program_param_defaults_app,
+    expr_head_symbol as expr_head_symbol_app, expr_keyword_name,
+    expr_list_items as expr_list_items_app,
+    expr_parse_edge_selector_spec as expr_parse_edge_selector_spec_app,
+    expr_parse_face_selector_spec as expr_parse_face_selector_spec_app,
+    expr_parse_stringish as expr_parse_stringish_app,
+    materialize_selector_nodes as materialize_selector_nodes_app, parse_value_kind_tag, IrExpr,
+    IrModel,
 };
-use super::shared::{unsupported, validation};
+use super::shared::{lowering_dependency_error, surface_dependency_error};
 
-pub fn lower_to_freecad(source: &str) -> AppResult<String> {
-    let model = super::model::parse_model(source)?;
+fn validation(message: impl Into<String>) -> AuthoringError {
+    AuthoringError::core_ir(AuthoringReason::Type, message)
+}
+
+fn unsupported(details: impl Into<String>) -> AuthoringError {
+    AuthoringError::unsupported_backend("FreeCAD", "lowering", details)
+}
+
+fn dependency<T>(result: crate::contracts::AppResult<T>) -> AuthoringResult<T> {
+    result.map_err(|err| lowering_dependency_error("FreeCAD", err))
+}
+
+fn edge_selector_spec_from_core_payload(
+    payload: &CoreSelectorPayload,
+) -> AuthoringResult<EdgeSelectorSpec> {
+    dependency(edge_selector_spec_from_core_payload_app(payload))
+}
+
+fn face_selector_spec_from_core_payload(
+    payload: &CoreSelectorPayload,
+) -> AuthoringResult<FaceSelectorSpec> {
+    dependency(face_selector_spec_from_core_payload_app(payload))
+}
+
+fn parse_edge_selector_spec(selector: &str) -> AuthoringResult<EdgeSelectorSpec> {
+    dependency(parse_edge_selector_spec_app(selector))
+}
+
+fn core_program_param_defaults(
+    program: &CoreProgram,
+) -> AuthoringResult<BTreeMap<String, ParamValue>> {
+    dependency(core_program_param_defaults_app(program))
+}
+
+fn expr_head_symbol<'a>(items: &'a [IrExpr], context: &str) -> AuthoringResult<&'a str> {
+    dependency(expr_head_symbol_app(items, context))
+}
+
+fn expr_list_items<'a>(value: &'a IrExpr, context: &str) -> AuthoringResult<&'a [IrExpr]> {
+    dependency(expr_list_items_app(value, context))
+}
+
+fn expr_parse_stringish(value: &IrExpr, context: &str) -> AuthoringResult<String> {
+    dependency(expr_parse_stringish_app(value, context))
+}
+
+fn expr_parse_edge_selector_spec(
+    value: &IrExpr,
+    context: &str,
+) -> AuthoringResult<EdgeSelectorSpec> {
+    dependency(expr_parse_edge_selector_spec_app(value, context))
+}
+
+fn expr_parse_face_selector_spec(
+    value: &IrExpr,
+    context: &str,
+) -> AuthoringResult<FaceSelectorSpec> {
+    dependency(expr_parse_face_selector_spec_app(value, context))
+}
+
+fn materialize_selector_nodes(value: IrExpr) -> AuthoringResult<IrExpr> {
+    dependency(materialize_selector_nodes_app(value))
+}
+
+#[cfg(test)]
+mod authoring_result_contract_tests {
+    use super::*;
+    use crate::contracts::{AppError, AppResult, AuthoringError, ErrorLayer};
+
+    #[test]
+    fn lowering_owner_returns_authoring_error_before_app_boundary() {
+        fn assert_authoring<T>(_: Result<T, AuthoringError>) {}
+
+        assert_authoring(lower_to_freecad("not-edn"));
+        let boundary: AppResult<_> = lower_to_freecad("not-edn").map_err(AppError::from);
+        assert_eq!(
+            boundary.expect_err("surface syntax must fail").layer,
+            Some(ErrorLayer::Surface)
+        );
+    }
+}
+
+pub fn lower_to_freecad(source: &str) -> AuthoringResult<String> {
+    let model = super::model::parse_model(source).map_err(surface_dependency_error)?;
     lower_model_to_freecad(&model)
 }
 
-pub(crate) fn lower_model_to_freecad(model: &IrModel) -> AppResult<String> {
+pub(crate) fn lower_model_to_freecad(model: &IrModel) -> AuthoringResult<String> {
     let defaults = model
         .params
         .iter()
@@ -41,7 +128,7 @@ pub(crate) fn lower_model_to_freecad(model: &IrModel) -> AppResult<String> {
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn lower_core_program_to_freecad(program: &CoreProgram) -> AppResult<String> {
+pub(crate) fn lower_core_program_to_freecad(program: &CoreProgram) -> AuthoringResult<String> {
     let defaults = core_program_param_defaults(program)?;
     let param_names = program
         .parameters
@@ -64,14 +151,14 @@ pub(crate) fn lower_core_program_to_freecad(program: &CoreProgram) -> AppResult<
                 )?,
             ))
         })
-        .collect::<AppResult<Vec<_>>>()?;
+        .collect::<AuthoringResult<Vec<_>>>()?;
     lower_parts_to_freecad(&defaults, &parts)
 }
 
 fn lower_parts_to_freecad(
     defaults: &BTreeMap<String, ParamValue>,
     parts: &[(String, IrExpr)],
-) -> AppResult<String> {
+) -> AuthoringResult<String> {
     let scope = LoweringScope::new(defaults.clone());
     let mut lowerer = FreecadLowerer::new();
     let mut lowered_parts = Vec::new();
@@ -181,7 +268,9 @@ fn core_operation_name_local(op: &CoreOperation) -> String {
     }
 }
 
-fn core_selector_payload_to_ir_expr_local(payload: &CoreSelectorPayload) -> AppResult<IrExpr> {
+fn core_selector_payload_to_ir_expr_local(
+    payload: &CoreSelectorPayload,
+) -> AuthoringResult<IrExpr> {
     match payload {
         CoreSelectorPayload::EdgeAll
         | CoreSelectorPayload::EdgeClauses(_)
@@ -207,7 +296,7 @@ fn core_node_to_ir_expr_local(
     refs: &BTreeMap<u64, String>,
     locals: &BTreeMap<String, String>,
     used_local_names: &mut BTreeMap<String, usize>,
-) -> AppResult<IrExpr> {
+) -> AuthoringResult<IrExpr> {
     match &node.kind {
         CoreNodeKind::Literal(CoreLiteral::Number(n)) => Ok(IrExpr::number(*n)),
         CoreNodeKind::Literal(CoreLiteral::Boolean(flag)) => Ok(IrExpr::boolean(*flag)),
@@ -313,7 +402,7 @@ fn core_node_to_ir_expr_local(
                     }
                     Ok(IrExpr::list(pair))
                 })
-                .collect::<AppResult<Vec<_>>>()?;
+                .collect::<AuthoringResult<Vec<_>>>()?;
             for (original_name, ir_name, _) in ir_binding_names {
                 nested_locals.insert(original_name, ir_name);
             }
@@ -475,7 +564,7 @@ fn core_node_to_ir_expr_local(
                 .map(|item| {
                     core_node_to_ir_expr_local(item, param_names, refs, locals, used_local_names)
                 })
-                .collect::<AppResult<Vec<_>>>()?,
+                .collect::<AuthoringResult<Vec<_>>>()?,
         )),
     }
 }
@@ -609,7 +698,7 @@ struct ThreadCall {
     lefthand: Option<IrExpr>,
 }
 
-fn parse_thread_call(args: &[IrExpr]) -> AppResult<ThreadCall> {
+fn parse_thread_call(args: &[IrExpr]) -> AuthoringResult<ThreadCall> {
     let parsed = ParsedCallArgs::parse(
         "thread",
         args,
@@ -649,8 +738,55 @@ fn parse_thread_call(args: &[IrExpr]) -> AppResult<ThreadCall> {
     })
 }
 
+struct TappedHoleCall {
+    iso: Option<IrExpr>,
+    radius: Option<IrExpr>,
+    pitch: Option<IrExpr>,
+    length: IrExpr,
+    depth: Option<IrExpr>,
+    base_width: Option<IrExpr>,
+    crest_width: Option<IrExpr>,
+    lefthand: Option<IrExpr>,
+}
+
+fn parse_tapped_hole_call(args: &[IrExpr]) -> AuthoringResult<TappedHoleCall> {
+    let parsed = ParsedCallArgs::parse(
+        "tapped-hole",
+        args,
+        &[
+            "iso",
+            "radius",
+            "pitch",
+            "length",
+            "depth",
+            "base-width",
+            "crest-width",
+            "lefthand",
+        ],
+    )?;
+    if !parsed.positional.is_empty() {
+        return Err(validation(
+            "`tapped-hole` expects keyword options: either `:iso \"M8\"` or `:radius`/`:pitch`/`:depth`, plus `:length` and optional `:base-width`, `:crest-width`, `:lefthand`.",
+        ));
+    }
+    Ok(TappedHoleCall {
+        iso: parsed.keywords.get("iso").cloned(),
+        radius: parsed.keywords.get("radius").cloned(),
+        pitch: parsed.keywords.get("pitch").cloned(),
+        length: parsed
+            .keywords
+            .get("length")
+            .cloned()
+            .ok_or_else(|| validation("`tapped-hole` requires `:length`."))?,
+        depth: parsed.keywords.get("depth").cloned(),
+        base_width: parsed.keywords.get("base_width").cloned(),
+        crest_width: parsed.keywords.get("crest_width").cloned(),
+        lefthand: parsed.keywords.get("lefthand").cloned(),
+    })
+}
+
 impl ParsedCallArgs {
-    fn parse(node: &str, args: &[IrExpr], allowed_keywords: &[&str]) -> AppResult<Self> {
+    fn parse(node: &str, args: &[IrExpr], allowed_keywords: &[&str]) -> AuthoringResult<Self> {
         let allowed = allowed_keywords.iter().copied().collect::<BTreeSet<_>>();
         let mut positional = Vec::new();
         let mut keywords = BTreeMap::new();
@@ -690,7 +826,7 @@ impl ParsedCallArgs {
     }
 }
 
-fn parse_sampled_radial_loft_call(args: &[IrExpr]) -> AppResult<SampledRadialLoftCall> {
+fn parse_sampled_radial_loft_call(args: &[IrExpr]) -> AuthoringResult<SampledRadialLoftCall> {
     if args.is_empty() {
         return Err(validation(
             "`sampled-radial-loft` expects binder names plus keyword/value options.",
@@ -742,7 +878,7 @@ fn parse_sampled_radial_loft_call(args: &[IrExpr]) -> AppResult<SampledRadialLof
     })
 }
 
-fn parse_helical_ridge_call(args: &[IrExpr]) -> AppResult<HelicalRidgeCall> {
+fn parse_helical_ridge_call(args: &[IrExpr]) -> AuthoringResult<HelicalRidgeCall> {
     let parsed = ParsedCallArgs::parse(
         "helical-ridge",
         args,
@@ -798,28 +934,6 @@ fn parse_helical_ridge_call(args: &[IrExpr]) -> AppResult<HelicalRidgeCall> {
         clearance: parsed.keywords.get("clearance").cloned(),
         lefthand: parsed.keywords.get("lefthand").cloned(),
     })
-}
-
-fn describe_expr(value: &IrExpr) -> String {
-    if let Some(sym) = value.as_symbol() {
-        return format!("symbol `{}`", sym);
-    }
-    if value.as_f64().is_some() {
-        return "number literal".to_string();
-    }
-    if value.as_bool().is_some() {
-        return "boolean literal".to_string();
-    }
-    if value.as_str().is_some() {
-        return "string literal".to_string();
-    }
-    if let Some(items) = value.as_list() {
-        if let Ok(head) = expr_head_symbol(items, "expression") {
-            return format!("expression `{}`", head);
-        }
-        return "list expression".to_string();
-    }
-    "expression".to_string()
 }
 
 fn typed_hole_error(args: &[IrExpr]) -> String {
@@ -903,7 +1017,7 @@ impl FreecadLowerer {
         &self,
         value: &IrExpr,
         scope: &LoweringScope,
-    ) -> AppResult<(Vec<String>, String, GeomKind, usize)> {
+    ) -> AuthoringResult<(Vec<String>, String, GeomKind, usize)> {
         let mut nested = FreecadLowerer {
             lines: Vec::new(),
             counter: self.counter,
@@ -918,7 +1032,7 @@ impl FreecadLowerer {
         value: &IrExpr,
         scope: &LoweringScope,
         hint: Option<CoreValueKind>,
-    ) -> AppResult<LoweredBinding> {
+    ) -> AuthoringResult<LoweredBinding> {
         match hint {
             Some(CoreValueKind::Number) => {
                 return Ok(LoweredBinding::Number(self.lower_num_expr(value, scope)?))
@@ -961,7 +1075,7 @@ impl FreecadLowerer {
         &mut self,
         value: &IrExpr,
         scope: &LoweringScope,
-    ) -> AppResult<LoweredBinding> {
+    ) -> AuthoringResult<LoweredBinding> {
         let geom_err = match self.lower_geom_expr(value, scope) {
             Ok(node) => {
                 return Ok(LoweredBinding::Geom {
@@ -988,26 +1102,15 @@ impl FreecadLowerer {
         if let Ok(stringish) = self.lower_stringish_expr(value, scope) {
             return Ok(LoweredBinding::Stringish(stringish));
         }
-        if matches!(geom_err.code, crate::contracts::AppErrorCode::Validation) {
-            return Err(geom_err);
-        }
-        if matches!(num_err.code, crate::contracts::AppErrorCode::Validation) {
-            return Err(num_err);
-        }
-        if matches!(bool_err.code, crate::contracts::AppErrorCode::Validation) {
-            return Err(bool_err);
-        }
-        Err(validation(format!(
-            "Could not lower binding value from {}.",
-            describe_expr(value)
-        )))
+        let _ = (num_err, bool_err);
+        Err(geom_err)
     }
 
     fn lower_scalar_binding(
         &self,
         value: &IrExpr,
         scope: &LoweringScope,
-    ) -> AppResult<LoweredBinding> {
+    ) -> AuthoringResult<LoweredBinding> {
         let num_err = match self.lower_num_expr(value, scope) {
             Ok(number) => return Ok(LoweredBinding::Number(number)),
             Err(err) => err,
@@ -1019,12 +1122,7 @@ impl FreecadLowerer {
         if let Ok(stringish) = self.lower_stringish_expr(value, scope) {
             return Ok(LoweredBinding::Stringish(stringish));
         }
-        if matches!(num_err.code, crate::contracts::AppErrorCode::Validation) {
-            return Err(num_err);
-        }
-        if matches!(bool_err.code, crate::contracts::AppErrorCode::Validation) {
-            return Err(bool_err);
-        }
+        let _ = bool_err;
         Err(num_err)
     }
 
@@ -1032,7 +1130,7 @@ impl FreecadLowerer {
         &self,
         bindings_value: &IrExpr,
         scope: &LoweringScope,
-    ) -> AppResult<LoweringScope> {
+    ) -> AuthoringResult<LoweringScope> {
         let bindings = expr_list_items(bindings_value, "let bindings")?;
         let mut frame = BTreeMap::new();
         let mut child_scope = scope.clone();
@@ -1051,7 +1149,7 @@ impl FreecadLowerer {
         Ok(child_scope)
     }
 
-    fn lower_num_expr(&self, value: &IrExpr, scope: &LoweringScope) -> AppResult<String> {
+    fn lower_num_expr(&self, value: &IrExpr, scope: &LoweringScope) -> AuthoringResult<String> {
         if let Some(n) = value.as_f64() {
             return Ok(fmt_f64(n));
         }
@@ -1109,7 +1207,7 @@ impl FreecadLowerer {
                 let parts = args
                     .iter()
                     .map(|arg| self.lower_num_expr(arg, scope))
-                    .collect::<AppResult<Vec<_>>>()?;
+                    .collect::<AuthoringResult<Vec<_>>>()?;
                 Ok(if parts.is_empty() {
                     "0.0".to_string()
                 } else {
@@ -1126,14 +1224,14 @@ impl FreecadLowerer {
                 let parts = args
                     .iter()
                     .map(|arg| self.lower_num_expr(arg, scope))
-                    .collect::<AppResult<Vec<_>>>()?;
+                    .collect::<AuthoringResult<Vec<_>>>()?;
                 Ok(format!("({})", parts.join(" - ")))
             }
             "*" => {
                 let parts = args
                     .iter()
                     .map(|arg| self.lower_num_expr(arg, scope))
-                    .collect::<AppResult<Vec<_>>>()?;
+                    .collect::<AuthoringResult<Vec<_>>>()?;
                 Ok(if parts.is_empty() {
                     "1.0".to_string()
                 } else {
@@ -1154,7 +1252,7 @@ impl FreecadLowerer {
                 let parts = args
                     .iter()
                     .map(|arg| self.lower_num_expr(arg, scope))
-                    .collect::<AppResult<Vec<_>>>()?;
+                    .collect::<AuthoringResult<Vec<_>>>()?;
                 Ok(format!("{}({})", op, parts.join(", ")))
             }
             "clamp" => {
@@ -1319,7 +1417,7 @@ impl FreecadLowerer {
         }
     }
 
-    fn lower_bool_expr(&self, value: &IrExpr, scope: &LoweringScope) -> AppResult<String> {
+    fn lower_bool_expr(&self, value: &IrExpr, scope: &LoweringScope) -> AuthoringResult<String> {
         if let Some(flag) = value.as_bool() {
             return Ok(if flag { "True".into() } else { "False".into() });
         }
@@ -1385,7 +1483,7 @@ impl FreecadLowerer {
                 let parts = args
                     .iter()
                     .map(|arg| self.lower_bool_expr(arg, scope))
-                    .collect::<AppResult<Vec<_>>>()?;
+                    .collect::<AuthoringResult<Vec<_>>>()?;
                 Ok(format!("({})", parts.join(&format!(" {} ", op))))
             }
             "=" | ">" | ">=" | "<" | "<=" => {
@@ -1420,7 +1518,11 @@ impl FreecadLowerer {
         }
     }
 
-    fn lower_stringish_expr(&self, value: &IrExpr, scope: &LoweringScope) -> AppResult<String> {
+    fn lower_stringish_expr(
+        &self,
+        value: &IrExpr,
+        scope: &LoweringScope,
+    ) -> AuthoringResult<String> {
         if let Some(text) = value.as_str() {
             return Ok(format!("{:?}", text));
         }
@@ -1459,7 +1561,7 @@ impl FreecadLowerer {
         &self,
         value: &IrExpr,
         scope: &LoweringScope,
-    ) -> AppResult<(String, String, String)> {
+    ) -> AuthoringResult<(String, String, String)> {
         let items = expr_list_items(value, "3D point expression")?;
         match items.len() {
             3 => Ok((
@@ -1471,7 +1573,7 @@ impl FreecadLowerer {
         }
     }
 
-    fn lower_point2(&self, value: &IrExpr, scope: &LoweringScope) -> AppResult<String> {
+    fn lower_point2(&self, value: &IrExpr, scope: &LoweringScope) -> AuthoringResult<String> {
         let items = expr_list_items(value, "2D point expression")?;
         if expr_head_symbol(items, "2D point expression").ok() == Some("list") && items.len() == 3 {
             return Ok(format!(
@@ -1498,7 +1600,7 @@ impl FreecadLowerer {
         }
     }
 
-    fn lower_point3(&self, value: &IrExpr, scope: &LoweringScope) -> AppResult<String> {
+    fn lower_point3(&self, value: &IrExpr, scope: &LoweringScope) -> AuthoringResult<String> {
         let items = expr_list_items(value, "3D point expression")?;
         if expr_head_symbol(items, "3D point expression").ok() == Some("list") && items.len() == 4 {
             return Ok(format!(
@@ -1532,7 +1634,7 @@ impl FreecadLowerer {
         value: Option<&IrExpr>,
         node: &str,
         default: (&'static str, &'static str, &'static str),
-    ) -> AppResult<String> {
+    ) -> AuthoringResult<String> {
         let Some(value) = value else {
             return Ok(format!(
                 "(\"{}\", \"{}\", \"{}\")",
@@ -1570,7 +1672,7 @@ impl FreecadLowerer {
         Ok(format!("({}, {}, {})", axis[0], axis[1], axis[2]))
     }
 
-    fn lower_edge_selector(&self, value: Option<&IrExpr>) -> AppResult<String> {
+    fn lower_edge_selector(&self, value: Option<&IrExpr>) -> AuthoringResult<String> {
         let parsed = match value {
             Some(value) => expr_parse_edge_selector_spec(value, "edge selection")?,
             None => parse_edge_selector_spec("all")?,
@@ -1578,7 +1680,7 @@ impl FreecadLowerer {
         Ok(parsed.python_payload_literal().to_string())
     }
 
-    fn lower_face_selector(&self, value: Option<&IrExpr>) -> AppResult<Option<String>> {
+    fn lower_face_selector(&self, value: Option<&IrExpr>) -> AuthoringResult<Option<String>> {
         let Some(value) = value else {
             return Ok(None);
         };
@@ -1591,7 +1693,7 @@ impl FreecadLowerer {
         value: &IrExpr,
         scope: &LoweringScope,
         node: &str,
-    ) -> AppResult<(String, String)> {
+    ) -> AuthoringResult<(String, String)> {
         let items = expr_list_items(value, node)?;
         if items.len() != 2 {
             return Err(validation(format!("`{}` expects `(min max)`.", node)));
@@ -1602,7 +1704,11 @@ impl FreecadLowerer {
         ))
     }
 
-    fn lower_frame_expr(&mut self, value: &IrExpr, scope: &LoweringScope) -> AppResult<String> {
+    fn lower_frame_expr(
+        &mut self,
+        value: &IrExpr,
+        scope: &LoweringScope,
+    ) -> AuthoringResult<String> {
         if let Some(sym) = value.as_symbol() {
             if let Some(binding) = scope.resolve(sym) {
                 return match binding {
@@ -1713,7 +1819,7 @@ impl FreecadLowerer {
         &mut self,
         values: &[IrExpr],
         scope: &LoweringScope,
-    ) -> AppResult<Vec<LoweredNode>> {
+    ) -> AuthoringResult<Vec<LoweredNode>> {
         values
             .iter()
             .map(|value| self.lower_geom_expr(value, scope))
@@ -1724,7 +1830,7 @@ impl FreecadLowerer {
         &mut self,
         value: &IrExpr,
         scope: &LoweringScope,
-    ) -> AppResult<LoweredRuntimeList> {
+    ) -> AuthoringResult<LoweredRuntimeList> {
         if let Some(sym) = value.as_symbol() {
             return match scope.resolve(sym) {
                 Some(LoweredBinding::RuntimeList(list)) => Ok(list.clone()),
@@ -1779,7 +1885,7 @@ impl FreecadLowerer {
         &mut self,
         args: &[IrExpr],
         scope: &LoweringScope,
-    ) -> AppResult<LoweredRuntimeList> {
+    ) -> AuthoringResult<LoweredRuntimeList> {
         if args.len() < 2 {
             return Err(validation(
                 "`map` expects function and at least one source list.",
@@ -1796,7 +1902,7 @@ impl FreecadLowerer {
         let sources = args[1..]
             .iter()
             .map(|source| self.lower_runtime_list_expr(source, scope))
-            .collect::<AppResult<Vec<_>>>()?;
+            .collect::<AuthoringResult<Vec<_>>>()?;
         for source in &sources {
             if source.kind != RuntimeListKind::Number {
                 return Err(unsupported(format!(
@@ -1849,7 +1955,7 @@ impl FreecadLowerer {
         &mut self,
         args: &[IrExpr],
         scope: &LoweringScope,
-    ) -> AppResult<LoweredNode> {
+    ) -> AuthoringResult<LoweredNode> {
         if args.len() < 2 {
             return Err(validation(
                 "`apply` expects an operation and a runtime list.",
@@ -1955,7 +2061,11 @@ impl FreecadLowerer {
         Ok(LoweredNode { expr: result, kind })
     }
 
-    fn lower_geom_expr(&mut self, value: &IrExpr, scope: &LoweringScope) -> AppResult<LoweredNode> {
+    fn lower_geom_expr(
+        &mut self,
+        value: &IrExpr,
+        scope: &LoweringScope,
+    ) -> AuthoringResult<LoweredNode> {
         if let Some(sym) = value.as_symbol() {
             return match scope.resolve(sym) {
                 Some(LoweredBinding::Geom { var, kind }) => Ok(LoweredNode {
@@ -2348,7 +2458,7 @@ impl FreecadLowerer {
                     .positional
                     .iter()
                     .map(|expr| self.lower_num_expr(expr, scope))
-                    .collect::<AppResult<Vec<_>>>()?;
+                    .collect::<AuthoringResult<Vec<_>>>()?;
                 let align = self.lower_align_tuple(
                     parsed.keywords.get("align"),
                     "wedge",
@@ -3226,6 +3336,63 @@ impl FreecadLowerer {
                     kind: GeomKind::Solid3d,
                 });
             }
+            "tapped-hole" => {
+                let call = parse_tapped_hole_call(args)?;
+                let length = self.lower_num_expr(&call.length, scope)?;
+                let (minor, pitch, depth) = if let Some(iso) = call.iso.as_ref() {
+                    let designation = iso.as_str().ok_or_else(|| {
+                        validation("`tapped-hole :iso` expects a string like \"M8\".")
+                    })?;
+                    let (r, p, d) = crate::ecky_core_ir::iso_metric_thread_core(designation)
+                        .ok_or_else(|| {
+                            validation(format!(
+                                "`tapped-hole` unknown ISO designation `{designation}` (try M3, M4, M5, M6, M8, M10, M12, M16, M20)."
+                            ))
+                        })?;
+                    (format!("{r}"), format!("{p}"), format!("{d}"))
+                } else {
+                    let radius = call.radius.as_ref().ok_or_else(|| {
+                        validation("`tapped-hole` requires `:radius` (or `:iso`).")
+                    })?;
+                    let pitch = call.pitch.as_ref().ok_or_else(|| {
+                        validation("`tapped-hole` requires `:pitch` (or `:iso`).")
+                    })?;
+                    let depth = call.depth.as_ref().ok_or_else(|| {
+                        validation("`tapped-hole` requires `:depth` (or `:iso`).")
+                    })?;
+                    (
+                        self.lower_num_expr(radius, scope)?,
+                        self.lower_num_expr(pitch, scope)?,
+                        self.lower_num_expr(depth, scope)?,
+                    )
+                };
+                let base_width = call
+                    .base_width
+                    .as_ref()
+                    .map(|value| self.lower_num_expr(value, scope))
+                    .transpose()?
+                    .unwrap_or_else(|| format!("({pitch}) * 0.75"));
+                let crest_width = call
+                    .crest_width
+                    .as_ref()
+                    .map(|value| self.lower_num_expr(value, scope))
+                    .transpose()?
+                    .unwrap_or_else(|| format!("({pitch}) * 0.25"));
+                let lefthand = call
+                    .lefthand
+                    .as_ref()
+                    .map(|value| self.lower_bool_expr(value, scope))
+                    .transpose()?
+                    .unwrap_or_else(|| "False".to_string());
+                let result = self.next_var();
+                self.emit(format!(
+                    "{result} = _ecky_tapped_hole({minor}, {pitch}, {length}, {depth}, {base_width}, {crest_width}, lefthand={lefthand})"
+                ));
+                return Ok(LoweredNode {
+                    expr: result,
+                    kind: GeomKind::Solid3d,
+                });
+            }
             "helical-ridge" => {
                 let call = parse_helical_ridge_call(args)?;
                 let radius = self.lower_num_expr(&call.radius, scope)?;
@@ -3724,7 +3891,7 @@ impl FreecadLowerer {
         value: &IrExpr,
         scope: &LoweringScope,
         allow_3d: bool,
-    ) -> AppResult<String> {
+    ) -> AuthoringResult<String> {
         let items = expr_list_items(value, "point list")?;
         let mut points = Vec::new();
         for item in items {
@@ -3753,7 +3920,11 @@ impl FreecadLowerer {
         Ok(points.join(", "))
     }
 
-    fn lower_wire_operand(&mut self, value: &IrExpr, scope: &LoweringScope) -> AppResult<String> {
+    fn lower_wire_operand(
+        &mut self,
+        value: &IrExpr,
+        scope: &LoweringScope,
+    ) -> AuthoringResult<String> {
         if let Ok(sketch) = self.lower_geom_expr(value, scope) {
             if sketch.kind != GeomKind::Sketch2d {
                 return Err(unsupported(format!(
@@ -3771,7 +3942,7 @@ impl FreecadLowerer {
         &mut self,
         value: &IrExpr,
         scope: &LoweringScope,
-    ) -> AppResult<Vec<String>> {
+    ) -> AuthoringResult<Vec<String>> {
         let items = expr_list_items(value, "wire collection")?;
         if items.is_empty() {
             return Ok(Vec::new());
@@ -3805,7 +3976,11 @@ impl FreecadLowerer {
             .collect()
     }
 
-    fn lower_num_list(&self, value: &IrExpr, scope: &LoweringScope) -> AppResult<Vec<String>> {
+    fn lower_num_list(
+        &self,
+        value: &IrExpr,
+        scope: &LoweringScope,
+    ) -> AuthoringResult<Vec<String>> {
         let items = expr_list_items(value, "numeric list")?;
         items
             .iter()
@@ -3818,7 +3993,7 @@ impl FreecadLowerer {
         value: &IrExpr,
         scope: &LoweringScope,
         minimum: usize,
-    ) -> AppResult<String> {
+    ) -> AuthoringResult<String> {
         if let Some(n) = value.as_f64() {
             return Ok((n.round().max(minimum as f64) as usize).to_string());
         }
@@ -3826,7 +4001,7 @@ impl FreecadLowerer {
         Ok(format!("max({}, int(round(float({expr}))))", minimum))
     }
 
-    fn same_kind(&self, operands: &[LoweredNode]) -> AppResult<GeomKind> {
+    fn same_kind(&self, operands: &[LoweredNode]) -> AuthoringResult<GeomKind> {
         let kind = operands
             .first()
             .map(|node| node.kind.clone())
@@ -4007,6 +4182,7 @@ fn freecad_preamble() -> Vec<String> {
         "def _ecky_helical_ridge(radius, pitch, height, base_width, crest_width, depth, female=False, clearance=0.0, lefthand=False):\n    radius = float(radius); pitch = float(pitch); height = float(height)\n    base_width = float(base_width); crest_width = float(crest_width); depth = float(depth)\n    clearance = max(0.0, float(clearance))\n    female = bool(female); lefthand = bool(lefthand)\n    if radius <= 0.0: raise ValueError('helical-ridge radius must be positive')\n    if pitch <= 0.0: raise ValueError('helical-ridge pitch must be positive')\n    if height <= 0.0: raise ValueError('helical-ridge height must be positive')\n    if base_width <= 0.0: raise ValueError('helical-ridge base-width must be positive')\n    if crest_width <= 0.0: raise ValueError('helical-ridge crest-width must be positive')\n    if depth <= 0.0: raise ValueError('helical-ridge depth must be positive')\n    envelope_clearance = clearance if female else 0.0\n    path_radius = radius\n    base_half = (base_width + 2.0 * envelope_clearance) * 0.5\n    crest_half = (crest_width + 2.0 * envelope_clearance) * 0.5\n    ridge_depth = depth + envelope_clearance\n    helix = Part.makeHelix(pitch, height, path_radius)\n    if lefthand:\n        helix.mirror(App.Vector(0, 0, 0), App.Vector(0, 1, 0))\n    points = [\n        App.Vector(path_radius, 0, -base_half),\n        App.Vector(path_radius + ridge_depth, 0, -crest_half),\n        App.Vector(path_radius + ridge_depth, 0, crest_half),\n        App.Vector(path_radius, 0, base_half),\n        App.Vector(path_radius, 0, -base_half),\n    ]\n    profile = Part.Wire(Part.makePolygon(points))\n    return Part.Wire(helix).makePipeShell([profile], True, False)".into(),
         String::new(),
         "def _ecky_thread(radius, pitch, length, depth, base_width, crest_width, female=False, clearance=0.0, lefthand=False):\n    ridge = _ecky_helical_ridge(radius, pitch, length, base_width, crest_width, depth, female=female, clearance=clearance, lefthand=lefthand)\n    if bool(female):\n        return ridge\n    core = _ecky_cylinder(float(radius), float(length))\n    return core.fuse(ridge)".into(),
+        "def _ecky_tapped_hole(minor, pitch, length, depth, base_width, crest_width, lefthand=False):\n    minor = float(minor); depth = float(depth)\n    overlap = min(0.3, minor * 0.5, depth)\n    relief = _ecky_helical_ridge(minor - overlap, pitch, length, base_width, crest_width, depth + overlap, lefthand=lefthand)\n    bore = _ecky_cylinder(float(minor), float(length))\n    return bore.fuse(relief)".into(),
         String::new(),
         "def _ecky_offset(shape, amount, openings=None):\n    base = shape\n    if openings:\n        base = _ecky_face_with_holes(shape, openings)\n    if getattr(base, 'ShapeType', '') == 'Face':\n        return base.makeOffset2D(float(amount))\n    return _ecky_as_wire(base).makeOffset2D(float(amount))".into(),
         String::new(),
@@ -4095,7 +4271,7 @@ fn freecad_preamble() -> Vec<String> {
     ]
 }
 
-fn parse_build_expr(value: &IrExpr) -> AppResult<(Vec<BuildBinding>, IrExpr)> {
+fn parse_build_expr(value: &IrExpr) -> AuthoringResult<(Vec<BuildBinding>, IrExpr)> {
     let items = expr_list_items(value, "build expression")?;
     if expr_head_symbol(items, "build expression")? != "build" {
         return Err(validation("Expected a `(build ...)` expression."));
@@ -4169,7 +4345,7 @@ fn parse_build_expr(value: &IrExpr) -> AppResult<(Vec<BuildBinding>, IrExpr)> {
     ))
 }
 
-fn parse_lambda_expr(value: &IrExpr) -> AppResult<(Vec<String>, IrExpr)> {
+fn parse_lambda_expr(value: &IrExpr) -> AuthoringResult<(Vec<String>, IrExpr)> {
     let items = expr_list_items(value, "lambda expression")?;
     if expr_head_symbol(items, "lambda expression")? != "lambda" || items.len() != 3 {
         return Err(validation("`map` expects `(lambda (args ...) body)`."));
@@ -4182,7 +4358,7 @@ fn parse_lambda_expr(value: &IrExpr) -> AppResult<(Vec<String>, IrExpr)> {
                 .map(str::to_string)
                 .ok_or_else(|| validation("Lambda parameters must be symbols."))
         })
-        .collect::<AppResult<Vec<_>>>()?;
+        .collect::<AuthoringResult<Vec<_>>>()?;
     Ok((params, items[2].clone()))
 }
 
@@ -4197,7 +4373,7 @@ struct BuildBinding {
 mod tests {
     use super::{lower_core_program_to_freecad, lower_to_freecad as lower_to_freecad_raw};
 
-    fn lower_to_freecad(source: &str) -> crate::contracts::AppResult<String> {
+    fn lower_to_freecad(source: &str) -> Result<String, crate::contracts::AuthoringError> {
         let source = source.to_string();
         std::thread::Builder::new()
             .name("freecad-lowering-test".to_string())
@@ -4390,6 +4566,32 @@ mod tests {
         assert!(
             code.contains("def _ecky_thread("),
             "thread helper: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn freecad_lowering_emits_tapped_hole_helper() {
+        let code = lower_to_freecad("(model (part hole (tapped-hole :iso \"M8\" :length 14)))")
+            .expect("lower");
+        assert!(
+            code.contains("_ecky_tapped_hole(3.23325, 1.25, 14.0,"),
+            "tapped-hole call: {}",
+            code
+        );
+        assert!(
+            code.contains("def _ecky_tapped_hole("),
+            "tapped-hole helper: {}",
+            code
+        );
+        assert!(
+            code.contains("bore = _ecky_cylinder(float(minor)"),
+            "tapped-hole bore cylinder at named minor radius: {}",
+            code
+        );
+        assert!(
+            code.contains("bore.fuse(relief)"),
+            "tapped-hole unions bore with reused helical-ridge relief: {}",
             code
         );
     }

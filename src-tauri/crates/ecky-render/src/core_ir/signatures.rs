@@ -461,7 +461,9 @@ fn verify_call(
         CoreOperation::Transform(transform) => {
             verify_transform(transform.clone(), &name, args, node, env)
         }
-        CoreOperation::Surface(surface) => verify_surface(surface.clone(), &name, args, node, env),
+        CoreOperation::Surface(surface) => {
+            verify_surface(surface.clone(), &name, args, keywords, node, env)
+        }
         CoreOperation::Path(path) => verify_path(path.clone(), &name, args, node, env),
         CoreOperation::Array(array) => verify_array(array.clone(), &name, args, node, env),
         CoreOperation::Frame(frame) => verify_frame(frame.clone(), &name, args, node, env),
@@ -475,10 +477,259 @@ fn verify_call(
         CoreOperation::Custom(custom) if custom == "heightfield" => {
             verify_heightfield(&name, args, keywords, node, env)
         }
+        CoreOperation::Custom(custom)
+            if matches!(
+                custom.as_str(),
+                "regular-polygon"
+                    | "trapezoid"
+                    | "slot-center-to-center"
+                    | "slot-center-point"
+                    | "thread"
+                    | "rib"
+                    | "groove"
+            ) =>
+        {
+            verify_convenience_custom(custom, args, keywords, node, env)
+        }
         CoreOperation::Custom(_) => Ok(()),
     }?;
     verify_keywords(&name, keywords, env)?;
     verify_call_dimensions(op, &name, args, env, warnings)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct KeywordSpec {
+    name: &'static str,
+    expected: ExpectedKind,
+    required: bool,
+}
+
+fn verify_convenience_custom(
+    name: &str,
+    args: &[CoreNode],
+    keywords: &[CoreKeywordArg],
+    node: &CoreNode,
+    env: &KindEnv,
+) -> CoreResult<()> {
+    let result = match name {
+        "regular-polygon" => {
+            verify_exact(name, args, &[num("sides"), num("circumradius")], env)?;
+            verify_keyword_contract(
+                name,
+                keywords,
+                &[KeywordSpec {
+                    name: "rotation",
+                    expected: ExpectedKind::Number,
+                    required: false,
+                }],
+                env,
+            )?;
+            ExpectedKind::Sketch
+        }
+        "trapezoid" => {
+            verify_exact(name, args, &[num("bottom"), num("top"), num("height")], env)?;
+            verify_keyword_contract(
+                name,
+                keywords,
+                &[KeywordSpec {
+                    name: "skew",
+                    expected: ExpectedKind::Number,
+                    required: false,
+                }],
+                env,
+            )?;
+            ExpectedKind::Sketch
+        }
+        "slot-center-to-center" => {
+            verify_exact(name, args, &[num("separation"), num("width")], env)?;
+            verify_keyword_contract(name, keywords, &[], env)?;
+            ExpectedKind::Sketch
+        }
+        "slot-center-point" => {
+            verify_exact(
+                name,
+                args,
+                &[
+                    num("center-x"),
+                    num("center-y"),
+                    num("point-x"),
+                    num("point-y"),
+                    num("width"),
+                ],
+                env,
+            )?;
+            verify_keyword_contract(name, keywords, &[], env)?;
+            ExpectedKind::Sketch
+        }
+        "rib" | "groove" => {
+            verify_exact(
+                name,
+                args,
+                &[solid("solid"), sketch("profile"), path("path")],
+                env,
+            )?;
+            verify_keyword_contract(name, keywords, &[], env)?;
+            ExpectedKind::Solid
+        }
+        "thread" => {
+            verify_exact(name, args, &[], env)?;
+            verify_thread_keywords(name, keywords, env)?;
+            ExpectedKind::Solid
+        }
+        _ => unreachable!("guarded convenience op"),
+    };
+    verify_result(name, result, node, env)
+}
+
+fn verify_thread_keywords(
+    name: &str,
+    keywords: &[CoreKeywordArg],
+    env: &KindEnv,
+) -> CoreResult<()> {
+    let has_iso = keywords.iter().any(|keyword| keyword.name == "iso");
+    let mut specs = vec![
+        KeywordSpec {
+            name: "length",
+            expected: ExpectedKind::Number,
+            required: true,
+        },
+        KeywordSpec {
+            name: "base-width",
+            expected: ExpectedKind::Number,
+            required: false,
+        },
+        KeywordSpec {
+            name: "crest-width",
+            expected: ExpectedKind::Number,
+            required: false,
+        },
+        KeywordSpec {
+            name: "top-radius",
+            expected: ExpectedKind::Number,
+            required: false,
+        },
+        KeywordSpec {
+            name: "clearance",
+            expected: ExpectedKind::Number,
+            required: false,
+        },
+        KeywordSpec {
+            name: "flank",
+            expected: ExpectedKind::Number,
+            required: false,
+        },
+        KeywordSpec {
+            name: "crest",
+            expected: ExpectedKind::Number,
+            required: false,
+        },
+        KeywordSpec {
+            name: "profile",
+            expected: ExpectedKind::Text,
+            required: false,
+        },
+        KeywordSpec {
+            name: "load-flank",
+            expected: ExpectedKind::Number,
+            required: false,
+        },
+        KeywordSpec {
+            name: "return-flank",
+            expected: ExpectedKind::Number,
+            required: false,
+        },
+        KeywordSpec {
+            name: "female",
+            expected: ExpectedKind::Boolean,
+            required: false,
+        },
+        KeywordSpec {
+            name: "lefthand",
+            expected: ExpectedKind::Boolean,
+            required: false,
+        },
+    ];
+    if has_iso {
+        specs.push(KeywordSpec {
+            name: "iso",
+            expected: ExpectedKind::Text,
+            required: true,
+        });
+    } else {
+        specs.extend([
+            KeywordSpec {
+                name: "radius",
+                expected: ExpectedKind::Number,
+                required: true,
+            },
+            KeywordSpec {
+                name: "pitch",
+                expected: ExpectedKind::Number,
+                required: true,
+            },
+            KeywordSpec {
+                name: "depth",
+                expected: ExpectedKind::Number,
+                required: true,
+            },
+        ]);
+    }
+    verify_keyword_contract(name, keywords, &specs, env)
+}
+
+fn verify_keyword_contract(
+    name: &str,
+    keywords: &[CoreKeywordArg],
+    specs: &[KeywordSpec],
+    env: &KindEnv,
+) -> CoreResult<()> {
+    for keyword in keywords {
+        let Some(spec) = specs.iter().find(|spec| spec.name == keyword.name) else {
+            return Err(type_error(
+                name,
+                "expected supported keyword options",
+                &format!("got `:{}`", keyword.name),
+                keyword.source_node().span,
+            ));
+        };
+        let count = keywords
+            .iter()
+            .filter(|candidate| candidate.name == keyword.name)
+            .count();
+        if count != 1 {
+            return Err(type_error(
+                name,
+                &format!("expected one `:{}`", keyword.name),
+                &format!("got {count}"),
+                keyword.source_node().span,
+            ));
+        }
+        verify_expected_node(
+            name,
+            0,
+            spec.name,
+            spec.expected,
+            keyword.source_node(),
+            env,
+        )?;
+    }
+    for spec in specs.iter().filter(|spec| spec.required) {
+        if !keywords.iter().any(|keyword| keyword.name == spec.name) {
+            return Err(type_error(
+                name,
+                &format!("expected `:{}`", spec.name),
+                "got no value",
+                node_span(keywords),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn node_span(keywords: &[CoreKeywordArg]) -> Option<SourceSpan> {
+    keywords
+        .first()
+        .and_then(|keyword| keyword.source_node().span)
 }
 
 fn verify_heightfield(
@@ -956,6 +1207,7 @@ fn verify_surface(
     surface: CoreSurfaceOp,
     name: &str,
     args: &[CoreNode],
+    keywords: &[CoreKeywordArg],
     node: &CoreNode,
     env: &KindEnv,
 ) -> CoreResult<()> {
@@ -985,6 +1237,30 @@ fn verify_surface(
         }
         CoreSurfaceOp::Fillet | CoreSurfaceOp::Chamfer => {
             verify_exact(name, args, &[num("radius"), solid("solid")], env)?;
+            if matches!(surface, CoreSurfaceOp::Fillet) {
+                let to_radius = keywords
+                    .iter()
+                    .filter(|keyword| keyword.name == "to-radius")
+                    .collect::<Vec<_>>();
+                if to_radius.len() > 1 {
+                    return Err(type_error(
+                        name,
+                        "expected at most one `:to-radius`",
+                        &format!("got {}", to_radius.len()),
+                        node.span,
+                    ));
+                }
+                if let Some(keyword) = to_radius.first() {
+                    verify_expected_node(
+                        name,
+                        0,
+                        "to-radius",
+                        ExpectedKind::Number,
+                        keyword.source_node(),
+                        env,
+                    )?;
+                }
+            }
         }
         CoreSurfaceOp::Taper => {
             verify_between(
@@ -2170,6 +2446,14 @@ mod tests {
         )
     }
 
+    fn text_lit(id: u64, value: &str) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Literal(CoreLiteral::Text(value.into())),
+            CoreValueKind::Text,
+        )
+    }
+
     fn local_ref(id: u64, name: &str) -> CoreNode {
         CoreNode::new(
             NodeId::new(id),
@@ -2228,6 +2512,27 @@ mod tests {
                 op,
                 args,
                 keywords: vec![],
+            },
+            kind,
+        )
+    }
+
+    fn call_with_keywords(
+        id: u64,
+        op: CoreOperation,
+        args: Vec<CoreNode>,
+        keywords: Vec<(&str, CoreNode)>,
+        kind: CoreValueKind,
+    ) -> CoreNode {
+        CoreNode::new(
+            NodeId::new(id),
+            CoreNodeKind::Call {
+                op,
+                args,
+                keywords: keywords
+                    .into_iter()
+                    .map(|(name, value)| CoreKeywordArg::expr(name.into(), value))
+                    .collect(),
             },
             kind,
         )
@@ -2490,6 +2795,274 @@ mod tests {
         ));
 
         verify_core_program(&program).expect("valid program");
+    }
+
+    #[test]
+    fn convenience_ops_reject_missing_and_mistyped_required_inputs() {
+        // language-convenience-stdlib 5.2: every new surface op must fail at
+        // the Core verifier boundary with its own name and signature context.
+        let cases = vec![
+            (
+                "torus",
+                call(
+                    10,
+                    CoreOperation::Primitive(CorePrimitive::Torus),
+                    vec![num(11, 10.0)],
+                    CoreValueKind::Solid,
+                ),
+                call(
+                    20,
+                    CoreOperation::Primitive(CorePrimitive::Torus),
+                    vec![bool_lit(21, true), num(22, 3.0)],
+                    CoreValueKind::Solid,
+                ),
+            ),
+            (
+                "ellipse",
+                call(
+                    30,
+                    CoreOperation::Primitive(CorePrimitive::Ellipse),
+                    vec![num(31, 10.0)],
+                    CoreValueKind::Sketch,
+                ),
+                call(
+                    40,
+                    CoreOperation::Primitive(CorePrimitive::Ellipse),
+                    vec![bool_lit(41, true), num(42, 4.0)],
+                    CoreValueKind::Sketch,
+                ),
+            ),
+            (
+                "slot-overall",
+                call(
+                    50,
+                    CoreOperation::Primitive(CorePrimitive::Slot),
+                    vec![num(51, 30.0)],
+                    CoreValueKind::Sketch,
+                ),
+                call(
+                    60,
+                    CoreOperation::Primitive(CorePrimitive::Slot),
+                    vec![bool_lit(61, true), num(62, 8.0)],
+                    CoreValueKind::Sketch,
+                ),
+            ),
+            (
+                "slot-arc",
+                call(
+                    70,
+                    CoreOperation::Primitive(CorePrimitive::SlotArc),
+                    vec![num(71, 20.0), num(72, 0.0), num(73, 90.0)],
+                    CoreValueKind::Sketch,
+                ),
+                call(
+                    80,
+                    CoreOperation::Primitive(CorePrimitive::SlotArc),
+                    vec![
+                        bool_lit(81, true),
+                        num(82, 0.0),
+                        num(83, 90.0),
+                        num(84, 8.0),
+                    ],
+                    CoreValueKind::Sketch,
+                ),
+            ),
+            (
+                "wedge",
+                call(
+                    90,
+                    CoreOperation::Primitive(CorePrimitive::Wedge),
+                    (0..6).map(|index| num(91 + index, 1.0)).collect(),
+                    CoreValueKind::Solid,
+                ),
+                call(
+                    100,
+                    CoreOperation::Primitive(CorePrimitive::Wedge),
+                    vec![
+                        bool_lit(101, true),
+                        num(102, 1.0),
+                        num(103, 1.0),
+                        num(104, 0.0),
+                        num(105, 0.0),
+                        num(106, 1.0),
+                        num(107, 1.0),
+                    ],
+                    CoreValueKind::Solid,
+                ),
+            ),
+            (
+                "draft",
+                call(
+                    110,
+                    CoreOperation::Surface(CoreSurfaceOp::Draft),
+                    vec![num(111, 5.0)],
+                    CoreValueKind::Solid,
+                ),
+                call(
+                    120,
+                    CoreOperation::Surface(CoreSurfaceOp::Draft),
+                    vec![bool_lit(121, true), box_node(122)],
+                    CoreValueKind::Solid,
+                ),
+            ),
+            (
+                "regular-polygon",
+                call(
+                    130,
+                    CoreOperation::Custom("regular-polygon".into()),
+                    vec![num(131, 6.0)],
+                    CoreValueKind::Sketch,
+                ),
+                call(
+                    140,
+                    CoreOperation::Custom("regular-polygon".into()),
+                    vec![bool_lit(141, true), num(142, 10.0)],
+                    CoreValueKind::Sketch,
+                ),
+            ),
+            (
+                "trapezoid",
+                call(
+                    150,
+                    CoreOperation::Custom("trapezoid".into()),
+                    vec![num(151, 20.0), num(152, 10.0)],
+                    CoreValueKind::Sketch,
+                ),
+                call(
+                    160,
+                    CoreOperation::Custom("trapezoid".into()),
+                    vec![bool_lit(161, true), num(162, 10.0), num(163, 8.0)],
+                    CoreValueKind::Sketch,
+                ),
+            ),
+            (
+                "slot-center-to-center",
+                call(
+                    170,
+                    CoreOperation::Custom("slot-center-to-center".into()),
+                    vec![num(171, 20.0)],
+                    CoreValueKind::Sketch,
+                ),
+                call(
+                    180,
+                    CoreOperation::Custom("slot-center-to-center".into()),
+                    vec![bool_lit(181, true), num(182, 8.0)],
+                    CoreValueKind::Sketch,
+                ),
+            ),
+            (
+                "slot-center-point",
+                call(
+                    190,
+                    CoreOperation::Custom("slot-center-point".into()),
+                    (0..4).map(|index| num(191 + index, 1.0)).collect(),
+                    CoreValueKind::Sketch,
+                ),
+                call(
+                    200,
+                    CoreOperation::Custom("slot-center-point".into()),
+                    vec![
+                        bool_lit(201, true),
+                        num(202, 0.0),
+                        num(203, 10.0),
+                        num(204, 0.0),
+                        num(205, 8.0),
+                    ],
+                    CoreValueKind::Sketch,
+                ),
+            ),
+            (
+                "thread",
+                call_with_keywords(
+                    210,
+                    CoreOperation::Custom("thread".into()),
+                    vec![],
+                    vec![("iso", text_lit(211, "M8"))],
+                    CoreValueKind::Solid,
+                ),
+                call_with_keywords(
+                    220,
+                    CoreOperation::Custom("thread".into()),
+                    vec![],
+                    vec![
+                        ("iso", text_lit(221, "M8")),
+                        ("length", bool_lit(222, true)),
+                    ],
+                    CoreValueKind::Solid,
+                ),
+            ),
+            (
+                "rib",
+                call(
+                    230,
+                    CoreOperation::Custom("rib".into()),
+                    vec![box_node(231), circle_node(235)],
+                    CoreValueKind::Solid,
+                ),
+                call(
+                    240,
+                    CoreOperation::Custom("rib".into()),
+                    vec![
+                        num(241, 1.0),
+                        circle_node(242),
+                        path_node(
+                            245,
+                            vec![point3(246, 0.0, 0.0, 0.0), point3(250, 0.0, 0.0, 10.0)],
+                        ),
+                    ],
+                    CoreValueKind::Solid,
+                ),
+            ),
+            (
+                "groove",
+                call(
+                    260,
+                    CoreOperation::Custom("groove".into()),
+                    vec![box_node(261), circle_node(265)],
+                    CoreValueKind::Solid,
+                ),
+                call(
+                    270,
+                    CoreOperation::Custom("groove".into()),
+                    vec![
+                        num(271, 1.0),
+                        circle_node(272),
+                        path_node(
+                            275,
+                            vec![point3(276, 0.0, 0.0, 0.0), point3(280, 0.0, 0.0, 10.0)],
+                        ),
+                    ],
+                    CoreValueKind::Solid,
+                ),
+            ),
+            (
+                "fillet",
+                call(
+                    290,
+                    CoreOperation::Surface(CoreSurfaceOp::Fillet),
+                    vec![num(291, 2.0)],
+                    CoreValueKind::Solid,
+                ),
+                call_with_keywords(
+                    300,
+                    CoreOperation::Surface(CoreSurfaceOp::Fillet),
+                    vec![num(301, 2.0), box_node(302)],
+                    vec![("to-radius", bool_lit(306, true))],
+                    CoreValueKind::Solid,
+                ),
+            ),
+        ];
+
+        for (name, missing, mistyped) in cases {
+            for (failure, node) in [("missing", missing), ("mistyped", mistyped)] {
+                let message = verify_err(part(node));
+                assert!(message.contains(name), "{name} {failure}: {message}");
+                assert!(
+                    message.contains("expected"),
+                    "{name} {failure} lacks signature context: {message}"
+                );
+            }
+        }
     }
 
     #[test]

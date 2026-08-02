@@ -6,14 +6,14 @@ pub fn authored_source_file_name(
 ) -> &'static str {
     match source_language {
         SourceLanguage::LegacyPython => "source.FCMacro",
-        SourceLanguage::Build123d => "source.py",
+        SourceLanguage::Build123d => "source.ecky",
         SourceLanguage::EckyIrV0 => "source.ecky",
     }
 }
 
 pub fn lowered_source_file_name(geometry_backend: GeometryBackend) -> &'static str {
     match geometry_backend {
-        GeometryBackend::Build123d => "lowered.py",
+        GeometryBackend::Build123d => "source.ecky",
         GeometryBackend::Freecad => "lowered.FCMacro",
         GeometryBackend::EckyRust => "source.ecky",
     }

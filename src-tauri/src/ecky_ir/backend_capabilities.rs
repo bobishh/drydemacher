@@ -152,7 +152,7 @@ const NATIVE_OCCT_OPS: &[BackendOperationCapability] = &[
     supported("build"),
 ];
 
-const BUILD123D_OPS: &[BackendOperationCapability] = &[
+const FREECAD_OPS: &[BackendOperationCapability] = &[
     supported("box"),
     unsupported(
         "mesh",
@@ -219,18 +219,11 @@ const BUILD123D_OPS: &[BackendOperationCapability] = &[
     supported("build"),
 ];
 
-const FREECAD_OPS: &[BackendOperationCapability] = BUILD123D_OPS;
-
 pub const BACKEND_CAPABILITIES: &[BackendCapability] = &[
     BackendCapability {
         backend: GeometryBackend::EckyRust,
         role: BackendRole::Primary,
         ops: NATIVE_OCCT_OPS,
-    },
-    BackendCapability {
-        backend: GeometryBackend::Build123d,
-        role: BackendRole::ExportInterop,
-        ops: BUILD123D_OPS,
     },
     BackendCapability {
         backend: GeometryBackend::Freecad,
@@ -270,18 +263,11 @@ mod tests {
 
     #[test]
     fn backend_capabilities_list_each_backend_once() {
-        assert_eq!(BACKEND_CAPABILITIES.len(), 3);
+        assert_eq!(BACKEND_CAPABILITIES.len(), 2);
         assert_eq!(
             BACKEND_CAPABILITIES
                 .iter()
                 .filter(|capability| capability.backend == GeometryBackend::EckyRust)
-                .count(),
-            1
-        );
-        assert_eq!(
-            BACKEND_CAPABILITIES
-                .iter()
-                .filter(|capability| capability.backend == GeometryBackend::Build123d)
                 .count(),
             1
         );
@@ -295,10 +281,6 @@ mod tests {
         assert_eq!(
             backend_capability(GeometryBackend::EckyRust).unwrap().role,
             BackendRole::Primary
-        );
-        assert_eq!(
-            backend_capability(GeometryBackend::Build123d).unwrap().role,
-            BackendRole::ExportInterop
         );
         assert_eq!(
             backend_capability(GeometryBackend::Freecad).unwrap().role,

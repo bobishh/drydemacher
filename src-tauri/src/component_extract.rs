@@ -271,7 +271,7 @@ fn scan_clauses(
                 scan_clauses(&items[2..], &mut nested, part_key, scan, found)?;
             }
             "part" | "feature" => {
-                if let Some(key) = items.get(1).and_then(expr_identifier) {
+                if let Some(key) = items.get(1).and_then(expr_stringish_key) {
                     if key == part_key && !*found {
                         scan.part_items = items.clone();
                         scan.part_scope = scope.clone();
@@ -284,6 +284,19 @@ fn scan_clauses(
         }
     }
     Ok(())
+}
+
+fn expr_stringish_key(expr: &ExprKind) -> Option<String> {
+    if let Some(identifier) = expr_identifier(expr) {
+        return Some(identifier);
+    }
+    let ExprKind::Atom(atom) = expr else {
+        return None;
+    };
+    match &atom.syn.ty {
+        TokenType::StringLiteral(value) => Some(value.resolve().to_string()),
+        _ => None,
+    }
 }
 
 fn scan_params_clause(entries: &[ExprKind], scan: &mut ModelScan) {
@@ -469,6 +482,21 @@ mod tests {
     }
 
     #[test]
+    fn extracts_legacy_part_with_string_key() {
+        let source = r#"
+            (model
+              (params (number clearance 0.2))
+              (part "BottleCage" (box 12 clearance 3)))
+        "#;
+
+        let extracted =
+            extract_component(&request(source, "BottleCage")).expect("extract string-key part");
+
+        assert_eq!(extracted.name, "BottleCage");
+        assert_eq!(extracted.header.params[0].key, "clearance");
+    }
+
+    #[test]
     fn scalar_let_bindings_become_plain_defaults() {
         let source = r#"
             (model
@@ -520,6 +548,23 @@ mod tests {
             .unwrap_or_else(|err| panic!("standalone recompile failed: {err}\n{wrapped}"));
         assert_eq!(program.parts.len(), 1);
         assert_eq!(program.parts[0].key, "demo");
+    }
+
+    #[test]
+    fn extracted_source_with_quoted_alignment_recompiles_standalone() {
+        let source = r#"
+            (model
+              (part "MountBase"
+                (box 24 6 85 :align '(center max center))))
+        "#;
+        let extracted = extract_component(&request(source, "MountBase")).expect("extract");
+        let wrapped = format!(
+            "{}\n(model (part demo ({})))",
+            extracted.component_source, extracted.name
+        );
+
+        compile_to_core_program(&wrapped)
+            .unwrap_or_else(|err| panic!("quoted alignment recompile failed: {err}\n{wrapped}"));
     }
 
     #[test]

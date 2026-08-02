@@ -215,7 +215,7 @@ Verification authoring uses existing verify syntax and future named constraints:
 
 - Source edits persist through existing version/history flows.
 - Configuration changes persist through `save_config` to
-  `app_config_dir/config.json`.
+  `app_config_dir/config.edn`.
 - Map layout preferences are config, not source.
 - Authored params, parts, relations, repeats, instances, and verify clauses are
   source.

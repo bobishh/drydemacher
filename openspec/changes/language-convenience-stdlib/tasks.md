@@ -236,33 +236,56 @@ build123d bbox+volume) is green.
   change it (shared contract with Phase 3).
 - [x] 3.2 search/get over the library — DONE-by-existing-infra
   (`component_search` header-only, `component_get` full source).
-- [ ] 3.3 Ship fasteners — hand-authored parametric families (not per-size files):
+- [x] 3.3 Ship fasteners — hand-authored parametric families (not per-size files):
   `hex-bolt` (d/length/pitch), `socket-head-cap-screw`, `hex-nut`, `washer`,
   `threaded-rod`. Threaded parts build on the `thread` + `tapped-hole` primitive
   (`openspec/changes/parametric-thread-feature`) — do NOT hand-roll
   core+ridge/bore geometry (it hits the coincident-face/hollow bug). Library =
   dimensional reference only.
-- [ ] 3.4 Ship mechanical: `ball-bearing` (608/623/624 family), `gt2-pulley`
+- [x] 3.4 Ship mechanical: `ball-bearing` (608/623/624 family), `gt2-pulley`
   (teeth/bore), `standoff`, `heat-set-insert-pocket` (FDM-critical).
-- [ ] 3.5 Ship mountings where `repeat-union` earns its keep: `corner-bracket`,
+- [x] 3.5 Ship mountings where `repeat-union` earns its keep: `corner-bracket`,
   `l-bracket`, `hole-plate` (parametric `cols×rows` grid).
 - [x] 3.6 version pinning — DONE-by-existing-infra (storage is version-keyed;
   `resolve_installed_component_source(version)`, version-keyed install/list).
-- [ ] 3.7 Tests: every shipped stdlib component compiles + passes its own
-  `verify` (single-solid + manifold at minimum) on the default backend.
+- [x] 3.7 Tests: every shipped stdlib component compiles + passes its own
+  `verify` (single-solid + manifold at minimum) on the default backend. VERIFIED:
+  all 12 shipped defaults render through build123d and execute their embedded
+  `non-manifold-edge-count = 0` checks green. Test
+  `shipped_stdlib_components_render_and_pass_embedded_manifold_verify` passed
+  in 111.38s.
 
 ## 4. Phase 3 — Component import
 
-- [ ] 4.1 Shared import path: list stdlib + user-library components and insert a
-  chosen one into the active model as copy-inlined instantiated source.
-- [ ] 4.2 MCP `component_import` tool over the shared path (agent entry point).
-- [ ] 4.3 Workbench import panel over the same shared path (human entry point):
+- [x] 4.1 Shared import path: list stdlib + user-library components and insert a
+  chosen one into the active model as copy-inlined instantiated source. DONE:
+  `component_import_runtime::copy_inline_component_import` resolves installed
+  package source through the existing integrity-validating resolver, prepends
+  self-contained definitions, and inserts canonical `(part key (entry))` into
+  the active `(model ...)` source.
+- [x] 4.2 MCP `component_import` tool over the shared path (agent entry point).
+  DONE: `component_import` dispatches to that runtime path. Proof:
+  `mcp::server::tests::tool_definitions_include_component_library_tools` GREEN.
+- [x] 4.3 Workbench import panel over the same shared path (human entry point):
   search → click → insert; no agent required. Theme-consistent (Tactical
-  Midnight), behaves identically to the MCP tool.
-- [ ] 4.4 Guard: import is copy-inline only — no implicit registry reference;
-  inserted source is self-contained.
-- [ ] 4.5 Tests: import → compile → render round-trip via both the tool and the
-  panel path for a representative stdlib part.
+  Midnight), behaves identically to the MCP tool. DONE: package cards retain
+  concise initial facts; explicit `COMPONENTS` expands choices, then `IMPORT`
+  calls the same Tauri runtime path and applies returned source. Playwright
+  happy, raw-error, pending, and concise-card paths GREEN.
+- [x] 4.4 Guard: MCP/UI `component_import` is copy-inline only — no implicit
+  registry reference, no `(import-component ...)` declaration, and no
+  dependency lock; inserted source is self-contained. DONE: runtime validates
+  source package has no transitive import, rejects output containing a live
+  import, and its regression asserts empty dependency lock.
+- [x] 4.5 Tests: import → compile → render round-trip via both the tool and the
+  panel path for a representative stdlib part. DONE: runtime
+  `copy_inline_import_inserts_self_contained_definition_and_instance` proves
+  vendor → compile with no lock; render service regression
+  `installed_live_source_component_travels_verify_and_renders_with_lock_evidence`
+  exercises the vendored no-lock render branch; MCP definition test GREEN;
+  browser component-package specs prove panel happy/error/pending. Current
+  proof: runtime copy-inline test GREEN, MCP definition test GREEN, and
+  `cd src-tauri && cargo check` GREEN.
 
 ## 5. Cross-cutting
 
@@ -279,4 +302,9 @@ build123d bbox+volume) is green.
   task 1.1, now has an automated regression. Original 4
   `live_differential_*` tests in `direct_occt_executor.rs` re-verified green
   after the extraction (2 pass, 2 pre-existing `#[ignore]` gaps unaffected).
-- [ ] 5.2 `verify_core_program` coverage for every new op's arity/type errors.
+- [x] 5.2 `verify_core_program` coverage for every new op's arity/type errors.
+  VERIFIED: `cargo test -p ecky-render
+  convenience_ops_reject_missing_and_mistyped_required_inputs` passed 1/1;
+  workspace `cargo check` clean. The parameterized matrix covers missing and
+  mistyped required inputs across all convenience ops, including numeric
+  `fillet :to-radius` validation.

@@ -64,6 +64,11 @@ sketch surface is out of scope here.
   instantiated `define-component` source (reusing `component_search`/
   `component_get`; copy-inline, no hidden registry reference). The panel and the
   tool share one import path.
+- Keep this vendoring action distinct from the language-level
+  `(import-component ...)` live package-reference form specified by
+  `component-package-imports`: `component_import` rewrites the model into
+  self-contained source and creates no dependency lock; `import-component`
+  preserves a package coordinate and requires locked resolution.
 
 ## Out of scope
 

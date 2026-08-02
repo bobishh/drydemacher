@@ -14,6 +14,18 @@ Fast entrypoint: resolve the default editable target, list recent threads, and r
 
 Arguments: `agentLabel`, `llmModelId`, `llmModelLabel`
 
+## capability_search
+
+Discover MCP capability groups and their tools without loading every schema. Compact managed sessions start with only core workflow tools; call this to find the specialist group (target reads, source edits, AST edits, semantic controls, verify/printability, components/library, project files, session activity) that owns a tool or capability, then capability_enable to load its schemas for tools/list. Optional query filters by group title/description or tool name/description; omit it to list every group with its tool names.
+
+Arguments: `query`
+
+## capability_enable
+
+Enable a specialist capability group for this session so its tool schemas appear in tools/list, then emit notifications/tools/list_changed. Compact managed sessions start with core only; use capability_search to find the group id first. Enabled groups are session-scoped. Returns the updated enabledGroups list.
+
+Arguments: `group` (required)
+
 ## freecad_library_search
 
 Search configured local FreeCAD-library folders for reusable FCStd/STEP/STL parts. Architecture folders are excluded unless includeArchitecture is true.
@@ -22,7 +34,7 @@ Arguments: `includeArchitecture`, `limit`, `query` (required), `roots`
 
 ## project_folder_export
 
-Mirror a thread's active macro into a plain folder (<projectsRoot>/<slug>/model.ecky + ecky-project.json) so external editors and file-skill agents can author source directly. Re-export refreshes a stale folder.
+Compatibility/recovery export. Bound targets already expose sourcePath/sourceFolder; edit sourcePath and call project_folder_apply instead. Use export only to seed/reseed a missing unbound folder. Existing bindings retain their exact stored folder.
 
 Arguments: `messageId`, `slug`, `threadId`
 
@@ -55,6 +67,12 @@ Arguments: `limit`, `query`
 Fetch one library component by name: full copy-inline `define-component` source plus its header.
 
 Arguments: `name` (required)
+
+## component_import
+
+Copy-inline an installed package component into active Ecky model source and add one instantiated part. Returns self-contained authored source; never emits import-component or a dependency lock.
+
+Arguments: `componentId` (required), `packageId` (required), `source` (required), `version` (required)
 
 ## freecad_library_import
 
@@ -136,7 +154,7 @@ Arguments: `agentLabel`, `llmModelId`, `llmModelLabel`, `messageId`, `threadId`
 
 ## target_macro_get
 
-Fetch active editable source metadata plus a 1-based line window, authoringContext, and artifactDigest. Pass startLine/endLine for a specific range. Prefer macro_buffer_get for edits.
+Fetch active editable source metadata plus a 1-based line window, authoringContext, and artifactDigest. Pass startLine/endLine for a specific range. For bound targets edit sourcePath instead; macro-buffer edits are compatibility-only when sourcePath is absent.
 
 Arguments: `agentLabel`, `endLine`, `llmModelId`, `llmModelLabel`, `messageId`, `startLine`, `threadId`
 
@@ -202,9 +220,9 @@ Arguments: `agentLabel`, `geometryBackend`, `llmModelId`, `llmModelLabel`, `mess
 
 ## macro_preview_render
 
-Replace macro code and rerender a draft. Returns artifactDigest; check hasStepExport before promising STEP. IMPORTANT: check workspace_overview.agentBrief.summary and rules — if sourceLanguage is `ecky`, macroCode MUST be current `.ecky` source (starting with `(model ...)`). geometryBackend chooses build123d, freecad, or native mesh lowering; source extension does not. Authoring uses pure lispy Ecky source compiled to internal Core IR or the selected backend. `define`, `lambda`, `let`, `let*`, `if`, and generic helpers like `range`, `map`, `filter`, `reduce`, `zip`, `enumerate`, `linspace`, and `flat-map` are allowed; `set!`, assignment, rebinding, and mutation are not. Current `let` bindings are parallel, so same-frame bindings cannot depend on earlier siblings; use `let*` or nested `let` for sequential dependencies. `(define ...)` is NOT valid inside `(model ...)`; use `let*` inside `(part ...)` for computed values from params, and reserve top-level `(define (fn args) ...)` for reusable helper functions outside `(model ...)`. When workspace_overview.agentBrief.summary reports sourceLanguage `ecky`, uiSpec and parameters are auto-derived from the params block. For existing targets, omit parameters: macro_preview_render preserves current target params. Use params_preview_render for numeric changes. parameters only seeds first versions. uiSpec.fields is an array of control descriptors — each field MUST have: key (string), label (string), type (one of: range|number|select|checkbox|image). For numeric parameters, prefer number; range only when explicitly needed. range/number: min, max, step (numbers). select: options array of {label, value} objects — MUST have at least one option. checkbox: no extra fields. image: use for file-picker inputs (e.g. a reference photo) — no extra fields, value is an absolute file path string once chosen by the user. parameters is a flat key→value map matching uiSpec field keys. For image fields, the parameter may be omitted or set to an empty string until the user picks a file in the UI.
+Compatibility-only when sourcePath is absent. Bound targets edit sourcePath then call project_folder_apply. Replace macro code and rerender a draft. Returns artifactDigest; check hasStepExport before promising STEP. IMPORTANT: check workspace_overview.agentBrief.summary and rules — if sourceLanguage is `ecky`, macroCode MUST be current `.ecky` source (starting with `(model ...)`). geometryBackend chooses FreeCAD interop or native Ecky lowering; source extension does not. Authoring uses pure lispy Ecky source compiled to internal Core IR or the selected backend. `define`, `lambda`, `let`, `let*`, `if`, and generic helpers like `range`, `map`, `filter`, `reduce`, `zip`, `enumerate`, `linspace`, and `flat-map` are allowed; `set!`, assignment, rebinding, and mutation are not. Current `let` bindings are parallel, so same-frame bindings cannot depend on earlier siblings; use `let*` or nested `let` for sequential dependencies. `(define ...)` is NOT valid inside `(model ...)`; use `let*` inside `(part ...)` for computed values from params, and reserve top-level `(define (fn args) ...)` for reusable helper functions outside `(model ...)`. When workspace_overview.agentBrief.summary reports sourceLanguage `ecky`, uiSpec and parameters are auto-derived from the params block. For existing targets, omit parameters: macro_preview_render preserves current target params. Use params_preview_render for numeric changes. parameters only seeds first versions. uiSpec.fields is an array of control descriptors — each field MUST have: key (string), label (string), type (one of: range|number|select|checkbox|image). For numeric parameters, prefer number; range only when explicitly needed. range/number: min, max, step (numbers). select: options array of {label, value} objects — MUST have at least one option. checkbox: no extra fields. image: use for file-picker inputs (e.g. a reference photo) — no extra fields, value is an absolute file path string once chosen by the user. parameters is a flat key→value map matching uiSpec field keys. For image fields, the parameter may be omitted or set to an empty string until the user picks a file in the UI. If macroCode came from a target_macro_get/macro_buffer_get window read (windowStartLine/windowEndLine/truncated), include sourceWindow with those raw observed/window/full-size details; a truncated window submitted as a full replacement is rejected unless sourceWindow.acknowledgesTruncation is true.
 
-Arguments: `agentLabel`, `geometryBackend`, `llmModelId`, `llmModelLabel`, `macroCode` (required), `messageId`, `parameters`, `threadId`, `uiSpec`
+Arguments: `agentLabel`, `geometryBackend`, `llmModelId`, `llmModelLabel`, `macroCode` (required), `messageId`, `parameters`, `sourceWindow`, `threadId`, `uiSpec`
 
 ## semantic_manifest_get
 
@@ -268,7 +286,7 @@ Arguments: `agentLabel`, `llmModelId`, `llmModelLabel`, `messageId`, `threadId`,
 
 ## compare_models
 
-Compare two STL models using build123d comparison engine. Returns volume and bounding box matching metrics.
+Compare two STL models using volume and bounding-box metrics.
 
 Arguments: `genPath` (required), `refPath` (required)
 

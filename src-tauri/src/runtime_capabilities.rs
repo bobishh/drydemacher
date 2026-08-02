@@ -1,4 +1,3 @@
-use crate::build123d;
 use crate::contracts::{
     AppError, AppResult, EngineKind, GeometryBackend, RuntimeAuthoringContext,
     RuntimeBackendCapability, RuntimeCapabilities, SourceLanguage,
@@ -15,7 +14,8 @@ pub fn collect_runtime_capabilities(
     app: &dyn PathResolver,
 ) -> RuntimeCapabilities {
     let freecad = probe_freecad_runtime(configured_freecad_cmd, app);
-    let build123d = probe_build123d_runtime(app);
+    let build123d =
+        unavailable_capability("build123d runtime removed; use Ecky Native.".to_string());
     let direct_occt = probe_direct_occt_runtime(app);
     let ecky_rust = RuntimeBackendCapability {
         available: true,
@@ -36,25 +36,9 @@ pub fn collect_runtime_capabilities(
 }
 
 pub fn recommended_authoring_context(
-    freecad_available: bool,
-    build123d_available: bool,
+    _freecad_available: bool,
+    _build123d_available: bool,
 ) -> RuntimeAuthoringContext {
-    if build123d_available {
-        return RuntimeAuthoringContext {
-            engine_kind: EngineKind::EckyIrV0,
-            source_language: SourceLanguage::EckyIrV0,
-            geometry_backend: GeometryBackend::Build123d,
-        };
-    }
-
-    if freecad_available {
-        return RuntimeAuthoringContext {
-            engine_kind: EngineKind::EckyIrV0,
-            source_language: SourceLanguage::EckyIrV0,
-            geometry_backend: GeometryBackend::Freecad,
-        };
-    }
-
     RuntimeAuthoringContext {
         engine_kind: EngineKind::EckyIrV0,
         source_language: SourceLanguage::EckyIrV0,
@@ -118,27 +102,12 @@ pub fn probe_freecad_runtime(
     }
 }
 
-pub fn probe_build123d_runtime(app: &dyn PathResolver) -> RuntimeBackendCapability {
-    let python_cmd = match build123d::resolve_python_cmd_with_app(app) {
-        Ok(path) => path,
-        Err(err) => return unavailable_capability(err.to_string()),
-    };
-
-    match probe_build123d_import(&python_cmd) {
-        Ok(executable) => {
-            available_capability(format!("Ready at {}", executable), Some(executable))
-        }
-        Err(err) => unavailable_capability(err.to_string()),
-    }
-}
-
 pub fn probe_direct_occt_runtime(app: &dyn PathResolver) -> RuntimeBackendCapability {
     if let Some(runner) =
         crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(app, true)
     {
         // The precompiled runner is self-contained: a responsive runner means
-        // native renders are available even when the OCP/SDK compile layout
-        // is absent (runner-first export never compiles a shim).
+        // Native renders depend only on the precompiled runner and bundled OCCT.
         let output = Command::new(&runner).arg("--version").output();
         return match output {
             Ok(output) if output.status.success() => {
@@ -162,30 +131,10 @@ pub fn probe_direct_occt_runtime(app: &dyn PathResolver) -> RuntimeBackendCapabi
         };
     }
 
-    let runtime_root = match resolve_direct_occt_runtime_root(app) {
-        Ok(path) => path,
-        Err(err) => {
-            return unavailable_capability(format!(
-                "Direct OCCT unavailable: runner missing and runtime root unresolved: {}",
-                err
-            ))
-        }
-    };
-    let layout =
-        crate::ecky_cad_host::direct_occt_sdk::inspect_build123d_ocp_runtime(&runtime_root);
-
-    let blockers = layout.blocker_summary();
-    unavailable_capability(format!(
-        "Direct OCCT unavailable: runner missing; {}",
-        if blockers.is_empty() {
-            format!(
-                "checked runtime root '{}'; build precompiled runner with `bash scripts/build_direct_occt_runner.sh`",
-                runtime_root.display()
-            )
-        } else {
-            blockers.join("; ")
-        }
-    ))
+    unavailable_capability(
+        "Direct OCCT unavailable: precompiled runner missing; run `npm run occt:prepare`."
+            .to_string(),
+    )
 }
 
 fn available_capability(detail: String, path: Option<String>) -> RuntimeBackendCapability {
@@ -220,30 +169,6 @@ pub(crate) fn resolve_direct_occt_runtime_root(app: &dyn PathResolver) -> AppRes
         }
     }
 
-    if let Ok(path) = std::env::var("BUILD123D_RUNTIME_DIR") {
-        let path = PathBuf::from(path.trim());
-        if path.is_dir() {
-            return Ok(path);
-        }
-    }
-
-    if let Some(path) = app.resource_path("runtime/build123d") {
-        if path.is_dir() {
-            return Ok(path);
-        }
-    }
-
-    for resource in [
-        "runtime/build123d/bin/python3",
-        "runtime/build123d/bin/python",
-    ] {
-        if let Some(path) = app.resource_path(resource) {
-            if let Some(root) = runtime_root_from_python_path(&path) {
-                return Ok(root);
-            }
-        }
-    }
-
     let repo_runtime = crate::ecky_cad_host::direct_occt_sdk::bundled_occt_runtime_root_from_repo(
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -253,31 +178,9 @@ pub(crate) fn resolve_direct_occt_runtime_root(app: &dyn PathResolver) -> AppRes
         return Ok(repo_runtime);
     }
 
-    let repo_runtime =
-        crate::ecky_cad_host::direct_occt_sdk::bundled_build123d_runtime_root_from_repo(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap_or_else(|| Path::new(".")),
-        );
-    if repo_runtime.is_dir() {
-        return Ok(repo_runtime);
-    }
-
-    let python = build123d::resolve_python_cmd_with_app(app)?;
-    runtime_root_from_python_path(&python).ok_or_else(|| {
-        AppError::render(format!(
-            "Direct OCCT runtime root could not be inferred from '{}'.",
-            python.display()
-        ))
-    })
-}
-
-fn runtime_root_from_python_path(path: &Path) -> Option<PathBuf> {
-    if !path.is_file() {
-        return None;
-    }
-    let bin_dir = path.parent()?;
-    (bin_dir.file_name()? == "bin").then(|| bin_dir.parent().map(Path::to_path_buf))?
+    Err(AppError::render(
+        "Direct OCCT runtime root unavailable; run `npm run occt:prepare`.",
+    ))
 }
 
 fn resolve_existing_freecad_path(configured_freecad_cmd: Option<&str>) -> AppResult<PathBuf> {
@@ -362,46 +265,6 @@ fn find_command_on_path(name: &str) -> Option<PathBuf> {
     None
 }
 
-fn probe_build123d_import(python_cmd: &Path) -> AppResult<String> {
-    let output = Command::new(python_cmd)
-        .arg("-c")
-        .arg("import build123d, sys; print(sys.executable)")
-        .output()
-        .map_err(|err| {
-            AppError::render(format!(
-                "Failed to execute build123d Python '{}': {}",
-                python_cmd.display(),
-                err
-            ))
-        })?;
-
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let detail = if stderr.is_empty() && stdout.is_empty() {
-            format!(
-                "build123d import check failed for '{}'.",
-                python_cmd.display()
-            )
-        } else {
-            format!(
-                "build123d import check failed for '{}'. stdout: {} stderr: {}",
-                python_cmd.display(),
-                stdout,
-                stderr
-            )
-        };
-        return Err(AppError::render(detail));
-    }
-
-    let executable = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if executable.is_empty() {
-        return Ok(python_cmd.display().to_string());
-    }
-
-    Ok(executable)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,40 +312,12 @@ mod tests {
         }
     }
 
-    fn create_direct_occt_runtime_layout(root: &Path) {
-        let ocp_root = root
-            .join("resources")
-            .join("runtime")
-            .join("occt")
-            .join("lib")
-            .join("python3.12")
-            .join("site-packages")
-            .join("OCP");
-        let include_dir = ocp_root.join("include").join("opencascade");
-        let dylib_dir = ocp_root.join(".dylibs");
-        fs::create_dir_all(&include_dir).unwrap();
-        fs::create_dir_all(&dylib_dir).unwrap();
-        for header in crate::ecky_cad_host::direct_occt_sdk::REQUIRED_OCCT_HEADERS {
-            fs::write(include_dir.join(header), "// header\n").unwrap();
-        }
-        for lib in crate::ecky_cad_host::direct_occt_sdk::REQUIRED_OCCT_LIBS {
-            let filename = if cfg!(target_os = "macos") {
-                format!("lib{lib}.dylib")
-            } else if cfg!(target_os = "windows") {
-                format!("{lib}.dll")
-            } else {
-                format!("lib{lib}.so")
-            };
-            fs::write(dylib_dir.join(filename), "").unwrap();
-        }
-    }
-
     #[test]
     fn recommended_authoring_context_prefers_ecky_source_over_raw_freecad() {
         let build123d = recommended_authoring_context(true, true);
         assert_eq!(build123d.engine_kind, EngineKind::EckyIrV0);
         assert_eq!(build123d.source_language, SourceLanguage::EckyIrV0);
-        assert_eq!(build123d.geometry_backend, GeometryBackend::Build123d);
+        assert_eq!(build123d.geometry_backend, GeometryBackend::EckyRust);
 
         let freecad = recommended_authoring_context(true, false);
         assert_eq!(freecad.engine_kind, EngineKind::EckyIrV0);
@@ -524,76 +359,6 @@ mod tests {
 
         assert!(!capability.available);
         assert!(capability.detail.contains(missing), "{:?}", capability);
-    }
-
-    #[test]
-    fn probe_build123d_runtime_reports_ready_when_import_probe_succeeds() {
-        let _guard = crate::build123d_test_env_lock().lock().unwrap();
-        let root = temp_root("build123d-ready");
-        let resolver = TestResolver { root };
-        let python =
-            std::env::temp_dir().join(format!("fake-build123d-python-{}", uuid::Uuid::new_v4()));
-        write_file(&python, "#!/bin/sh\nprintf '%s\\n' \"$0\"\nexit 0\n");
-        std::env::set_var("BUILD123D_PYTHON", &python);
-
-        let capability = probe_build123d_runtime(&resolver);
-
-        std::env::remove_var("BUILD123D_PYTHON");
-        assert!(capability.available, "{:?}", capability);
-        assert_eq!(
-            capability.path.as_deref(),
-            Some(python.to_string_lossy().as_ref())
-        );
-    }
-
-    #[test]
-    fn probe_build123d_runtime_reports_import_failure() {
-        let _guard = crate::build123d_test_env_lock().lock().unwrap();
-        let root = temp_root("build123d-fail");
-        let resolver = TestResolver { root };
-        let python = std::env::temp_dir().join(format!(
-            "fake-build123d-python-fail-{}",
-            uuid::Uuid::new_v4()
-        ));
-        write_file(&python, "#!/bin/sh\nprintf 'boom' >&2\nexit 1\n");
-        std::env::set_var("BUILD123D_PYTHON", &python);
-
-        let capability = probe_build123d_runtime(&resolver);
-
-        std::env::remove_var("BUILD123D_PYTHON");
-        assert!(!capability.available);
-        assert!(capability.detail.contains("boom"), "{:?}", capability);
-    }
-
-    #[test]
-    fn collect_runtime_capabilities_prefers_build123d_when_freecad_missing() {
-        let _guard = crate::build123d_test_env_lock().lock().unwrap();
-        let root = temp_root("build123d-only");
-        let resolver = TestResolver { root };
-        let python = std::env::temp_dir().join(format!(
-            "fake-build123d-python-only-{}",
-            uuid::Uuid::new_v4()
-        ));
-        write_file(&python, "#!/bin/sh\nprintf '%s\\n' \"$0\"\nexit 0\n");
-        std::env::set_var("BUILD123D_PYTHON", &python);
-
-        let capabilities = collect_runtime_capabilities(Some("/missing/freecadcmd"), &resolver);
-
-        std::env::remove_var("BUILD123D_PYTHON");
-        assert!(
-            !capabilities.freecad.available,
-            "{:?}",
-            capabilities.freecad
-        );
-        assert!(
-            capabilities.build123d.available,
-            "{:?}",
-            capabilities.build123d
-        );
-        assert_eq!(
-            capabilities.recommended_authoring_context.geometry_backend,
-            GeometryBackend::Build123d
-        );
     }
 
     #[test]
@@ -651,7 +416,6 @@ mod tests {
     fn probe_direct_occt_runtime_prefers_runner_when_available() {
         let root = temp_root("direct-occt-runner-ready");
         let resolver = TestResolver { root: root.clone() };
-        create_direct_occt_runtime_layout(&root);
         let runner = root
             .join("resources")
             .join("runtime")
@@ -674,7 +438,6 @@ mod tests {
     fn probe_direct_occt_runtime_reports_runner_failure() {
         let root = temp_root("direct-occt-runner-fail");
         let resolver = TestResolver { root: root.clone() };
-        create_direct_occt_runtime_layout(&root);
         let runner = root
             .join("resources")
             .join("runtime")
@@ -695,7 +458,7 @@ mod tests {
 
     #[test]
     fn probe_direct_occt_runtime_runner_alone_is_available_without_sdk_layout() {
-        // The precompiled runner is self-contained; the OCP/SDK compile layout
+        // The precompiled runner is self-contained; the SDK compile layout
         // is only needed for the shim-compile leg. A responsive runner alone
         // means native renders are available.
         let root = temp_root("direct-occt-runner-no-layout");

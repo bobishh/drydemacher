@@ -19,8 +19,8 @@ fixture: film-path-gap-coupon
   part: film_path_lower_055 key: sha256:a3ccb21bcb0d84768d4dc17dbcb3e7fdae43fe27c62e7beafe4e224a7afa3120
   part: film_path_upper_clamp_055 key: sha256:7da4aa4e6f1cdaa2487b0ce12fe5b10ae08ed4bac375515712a3c88a80a9daf7
 fixture: film-scanning-adapter-helicoid
-  part: top_cover_integrated_helicoid key: sha256:cdd89618888cd4da302ef81e8d27cca365d998660f5a74254f3f37f294d3729f
-  part: moving_lens_carrier key: sha256:f9a7232d018c97789455d03c679aa7db11ca2691d0d6ece7401d79b450ad2496
+  part: top_cover_integrated_helicoid key: sha256:fd06f3dd2b4b75baa1257830daf06722bfbfee7b2803926442fd07ca1c38aec5
+  part: moving_lens_carrier key: sha256:9e48e46dbb0e7e1ab2d34f98d71482ebbe7fbadf1f87ca1c79ec776b1816c1d9
 fixture: helicoid-thread-coupon
   part: coupon_male_020 key: sha256:12267f1591f3c521f2e863340014d4750c7a14c4afbf04f9bfb4344319dff4c4
   part: coupon_female_020 key: sha256:adfa5843b3353b497a62b15fcb6d257faad40e6808b8993a31dfda0adead1153

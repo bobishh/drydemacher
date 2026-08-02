@@ -47,6 +47,8 @@ zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 lexpr = "0.2.7"
 csgrs = { version = "0.20.1", default-features = false, features = ["f64", "stl-io", "earcut", "offset"] }
 geo = "0.29.3"
+fs2 = "0.4"
+im-rc = "15.1.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.25"
@@ -54,6 +56,9 @@ objc = "0.2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 proptest = "1.6"
@@ -65,3 +70,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "ecky_cad"
 path = "src/main.rs"
+
+[[bin]]
+name = "ecky"
+path = "src/bin/ecky.rs"

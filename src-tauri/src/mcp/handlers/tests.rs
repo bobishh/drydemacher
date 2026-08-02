@@ -32,20 +32,6 @@ fn test_db_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("ecky-mcp-{}-{}", name, Uuid::new_v4()))
 }
 
-fn write_executable(path: &std::path::Path, body: &str) {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).unwrap();
-    }
-    fs::write(path, body).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(path).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(path, perms).unwrap();
-    }
-}
-
 fn write_closed_tetra_binary_stl(path: &std::path::Path) {
     let triangles = [
         [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
@@ -396,6 +382,9 @@ fn sample_design(title: &str, version_name: &str, macro_code: &str) -> DesignOut
 fn sample_bundle(model_id: &str, preview_name: &str) -> ArtifactBundle {
     ArtifactBundle {
         geometry_provenance: None,
+        component_dependency_lock: None,
+        component_dependency_lock_digest: None,
+        component_import_origins: Vec::new(),
         schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind: ModelSourceKind::Generated,
@@ -420,6 +409,7 @@ fn sample_bundle(model_id: &str, preview_name: &str) -> ArtifactBundle {
 fn sample_manifest(model_id: &str) -> ModelManifest {
     ModelManifest {
         geometry_provenance: None,
+        component_import_origins: Vec::new(),
         schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind: ModelSourceKind::Generated,
@@ -548,6 +538,33 @@ fn sample_manifest(model_id: &str) -> ModelManifest {
             proposals: Vec::new(),
         },
     }
+}
+
+/// Force a design/bundle/manifest trio onto the Ecky authoring stack.
+///
+/// `normalize_design_output` (applied whenever a draft is read back from
+/// history) rewrites an Ecky macro's `engine_kind` to `EckyIrV0`, so the
+/// artifact bundle and model manifest must already agree or render
+/// compatibility validation rejects the draft. Production renders always emit
+/// a consistent trio; these fixtures reuse the Freecad `sample_*` builders, so
+/// they must be coerced to match the `(model ...)` macro before the preview is
+/// stored.
+fn coerce_preview_trio_to_ecky(
+    mut design: DesignOutput,
+    mut bundle: ArtifactBundle,
+    mut manifest: ModelManifest,
+) -> (DesignOutput, ArtifactBundle, ModelManifest) {
+    design.macro_dialect = MacroDialect::EckyIrV0;
+    design.engine_kind = crate::contracts::EngineKind::EckyIrV0;
+    design.geometry_backend = crate::contracts::GeometryBackend::EckyRust;
+    design.source_language = crate::contracts::SourceLanguage::EckyIrV0;
+    bundle.engine_kind = crate::contracts::EngineKind::EckyIrV0;
+    bundle.geometry_backend = crate::contracts::GeometryBackend::EckyRust;
+    bundle.source_language = crate::contracts::SourceLanguage::EckyIrV0;
+    manifest.engine_kind = crate::contracts::EngineKind::EckyIrV0;
+    manifest.geometry_backend = crate::contracts::GeometryBackend::EckyRust;
+    manifest.source_language = crate::contracts::SourceLanguage::EckyIrV0;
+    (design, bundle, manifest)
 }
 
 async fn seed_target() -> (AppState, TestPathResolver) {
@@ -856,12 +873,8 @@ async fn seed_target_with_macro(
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn health_check_includes_runtime_capabilities() {
-    let _guard = crate::build123d_test_env_lock().lock().unwrap();
     let root = std::env::temp_dir().join(format!("ecky-mcp-health-{}", Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap();
-    let python = root.join("bin").join("python3");
-    write_executable(&python, "#!/bin/sh\nprintf '%s\\n' \"$0\"\nexit 0\n");
-    std::env::set_var("BUILD123D_PYTHON", &python);
 
     let conn = crate::db::init_db(&test_db_path("health-check")).expect("db");
     let mut config = test_config();
@@ -872,8 +885,6 @@ async fn health_check_includes_runtime_capabilities() {
     let response = handle_health_check(&state, &resolver)
         .await
         .expect("health check");
-
-    std::env::remove_var("BUILD123D_PYTHON");
 
     assert!(response.db_ready);
     assert!(!response.freecad_configured);
@@ -923,10 +934,15 @@ async fn seed_live_session(state: &AppState) {
 async fn thread_create_creates_blank_thread_and_binds_session() {
     let conn = crate::db::init_db(&test_db_path("thread-create")).expect("db");
     let state = AppState::new(test_config(), None, conn);
+    let resolver = TestPathResolver {
+        root: std::env::temp_dir().join(format!("ecky-mcp-root-{}", Uuid::new_v4())),
+    };
+    std::fs::create_dir_all(&resolver.root).unwrap();
     seed_live_session(&state).await;
 
     let response = handle_thread_create(
         &state,
+        &resolver,
         ThreadCreateRequest {
             identity: AgentIdentityOverride::default(),
             title: Some("Seven Petal Badge".to_string()),
@@ -1246,6 +1262,99 @@ async fn target_meta_get_marks_ecky_source_as_ast_patchable() {
         .allowed_patch_targets
         .contains(&"eckyAstReplaceAndRender".to_string()));
     assert_eq!(response.scene_packet.active_lens.as_str(), "exact");
+}
+
+// openspec thread-source-binding 4.1: agent target metadata exposes the
+// bound source path/folder/state using the exact stored binding path.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn target_meta_get_exposes_bound_source_path_folder_state() {
+    let (state, resolver) = seed_target().await;
+
+    // Bind thread-1 through the commit-sync flow (the realistic path for a
+    // thread that already has a committed version): refresh_on_commit aligns
+    // the on-disk source + manifest with the thread head message.
+    let binding = {
+        let conn = state.db.lock().await;
+        crate::thread_source_binding::refresh_on_commit(
+            &resolver,
+            &conn,
+            state.config.lock().unwrap().projects_root.as_deref(),
+            "thread-1",
+            "Base Pot",
+            "base_macro()",
+            "msg-1",
+            None,
+            Some("msg-1"),
+        )
+        .expect("refresh binds on first commit")
+    };
+
+    let response = handle_target_meta_get(
+        &state,
+        &resolver,
+        TargetMetaRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some("thread-1".to_string()),
+            message_id: Some("msg-1".to_string()),
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("target meta");
+
+    // Exact stored binding path (camelCase JSON keys).
+    let value = serde_json::to_value(&response).expect("serialize");
+    let source_path = value
+        .get("sourcePath")
+        .and_then(serde_json::Value::as_str)
+        .expect("sourcePath present for bound target");
+    let source_folder = value
+        .get("sourceFolder")
+        .and_then(serde_json::Value::as_str)
+        .expect("sourceFolder present for bound target");
+    let source_state = value
+        .get("sourceState")
+        .and_then(serde_json::Value::as_str)
+        .expect("sourceState present for bound target");
+    assert_eq!(source_path, binding.source_path);
+    assert_eq!(source_folder, binding.folder_path);
+    assert!(source_path.ends_with("model.ecky"));
+    assert_eq!(source_state, "clean");
+}
+
+// openspec thread-source-binding 4.1: unbound target omits source fields so
+// the agent never edits a path that does not exist yet.
+#[tokio::test]
+async fn target_meta_get_omits_source_fields_when_unbound() {
+    let (state, resolver) = seed_target().await;
+
+    let response = handle_target_meta_get(
+        &state,
+        &resolver,
+        TargetMetaRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some("thread-1".to_string()),
+            message_id: Some("msg-1".to_string()),
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("target meta");
+
+    let value = serde_json::to_value(&response).expect("serialize");
+    assert!(
+        value.get("sourcePath").is_none(),
+        "unbound target must not expose a sourcePath"
+    );
+    assert!(
+        value.get("sourceFolder").is_none(),
+        "unbound target must not expose a sourceFolder"
+    );
+    assert!(
+        value.get("sourceState").is_none(),
+        "unbound target must not expose a sourceState"
+    );
 }
 
 #[tokio::test]
@@ -4707,6 +4816,7 @@ async fn given_macro_preview_on_existing_target_when_agent_passes_parameters_the
                 ])),
                 post_processing: None,
                 geometry_backend: None,
+                source_window: None,
             },
             &test_ctx(),
         )
@@ -4768,6 +4878,7 @@ async fn given_macro_preview_adds_first_params_to_existing_target_then_new_macro
                 ])),
                 post_processing: None,
                 geometry_backend: None,
+                source_window: None,
             },
             &test_ctx(),
         )
@@ -4811,6 +4922,7 @@ async fn macro_preview_uses_saved_ecky_dialect_when_request_omits_it() {
             parameters: None,
             post_processing: None,
             geometry_backend: None,
+            source_window: None,
         },
         &test_ctx(),
     )
@@ -5232,6 +5344,7 @@ async fn given_render_lowering_failures_when_macro_preview_render_then_mcp_error
             )])),
             post_processing: None,
             geometry_backend: Some(crate::contracts::GeometryBackend::Build123d),
+            source_window: None,
         },
         &test_ctx(),
     )
@@ -5276,6 +5389,7 @@ async fn given_render_lowering_failures_when_macro_preview_render_then_mcp_error
             parameters: None,
             post_processing: None,
             geometry_backend: Some(crate::contracts::GeometryBackend::Build123d),
+            source_window: None,
         },
         &test_ctx(),
     )
@@ -7803,8 +7917,14 @@ async fn given_parallel_preview_revisions_when_older_finishes_last_then_newer_dr
 {
     let (state, resolver) = seed_target().await;
     let ctx = test_ctx();
-    let older_revision = reserve_authoring_actor_revision(&ctx, "thread-1").await;
-    let newer_revision = reserve_authoring_actor_revision(&ctx, "thread-1").await;
+    let older_revision = state
+        .authoring_actor_registry
+        .reserve_authoring_actor_revision(&ctx.session_id, "thread-1")
+        .await;
+    let newer_revision = state
+        .authoring_actor_registry
+        .reserve_authoring_actor_revision(&ctx.session_id, "thread-1")
+        .await;
 
     let newer = store_session_render_preview_at_revision(
         &state,
@@ -8737,7 +8857,16 @@ async fn project_folder_apply_refuses_stale_and_conflicted_folders() {
     .await
     .expect("export");
 
-    // Advance the thread behind the folder's back (normal in-app edit).
+    // Compatibility path: simulate a pre-binding exported folder. Bound
+    // folders auto-refresh on normal in-app commits and therefore cannot
+    // become stale through this route.
+    {
+        let conn = state.db.lock().await;
+        crate::thread_source_binding::delete_binding(&conn, "thread-1")
+            .expect("remove binding row while retaining legacy folder");
+    }
+
+    // Advance the thread behind the legacy folder's back.
     let preview = handle_macro_preview_render(
         &state,
         &resolver,
@@ -8751,6 +8880,7 @@ async fn project_folder_apply_refuses_stale_and_conflicted_folders() {
             parameters: None,
             post_processing: None,
             geometry_backend: None,
+            source_window: None,
         },
         &test_ctx(),
     )
@@ -8987,4 +9117,452 @@ async fn project_folder_watcher_reports_broken_edit_once_and_retries_after_chang
         matches!(&events[0], ProjectFolderWatchEvent::Applied { .. }),
         "{events:?}"
     );
+}
+
+// --- thread-source-binding §1/§2 production wiring (integration) ---------
+//
+// These exercise the production lifecycle seams (not the foundation unit
+// tests): thread creation binds a folder immediately; export indexes the
+// binding digest-safely; an Ecky commit refreshes the bound source and
+// refuses to clobber a pending external edit; watcher/apply syncs the
+// binding row digest without creating duplicate versions.
+
+fn tsb_temp_resolver(label: &str) -> TestPathResolver {
+    let root = std::env::temp_dir().join(format!("ecky-tsb-{label}-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    TestPathResolver { root }
+}
+
+/// Asserts the binding row digest equals the on-disk file digest AND the
+/// manifest digest (the digest-safe invariant).
+fn tsb_assert_digest_triplet(folder: &std::path::Path, binding_digest: &str) {
+    let on_disk =
+        std::fs::read_to_string(folder.join(crate::project_mirror::PROJECT_SOURCE_FILE_NAME))
+            .unwrap();
+    let manifest = crate::project_mirror::read_manifest(folder)
+        .unwrap()
+        .expect("manifest");
+    let file_digest = crate::project_mirror::source_digest(&on_disk);
+    assert_eq!(binding_digest, file_digest, "binding digest != file digest");
+    assert_eq!(
+        manifest.source_digest, file_digest,
+        "manifest digest != file digest"
+    );
+}
+
+#[tokio::test]
+async fn thread_create_binds_source_folder_immediately() {
+    let conn = crate::db::init_db(&test_db_path("tsb-thread-create")).expect("db");
+    let state = AppState::new(test_config(), None, conn);
+    seed_live_session(&state).await;
+    let resolver = tsb_temp_resolver("create");
+
+    let response = handle_thread_create(
+        &state,
+        &resolver,
+        ThreadCreateRequest {
+            identity: AgentIdentityOverride::default(),
+            title: Some("Lithophane Badge".to_string()),
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("thread create binds folder");
+
+    // history.sqlite contains the exact binding.
+    let binding = {
+        let conn = state.db.lock().await;
+        crate::thread_source_binding::get_binding(&conn, &response.thread_id)
+            .expect("query binding")
+            .expect("binding row exists")
+    };
+    assert_eq!(binding.thread_id, response.thread_id);
+
+    // Folder + default model.ecky + manifest exist immediately.
+    let folder = std::path::PathBuf::from(&binding.folder_path);
+    let source_path = folder.join(crate::project_mirror::PROJECT_SOURCE_FILE_NAME);
+    let manifest_path = folder.join(crate::project_mirror::PROJECT_MANIFEST_FILE_NAME);
+    assert!(source_path.is_file(), "missing {}", source_path.display());
+    assert!(
+        manifest_path.is_file(),
+        "missing {}",
+        manifest_path.display()
+    );
+    let on_disk = std::fs::read_to_string(&source_path).unwrap();
+    assert_eq!(on_disk, crate::thread_source_binding::DEFAULT_THREAD_SOURCE);
+    tsb_assert_digest_triplet(&folder, &binding.source_digest);
+}
+
+#[tokio::test]
+async fn project_folder_export_indexes_binding_row_digest_safe() {
+    let (state, resolver) =
+        seed_target_with_macro("Pendant", "V-base", "(model (part body (box 4 4 2)))").await;
+
+    let export = handle_project_folder_export(
+        &state,
+        &resolver,
+        ProjectFolderExportRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some("thread-1".to_string()),
+            message_id: Some("msg-1".to_string()),
+            slug: None,
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("export");
+
+    let binding = {
+        let conn = state.db.lock().await;
+        crate::thread_source_binding::get_binding(&conn, "thread-1")
+            .expect("query binding")
+            .expect("export indexed a binding row")
+    };
+    let folder = std::path::PathBuf::from(&export.folder);
+    tsb_assert_digest_triplet(&folder, &binding.source_digest);
+
+    // Atomic (temp+rename) writes leave no stray temp files behind.
+    let leftover: Vec<_> = std::fs::read_dir(&folder)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name())
+        .filter(|name| name.to_string_lossy().contains("atomic"))
+        .collect();
+    assert!(leftover.is_empty(), "stray temp files: {leftover:?}");
+}
+
+#[tokio::test]
+async fn commit_preview_version_refreshes_clean_bound_source() {
+    let (state, resolver) =
+        seed_target_with_macro("Cog", "V-base", "(model (part body (box 3 3 3)))").await;
+    // Establish the binding from the current version, like an agent export.
+    let export = handle_project_folder_export(
+        &state,
+        &resolver,
+        ProjectFolderExportRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some("thread-1".to_string()),
+            message_id: Some("msg-1".to_string()),
+            slug: None,
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("export");
+    let folder = std::path::PathBuf::from(&export.folder);
+
+    // Render + verify an in-app Ecky advance, then commit.
+    let ctx = test_ctx();
+    let preview_stl = resolver.root.join("cog-v2.stl");
+    write_closed_tetra_binary_stl(&preview_stl);
+    let mut bundle = sample_bundle("model-cog-v2", "cog-v2.stl");
+    bundle.preview_stl_path = preview_stl.display().to_string();
+    let new_macro = "(model (part body (box 6 6 3)))";
+    let (design, bundle, manifest) = coerce_preview_trio_to_ecky(
+        sample_design("Cog", "", new_macro),
+        bundle,
+        sample_manifest("model-cog-v2"),
+    );
+    let preview = store_session_render_preview(
+        &state,
+        &resolver,
+        &ctx,
+        StoreSessionRenderPreviewRequest {
+            thread_id: "thread-1".to_string(),
+            base_message_id: Some("msg-1".to_string()),
+            design_output: design,
+            artifact_bundle: bundle,
+            model_manifest: manifest,
+            draft_feedback: None,
+        },
+    )
+    .await
+    .expect("store preview");
+    let verified = handle_verify_generated_model(
+        &state,
+        &resolver,
+        &preview.thread_id,
+        &preview.preview_id,
+        &preview.artifact_bundle.model_id,
+        "",
+    )
+    .await
+    .expect("verify");
+    assert!(verified.result.passed, "{}", verified.result.summary);
+
+    let committed = handle_commit_preview_version(
+        &state,
+        &resolver,
+        VersionSaveRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some(preview.thread_id.clone()),
+            message_id: Some(preview.preview_id.clone()),
+            title: None,
+            version_name: Some("V-cog-v2".to_string()),
+        },
+        &ctx,
+    )
+    .await
+    .expect("commit refreshes bound source");
+
+    // The bound working copy advanced to the committed Ecky source.
+    let on_disk =
+        std::fs::read_to_string(folder.join(crate::project_mirror::PROJECT_SOURCE_FILE_NAME))
+            .unwrap();
+    assert_eq!(on_disk, new_macro);
+    // Manifest rebased onto the committed version id.
+    let manifest = crate::project_mirror::read_manifest(&folder)
+        .unwrap()
+        .expect("manifest");
+    assert_eq!(manifest.message_id, committed.message_id);
+    assert_eq!(
+        manifest.source_digest,
+        crate::project_mirror::source_digest(new_macro)
+    );
+    // Binding row digest synchronized.
+    let binding = {
+        let conn = state.db.lock().await;
+        crate::thread_source_binding::get_binding(&conn, "thread-1")
+            .unwrap()
+            .expect("binding")
+    };
+    assert_eq!(
+        binding.source_digest,
+        crate::project_mirror::source_digest(new_macro)
+    );
+}
+
+#[tokio::test]
+async fn commit_preview_version_refuses_on_pending_external_edit() {
+    let (state, resolver) =
+        seed_target_with_macro("Cog", "V-base", "(model (part body (box 3 3 3)))").await;
+    let export = handle_project_folder_export(
+        &state,
+        &resolver,
+        ProjectFolderExportRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some("thread-1".to_string()),
+            message_id: Some("msg-1".to_string()),
+            slug: None,
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("export");
+    let folder = std::path::PathBuf::from(&export.folder);
+    let baseline_binding = {
+        let conn = state.db.lock().await;
+        crate::thread_source_binding::get_binding(&conn, "thread-1")
+            .unwrap()
+            .expect("binding")
+    };
+
+    // External editor changes the bound working copy behind Ecky's back.
+    let external_edit = "(model (part body (box 9 9 9)))";
+    std::fs::write(
+        folder.join(crate::project_mirror::PROJECT_SOURCE_FILE_NAME),
+        external_edit,
+    )
+    .expect("external edit");
+
+    // An in-app Ecky advance that would clobber the pending edit.
+    let ctx = test_ctx();
+    let preview_stl = resolver.root.join("cog-clobber.stl");
+    write_closed_tetra_binary_stl(&preview_stl);
+    let mut bundle = sample_bundle("model-cog-clobber", "cog-clobber.stl");
+    bundle.preview_stl_path = preview_stl.display().to_string();
+    let new_macro = "(model (part body (box 6 6 3)))";
+    let (design, bundle, manifest) = coerce_preview_trio_to_ecky(
+        sample_design("Cog", "", new_macro),
+        bundle,
+        sample_manifest("model-cog-clobber"),
+    );
+    let preview = store_session_render_preview(
+        &state,
+        &resolver,
+        &ctx,
+        StoreSessionRenderPreviewRequest {
+            thread_id: "thread-1".to_string(),
+            base_message_id: Some("msg-1".to_string()),
+            design_output: design,
+            artifact_bundle: bundle,
+            model_manifest: manifest,
+            draft_feedback: None,
+        },
+    )
+    .await
+    .expect("store preview");
+    let verified = handle_verify_generated_model(
+        &state,
+        &resolver,
+        &preview.thread_id,
+        &preview.preview_id,
+        &preview.artifact_bundle.model_id,
+        "",
+    )
+    .await
+    .expect("verify");
+    assert!(verified.result.passed, "{}", verified.result.summary);
+
+    let baseline_message_count = {
+        let conn = state.db.lock().await;
+        db::get_thread_messages(&conn, "thread-1")
+            .unwrap()
+            .into_iter()
+            .filter(|message| {
+                message.role == MessageRole::Assistant
+                    && message.status == MessageStatus::Success
+                    && message.output.is_some()
+            })
+            .count()
+    };
+
+    let error = handle_commit_preview_version(
+        &state,
+        &resolver,
+        VersionSaveRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some(preview.thread_id.clone()),
+            message_id: Some(preview.preview_id.clone()),
+            title: None,
+            version_name: Some("V-cog-clobber".to_string()),
+        },
+        &ctx,
+    )
+    .await
+    .expect_err("pending edit must block the version");
+    assert!(
+        error.message.contains("refusing to overwrite"),
+        "raw error: {}",
+        error.message
+    );
+
+    // No version was created.
+    let after_message_count = {
+        let conn = state.db.lock().await;
+        db::get_thread_messages(&conn, "thread-1")
+            .unwrap()
+            .into_iter()
+            .filter(|message| {
+                message.role == MessageRole::Assistant
+                    && message.status == MessageStatus::Success
+                    && message.output.is_some()
+            })
+            .count()
+    };
+    assert_eq!(after_message_count, baseline_message_count);
+
+    // The pending external edit was NOT clobbered.
+    let on_disk =
+        std::fs::read_to_string(folder.join(crate::project_mirror::PROJECT_SOURCE_FILE_NAME))
+            .unwrap();
+    assert_eq!(on_disk, external_edit);
+    // Binding digest unchanged.
+    let binding = {
+        let conn = state.db.lock().await;
+        crate::thread_source_binding::get_binding(&conn, "thread-1")
+            .unwrap()
+            .expect("binding")
+    };
+    assert_eq!(binding.source_digest, baseline_binding.source_digest);
+}
+
+#[tokio::test]
+async fn project_folder_apply_syncs_binding_digest_and_is_idempotent() {
+    let (state, resolver) =
+        seed_target_with_macro("Mount", "V-base", "(model (part body (box 8 8 4)))").await;
+    let export = handle_project_folder_export(
+        &state,
+        &resolver,
+        ProjectFolderExportRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some("thread-1".to_string()),
+            message_id: Some("msg-1".to_string()),
+            slug: None,
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("export");
+    let folder = std::path::PathBuf::from(&export.folder);
+
+    let applied_source = "(model (part body (box 12 8 4)))";
+    std::fs::write(
+        folder.join(crate::project_mirror::PROJECT_SOURCE_FILE_NAME),
+        applied_source,
+    )
+    .expect("external edit");
+
+    let applied = handle_project_folder_apply(
+        &state,
+        &resolver,
+        ProjectFolderApplyRequest {
+            identity: AgentIdentityOverride::default(),
+            slug: export.slug.clone(),
+            force: false,
+            title: None,
+            version_name: Some("V-folder-sync".to_string()),
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("apply");
+    assert!(!applied.no_op);
+
+    // Watcher/apply keeps the binding row digest synchronized with the new
+    // committed baseline (manifest == file == binding).
+    let binding = {
+        let conn = state.db.lock().await;
+        crate::thread_source_binding::get_binding(&conn, "thread-1")
+            .unwrap()
+            .expect("binding")
+    };
+    assert_eq!(
+        binding.source_digest,
+        crate::project_mirror::source_digest(applied_source)
+    );
+    tsb_assert_digest_triplet(&folder, &binding.source_digest);
+
+    // Idempotent: a clean re-apply does not create another version and the
+    // binding digest does not drift.
+    let version_count_before = {
+        let conn = state.db.lock().await;
+        db::get_thread_messages(&conn, "thread-1")
+            .unwrap()
+            .into_iter()
+            .filter(|message| {
+                message.role == MessageRole::Assistant
+                    && message.status == MessageStatus::Success
+                    && message.output.is_some()
+            })
+            .count()
+    };
+    let noop = handle_project_folder_apply(
+        &state,
+        &resolver,
+        ProjectFolderApplyRequest {
+            identity: AgentIdentityOverride::default(),
+            slug: export.slug.clone(),
+            force: false,
+            title: None,
+            version_name: None,
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("noop apply");
+    assert!(noop.no_op);
+    let version_count_after = {
+        let conn = state.db.lock().await;
+        db::get_thread_messages(&conn, "thread-1")
+            .unwrap()
+            .into_iter()
+            .filter(|message| {
+                message.role == MessageRole::Assistant
+                    && message.status == MessageStatus::Success
+                    && message.output.is_some()
+            })
+            .count()
+    };
+    assert_eq!(version_count_after, version_count_before);
 }

@@ -73,9 +73,11 @@ implementation for a backend is build123d unless noted.
   file, each self-contained and carrying `verify` clauses.
 - Discovery: a manifest (name, summary, params, tags, version) consumed by the
   existing `component_search` surface; bodies fetched by `component_get`.
-- Loading: import = copy-inline the component source into the model and
-  instantiate it (no implicit registry link), matching the existing
-  component-library contract.
+- Loading: MCP/UI `component_import` = copy-inline the component source into
+  the model and instantiate it (no implicit registry link), matching the
+  existing component-library contract. This is vendoring, not the
+  `(import-component ...)` live-reference language form. Vendoring emits no
+  package declaration or dependency lock.
 - Versioning: stdlib entries are pinned by version in the manifest so a model's
   reproducibility does not silently change when the stdlib updates.
 

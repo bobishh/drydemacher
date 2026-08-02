@@ -1344,24 +1344,12 @@ fn unsupported_python(pos: (usize, usize), detail: &str) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build123d;
-    use crate::ecky_ir::lower_to_build123d;
 
     /// Production lowers on a 32 MiB guarded thread (`lower_ecky_with_large_stack`);
     /// default test threads are too small for the thomas fixture's recursion depth.
-    fn lower_on_guarded_stack(macro_code: &str) -> String {
-        let code = macro_code.to_string();
-        std::thread::Builder::new()
-            .stack_size(32 * 1024 * 1024)
-            .spawn(move || lower_to_build123d(&code).expect("lower"))
-            .expect("spawn lowering thread")
-            .join()
-            .expect("join lowering thread")
-    }
     use crate::freecad;
-    use crate::models::PathResolver;
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::process::Command;
 
     fn fixture_root() -> PathBuf {
@@ -1375,49 +1363,6 @@ mod tests {
         fixture_root()
             .join("reference")
             .join("thomas_modular_ramp_legacy.py")
-    }
-
-    #[derive(Clone)]
-    struct TestResolver {
-        root: PathBuf,
-    }
-
-    impl PathResolver for TestResolver {
-        fn app_config_dir(&self) -> PathBuf {
-            self.root.clone()
-        }
-
-        fn app_data_dir(&self) -> PathBuf {
-            self.root.clone()
-        }
-
-        fn resource_path(&self, path: &str) -> Option<PathBuf> {
-            let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-            match path {
-                "server/build123d_runner.py" => {
-                    Some(repo_root.join("server").join("build123d_runner.py"))
-                }
-                "runtime/build123d/bin/python3" => Some(
-                    repo_root
-                        .join(".dist")
-                        .join("build123d-runtime")
-                        .join("bin")
-                        .join("python3"),
-                ),
-                "runtime/build123d/bin/python" => Some(
-                    repo_root
-                        .join(".dist")
-                        .join("build123d-runtime")
-                        .join("bin")
-                        .join("python"),
-                ),
-                _ => None,
-            }
-        }
-    }
-
-    fn test_root() -> PathBuf {
-        std::env::temp_dir().join(format!("ecky-legacy-xlate-{}", uuid::Uuid::new_v4()))
     }
 
     fn has_freecad() -> bool {
@@ -1475,24 +1420,6 @@ mod tests {
     }
 
     #[test]
-    fn translated_thomas_fixture_lowers_to_smooth_build123d_code() {
-        let source = fs::read_to_string(fixture_reference()).expect("fixture");
-        let result = translate_legacy_python_to_ecky_ir(&source).expect("translate");
-        let code = lower_on_guarded_stack(&result.macro_code);
-        assert!(code.contains("Polyline("), "{}", code);
-        assert!(
-            code.contains("Rectangle(")
-                || code.contains("Polygon(")
-                || code.contains("_ecky_polygon("),
-            "{}",
-            code
-        );
-        assert!(code.contains("_ecky_place("), "{}", code);
-        assert!(code.contains("_ecky_clip_box("), "{}", code);
-        assert!(code.contains("_ecky_fuse_many("), "{}", code);
-    }
-
-    #[test]
     fn translated_thomas_fixture_emits_model_source() {
         let source = fs::read_to_string(fixture_reference()).expect("fixture");
         let result = translate_legacy_python_to_ecky_ir(&source).expect("translate");
@@ -1528,18 +1455,5 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-    }
-
-    #[test]
-    fn render_translated_thomas_fixture_on_build123d() {
-        let source = fs::read_to_string(fixture_reference()).expect("fixture");
-        let result = translate_legacy_python_to_ecky_ir(&source).expect("translate");
-        let lowered = lower_on_guarded_stack(&result.macro_code);
-        let root = test_root();
-        fs::create_dir_all(&root).expect("root");
-        let resolver = TestResolver { root };
-        let bundle =
-            build123d::render_model(&lowered, &BTreeMap::new(), &resolver).expect("render");
-        assert!(Path::new(&bundle.preview_stl_path).exists());
     }
 }

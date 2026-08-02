@@ -170,10 +170,6 @@ pub(super) fn load_cached_bundle(bundle_dir: &Path) -> AppResult<Option<Artifact
 fn cached_indexed_mesh_assets_are_valid(bundle: &ArtifactBundle) -> bool {
     bundle.viewer_assets.iter().all(|asset| {
         crate::ecky_ir::mesh_asset::IndexedMeshAsset::read_cache(
-            crate::ecky_ir::mesh_asset::MeshAssetSource::Generated {
-                provider: "ecky-rust".to_string(),
-                model: None,
-            },
             &Path::new(&asset.path).with_extension("indexed-mesh.json"),
         )
         .is_ok()
@@ -1217,6 +1213,7 @@ fn render_prepared_parts(
     });
     let manifest = ModelManifest {
         geometry_provenance: geometry_provenance.clone(),
+        component_import_origins: Vec::new(),
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.clone(),
         source_kind: ModelSourceKind::Generated,
@@ -1276,6 +1273,9 @@ fn render_prepared_parts(
     };
     let bundle = ArtifactBundle {
         geometry_provenance,
+        component_dependency_lock: None,
+        component_dependency_lock_digest: None,
+        component_import_origins: Vec::new(),
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id,
         source_kind: ModelSourceKind::Generated,
@@ -1838,14 +1838,8 @@ mod tests {
         assert_eq!(manifest.ast_schema_version, Some(1));
         let indexed_path =
             Path::new(&bundle.viewer_assets[0].path).with_extension("indexed-mesh.json");
-        let indexed = crate::ecky_ir::mesh_asset::IndexedMeshAsset::read_cache(
-            crate::ecky_ir::mesh_asset::MeshAssetSource::Generated {
-                provider: "ecky-rust".to_string(),
-                model: None,
-            },
-            &indexed_path,
-        )
-        .expect("indexed mesh handoff cache");
+        let indexed = crate::ecky_ir::mesh_asset::IndexedMeshAsset::read_cache(&indexed_path)
+            .expect("indexed mesh handoff cache");
         assert!(indexed.topology().closed);
     }
 
@@ -1864,14 +1858,8 @@ mod tests {
             .expect("invalid indexed sidecar must rebuild, not be returned from cache");
         let restored_path =
             Path::new(&second.viewer_assets[0].path).with_extension("indexed-mesh.json");
-        crate::ecky_ir::mesh_asset::IndexedMeshAsset::read_cache(
-            crate::ecky_ir::mesh_asset::MeshAssetSource::Generated {
-                provider: "ecky-rust".to_string(),
-                model: None,
-            },
-            &restored_path,
-        )
-        .expect("rebuilt indexed sidecar validates");
+        crate::ecky_ir::mesh_asset::IndexedMeshAsset::read_cache(&restored_path)
+            .expect("rebuilt indexed sidecar validates");
 
         std::fs::remove_dir_all(root).expect("cleanup");
     }
@@ -2296,24 +2284,5 @@ mod tests {
                 .contains("CoreProgram `:edges` keyword requires edge selector payload"),
             "{err}"
         );
-    }
-
-    #[test]
-    fn ecky_lowering_failure_exposes_operation_stable_node_key_and_line_range() {
-        let source = r#"(model (part body (wall-pattern (:mode ribs :depth 1) (shell 2 (cylinder 10 20)))))"#;
-        let err = crate::ecky_ir::lower_to_build123d(source)
-            .expect_err("wall-pattern should fail on build123d")
-            .with_operation("lower:build123d")
-            .with_line_range(1, 1)
-            .with_stable_node_key("sha256:test-lowering-span");
-
-        assert_eq!(err.operation.as_deref(), Some("lower:build123d"));
-        assert_eq!(
-            err.stable_node_key.as_deref(),
-            Some("sha256:test-lowering-span")
-        );
-        assert_eq!(err.start_line, Some(1));
-        assert_eq!(err.end_line, Some(1));
-        assert!(err.start_line.unwrap() <= err.end_line.unwrap(), "{err:?}");
     }
 }

@@ -18,12 +18,18 @@
 
 pub mod agent_prompt;
 pub mod bindings;
-pub mod build123d;
+pub mod cad_source_adapters;
 pub mod cad_transpile;
+pub mod campaign_definition;
+pub mod campaign_projects;
 pub mod commands;
 pub mod component_extract;
+pub mod component_import_runtime;
 pub mod component_package_runtime;
+pub mod component_step_runtime;
+pub mod config_store;
 pub mod context;
+pub mod context_envelope;
 pub mod contracts;
 pub mod db;
 pub mod displacement;
@@ -48,16 +54,13 @@ pub mod project_mirror;
 pub mod raster_trace;
 pub mod runtime_capabilities;
 pub mod services;
+pub mod shape_summary;
 pub mod sketch_brep_validation;
 pub mod sketch_draft_runtime;
 pub mod source_flavor;
+pub mod steel_data;
+pub mod thread_source_binding;
 pub mod topology_target_ids;
-
-#[cfg(test)]
-pub(crate) fn build123d_test_env_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
-}
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -69,7 +72,9 @@ use tokio::time::sleep;
 use uuid::Uuid;
 
 use crate::context::*;
-use crate::contracts::{Attachment, GenieTraits, IntentDecision, ThreadReference};
+use crate::contracts::{
+    AppResult, Attachment, Config, GenieTraits, IntentDecision, ThreadReference,
+};
 use crate::models::{AppState, PathResolver};
 
 use rand::Rng;
@@ -143,8 +148,62 @@ fn init_history_db_with_recovery(
     }
 }
 
-fn has_explicit_max_verify_attempts(raw: &serde_json::Value) -> bool {
-    raw.get("maxVerifyAttempts").is_some() || raw.get("max_verify_attempts").is_some()
+fn load_startup_config(
+    app: &dyn PathResolver,
+    config_dir: &Path,
+    default: Config,
+) -> AppResult<(Config, crate::models::ConfigPersistenceStatus)> {
+    let outcome = crate::config_store::load_config(config_dir, default, |mut config, markers| {
+        if !markers.mcp_mode_present {
+            config.mcp.mode = crate::mcp::runtime::default_mcp_mode(&config);
+        }
+        if !markers.primary_agent_id_present {
+            crate::mcp::runtime::ensure_primary_agent_id(&mut config);
+        }
+        Ok(config)
+    })?;
+    let mut config = outcome.config;
+    let mut warnings = outcome.warnings;
+    let primary_changed = crate::mcp::runtime::ensure_primary_agent_id(&mut config);
+    let assets_changed = crate::commands::assets::sync_image_assets_into_config(app, &mut config)
+        .map_err(|_| {
+        crate::contracts::AppError::persistence("config startup failed: asset-scan")
+    })?;
+    let mut cleanup_pending = outcome.cleanup_pending;
+    let derived_changed = primary_changed || assets_changed;
+    if derived_changed && outcome.source != crate::config_store::ConfigSource::Default {
+        let saved = crate::config_store::save_config(config_dir, config.clone())?;
+        warnings.extend(saved.warnings);
+        cleanup_pending = saved.cleanup_pending;
+    }
+    warnings.sort();
+    warnings.dedup();
+    Ok((
+        config,
+        crate::models::ConfigPersistenceStatus {
+            cleanup_pending,
+            warnings,
+        },
+    ))
+}
+
+fn load_startup_config_or_default(
+    app: &dyn PathResolver,
+    config_dir: &Path,
+    default: Config,
+) -> (Config, crate::models::ConfigPersistenceStatus) {
+    match load_startup_config(app, config_dir, default.clone()) {
+        Ok(loaded) => loaded,
+        Err(err) => (
+            default,
+            crate::models::ConfigPersistenceStatus {
+                cleanup_pending: false,
+                warnings: vec![format!(
+                    "[BOOT] Config load failed; running with defaults: {err}"
+                )],
+            },
+        ),
+    }
 }
 
 pub fn generate_genie_traits() -> GenieTraits {
@@ -556,55 +615,8 @@ pub fn run() {
                 fs::create_dir_all(&app_data_dir)?;
             }
 
-            let mut config = default_config;
-            let mut has_explicit_mcp_mode = false;
-            let mut has_explicit_primary_agent = false;
-            let mut has_explicit_max_verify_attempts_field = false;
-            let config_path = config_dir.join("config.json");
-            if config_path.exists() {
-                if let Ok(data) = fs::read_to_string(&config_path) {
-                    if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&data) {
-                        has_explicit_mcp_mode =
-                            raw.get("mcp").and_then(|mcp| mcp.get("mode")).is_some();
-                        has_explicit_primary_agent = raw
-                            .get("mcp")
-                            .and_then(|mcp| mcp.get("primaryAgentId"))
-                            .is_some();
-                        has_explicit_max_verify_attempts_field =
-                            has_explicit_max_verify_attempts(&raw);
-                    }
-                    if let Ok(c) = serde_json::from_str::<crate::contracts::Config>(&data) {
-                        config = c;
-                    }
-                }
-            }
-            let mut should_persist_config = false;
-            if crate::commands::assets::sync_image_assets_into_config(app.handle(), &mut config)? {
-                should_persist_config = true;
-            }
-            if !has_explicit_mcp_mode {
-                let next_mode = crate::mcp::runtime::default_mcp_mode(&config);
-                if config.mcp.mode != next_mode {
-                    config.mcp.mode = next_mode;
-                    should_persist_config = true;
-                }
-            }
-            if !has_explicit_primary_agent
-                || crate::mcp::runtime::ensure_primary_agent_id(&mut config)
-            {
-                should_persist_config = true;
-            }
-            if !has_explicit_max_verify_attempts_field && config.max_verify_attempts != 2 {
-                config.max_verify_attempts = 2;
-                should_persist_config = true;
-            }
-            if should_persist_config {
-                if let Ok(data) = serde_json::to_string_pretty(&config) {
-                    if let Err(err) = fs::write(&config_path, data) {
-                        eprintln!("Failed to persist migrated config prompts: {}", err);
-                    }
-                }
-            }
+            let (config, config_persistence_status) =
+                load_startup_config_or_default(app.handle(), &config_dir, default_config);
 
             let db_path = config_dir.join("history.sqlite");
             let (conn, startup_warnings) = init_history_db_with_recovery(&config_dir)
@@ -630,10 +642,15 @@ pub fn run() {
             let mcp_port = config.mcp.port;
             let state =
                 AppState::new_with_read_connection(config, last_snapshot, conn, Some(read_conn));
+            *state.config_persistence_status.lock().unwrap() = config_persistence_status.clone();
             state.set_app_handle(app.handle().clone());
             app.manage(state.clone());
             for warning in startup_warnings {
                 eprintln!("{}", warning);
+                state.push_log(warning);
+            }
+            for warning in config_persistence_status.warnings {
+                eprintln!("[BOOT] {warning}");
                 state.push_log(warning);
             }
 
@@ -716,6 +733,223 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct StartupPaths(std::path::PathBuf);
+
+    impl PathResolver for StartupPaths {
+        fn app_config_dir(&self) -> std::path::PathBuf {
+            self.0.join("config")
+        }
+        fn app_data_dir(&self) -> std::path::PathBuf {
+            self.0.join("data")
+        }
+        fn resource_path(&self, _path: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+    }
+
+    fn startup_config() -> Config {
+        Config {
+            engines: vec![],
+            selected_engine_id: "selected".into(),
+            freecad_cmd: String::new(),
+            cad_text_font_path: String::new(),
+            freecad_library_roots: vec![],
+            assets: vec![],
+            microwave: None,
+            voice: crate::contracts::VoiceConfig::default(),
+            mcp: crate::contracts::McpConfig::default(),
+            has_seen_onboarding: false,
+            connection_type: None,
+            default_engine_kind: crate::contracts::EngineKind::EckyIrV0,
+            default_source_language: crate::contracts::SourceLanguage::EckyIrV0,
+            default_geometry_backend: crate::contracts::GeometryBackend::Build123d,
+            max_generation_attempts: 3,
+            max_verify_attempts: 2,
+            projects_root: None,
+        }
+    }
+
+    fn startup_root() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("ecky-startup-config-{}", Uuid::new_v4()))
+    }
+
+    #[test]
+    fn bdd_startup_json_only_backfills_edn_and_removes_json() {
+        let root = startup_root();
+        let paths = StartupPaths(root.clone());
+        fs::create_dir_all(paths.app_config_dir()).unwrap();
+        let mut legacy = serde_json::to_value(startup_config()).unwrap();
+        legacy["mcp"]["autoAgents"] = serde_json::json!([{
+            "id": "agent",
+            "label": "Agent",
+            "cmd": "sentinel-secret-command",
+            "args": [],
+            "enabled": true,
+            "startOnDemand": true
+        }]);
+        legacy["mcp"].as_object_mut().unwrap().remove("mode");
+        legacy["mcp"]
+            .as_object_mut()
+            .unwrap()
+            .remove("primaryAgentId");
+        legacy.as_object_mut().unwrap().remove("maxVerifyAttempts");
+        fs::write(
+            paths.app_config_dir().join("config.json"),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let (loaded, _) =
+            load_startup_config(&paths, &paths.app_config_dir(), startup_config()).unwrap();
+        assert_eq!(loaded.mcp.mode, crate::contracts::McpMode::Active);
+        assert_eq!(loaded.mcp.primary_agent_id.as_deref(), Some("agent"));
+        assert_eq!(loaded.max_verify_attempts, 2);
+        assert!(!loaded.mcp.auto_agents[0].start_on_demand);
+        assert!(paths.app_config_dir().join("config.edn").exists());
+        assert!(!paths.app_config_dir().join("config.json").exists());
+        let disk = crate::config_store::load_config(
+            &paths.app_config_dir(),
+            startup_config(),
+            |config, _| Ok(config),
+        )
+        .unwrap()
+        .config;
+        assert_eq!(disk, loaded);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bdd_startup_invalid_edn_fails_closed_without_deleting_json() {
+        let root = startup_root();
+        let paths = StartupPaths(root.clone());
+        fs::create_dir_all(paths.app_config_dir()).unwrap();
+        let invalid_edn = "sentinel-secret-edn [";
+        let invalid_json = "{sentinel-secret-json";
+        fs::write(paths.app_config_dir().join("config.edn"), invalid_edn).unwrap();
+        fs::write(paths.app_config_dir().join("config.json"), invalid_json).unwrap();
+        let error =
+            load_startup_config(&paths, &paths.app_config_dir(), startup_config()).unwrap_err();
+        assert!(!error.to_string().contains("sentinel-secret"));
+        assert_eq!(
+            fs::read_to_string(paths.app_config_dir().join("config.edn")).unwrap(),
+            invalid_edn
+        );
+        assert_eq!(
+            fs::read_to_string(paths.app_config_dir().join("config.json")).unwrap(),
+            invalid_json
+        );
+        assert!(paths.app_config_dir().join("config.json").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bdd_startup_invalid_edn_uses_defaults_without_overwriting_the_file() {
+        let root = startup_root();
+        let paths = StartupPaths(root.clone());
+        let invalid_edn = "invalid-shape [";
+        fs::create_dir_all(paths.app_config_dir()).unwrap();
+        fs::write(paths.app_config_dir().join("config.edn"), invalid_edn).unwrap();
+
+        let default = startup_config();
+        let (loaded, status) =
+            load_startup_config_or_default(&paths, &paths.app_config_dir(), default.clone());
+
+        assert_eq!(loaded, default);
+        assert_eq!(
+            fs::read_to_string(paths.app_config_dir().join("config.edn")).unwrap(),
+            invalid_edn
+        );
+        assert_eq!(
+            status.warnings,
+            vec!["[BOOT] Config load failed; running with defaults: config.edn: invalid-shape"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bdd_startup_repairs_stale_edn_primary_agent_and_persists_repair() {
+        let root = startup_root();
+        let paths = StartupPaths(root.clone());
+        let mut stale = startup_config();
+        stale.mcp.auto_agents.push(crate::contracts::AutoAgent {
+            id: "agent".into(),
+            label: "Agent".into(),
+            cmd: "command".into(),
+            model: None,
+            args: vec![],
+            enabled: true,
+            start_on_demand: false,
+        });
+        stale.mcp.primary_agent_id = Some("missing".into());
+        crate::config_store::save_config(&paths.app_config_dir(), stale).unwrap();
+
+        let (loaded, _) =
+            load_startup_config(&paths, &paths.app_config_dir(), startup_config()).unwrap();
+
+        assert_eq!(loaded.mcp.primary_agent_id.as_deref(), Some("agent"));
+        let disk = crate::config_store::load_config(
+            &paths.app_config_dir(),
+            startup_config(),
+            |config, _| Ok(config),
+        )
+        .unwrap()
+        .config;
+        assert_eq!(disk.mcp.primary_agent_id.as_deref(), Some("agent"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bdd_startup_reports_static_asset_scan_error_without_path() {
+        let root = startup_root();
+        let paths = StartupPaths(root.clone());
+        fs::create_dir_all(&root).unwrap();
+        fs::write(paths.app_data_dir(), "sentinel-secret-path").unwrap();
+
+        let error =
+            load_startup_config(&paths, &paths.app_config_dir(), startup_config()).unwrap_err();
+
+        assert_eq!(error.message, "config startup failed: asset-scan");
+        assert!(!error.to_string().contains("sentinel-secret"));
+        assert!(!error
+            .to_string()
+            .contains(&root.to_string_lossy().to_string()));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bdd_startup_surfaces_cleanup_pending_and_retries_next_load() {
+        let root = startup_root();
+        let paths = StartupPaths(root.clone());
+        crate::config_store::save_config(&paths.app_config_dir(), startup_config()).unwrap();
+        let json = paths
+            .app_config_dir()
+            .join(crate::config_store::CONFIG_JSON_FILE);
+        fs::create_dir(&json).unwrap();
+
+        let (_, pending) =
+            load_startup_config(&paths, &paths.app_config_dir(), startup_config()).unwrap();
+        assert!(pending.cleanup_pending);
+        assert_eq!(pending.warnings, vec!["config.json: cleanup-pending"]);
+
+        fs::remove_dir(&json).unwrap();
+        fs::write(&json, "{stale-invalid-json").unwrap();
+        let (_, retried) =
+            load_startup_config(&paths, &paths.app_config_dir(), startup_config()).unwrap();
+        assert!(!retried.cleanup_pending);
+        assert!(retried.warnings.is_empty());
+        assert!(!json.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bdd_startup_default_keeps_files_absent() {
+        let root = startup_root();
+        let paths = StartupPaths(root.clone());
+        let _ = load_startup_config(&paths, &paths.app_config_dir(), startup_config()).unwrap();
+        assert!(!paths.app_config_dir().join("config.edn").exists());
+        assert!(!paths.app_config_dir().join("config.json").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     // --- extract_code_blocks ---
 
@@ -830,17 +1064,6 @@ mod tests {
         assert_eq!(traits.version, crate::contracts::GENIE_TRAITS_VERSION);
         assert!(traits.seed > 0);
         assert!((10..=24).contains(&traits.vertex_count));
-    }
-
-    #[test]
-    fn detects_explicit_max_verify_attempts_in_camel_or_snake_case() {
-        assert!(has_explicit_max_verify_attempts(&serde_json::json!({
-            "maxVerifyAttempts": 0
-        })));
-        assert!(has_explicit_max_verify_attempts(&serde_json::json!({
-            "max_verify_attempts": 0
-        })));
-        assert!(!has_explicit_max_verify_attempts(&serde_json::json!({})));
     }
 
     #[test]

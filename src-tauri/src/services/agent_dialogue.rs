@@ -447,6 +447,9 @@ mod tests {
                 message_id: Some("msg-snapshot".to_string()),
                 artifact_bundle: Some(crate::contracts::ArtifactBundle {
                     geometry_provenance: None,
+                    component_dependency_lock: None,
+                    component_dependency_lock_digest: None,
+                    component_import_origins: Vec::new(),
                     schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
                     model_id: "model-snapshot".to_string(),
                     source_kind: crate::contracts::ModelSourceKind::Generated,

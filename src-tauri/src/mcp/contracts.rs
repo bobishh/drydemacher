@@ -375,6 +375,16 @@ pub struct WorkspaceOverviewTarget {
     pub has_version: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claim_owner: Option<crate::contracts::AgentSession>,
+    // openspec thread-source-binding 4.1: bound source view for the agent.
+    // Populated from the authoritative stored binding. A missing folder still
+    // exposes the retained path with sourceState=missing; absent only when no
+    // binding row exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_folder: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_state: Option<crate::project_mirror::ProjectSyncState>,
 }
 
 #[derive(Debug, Serialize)]
@@ -518,6 +528,16 @@ pub struct TargetMetaResponse {
     pub control_relation_count: usize,
     pub control_view_count: usize,
     pub scene_packet: AgentScenePacket,
+    // openspec thread-source-binding 4.1: bound source view for the agent.
+    // Populated from the authoritative stored binding. A missing folder still
+    // exposes the retained path with sourceState=missing; absent only when no
+    // binding row exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_folder: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_state: Option<crate::project_mirror::ProjectSyncState>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1506,6 +1526,30 @@ pub struct SessionActivityClearResponse {
     pub status_text: Option<String>,
 }
 
+/// Typed acknowledgement linking a `macro_preview_render` full replacement to
+/// the `target_macro_get` / `macro_buffer_get` read that produced the submitted
+/// `macroCode`. Carries the raw observed/window/full-size details so the
+/// boundary can reject a truncated read window submitted as a full
+/// replacement without explicit acknowledgement, without heuristic content
+/// detection.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MacroSourceWindow {
+    /// Total line count of the target's current macro as observed by the read
+    /// (`target_macro_get` `lineCount`).
+    pub full_size_line_count: usize,
+    /// First line of the read window (`windowStartLine`, 1-based inclusive).
+    pub window_start_line: usize,
+    /// Last line of the read window (`windowEndLine`, 1-based inclusive).
+    pub window_end_line: usize,
+    /// Number of lines the agent actually observed in the read window.
+    pub observed_line_count: usize,
+    /// Explicit acknowledgement that a truncated window is intentionally
+    /// submitted as a full replacement, deleting unread lines.
+    #[serde(default)]
+    pub acknowledges_truncation: bool,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MacroReplaceRequest {
@@ -1520,6 +1564,12 @@ pub struct MacroReplaceRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_processing: Option<crate::contracts::PostProcessingSpec>,
     pub geometry_backend: Option<crate::contracts::GeometryBackend>,
+    /// Optional acknowledgement linking the submitted `macroCode` to a
+    /// `target_macro_get` read window. When present, the boundary enforces raw
+    /// observed/window/full-size consistency and requires
+    /// `acknowledgesTruncation` when the window did not cover the whole target.
+    #[serde(default)]
+    pub source_window: Option<MacroSourceWindow>,
 }
 
 #[derive(Debug, Serialize)]

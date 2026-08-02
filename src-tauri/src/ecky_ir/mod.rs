@@ -1,5 +1,4 @@
 pub mod backend_capabilities;
-mod build123d_lowering;
 pub(crate) mod edge_ops;
 mod eval_scalar;
 mod freecad_lowering;
@@ -7,7 +6,6 @@ mod heightfield;
 pub mod mesh_asset;
 pub(crate) mod mesh_literal;
 mod mesh_ops;
-pub(crate) use mesh_ops::read_stl_mesh;
 mod model;
 pub mod op_suggest;
 pub mod poly_partition;
@@ -47,24 +45,6 @@ pub fn source_uses_direct_occt_required_cad_ops(source: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub fn lower_to_build123d(source: &str) -> AppResult<String> {
-    lower_to_build123d_with_previous_manifest(source, None)
-}
-
-pub fn lower_to_build123d_with_previous_manifest(
-    source: &str,
-    previous_manifest: Option<&ModelManifest>,
-) -> AppResult<String> {
-    if let Some(program) = try_compile_to_core_program(source) {
-        let program = crate::topology_target_ids::rebind_program_tagged_selectors(
-            &program?,
-            previous_manifest,
-        )?;
-        return build123d_lowering::lower_core_program_to_build123d(&program);
-    }
-    build123d_lowering::lower_to_build123d(source)
-}
-
 pub fn lower_to_freecad(source: &str) -> AppResult<String> {
     lower_to_freecad_with_previous_manifest(source, None)
 }
@@ -78,9 +58,10 @@ pub fn lower_to_freecad_with_previous_manifest(
             &program?,
             previous_manifest,
         )?;
-        return freecad_lowering::lower_core_program_to_freecad(&program);
+        return freecad_lowering::lower_core_program_to_freecad(&program)
+            .map_err(crate::contracts::AppError::from);
     }
-    freecad_lowering::lower_to_freecad(source)
+    freecad_lowering::lower_to_freecad(source).map_err(crate::contracts::AppError::from)
 }
 
 pub fn derive_controls(source: &str) -> AppResult<ParsedParamsResult> {
@@ -322,7 +303,7 @@ pub(crate) fn is_ecky_rust_only_cad_head(head: &str) -> bool {
 fn is_direct_occt_required_cad_head(head: &str) -> bool {
     matches!(
         head,
-        "text" | "svg" | "import-stl" | "helical-ridge" | "chamfer" | "fillet"
+        "text" | "svg" | "import-stl" | "import-step" | "helical-ridge" | "chamfer" | "fillet"
     ) || crate::ecky_language_surface::ECKY_RUST_DIRECT_ONLY_CAD_OPS.contains(&head)
 }
 
@@ -334,7 +315,8 @@ fn is_direct_occt_required_core_op(op: &CoreOperation) -> bool {
             | CoreOperation::Primitive(crate::ecky_core_ir::CorePrimitive::Stl)
             | CoreOperation::Surface(CoreSurfaceOp::Chamfer | CoreSurfaceOp::Fillet)
     ) || matches!(op, CoreOperation::Custom(name)
-        if name == "helical-ridge"
+        if name == "import-step"
+            || name == "helical-ridge"
             || crate::ecky_language_surface::ECKY_RUST_DIRECT_ONLY_CAD_OPS.contains(&name.as_str()))
 }
 

@@ -431,7 +431,6 @@ pub(super) struct TypedBuildExpr {
 pub(super) struct TypedBuildBinding {
     pub(super) name: String,
     pub(super) expr: IrExpr,
-    pub(super) value_kind: Option<CoreValueKind>,
 }
 
 #[derive(Debug, Clone)]
@@ -445,7 +444,6 @@ pub(crate) struct IrPart {
     pub(super) part_id: String,
     pub(super) label: String,
     pub(super) expr: IrExpr,
-    pub(super) value_kind: Option<CoreValueKind>,
 }
 
 #[cfg(test)]
@@ -635,7 +633,6 @@ pub(super) fn parse_part_decl(items: &[Value]) -> AppResult<IrPart> {
         part_id,
         label,
         expr: materialize_selector_nodes(IrExpr::from_value(&expr)?)?,
-        value_kind: None,
     })
 }
 
@@ -741,18 +738,20 @@ pub(super) fn parse_typed_build_expr(value: &IrExpr) -> AppResult<TypedBuildExpr
                         name
                     )));
                 }
-                let value_kind = if stmt.len() == 5 {
+                if stmt.len() == 5 {
                     expr_keyword_name(&stmt[3])
                         .filter(|k| *k == "value-kind")
                         .and_then(|_| stmt[4].as_symbol())
                         .and_then(parse_value_kind_tag)
-                } else {
-                    None
-                };
+                        .ok_or_else(|| {
+                            validation(
+                                "Typed `build` bindings require `:value-kind <tag>` metadata.",
+                            )
+                        })?;
+                }
                 bindings.push(TypedBuildBinding {
                     name,
                     expr: stmt[2].dup(),
-                    value_kind,
                 });
             }
             "result" => {
@@ -922,7 +921,6 @@ pub(crate) fn core_part_to_ir_part(
             &BTreeMap::new(),
             &mut used_local_names,
         )?)?,
-        value_kind: Some(part.root.value_kind),
     })
 }
 
@@ -1491,8 +1489,8 @@ mod tests {
         match &items[3] {
             IrExpr::Selector(IrSelectorExpr::Edge(selector)) => {
                 assert_eq!(
-                    selector.target_ids(),
-                    Some(&["body:edge:0:0-0-0_1-0-0".to_string()][..])
+                    selector.canonical_string(),
+                    "target-ids:body:edge:0:0-0-0_1-0-0"
                 );
             }
             other => panic!("expected edge selector node, got {other:?}"),

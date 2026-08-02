@@ -34,8 +34,8 @@ everything you need to write valid source is in this prompt.
   `verify` clauses consistent.
 - On a failed request you receive the compiler diagnostic. Treat it as
   authoritative: fix the named cause and re-emit. A diagnostic naming an op as
-  unsupported on the active backend (e.g. native-only `:created-by`, or
-  `:to-radius` rejected by build123d) means switch the approach or the backend,
+  unsupported on the active backend (e.g. native-only `:created-by` rejected by
+  FreeCAD interop) means switch the approach or the backend,
   not retry verbatim.
 - Respect the per-op backend support listed in the op catalogue below. Prefer
   geometry that renders on the active backend.
@@ -44,7 +44,7 @@ everything you need to write valid source is in this prompt.
 /// The full self-contained language reference for `backend`.
 pub fn agent_language_reference(backend: GeometryBackend) -> String {
     let backend_label = match backend {
-        GeometryBackend::Build123d => "build123d",
+        GeometryBackend::Build123d => "mesh (legacy setting migrated to Ecky Native)",
         GeometryBackend::Freecad => "freecad",
         GeometryBackend::EckyRust => "mesh",
     };

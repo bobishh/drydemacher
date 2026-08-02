@@ -89,7 +89,7 @@ pub struct AutoAgent {
     pub enabled: bool,
     /// Deprecated compatibility flag from the old eager-start implementation.
     /// Active-mode wake behavior now depends on `mcp.mode` and `mcp.primaryAgentId`.
-    #[serde(default)]
+    #[serde(default, alias = "start_on_demand")]
     pub start_on_demand: bool,
 }
 
@@ -134,7 +134,7 @@ pub struct McpConfig {
     #[serde(default)]
     pub ecky_ast_authoring: bool,
     /// External processes available to Ecky in active mode.
-    #[serde(default)]
+    #[serde(default, alias = "auto_agents")]
     pub auto_agents: Vec<AutoAgent>,
 }
 
@@ -184,7 +184,7 @@ pub struct Config {
     pub default_geometry_backend: GeometryBackend,
     #[serde(default = "default_max_generation_attempts")]
     pub max_generation_attempts: u32,
-    #[serde(default)]
+    #[serde(default, alias = "max_verify_attempts")]
     pub max_verify_attempts: u32,
     /// Filesystem root for exported project folders. Blank/None uses the
     /// default `<app_data>/projects`. See `filesystem-project-mirror`.
@@ -243,7 +243,7 @@ fn default_source_language() -> SourceLanguage {
 }
 
 fn default_geometry_backend() -> GeometryBackend {
-    GeometryBackend::Build123d
+    GeometryBackend::EckyRust
 }
 
 fn default_true() -> bool {

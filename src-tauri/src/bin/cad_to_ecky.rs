@@ -10,33 +10,83 @@
 use std::fs;
 use std::path::PathBuf;
 
+use ecky_cad_lib::cad_source_adapters::{adapt_cad_source, SystemCadSourceCommandRunner};
 use ecky_cad_lib::cad_transpile::{build_transpile_messages, strip_code_fence};
-use ecky_cad_lib::contracts::Config;
 use ecky_cad_lib::contracts::GeometryBackend;
 use ecky_cad_lib::llm::{extract_openai_message_content, send_openai_request};
+use ecky_cad_lib::steel_data::parse_steel_data;
 
 fn usage() -> &'static str {
-    "Usage: cad_to_ecky <input> [--backend mesh|build123d|freecad] [--model M] \
-[--base-url URL] [--api-key K] [--config config.json] [--out out.ecky] [--dump-prompt]"
+    "Usage: cad_to_ecky <input> [--backend mesh|freecad] [--model M] \
+[--base-url URL] [--api-key K] [--config config.edn] [--out out.ecky] [--dump-prompt]"
 }
 
 fn parse_backend(s: &str) -> Result<GeometryBackend, String> {
     serde_json::from_value(serde_json::Value::String(s.to_string()))
-        .map_err(|_| format!("unknown backend '{s}' (use mesh|build123d|freecad)"))
+        .map_err(|_| format!("unknown backend '{s}' (use mesh|freecad)"))
+        .and_then(|backend| match backend {
+            GeometryBackend::Build123d => {
+                Err("build123d was removed; use mesh or freecad".to_string())
+            }
+            backend => Ok(backend),
+        })
+}
+
+/// Route source formats through text-only adapters. No adapter emits Ecky.
+fn read_transpile_source(input: &std::path::Path) -> Result<String, String> {
+    let bytes =
+        fs::read(input).map_err(|error| format!("read input '{}': {error}", input.display()))?;
+    adapt_cad_source(input, &bytes, &SystemCadSourceCommandRunner)
 }
 
 /// Resolve the app config path: explicit flag, then `ECKY_APP_CONFIG_DIR`, then
-/// the platform default under the user's config dir.
-fn config_path(explicit: Option<PathBuf>) -> Result<PathBuf, String> {
+/// the same platform location used by Tauri's app config directory.
+fn config_path(explicit: Option<PathBuf>) -> Result<(PathBuf, bool), String> {
     if let Some(path) = explicit {
-        return Ok(path);
+        validate_config_path(&path)?;
+        return Ok((path, true));
     }
     if let Some(dir) = std::env::var_os("ECKY_APP_CONFIG_DIR") {
-        return Ok(PathBuf::from(dir).join("config.json"));
+        return Ok((PathBuf::from(dir).join("config.edn"), false));
     }
-    let home = std::env::var_os("HOME").ok_or("HOME not set; pass --config")?;
-    Ok(PathBuf::from(home)
-        .join("Library/Application Support/com.alcoholics-audacious.ecky-cad/config.json"))
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME").ok_or("HOME not set; pass --config")?;
+        return Ok((
+            PathBuf::from(home)
+                .join("Library/Application Support/com.alcoholics-audacious.ecky-cad/config.edn"),
+            false,
+        ));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let app_data = std::env::var_os("APPDATA").ok_or("APPDATA not set; pass --config")?;
+        return Ok((
+            PathBuf::from(app_data).join("com.alcoholics-audacious.ecky-cad/config.edn"),
+            false,
+        ));
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .ok_or("XDG_CONFIG_HOME and HOME not set; pass --config")?;
+        Ok((
+            base.join("com.alcoholics-audacious.ecky-cad/config.edn"),
+            false,
+        ))
+    }
+}
+
+fn validate_config_path(path: &std::path::Path) -> Result<(), String> {
+    if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+    {
+        return Err("--config accepts canonical EDN only".to_string());
+    }
+    Ok(())
 }
 
 struct Resolved {
@@ -47,31 +97,76 @@ struct Resolved {
 }
 
 fn resolve(
-    cfg_path: &PathBuf,
+    cfg_path: &std::path::Path,
+    explicit_config: bool,
     flag_model: Option<String>,
     flag_base: Option<String>,
     flag_key: Option<String>,
     flag_backend: Option<GeometryBackend>,
 ) -> Result<Resolved, String> {
-    let data = fs::read_to_string(cfg_path)
-        .map_err(|e| format!("read config '{}': {e}", cfg_path.display()))?;
-    let config: Config = serde_json::from_str(&data).map_err(|e| format!("parse config: {e}"))?;
-    let engine = config
-        .engines
-        .iter()
-        .find(|e| e.id == config.selected_engine_id)
-        .ok_or("no selected engine in config")?;
+    let config = match fs::read_to_string(cfg_path) {
+        Ok(data) => {
+            let data =
+                parse_steel_data(&data).map_err(|_| "config.edn: invalid-data".to_string())?;
+            Some(
+                ecky_cad_lib::contracts::decode_config(&data)
+                    .map_err(|_| "config.edn: invalid-shape".to_string())?,
+            )
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !explicit_config => None,
+        Err(_) => return Err("config.edn: read-failed".to_string()),
+    };
 
-    let pick = |flag: Option<String>, env: &str, base: &str| -> String {
-        flag.or_else(|| std::env::var(env).ok())
-            .unwrap_or_else(|| base.to_string())
+    let engine = config
+        .as_ref()
+        .map(|config| {
+            config
+                .engines
+                .iter()
+                .find(|engine| engine.id == config.selected_engine_id)
+                .ok_or_else(|| "config.edn: selected-engine-missing".to_string())
+        })
+        .transpose()?;
+
+    let pick = |flag: Option<String>,
+                nvidia_env: &str,
+                nim_env: &str,
+                config_value: Option<&str>,
+                fallback: &str|
+     -> String {
+        flag.or_else(|| std::env::var(nvidia_env).ok())
+            .or_else(|| std::env::var(nim_env).ok())
+            .or_else(|| config_value.map(str::to_owned))
+            .unwrap_or_else(|| fallback.to_owned())
     };
 
     Ok(Resolved {
-        base_url: pick(flag_base, "NVIDIA_BASE_URL", &engine.base_url),
-        api_key: pick(flag_key, "NVIDIA_API_KEY", &engine.api_key),
-        model: pick(flag_model, "NVIDIA_MODEL", &engine.model),
-        backend: flag_backend.unwrap_or(config.default_geometry_backend),
+        base_url: pick(
+            flag_base,
+            "NVIDIA_BASE_URL",
+            "NIM_BASE_URL",
+            engine.map(|engine| engine.base_url.as_str()),
+            "https://integrate.api.nvidia.com/v1",
+        ),
+        api_key: pick(
+            flag_key,
+            "NVIDIA_API_KEY",
+            "NIM_API_KEY",
+            engine.map(|engine| engine.api_key.as_str()),
+            "",
+        ),
+        model: pick(
+            flag_model,
+            "NVIDIA_MODEL",
+            "NIM_MODEL",
+            engine.map(|engine| engine.model.as_str()),
+            "",
+        ),
+        backend: flag_backend.unwrap_or_else(|| {
+            config
+                .map(|config| config.default_geometry_backend)
+                .unwrap_or_default()
+        }),
     })
 }
 
@@ -104,8 +199,10 @@ async fn main() -> Result<(), String> {
     }
 
     let input = input.ok_or(usage())?;
-    let source =
-        fs::read_to_string(&input).map_err(|e| format!("read input '{}': {e}", input.display()))?;
+    if let Some(path) = cfg.as_deref() {
+        validate_config_path(path)?;
+    }
+    let source = read_transpile_source(&input)?;
 
     // --dump-prompt is network-free: it only needs the backend.
     if dump_prompt {
@@ -116,7 +213,7 @@ async fn main() -> Result<(), String> {
     }
 
     let cfg_path = config_path(cfg)?;
-    let r = resolve(&cfg_path, model, base, key, backend)?;
+    let r = resolve(&cfg_path.0, cfg_path.1, model, base, key, backend)?;
     if r.api_key.is_empty() {
         return Err("no API key (config/env/--api-key all empty)".to_string());
     }
@@ -146,10 +243,7 @@ async fn main() -> Result<(), String> {
                 break;
             }
             Ok((status, body)) => {
-                last_err = format!(
-                    "HTTP {status}: {}",
-                    body.chars().take(200).collect::<String>()
-                );
+                last_err = format!("HTTP {status}: provider-request-failed");
                 let cold = status.as_u16() == 500 || status.as_u16() == 503;
                 if cold && body.contains("not found") && attempt < 6 {
                     eprintln!("attempt {attempt}: cold instance, retrying…");
@@ -158,8 +252,8 @@ async fn main() -> Result<(), String> {
                 }
                 break;
             }
-            Err(e) => {
-                last_err = e;
+            Err(_) => {
+                last_err = "provider-transport-failed".to_string();
                 break;
             }
         }

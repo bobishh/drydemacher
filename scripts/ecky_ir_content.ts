@@ -15,10 +15,10 @@ type CampaignLevel = {
 
 const CAMPAIGN_LEVELS: CampaignLevel[] = [
   {
-    sourceTitle: 'First Solid: Ball on a Base',
-    title: 'Level 01: Marker',
-    mission: 'Build one printable part from two primitives.',
-    clear: 'Preview shows one connected ball-on-base solid and the first code block compiles.',
+    sourceTitle: 'First Solid: Corner Bracket',
+    title: 'Level 01: Corner Bracket',
+    mission: 'Build one connected corner bracket from a horizontal foot and a vertical flange.',
+    clear: 'Preview shows one connected L-bracket where the foot and flange overlap, and the source compiles.',
   },
   {
     sourceTitle: 'Cut and Join: Mounting Plate',
@@ -27,10 +27,10 @@ const CAMPAIGN_LEVELS: CampaignLevel[] = [
     clear: 'Every cutter crosses the plate and the exported STL remains one component.',
   },
   {
-    sourceTitle: 'Repetition: Ribs, Slots, and Patterns',
-    title: 'Level 03: Parametric Pattern',
-    mission: 'Replace copied geometry with one repeated rule.',
-    clear: 'Changing count or pitch moves the whole pattern without editing shape blocks.',
+    sourceTitle: 'Physical Fit: Dovetail Rail and Channel',
+    title: 'Level 03: Dovetail Fit',
+    mission: 'Make one named fit_clearance drive both mating sides of a dovetail rail and channel.',
+    clear: 'Changing fit_clearance widens the channel while the rail stays nominal; no second anonymous offset needs editing.',
   },
   {
     sourceTitle: 'Real Model Patterns: Procedural Cuts and Arrayed Frames',
@@ -106,8 +106,7 @@ export function projectEckyIrContent(corpus: string): EckyIrContentProjection {
     reference: [
       '# Ecky Language Reference',
       '',
-      'Dry syntax, signatures, selectors, backend support, and verification grammar.',
-      'For project-driven learning, use the campaign under `/learn/ecky-ir`.',
+      'Exact forms, signatures, selectors, and verification grammar.',
       '',
       referenceBody,
       '',

@@ -5,8 +5,8 @@
 The system SHALL render workbench navigation as a bottom-positioned, named horizontal
 toolbar using Ecky Tactical Midnight visual language. It SHALL group persistent
 workspace windows separately from transient modes and utilities, use one coherent
-repo-native vector icon system, and expose labels and state without relying on color or
-pointer hover alone.
+repo-native vector icon system, and expose durable labels plus ARIA state without
+relying on pointer hover alone.
 
 #### Scenario: Dock appears at bottom
 
@@ -18,7 +18,7 @@ pointer hover alone.
 #### Scenario: Controls follow task grouping
 
 - **WHEN** the dock renders
-- **THEN** Projects, Parameters, Dialogue, Sketch, Code, and Docs appear in the
+- **THEN** Projects, Parameters, Dialogue, Code, Docs, and Library appear in the
   persistent-window group
 - **AND** Draw, conditional Terminal, and Settings appear after the utility separator.
 
@@ -26,9 +26,11 @@ pointer hover alone.
 
 - **WHEN** assistive queries inspect the dock
 - **THEN** it is a horizontal toolbar named `Workbench tools`
-- **AND** Projects, Parameters, Dialogue, Ecky IR docs, Code inspector, Sketch
-  Workspace, draw, conditional terminal, and settings controls have stable full names
-- **AND** every visible/open/active state has a non-color indicator.
+- **AND** Projects, Parameters, Dialogue, Ecky IR docs, Code inspector, reusable
+  component library, draw, conditional terminal, and settings controls have stable
+  full names
+- **AND** every visible/open/active state exposes its ARIA state without clipped
+  inline or bottom marker glyphs.
 
 #### Scenario: Keyboard traverses one toolbar
 

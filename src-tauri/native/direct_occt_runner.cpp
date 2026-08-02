@@ -5,6 +5,7 @@
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBuilderAPI_GTransform.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
@@ -31,10 +32,12 @@
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepBuilderAPI_TransitionMode.hxx>
+#include <BinTools.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepLib.hxx>
 #include <ShapeFix_Shape.hxx>
 #include <BOPAlgo_Builder.hxx>
+#include <BOPAlgo_PaveFiller.hxx>
 #include <BOPAlgo_Tools.hxx>
 #include <ShapeFix_Face.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
@@ -50,13 +53,19 @@
 #include <Geom_BezierCurve.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_CylindricalSurface.hxx>
+#include <Geom_ConicalSurface.hxx>
+#include <Geom_Surface.hxx>
 #include <GeomAPI_PointsToBSpline.hxx>
 #include <GProp_GProps.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Poly_Triangulation.hxx>
+#include <OSD_Parallel.hxx>
+#include <OSD_ThreadPool.hxx>
 #include <StlAPI_Reader.hxx>
+#include <STEPControl_Reader.hxx>
 #include <STEPControl_Writer.hxx>
 #include <Standard_Failure.hxx>
+#include <Standard_Version.hxx>
 #include <StdFail_NotDone.hxx>
 #include <TColgp_Array1OfPnt.hxx>
 #include <TopAbs_Orientation.hxx>
@@ -79,19 +88,24 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <variant>
 #include <vector>
 #include <gp_Ax1.hxx>
@@ -107,6 +121,8 @@
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 #include <manifold/manifold.h>
+#include "execution_identity.hpp"
+#include "part_mesh.hpp"
 #include "vendor/yyjson/yyjson.h"
 
 namespace fs = std::filesystem;
@@ -176,10 +192,20 @@ struct Part {
     std::vector<Command> commands;
 };
 
+struct PartialBooleanGroupPlan {
+    std::string part_key;
+    std::uint64_t parent_output = 0;
+    std::string operation;
+    std::vector<std::uint32_t> input_indices;
+    std::uint32_t ordinal = 0;
+    std::uint32_t version = 0;
+};
+
 struct Plan {
     std::uint32_t schema_version = 0;
     std::string plan_id;
     std::vector<Part> parts;
+    std::vector<PartialBooleanGroupPlan> partial_boolean_groups;
 };
 
 struct ShapeRecord {
@@ -248,7 +274,20 @@ struct IoError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
-std::string direct_occt_current_stage = "startup";
+struct CommandCacheEvidence {
+    std::string command_id;
+    bool cache_hit = false;
+    bool cache_admitted = false;
+};
+struct CommandTimingEvidence {
+    std::string command_id;
+    std::string op;
+    std::uint64_t elapsed_ms = 0;
+};
+struct PartMeshEvidence {
+    std::string identity;
+    std::uint64_t facet_count = 0;
+};
 std::string quote_json_string(const std::string& value);
 
 // Stable diagnostics contract. Each stage appears in this fixed order, even
@@ -257,43 +296,164 @@ std::string quote_json_string(const std::string& value);
 const std::array<const char*, 8> kStageReportNames = {
     "import", "validate", "solidify", "boolean", "cleanup", "mesh", "verify", "export"
 };
-std::map<std::string, std::uint32_t> direct_occt_stage_execution_counts;
-std::map<std::string, std::chrono::steady_clock::duration> direct_occt_stage_elapsed;
-std::chrono::steady_clock::time_point direct_occt_report_started_at =
-    std::chrono::steady_clock::now();
+// One render owns all mutable diagnostics and cache/mesh evidence. Workers
+// receive this context explicitly; the mutex only protects aggregate evidence.
+struct ExecutionContext {
+    mutable std::mutex mutex;
+    std::string current_stage = "startup";
+    std::uint32_t worker_budget = 1;
+    std::uint32_t mesh_outer_worker_budget = 1;
+    std::uint32_t mesh_pool_budget = 1;
+    std::uint32_t mesh_launcher_budget = 1;
+    std::uint32_t peak_dag_concurrency = 0;
+    std::uint32_t active_dag_nodes = 0;
+    std::map<std::string, std::uint32_t> part_executed_commands;
+    std::map<std::string, bool> part_cache_hits;
+    std::vector<CommandCacheEvidence> command_cache_evidence;
+    std::vector<CommandTimingEvidence> command_timing_evidence;
+    std::map<std::string, std::vector<std::string>> part_executed_command_ids;
+    std::map<std::string, PartMeshEvidence> part_mesh_evidence;
+    std::uint32_t mesh_build_count = 0;
+    std::uint32_t mesh_cache_hit_count = 0;
+    std::uint64_t preview_facet_count = 0;
+    std::uint64_t released_slot_count = 0;
+    std::uint64_t cache_read_count = 0;
+    std::uint64_t cache_write_count = 0;
+    std::uint64_t cache_rejection_count = 0;
+    std::uint64_t partial_boolean_cache_hit_count = 0;
+    std::uint64_t partial_boolean_cache_miss_count = 0;
+    std::uint64_t partial_boolean_cache_write_count = 0;
+    std::uint64_t four_way_intersection_count = 0;
+    std::map<std::string, std::uint32_t> stage_execution_counts;
+    std::map<std::string, std::chrono::steady_clock::duration> stage_elapsed;
+    std::chrono::steady_clock::time_point report_started_at = std::chrono::steady_clock::now();
+    std::string runner_binary_digest;
+
+    void set_stage(std::string stage) {
+        std::lock_guard<std::mutex> lock(mutex);
+        current_stage = std::move(stage);
+    }
+
+    std::string stage() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return current_stage;
+    }
+};
+
+// The outer scheduler and OCCT's Boolean pool share one process CPU budget.
+// Parallelize inside OCCT only for a singleton DAG batch; otherwise each ready
+// node owns its outer worker and nested pools would oversubscribe the host.
+bool boolean_runs_parallel(const ExecutionContext& context) {
+    std::lock_guard<std::mutex> lock(context.mutex);
+    return context.active_dag_nodes <= 1;
+}
 
 class StageExecutionTimer {
 public:
-    explicit StageExecutionTimer(const char* name)
-        : name_(name), started_at_(std::chrono::steady_clock::now()) {
-        ++direct_occt_stage_execution_counts[name_];
+    StageExecutionTimer(ExecutionContext& context, const char* name)
+        : context_(context), name_(name), started_at_(std::chrono::steady_clock::now()) {
+        std::lock_guard<std::mutex> lock(context_.mutex);
+        ++context_.stage_execution_counts[name_];
     }
 
     ~StageExecutionTimer() {
-        direct_occt_stage_elapsed[name_] += std::chrono::steady_clock::now() - started_at_;
+        std::lock_guard<std::mutex> lock(context_.mutex);
+        context_.stage_elapsed[name_] += std::chrono::steady_clock::now() - started_at_;
     }
 
 private:
+    ExecutionContext& context_;
     std::string name_;
     std::chrono::steady_clock::time_point started_at_;
 };
 
-void write_stage_report(const fs::path& path) {
+void write_stage_report(const fs::path& path, ExecutionContext& context) {
     std::ofstream out(path);
     if (!out) {
         throw IoError("failed to open stage report file");
     }
     const auto total_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - direct_occt_report_started_at).count();
-    out << "{\"schemaVersion\":1,\"totalElapsedMs\":" << total_elapsed << ",\"stages\":[";
+        std::chrono::steady_clock::now() - context.report_started_at).count();
+    std::lock_guard<std::mutex> lock(context.mutex);
+    out << "{\"schemaVersion\":1,\"totalElapsedMs\":" << total_elapsed
+        << ",\"workerBudget\":" << context.worker_budget
+        << ",\"meshOuterWorkerBudget\":" << context.mesh_outer_worker_budget
+        << ",\"meshPoolBudget\":" << context.mesh_pool_budget
+        << ",\"meshLauncherBudget\":" << context.mesh_launcher_budget
+        << ",\"peakDagConcurrency\":" << context.peak_dag_concurrency
+        << ",\"meshBuildCount\":" << context.mesh_build_count
+        << ",\"meshCacheHitCount\":" << context.mesh_cache_hit_count
+        << ",\"releasedSlotCount\":" << context.released_slot_count
+        << ",\"cacheReadCount\":" << context.cache_read_count
+        << ",\"cacheWriteCount\":" << context.cache_write_count
+        << ",\"cacheRejectionCount\":" << context.cache_rejection_count
+        << ",\"partialBooleanCacheHitCount\":" << context.partial_boolean_cache_hit_count
+        << ",\"partialBooleanCacheMissCount\":" << context.partial_boolean_cache_miss_count
+        << ",\"partialBooleanCacheWriteCount\":" << context.partial_boolean_cache_write_count
+        << ",\"fourWayIntersectionCount\":" << context.four_way_intersection_count
+        << ",\"previewFacetCount\":" << context.preview_facet_count
+        << ",\"parts\":[";
+    bool first_part = true;
+    std::set<std::string> reported_parts;
+    for (const auto& [part_id, count] : context.part_executed_commands) {
+        reported_parts.insert(part_id);
+        if (!first_part) out << ",";
+        first_part = false;
+        out << "{\"partId\":" << quote_json_string(part_id)
+            << ",\"cacheHit\":" << (context.part_cache_hits[part_id] ? "true" : "false")
+            << ",\"executedCommandCount\":" << count;
+        if (const auto mesh = context.part_mesh_evidence.find(part_id);
+            mesh != context.part_mesh_evidence.end()) {
+            out << ",\"meshIdentity\":" << quote_json_string(mesh->second.identity)
+                << ",\"meshFacetCount\":" << mesh->second.facet_count;
+        }
+        out << ",\"executedCommandIds\":[";
+        const auto& ids = context.part_executed_command_ids[part_id];
+        for (std::size_t index = 0; index < ids.size(); ++index) {
+            if (index != 0) out << ',';
+            out << quote_json_string(ids[index]);
+        }
+        out << "]}";
+    }
+    for (const auto& [part_id, cache_hit] : context.part_cache_hits) {
+        if (reported_parts.find(part_id) != reported_parts.end()) continue;
+        if (!first_part) out << ",";
+        first_part = false;
+        out << "{\"partId\":" << quote_json_string(part_id)
+            << ",\"cacheHit\":" << (cache_hit ? "true" : "false")
+            << ",\"executedCommandCount\":0";
+        if (const auto mesh = context.part_mesh_evidence.find(part_id);
+            mesh != context.part_mesh_evidence.end()) {
+            out << ",\"meshIdentity\":" << quote_json_string(mesh->second.identity)
+                << ",\"meshFacetCount\":" << mesh->second.facet_count;
+        }
+        out << ",\"executedCommandIds\":[]}";
+    }
+    out << "],\"commands\":[";
+    for (std::size_t index = 0; index < context.command_cache_evidence.size(); ++index) {
+        if (index != 0) out << ',';
+        const CommandCacheEvidence& evidence = context.command_cache_evidence[index];
+        out << "{\"commandId\":" << quote_json_string(evidence.command_id)
+            << ",\"cacheAdmitted\":" << (evidence.cache_admitted ? "true" : "false")
+            << ",\"cacheHit\":" << (evidence.cache_hit ? "true" : "false") << "}";
+    }
+    out << "],\"commandTimings\":[";
+    for (std::size_t index = 0; index < context.command_timing_evidence.size(); ++index) {
+        if (index != 0) out << ',';
+        const CommandTimingEvidence& evidence = context.command_timing_evidence[index];
+        out << "{\"commandId\":" << quote_json_string(evidence.command_id)
+            << ",\"op\":" << quote_json_string(evidence.op)
+            << ",\"elapsedMs\":" << evidence.elapsed_ms << "}";
+    }
+    out << "],\"stages\":[";
     for (std::size_t index = 0; index < kStageReportNames.size(); ++index) {
         if (index != 0) {
             out << ",";
         }
         const std::string name = kStageReportNames[index];
-        const std::uint32_t execution_count = direct_occt_stage_execution_counts[name];
+        const std::uint32_t execution_count = context.stage_execution_counts[name];
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            direct_occt_stage_elapsed[name]).count();
+            context.stage_elapsed[name]).count();
         out << "{\"name\":" << quote_json_string(name)
             << ",\"status\":" << quote_json_string(execution_count == 0 ? "skipped" : "executed")
             << ",\"executionCount\":" << execution_count
@@ -608,6 +768,29 @@ Part parse_part(yyjson_val* value) {
     return part;
 }
 
+PartialBooleanGroupPlan parse_partial_boolean_group(yyjson_val* value) {
+    PartialBooleanGroupPlan group;
+    group.part_key = json_string(json_require(value, "partKey"), "partialBooleanGroup.partKey");
+    group.parent_output = static_cast<std::uint64_t>(
+        json_number(json_require(value, "parentOutput"), "partialBooleanGroup.parentOutput"));
+    group.operation = json_string(json_require(value, "operation"), "partialBooleanGroup.operation");
+    group.ordinal = static_cast<std::uint32_t>(
+        json_number(json_require(value, "ordinal"), "partialBooleanGroup.ordinal"));
+    group.version = static_cast<std::uint32_t>(
+        json_number(json_require(value, "version"), "partialBooleanGroup.version"));
+    yyjson_val* indices = json_array(json_require(value, "inputIndices"), "partialBooleanGroup.inputIndices");
+    size_t index;
+    size_t max;
+    yyjson_val* item;
+    yyjson_arr_foreach(indices, index, max, item) {
+        group.input_indices.push_back(static_cast<std::uint32_t>(json_number(item, "partialBooleanGroup.inputIndex")));
+    }
+    if (group.operation != "union" || group.version != 1 || group.input_indices.size() != 2) {
+        throw SchemaError("unsupported partialBooleanGroup");
+    }
+    return group;
+}
+
 Plan parse_plan(yyjson_val* value) {
     if (!value || !yyjson_is_obj(value)) {
         throw SchemaError("expected root plan object");
@@ -625,6 +808,15 @@ Plan parse_plan(yyjson_val* value) {
     yyjson_val* part;
     yyjson_arr_foreach(parts, part_index, part_max, part) {
         plan.parts.push_back(parse_part(part));
+    }
+    if (yyjson_val* groups = yyjson_obj_get(value, "partialBooleanGroups")) {
+        groups = json_array(groups, "partialBooleanGroups");
+        size_t group_index;
+        size_t group_max;
+        yyjson_val* group;
+        yyjson_arr_foreach(groups, group_index, group_max, group) {
+            plan.partial_boolean_groups.push_back(parse_partial_boolean_group(group));
+        }
     }
     return plan;
 }
@@ -2449,26 +2641,48 @@ TopoDS_Shape taper_shape(const TopoDS_Shape& profile, double height, double scal
     return taper.Shape();
 }
 
+TopoDS_Shape private_boolean_operand(const TopoDS_Shape& shape) {
+    BRepBuilderAPI_Copy copy(shape, Standard_False, Standard_False);
+    const TopoDS_Shape result = copy.Shape();
+    if (result.IsNull()) throw EvalError("Direct OCCT boolean could not copy operand");
+    return result;
+}
+
+bool boolean_inputs_are_valid_solids(const std::vector<TopoDS_Shape>& shapes) {
+    return std::all_of(shapes.begin(), shapes.end(), [](const TopoDS_Shape& shape) {
+        return !shape.IsNull() && shape_has_solid(shape) && BRepCheck_Analyzer(shape).IsValid();
+    });
+}
+
 template <typename BooleanBuilder>
 TopoDS_Shape checked_boolean_shapes(
     const std::vector<TopoDS_Shape>& argument_shapes,
     const std::vector<TopoDS_Shape>& tool_shapes,
-    const std::string& op
+    const std::string& op,
+    ExecutionContext& context
 ) {
-    StageExecutionTimer stage_timer("boolean");
+    StageExecutionTimer stage_timer(context, "boolean");
     TopTools_ListOfShape arguments;
     for (const TopoDS_Shape& shape : argument_shapes) {
-        arguments.Append(shape);
+        arguments.Append(private_boolean_operand(shape));
     }
     TopTools_ListOfShape tools;
     for (const TopoDS_Shape& shape : tool_shapes) {
-        tools.Append(shape);
+        tools.Append(private_boolean_operand(shape));
     }
     BooleanBuilder builder;
     builder.SetArguments(arguments);
     builder.SetTools(tools);
+    // Private copies isolate published slots, so OCCT avoids its slower
+    // non-destructive bookkeeping without mutating a shared DAG input.
+    builder.SetNonDestructive(false);
     builder.SetFuzzyValue(1.0e-5);
-    builder.SetRunParallel(true);
+    // Inputs proved valid solids. The inverted-solid scan repeats validation
+    // already completed by this predicate and is expensive for dense imports.
+    const bool inputs_valid = boolean_inputs_are_valid_solids(argument_shapes) &&
+        boolean_inputs_are_valid_solids(tool_shapes);
+    builder.SetCheckInverted(inputs_valid ? Standard_False : Standard_True);
+    builder.SetRunParallel(boolean_runs_parallel(context));
     builder.SetUseOBB(true);
     builder.Build();
     if (!builder.IsDone()) {
@@ -2481,40 +2695,116 @@ TopoDS_Shape checked_boolean_shapes(
     return result;
 }
 
-TopoDS_Shape fuse_shapes(const TopoDS_Shape& lhs, const TopoDS_Shape& rhs) {
-    return checked_boolean_shapes<BRepAlgoAPI_Fuse>({lhs}, {rhs}, "union");
+TopoDS_Shape fuse_shapes(
+    const TopoDS_Shape& lhs, const TopoDS_Shape& rhs, ExecutionContext& context
+) {
+    return checked_boolean_shapes<BRepAlgoAPI_Fuse>({lhs}, {rhs}, "union", context);
 }
 
-TopoDS_Shape fuse_shapes(const std::vector<TopoDS_Shape>& shapes) {
+struct PreparedUnionResult {
+    TopoDS_Shape full;
+    std::vector<TopoDS_Shape> groups;
+};
+
+PreparedUnionResult prepare_four_way_union(
+    const std::vector<TopoDS_Shape>& shapes, ExecutionContext& context
+) {
+    if (shapes.size() != 4) throw EvalError("prepared four-way union requires four operands");
+    StageExecutionTimer stage_timer(context, "boolean");
+    TopTools_ListOfShape arguments;
+    std::vector<TopoDS_Shape> prepared;
+    prepared.reserve(shapes.size());
+    for (const TopoDS_Shape& shape : shapes) {
+        prepared.push_back(private_boolean_operand(shape));
+        arguments.Append(prepared.back());
+    }
+    BOPAlgo_PaveFiller filler;
+    filler.SetArguments(arguments);
+    filler.SetFuzzyValue(1.0e-5);
+    filler.SetRunParallel(boolean_runs_parallel(context));
+    filler.Perform();
+    if (filler.HasErrors()) throw EvalError("Direct OCCT boolean `union` intersection failed");
+
+    const auto materialize = [&](const std::vector<std::size_t>& indices) {
+        BOPAlgo_Builder builder;
+        builder.SetArguments(arguments);
+        builder.PerformWithFiller(filler);
+        if (builder.HasErrors()) throw EvalError("Direct OCCT union could not use prepared intersections");
+        TopTools_ListOfShape objects;
+        objects.Append(prepared[indices.front()]);
+        TopTools_ListOfShape tools;
+        for (std::size_t offset = 1; offset < indices.size(); ++offset) tools.Append(prepared[indices[offset]]);
+        builder.BuildBOP(objects, tools, BOPAlgo_FUSE, Message_ProgressRange());
+        if (builder.HasErrors() || builder.Shape().IsNull()) throw EvalError("Direct OCCT union materialization failed");
+        return builder.Shape();
+    };
+    return {materialize({0, 1, 2, 3}), {materialize({0, 1}), materialize({2, 3})}};
+}
+
+TopoDS_Shape fuse_shapes(const std::vector<TopoDS_Shape>& shapes, ExecutionContext& context) {
     if (shapes.empty()) {
         throw EvalError("Direct OCCT boolean `union` requires at least one operand");
     }
     if (shapes.size() == 1) {
         return shapes.front();
     }
-    return checked_boolean_shapes<BRepAlgoAPI_Fuse>(
-        {shapes.front()},
-        std::vector<TopoDS_Shape>(shapes.begin() + 1, shapes.end()),
-        "union"
-    );
+    if (shapes.size() == 4) return prepare_four_way_union(shapes, context).full;
+    StageExecutionTimer stage_timer(context, "boolean");
+    TopTools_ListOfShape arguments;
+    std::vector<TopoDS_Shape> prepared;
+    prepared.reserve(shapes.size());
+    for (const TopoDS_Shape& shape : shapes) {
+        prepared.push_back(private_boolean_operand(shape));
+        arguments.Append(prepared.back());
+    }
+    BOPAlgo_PaveFiller filler;
+    filler.SetArguments(arguments);
+    filler.SetFuzzyValue(1.0e-5);
+    filler.SetRunParallel(boolean_runs_parallel(context));
+    filler.Perform();
+    if (filler.HasErrors()) {
+        throw EvalError("Direct OCCT boolean `union` intersection failed");
+    }
+    BOPAlgo_Builder builder;
+    builder.SetArguments(arguments);
+    builder.PerformWithFiller(filler);
+    if (builder.HasErrors()) {
+        throw EvalError("Direct OCCT boolean `union` could not materialize prepared intersections");
+    }
+    TopTools_ListOfShape objects;
+    objects.Append(prepared.front());
+    TopTools_ListOfShape tools;
+    for (std::size_t index = 1; index < prepared.size(); ++index) {
+        tools.Append(prepared[index]);
+    }
+    builder.BuildBOP(objects, tools, BOPAlgo_FUSE, Message_ProgressRange());
+    if (builder.HasErrors() || builder.Shape().IsNull()) {
+        throw EvalError("Direct OCCT boolean `union` failed");
+    }
+    return builder.Shape();
 }
 
-TopoDS_Shape cut_shapes(const TopoDS_Shape& lhs, const TopoDS_Shape& rhs) {
-    return checked_boolean_shapes<BRepAlgoAPI_Cut>({lhs}, {rhs}, "difference");
+TopoDS_Shape cut_shapes(
+    const TopoDS_Shape& lhs, const TopoDS_Shape& rhs, ExecutionContext& context
+) {
+    return checked_boolean_shapes<BRepAlgoAPI_Cut>({lhs}, {rhs}, "difference", context);
 }
 
 TopoDS_Shape cut_shapes(
     const TopoDS_Shape& head,
-    const std::vector<TopoDS_Shape>& tools
+    const std::vector<TopoDS_Shape>& tools,
+    ExecutionContext& context
 ) {
     if (tools.empty()) {
         throw EvalError("Direct OCCT boolean `difference` requires at least two operands");
     }
-    return checked_boolean_shapes<BRepAlgoAPI_Cut>({head}, tools, "difference");
+    return checked_boolean_shapes<BRepAlgoAPI_Cut>({head}, tools, "difference", context);
 }
 
-TopoDS_Shape common_shapes(const TopoDS_Shape& lhs, const TopoDS_Shape& rhs) {
-    return checked_boolean_shapes<BRepAlgoAPI_Common>({lhs}, {rhs}, "intersection");
+TopoDS_Shape common_shapes(
+    const TopoDS_Shape& lhs, const TopoDS_Shape& rhs, ExecutionContext& context
+) {
+    return checked_boolean_shapes<BRepAlgoAPI_Common>({lhs}, {rhs}, "intersection", context);
 }
 
 // --- Convex hull -----------------------------------------------------------
@@ -3532,7 +3822,8 @@ TopoDS_Shape make_path_wire(const std::vector<std::array<double, 3>>& points) {
     return path.Wire();
 }
 
-TopoDS_Shape make_helix_path_wire(double radius, double pitch, double height, bool lefthand) {
+TopoDS_Shape make_helix_path_wire(double radius, double pitch, double height, bool lefthand,
+                                  std::optional<double> top_radius_arg = std::nullopt) {
     if (!std::isfinite(radius) || radius <= 0.0) {
         throw EvalError("helix-path radius must be positive");
     }
@@ -3542,12 +3833,26 @@ TopoDS_Shape make_helix_path_wire(double radius, double pitch, double height, bo
     if (!std::isfinite(height) || height <= 0.0) {
         throw EvalError("helix-path height must be positive");
     }
+    const double top_radius = top_radius_arg.value_or(radius);
+    if (!std::isfinite(top_radius) || top_radius <= 0.0) {
+        throw EvalError("helix-path top radius must be positive");
+    }
     const double turns = height / pitch;
-    const double end_angle = (lefthand ? -1.0 : 1.0) * 6.28318530717958647692 * turns;
-    Handle(Geom_CylindricalSurface) surface =
-        new Geom_CylindricalSurface(gp_Ax3(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), radius);
+    double end_angle = (lefthand ? -1.0 : 1.0) * 6.28318530717958647692 * turns;
+    double end_v = height;
+    Handle(Geom_Surface) surface;
+    if (top_radius == radius) {
+        surface = new Geom_CylindricalSurface(
+            gp_Ax3(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), radius);
+    } else {
+        const double semi_angle = std::atan2(top_radius - radius, height);
+        end_angle /= std::cos(semi_angle);
+        end_v = height / std::cos(semi_angle);
+        surface = new Geom_ConicalSurface(
+            gp_Ax3(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), semi_angle, radius);
+    }
     Handle(Geom2d_TrimmedCurve) curve2d =
-        GCE2d_MakeSegment(gp_Pnt2d(0, 0), gp_Pnt2d(end_angle, height)).Value();
+        GCE2d_MakeSegment(gp_Pnt2d(0, 0), gp_Pnt2d(end_angle, end_v)).Value();
     TopoDS_Edge edge = BRepBuilderAPI_MakeEdge(curve2d, surface).Edge();
     // The edge so far only carries a pcurve on the cylinder; sweeping (and other
     // 3D consumers) need an explicit 3D curve or MakePipeShell throws
@@ -3975,7 +4280,7 @@ const manifold::Manifold& lookup_manifold(
     return it->second.manifold;
 }
 
-manifold::Manifold make_indexed_manifold(const Command& command) {
+manifold::Manifold make_indexed_manifold(const Command& command, ExecutionContext& context) {
     const std::string op = "import-indexed-mesh";
     if (command.args.size() != 3 || command.args[0].kind != Arg::Kind::List ||
         command.args[1].kind != Arg::Kind::List ||
@@ -3983,7 +4288,7 @@ manifold::Manifold make_indexed_manifold(const Command& command) {
         command.args[2].text_value.empty()) {
         throw EvalError(op + " expects vertices, triangles, and contentDigest");
     }
-    StageExecutionTimer stage_timer("validate");
+    StageExecutionTimer stage_timer(context, "validate");
     manifold::MeshGL64 mesh;
     mesh.numProp = 3;
     mesh.vertProperties.reserve(command.args[0].list_value.size() * 3);
@@ -4023,8 +4328,10 @@ manifold::Manifold make_indexed_manifold(const Command& command) {
     return result;
 }
 
-manifold::Manifold manifold_from_occt_shape(const TopoDS_Shape& shape, const std::string& op) {
-    StageExecutionTimer stage_timer("mesh");
+manifold::Manifold manifold_from_occt_shape(
+    const TopoDS_Shape& shape, const std::string& op, ExecutionContext& context
+) {
+    StageExecutionTimer stage_timer(context, "mesh");
     BRepMesh_IncrementalMesh mesher(shape, 0.04, Standard_False, 0.25, Standard_True);
     (void)mesher;
     manifold::MeshGL64 mesh;
@@ -4068,7 +4375,8 @@ manifold::Manifold manifold_from_occt_shape(const TopoDS_Shape& shape, const std
 SlotValue evaluate_command(
     const Command& command,
     const std::map<std::uint64_t, SlotValue>& slots,
-    const std::string& part_id
+    const std::string& part_id,
+    ExecutionContext& context
 ) {
     const std::string op = command.op;
     auto get_ref_shape = [&](std::size_t index) -> const TopoDS_Shape& {
@@ -4224,20 +4532,62 @@ SlotValue evaluate_command(
         }
         TopoDS_Shape shape;
         StlAPI_Reader reader;
-        StageExecutionTimer stage_timer("import");
+        StageExecutionTimer stage_timer(context, "import");
         if (!reader.Read(shape, command.args[0].text_value.c_str())) {
             throw EvalError(op + " could not read STL file");
         }
         return shape;
     }
+    if (op == "import-step") {
+        // OpenSpec native-step-component-import, Direct OCCT ImportStep.
+        // Locked STEP bytes load through STEPControl_Reader and must pass every
+        // validation gate before a shape slot is published. This path MUST NOT
+        // fall back to FreeCAD, STL conversion, solidify, or implicit fuse —
+        // STEP transfer already yields BRep topology, so solidify would be
+        // hidden repair and a fuse would change STEP product/part structure.
+        if (command.args.size() != 1 ||
+            (command.args[0].kind != Arg::Kind::Text && command.args[0].kind != Arg::Kind::Symbol)) {
+            throw EvalError(op + " expects a file path");
+        }
+        TopoDS_Shape shape;
+        {
+            StageExecutionTimer import_timer(context, "import");
+            STEPControl_Reader reader;
+            if (reader.ReadFile(command.args[0].text_value.c_str()) != IFSelect_RetDone) {
+                throw EvalError(op + " could not read STEP file (ReadFile did not return IFSelect_RetDone)");
+            }
+            if (reader.TransferRoots() <= 0) {
+                throw EvalError(op + " transferred zero roots");
+            }
+            shape = reader.OneShape();
+            if (shape.IsNull()) {
+                throw EvalError(op + " produced a null shape");
+            }
+        }
+        {
+            // Validate only the transferred BRep. Do not sew, solidify, heal,
+            // or fuse it: a locked STEP asset must preserve its native topology.
+            StageExecutionTimer validation_timer(context, "validate");
+            bool has_solid = (shape.ShapeType() == TopAbs_SOLID) ||
+                             (shape.ShapeType() == TopAbs_COMPSOLID) ||
+                             TopExp_Explorer(shape, TopAbs_SOLID).More();
+            if (!has_solid) {
+                throw EvalError(op + " produced no solid (shell-only payloads are rejected without healing)");
+            }
+            if (!BRepCheck_Analyzer(shape).IsValid()) {
+                throw EvalError(op + " failed BRep validity check");
+            }
+        }
+        return shape;
+    }
     if (op == "import-indexed-mesh") {
-        return SlotValue::manifold_value(make_indexed_manifold(command));
+        return SlotValue::manifold_value(make_indexed_manifold(command, context));
     }
     if (op == "solidify") {
         if (command.args.size() != 1) {
             throw EvalError(op + " expects exactly one shape reference");
         }
-        StageExecutionTimer stage_timer("solidify");
+        StageExecutionTimer stage_timer(context, "solidify");
         if (command.args[0].kind == Arg::Kind::Ref) {
             auto input = slots.find(command.args[0].ref_value);
             if (input != slots.end() && input->second.kind == SlotValue::Kind::Manifold) {
@@ -4304,7 +4654,10 @@ SlotValue evaluate_command(
         return make_helix_path_wire(require_number_arg(command.args, 0, op),
                                     require_number_arg(command.args, 1, op),
                                     require_number_arg(command.args, 2, op),
-                                    require_bool_arg(command.args, 3, op));
+                                    require_bool_arg(command.args, 3, op),
+                                    command.args.size() > 4
+                                        ? std::optional<double>(require_number_arg(command.args, 4, op))
+                                        : std::nullopt);
     }
     if (op == "bezier-path") {
         return make_bezier_path_wire(require_point3_sequence(command.args, op));
@@ -4379,12 +4732,12 @@ SlotValue evaluate_command(
             }
         }
         if (has_manifold) {
-            StageExecutionTimer stage_timer("boolean");
+            StageExecutionTimer stage_timer(context, "boolean");
             auto input_manifold = [&](const Arg& arg) {
                 const SlotValue& input = slots.at(arg.ref_value);
                 return input.kind == SlotValue::Kind::Manifold
                     ? input.manifold
-                    : manifold_from_occt_shape(input.shape, op);
+                    : manifold_from_occt_shape(input.shape, op, context);
             };
             manifold::Manifold result = input_manifold(refs.front());
             for (std::size_t index = 1; index < refs.size(); ++index) {
@@ -4402,7 +4755,7 @@ SlotValue evaluate_command(
             for (const Arg& arg : refs) {
                 shapes_to_fuse.push_back(lookup_shape(slots, arg.ref_value, op));
             }
-            return fuse_shapes(shapes_to_fuse);
+            return fuse_shapes(shapes_to_fuse, context);
         }
         if (op == "difference") {
             const TopoDS_Shape& head = lookup_shape(slots, refs.front().ref_value, op);
@@ -4411,12 +4764,12 @@ SlotValue evaluate_command(
             for (std::size_t index = 1; index < refs.size(); ++index) {
                 tools.push_back(lookup_shape(slots, refs[index].ref_value, op));
             }
-            return cut_shapes(head, tools);
+            return cut_shapes(head, tools, context);
         }
         TopoDS_Shape result = lookup_shape(slots, refs.front().ref_value, op);
         for (std::size_t index = 1; index < refs.size(); ++index) {
             const TopoDS_Shape& next = lookup_shape(slots, refs[index].ref_value, op);
-            result = common_shapes(result, next);
+            result = common_shapes(result, next, context);
         }
         return result;
     }
@@ -4547,38 +4900,746 @@ SlotValue evaluate_command(
     throw EvalError("unsupported direct OCCT op `" + op + "`");
 }
 
-std::vector<ShapeRecord> evaluate_plan(const Plan& plan) {
-    if (plan.parts.empty()) {
-        throw EvalError("plan needs at least one part");
+void collect_arg_refs(const Arg& arg, std::vector<std::uint64_t>& refs) {
+    if (arg.kind == Arg::Kind::Ref) {
+        refs.push_back(arg.ref_value);
+        return;
     }
+    if (arg.kind == Arg::Kind::List) {
+        for (const Arg& item : arg.list_value) collect_arg_refs(item, refs);
+    }
+}
 
-    std::vector<ShapeRecord> parts;
-    for (const Part& part : plan.parts) {
-        std::map<std::uint64_t, SlotValue> slots;
-        for (std::size_t command_index = 0; command_index < part.commands.size(); ++command_index) {
-            const Command& command = part.commands[command_index];
-            direct_occt_current_stage =
-                "evaluate part `" + part.part_id + "` command #" +
-                std::to_string(command_index) + " output slot " +
-                std::to_string(command.output) + " op `" + command.op + "`";
-            try {
-                SlotValue value = evaluate_command(command, slots, part.part_id);
-                slots[command.output] = value;
-            } catch (const Standard_Failure& error) {
-                const char* raw_message = error.GetMessageString();
-                const std::string message = raw_message ? raw_message : "unknown OCCT failure";
-                throw OcctRuntimeError(
-                    "Direct OCCT part `" + part.part_id + "` command #" +
-                    std::to_string(command_index) + " output slot " +
-                    std::to_string(command.output) + " op `" + command.op +
-                    "` failed: " + message
-                );
+std::vector<std::uint64_t> command_refs(const Command& command) {
+    std::vector<std::uint64_t> refs;
+    for (const Arg& arg : command.args) collect_arg_refs(arg, refs);
+    for (const Keyword& keyword : command.keywords) collect_arg_refs(keyword.value, refs);
+    std::sort(refs.begin(), refs.end());
+    refs.erase(std::unique(refs.begin(), refs.end()), refs.end());
+    return refs;
+}
+
+// Only these operations are admitted to overlap.  They either construct a
+// fresh value or make a documented copy; all unknown/effectful OCCT calls run
+// behind the exclusive barrier.  This is deliberately conservative.
+bool command_has_proven_immutable_inputs(const Command& command) {
+    static const std::set<std::string> kSafe = {
+        "box", "sphere", "cylinder", "cone", "torus", "wedge", "rectangle",
+        "ellipse", "slot-overall", "slot-arc", "circle", "rounded-rect",
+        "rounded-polygon", "polygon", "path", "helix-path", "bezier-path",
+        "plane", "location", "bspline", "translate", "rotate", "scale", "mirror",
+        "linear-array", "radial-array", "grid-array", "arc-array"
+    };
+    return kSafe.find(command.op) != kSafe.end();
+}
+
+struct DagNode {
+    std::size_t part_index = 0;
+    std::size_t command_index = 0;
+    std::vector<std::size_t> dependents;
+    std::size_t unmet_dependencies = 0;
+    bool exclusive = true;
+};
+
+struct CompletedDagNode {
+    std::size_t node_index = 0;
+    SlotValue value;
+    std::vector<std::pair<std::string, TopoDS_Shape>> partial_boolean_outputs;
+};
+
+std::string partial_group_id(
+    std::size_t part_index, std::uint64_t parent_output, std::uint32_t ordinal
+) {
+    return std::to_string(part_index) + ":" + std::to_string(parent_output) + ":" +
+        std::to_string(ordinal);
+}
+
+std::uint32_t configured_worker_budget() {
+    const char* raw = std::getenv("ECKY_DIRECT_OCCT_WORKERS");
+    if (!raw || !*raw) return std::max(1u, std::thread::hardware_concurrency());
+    try {
+        unsigned long parsed = std::stoul(raw);
+        return static_cast<std::uint32_t>(std::clamp<unsigned long>(parsed, 1, 64));
+    } catch (...) {
+        throw ParseError("ECKY_DIRECT_OCCT_WORKERS must be an integer from 1 to 64");
+    }
+}
+
+void configure_mesh_parallelism_budget(std::size_t final_part_count, ExecutionContext& context) {
+    if (final_part_count == 0) throw EvalError("part mesh scheduler needs at least one final part");
+    if (context.worker_budget == 1) {
+        context.mesh_outer_worker_budget = 1;
+        context.mesh_pool_budget = 1;
+        context.mesh_launcher_budget = 1;
+        return;
+    }
+    // OSD's default pool counts its caller. M outer mesh callers plus P-1
+    // pool workers stay within N total workers. K limits each mesher launcher
+    // so concurrently tessellated final parts split that single pool fairly.
+    context.mesh_outer_worker_budget = static_cast<std::uint32_t>(std::min<std::size_t>(
+        final_part_count, std::max(1u, context.worker_budget / 4)));
+    context.mesh_pool_budget =
+        context.worker_budget - context.mesh_outer_worker_budget + 1;
+    context.mesh_launcher_budget = 1 +
+        (context.mesh_pool_budget - 1) / context.mesh_outer_worker_budget;
+    OSD_Parallel::SetUseOcctThreads(Standard_True);
+    if (!OSD_Parallel::ToUseOcctThreads()) {
+        throw EvalError("Direct OCCT runtime cannot enable its shared OSD thread pool");
+    }
+    const Handle(OSD_ThreadPool)& pool =
+        OSD_ThreadPool::DefaultPool(static_cast<int>(context.mesh_pool_budget));
+    pool->SetNbDefaultThreadsToLaunch(static_cast<int>(context.mesh_launcher_budget));
+}
+
+std::optional<fs::path> selective_cache_root() {
+    const char* raw = std::getenv("ECKY_DIRECT_OCCT_CACHE_DIR");
+    if (!raw || !*raw) return std::nullopt;
+    fs::path root(raw);
+    fs::create_directories(root);
+    return root;
+}
+
+constexpr char kSelectiveCacheSchema[] = "direct-occt-selective-brep-v3";
+constexpr char kDirectOcctRunnerAbi[] = "direct-occt-runner-abi-3";
+std::string direct_occt_runner_abi_digest() {
+    return "sha256:" + ecky::sha256_hex(kDirectOcctRunnerAbi);
+}
+
+std::string canonical_number(double value) {
+    try {
+        return ecky::canonical_f64(value);
+    } catch (const std::invalid_argument&) {
+        throw EvalError("runner cache identity rejects non-finite resolved numbers");
+    }
+}
+
+std::string canonical_semantic_arg(
+    const Arg& arg,
+    const std::map<std::uint64_t, std::string>& dependencies
+) {
+    std::ostringstream out;
+    out << "kind=" << static_cast<int>(arg.kind) << ':';
+    switch (arg.kind) {
+        case Arg::Kind::Number:
+            out << canonical_number(arg.number_value);
+            break;
+        case Arg::Kind::Boolean: out << (arg.bool_value ? '1' : '0'); break;
+        case Arg::Kind::Text:
+        case Arg::Kind::Symbol: out << arg.text_value; break;
+        case Arg::Kind::Point2:
+            out << canonical_number(arg.point2_value[0]) << ',' << canonical_number(arg.point2_value[1]);
+            break;
+        case Arg::Kind::Point3:
+            out << canonical_number(arg.point3_value[0]) << ',' << canonical_number(arg.point3_value[1])
+                << ',' << canonical_number(arg.point3_value[2]);
+            break;
+        case Arg::Kind::List:
+            out << '[';
+            for (const Arg& item : arg.list_value) out << canonical_semantic_arg(item, dependencies);
+            out << ']';
+            break;
+        case Arg::Kind::Ref: {
+            auto found = dependencies.find(arg.ref_value);
+            if (found == dependencies.end()) throw EvalError("cache identity references unknown slot");
+            out << "dependency";
+            break;
+        }
+        case Arg::Kind::Param: throw EvalError("runner cache identity requires resolved args");
+    }
+    return out.str();
+}
+
+void append_dependency_identities(
+    const Arg& arg,
+    const std::map<std::uint64_t, std::string>& dependencies,
+    std::vector<std::string>& result
+) {
+    if (arg.kind == Arg::Kind::Ref) {
+        auto found = dependencies.find(arg.ref_value);
+        if (found == dependencies.end()) throw EvalError("cache identity references unknown slot");
+        result.push_back(found->second);
+    } else if (arg.kind == Arg::Kind::List) {
+        for (const Arg& item : arg.list_value) append_dependency_identities(item, dependencies, result);
+    }
+}
+
+std::string canonical_selector_payload(const SelectorPayload& payload) {
+    std::ostringstream out;
+    out << "selector:" << static_cast<int>(payload.type) << ':' << static_cast<int>(payload.kind) << ':';
+    for (const std::string& id : payload.target_ids) out << id.size() << ':' << id << ';';
+    for (const SelectorClause& clause : payload.clauses) {
+        out << static_cast<int>(clause.type) << ':'
+            << (clause.axis ? std::to_string(static_cast<int>(*clause.axis)) : "-") << ':'
+            << (clause.bound ? std::to_string(static_cast<int>(*clause.bound)) : "-") << ':'
+            << (clause.rank ? std::to_string(static_cast<int>(*clause.rank)) : "-") << ';';
+    }
+    return out.str();
+}
+
+std::string read_binary_file(const fs::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) throw IoError("cannot read execution identity input `" + path.string() + "`");
+    std::ostringstream bytes;
+    bytes << input.rdbuf();
+    if (!input.good() && !input.eof()) throw IoError("cannot finish execution identity input `" + path.string() + "`");
+    return bytes.str();
+}
+
+ecky::ExecutionIdentityInput execution_identity_base(const std::string& op, const ExecutionContext& context) {
+    if (context.runner_binary_digest.empty()) {
+        throw EvalError("runner binary digest unavailable for selective cache identity");
+    }
+    ecky::ExecutionIdentityInput input;
+    input.cache_schema = kSelectiveCacheSchema;
+    input.runner_abi = direct_occt_runner_abi_digest();
+    input.runner_binary_digest = context.runner_binary_digest;
+    input.occt_runtime = std::string("occt=") + OCC_VERSION_COMPLETE;
+    input.tolerance_policy = "boolean-fuzzy=1e-5;stl-weld=1e-6";
+    input.tessellation_policy = "linear=0.04;angular=clamp(linear*5+0.005,0.005,0.1);part-mesh-v2";
+    input.op = op;
+    return input;
+}
+
+std::string command_cache_key(
+    const Command& command,
+    const std::map<std::uint64_t, std::string>& dependencies,
+    const ExecutionContext& context
+) {
+    ecky::ExecutionIdentityInput input = execution_identity_base(command.op, context);
+    for (std::size_t index = 0; index < command.args.size(); ++index) {
+        const Arg& arg = command.args[index];
+        const bool imported_payload = (command.op == "import-stl" || command.op == "import-step") && index == 0 &&
+            (arg.kind == Arg::Kind::Text || arg.kind == Arg::Kind::Symbol);
+        input.resolved_args.push_back(imported_payload ? "import-payload" : canonical_semantic_arg(arg, dependencies));
+        if (imported_payload) input.import_payloads.push_back(read_binary_file(arg.text_value));
+        append_dependency_identities(arg, dependencies, input.ordered_dependency_identities);
+    }
+    for (const Keyword& keyword : command.keywords) {
+        input.normalized_keywords.push_back(
+            "keyword:" + keyword.name + ':' + std::to_string(static_cast<int>(keyword.kind)) + ':' +
+            canonical_semantic_arg(keyword.value, dependencies));
+        append_dependency_identities(keyword.value, dependencies, input.ordered_dependency_identities);
+        if (keyword.selector_payload.has_value()) {
+            input.selectors.push_back(canonical_selector_payload(*keyword.selector_payload));
+        }
+    }
+    return ecky::execution_identity(input);
+}
+
+std::string partial_boolean_group_cache_key(
+    const Command& command,
+    const PartialBooleanGroupPlan& group,
+    const std::map<std::uint64_t, std::string>& dependencies,
+    const ExecutionContext& context
+) {
+    ecky::ExecutionIdentityInput input = execution_identity_base("partial-union-v1", context);
+    input.resolved_args.push_back("operation:" + group.operation);
+    input.resolved_args.push_back("version:" + std::to_string(group.version));
+    for (std::uint32_t index : group.input_indices) {
+        if (index >= command.args.size()) throw EvalError("partial union input index out of range");
+        const Arg& arg = command.args[index];
+        input.resolved_args.push_back(canonical_semantic_arg(arg, dependencies));
+        append_dependency_identities(arg, dependencies, input.ordered_dependency_identities);
+    }
+    return ecky::execution_identity(input);
+}
+
+std::string part_cache_key(const Part& part, const ExecutionContext& context) {
+    std::map<std::uint64_t, std::string> signatures;
+    for (const Command& command : part.commands) {
+        signatures.emplace(command.output, command_cache_key(command, signatures, context));
+    }
+    auto root = signatures.find(part.root);
+    if (root == signatures.end()) throw EvalError("cache identity missing part root");
+    ecky::ExecutionIdentityInput input = execution_identity_base("part-root", context);
+    input.resolved_args = {
+        "representation:analytic-brep",
+        "export:step+part-mesh-stl",
+        "root:" + root->second,
+    };
+    input.ordered_dependency_identities.push_back(root->second);
+    return ecky::execution_identity(input);
+}
+
+bool command_cache_admitted(const Command& command) {
+    static const std::set<std::string> kExpensive = {
+        "union", "difference", "intersection", "fillet", "chamfer", "shell", "loft",
+        "sweep", "solidify", "import-stl", "import-step", "hull"
+    };
+    return kExpensive.find(command.op) != kExpensive.end();
+}
+
+std::string file_digest(const fs::path& path) {
+    return "sha256:" + ecky::sha256_hex(read_binary_file(path));
+}
+
+std::optional<TopoDS_Shape> read_cached_shape(
+    const fs::path& root, const std::string& kind, const std::string& key, ExecutionContext& context
+) {
+    {
+        std::lock_guard<std::mutex> lock(context.mutex);
+        ++context.cache_read_count;
+    }
+    const fs::path cache_dir = root / kind;
+    const fs::path artifact = cache_dir / (key + ".brepbin");
+    const fs::path metadata = cache_dir / (key + ".meta");
+    try {
+        std::ifstream meta(metadata);
+        std::string schema, stored_key, stored_digest, stored_size;
+        if (!(meta >> schema >> stored_key >> stored_digest >> stored_size) ||
+            schema != kSelectiveCacheSchema || stored_key != key ||
+            !fs::is_regular_file(artifact) || file_digest(artifact) != stored_digest ||
+            std::to_string(fs::file_size(artifact)) != stored_size) {
+            fs::remove(artifact);
+            fs::remove(metadata);
+            {
+                std::lock_guard<std::mutex> lock(context.mutex);
+                ++context.cache_rejection_count;
+            }
+            return std::nullopt;
+        }
+        TopoDS_Shape shape;
+        if (!BinTools::Read(shape, artifact.string().c_str()) || shape.IsNull() ||
+            !BRepCheck_Analyzer(shape).IsValid()) {
+            fs::remove(artifact);
+            fs::remove(metadata);
+            {
+                std::lock_guard<std::mutex> lock(context.mutex);
+                ++context.cache_rejection_count;
+            }
+            return std::nullopt;
+        }
+        const auto now = fs::file_time_type::clock::now();
+        std::error_code touch_error;
+        fs::last_write_time(artifact, now, touch_error);
+        fs::last_write_time(metadata, now, touch_error);
+        return shape;
+    } catch (...) {
+        std::error_code ignored;
+        fs::remove(artifact, ignored);
+        fs::remove(metadata, ignored);
+        {
+            std::lock_guard<std::mutex> lock(context.mutex);
+            ++context.cache_rejection_count;
+        }
+        return std::nullopt;
+    }
+}
+
+std::uintmax_t configured_cache_budget_bytes() {
+    const char* raw = std::getenv("ECKY_DIRECT_OCCT_CACHE_BYTES");
+    if (!raw || !*raw) return 512ULL * 1024ULL * 1024ULL;
+    try { return std::stoull(raw); }
+    catch (...) { throw ParseError("ECKY_DIRECT_OCCT_CACHE_BYTES must be an unsigned integer"); }
+}
+
+void evict_cache_to_budget(const fs::path& root) {
+    struct Entry { fs::path artifact; fs::path metadata; fs::file_time_type used; std::uintmax_t bytes; };
+    std::vector<Entry> entries;
+    std::uintmax_t total = 0;
+    for (const auto& [kind, extension] : std::array<std::pair<const char*, const char*>, 4>{{
+             {"parts", ".brepbin"}, {"commands", ".brepbin"},
+             {"partial-booleans", ".brepbin"}, {"part-meshes", ".partmesh"}}}) {
+        const fs::path dir = root / kind;
+        if (!fs::is_directory(dir)) continue;
+        for (const auto& item : fs::directory_iterator(dir)) {
+            if (item.path().extension() != extension) continue;
+            const fs::path metadata = item.path().parent_path() /
+                (item.path().stem().string() + ".meta");
+            std::error_code error;
+            const std::uintmax_t bytes = fs::file_size(item.path(), error) +
+                (fs::exists(metadata) ? fs::file_size(metadata, error) : 0);
+            entries.push_back({item.path(), metadata, fs::last_write_time(item.path(), error), bytes});
+            total += bytes;
+        }
+    }
+    std::sort(entries.begin(), entries.end(), [](const Entry& left, const Entry& right) {
+        return left.used < right.used;
+    });
+    const std::uintmax_t budget = configured_cache_budget_bytes();
+    for (const Entry& entry : entries) {
+        if (total <= budget) break;
+        std::error_code ignored;
+        fs::remove(entry.artifact, ignored);
+        fs::remove(entry.metadata, ignored);
+        total -= entry.bytes;
+    }
+}
+
+void write_cached_shape(
+    const fs::path& root, const std::string& kind, const std::string& key, const TopoDS_Shape& shape,
+    ExecutionContext& context
+) {
+    if (shape.IsNull() || !BRepCheck_Analyzer(shape).IsValid()) return;
+    const fs::path cache_dir = root / kind;
+    fs::create_directories(cache_dir);
+    const fs::path artifact = cache_dir / (key + ".brepbin");
+    const fs::path metadata = cache_dir / (key + ".meta");
+    const std::string suffix = ".tmp-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    const fs::path artifact_tmp = artifact.string() + suffix;
+    const fs::path metadata_tmp = metadata.string() + suffix;
+    if (!BinTools::Write(shape, artifact_tmp.string().c_str())) return;
+    const std::string digest = file_digest(artifact_tmp);
+    {
+        std::ofstream meta(metadata_tmp);
+        if (!meta) { fs::remove(artifact_tmp); return; }
+        meta << kSelectiveCacheSchema << ' ' << key << ' ' << digest << ' '
+             << fs::file_size(artifact_tmp) << '\n';
+    }
+    std::error_code error;
+    fs::rename(artifact_tmp, artifact, error);
+    if (error) { fs::remove(artifact_tmp); fs::remove(metadata_tmp); return; }
+    fs::rename(metadata_tmp, metadata, error);
+    if (error) { fs::remove(metadata_tmp); fs::remove(artifact); return; }
+    std::lock_guard<std::mutex> lock(context.mutex);
+    ++context.cache_write_count;
+}
+
+std::vector<ShapeRecord> evaluate_plan(
+    const Plan& plan,
+    const std::optional<fs::path>& cache_root,
+    ecky::RenderCacheTransaction* cache_transaction,
+    ExecutionContext& context
+) {
+    if (plan.parts.empty()) throw EvalError("plan needs at least one part");
+    if (cache_root.has_value() != (cache_transaction != nullptr)) {
+        throw EvalError("selective cache transaction must match cache configuration");
+    }
+    std::vector<std::string> cache_keys(plan.parts.size());
+    std::vector<std::optional<ShapeRecord>> cached_parts(plan.parts.size());
+    std::vector<std::vector<std::string>> command_cache_keys(plan.parts.size());
+    std::vector<std::map<std::uint64_t, SlotValue>> cached_command_slots(plan.parts.size());
+    std::map<std::string, std::string> partial_group_cache_keys;
+    std::map<std::string, TopoDS_Shape> cached_partial_groups;
+    if (cache_root.has_value()) {
+        for (std::size_t part_index = 0; part_index < plan.parts.size(); ++part_index) {
+            const Part& part = plan.parts[part_index];
+            cache_keys[part_index] = part_cache_key(part, context);
+            if (auto shape = read_cached_shape(*cache_root, "parts", cache_keys[part_index], context)) {
+                ShapeRecord record;
+                record.part_id = part.part_id;
+                record.label = part.label;
+                record.shape = std::move(*shape);
+                cached_parts[part_index] = std::move(record);
+                std::lock_guard<std::mutex> lock(context.mutex);
+                context.part_cache_hits[part.part_id] = true;
+            } else {
+                std::lock_guard<std::mutex> lock(context.mutex);
+                context.part_cache_hits[part.part_id] = false;
+            }
+            std::map<std::uint64_t, std::string> fingerprints;
+            command_cache_keys[part_index].reserve(part.commands.size());
+            for (const Command& command : part.commands) {
+                const std::string key = command_cache_key(command, fingerprints, context);
+                command_cache_keys[part_index].push_back(key);
+                for (const PartialBooleanGroupPlan& group : plan.partial_boolean_groups) {
+                    if (group.part_key != part.part_id || group.parent_output != command.output) continue;
+                    const std::string group_id = partial_group_id(part_index, command.output, group.ordinal);
+                    const std::string group_key = partial_boolean_group_cache_key(
+                        command, group, fingerprints, context);
+                    partial_group_cache_keys.emplace(group_id, group_key);
+                    if (!cached_parts[part_index].has_value()) {
+                        if (auto shape = read_cached_shape(*cache_root, "partial-booleans", group_key, context)) {
+                            cached_partial_groups.emplace(group_id, std::move(*shape));
+                            std::lock_guard<std::mutex> lock(context.mutex);
+                            ++context.partial_boolean_cache_hit_count;
+                        } else {
+                            std::lock_guard<std::mutex> lock(context.mutex);
+                            ++context.partial_boolean_cache_miss_count;
+                        }
+                    }
+                }
+                fingerprints.emplace(command.output, key);
+                if (!cached_parts[part_index].has_value() && command_cache_admitted(command)) {
+                    const std::string command_id = part.part_id + ":" + std::to_string(command.output);
+                    if (auto shape = read_cached_shape(*cache_root, "commands", key, context)) {
+                        cached_command_slots[part_index].emplace(command.output, SlotValue::shape_value(*shape));
+                        context.command_cache_evidence.push_back({command_id, true, true});
+                    } else {
+                        context.command_cache_evidence.push_back({command_id, false, true});
+                    }
+                }
             }
         }
-        auto root = slots.find(part.root);
-        if (root == slots.end()) {
-            throw EvalError("missing root shape for part `" + part.part_id + "`");
+    }
+
+    std::vector<DagNode> nodes;
+    std::vector<std::map<std::uint64_t, std::size_t>> producers(plan.parts.size());
+    for (std::size_t part_index = 0; part_index < plan.parts.size(); ++part_index) {
+        const Part& part = plan.parts[part_index];
+        if (cached_parts[part_index].has_value()) continue;
+        for (std::size_t command_index = 0; command_index < part.commands.size(); ++command_index) {
+            const Command& command = part.commands[command_index];
+            if (cached_command_slots[part_index].find(command.output) != cached_command_slots[part_index].end()) {
+                continue;
+            }
+            if (!producers[part_index].emplace(command.output, nodes.size()).second) {
+                throw EvalError("duplicate output slot in part `" + part.part_id + "`");
+            }
+            DagNode node;
+            node.part_index = part_index;
+            node.command_index = command_index;
+            node.exclusive = !command_has_proven_immutable_inputs(command);
+            nodes.push_back(std::move(node));
         }
+    }
+    for (std::size_t node_index = 0; node_index < nodes.size(); ++node_index) {
+        DagNode& node = nodes[node_index];
+        const Command& command = plan.parts[node.part_index].commands[node.command_index];
+        for (std::uint64_t ref : command_refs(command)) {
+            auto producer = producers[node.part_index].find(ref);
+            if (producer == producers[node.part_index].end()) {
+                if (cached_command_slots[node.part_index].find(ref) != cached_command_slots[node.part_index].end()) {
+                    continue;
+                }
+                throw EvalError(command.op + " references unknown slot " + std::to_string(ref));
+            }
+            ++node.unmet_dependencies;
+            nodes[producer->second].dependents.push_back(node_index);
+        }
+    }
+
+    // A command-cache hit supplies its output before scheduling. Walk backward
+    // only from uncached part roots, stopping at supplied slots, so upstream
+    // work stays dormant unless some other missed root consumes it.
+    std::vector<bool> required(nodes.size(), false);
+    std::vector<std::size_t> pending;
+    for (std::size_t part_index = 0; part_index < plan.parts.size(); ++part_index) {
+        if (cached_parts[part_index].has_value()) continue;
+        auto root = producers[part_index].find(plan.parts[part_index].root);
+        if (root != producers[part_index].end()) pending.push_back(root->second);
+    }
+    while (!pending.empty()) {
+        const std::size_t node_index = pending.back();
+        pending.pop_back();
+        if (required[node_index]) continue;
+        required[node_index] = true;
+        const DagNode& node = nodes[node_index];
+        const Command& command = plan.parts[node.part_index].commands[node.command_index];
+        for (std::uint64_t ref : command_refs(command)) {
+            auto producer = producers[node.part_index].find(ref);
+            if (producer != producers[node.part_index].end()) pending.push_back(producer->second);
+        }
+    }
+    for (DagNode& node : nodes) {
+        node.unmet_dependencies = 0;
+        node.dependents.clear();
+    }
+    std::size_t required_count = 0;
+    for (std::size_t node_index = 0; node_index < nodes.size(); ++node_index) {
+        if (!required[node_index]) continue;
+        ++required_count;
+        DagNode& node = nodes[node_index];
+        const Command& command = plan.parts[node.part_index].commands[node.command_index];
+        for (std::uint64_t ref : command_refs(command)) {
+            auto producer = producers[node.part_index].find(ref);
+            if (producer != producers[node.part_index].end() && required[producer->second]) {
+                ++node.unmet_dependencies;
+                nodes[producer->second].dependents.push_back(node_index);
+            }
+        }
+    }
+
+    // Slot values remain immutable while consumed. Count required consumers up
+    // front so a non-root value is released immediately after its last reader.
+    // This keeps broad DAGs from retaining every intermediate until export.
+    std::vector<std::map<std::uint64_t, std::size_t>> remaining_uses(plan.parts.size());
+    for (std::size_t node_index = 0; node_index < nodes.size(); ++node_index) {
+        if (!required[node_index]) continue;
+        const DagNode& node = nodes[node_index];
+        const Command& command = plan.parts[node.part_index].commands[node.command_index];
+        for (std::uint64_t ref : command_refs(command)) ++remaining_uses[node.part_index][ref];
+    }
+
+    std::vector<std::map<std::uint64_t, SlotValue>> slots = std::move(cached_command_slots);
+    for (std::size_t part_index = 0; part_index < slots.size(); ++part_index) {
+        for (auto value = slots[part_index].begin(); value != slots[part_index].end();) {
+            if (value->first != plan.parts[part_index].root &&
+                remaining_uses[part_index][value->first] == 0) {
+                value = slots[part_index].erase(value);
+                std::lock_guard<std::mutex> lock(context.mutex);
+                ++context.released_slot_count;
+            } else {
+                ++value;
+            }
+        }
+    }
+    std::set<std::size_t> ready;
+    for (std::size_t index = 0; index < nodes.size(); ++index) {
+        if (required[index] && nodes[index].unmet_dependencies == 0) ready.insert(index);
+    }
+    std::size_t completed_count = 0;
+    while (!ready.empty()) {
+        std::vector<std::size_t> batch;
+        const std::size_t first = *ready.begin();
+        if (nodes[first].exclusive) {
+            batch.push_back(first);
+        } else {
+            for (std::size_t candidate : ready) {
+                if (nodes[candidate].exclusive) continue;
+                batch.push_back(candidate);
+                if (batch.size() == context.worker_budget) break;
+            }
+            if (batch.empty()) batch.push_back(first);
+        }
+        for (std::size_t index : batch) ready.erase(index);
+        {
+            std::lock_guard<std::mutex> lock(context.mutex);
+            context.active_dag_nodes = static_cast<std::uint32_t>(batch.size());
+            context.peak_dag_concurrency = std::max(
+                context.peak_dag_concurrency, context.active_dag_nodes);
+        }
+        std::vector<std::future<CompletedDagNode>> running;
+        running.reserve(batch.size());
+        for (std::size_t node_index : batch) {
+            const DagNode& node = nodes[node_index];
+            const Part& part = plan.parts[node.part_index];
+            const Command& command = part.commands[node.command_index];
+            const std::map<std::uint64_t, SlotValue> inputs = slots[node.part_index];
+            std::vector<PartialBooleanGroupPlan> task_groups;
+            std::map<std::uint32_t, TopoDS_Shape> task_cached_groups;
+            for (const PartialBooleanGroupPlan& group :
+                 cache_root.has_value() ? plan.partial_boolean_groups
+                                        : std::vector<PartialBooleanGroupPlan>{}) {
+                if (group.part_key != part.part_id || group.parent_output != command.output) continue;
+                task_groups.push_back(group);
+                const std::string group_id = partial_group_id(node.part_index, command.output, group.ordinal);
+                if (auto hit = cached_partial_groups.find(group_id); hit != cached_partial_groups.end()) {
+                    task_cached_groups.emplace(group.ordinal, hit->second);
+                }
+            }
+            running.push_back(std::async(std::launch::async, [&, node_index, inputs, task_groups, task_cached_groups]() {
+                const DagNode& task = nodes[node_index];
+                const Part& task_part = plan.parts[task.part_index];
+                const Command& task_command = task_part.commands[task.command_index];
+                try {
+                    const auto command_started_at = std::chrono::steady_clock::now();
+                    SlotValue value;
+                    std::vector<std::pair<std::string, TopoDS_Shape>> partial_outputs;
+                    if (task_command.op == "union" && task_groups.size() == 2 &&
+                        task_command.args.size() == 4) {
+                        std::vector<TopoDS_Shape> operands;
+                        for (const Arg& arg : task_command.args) {
+                            operands.push_back(lookup_shape(inputs, arg.ref_value, "union"));
+                        }
+                        if (task_cached_groups.size() == 2) {
+                            value = SlotValue::shape_value(fuse_shapes(
+                                {task_cached_groups.at(0), task_cached_groups.at(1)}, context));
+                        } else if (task_cached_groups.size() == 1) {
+                            const std::uint32_t hit_ordinal = task_cached_groups.begin()->first;
+                            const std::uint32_t dirty_ordinal = hit_ordinal == 0 ? 1 : 0;
+                            const PartialBooleanGroupPlan& dirty_group = *std::find_if(
+                                task_groups.begin(), task_groups.end(), [&](const auto& group) {
+                                    return group.ordinal == dirty_ordinal;
+                                });
+                            TopoDS_Shape dirty = fuse_shapes(
+                                operands[dirty_group.input_indices[0]],
+                                operands[dirty_group.input_indices[1]], context);
+                            const std::string dirty_id = partial_group_id(
+                                task.part_index, task_command.output, dirty_ordinal);
+                            partial_outputs.emplace_back(partial_group_cache_keys.at(dirty_id), dirty);
+                            value = SlotValue::shape_value(hit_ordinal == 0
+                                ? fuse_shapes(task_cached_groups.begin()->second, dirty, context)
+                                : fuse_shapes(dirty, task_cached_groups.begin()->second, context));
+                        } else {
+                            {
+                                std::lock_guard<std::mutex> lock(context.mutex);
+                                ++context.four_way_intersection_count;
+                            }
+                            PreparedUnionResult prepared = prepare_four_way_union(operands, context);
+                            value = SlotValue::shape_value(prepared.full);
+                            for (const PartialBooleanGroupPlan& group : task_groups) {
+                                const std::string group_id = partial_group_id(
+                                    task.part_index, task_command.output, group.ordinal);
+                                partial_outputs.emplace_back(
+                                    partial_group_cache_keys.at(group_id), prepared.groups.at(group.ordinal));
+                            }
+                        }
+                    } else {
+                        value = evaluate_command(task_command, inputs, task_part.part_id, context);
+                    }
+                    if (task_command.op == "union" || task_command.op == "difference" ||
+                        task_command.op == "intersection") {
+                        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - command_started_at).count();
+                        std::lock_guard<std::mutex> lock(context.mutex);
+                        context.command_timing_evidence.push_back(CommandTimingEvidence{
+                            task_part.part_id + ":" + std::to_string(task_command.output),
+                            task_command.op,
+                            static_cast<std::uint64_t>(std::max<std::int64_t>(0, elapsed_ms)),
+                        });
+                    }
+                    return CompletedDagNode{
+                        node_index, std::move(value), std::move(partial_outputs)};
+                } catch (const Standard_Failure& error) {
+                    const char* raw = error.GetMessageString();
+                    throw OcctRuntimeError(
+                        "Direct OCCT part `" + task_part.part_id + "` command #" +
+                        std::to_string(task.command_index) + " output slot " +
+                        std::to_string(task_command.output) + " op `" + task_command.op +
+                        "` failed: " + (raw ? raw : "unknown OCCT failure"));
+                }
+            }));
+        }
+        for (auto& future : running) {
+            CompletedDagNode result = future.get();
+            const DagNode& node = nodes[result.node_index];
+            const Part& part = plan.parts[node.part_index];
+            const Command& command = part.commands[node.command_index];
+            if (cache_root.has_value() && command_cache_admitted(command) &&
+                result.value.kind == SlotValue::Kind::Shape) {
+                write_cached_shape(
+                    cache_transaction->staging_root(), "commands",
+                    command_cache_keys[node.part_index][node.command_index], result.value.shape, context);
+            }
+            if (cache_root.has_value()) {
+                for (const auto& [key, shape] : result.partial_boolean_outputs) {
+                    write_cached_shape(
+                        cache_transaction->staging_root(), "partial-booleans", key, shape, context);
+                    std::lock_guard<std::mutex> lock(context.mutex);
+                    ++context.partial_boolean_cache_write_count;
+                }
+            }
+            slots[node.part_index].emplace(command.output, std::move(result.value));
+            {
+                std::lock_guard<std::mutex> lock(context.mutex);
+                ++context.part_executed_commands[part.part_id];
+                context.part_executed_command_ids[part.part_id].push_back(
+                    part.part_id + ":" + std::to_string(command.output));
+            }
+            for (std::uint64_t ref : command_refs(command)) {
+                auto remaining = remaining_uses[node.part_index].find(ref);
+                if (remaining == remaining_uses[node.part_index].end() || remaining->second == 0) {
+                    throw EvalError("slot consumer count underflow for slot " + std::to_string(ref));
+                }
+                --remaining->second;
+                if (remaining->second == 0 && ref != part.root) {
+                    auto value = slots[node.part_index].find(ref);
+                    if (value != slots[node.part_index].end()) {
+                        slots[node.part_index].erase(value);
+                        std::lock_guard<std::mutex> lock(context.mutex);
+                        ++context.released_slot_count;
+                    }
+                }
+            }
+            ++completed_count;
+            for (std::size_t dependent : node.dependents) {
+                if (--nodes[dependent].unmet_dependencies == 0) ready.insert(dependent);
+            }
+        }
+    }
+    if (completed_count != required_count) throw EvalError("command graph contains a dependency cycle");
+
+    std::vector<ShapeRecord> parts;
+    parts.reserve(plan.parts.size());
+    for (std::size_t part_index = 0; part_index < plan.parts.size(); ++part_index) {
+        const Part& part = plan.parts[part_index];
+        if (cached_parts[part_index].has_value()) {
+            parts.push_back(std::move(*cached_parts[part_index]));
+            continue;
+        }
+        auto root = slots[part_index].find(part.root);
+        if (root == slots[part_index].end()) throw EvalError("missing root shape for part `" + part.part_id + "`");
         if (root->second.kind == SlotValue::Kind::Frame) {
             throw EvalError("root slot for part `" + part.part_id + "` is not geometry");
         }
@@ -4590,6 +5651,10 @@ std::vector<ShapeRecord> evaluate_plan(const Plan& plan) {
             record.manifold = root->second.manifold;
         } else {
             record.shape = root->second.shape;
+            if (cache_root.has_value()) {
+                write_cached_shape(
+                    cache_transaction->staging_root(), "parts", cache_keys[part_index], record.shape, context);
+            }
         }
         parts.push_back(std::move(record));
     }
@@ -4604,12 +5669,17 @@ void write_step_file(const fs::path& path, const TopoDS_Shape& shape) {
     }
 }
 
-// Preview/export STL tessellation quality. The previous 0.2 mm linear-only
-// deflection left visibly faceted cylinders (coarse on print). Use a finer
-// linear deflection plus an angular deflection so curved surfaces (cylinders,
-// fillets, lofts) stay smooth regardless of radius.
-static constexpr double kStlLinearDeflection = 0.04;   // mm chord error
-static constexpr double kStlAngularDeflection = 0.25;  // rad (~14 deg) per facet
+// Preview/export STL tessellation quality. Use FreeCAD-style adaptive angular
+// deflection so curved surfaces stay smooth at small scales and avoid
+// over-tessellating large parts. Linear deflection stays fixed.
+static constexpr double kStlLinearDeflection = 0.04;  // mm chord error
+static constexpr double kStlAngularDeflectionMin = 0.005;
+static constexpr double kStlAngularDeflectionMax = 0.1;
+
+static constexpr double stl_angular_deflection_for_linear(double linear) {
+    const double adaptive = linear * 5.0 + 0.005;
+    return std::clamp(adaptive, kStlAngularDeflectionMin, kStlAngularDeflectionMax);
+}
 
 // Weld tolerance for STL vertices. Boolean rebuilds and transform round-trips
 // leave duplicated boundary topology whose tessellations drift a few double
@@ -4664,10 +5734,218 @@ private:
     std::map<std::string, std::vector<gp_Pnt>> buckets_;
 };
 
-void write_stl_file(const fs::path& path, const TopoDS_Shape& shape) {
-    StageExecutionTimer stage_timer("mesh");
+constexpr std::size_t kPartMeshReservationBytes = 256ULL * 1024ULL * 1024ULL;
+constexpr std::size_t kDefaultPartMeshMemoryBudgetBytes = 512ULL * 1024ULL * 1024ULL;
+
+std::size_t configured_part_mesh_memory_budget_bytes() {
+    const char* raw = std::getenv("ECKY_DIRECT_OCCT_MESH_MEMORY_BYTES");
+    if (!raw || !*raw) return kDefaultPartMeshMemoryBudgetBytes;
+    try {
+        const unsigned long long bytes = std::stoull(raw);
+        if (bytes < kPartMeshReservationBytes) {
+            throw ParseError("ECKY_DIRECT_OCCT_MESH_MEMORY_BYTES must admit one 256 MiB mesh reservation");
+        }
+        return static_cast<std::size_t>(bytes);
+    } catch (const ParseError&) {
+        throw;
+    } catch (...) {
+        throw ParseError("ECKY_DIRECT_OCCT_MESH_MEMORY_BYTES must be an unsigned integer");
+    }
+}
+
+std::string part_mesh_runtime_policy_identity(const ExecutionContext& context) {
+    if (context.runner_binary_digest.empty()) {
+        throw EvalError("runner binary digest unavailable for part mesh identity");
+    }
+    return std::string(ecky::kPartMeshPolicyIdentity) + "|cache=" + kSelectiveCacheSchema +
+        "|abi=" + direct_occt_runner_abi_digest() + "|binary=" + context.runner_binary_digest +
+        "|occt=" + OCC_VERSION_COMPLETE;
+}
+
+ecky::PartMesh tessellate_brep_part_mesh(
+    const TopoDS_Shape& shape, const std::string& part_id, ExecutionContext& context
+) {
+    StageExecutionTimer stage_timer(context, "mesh");
+    const double angular_deflection = stl_angular_deflection_for_linear(kStlLinearDeflection);
+    // BRepMesh stores triangulation on face TShapes. Parts may be instances of
+    // one root, so give every concurrent job private topology while retaining
+    // read-only analytic geometry and dropping any prior triangulation.
+    BRepBuilderAPI_Copy private_topology(shape, Standard_False, Standard_False);
+    const TopoDS_Shape mesh_shape = private_topology.Shape();
+    if (mesh_shape.IsNull()) throw EvalError("failed to create private topology for part mesh");
+    // The outer mesh scheduler and this inner mesher share the process-wide
+    // OSD pool configured from one total worker budget.
+    const Standard_Boolean mesher_parallel =
+        context.worker_budget > 1 ? Standard_True : Standard_False;
+    BRepMesh_IncrementalMesh mesher(
+        mesh_shape, kStlLinearDeflection, Standard_False, angular_deflection, mesher_parallel);
+    (void)mesher;
+
+    ecky::PartMesh mesh;
+    mesh.part_id = part_id;
+    StlVertexWelder welder;
+    for (TopExp_Explorer face_explorer(mesh_shape, TopAbs_FACE); face_explorer.More(); face_explorer.Next()) {
+        TopoDS_Face face = TopoDS::Face(face_explorer.Current());
+        TopLoc_Location location;
+        Handle(Poly_Triangulation) triangulation = BRep_Tool::Triangulation(face, location);
+        if (triangulation.IsNull()) continue;
+        const gp_Trsf transform = location.Transformation();
+        for (Standard_Integer triangle_index = 1;
+             triangle_index <= triangulation->NbTriangles();
+             ++triangle_index) {
+            Standard_Integer n1 = 0;
+            Standard_Integer n2 = 0;
+            Standard_Integer n3 = 0;
+            triangulation->Triangle(triangle_index).Get(n1, n2, n3);
+            gp_Pnt p1 = welder.weld(triangulation->Node(n1).Transformed(transform));
+            gp_Pnt p2 = welder.weld(triangulation->Node(n2).Transformed(transform));
+            gp_Pnt p3 = welder.weld(triangulation->Node(n3).Transformed(transform));
+            if (face.Orientation() == TopAbs_REVERSED) std::swap(p2, p3);
+            const gp_Vec normal = gp_Vec(p1, p2).Crossed(gp_Vec(p1, p3));
+            if (normal.SquareMagnitude() <= 1.0e-18) continue;
+            ecky::MeshTriangle triangle;
+            triangle.vertices[0] = {p1.X(), p1.Y(), p1.Z()};
+            triangle.vertices[1] = {p2.X(), p2.Y(), p2.Z()};
+            triangle.vertices[2] = {p3.X(), p3.Y(), p3.Z()};
+            mesh.triangles.push_back(triangle);
+        }
+    }
+    if (mesh.triangles.empty()) {
+        throw IoError("failed to build part mesh: shape produced no triangulated faces");
+    }
+    if (mesh.resident_bytes() > kPartMeshReservationBytes) {
+        throw EvalError("part mesh exceeded the 256 MiB bounded mesh reservation; split the part or raise the reservation policy");
+    }
+    return mesh;
+}
+
+void write_part_mesh_stl_file(const fs::path& path, const std::vector<const ecky::PartMesh*>& meshes) {
+    std::uint64_t triangle_count = 0;
+    for (const ecky::PartMesh* mesh : meshes) {
+        triangle_count += mesh->triangles.size();
+    }
+    if (triangle_count == 0 || triangle_count > std::numeric_limits<std::uint32_t>::max()) {
+        throw IoError("failed to write STL: invalid part mesh triangle count");
+    }
+    std::ofstream out(path, std::ios::binary);
+    if (!out) throw IoError("failed to write STL");
+    const std::string header(80, '\0');
+    out.write(header.data(), 80);
+    const std::uint32_t count = static_cast<std::uint32_t>(triangle_count);
+    out.write(reinterpret_cast<const char*>(&count), 4);
+    const auto write_float = [&](double value) {
+        const float float_value = static_cast<float>(value);
+        out.write(reinterpret_cast<const char*>(&float_value), 4);
+    };
+    for (const ecky::PartMesh* mesh : meshes) {
+        for (const ecky::MeshTriangle& triangle : mesh->triangles) {
+            const ecky::MeshPoint& p1 = triangle.vertices[0];
+            const ecky::MeshPoint& p2 = triangle.vertices[1];
+            const ecky::MeshPoint& p3 = triangle.vertices[2];
+            double nx = (p2.y - p1.y) * (p3.z - p1.z) - (p2.z - p1.z) * (p3.y - p1.y);
+            double ny = (p2.z - p1.z) * (p3.x - p1.x) - (p2.x - p1.x) * (p3.z - p1.z);
+            double nz = (p2.x - p1.x) * (p3.y - p1.y) - (p2.y - p1.y) * (p3.x - p1.x);
+            const double magnitude = std::sqrt(nx * nx + ny * ny + nz * nz);
+            if (magnitude > 0.0) { nx /= magnitude; ny /= magnitude; nz /= magnitude; }
+            write_float(nx); write_float(ny); write_float(nz);
+            write_float(p1.x); write_float(p1.y); write_float(p1.z);
+            write_float(p2.x); write_float(p2.y); write_float(p2.z);
+            write_float(p3.x); write_float(p3.y); write_float(p3.z);
+            const std::uint16_t attribute = 0;
+            out.write(reinterpret_cast<const char*>(&attribute), 2);
+        }
+    }
+    if (!out.good()) throw IoError("failed to write STL: I/O error after writing part mesh triangles");
+}
+
+std::vector<ecky::PartMesh> build_brep_part_meshes(
+    const Plan& plan,
+    const std::vector<ShapeRecord>& parts,
+    const std::optional<fs::path>& cache_root,
+    ecky::RenderCacheTransaction* cache_transaction,
+    ExecutionContext& context
+) {
+    struct InFlightMesh {
+        std::size_t part_index = 0;
+        std::string identity;
+        std::future<ecky::PartMesh> result;
+    };
+
+    std::vector<std::optional<ecky::PartMesh>> meshes(parts.size());
+    std::vector<std::string> identities(parts.size());
+    std::unique_ptr<ecky::PartMeshCache> cache;
+    std::unique_ptr<ecky::PartMeshCache> staged_cache;
+    if (cache_root.has_value()) {
+        cache = std::make_unique<ecky::PartMeshCache>(*cache_root / "part-meshes");
+        staged_cache = std::make_unique<ecky::PartMeshCache>(
+            cache_transaction->staging_root() / "part-meshes");
+    }
+    const std::string policy_identity = part_mesh_runtime_policy_identity(context);
+    for (std::size_t index = 0; index < parts.size(); ++index) {
+        identities[index] = ecky::part_mesh_identity(part_cache_key(plan.parts[index], context), policy_identity);
+        if (!cache) continue;
+        if (auto hit = cache->read(identities[index])) {
+            meshes[index] = std::move(*hit);
+            std::lock_guard<std::mutex> lock(context.mutex);
+            ++context.mesh_cache_hit_count;
+            context.part_mesh_evidence[parts[index].part_id] = {
+                identities[index], static_cast<std::uint64_t>(meshes[index]->triangles.size())};
+        }
+    }
+
+    ecky::PartMeshMemoryBudget memory_budget(configured_part_mesh_memory_budget_bytes());
+    std::vector<InFlightMesh> in_flight;
+    std::size_t next_part = 0;
+    while (next_part < parts.size() || !in_flight.empty()) {
+        while (next_part < parts.size() &&
+               in_flight.size() < context.mesh_outer_worker_budget) {
+            const std::size_t index = next_part++;
+            if (meshes[index].has_value()) continue;
+            auto lease = memory_budget.try_reserve(kPartMeshReservationBytes);
+            if (!lease.has_value()) {
+                --next_part;
+                break;
+            }
+            const TopoDS_Shape shape = parts[index].shape;
+            const std::string part_id = parts[index].part_id;
+            in_flight.push_back({
+                index,
+                identities[index],
+                std::async(std::launch::async, [shape, part_id, &context, lease = std::move(*lease)]() mutable {
+                    return tessellate_brep_part_mesh(shape, part_id, context);
+                })
+            });
+        }
+        if (in_flight.empty()) {
+            if (next_part == parts.size()) break;
+            throw EvalError("part mesh scheduler cannot admit one mesh under the configured memory budget");
+        }
+        InFlightMesh completed = std::move(in_flight.front());
+        in_flight.erase(in_flight.begin());
+        ecky::PartMesh mesh = completed.result.get();
+        if (staged_cache) {
+            staged_cache->write(completed.identity, mesh);
+            std::lock_guard<std::mutex> lock(context.mutex);
+            ++context.cache_write_count;
+        }
+        meshes[completed.part_index] = std::move(mesh);
+        std::lock_guard<std::mutex> lock(context.mutex);
+        ++context.mesh_build_count;
+        context.part_mesh_evidence[parts[completed.part_index].part_id] = {
+            completed.identity, static_cast<std::uint64_t>(meshes[completed.part_index]->triangles.size())};
+    }
+
+    std::vector<ecky::PartMesh> result;
+    result.reserve(parts.size());
+    for (std::optional<ecky::PartMesh>& mesh : meshes) result.push_back(std::move(*mesh));
+    return result;
+}
+
+void write_stl_file(const fs::path& path, const TopoDS_Shape& shape, ExecutionContext& context) {
+    StageExecutionTimer stage_timer(context, "mesh");
+    const double angular_deflection = stl_angular_deflection_for_linear(kStlLinearDeflection);
     BRepMesh_IncrementalMesh mesh(
-        shape, kStlLinearDeflection, Standard_False, kStlAngularDeflection, Standard_True);
+        shape, kStlLinearDeflection, Standard_False, angular_deflection, Standard_True);
     // Collect triangles first (welded, degenerate-skipped), then write as binary
     // STL. Binary format is required because downstream multipart export
     // (3MF / zip) parses the binary triangle-count header; ASCII STL makes the
@@ -4749,8 +6027,10 @@ void write_stl_file(const fs::path& path, const TopoDS_Shape& shape) {
     }
 }
 
-void write_manifold_stl_file(const fs::path& path, const manifold::Manifold& value) {
-    StageExecutionTimer stage_timer("mesh");
+void write_manifold_stl_file(
+    const fs::path& path, const manifold::Manifold& value, ExecutionContext& context
+) {
+    StageExecutionTimer stage_timer(context, "mesh");
     require_manifold_status(value, "mesh export");
     const manifold::MeshGL64 mesh = value.GetMeshGL64();
     if (mesh.numProp < 3 || mesh.triVerts.empty() || mesh.triVerts.size() % 3 != 0 ||
@@ -4824,9 +6104,10 @@ void write_error_json(
 
 void run_occt_export_stage(
     const std::string& stage,
-    const std::function<void()>& action
+    const std::function<void()>& action,
+    ExecutionContext& context
 ) {
-    direct_occt_current_stage = stage;
+    context.set_stage(stage);
     try {
         action();
     } catch (const Standard_Failure& error) {
@@ -4838,11 +6119,10 @@ void run_occt_export_stage(
     }
 }
 
-int run(int argc, char** argv) {
-    direct_occt_stage_execution_counts.clear();
-    direct_occt_stage_elapsed.clear();
-    direct_occt_report_started_at = std::chrono::steady_clock::now();
-    direct_occt_current_stage = "parse-arguments";
+int run(int argc, char** argv, ExecutionContext& context) {
+    context.worker_budget = configured_worker_budget();
+    context.report_started_at = std::chrono::steady_clock::now();
+    context.set_stage("parse-arguments");
     fs::path plan_path;
     fs::path out_dir;
     for (int index = 1; index < argc; ++index) {
@@ -4870,9 +6150,17 @@ int run(int argc, char** argv) {
         throw ParseError("usage: direct-occt-runner --plan PLAN --out DIR");
     }
 
-    direct_occt_current_stage = "read-plan";
+    std::error_code runner_path_error;
+    const fs::path runner_path = fs::canonical(fs::path(argv[0]), runner_path_error);
+    if (runner_path_error) {
+        throw IoError("cannot resolve running Direct OCCT binary for cache identity: " +
+                      runner_path_error.message());
+    }
+    context.runner_binary_digest = "sha256:" + ecky::sha256_hex(read_binary_file(runner_path));
+
+    context.set_stage("read-plan");
     std::string plan_text = read_text_file(plan_path);
-    direct_occt_current_stage = "parse-plan";
+    context.set_stage("parse-plan");
     yyjson_read_err json_error;
     std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)> document(
         yyjson_read_opts(plan_text.data(), plan_text.size(), YYJSON_READ_NOFLAG, nullptr, &json_error),
@@ -4885,8 +6173,13 @@ int run(int argc, char** argv) {
         );
     }
     const Plan plan = parse_plan(yyjson_doc_get_root(document.get()));
-    direct_occt_current_stage = "evaluate-plan";
-    const std::vector<ShapeRecord> parts = evaluate_plan(plan);
+    configure_mesh_parallelism_budget(plan.parts.size(), context);
+    const std::optional<fs::path> cache_root = selective_cache_root();
+    std::optional<ecky::RenderCacheTransaction> cache_transaction;
+    if (cache_root.has_value()) cache_transaction.emplace(*cache_root);
+    context.set_stage("evaluate-plan");
+    const std::vector<ShapeRecord> parts = evaluate_plan(
+        plan, cache_root, cache_transaction ? &*cache_transaction : nullptr, context);
 
     fs::create_directories(out_dir);
     const fs::path step_path = out_dir / "model.step";
@@ -4903,8 +6196,9 @@ int run(int argc, char** argv) {
         throw EvalError("mixed BRep and Manifold part roots cannot share one export bundle");
     }
 
+    std::vector<ecky::PartMesh> brep_part_meshes;
     if (mesh_only) {
-        direct_occt_current_stage = "assemble-manifold-preview";
+        context.set_stage("assemble-manifold-preview");
         manifold::Manifold preview = parts.front().manifold;
         if (parts.size() > 1) {
             std::vector<manifold::Manifold> manifolds;
@@ -4916,11 +6210,11 @@ int run(int argc, char** argv) {
             require_manifold_status(preview, "multipart Manifold preview");
         }
         run_occt_export_stage("write-preview-stl", [&]() {
-            StageExecutionTimer stage_timer("export");
-            write_manifold_stl_file(stl_path, preview);
-        });
+            StageExecutionTimer stage_timer(context, "export");
+            write_manifold_stl_file(stl_path, preview, context);
+        }, context);
     } else {
-        direct_occt_current_stage = "assemble-export-shape";
+        context.set_stage("assemble-export-shape");
         TopoDS_Shape export_shape = parts.size() == 1 ? parts.front().shape : compound_shapes([&]() {
             std::vector<TopoDS_Shape> shapes;
             shapes.reserve(parts.size());
@@ -4930,16 +6224,33 @@ int run(int argc, char** argv) {
             return shapes;
         }());
         run_occt_export_stage("write-step", [&]() {
-            StageExecutionTimer stage_timer("export");
+            StageExecutionTimer stage_timer(context, "export");
             write_step_file(step_path, export_shape);
-        });
+        }, context);
+        // Final BRep parts tessellate once. The immutable per-part streams are
+        // then reused by deterministic preview assembly and multipart STL.
+        brep_part_meshes = build_brep_part_meshes(
+            plan, parts, cache_root, cache_transaction ? &*cache_transaction : nullptr, context);
+        std::vector<const ecky::PartMesh*> preview_meshes;
+        preview_meshes.reserve(brep_part_meshes.size());
+        for (const ecky::PartMesh& mesh : brep_part_meshes) {
+            preview_meshes.push_back(&mesh);
+        }
+        {
+            std::lock_guard<std::mutex> lock(context.mutex);
+            context.preview_facet_count = 0;
+            for (const ecky::PartMesh& mesh : brep_part_meshes) {
+                context.preview_facet_count += mesh.triangles.size();
+            }
+        }
         run_occt_export_stage("write-preview-stl", [&]() {
-            StageExecutionTimer stage_timer("export");
-            write_stl_file(stl_path, export_shape);
-        });
+            StageExecutionTimer stage_timer(context, "export");
+            write_part_mesh_stl_file(stl_path, preview_meshes);
+        }, context);
     }
-    // Write per-part binary STL files so multipart export (3MF / zip) has
-    // distinct geometry per part instead of duplicating the merged mesh.
+// Write per-part binary STL files so multipart export (3MF / zip) has
+// distinct geometry per part instead of duplicating the merged mesh. Same
+// adaptive tessellation policy as the merged preview/export path.
     if (parts.size() > 1) {
         const fs::path parts_dir = out_dir / "parts";
         fs::create_directories(parts_dir);
@@ -4953,28 +6264,33 @@ int run(int argc, char** argv) {
             }
             const fs::path part_stl = parts_dir / (name + ".stl");
             run_occt_export_stage("write-part-stl:" + name, [&]() {
-                StageExecutionTimer stage_timer("export");
+                StageExecutionTimer stage_timer(context, "export");
                 if (parts[i].kind == ShapeRecord::Kind::Manifold) {
-                    write_manifold_stl_file(part_stl, parts[i].manifold);
+                    write_manifold_stl_file(part_stl, parts[i].manifold, context);
                 } else {
-                    write_stl_file(part_stl, parts[i].shape);
+                    write_part_mesh_stl_file(part_stl, {&brep_part_meshes[i]});
                 }
-            });
+            }, context);
         }
     }
-    direct_occt_current_stage = "write-topology";
+    context.set_stage("write-topology");
     write_topology_report(topology_path, parts);
-    direct_occt_current_stage = "write-stage-report";
-    write_stage_report(stage_report_path);
-    direct_occt_current_stage = "complete";
+    context.set_stage("write-stage-report");
+    write_stage_report(stage_report_path, context);
+    if (cache_transaction.has_value()) {
+        cache_transaction->commit();
+        evict_cache_to_budget(*cache_root);
+    }
+    context.set_stage("complete");
     return 0;
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
+    ExecutionContext context;
     try {
-        return run(argc, argv);
+        return run(argc, argv, context);
     } catch (const ParseError& error) {
         write_error_json("parse_error", "parse_failed", error.what(), error.what());
         return 1;
@@ -5003,13 +6319,13 @@ int main(int argc, char** argv) {
         return 5;
     } catch (const StdFail_NotDone& error) {
         const char* raw_message = error.GetMessageString();
-        std::string message = "Direct OCCT stage `" + direct_occt_current_stage +
+        std::string message = "Direct OCCT stage `" + context.stage() +
             "` failed: " + (raw_message ? raw_message : "unknown OCCT failure");
         write_error_json("runtime_error", "occt_not_done", message, message);
         return 5;
     } catch (const Standard_Failure& error) {
         const char* raw_message = error.GetMessageString();
-        std::string message = "Direct OCCT stage `" + direct_occt_current_stage +
+        std::string message = "Direct OCCT stage `" + context.stage() +
             "` failed: " + (raw_message ? raw_message : "unknown OCCT failure");
         write_error_json("runtime_error", "occt_failure", message, message);
         return 5;

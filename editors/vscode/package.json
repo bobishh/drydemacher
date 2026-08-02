@@ -1,0 +1,49 @@
+{
+  "name": "ecky-lang",
+  "displayName": "Ecky Language Support",
+  "description": "Syntax highlighting and language support for Ecky CAD DSL",
+  "version": "0.0.1",
+  "publisher": "ecky",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "files": [
+    "language-configuration.json",
+    "syntaxes/**",
+    "README.md"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "ecky",
+        "aliases": [
+          "Ecky",
+          "ecky"
+        ],
+        "extensions": [
+          ".ecky"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "ecky",
+        "scopeName": "source.ecky",
+        "path": "./syntaxes/ecky.tmLanguage.json"
+      }
+    ]
+  },
+  "keywords": [
+    "ecky",
+    "cad",
+    "dsl",
+    "scheme",
+    "lisp",
+    "3d",
+    "geometry"
+  ]
+}

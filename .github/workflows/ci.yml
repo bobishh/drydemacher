@@ -48,7 +48,7 @@ jobs:
           workspaces: src-tauri -> target
 
       - name: Prepare Runtime Resource Directories
-        run: mkdir -p .dist/build123d-runtime .dist/speech-runtime
+        run: mkdir -p .dist/runtime/occt .dist/speech-runtime
 
       - name: Check Formatting
         run: cd src-tauri && cargo fmt --all -- --check
@@ -81,6 +81,9 @@ jobs:
 
       - name: Run Frontend Unit Tests
         run: npm run test:unit
+
+      - name: Run Frontend Component Tests
+        run: npm run test:component
 
       - name: Build Frontend
         run: npm run build
@@ -203,7 +206,7 @@ jobs:
         run: npm ci
 
       - name: Prepare Runtime Resource Directories
-        run: mkdir -p .dist/build123d-runtime .dist/speech-runtime
+        run: mkdir -p .dist/runtime/occt .dist/speech-runtime
 
       - name: Build Frontend
         run: npm run build

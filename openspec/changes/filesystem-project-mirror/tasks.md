@@ -65,14 +65,44 @@ Write scope: `src-tauri/src/mcp/server.rs`, tests.
 - [x] 5.1 File watcher (debounced) emitting status changes to the UI.
   (1s polling loop, two-tick digest settle, per-digest failure memo;
   emits `history-updated` + `project-folder-sync` events.)
-- [ ] 5.2 Status chip + export/apply affordances in the app shell.
-- [ ] 5.3 Playwright BDD: happy path + conflict path on a real route.
+- [x] 5.2 Status chip + export/apply affordances in the app shell.
+  (Tauri commands `project_folder_export` / `project_folder_status` /
+  `project_folder_apply` in `src-tauri/src/commands/project_mirror.rs`, thin
+  wrappers over the existing mirror core + MCP `project_folder_*` handlers
+  so all version writes flow through preview -> verify -> commit (no direct
+  DB writes); registered in `bindings.rs`. Frontend wrappers in
+  `src/lib/tauri/client.ts` + regenerated `contracts.ts`. New
+  `src/lib/ProjectFolderStatusChip.svelte` rendered above the ParamPanel
+  mode tabs, refreshed on thread/version switch and on `project-folder-sync`
+  / `history-updated` events; surfaces state
+  (clean/fileChanged/threadAdvanced/conflict/missing) plus
+  EXPORT / APPLY / RE-EXPORT / FORCE APPLY affordances and the raw backend
+  error verbatim. BDD: `e2e/project-folder-sync.spec.ts`.)
+- [x] 5.3 Playwright BDD: happy path + conflict path on a real route.
+  (`e2e/project-folder-sync.spec.ts`: happy path export -> fileChanged ->
+  Apply commits a new version -> chip goes clean; conflict path
+  threadAdvanced -> Apply refuses without force and surfaces the exact
+  reason, with RE-EXPORT remediation available. Mocks the Tauri boundary
+  and replays `project-folder-sync` via `__emitTauriEvent`.)
 
 ## 6. T6 - Literate Document Renderer (rides macro-ast-map-editor)
 
-- [ ] 6.1 Document-skin renderer over the AstMap projection (same node ids,
+- [x] 6.1 Document-skin renderer over the AstMap projection (same node ids,
   same patch intents, document layout); tracked in macro-ast-map-editor
   phases, listed here for traceability.
+  (New `src/lib/MacroAstDocument.svelte` is an alternate LAYOUT over the
+  existing `buildMacroAstMapProjection` — identical stable node ids, identical
+  patch intents (`onUpdate` / `onDraftValue` / `onApplyMacroCode` /
+  `onControlFocusChange`) reused from `MacroAstMap.svelte`; only the layout
+  differs (nested document vs spatial scene). No second identity model, no
+  embedded fake data, no direct DB writes. A MAP/DOC sub-toggle in
+  `ParamPanel`'s `newParams` branch switches layouts; `astViewMode` is
+  session-only view state. Theme: Tactical Midnight, square borders, bronze
+  accents, `overflow: hidden`. BDD: `e2e/ast-document-skin.spec.ts` —
+  happy path proves DOC node ids == MAP node ids for the same macro and an
+  inline param edit in DOC view emits the shared `render_model` patch via
+  Apply; failure path proves a render failure after a DOC-view inline edit
+  surfaces the raw backend error verbatim in the session bubble.)
 
 ## Proof Gates
 

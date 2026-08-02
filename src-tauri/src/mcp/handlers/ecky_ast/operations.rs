@@ -801,6 +801,7 @@ pub async fn handle_ecky_ast_replace_and_render(
             parameters: req.parameters,
             post_processing: req.post_processing,
             geometry_backend: req.geometry_backend,
+            source_window: None,
         },
         &ctx,
     )

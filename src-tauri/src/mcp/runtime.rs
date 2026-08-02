@@ -940,16 +940,18 @@ fn write_agent_instructions(
            c. Read only `workspace_overview.agentBrief.primaryGuideUri` / `mustRead` for normal authoring. For `sourceLanguage=ecky`, write `.ecky`; the backend is a lowerer, not Python. Read `compatibilityManifestUri` only for a concrete op/support check, and read prose backend guides only after lowerer/render errors or artifact/export claims.\n\
            d. If `workspace_overview.defaultTarget.hasVersion` is true, call `target_meta_get`.\n\
               If false, use `agentBrief` config/session defaults for the first version.\n\
-           e. Use `target_macro_get` for macro reasoning, `macro_buffer_get` for digest-checked line edits, \
-              `artifact_manifest_get` for full artifact JSON, and `target_detail_get(section=...)` for exact chunks.\n\
+           e. Inspect `sourcePath` / `sourceState` in target metadata. When `sourcePath` is present, \
+              read and edit that file with normal file tools. Only when `sourcePath` is absent, use \
+              `target_macro_get` / `macro_buffer_get` for source edits. Use `artifact_manifest_get` \
+              for full artifact JSON and `target_detail_get(section=...)` for exact chunks.\n\
            f. Use `semantic_manifest_get` only when semantic bindings matter.\n\
            g. Use `target_get` only as a last-resort full payload.\n\
            h. Use `measurement_annotation_save/delete` when you need to encode what a dimension \
               means in the manifest.\n\
            i. If a step will take more than a few seconds, call `session_activity_set`, and call \
               `session_activity_clear` when that step finishes.\n\
-           j. Act on the request using `macro_buffer_replace_and_preview`, `macro_preview_render`, or `params_preview_render`; prefer buffer replacement for non-trivial edits.\n\
-           k. After every preview/render that may become a user-visible version, call `verify_generated_model`. If verification is red and the request is still repairable, patch source/params and preview again before commit. Commit only green verification; if the repair cap is exhausted, do not commit and report capped red honestly with exact issue codes/messages.\n\
+           j. For a bound `sourcePath`, edit the file and call `project_folder_apply` with its folder slug; do not export first. Only for an unbound legacy target, use `macro_buffer_replace_and_preview`, `macro_preview_render`, or `params_preview_render`.\n\
+           k. After every preview/render-tool draft that may become a user-visible version, call `verify_generated_model`. `project_folder_apply` already validates, previews, and commits its source result. If verification is red and the request is still repairable, patch source/params and preview again before commit. Commit only green verification; if the repair cap is exhausted, do not commit and report capped red honestly with exact issue codes/messages.\n\
         5. When you finish a user-facing turn, call `session_reply_save` for the final reply \
            (or fatal error) if the user should see text in the thread history.\n\
         6. Immediately after the turn completes, call `request_user_prompt` again so Ecky can \

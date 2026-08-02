@@ -8,12 +8,14 @@ import express from 'express';
 import { execa } from 'execa';
 import type { Request as ExpressRequest, Response as ExpressResponse } from 'express';
 
+import {
+  resolveModelConfig,
+  type ModelRequestConfig,
+} from './model_config.js';
 import { MODEL_SYSTEM_PROMPT, buildUserPrompt, type ServerModelOutput } from './prompt.js';
 import type {
-  AppConfig,
   DesignOutput,
   DesignParams,
-  EngineConfig,
   UiSpec,
 } from '../src/lib/types/domain.js';
 
@@ -23,81 +25,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, '..');
 const OUTPUTS_DIR = path.join(ROOT, 'outputs');
-const CONFIG_FILE = path.join(ROOT, 'config.json');
 const TEMPLATE_MACRO = path.join(ROOT, 'templates', 'cache_pot_default.FCMacro');
 const CAD_SDK_SOURCE = path.join(ROOT, 'model-runtime', 'cad_sdk.py');
 const FREECAD_RUNNER = path.join(__dirname, 'freecad_runner.py');
 
 const app = express();
 const port = Number(process.env.API_PORT || 8787);
-
-function createDefaultConfig(): AppConfig {
-  const engines: EngineConfig[] = [
-    {
-      id: 'default-gemini',
-      name: 'Google Gemini 2.0',
-      provider: 'gemini',
-      apiKey: process.env.GEMINI_API_KEY || '',
-      model: 'gemini-2.5-flash',
-      lightModel: 'gemini-2.5-flash-lite',
-      baseUrl: '',
-      visionOverrides: {},
-    },
-    {
-      id: 'default-openai',
-      name: 'OpenAI GPT-4o',
-      provider: 'openai',
-      apiKey: process.env.OPENAI_API_KEY || '',
-      model: 'gpt-4o',
-      lightModel: 'gpt-4o-mini',
-      baseUrl: '',
-      visionOverrides: {},
-    },
-  ];
-
-  return {
-    engines,
-    selectedEngineId: engines[0]?.id ?? '',
-    freecadCmd: '',
-    cadTextFontPath: '',
-    freecadLibraryRoots: [],
-    assets: [],
-    microwave: null,
-    voice: {
-      sttLanguageCode: 'en-US',
-    },
-    mcp: {
-      port: null,
-      maxSessions: null,
-      mode: 'passive',
-      primaryAgentId: null,
-      promptTimeoutSecs: 1800,
-      eckyAstAuthoring: false,
-      autoAgents: [],
-    },
-    hasSeenOnboarding: false,
-    defaultEngineKind: 'freecad',
-    defaultSourceLanguage: 'legacyPython',
-    defaultGeometryBackend: 'freecad',
-    maxGenerationAttempts: 3,
-    maxVerifyAttempts: 0,
-  };
-}
-
-let activeConfig: AppConfig = createDefaultConfig();
-
-async function loadConfig(): Promise<void> {
-  try {
-    const data = await fs.readFile(CONFIG_FILE, 'utf8');
-    activeConfig = {
-      ...activeConfig,
-      ...JSON.parse(data),
-    } as AppConfig;
-    console.log('Configuration loaded from disk.');
-  } catch {
-    console.log('No config file found, using defaults.');
-  }
-}
+let boundPort = port;
 
 async function ensureCadSdk(outputDir: string): Promise<void> {
   const target = path.join(outputDir, 'cad_sdk.py');
@@ -137,14 +71,6 @@ async function renderStlWithFreecad(
   }
 }
 
-function activeEngine(): EngineConfig {
-  const engine = activeConfig.engines.find((item) => item.id === activeConfig.selectedEngineId);
-  if (!engine) {
-    throw new Error('No active engine selected.');
-  }
-  return engine;
-}
-
 async function parseJsonResponse(response: globalThis.Response): Promise<ServerModelOutput> {
   const body = (await response.json()) as {
     choices?: Array<{ message?: { content?: string } }>;
@@ -160,12 +86,13 @@ async function parseJsonResponse(response: globalThis.Response): Promise<ServerM
   return JSON.parse(text) as ServerModelOutput;
 }
 
-async function generateMacroWithModel(userPrompt: string): Promise<ServerModelOutput> {
-  const engine = activeEngine();
-  const { provider, apiKey, model, baseUrl } = engine;
+async function generateMacroWithModel(
+  userPrompt: string,
+  { provider, apiKey, model, baseUrl }: ModelRequestConfig,
+): Promise<ServerModelOutput> {
 
   if (!apiKey && provider !== 'ollama') {
-    throw new Error(`API key for ${engine.name} is not set.`);
+    throw new Error(`API key for ${provider} is not set.`);
   }
 
   if (provider === 'openai' || provider === 'ollama') {
@@ -223,25 +150,11 @@ async function generateMacroWithModel(userPrompt: string): Promise<ServerModelOu
   throw new Error(`Unsupported provider: ${provider}`);
 }
 
-loadConfig().catch((error) => {
-  console.error('Failed to load config:', error);
-});
-
 app.use(express.json({ limit: '5mb' }));
 app.use('/outputs', express.static(OUTPUTS_DIR));
 
 app.get('/api/health', async (_req: ExpressRequest, res: ExpressResponse) => {
-  res.json({ ok: true, port, outputsDir: OUTPUTS_DIR });
-});
-
-app.get('/api/config', (_req: ExpressRequest, res: ExpressResponse) => {
-  res.json(activeConfig);
-});
-
-app.post('/api/config', async (req: ExpressRequest, res: ExpressResponse) => {
-  activeConfig = { ...activeConfig, ...req.body } as AppConfig;
-  await fs.writeFile(CONFIG_FILE, JSON.stringify(activeConfig, null, 2));
-  res.json({ ok: true, config: activeConfig });
+  res.json({ ok: true, port: boundPort, outputsDir: OUTPUTS_DIR });
 });
 
 app.get('/api/default-macro', async (_req: ExpressRequest, res: ExpressResponse) => {
@@ -276,7 +189,7 @@ app.post('/api/generate', async (req: ExpressRequest, res: ExpressResponse) => {
   let modelError: string | null = null;
 
   try {
-    const modelOutput = await generateMacroWithModel(userPrompt);
+    const modelOutput = await generateMacroWithModel(userPrompt, resolveModelConfig(req.body ?? {}));
     macroCode = modelOutput.macroCode;
     uiSpec = modelOutput.uiSpec;
     initialParams = modelOutput.initialParams;
@@ -345,6 +258,8 @@ app.post('/api/render', async (req: ExpressRequest, res: ExpressResponse) => {
   }
 });
 
-app.listen(port, () => {
-  console.log(`Ecky CAD API listening on http://localhost:${port}`);
+const server = app.listen(port, () => {
+  const address = server.address();
+  boundPort = typeof address === 'object' && address ? address.port : port;
+  console.log(`Ecky CAD API listening on http://localhost:${boundPort}`);
 });

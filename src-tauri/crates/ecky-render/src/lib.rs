@@ -147,6 +147,19 @@ pub struct KernelPlan {
     pub schema_version: u32,
     pub plan_id: String,
     pub parts: Vec<KernelPart>,
+    #[serde(default)]
+    pub partial_boolean_groups: Vec<KernelPartialBooleanGroupPlan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KernelPartialBooleanGroupPlan {
+    pub part_key: String,
+    pub parent_output: u64,
+    pub operation: String,
+    pub input_indices: Vec<u32>,
+    pub ordinal: u32,
+    pub version: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -23,6 +23,25 @@ pub async fn handle_commit_preview_version(
     req: VersionSaveRequest,
     ctx: &AgentContext,
 ) -> AppResult<VersionSaveResponse> {
+    handle_commit_preview_version_inner(state, app, req, ctx, true).await
+}
+
+pub(super) async fn handle_commit_preview_version_from_external_source(
+    state: &AppState,
+    app: &dyn PathResolver,
+    req: VersionSaveRequest,
+    ctx: &AgentContext,
+) -> AppResult<VersionSaveResponse> {
+    handle_commit_preview_version_inner(state, app, req, ctx, false).await
+}
+
+async fn handle_commit_preview_version_inner(
+    state: &AppState,
+    app: &dyn PathResolver,
+    req: VersionSaveRequest,
+    ctx: &AgentContext,
+    refresh_bound_source: bool,
+) -> AppResult<VersionSaveResponse> {
     let total_started = Instant::now();
     let ctx = ctx.with_override(&req.identity);
     let ctx = &ctx;
@@ -84,6 +103,22 @@ pub async fn handle_commit_preview_version(
             design_output.version_name.clear();
         }
 
+        // thread-source-binding guard: refuse to clobber a pending external
+        // edit BEFORE the version is written, so a refusal creates no version.
+        let committed_title = design_output.title.clone();
+        let committed_source = design_output.macro_code.clone();
+        let configured_root = state.config.lock().unwrap().projects_root.clone();
+        if refresh_bound_source {
+            let conn = state.db.lock().await;
+            crate::thread_source_binding::pre_commit_guard(
+                app,
+                &conn,
+                configured_root.as_deref(),
+                &preview.thread_id,
+                &committed_title,
+            )?;
+        }
+
         let save_started = Instant::now();
         let save_result = save_or_update_agent_version_for_session(
             state,
@@ -139,6 +174,25 @@ pub async fn handle_commit_preview_version(
         );
         tracked_message_id = Some(save_result.message_id.clone());
         tracked_model_id = save_result.model_id.clone();
+
+        // thread-source-binding refresh: publish the committed Ecky source to
+        // the bound working copy + rebased manifest + binding row digest. The
+        // file was verified clean by `pre_commit_guard` above; this is the
+        // single-direction Ecky->file refresh (no version duplication).
+        if refresh_bound_source {
+            let conn = state.db.lock().await;
+            crate::thread_source_binding::refresh_on_commit(
+                app,
+                &conn,
+                configured_root.as_deref(),
+                &preview.thread_id,
+                &committed_title,
+                &committed_source,
+                &save_result.message_id,
+                save_result.model_id.as_deref(),
+                Some(&save_result.message_id),
+            )?;
+        }
 
         Ok(VersionSaveResponse {
             thread_id: preview.thread_id,

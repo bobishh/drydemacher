@@ -5,13 +5,20 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 mod error;
 pub use error::{
-    AppError, AppErrorCode, AppResult, AuthoringError, AuthoringReason, DiagnosticContext,
-    DiagnosticParamValue, ErrorFix, ErrorLayer,
+    AppError, AppErrorCode, AppResult, AuthoringError, AuthoringReason, AuthoringResult,
+    DiagnosticContext, DiagnosticParamValue, ErrorFix, ErrorLayer,
 };
+mod authoring_graph;
+pub use authoring_graph::*;
 mod config;
+mod config_edn;
 pub use config::{
     AppLogEntry, Asset, AutoAgent, Config, Engine, FreecadLibraryImportRequest, FreecadLibraryItem,
     FreecadLibrarySearchRequest, McpConfig, McpMode, MicrowaveConfig, VoiceConfig,
+};
+pub use config_edn::{
+    decode_config, encode_config, normalize_legacy_config_for_edn, ConfigNormalizationWarning,
+    CONFIG_DEPRECATED_START_ON_DEMAND_DROPPED, CONFIG_NONCANONICAL_DEPRECATED_FIELD,
 };
 mod geometry;
 pub use geometry::{
@@ -35,9 +42,6 @@ mod agent;
 pub use agent::*;
 mod mcp;
 pub use mcp::*;
-mod animal_cap;
-pub use animal_cap::*;
-
 pub type DesignParams = BTreeMap<String, ParamValue>;
 pub const GENIE_TRAITS_VERSION: u8 = 2;
 
@@ -50,7 +54,7 @@ fn default_source_language() -> SourceLanguage {
 }
 
 fn default_geometry_backend() -> GeometryBackend {
-    GeometryBackend::Build123d
+    GeometryBackend::EckyRust
 }
 
 fn default_model_runtime_schema_version() -> u32 {
@@ -1215,6 +1219,52 @@ pub struct Thread {
     pub pending_confirm: Option<String>,
 }
 
+/// A self-contained learner workspace. Unlike a design `Thread`, a campaign
+/// run never creates chat messages, model versions, or history rows.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CampaignRun {
+    pub id: String,
+    /// Explicit discriminator for heterogeneous Projects inventory.
+    #[serde(default = "campaign_run_kind")]
+    pub kind: String,
+    pub title: String,
+    pub definition_id: String,
+    pub definition_version: String,
+    pub current_step_id: String,
+    #[serde(default)]
+    pub completed_step_ids: Vec<String>,
+    #[serde(default)]
+    pub passed_challenge_ids: Vec<String>,
+    #[serde(default)]
+    pub draft_overrides_by_step_id: BTreeMap<String, String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateCampaignRunInput {
+    pub title: String,
+    pub definition_id: String,
+    pub definition_version: String,
+    pub current_step_id: String,
+}
+
+/// Last Project surface selected by the user. Campaign runs and design threads
+/// deliberately keep separate identities.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveProjectNavigation {
+    pub kind: String,
+    pub id: String,
+    pub view: String,
+}
+
+fn campaign_run_kind() -> String {
+    "campaignRun".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadMessagesPage {
@@ -1856,6 +1906,12 @@ pub fn validate_model_runtime_bundle(
 ) -> AppResult<()> {
     validate_model_manifest(manifest)?;
     validate_artifact_bundle(bundle)?;
+    validate_component_import_evidence(
+        bundle.component_dependency_lock.as_ref(),
+        bundle.component_dependency_lock_digest.as_deref(),
+        &bundle.component_import_origins,
+        &manifest.component_import_origins,
+    )?;
 
     if bundle.model_id != manifest.model_id {
         return Err(AppError::validation(
@@ -2077,6 +2133,8 @@ pub fn component_package_header(package: &ComponentPackage) -> AppResult<Compone
                 component_id: component.component_id.clone(),
                 version: component.version.clone(),
                 display_name: component.display_name.clone(),
+                entry_symbol: component.entry_symbol.clone(),
+                geometry_provenance: component.geometry_provenance.clone(),
                 params: component.params.clone(),
                 ui_spec: component.ui_spec.clone(),
                 initial_params: component.initial_params.clone(),
@@ -2408,6 +2466,14 @@ fn validate_component_definition(component: &ComponentDefinition) -> AppResult<(
             return Err(AppError::validation(format!(
                 "component '{}' sourceRef must be non-empty when present.",
                 component.component_id
+            )));
+        }
+    }
+    if let Some(entry_symbol) = component.entry_symbol.as_deref() {
+        if !is_valid_ecky_symbol(entry_symbol) {
+            return Err(AppError::validation(format!(
+                "component '{}' entrySymbol '{}' must be a valid Ecky symbol (letters, digits, `_` or `-`, starting with a letter).",
+                component.component_id, entry_symbol
             )));
         }
     }
@@ -3139,6 +3205,17 @@ fn require_non_empty(value: &str, message: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// A valid Ecky symbol usable as a local alias or component entry symbol:
+/// ASCII letters, digits, `_` or `-`, starting with a letter. Shared by the
+/// live-reference alias namespace check and `entrySymbol` validation.
+pub(crate) fn is_valid_ecky_symbol(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 fn validate_non_empty_strings(values: &[String], message: &str) -> AppResult<()> {
     for value in values {
         if value.trim().is_empty() {
@@ -3167,6 +3244,7 @@ mod tests {
     fn sample_manifest() -> ModelManifest {
         ModelManifest {
             geometry_provenance: None,
+            component_import_origins: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: "generated-abc123".to_string(),
             source_kind: ModelSourceKind::Generated,
@@ -3323,6 +3401,9 @@ mod tests {
     fn sample_artifact_bundle() -> ArtifactBundle {
         ArtifactBundle {
             geometry_provenance: None,
+            component_dependency_lock: None,
+            component_dependency_lock_digest: None,
+            component_import_origins: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: "generated-abc123".to_string(),
             source_kind: ModelSourceKind::Generated,
@@ -3414,6 +3495,7 @@ mod tests {
 
         ModelManifest {
             geometry_provenance: None,
+            component_import_origins: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: format!(
                 "generated-shape-{}-{}-{}",
@@ -4039,6 +4121,9 @@ mod tests {
 
         let bundle = ArtifactBundle {
             geometry_provenance: None,
+            component_dependency_lock: None,
+            component_dependency_lock_digest: None,
+            component_import_origins: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: manifest.model_id.clone(),
             source_kind: ModelSourceKind::Generated,
@@ -4079,6 +4164,9 @@ mod tests {
 
         let bundle = ArtifactBundle {
             geometry_provenance: None,
+            component_dependency_lock: None,
+            component_dependency_lock_digest: None,
+            component_import_origins: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: manifest.model_id.clone(),
             source_kind: ModelSourceKind::Generated,
@@ -4157,6 +4245,9 @@ mod tests {
 
         let bundle = ArtifactBundle {
             geometry_provenance: None,
+            component_dependency_lock: None,
+            component_dependency_lock_digest: None,
+            component_import_origins: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: manifest.model_id.clone(),
             source_kind: ModelSourceKind::Generated,
@@ -4231,6 +4322,9 @@ mod tests {
         let manifest = sample_manifest();
         let bundle = ArtifactBundle {
             geometry_provenance: None,
+            component_dependency_lock: None,
+            component_dependency_lock_digest: None,
+            component_import_origins: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: manifest.model_id.clone(),
             source_kind: ModelSourceKind::Generated,
@@ -4281,6 +4375,9 @@ mod tests {
         let manifest = sample_manifest();
         let bundle = ArtifactBundle {
             geometry_provenance: None,
+            component_dependency_lock: None,
+            component_dependency_lock_digest: None,
+            component_import_origins: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: manifest.model_id.clone(),
             source_kind: ModelSourceKind::Generated,

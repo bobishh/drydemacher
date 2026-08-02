@@ -1,0 +1,226 @@
+{
+  "name": "Ecky",
+  "scopeName": "source.ecky",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#constants"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#definitions"
+    },
+    {
+      "include": "#model-clauses"
+    },
+    {
+      "include": "#model-wrappers"
+    },
+    {
+      "include": "#expression-forms"
+    },
+    {
+      "include": "#numeric-helpers"
+    },
+    {
+      "include": "#point-list-helpers"
+    },
+    {
+      "include": "#boolean-helpers"
+    },
+    {
+      "include": "#cad-ops"
+    },
+    {
+      "include": "#wall-pattern-modes"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.semicolon.ecky",
+          "match": ";.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.ecky",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.ecky",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.true.ecky",
+          "match": "#t(?![\\w-])"
+        },
+        {
+          "name": "constant.language.boolean.false.ecky",
+          "match": "#f(?![\\w-])"
+        },
+        {
+          "name": "constant.numeric.ecky",
+          "match": "(?<![\\w-])([+-]?\\d+\\.\\d+(?:[eE][+-]?\\d+)?|[+-]?\\d+\\.?(?:[eE][+-]?\\d+)?)(?![\\w-])"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.other.ecky",
+          "match": "(?<![\\w-]):([a-zA-Z][\\w-]*)(?![\\w-])",
+          "captures": {
+            "1": {
+              "name": "entity.name.tag.ecky"
+            }
+          }
+        }
+      ]
+    },
+    "definitions": {
+      "patterns": [
+        {
+          "name": "meta.definition.ecky",
+          "match": "(\\()\\s*(define-component|define|part)\\s+([^\\s();]+)",
+          "captures": {
+            "1": {
+              "name": "punctuation.section.parens.begin.ecky"
+            },
+            "2": {
+              "name": "keyword.declaration.ecky"
+            },
+            "3": {
+              "name": "entity.name.function.ecky"
+            }
+          }
+        }
+      ]
+    },
+    "model-clauses": {
+      "patterns": [
+        {
+          "name": "keyword.control.model-clause.ecky",
+          "match": "(?<![\\w-])(params|part|meta)(?![\\w-])"
+        }
+      ]
+    },
+    "model-wrappers": {
+      "patterns": [
+        {
+          "name": "keyword.control.model-wrapper.ecky",
+          "match": "(?<![\\w-])(begin|let|let\\*)(?![\\w-])"
+        },
+        {
+          "name": "keyword.control.model-wrapper.ecky",
+          "match": "(?<![\\w-])let\\*(?![\\w-])"
+        }
+      ]
+    },
+    "expression-forms": {
+      "patterns": [
+        {
+          "name": "keyword.control.expression.ecky",
+          "match": "(?<![\\w-])(define|lambda|if|list|append|reverse|range|map|filter|fold|reduce|zip|enumerate|linspace|flat-map|concat-map|apply)(?![\\w-])"
+        },
+        {
+          "name": "keyword.control.expression.ecky",
+          "match": "(?<![\\w-])let(?![\\w-])"
+        },
+        {
+          "name": "keyword.control.expression.ecky",
+          "match": "(?<![\\w-])let\\*(?![\\w-])"
+        },
+        {
+          "name": "keyword.control.expression.ecky",
+          "match": "(?<![\\w-])begin(?![\\w-])"
+        },
+        {
+          "name": "keyword.control.expression.ecky",
+          "match": "(?<![\\w-])quote(?![\\w-])"
+        }
+      ]
+    },
+    "numeric-helpers": {
+      "patterns": [
+        {
+          "name": "support.function.numeric.ecky",
+          "match": "(?<![\\w-])(\\+|-|\\*|/|min|max|abs|floor|sin|cos|tan|atan|atan2|deg|rad|deg->rad|rad->deg|clamp|lerp|smoothstep|hash01|hash-signed|noise2|fbm2|voronoi2|cell-distance2)(?![\\w-])"
+        }
+      ]
+    },
+    "point-list-helpers": {
+      "patterns": [
+        {
+          "name": "support.function.point-list.ecky",
+          "match": "(?<![\\w-])(jitter2|jittered-grid|polar-points|organic-loop|wave-loop|superellipse-point|voronoi-cells|lorenz-points|rossler-points|logistic-bifurcation-points|henon-points)(?![\\w-])"
+        }
+      ]
+    },
+    "boolean-helpers": {
+      "patterns": [
+        {
+          "name": "support.function.boolean.ecky",
+          "match": "(?<![\\w-])(not|and|or|=|>|>=|<|<=)(?![\\w-])"
+        },
+        {
+          "name": "support.function.boolean.ecky",
+          "match": "(?<![\\w-])even\\?(?![\\w-])"
+        },
+        {
+          "name": "support.function.boolean.ecky",
+          "match": "(?<![\\w-])odd\\?(?![\\w-])"
+        },
+        {
+          "name": "support.function.boolean.ecky",
+          "match": "(?<![\\w-])zero\\?(?![\\w-])"
+        },
+        {
+          "name": "support.function.boolean.ecky",
+          "match": "(?<![\\w-])null\\?(?![\\w-])"
+        },
+        {
+          "name": "support.function.boolean.ecky",
+          "match": "(?<![\\w-])empty\\?(?![\\w-])"
+        },
+        {
+          "name": "support.function.boolean.ecky",
+          "match": "(?<![\\w-])list\\?(?![\\w-])"
+        }
+      ]
+    },
+    "cad-ops": {
+      "patterns": [
+        {
+          "name": "support.function.cad.ecky",
+          "match": "(?<![\\w-])(box|sphere|cylinder|cone|circle|ring|rectangle|rounded-rect|rounded-polygon|polygon|profile|make-face|text|svg|import-stl|path|polyline|bezier-path|bspline|extrude|revolve|loft|sweep|helical-ridge|thread|tapped-hole|rib|groove|torus|ellipse|regular-polygon|trapezoid|wedge|slot-overall|slot-center-to-center|slot-center-point|slot-arc|shell|offset|offset-rounded|fillet|chamfer|taper|twist|union|fuse|difference|cut|intersection|common|xor|compound|translate|rotate|scale|mirror|linear-array|radial-array|grid-array|arc-array|repeat|repeat-union|repeat-compound|repeat-pick|for-union|for-compound|plane|location|path-frame|place|clip-box|build|shape|result|sampled-radial-loft|wall-pattern|hull|mesh|polyhedron|heightfield)(?![\\w-])"
+        }
+      ]
+    },
+    "wall-pattern-modes": {
+      "patterns": [
+        {
+          "name": "support.constant.wall-pattern-mode.ecky",
+          "match": "(?<![\\w-])(ribs|rings|spiral|diamond|hammered|fourier|cellular|fbm|gyroid|schwarz-p|schwarz-d|diamond-field|neovius|attractor-field)(?![\\w-])"
+        }
+      ]
+    }
+  }
+}

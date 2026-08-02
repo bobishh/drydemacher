@@ -167,6 +167,13 @@ pub fn get_inventory(conn: &rusqlite::Connection) -> AppResult<Vec<Thread>> {
     db::get_inventory_threads(conn).map_err(|err| AppError::persistence(err.to_string()))
 }
 
+pub fn get_thread_preview(
+    conn: &rusqlite::Connection,
+    thread_id: &str,
+) -> AppResult<Option<String>> {
+    db::get_thread_preview(conn, thread_id).map_err(|err| AppError::persistence(err.to_string()))
+}
+
 pub fn delete_version(conn: &rusqlite::Connection, message_id: &str) -> AppResult<()> {
     let thread_id = db::delete_version_cluster(conn, message_id)
         .map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))?;
@@ -235,6 +242,9 @@ mod tests {
     fn sample_artifact_bundle(model_id: &str) -> crate::contracts::ArtifactBundle {
         crate::contracts::ArtifactBundle {
             geometry_provenance: None,
+            component_dependency_lock: None,
+            component_dependency_lock_digest: None,
+            component_import_origins: Vec::new(),
             schema_version: 1,
             model_id: model_id.to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,

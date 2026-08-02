@@ -5,3 +5,4 @@ pub mod macro_buffer;
 pub mod runtime;
 pub mod server;
 pub mod skill;
+pub mod source_window_guard;

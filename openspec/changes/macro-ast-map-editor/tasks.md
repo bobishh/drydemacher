@@ -138,19 +138,19 @@ Real gap — see triage note. A "Search controls..." input exists
 (`e2e/params.spec.ts:660`, visibility-only assertion) but none of 3.1-3.7's
 focus/frame/zoom-pulse behavior is implemented or tested.
 
-- [ ] 3.1 Add failing Playwright test for searching a parameter and focusing the
+- [x] 3.1 Add failing Playwright test for searching a parameter and focusing the
   matching map region.
-- [ ] 3.2 Add failing Playwright test for no-match search preserving current
+- [x] 3.2 Add failing Playwright test for no-match search preserving current
   source and selection.
-- [ ] 3.3 Add unit tests for search index over param names, labels, node ids, and
+- [x] 3.3 Add unit tests for search index over param names, labels, node ids, and
   visible source-backed labels.
-- [ ] 3.4 Implement result selection that selects and frames the owning map
+- [x] 3.4 Implement result selection that selects and frames the owning map
   region.
-- [ ] 3.5 Style focused region with Tactical Midnight accents and no literal
+- [x] 3.5 Style focused region with Tactical Midnight accents and no literal
   molecular-biology art lock.
-- [ ] 3.6 Add Playwright proof for search result followed by inline apply on the
+- [x] 3.6 Add Playwright proof for search result followed by inline apply on the
   focused node.
-- [ ] 3.7 Add Playwright proof that search focus zooms or pans the SVG scene and
+- [x] 3.7 Add Playwright proof that search focus zooms or pans the SVG scene and
   pulses the target contour without turning the map into a nested rectangle
   list.
 

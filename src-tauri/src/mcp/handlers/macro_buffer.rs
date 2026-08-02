@@ -341,6 +341,7 @@ pub async fn handle_macro_buffer_replace_and_preview(
             parameters: req.parameters,
             post_processing: req.post_processing.or(buffer.post_processing.clone()),
             geometry_backend: Some(buffer.geometry_backend),
+            source_window: None,
         },
         ctx,
     )
@@ -445,6 +446,7 @@ pub async fn handle_macro_buffer_preview_render(
             parameters: req.parameters,
             post_processing: req.post_processing.or(buffer.post_processing.clone()),
             geometry_backend: Some(buffer.geometry_backend),
+            source_window: None,
         },
         ctx,
     )

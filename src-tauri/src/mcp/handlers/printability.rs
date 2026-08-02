@@ -1,7 +1,6 @@
 use super::{
     artifact_bundle_digest, carry_forward_semantic_manifest,
-    draft_feedback_from_structural_verification, persist_agent_session,
-    reserve_authoring_actor_revision, settle_live_render_phase,
+    draft_feedback_from_structural_verification, persist_agent_session, settle_live_render_phase,
     store_session_render_preview_at_revision, try_record_agent_error, AgentContext,
     StoreSessionRenderPreviewRequest,
 };
@@ -245,7 +244,10 @@ pub async fn handle_semantic_transform_preview(
     let requested_actor_revision = if let Some(thread_id) = req.thread_id.as_deref() {
         Some((
             thread_id.to_string(),
-            reserve_authoring_actor_revision(ctx, thread_id).await,
+            state
+                .authoring_actor_registry
+                .reserve_authoring_actor_revision(&ctx.session_id, thread_id)
+                .await,
         ))
     } else {
         None
@@ -268,7 +270,12 @@ pub async fn handle_semantic_transform_preview(
         tracked_message_id = Some(target.message_id.clone());
         let actor_revision = match requested_actor_revision {
             Some((ref thread_id, revision)) if thread_id == &target.thread_id => revision,
-            _ => reserve_authoring_actor_revision(ctx, &target.thread_id).await,
+            _ => {
+                state
+                    .authoring_actor_registry
+                    .reserve_authoring_actor_revision(&ctx.session_id, &target.thread_id)
+                    .await
+            }
         };
         let requested_model_id = req
             .model_id

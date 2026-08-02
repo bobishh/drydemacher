@@ -146,13 +146,13 @@ fn resolve_manual_authoring_context(
 ) {
     let resolved_source = source_language.unwrap_or(match macro_dialect {
         MacroDialect::EckyIrV0 => crate::contracts::SourceLanguage::EckyIrV0,
-        MacroDialect::Build123d => crate::contracts::SourceLanguage::Build123d,
+        MacroDialect::Build123d => crate::contracts::SourceLanguage::EckyIrV0,
         _ => crate::contracts::SourceLanguage::LegacyPython,
     });
     let engine_kind = resolved_source.to_engine_kind();
     let resolved_backend = geometry_backend.unwrap_or(match resolved_source {
         crate::contracts::SourceLanguage::EckyIrV0 => crate::contracts::GeometryBackend::EckyRust,
-        crate::contracts::SourceLanguage::Build123d => crate::contracts::GeometryBackend::Build123d,
+        crate::contracts::SourceLanguage::Build123d => crate::contracts::GeometryBackend::EckyRust,
         crate::contracts::SourceLanguage::LegacyPython => {
             crate::contracts::GeometryBackend::Freecad
         }
@@ -163,7 +163,7 @@ fn resolve_manual_authoring_context(
 pub async fn add_manual_version(
     request: AddManualVersionRequest,
     state: &AppState,
-    _app: &dyn PathResolver,
+    app: &dyn PathResolver,
 ) -> AppResult<String> {
     let AddManualVersionRequest {
         thread_id,
@@ -203,6 +203,7 @@ pub async fn add_manual_version(
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
+    let configured_root = state.config.lock().unwrap().projects_root.clone();
     let db = state.db.lock().await;
 
     let (engine_kind, source_language, geometry_backend) =
@@ -224,6 +225,13 @@ pub async fn add_manual_version(
         post_processing,
     };
     validate_design_output(&output)?;
+    crate::thread_source_binding::pre_commit_guard(
+        app,
+        &db,
+        configured_root.as_deref(),
+        &thread_id,
+        &title,
+    )?;
 
     let thread_traits = if db::get_thread_title(&db, &thread_id)
         .map_err(|err| AppError::persistence(err.to_string()))?
@@ -256,8 +264,33 @@ pub async fn add_manual_version(
     };
 
     db::add_message(&db, &thread_id, &msg).map_err(|err| AppError::persistence(err.to_string()))?;
+    let model_id = artifact_bundle
+        .as_ref()
+        .map(|bundle| bundle.model_id.as_str())
+        .or_else(|| {
+            model_manifest
+                .as_ref()
+                .map(|manifest| manifest.model_id.as_str())
+        });
+    crate::thread_source_binding::refresh_on_commit(
+        app,
+        &db,
+        configured_root.as_deref(),
+        &thread_id,
+        &title,
+        &msg.output
+            .as_ref()
+            .expect("manual version has output")
+            .macro_code,
+        &msg_id,
+        model_id,
+        Some(&msg_id),
+    )?;
     drop(db);
-    crate::mcp::handlers::invalidate_authoring_actors_for_thread(&thread_id).await;
+    state
+        .authoring_actor_registry
+        .invalidate_authoring_actors_for_thread(&thread_id)
+        .await;
 
     Ok(msg_id)
 }
@@ -267,6 +300,7 @@ mod tests {
     use super::*;
     use crate::contracts::{ParamValue, UiField};
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
 
     fn legacy_macro() -> &'static str {
         r#"
@@ -399,5 +433,116 @@ params = {
             geometry_backend,
             crate::contracts::GeometryBackend::Build123d
         );
+    }
+
+    struct TestPathResolver {
+        root: PathBuf,
+    }
+
+    impl PathResolver for TestPathResolver {
+        fn app_config_dir(&self) -> PathBuf {
+            self.root.clone()
+        }
+
+        fn app_data_dir(&self) -> PathBuf {
+            self.root.clone()
+        }
+
+        fn resource_path(&self, _path: &str) -> Option<PathBuf> {
+            None
+        }
+    }
+
+    fn manual_request(thread_id: &str, title: &str, source: &str) -> AddManualVersionRequest {
+        AddManualVersionRequest {
+            thread_id: thread_id.to_string(),
+            title: title.to_string(),
+            version_name: "V1".to_string(),
+            macro_code: source.to_string(),
+            source_language: Some(crate::contracts::SourceLanguage::EckyIrV0),
+            geometry_backend: Some(crate::contracts::GeometryBackend::EckyRust),
+            parameters: DesignParams::new(),
+            ui_spec: UiSpec { fields: Vec::new() },
+            post_processing: None,
+            artifact_bundle: None,
+            model_manifest: None,
+            response_text: None,
+            agent_origin: None,
+        }
+    }
+
+    fn test_config() -> crate::contracts::Config {
+        crate::contracts::Config {
+            engines: Vec::new(),
+            selected_engine_id: String::new(),
+            freecad_cmd: String::new(),
+            cad_text_font_path: String::new(),
+            freecad_library_roots: Vec::new(),
+            assets: Vec::new(),
+            microwave: None,
+            voice: crate::contracts::VoiceConfig::default(),
+            mcp: crate::contracts::McpConfig::default(),
+            has_seen_onboarding: true,
+            connection_type: None,
+            default_engine_kind: crate::contracts::EngineKind::Freecad,
+            default_source_language: crate::contracts::SourceLanguage::LegacyPython,
+            default_geometry_backend: crate::contracts::GeometryBackend::Freecad,
+            max_generation_attempts: 3,
+            max_verify_attempts: 0,
+            projects_root: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_version_binds_source_then_refuses_pending_external_edit() {
+        let root =
+            std::env::temp_dir().join(format!("ecky-manual-binding-{}", uuid::Uuid::new_v4()));
+        let db_path = root.join("history.sqlite");
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = crate::db::init_db(&db_path).expect("db");
+        let state = AppState::new(test_config(), None, conn);
+        let resolver = TestPathResolver { root };
+        let baseline = "(model (part body (box 3 3 3)))";
+
+        add_manual_version(
+            manual_request("thread-1", "Bracket", baseline),
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("first manual version");
+
+        let binding = {
+            let conn = state.db.lock().await;
+            crate::thread_source_binding::get_binding(&conn, "thread-1")
+                .unwrap()
+                .expect("binding")
+        };
+        let source_path = PathBuf::from(&binding.source_path);
+        let pending = "(model (part body (box 9 9 9)))";
+        std::fs::write(&source_path, pending).unwrap();
+
+        let before = {
+            let conn = state.db.lock().await;
+            crate::db::get_thread_messages(&conn, "thread-1")
+                .unwrap()
+                .len()
+        };
+        let error = add_manual_version(
+            manual_request("thread-1", "Bracket", "(model (part body (box 5 5 5)))"),
+            &state,
+            &resolver,
+        )
+        .await
+        .expect_err("pending edit blocks manual commit");
+        assert!(error.message.contains("refusing to overwrite"));
+        assert_eq!(std::fs::read_to_string(source_path).unwrap(), pending);
+        let after = {
+            let conn = state.db.lock().await;
+            crate::db::get_thread_messages(&conn, "thread-1")
+                .unwrap()
+                .len()
+        };
+        assert_eq!(after, before, "refused source write creates no version");
     }
 }

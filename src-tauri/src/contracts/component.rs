@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use specta::Type;
 use std::collections::BTreeMap;
 
@@ -853,12 +854,22 @@ pub struct ComponentDefinition {
     pub display_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_ref: Option<String>,
+    /// Optional live-reference export symbol selecting the top-level
+    /// `define-component` exposed for `(import-component ...)`. When omitted,
+    /// a valid Ecky-symbol `componentId` is the fallback. Interface metadata
+    /// only; it does not change copy-inline vendoring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_symbol: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_language: Option<SourceLanguage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geometry_backend: Option<GeometryBackend>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub macro_dialect: Option<MacroDialect>,
+    /// Package-carried representation evidence required for live STEP
+    /// components. A `.step` suffix alone never proves analytic geometry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry_provenance: Option<crate::contracts::GeometryProvenance>,
     #[serde(default)]
     pub sketches: Vec<SketchDefinition>,
     #[serde(default)]
@@ -1158,6 +1169,10 @@ pub struct ComponentHeader {
     pub component_id: String,
     pub version: String,
     pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_symbol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry_provenance: Option<crate::contracts::GeometryProvenance>,
     #[serde(default)]
     pub params: Vec<ComponentParam>,
     #[serde(default, alias = "ui_spec")]
@@ -1181,4 +1196,579 @@ pub struct AssemblyHeader {
 
 fn default_component_package_schema_version() -> u32 {
     COMPONENT_PACKAGE_SCHEMA_VERSION
+}
+
+// --- Live package component imports (component-package-imports) ---
+//
+// These contracts describe the *live reference* mode (`(import-component ...)`),
+// which is intentionally separate from copy-inline vendoring (MCP/UI
+// `component_import` / `component_get`). Live references keep an exact
+// `packageId@version:componentId` coordinate and require a dependency lock;
+// they never copy package source into persisted authored source.
+
+/// Schema version for the persisted dependency lock. Bumping it changes the
+/// canonical lock digest for every lock.
+pub const COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION: u32 = 1;
+
+/// Canonical coordinate of a live-referenced package component.
+/// Identity is `<packageId>@<packageVersion>:<componentId>`; package version is
+/// the resolver version (component version stays interface metadata).
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentCoordinate {
+    pub package_id: String,
+    pub version: String,
+    pub component_id: String,
+}
+
+impl ComponentCoordinate {
+    /// Canonical identity string `<packageId>@<version>:<componentId>`.
+    pub fn canonical_identity(&self) -> String {
+        format!("{}@{}:{}", self.package_id, self.version, self.component_id)
+    }
+}
+
+/// One component entry inside a dependency lock.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentDependencyLockComponent {
+    pub component_id: String,
+    /// Selected export symbol (`entrySymbol`) or `None` when the component id
+    /// fallback was used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_symbol: Option<String>,
+    /// `sha256:<hex>` digest of the resolved package payload that produced this
+    /// component's source. Independent of the package-coordinate digest so a
+    /// single payload lock survives coordinate reindexing.
+    pub payload_digest: String,
+    /// Static STEP entries set `step`; source entries set `source`. Optional
+    /// only for schema-v1 source-lock backward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_kind: Option<ComponentPayloadKind>,
+    /// Required when `payloadKind=step`; copied from package provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry_representation: Option<crate::contracts::GeometryRepresentation>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ComponentPayloadKind {
+    Source,
+    Step,
+}
+
+/// One package dependency inside a dependency lock.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentDependencyLockEntry {
+    pub package_id: String,
+    pub version: String,
+    /// `sha256:<hex>` digest of the package payload at install time.
+    pub package_digest: String,
+    pub components: Vec<ComponentDependencyLockComponent>,
+}
+
+/// Canonical dependency lock produced by successful live resolution and owned
+/// by `Message.artifactBundle.componentDependencyLock`. Canonical ordering is
+/// dependencies by `(packageId, version)`, components by `componentId`.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentDependencyLock {
+    #[serde(default = "default_component_dependency_lock_schema_version")]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub dependencies: Vec<ComponentDependencyLockEntry>,
+}
+
+fn default_component_dependency_lock_schema_version() -> u32 {
+    COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION
+}
+
+impl ComponentDependencyLock {
+    /// Returns a canonically-ordered copy (dependencies by `(packageId,
+    /// version)`, components by `componentId`). Equal inputs always produce
+    /// byte-identical canonical lock bytes and therefore equal digests.
+    pub fn canonical(self) -> Self {
+        let mut dependencies = self.dependencies;
+        dependencies.sort_by(|a, b| {
+            a.package_id
+                .cmp(&b.package_id)
+                .then_with(|| a.version.cmp(&b.version))
+        });
+        for entry in dependencies.iter_mut() {
+            entry
+                .components
+                .sort_by(|a, b| a.component_id.cmp(&b.component_id));
+        }
+        Self {
+            schema_version: self.schema_version,
+            dependencies,
+        }
+    }
+
+    /// Compact canonical JSON bytes used to compute the lock digest.
+    pub fn canonical_bytes(&self) -> crate::contracts::AppResult<Vec<u8>> {
+        serde_json::to_vec(&self.clone().canonical()).map_err(|err| {
+            crate::contracts::AppError::internal(format!(
+                "Cannot canonicalize component dependency lock: {err}"
+            ))
+        })
+    }
+
+    /// Validate lock ownership data before it is accepted as a committed
+    /// version input. Ordering is normalized separately; duplicate coordinates
+    /// or components are ambiguous and therefore never canonicalized away.
+    pub fn validate(&self) -> crate::contracts::AppResult<()> {
+        if self.schema_version != COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION {
+            return Err(crate::contracts::AppError::validation(format!(
+                "Unsupported component dependency lock schemaVersion '{}'.",
+                self.schema_version
+            )));
+        }
+        let mut dependencies = std::collections::BTreeSet::new();
+        for dependency in &self.dependencies {
+            if dependency.package_id.trim().is_empty()
+                || dependency.version.trim().is_empty()
+                || dependency.package_digest.trim().is_empty()
+            {
+                return Err(crate::contracts::AppError::validation(
+                    "Component dependency locks require non-empty packageId, version, and packageDigest.",
+                ));
+            }
+            if !dependencies.insert((&dependency.package_id, &dependency.version)) {
+                return Err(crate::contracts::AppError::validation(format!(
+                    "Component dependency lock duplicates '{}@{}'.",
+                    dependency.package_id, dependency.version
+                )));
+            }
+            let mut components = std::collections::BTreeSet::new();
+            for component in &dependency.components {
+                if component.component_id.trim().is_empty()
+                    || component.payload_digest.trim().is_empty()
+                {
+                    return Err(crate::contracts::AppError::validation(format!(
+                        "Component dependency lock '{}' requires non-empty componentId and payloadDigest.",
+                        dependency.package_id
+                    )));
+                }
+                match component.payload_kind {
+                    None | Some(ComponentPayloadKind::Source) => {
+                        if component.payload_digest != dependency.package_digest {
+                            return Err(crate::contracts::AppError::validation(format!(
+                                "Source component dependency lock '{}@{}:{}' payloadDigest differs from packageDigest.",
+                                dependency.package_id, dependency.version, component.component_id
+                            )));
+                        }
+                        if component.geometry_representation.is_some() {
+                            return Err(crate::contracts::AppError::validation(format!(
+                                "Source component dependency lock '{}@{}:{}' cannot declare geometryRepresentation.",
+                                dependency.package_id, dependency.version, component.component_id
+                            )));
+                        }
+                    }
+                    Some(ComponentPayloadKind::Step) => {
+                        if !matches!(
+                            component.geometry_representation.as_ref(),
+                            Some(crate::contracts::GeometryRepresentation::AnalyticBrep)
+                                | Some(crate::contracts::GeometryRepresentation::FacetedPolyBrep)
+                                | Some(crate::contracts::GeometryRepresentation::Hybrid)
+                        ) {
+                            return Err(crate::contracts::AppError::validation(format!(
+                                "STEP component dependency lock '{}@{}:{}' requires analyticBrep, facetedPolyBrep, or hybrid geometryRepresentation.",
+                                dependency.package_id, dependency.version, component.component_id
+                            )));
+                        }
+                    }
+                }
+                if !components.insert(&component.component_id) {
+                    return Err(crate::contracts::AppError::validation(format!(
+                        "Component dependency lock '{}@{}' duplicates componentId '{}'.",
+                        dependency.package_id, dependency.version, component.component_id
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A byte range in authored or ephemeral materialized source. Provenance uses
+/// this host-owned value rather than adding package metadata to Core IR spans.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentImportSourceSpan {
+    pub start: u32,
+    pub end: u32,
+}
+
+/// Persisted and transient provenance for one live-referenced component.
+/// Lives outside Core IR; equivalent records appear in `ArtifactBundle` and
+/// `ModelManifest`.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentImportOrigin {
+    pub package_id: String,
+    pub version: String,
+    pub component_id: String,
+    /// Model-local alias the export was bound to.
+    pub alias: String,
+    /// `sha256:<hex>` package payload digest.
+    pub payload_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authored_span: Option<ComponentImportSourceSpan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_span: Option<ComponentImportSourceSpan>,
+    /// Part ids that originated from this import's expansion.
+    #[serde(default)]
+    pub part_ids: Vec<String>,
+    /// Raw Core node ids that originated from this import's expansion.
+    #[serde(default)]
+    pub node_ids: Vec<u64>,
+}
+
+impl ComponentImportOrigin {
+    pub fn canonical_identity(&self) -> String {
+        format!("{}@{}:{}", self.package_id, self.version, self.component_id)
+    }
+}
+
+/// Validates the version-owned import evidence that ArtifactBundle and
+/// ModelManifest persist in their named sidecar fields. Keeping this contract
+/// here lets persistence/render callers prove equality without adding package
+/// data to CoreProgram/CoreNode.
+pub fn validate_component_import_evidence(
+    lock: Option<&ComponentDependencyLock>,
+    lock_digest: Option<&str>,
+    bundle_origins: &[ComponentImportOrigin],
+    manifest_origins: &[ComponentImportOrigin],
+) -> crate::contracts::AppResult<()> {
+    match (lock, lock_digest) {
+        (None, None) => {
+            if !bundle_origins.is_empty() || !manifest_origins.is_empty() {
+                return Err(crate::contracts::AppError::validation(
+                    "Component import origins require componentDependencyLock evidence.",
+                ));
+            }
+        }
+        (Some(lock), Some(lock_digest)) => {
+            lock.validate()?;
+            let actual = format!("sha256:{:x}", Sha256::digest(lock.canonical_bytes()?));
+            if actual != lock_digest {
+                return Err(crate::contracts::AppError::validation(format!(
+                    "componentDependencyLockDigest '{}' does not match canonical lock digest '{}'.",
+                    lock_digest, actual
+                )));
+            }
+            for origin in bundle_origins.iter().chain(manifest_origins) {
+                let dependency = lock.dependencies.iter().find(|dependency| {
+                    dependency.package_id == origin.package_id
+                        && dependency.version == origin.version
+                });
+                let Some(dependency) = dependency else {
+                    return Err(crate::contracts::AppError::validation(format!(
+                        "Component import origin '{}' is absent from componentDependencyLock.",
+                        origin.canonical_identity()
+                    )));
+                };
+                if !dependency.components.iter().any(|component| {
+                    component.component_id == origin.component_id
+                        && component.payload_digest == origin.payload_digest
+                }) {
+                    return Err(crate::contracts::AppError::validation(format!(
+                        "Component import origin '{}' does not match its locked payload digest.",
+                        origin.canonical_identity()
+                    )));
+                }
+            }
+        }
+        _ => {
+            return Err(crate::contracts::AppError::validation(
+                "componentDependencyLock and componentDependencyLockDigest must be stored together.",
+            ));
+        }
+    }
+
+    let mut bundle_origins = bundle_origins.to_vec();
+    let mut manifest_origins = manifest_origins.to_vec();
+    canonicalize_component_import_origins(&mut bundle_origins);
+    canonicalize_component_import_origins(&mut manifest_origins);
+    if bundle_origins != manifest_origins {
+        return Err(crate::contracts::AppError::validation(
+            "ArtifactBundle.componentImportOrigins must equal ModelManifest.componentImportOrigins.",
+        ));
+    }
+    Ok(())
+}
+
+fn canonicalize_component_import_origins(origins: &mut [ComponentImportOrigin]) {
+    for origin in origins.iter_mut() {
+        origin.part_ids.sort();
+        origin.part_ids.dedup();
+        origin.node_ids.sort_unstable();
+        origin.node_ids.dedup();
+    }
+    origins.sort_by(|left, right| {
+        left.package_id
+            .cmp(&right.package_id)
+            .then_with(|| left.version.cmp(&right.version))
+            .then_with(|| left.component_id.cmp(&right.component_id))
+            .then_with(|| left.alias.cmp(&right.alias))
+    });
+}
+
+/// One ordered entry in the runtime-owned integrity sidecar. Paths are
+/// normalized UTF-8 with `/` separators, sorted by path bytes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PackagePayloadInventoryEntry {
+    pub path: String,
+    pub sha256: String,
+}
+
+/// Runtime-owned `ecky-integrity.json` sidecar. Records the package payload
+/// digest plus an ordered per-file inventory. The sidecar itself is never part
+/// of the package payload digest input (it would self-reference).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PackagePayloadInventory {
+    #[serde(default = "default_payload_inventory_schema_version")]
+    pub schema_version: u32,
+    pub package_digest: String,
+    pub entries: Vec<PackagePayloadInventoryEntry>,
+}
+
+pub const PACKAGE_PAYLOAD_INVENTORY_SCHEMA_VERSION: u32 = 1;
+
+fn default_payload_inventory_schema_version() -> u32 {
+    PACKAGE_PAYLOAD_INVENTORY_SCHEMA_VERSION
+}
+
+/// Mutable coordinate-index record mapping an exact `packageId@version` to one
+/// payload digest in the global content-addressed store. Unlocked authoring
+/// resolves through this index; committed versions resolve their expected
+/// digest directly and ignore index mutations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentCoordinateIndexEntry {
+    pub package_id: String,
+    pub version: String,
+    pub package_digest: String,
+}
+
+#[cfg(test)]
+mod component_import_contract_tests {
+    use super::*;
+
+    fn lock_component(
+        component_id: &str,
+        entry_symbol: Option<&str>,
+        payload_digest: &str,
+    ) -> ComponentDependencyLockComponent {
+        ComponentDependencyLockComponent {
+            component_id: component_id.to_string(),
+            entry_symbol: entry_symbol.map(str::to_string),
+            payload_digest: payload_digest.to_string(),
+            payload_kind: None,
+            geometry_representation: None,
+        }
+    }
+
+    fn lock_entry(
+        package_id: &str,
+        version: &str,
+        package_digest: &str,
+        components: Vec<ComponentDependencyLockComponent>,
+    ) -> ComponentDependencyLockEntry {
+        ComponentDependencyLockEntry {
+            package_id: package_id.to_string(),
+            version: version.to_string(),
+            package_digest: package_digest.to_string(),
+            components,
+        }
+    }
+
+    fn sample_lock_shuffled() -> ComponentDependencyLock {
+        // Deliberately out of canonical order.
+        ComponentDependencyLock {
+            schema_version: COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION,
+            dependencies: vec![
+                lock_entry(
+                    "bike.kit",
+                    "1.2.0",
+                    "sha256:bbb",
+                    vec![
+                        lock_component("cage", Some("cage-v2"), "sha256:bbb"),
+                        lock_component("adapter", None, "sha256:bbb"),
+                    ],
+                ),
+                lock_entry(
+                    "bike.kit",
+                    "1.0.0",
+                    "sha256:aaa",
+                    vec![lock_component("rail", None, "sha256:aaa")],
+                ),
+            ],
+        }
+    }
+
+    #[test]
+    fn coordinate_canonical_identity_is_exact_coordinate() {
+        let coordinate = ComponentCoordinate {
+            package_id: "bike.kit".to_string(),
+            version: "1.2.0".to_string(),
+            component_id: "cage".to_string(),
+        };
+        assert_eq!(coordinate.canonical_identity(), "bike.kit@1.2.0:cage");
+    }
+
+    #[test]
+    fn lock_canonical_sorts_dependencies_and_components() {
+        let canonical = sample_lock_shuffled().canonical();
+
+        assert_eq!(canonical.dependencies.len(), 2);
+        assert_eq!(canonical.dependencies[0].version, "1.0.0");
+        assert_eq!(canonical.dependencies[1].version, "1.2.0");
+
+        let cage_pkg = &canonical.dependencies[1];
+        assert_eq!(cage_pkg.components.len(), 2);
+        assert_eq!(cage_pkg.components[0].component_id, "adapter");
+        assert_eq!(cage_pkg.components[1].component_id, "cage");
+        assert_eq!(
+            cage_pkg.components[1].entry_symbol.as_deref(),
+            Some("cage-v2")
+        );
+    }
+
+    #[test]
+    fn lock_canonical_bytes_are_independent_of_input_order() {
+        let bytes_a = sample_lock_shuffled()
+            .canonical()
+            .canonical_bytes()
+            .expect("bytes a");
+        // Same contents, different input order.
+        let mut reversed = sample_lock_shuffled();
+        reversed.dependencies.reverse();
+        reversed.dependencies[0].components.reverse();
+        let bytes_b = reversed.canonical().canonical_bytes().expect("bytes b");
+
+        assert_eq!(bytes_a, bytes_b);
+    }
+
+    #[test]
+    fn lock_json_uses_camel_case_boundary() {
+        let lock = sample_lock_shuffled().canonical();
+        let json = serde_json::to_value(&lock).expect("serialize lock");
+        assert!(json.get("schemaVersion").is_some());
+        assert!(json.get("dependencies").is_some());
+        assert!(json.get("schema_version").is_none());
+        assert_eq!(json["dependencies"][0]["packageId"], "bike.kit");
+        assert_eq!(
+            json["dependencies"][0]["components"][0]["payloadDigest"],
+            "sha256:aaa"
+        );
+    }
+
+    #[test]
+    fn step_header_and_lock_evidence_use_camel_case_contract_fields() {
+        let header = ComponentHeader {
+            component_id: "bracket".to_string(),
+            version: "1.0.0".to_string(),
+            display_name: "Bracket".to_string(),
+            entry_symbol: None,
+            geometry_provenance: Some(crate::contracts::GeometryProvenance {
+                representation: crate::contracts::GeometryRepresentation::AnalyticBrep,
+                source_mesh_digests: Vec::new(),
+                closed: None,
+                boundary_or_non_manifold_edge_count: None,
+            }),
+            params: Vec::new(),
+            ui_spec: UiSpec::default(),
+            initial_params: DesignParams::new(),
+            ports: Vec::new(),
+        };
+        let header_json = serde_json::to_value(&header).expect("header json");
+        assert_eq!(
+            header_json["geometryProvenance"]["representation"],
+            "analyticBrep"
+        );
+        assert!(header_json.get("geometry_provenance").is_none());
+
+        let step_digest = format!("sha256:{}", "b".repeat(64));
+        let lock = ComponentDependencyLock {
+            schema_version: COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION,
+            dependencies: vec![lock_entry(
+                "fixture.step",
+                "1.0.0",
+                &format!("sha256:{}", "a".repeat(64)),
+                vec![ComponentDependencyLockComponent {
+                    component_id: "bracket".to_string(),
+                    entry_symbol: None,
+                    payload_digest: step_digest,
+                    payload_kind: Some(ComponentPayloadKind::Step),
+                    geometry_representation: Some(
+                        crate::contracts::GeometryRepresentation::FacetedPolyBrep,
+                    ),
+                }],
+            )],
+        };
+        lock.validate().expect("valid STEP lock");
+        let lock_json = serde_json::to_value(&lock).expect("lock json");
+        let component = &lock_json["dependencies"][0]["components"][0];
+        assert_eq!(component["payloadKind"], "step");
+        assert_eq!(component["geometryRepresentation"], "facetedPolyBrep");
+        assert!(component.get("payload_kind").is_none());
+        assert!(component.get("geometry_representation").is_none());
+    }
+
+    #[test]
+    fn import_evidence_requires_matching_lock_digest_and_bundle_manifest_origins() {
+        let lock = sample_lock_shuffled().canonical();
+        let digest = format!(
+            "sha256:{:x}",
+            Sha256::digest(lock.canonical_bytes().unwrap())
+        );
+        let origin = ComponentImportOrigin {
+            package_id: "bike.kit".to_string(),
+            version: "1.0.0".to_string(),
+            component_id: "rail".to_string(),
+            alias: "rail".to_string(),
+            payload_digest: "sha256:aaa".to_string(),
+            authored_span: None,
+            resolved_span: None,
+            part_ids: vec!["holder".to_string()],
+            node_ids: vec![7],
+        };
+        validate_component_import_evidence(
+            Some(&lock),
+            Some(&digest),
+            std::slice::from_ref(&origin),
+            std::slice::from_ref(&origin),
+        )
+        .expect("matching evidence");
+
+        let err = validate_component_import_evidence(
+            Some(&lock),
+            Some(&digest),
+            std::slice::from_ref(&origin),
+            &[],
+        )
+        .expect_err("manifest provenance drift must fail");
+        assert!(
+            err.message.contains("componentImportOrigins"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn coordinate_index_entry_json_uses_camel_case_boundary() {
+        let entry = ComponentCoordinateIndexEntry {
+            package_id: "bike.kit".to_string(),
+            version: "1.2.0".to_string(),
+            package_digest: "sha256:aaa".to_string(),
+        };
+        let json = serde_json::to_value(&entry).expect("serialize index entry");
+        assert!(json.get("packageDigest").is_some());
+        assert!(json.get("package_digest").is_none());
+    }
 }
