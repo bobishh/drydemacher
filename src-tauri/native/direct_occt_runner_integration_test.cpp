@@ -135,8 +135,10 @@ void given_independent_ready_nodes_when_scheduled_then_order_release_budget_and_
     assert(std::abs(signed_volume(serial_parts) - signed_volume(parallel_parts)) < 1.0e-7);
 
     Command safe = command(1, "sphere", {number(1)});
-    Command barrier = command(2, "union", {ref(1), ref(1)});
+    Command copied_boolean = command(2, "union", {ref(1), ref(1)});
+    Command barrier = command(3, "fillet", {ref(2), number(1)});
     assert(command_has_proven_immutable_inputs(safe));
+    assert(!command_has_proven_immutable_inputs(copied_boolean));
     assert(!command_has_proven_immutable_inputs(barrier));
 }
 
@@ -170,7 +172,8 @@ void given_resolved_runner_plan_when_identity_is_built_then_only_semantics_and_n
     assert(identity != command_cache_key(canonical, changed_dependency, context));
 
     Command grouped_union = command(50, "union", {ref(1), ref(2), ref(3), ref(4)});
-    const PartialBooleanGroupPlan right_group{"lid", 50, "union", {2, 3}, 1, 1};
+    const PartialBooleanGroupPlan right_group{
+        "lid", 50, "decorated-dome", "union", {2, 3}, 1, 2};
     const std::map<std::uint64_t, std::string> group_dependencies = {
         {1, "left-a"}, {2, "left-b"}, {3, "right-a"}, {4, "right-b"}};
     const std::string group_identity = partial_boolean_group_cache_key(
@@ -204,14 +207,44 @@ void given_bad_ready_node_when_evaluated_then_failure_stops_publication() {
     assert(failed);
 }
 
-void given_singleton_boolean_batch_when_boolean_is_built_then_occt_pool_is_enabled() {
+void given_boolean_work_when_leased_then_outer_plus_nested_never_exceeds_budget() {
     ExecutionContext singleton;
+    singleton.worker_budget = 8;
     singleton.active_dag_nodes = 1;
-    assert(boolean_runs_parallel(singleton));
+    {
+        BooleanParallelLease lease(singleton);
+        assert(lease.runs_parallel());
+        assert(lease.nested_units() == 5);
+    }
+    assert(singleton.nested_kernel_units_in_use == 0);
+    assert(singleton.parallel_boolean_count == 1);
+    assert(singleton.max_nested_kernel_lease == 5);
+    assert(singleton.peak_total_allocated_cpu_units == 6);
 
     ExecutionContext competing;
+    competing.worker_budget = 8;
     competing.active_dag_nodes = 2;
-    assert(!boolean_runs_parallel(competing));
+    {
+        BooleanParallelLease first(competing);
+        BooleanParallelLease second(competing);
+        assert(first.runs_parallel());
+        assert(second.runs_parallel());
+        assert(first.nested_units() == 3);
+        assert(second.nested_units() == 3);
+    }
+    assert(competing.parallel_boolean_count == 2);
+    assert(competing.peak_total_allocated_cpu_units == 8);
+
+    ExecutionContext outer_only;
+    outer_only.worker_budget = 8;
+    outer_only.active_dag_nodes = 1;
+    outer_only.parallel_policy = ParallelPolicy::OuterOnly;
+    {
+        BooleanParallelLease lease(outer_only);
+        assert(!lease.runs_parallel());
+    }
+    assert(outer_only.serial_boolean_count == 1);
+    assert(outer_only.peak_total_allocated_cpu_units == 1);
 }
 
 void given_boolean_commands_when_plan_is_evaluated_then_context_records_compact_timings() {
@@ -467,8 +500,8 @@ Plan partial_union_plan(double first_width) {
     };
     plan.parts = {part};
     plan.partial_boolean_groups = {
-        {"lid", 9, "union", {0, 1}, 0, 1},
-        {"lid", 9, "union", {2, 3}, 1, 1},
+        {"lid", 9, "structural-pair", "union", {0, 1}, 0, 2},
+        {"lid", 9, "decorated-dome", "union", {2, 3}, 1, 2},
     };
     return plan;
 }
@@ -502,6 +535,39 @@ void given_partial_union_cache_when_one_half_changes_then_other_half_hits_withou
     assert(warm_context.partial_boolean_cache_miss_count == 1);
     assert(warm_context.partial_boolean_cache_write_count == 1);
     assert(warm_context.four_way_intersection_count == 0);
+    const auto decorated = std::find_if(
+        warm_context.partial_boolean_group_evidence.begin(),
+        warm_context.partial_boolean_group_evidence.end(),
+        [](const PartialBooleanGroupEvidence& evidence) {
+            return evidence.key == "decorated-dome";
+        });
+    assert(decorated != warm_context.partial_boolean_group_evidence.end());
+    assert(decorated->cache_hit);
+    assert(decorated->recompute_count == 0);
+    const auto& executed = warm_context.part_executed_command_ids.at("lid");
+    assert(std::find(executed.begin(), executed.end(), "lid:6") == executed.end());
+    assert(std::find(executed.begin(), executed.end(), "lid:7") == executed.end());
+    fs::remove_all(root);
+}
+
+void given_outer_only_policy_when_grouped_union_executes_then_authored_nary_path_stays_baseline() {
+    const fs::path root =
+        fs::temp_directory_path() / "ecky-direct-occt-outer-only-union-test";
+    fs::remove_all(root);
+    ExecutionContext context;
+    context.worker_budget = 8;
+    context.parallel_policy = ParallelPolicy::OuterOnly;
+    context.runner_binary_digest = "sha256:native-test";
+    {
+        ecky::RenderCacheTransaction transaction(root);
+        (void)evaluate_plan(partial_union_plan(10), root, &transaction, context);
+        transaction.commit();
+    }
+    assert(context.partial_boolean_cache_hit_count == 0);
+    assert(context.partial_boolean_cache_miss_count == 0);
+    assert(context.partial_boolean_cache_write_count == 0);
+    assert(context.parallel_boolean_count == 0);
+    assert(context.serial_boolean_count >= 1);
     fs::remove_all(root);
 }
 
@@ -567,7 +633,7 @@ int main() {
     given_independent_ready_nodes_when_scheduled_then_order_release_budget_and_parity_hold();
     given_resolved_runner_plan_when_identity_is_built_then_only_semantics_and_native_runtime_enter();
     given_bad_ready_node_when_evaluated_then_failure_stops_publication();
-    given_singleton_boolean_batch_when_boolean_is_built_then_occt_pool_is_enabled();
+    given_boolean_work_when_leased_then_outer_plus_nested_never_exceeds_budget();
     given_boolean_commands_when_plan_is_evaluated_then_context_records_compact_timings();
     given_four_shared_boolean_operands_when_fused_privately_then_inputs_and_result_topology_hold();
     given_four_operands_when_one_pave_filler_materializes_full_and_subset_fuses_then_parity_holds();
@@ -575,5 +641,6 @@ int main() {
     given_localized_edit_when_other_part_cache_is_clean_then_zero_clean_commands_and_topology_hold();
     given_render_failure_when_cache_staged_then_transaction_publishes_zero_entries();
     given_partial_union_cache_when_one_half_changes_then_other_half_hits_without_four_way_fill();
+    given_outer_only_policy_when_grouped_union_executes_then_authored_nary_path_stays_baseline();
     given_partial_union_side_outputs_when_render_fails_then_none_publish_and_corruption_recomputes();
 }

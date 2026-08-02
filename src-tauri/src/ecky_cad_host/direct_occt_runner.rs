@@ -11,7 +11,7 @@ use ecky_render::{
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use super::direct_occt::{OcctArg, OcctCommand, OcctKeyword, OcctOp, OcctPlan};
+use super::direct_occt::{OcctArg, OcctCommand, OcctKeyword, OcctOp, OcctPlan, OcctSlot};
 use crate::contracts::{AppError, AppResult};
 use crate::models::PathResolver;
 
@@ -65,6 +65,16 @@ struct RunnerStageReport {
     #[serde(default)]
     worker_budget: Option<u32>,
     #[serde(default)]
+    parallel_policy: Option<String>,
+    #[serde(default)]
+    serial_boolean_count: Option<u32>,
+    #[serde(default)]
+    parallel_boolean_count: Option<u32>,
+    #[serde(default)]
+    max_nested_kernel_lease: Option<u32>,
+    #[serde(default)]
+    peak_total_allocated_cpu_units: Option<u32>,
+    #[serde(default)]
     peak_dag_concurrency: Option<u32>,
     #[serde(default)]
     mesh_outer_worker_budget: Option<u32>,
@@ -90,6 +100,8 @@ struct RunnerStageReport {
     parts: Vec<RunnerPartExecutionEvidence>,
     #[serde(default)]
     commands: Vec<RunnerCommandExecutionEvidence>,
+    #[serde(default)]
+    partial_boolean_groups: Vec<RunnerPartialBooleanGroupEvidence>,
     stages: Vec<RunnerStageReportEntry>,
 }
 
@@ -117,6 +129,16 @@ struct RunnerCommandExecutionEvidence {
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+struct RunnerPartialBooleanGroupEvidence {
+    part_id: String,
+    parent_output: u64,
+    key: String,
+    cache_hit: bool,
+    recompute_count: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 struct RunnerStageReportEntry {
     name: String,
     status: String,
@@ -137,6 +159,22 @@ fn validate_runner_stage_report(report: &RunnerStageReport) -> AppResult<()> {
             RUNNER_STAGE_NAMES.len(),
             report.stages.len()
         )));
+    }
+    if let Some(policy) = report.parallel_policy.as_deref() {
+        if !matches!(policy, "outer-only" | "adaptive") {
+            return Err(AppError::validation(format!(
+                "Direct OCCT runner reported unsupported parallelPolicy `{policy}`."
+            )));
+        }
+    }
+    if let (Some(peak), Some(budget)) =
+        (report.peak_total_allocated_cpu_units, report.worker_budget)
+    {
+        if peak > budget {
+            return Err(AppError::validation(format!(
+                "Direct OCCT runner allocated {peak} CPU units with worker budget {budget}."
+            )));
+        }
     }
     for (entry, expected_name) in report.stages.iter().zip(RUNNER_STAGE_NAMES) {
         if entry.name != expected_name {
@@ -418,15 +456,21 @@ fn runner_plan(plan: &OcctPlan) -> AppResult<Option<RunnerPlan>> {
                     .iter()
                     .all(|arg| matches!(arg, OcctArg::Ref(_)))
                 && command.keywords.is_empty()
+                && decorated_dome_pair(command, &part.commands)
             {
                 for (ordinal, input_indices) in [[0_u32, 1], [2, 3]].into_iter().enumerate() {
                     partial_boolean_groups.push(RunnerPartialBooleanGroupPlan {
                         part_key: part.key.clone(),
                         parent_output: command.output.0,
+                        key: if ordinal == 1 {
+                            "decorated-dome".to_string()
+                        } else {
+                            "operand-pair-0".to_string()
+                        },
                         operation: "union".to_string(),
                         input_indices: input_indices.to_vec(),
                         ordinal: ordinal as u32,
-                        version: 1,
+                        version: 2,
                     });
                 }
             }
@@ -450,11 +494,51 @@ fn runner_plan(plan: &OcctPlan) -> AppResult<Option<RunnerPlan>> {
 
     let body = RunnerPlan {
         schema_version: 1,
-        plan_id: runner_plan_id(&parts)?,
+        plan_id: runner_plan_id(&parts, &partial_boolean_groups)?,
         parts,
         partial_boolean_groups,
     };
     Ok(Some(body))
+}
+
+fn decorated_dome_pair(command: &OcctCommand, commands: &[OcctCommand]) -> bool {
+    let [OcctArg::Ref(left), OcctArg::Ref(right)] = &command.args[2..4] else {
+        return false;
+    };
+    let by_output = commands
+        .iter()
+        .map(|candidate| (candidate.output, candidate))
+        .collect::<HashMap<_, _>>();
+    let contains = |root: OcctSlot, accepted: fn(OcctOp) -> bool| {
+        let mut pending = vec![root];
+        let mut visited = HashSet::new();
+        while let Some(slot) = pending.pop() {
+            if !visited.insert(slot) {
+                continue;
+            }
+            let Some(candidate) = by_output.get(&slot) else {
+                continue;
+            };
+            if accepted(candidate.op) {
+                return true;
+            }
+            for arg in &candidate.args {
+                if let OcctArg::Ref(dependency) = arg {
+                    pending.push(*dependency);
+                }
+            }
+            for keyword in &candidate.keywords {
+                if let OcctArg::Ref(dependency) = keyword.source_arg() {
+                    pending.push(*dependency);
+                }
+            }
+        }
+        false
+    };
+    let is_import = |op| matches!(op, OcctOp::ImportStl | OcctOp::ImportStep);
+    let is_analytic_clip = |op| op == OcctOp::Intersection;
+    (contains(*left, is_import) && contains(*right, is_analytic_clip))
+        || (contains(*right, is_import) && contains(*left, is_analytic_clip))
 }
 
 fn indexed_mesh_imports_for_root_boolean(
@@ -658,10 +742,14 @@ fn runner_indexed_mesh_command(
     })
 }
 
-fn runner_plan_id(parts: &[RunnerPart]) -> AppResult<String> {
+fn runner_plan_id(
+    parts: &[RunnerPart],
+    partial_boolean_groups: &[RunnerPartialBooleanGroupPlan],
+) -> AppResult<String> {
     let body = serde_json::json!({
         "schemaVersion": 1,
         "parts": parts,
+        "partialBooleanGroups": partial_boolean_groups,
     });
     let body = serde_json::to_vec(&body).map_err(|err| {
         AppError::validation(format!("Direct OCCT runner plan hashing failed: {}", err))
@@ -1476,6 +1564,11 @@ mod tests {
             schema_version: 1,
             total_elapsed_ms: 3,
             worker_budget: None,
+            parallel_policy: None,
+            serial_boolean_count: None,
+            parallel_boolean_count: None,
+            max_nested_kernel_lease: None,
+            peak_total_allocated_cpu_units: None,
             peak_dag_concurrency: None,
             mesh_outer_worker_budget: None,
             mesh_pool_budget: None,
@@ -1489,6 +1582,7 @@ mod tests {
             four_way_intersection_count: None,
             parts: Vec::new(),
             commands: Vec::new(),
+            partial_boolean_groups: Vec::new(),
             stages: RUNNER_STAGE_NAMES
                 .into_iter()
                 .map(|name| {
@@ -1530,7 +1624,7 @@ mod tests {
     }
 
     #[test]
-    fn runner_plan_declares_two_partial_groups_for_four_ref_union() {
+    fn runner_plan_does_not_decompose_unrelated_four_ref_union() {
         let program = crate::ecky_scheme::compile_to_core_program(
             r#"(model (part lid (union
                 (box 1 1 1)
@@ -1541,13 +1635,73 @@ mod tests {
         .expect("compile");
         let occt = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
         let runner = runner_plan(&occt).expect("runner plan").expect("supported");
-        assert_eq!(runner.partial_boolean_groups.len(), 2);
-        assert_eq!(runner.partial_boolean_groups[0].input_indices, vec![0, 1]);
+        assert!(runner.partial_boolean_groups.is_empty());
+    }
+
+    #[test]
+    fn runner_plan_names_imported_relief_plus_analytic_clip_as_decorated_dome() {
+        let command = |output, op, args| OcctCommand {
+            output: OcctSlot(output),
+            op,
+            args,
+            keywords: Vec::new(),
+        };
+        let plan = OcctPlan {
+            parameters: Vec::new(),
+            parts: vec![OcctPartPlan {
+                key: "lid".to_string(),
+                label: "lid".to_string(),
+                root: OcctSlot(9),
+                commands: vec![
+                    command(1, OcctOp::Box, vec![OcctArg::Number(1.0); 3]),
+                    command(2, OcctOp::Sphere, vec![OcctArg::Number(2.0)]),
+                    command(
+                        3,
+                        OcctOp::Cylinder,
+                        vec![
+                            OcctArg::Number(2.0),
+                            OcctArg::Number(1.0),
+                            OcctArg::Number(32.0),
+                        ],
+                    ),
+                    command(
+                        4,
+                        OcctOp::Intersection,
+                        vec![OcctArg::Ref(OcctSlot(2)), OcctArg::Ref(OcctSlot(3))],
+                    ),
+                    command(
+                        5,
+                        OcctOp::ImportStep,
+                        vec![OcctArg::Text("ladybug.step".to_string())],
+                    ),
+                    command(
+                        6,
+                        OcctOp::Translate,
+                        vec![
+                            OcctArg::Number(0.0),
+                            OcctArg::Number(0.0),
+                            OcctArg::Number(1.0),
+                            OcctArg::Ref(OcctSlot(5)),
+                        ],
+                    ),
+                    command(7, OcctOp::Box, vec![OcctArg::Number(1.0); 3]),
+                    command(8, OcctOp::Box, vec![OcctArg::Number(1.0); 3]),
+                    command(
+                        9,
+                        OcctOp::Union,
+                        vec![
+                            OcctArg::Ref(OcctSlot(7)),
+                            OcctArg::Ref(OcctSlot(8)),
+                            OcctArg::Ref(OcctSlot(4)),
+                            OcctArg::Ref(OcctSlot(6)),
+                        ],
+                    ),
+                ],
+            }],
+        };
+        let runner = runner_plan(&plan).expect("runner plan").expect("supported");
+        assert_eq!(runner.partial_boolean_groups[1].key, "decorated-dome");
         assert_eq!(runner.partial_boolean_groups[1].input_indices, vec![2, 3]);
-        assert_eq!(
-            runner.partial_boolean_groups[0].parent_output,
-            runner.parts[0].root
-        );
     }
 
     #[test]
@@ -2665,14 +2819,14 @@ mod tests {
     #[test]
     fn native_runner_boolean_builder_adapts_pool_to_outer_dag_budget_obb_and_nary_union() {
         let source = include_str!("../../native/direct_occt_runner.cpp");
-        assert!(source.contains("bool boolean_runs_parallel"), "{source}");
-        assert!(source.contains("context.active_dag_nodes <= 1"), "{source}");
+        assert!(source.contains("class BooleanParallelLease"), "{source}");
+        assert!(source.contains("fair_share"), "{source}");
         assert!(
-            source.contains("builder.SetRunParallel(boolean_runs_parallel(context));"),
+            source.contains("filler.SetRunParallel(parallel_lease.runs_parallel());"),
             "{source}"
         );
         assert!(
-            source.contains("builder.SetNonDestructive(true);"),
+            source.contains("builder.SetNonDestructive(false);"),
             "{source}"
         );
         assert!(source.contains("builder.SetUseOBB(true);"), "{source}");

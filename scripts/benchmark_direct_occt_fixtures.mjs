@@ -33,7 +33,7 @@ function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-function median(values) {
+export function median(values) {
   assert.ok(values.length > 0, 'median needs at least one value');
   const ordered = [...values].sort((left, right) => left - right);
   return ordered[Math.floor(ordered.length / 2)];
@@ -247,7 +247,7 @@ function assertWorkerBudget(samples, expected) {
   }
 }
 
-function nativeElapsedMs(sample) {
+export function nativeElapsedMs(sample) {
   const elapsed = sample.stage?.totalElapsedMs;
   assert.ok(Number.isFinite(elapsed) && elapsed >= 0, `${sample.label} missing native stage totalElapsedMs`);
   return elapsed;
@@ -376,7 +376,7 @@ function writeRequest(sampleDir, request) {
   return path;
 }
 
-function runGuardedSample(request) {
+export function runGuardedSample(request) {
   mkdirSync(request.sampleDir, { recursive: true });
   const requestPath = writeRequest(request.sampleDir, request);
   const guardArgs = [
@@ -398,9 +398,9 @@ function runGuardedSample(request) {
   return result;
 }
 
-function makeRequest({ runDir, label, fixture, cli, driver, runtimeRoot, params, workers, cacheDir }) {
+export function makeRequest({ runDir, label, fixture, cli, driver, runtimeRoot, params, workers, cacheDir, parallelPolicy = 'adaptive' }) {
   const sampleDir = join(runDir, label);
-  return { label, sampleDir, fixture, cli, driver, runtimeRoot, params, workers, cacheDir };
+  return { label, sampleDir, fixture, cli, driver, runtimeRoot, params, workers, cacheDir, parallelPolicy };
 }
 
 function runReal({ runDir, cli, driver, runtimeRoot, samples, workers }) {

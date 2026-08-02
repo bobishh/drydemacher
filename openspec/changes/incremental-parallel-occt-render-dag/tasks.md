@@ -103,14 +103,14 @@ and preserves a compact resource-failure report.
   and Boolean time, plus at most `23 s` median native total on the recorded
   18-core Apple M5 Pro, while preserving its three intentional components and
   exact artifact parity.
-- [ ] 7.8 Implement adaptive nested OCCT leases: wide ready queues consume the
+- [x] 7.8 Implement adaptive nested OCCT leases: wide ready queues consume the
   budget through outer DAG work; a lone expensive Boolean receives idle units
   and enables internal parallelism. Prove peak outer+nested allocation never
   exceeds the configured budget.
 - [ ] 7.9 Run one guarded before/after characterization during development, then
   the final three-sample-per-policy release gate. Retain compact timing,
   topology, digest, CPU-lease, and resource evidence only.
-- [ ] 7.10 Add a red planner/native integration proving a four-operand lid union
+- [x] 7.10 Add a red planner/native integration proving a four-operand lid union
   exposes a cacheable `decorated-dome` partial. Implement deterministic
   parameter-affinity decomposition without requiring a source rewrite.
 - [ ] 7.11 Seed the bracelet cache once, then prove: identical rerender executes
@@ -121,7 +121,7 @@ and preserves a compact resource-failure report.
 
 ## 8. Final verification
 
-- [ ] 8.1 Run focused Rust/native tests and full relevant suite.
+- [x] 8.1 Run focused Rust/native tests and full relevant suite.
 - [x] 8.2 Run `cd src-tauri && cargo check`.
 - [x] 8.3 Run MCP `inspect -> validate -> preview -> commit` against an existing
   permanent benchmark target. Commit exactly one named
@@ -165,6 +165,36 @@ ladybug relief share one cache identity. Private-copy destructive mode produced
 regressed to `46.551 s` / `40.762 s`. Neither path removes the dominant kernel.
 The next required change is planner-emitted partial-Boolean cache granularity,
 tasks 7.10-7.11.
+
+Planner/native implementation now emits versioned named partial groups only for
+the detected four-input decorated-lid pattern. `decorated-dome` owns the
+analytic dome plus imported relief; its cache identity includes ordered resolved
+dependencies, group name, operation, and version. A warm group hit removes its
+input refs from the required execution closure, so relief/dome producers never
+enter the ready queue. Generic four-input unions remain authored n-ary Booleans.
+The native integration proves one changed group preserves the other, reports
+zero recomputes for the hit, skips the hit's producer commands, and publishes no
+partial cache entries after failure or corruption.
+
+Adaptive Boolean work now leases idle CPU units from the same outer-DAG budget.
+Compact stage evidence records policy, serial/parallel Boolean counts, maximum
+nested lease, and peak outer+nested allocation. The lease integration proves
+singleton and competing-work cases never exceed the configured budget;
+`outer-only` keeps the baseline authored n-ary path.
+
+Cold bracelet acceptance remains open. Pairwise BRep decomposition and
+concurrent OCCT Booleans both produced severe negative scaling and were removed.
+The retained shared `BOPAlgo_PaveFiller` path still exceeded the bounded
+characterization window after the partial-cache work, so no `3x` or `23 s` claim
+is recorded. Closing tasks 7.7, 7.9, and 7.11 requires a representation-level
+decision for the STL relief (mesh-domain lid/export contract) plus one final
+guarded release gate, not more scheduling around the same BRep kernel.
+
+Focused final proof: guarded native runner build/integration passed; guarded
+`cargo test direct_occt_runner --lib` passed 69 tests; guarded JS BDD passed
+20 tests; `cargo check`, `cargo check --tests`, `cargo fmt --check`, and
+`git diff --check` passed. All heavy process trees used the shared resource
+guard with one build/test active at a time.
 
 ### Identity proof — 2026-08-02
 

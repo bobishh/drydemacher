@@ -156,6 +156,7 @@ pub struct KernelPlan {
 pub struct KernelPartialBooleanGroupPlan {
     pub part_key: String,
     pub parent_output: u64,
+    pub key: String,
     pub operation: String,
     pub input_indices: Vec<u32>,
     pub ordinal: u32,
