@@ -1,5 +1,7 @@
 # Build123d Lowering Pipeline — Architectural Review
 
+> Archived architecture review. The reviewed backend, runner, and lowering pipeline were removed on 2026-08-02. Kept only as historical evidence.
+
 **Date:** 2026-04-20
 **Status:** Core lowering/tests green. Current backend corpus status on 2026-04-23:
 - `frame_peg_attach` — EXCELLENT MATCH

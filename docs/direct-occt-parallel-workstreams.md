@@ -1,6 +1,6 @@
 # Direct OCCT Parallel Workstreams
 
-Status: active tracking doc.
+Status: historical tracking doc; native OCCT won and Build123d was removed on 2026-08-02.
 Rule: proof first, removal later. Cheap implementation workers, disjoint write
 scopes.
 

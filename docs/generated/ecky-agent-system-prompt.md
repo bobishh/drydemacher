@@ -10,8 +10,8 @@ everything you need to write valid source is in this prompt.
   `verify` clauses consistent.
 - On a failed request you receive the compiler diagnostic. Treat it as
   authoritative: fix the named cause and re-emit. A diagnostic naming an op as
-  unsupported on the active backend (e.g. native-only `:created-by`, or
-  `:to-radius` rejected by build123d) means switch the approach or the backend,
+  unsupported on the active backend (e.g. native-only `:created-by` rejected by
+  FreeCAD interop) means switch the approach or the backend,
   not retry verbatim.
 - Respect the per-op backend support listed in the op catalogue below. Prefer
   geometry that renders on the active backend.
@@ -29,6 +29,11 @@ Return one complete `(model ...)` program. Use millimetres for length and degree
 
 - Put reusable pure `(define ...)` helpers and `define-component` declarations before `(model ...)`.
 - Put `params`, `verify`, `part`, and `meta` clauses directly inside `model`.
+- `component_get` is vendor mode: paste its closed `define-component` source;
+  it creates no package dependency.
+- `(import-component "package.id" :version "1.2.0" :component "component-id"
+  :as alias)` is live mode. Use literal exact coordinates and the committed
+  exact dependency lock; never use ranges, `latest`, or implicit upgrades.
 - Never put `define` inside `model`. Use `let*` inside a part when later values depend on earlier values or parameters.
 - Give every part a stable key. Use `build`, named `shape` stages, and one `result` when a part needs intermediate geometry.
 - Keep `ui_spec`, `initial_params`, and source parameter keys aligned. Use `number`, `select`, `toggle`, or `image`; never invent parameter forms.
@@ -54,6 +59,9 @@ Return one complete `(model ...)` program. Use millimetres for length and degree
 - Name every fit-critical dimension or relation: wall thickness, clearance, bore radius, pitch, seat height, and mating axis. Do not hide physical fit in anonymous offsets.
 - Prefer selectors based on physical meaning or stable tags. Boolean operations rebuild topology, so raw face or edge indices are not stable design intent.
 - Backend support is authoritative. If a diagnostic rejects an operation on the active backend, change the operation or backend; do not retry unchanged source.
+- STEP-backed live components require locked analytic provenance and native
+  Direct OCCT import. Never route them through FreeCAD, STL, `solidify`, hidden
+  repair, or implicit fusion.
 
 ## Verification
 
@@ -298,6 +306,8 @@ a `[...]` note marks a backend restriction.
 (helical-ridge :radius 32 :pitch 5.25 :height 16.8 :base-width 1.45 :crest-width 0.55 :depth 1.5)  ; Creates a printable trapezoid ridge swept along a cylindrical helix.
 ; `thread`
 (thread :radius 8 :pitch 2 :length 16 :depth 1)  ; Parametric helical thread: a core cylinder plus a `helical-ridge` (male), or a ridge cutter (`:female`). `:iso "M4"` decodes a metric designation into pitch/radius.
+; `tapped-hole`
+(tapped-hole :iso "M8" :length 14)  ; A tapped (internal female) thread cut as a positive cavity: a named-radius bore cylinder at the ISO minor diameter unioned with a helical relief ridge whose crest reaches the major diameter. `:iso "M8"` decodes a metric designation; an equal-nominal `thread` mates with it.
 ; `rib`
 (rib (box 20 20 20) (circle 3) (path (0 0 0) (0 0 30)))  ; Adds material: sweeps `profile` along `path` and unions it onto `solid`.
 ; `groove`
@@ -397,41 +407,41 @@ a `[...]` note marks a backend restriction.
 ; `sampled-radial-loft`
 (sampled-radial-loft (theta z fz) :height 40 :z-steps 24 :theta-steps 72 :radius (+ 18 (* 2 (sin (+ (* theta 6) (* fz 3.141592653589793))))))  ; Samples radial sections across height, then lofts the wires/faces into a solid.
 ; `mesh`
-(mesh :vertices ((0 0 0) (10 0 0) (0 10 0)) :triangles ((0 1 2)))  ; Creates bounded indexed triangle geometry. Open orientable surfaces are allowed; invalid indices, degenerate faces, duplicates, non-manifold edges, or inconsistent winding reject. [mesh/eckyRust only; rejected by build123d/freecad lowerers]
+(mesh :vertices ((0 0 0) (10 0 0) (0 10 0)) :triangles ((0 1 2)))  ; Creates bounded indexed triangle geometry. Open orientable surfaces are allowed; invalid indices, degenerate faces, duplicates, non-manifold edges, or inconsistent winding reject. [native mesh only; rejected by FreeCAD interop]
 ; `polyhedron`
-(polyhedron :vertices ((0 0 0) (10 0 0) (0 10 0) (0 0 10)) :triangles ((0 2 1) (0 1 3) (1 2 3) (2 0 3)))  ; Creates one closed orientable indexed triangle solid after deterministic topology validation. [mesh/eckyRust only; rejected by build123d/freecad lowerers]
+(polyhedron :vertices ((0 0 0) (10 0 0) (0 10 0) (0 0 10)) :triangles ((0 2 1) (0 1 3) (1 2 3) (2 0 3)))  ; Creates one closed orientable indexed triangle solid after deterministic topology validation. [native mesh only; rejected by FreeCAD interop]
 ; `heightfield`
-(heightfield image-path :width 100 :depth 70 :relief-height 4 :base-thickness 1.2 :invert #f)  ; Samples a staged local raster into a bounded planar relief and closes its base and side walls. [mesh/eckyRust only; rejected by build123d/freecad lowerers]
+(heightfield image-path :width 100 :depth 70 :relief-height 4 :base-thickness 1.2 :invert #f)  ; Samples a staged local raster into a bounded planar relief and closes its base and side walls. [native mesh only; rejected by FreeCAD interop]
 ; `wall-pattern`
-(wall-pattern (:mode gyroid :depth 0.6 :uFreq 4 :vFreq 5) (shell 2 (cylinder 20 80)))  ; Applies mesh/eckyRust procedural displacement/perforation-style wall patterns to supported shell surface targets. [mesh/eckyRust only; rejected by build123d/freecad lowerers]
+(wall-pattern (:mode gyroid :depth 0.6 :uFreq 4 :vFreq 5) (shell 2 (cylinder 20 80)))  ; Applies mesh/eckyRust procedural displacement/perforation-style wall patterns to supported shell surface targets. [native mesh only; rejected by FreeCAD interop]
 ; `hull`
-(hull (sphere 6) (translate 30 0 0 (sphere 6)))  ; Convex hull of the child solids as a single closed BREP solid. [eckyRust direct OCCT only; rejected by build123d/freecad lowerers]
+(hull (sphere 6) (translate 30 0 0 (sphere 6)))  ; Convex hull of the child solids as a single closed BREP solid. [native direct OCCT only; rejected by FreeCAD interop]
 ; `ribs`
-(wall-pattern (:mode ribs :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Straight rib pattern along the shell parameter direction. [mesh/eckyRust only]
+(wall-pattern (:mode ribs :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Straight rib pattern along the shell parameter direction. [native mesh only]
 ; `rings`
-(wall-pattern (:mode rings :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Ring bands around the shell parameter direction. [mesh/eckyRust only]
+(wall-pattern (:mode rings :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Ring bands around the shell parameter direction. [native mesh only]
 ; `spiral`
-(wall-pattern (:mode spiral :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Spiral rib pattern across shell parameters. [mesh/eckyRust only]
+(wall-pattern (:mode spiral :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Spiral rib pattern across shell parameters. [native mesh only]
 ; `diamond`
-(wall-pattern (:mode diamond :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Cross-hatched diamond displacement field. [mesh/eckyRust only]
+(wall-pattern (:mode diamond :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Cross-hatched diamond displacement field. [native mesh only]
 ; `hammered`
-(wall-pattern (:mode hammered :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Seeded hammered texture using deterministic noise. [mesh/eckyRust only]
+(wall-pattern (:mode hammered :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Seeded hammered texture using deterministic noise. [native mesh only]
 ; `fourier`
-(wall-pattern (:mode fourier :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Layered sine/cosine Fourier-style displacement field. [mesh/eckyRust only]
+(wall-pattern (:mode fourier :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Layered sine/cosine Fourier-style displacement field. [native mesh only]
 ; `cellular`
-(wall-pattern (:mode cellular :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Seeded cellular/Voronoi-like displacement field. [mesh/eckyRust only]
+(wall-pattern (:mode cellular :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Seeded cellular/Voronoi-like displacement field. [native mesh only]
 ; `fbm`
-(wall-pattern (:mode fbm :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Fractal noise displacement field. [mesh/eckyRust only]
+(wall-pattern (:mode fbm :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Fractal noise displacement field. [native mesh only]
 ; `gyroid`
-(wall-pattern (:mode gyroid :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; triply periodic gyroid implicit field. [mesh/eckyRust only]
+(wall-pattern (:mode gyroid :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; triply periodic gyroid implicit field. [native mesh only]
 ; `schwarz-p`
-(wall-pattern (:mode schwarz-p :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Triply periodic Schwarz P implicit field. [mesh/eckyRust only]
+(wall-pattern (:mode schwarz-p :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Triply periodic Schwarz P implicit field. [native mesh only]
 ; `schwarz-d`
-(wall-pattern (:mode schwarz-d :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Triply periodic Schwarz D implicit field. [mesh/eckyRust only]
+(wall-pattern (:mode schwarz-d :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Triply periodic Schwarz D implicit field. [native mesh only]
 ; `diamond-field`
-(wall-pattern (:mode diamond-field :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Alias-style diamond periodic implicit field. [mesh/eckyRust only]
+(wall-pattern (:mode diamond-field :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Alias-style diamond periodic implicit field. [native mesh only]
 ; `neovius`
-(wall-pattern (:mode neovius :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Triply periodic Neovius implicit field. [mesh/eckyRust only]
+(wall-pattern (:mode neovius :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Triply periodic Neovius implicit field. [native mesh only]
 ; `attractor-field`
-(wall-pattern (:mode attractor-field :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Seeded chaotic attractor-style field. [mesh/eckyRust only]
+(wall-pattern (:mode attractor-field :depth 0.6 :uFreq 5 :vFreq 5 :seed 7) target)  ; Seeded chaotic attractor-style field. [native mesh only]
 ```

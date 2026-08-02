@@ -1,5 +1,7 @@
 # LLM CAD Agent IR Plan
 
+> Historical plan note: Build123d runtime/lowering was removed on 2026-08-02. References below document retired parity work.
+
 ## Purpose
 
 Make Ecky a structural CAD-agent system, not text regeneration pipeline.

@@ -4,12 +4,8 @@ Status terms:
 
 - `direct`: planned and executed by Direct OCCT.
 - `runner-supported`: accepted by current precompiled runner gate.
-- `runner-fallback`: Direct OCCT generated-source path remains required until
-  runner parity expands.
 - `normalized-direct`: rewritten by Rust normalizer into direct operations.
 - `mesh-only`: intentionally handled by Rust mesh path, not BREP.
-- `explicit-exact`: available only when caller explicitly selects build123d or
-  FreeCAD exact backend.
 - `unsupported`: deterministic Direct OCCT rejection.
 - `gap`: missing proof or unclear behavior.
 
@@ -50,7 +46,7 @@ Status terms:
 | surface | `chamfer` | direct | fillet/chamfer live test | target-id selectors supported |
 | surface | `taper` | direct | taper live test | BREP transform-like op |
 | surface | `twist` | direct | twist live test | BREP generated op |
-| surface | `draft` | direct | draft planner test; runner live + build123d differential tests | side-wall face draft, runner-supported |
+| surface | `draft` | direct | draft planner and runner live tests | side-wall face draft, runner-supported |
 | path | `polyline` | direct | path frame/sweep tests | emitted as path |
 | path | `bezier-path` | direct | bezier sweep live test | cubic-control validation |
 | path | `bspline` | direct | bspline profile live test | closed/open profile usage |
@@ -70,9 +66,9 @@ Status terms:
 | meta | `group` | direct | multi-part/compound tests | emitted as compound |
 | meta | `comment` | unsupported | normalizer/planner unsupported branch | rejected by operation name |
 | meta | `annotate` | unsupported | normalizer/planner unsupported branch | rejected by operation name |
-| custom | `sampled-radial-loft` | normalized-direct | sampled-radial-loft live + differential parity tests | portable: native, build123d, FreeCAD (not mesh) |
-| custom | `hull` | direct | hull capsule live tests (runner + shim tiers) | native-only convex hull; build123d/FreeCAD reject |
-| custom | `helical-ridge` | normalized-direct | native helical-ridge render tests; build123d/freecad lowering tests | planner-expanded into helix sweep + boolean forms |
+| custom | `sampled-radial-loft` | normalized-direct | sampled-radial-loft live tests | native and FreeCAD (not mesh) |
+| custom | `hull` | direct | hull capsule runner live tests | native-only convex hull; FreeCAD rejects |
+| custom | `helical-ridge` | normalized-direct | native helical-ridge render tests; FreeCAD lowering tests | planner-expanded into helix sweep + boolean forms |
 | custom | `hole` | unsupported | typed-hole rejection test | must be filled before planning |
 | custom | `wall-pattern` | mesh-only (hybrid-bridged) | mesh path tests + hybrid poly BRep tests | Rust mesh-only op; hybrid bridge routes to OCCT solidify + boolean when followed by BRep ops |
 | custom | `pattern` | mesh-only (hybrid-bridged) | source classifier | legacy mesh alias; hybrid bridge applies when followed by BRep ops |
@@ -110,12 +106,9 @@ are unaffected — they use existing paths with zero regression.
 
 ## Open Gaps
 
-- FreeCAD/build123d exact-only operations still outside Direct OCCT path:
-  `text`, `import-stl`, `xor`.
+- FreeCAD-only interop operations outside Direct OCCT path: `text`, `xor`.
 - Typed `hole` placeholders still must be filled before Direct OCCT planning.
-- Precompiled runner is proven for the covered subset below, but generated C++
-  fallback remains required for Direct OCCT forms that are not yet admitted by
-  the runner gate.
+- Unsupported runner plans fail explicitly. No generated-C++ fallback exists.
 
 ## Current Runner Subset
 
@@ -165,64 +158,38 @@ proven runner subset:
 | `scale` | runner-supported | transform |
 | `mirror` | runner-supported | transform |
 | `compound` | runner-supported | grouping output |
-| `draft` | runner-supported | keyword-free or `:neutral-z`/`:neutral_z` numeric keyword; native `draft_shape` added 2026-07-06, no longer generated-source-only |
+| `draft` | runner-supported | keyword-free or `:neutral-z`/`:neutral_z` numeric keyword |
 | `hull` | runner-supported | variadic shape refs; incremental 3-D convex hull added 2026-07-09 |
 
-Every other Direct OCCT op is currently runner-fallback, not unsupported by
-Direct OCCT itself. Generated C++ fallback remains the active execution path for
-forms that still miss runner admission/proof.
+Every other Direct OCCT op is rejected by the runner with an explicit unsupported-plan error.
 
 ## Parity Against Exact Lowerings
 
 This section answers a narrower question than “can Direct OCCT plan it?”:
-whether the current `EckyRust -> runner-first` path already covers forms that
-the build123d / FreeCAD exact lowerings can render.
+whether the current `EckyRust -> runner-first` path covers forms that FreeCAD
+interop can render.
 
-| Form in exact lowerings | build123d | FreeCAD | Direct OCCT planner | Runner-first status | Notes |
-| --- | --- | --- | --- | --- | --- |
-| primitives `box/sphere/cylinder/cone/circle/rectangle/polygon` | yes | yes | yes | covered | direct BREP |
-| `rounded-rect`, `rounded-polygon` | yes | yes | yes | covered | direct sketch/BREP |
-| `profile` with `:outer` / `:holes` | yes | yes | yes | covered | runner keyword support |
-| `svg` profile extrusion | yes | yes | yes | covered | normalized to profile loops, then runner/direct |
-| `union/difference/intersection` | yes | yes | yes | covered | direct booleans |
-| `extrude/revolve/loft/sweep/taper/twist/offset` | yes | yes | yes | covered | direct BREP forms |
-| `offset-rounded` | yes | yes | yes | covered | normalized/emitted as direct offset path |
-| `sampled-radial-loft` | yes | yes | yes | covered | planner-expanded into loft sections; differential parity proven vs build123d |
-| `hull` | no | no | yes | covered (native-only) | direct-OCCT-required op; exact lowerings reject with a diagnostic |
-| arrays `linear/radial/grid/arc` | yes | yes | yes | covered | direct transform arrays |
-| `repeat`, `repeat-union`, `repeat-pick`, `repeat-compound` | yes | yes | yes | covered | normalized into finite direct forms before runner/direct execution |
-| frames `plane/location/path-frame/place/clip-box` | yes | yes | yes | covered | runner-first proven |
-| `fillet` / `chamfer` all-edges | yes | yes | yes | covered | keyword-free and `:edges "all"` |
-| `fillet` / `chamfer` exact edge target ids | yes | yes | yes | covered | runner-first parity proven |
-| `fillet` / `chamfer` coarse edge clauses | yes | yes | yes | covered | runner-first parity proven |
-| `shell` exact face target ids | yes | yes | yes | covered | runner-first parity proven |
-| `shell` face clauses (`top`, `planar+normal-z+area-max`, etc.) | yes | yes | yes | covered | runner-first parity proven |
-| keywordless `shell` | yes | yes | yes | covered | runner-first parity proven |
-| `text` | limited/no | yes | no | not covered | FreeCAD exact-only today |
-| `import-stl` | yes | yes | no | not covered | mesh/import path, not Direct OCCT BREP |
-| `xor` | yes | yes | no | not covered | Direct OCCT rejects `xor` |
-| `helical-ridge` | yes | yes | yes | covered | planner-expanded helix sweep; native render test proven |
-| typed `hole` placeholders | rejected until filled | rejected until filled | rejected until filled | not applicable | authoring placeholder, not runtime op |
+| Form | FreeCAD | Direct OCCT runner | Notes |
+| --- | --- | --- | --- |
+| primitives, profiles, booleans, transforms, arrays, frames | yes | covered | direct BREP |
+| selector `fillet` / `chamfer` / `shell` | yes | covered | runner-first proven |
+| `sampled-radial-loft`, `helical-ridge` | yes | covered | normalized into runner operations |
+| `hull` | no | covered | native-only |
+| `text`, `xor` | yes | unsupported | FreeCAD interop only |
+| typed `hole` placeholders | rejected until filled | rejected until filled | authoring placeholder, not runtime op |
 
 ### Practical reading
 
-- `build123d` and `FreeCAD` still cover a bigger surface than current
-  runner-first only because of exact-only extras like `text`, `import-stl`,
-  and `xor`. Conversely `hull` is native-only: Direct OCCT renders it and the
-  exact lowerings reject it.
 - For the shared BREP subset, `EckyRust -> Direct OCCT -> precompiled runner`
   now covers the common primitives, booleans, transforms, arrays, frames,
   profile/SVG workflows, and the supported selector-driven `fillet` /
   `chamfer` / `shell` flows.
-- Generated C++ fallback still exists inside the Direct OCCT path. Removing
-  build123d/FreeCAD dependencies only makes sense after the remaining exact-only
-  surface is either implemented or explicitly out of scope.
+- The runner is the only native BREP executor. Unsupported plans are rejected;
+  they do not compile generated C++.
 
-## Removal Blockers From This Matrix
+## Runner Boundary
 
-- Build123d fallback is not part of the EckyRust direct path. Remaining
-  exact-only surface for full dependency removal: `text`, `import-stl`, `xor`.
-- Generated C++ compile cannot be removed until `plan.json` runner covers the
-  complete Direct OCCT op set, including keyword/selector-driven exact ops.
-- UI/MCP cannot claim full Direct OCCT support until broad selector filtering
-  and exact op closure are deterministic.
+- `Core IR -> OcctPlan/plan.json -> precompiled direct-occt-runner -> OCCT` is
+  the sole native BREP path.
+- UI/MCP must surface unsupported-plan errors instead of selecting a hidden
+  fallback.

@@ -28,63 +28,6 @@
     height)))
 
 
-;; ----------------------------------------------------------------
-;; COMPACT PETG LENS GUARD
-;; ----------------------------------------------------------------
-
-(define-component lens-guard-snap-ring
-  ((number flange-diameter 22.0)
-   (number opening-diameter 16.6)
-   (number flange-thickness 1.2)
-   (number collar-diameter 18.2)
-   (number collar-length 1.2)
-   (number snap-bead-extra-radius 0.32)
-   (number snap-bead-height 0.45))
-
-  (let* (
-    (flange-radius (/ flange-diameter 2.0))
-    (opening-radius (/ opening-diameter 2.0))
-    (collar-radius (/ collar-diameter 2.0))
-    (snap-bead-radius
-      (+ collar-radius snap-bead-extra-radius))
-    (through-height
-      (+ flange-thickness collar-length snap-bead-height 1.0))
-
-    (opening-cutter
-      (translate 0 0 -0.5
-        (cylinder opening-radius through-height 64)))
-
-    (flange
-      (difference
-        (cylinder flange-radius flange-thickness 64)
-        opening-cutter))
-
-    (collar
-      (difference
-        (translate 0 0 flange-thickness
-          (cylinder collar-radius collar-length 64))
-        opening-cutter))
-
-    ;; Tapered lead-in. TPU socket flexes; PETG ring stays stiff.
-    (snap-bead-start-z
-      (+ flange-thickness
-         collar-length
-         (- 0.0 snap-bead-height)))
-
-    (snap-bead
-      (difference
-        (translate 0 0 snap-bead-start-z
-          (cone
-            snap-bead-radius
-            collar-radius
-            snap-bead-height
-            64))
-        opening-cutter))
-  )
-
-  (union flange collar snap-bead)))
-
-
 ;; ================================================================
 ;; COMPLETE TWO-PART MODEL
 ;; ================================================================
@@ -1226,15 +1169,64 @@
            lens-guard-seat-depth))
 
       (preview-x 65.0)
+
+      (flange-radius
+        (/ lens-guard-flange-diameter 2.0))
+
+      (opening-radius
+        (/ lens-guard-opening-diameter 2.0))
+
+      (collar-radius
+        (/ lens-guard-collar-diameter 2.0))
+
+      (snap-bead-radius
+        (+ collar-radius
+           lens-guard-snap-bead-extra-radius))
+
+      (through-height
+        (+ lens-guard-flange-thickness
+           installed-collar-length
+           lens-guard-snap-bead-height
+           1.0))
+
+      (opening-cutter
+        (translate 0 0 -0.5
+          (cylinder opening-radius through-height 64)))
+
+      (flange
+        (difference
+          (cylinder
+            flange-radius
+            lens-guard-flange-thickness
+            64)
+          opening-cutter))
+
+      (collar
+        (difference
+          (translate 0 0 lens-guard-flange-thickness
+            (cylinder
+              collar-radius
+              installed-collar-length
+              64))
+          opening-cutter))
+
+      ;; Tapered lead-in. TPU socket flexes; PETG ring stays stiff.
+      (snap-bead-start-z
+        (+ lens-guard-flange-thickness
+           installed-collar-length
+           (- 0.0 lens-guard-snap-bead-height)))
+
+      (snap-bead
+        (difference
+          (translate 0 0 snap-bead-start-z
+            (cone
+              snap-bead-radius
+              collar-radius
+              lens-guard-snap-bead-height
+              64))
+          opening-cutter))
     )
 
     (translate preview-x 0 0
-      (lens-guard-snap-ring
-        :flange-diameter lens-guard-flange-diameter
-        :opening-diameter lens-guard-opening-diameter
-        :flange-thickness lens-guard-flange-thickness
-        :collar-diameter lens-guard-collar-diameter
-        :collar-length installed-collar-length
-        :snap-bead-extra-radius lens-guard-snap-bead-extra-radius
-        :snap-bead-height lens-guard-snap-bead-height))))
+      (union flange collar snap-bead))))
 )

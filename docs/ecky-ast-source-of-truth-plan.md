@@ -1,5 +1,7 @@
 # Ecky AST Source Of Truth Plan
 
+> Historical plan note: Build123d runtime/lowering was removed on 2026-08-02. Current structural authoring lowers to native OCCT or optional FreeCAD interop.
+
 ## Goal
 
 Move AI-facing authoring from fat source text buffers to bounded structural access over Ecky Lisp/Core IR.

@@ -1,68 +1,45 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import EckyMascot from './EckyMascot.svelte';
-  import CaseWorkbench from './showcase/CaseWorkbench.svelte';
-  import AnimalCapWorkbench from './showcase/AnimalCapWorkbench.svelte';
+  import ModelWorkbench from './showcase/ModelWorkbench.svelte';
 
   const repoUrl = 'https://github.com/bobishh/ecky';
-  const docsUrl = '/docs/';
+  const chaptersUrl = '/docs/chapters/';
+  const referenceUrl = '/docs/';
+  const heroInvariants = [
+    'keep every dimension named',
+    'keep fit relationships explicit',
+    'keep source inspectable',
+    'keep exports reproducible',
+  ];
+
+  let heroInvariantIndex = $state(0);
+  const heroInvariant = $derived(heroInvariants[heroInvariantIndex]);
+
+  onMount(() => {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const timer = window.setInterval(() => {
+      heroInvariantIndex = (heroInvariantIndex + 1) % heroInvariants.length;
+    }, 2_400);
+    return () => window.clearInterval(timer);
+  });
 
   const facts = [
     {
-      title: '54 Core IR operations',
-      body: '50 run directly on native OCCT. Text and SVG preprocess, import-STL uses interop, and XOR is rejected by native normalization.',
+      title: 'A solid you can keep editing',
+      body: 'Ecky renders B-rep geometry through Open CASCADE Technology (OCCT), a CAD kernel. Change dimensions, inspect faces and edges, then export STEP or STL.',
     },
     {
-      title: '3 geometry backends',
-      body: 'Native OCCT is primary. build123d and FreeCAD remain interop backends for export, import, and parity checks.',
+      title: 'Readable source, bounded vocabulary',
+      body: 'The model produces .ecky: a small, inspectable modeling language—not arbitrary generated Python. You can edit the source and rerender the same part.',
     },
     {
-      title: '2 authoring paths',
-      body: 'API mode calls a configured LLM provider. MCP mode gives an external agent typed modeling tools.',
+      title: 'Checks travel with the geometry',
+      body: 'Declare requirements beside a model. Ecky validates source, previews the result, and records the check before an agent-authored version is saved.',
     },
     {
-      title: '3 provider adapters',
-      body: 'Gemini, OpenAI-compatible HTTP APIs, and local Ollama. Model behavior still varies by endpoint and model.',
-    },
-    {
-      title: '4 MCP gates',
-      body: 'Inspect, validate, preview, commit. A saved agent-authored version must come from a green verified preview.',
-    },
-    {
-      title: 'Local, inspectable state',
-      body: 'SQLite stores saved versions. Project mirrors expose .ecky source as ordinary files without making the folder a second database.',
-    },
-  ];
-
-  const history = [
-    {
-      date: 'March 2026',
-      title: 'FreeCAD Python macros',
-      body: 'First repository snapshot: an LLM generated Python, then headless FreeCAD executed it.',
-    },
-    {
-      date: 'March 2026',
-      title: 'Ecky IR',
-      body: 'Arbitrary generated scripts gave way to .ecky source and a finite modeling vocabulary.',
-    },
-    {
-      date: 'April 2026',
-      title: 'Requirements became code',
-      body: 'Verify clauses added machine-checkable expectations alongside geometry.',
-    },
-    {
-      date: 'May 2026',
-      title: 'Native rendering expanded',
-      body: 'OCCT moved from implementation detail toward the primary kernel; the field guide documented the language.',
-    },
-    {
-      date: 'June 2026',
-      title: 'Agent loop gained boundaries',
-      body: 'Typed MCP tools, structured authoring errors, backend parity work, and a verify-before-commit rule narrowed failure modes.',
-    },
-    {
-      date: 'July 2026',
-      title: 'Public v0.0.1 surface',
-      body: 'Static landing, served field guide, native capability table, and real exported models. Still pre-release.',
+      title: 'Local app, ordinary files',
+      body: 'Use a configured Gemini, OpenAI-compatible, or local Ollama provider. Ecky keeps source and saved versions locally; .ecky files remain files you can inspect.',
     },
   ];
 </script>
@@ -74,7 +51,8 @@
       <span class="brand-name">Ecky&nbsp;CAD</span>
     </a>
     <div class="nav-links">
-      <a href={docsUrl}>Docs</a>
+      <a href="#models">Models</a>
+      <a href="#learn">Learn</a>
       <a href={repoUrl} target="_blank" rel="noreferrer">GitHub ↗</a>
     </div>
   </div>
@@ -83,41 +61,39 @@
 <header class="hero" id="case-study">
   <div class="hero-intro">
     <div class="hero-copy">
-      <span class="kicker">PROMPT-DRIVEN CAD · V0.0.1 PRE-RELEASE</span>
-      <h1 class="hero-title">Write Lisp you don't understand.</h1>
-      <p class="hero-lede">Gaslight an LLM until it produces something useful. Burn an irresponsible number of tokens making your dog a funny plastic hat. AI companies love this workflow.</p>
+      <span class="kicker">LOCAL DESKTOP AI-ASSISTED CAD · V0.0.1 PRE-RELEASE</span>
+      <h1 class="hero-title">Make parts with AI. Keep the model.</h1>
+      <p class="hero-invariant-line" aria-label={`make weird shit / ${heroInvariant}`}>
+        <span class="hero-invariant-prefix">make weird shit /</span>
+        <span class="hero-invariant-value" data-testid="hero-invariant" aria-hidden="true">{heroInvariant}</span>
+      </p>
+      <p class="hero-lede">Ecky is local desktop CAD for technical makers and developers. Describe a part; inspect or edit the readable <code>.ecky</code> source behind its CAD solid.</p>
       <p class="hero-summary">
-        v0.0.1 pre-release. Describe a part. Argue through the iterations. Keep inspectable <code>.ecky</code> source, native OCCT geometry, and every saved version.
+        The gallery uses real source and downloadable STLs, not mockups. Experimental pre-release: build from source and verify fit before manufacturing.
       </p>
       <div class="hero-cta">
-        <a class="btn btn-primary" href={repoUrl} target="_blank" rel="noreferrer">Source ↗</a>
-        <a class="btn" href={docsUrl}>Docs</a>
+        <a class="btn btn-primary" href={chaptersUrl}>Read the chapters</a>
+        <a class="btn" href="#models">Inspect working models</a>
       </div>
     </div>
-    <div class="hero-mascot" aria-hidden="true">
+    <div class="hero-mascot">
       <EckyMascot size={190} />
     </div>
   </div>
-  <CaseWorkbench />
-</header>
-
-<section class="section" id="animal-caps">
-  <div class="section-head">
-    <span class="kicker">MANIFEST-DRIVEN MESH + NATIVE BORE</span>
-    <h2>Animals with engineering problems.</h2>
-    <p class="section-sub">
-      Licensed source mesh. Uniform scale. Named blind Presta fit. Ecky owns the cut,
-      verification, and saved version; one manifest publishes the desktop and web subsets.
-    </p>
+  <div id="models">
+    <div class="models-head">
+      <span class="kicker">REAL MODELS · SOURCE + STL</span>
+      <p>Open the source, orbit the exported parts, and download the same artifacts.</p>
+    </div>
+    <ModelWorkbench />
   </div>
-  <AnimalCapWorkbench />
-</section>
+</header>
 
 <section class="section">
   <div class="section-head">
-    <span class="kicker">CURRENT SOURCE TREE</span>
-    <h2>Measured scope</h2>
-    <p class="section-sub">Counts come from the v0.0.1 capability table and configured adapters. They describe implemented paths, not model quality.</p>
+    <span class="kicker">WHAT MAKES THIS DIFFERENT</span>
+    <h2>Review the model. Then change it.</h2>
+    <p class="section-sub">A prompt starts the work. Source, solid, and checks stay available when it is time to inspect what actually happened.</p>
   </div>
   <div class="feature-grid">
     {#each facts as fact}
@@ -129,30 +105,15 @@
   </div>
 </section>
 
-<section class="section">
-  <div class="section-head">
-    <span class="kicker">REPOSITORY HISTORY</span>
-    <h2>From Python macros to a constrained CAD language</h2>
-    <p class="section-sub">The architecture emerged through working prototypes. Dates and transitions below follow repository history; no clean origin myth.</p>
-  </div>
-  <div class="feature-grid">
-    {#each history as item}
-      <article class="feature-card">
-        <span class="status">{item.date}</span>
-        <h3>{item.title}</h3>
-        <p>{item.body}</p>
-      </article>
-    {/each}
-  </div>
-</section>
-
-<section class="cta-section">
+<section class="cta-section" id="learn">
   <div class="cta-card">
-    <h2>Source first. Release later.</h2>
-    <p>v0.0.1 can render and version real parts, but no packaged app release exists yet. Inspect the source and verify dimensions before manufacturing.</p>
+    <span class="kicker">LEARN ECKY</span>
+    <h2>Learn Ecky through six practical chapters.</h2>
+    <p>The chapters move from a connected bracket through parameters, patterns, named fits, and a multipart mechanism. The function reference stays separate for exact forms and signatures.</p>
     <div class="cta-row">
-      <a class="btn btn-primary" href={repoUrl} target="_blank" rel="noreferrer">GitHub ↗</a>
-      <a class="btn" href={docsUrl}>Docs</a>
+      <a class="btn btn-primary" href={chaptersUrl}>Read the chapters</a>
+      <a class="btn" href={referenceUrl}>Function reference</a>
+      <a class="btn" href="/docs/ecky-ir-field-guide.epub" download>Download EPUB</a>
     </div>
   </div>
 </section>
@@ -160,7 +121,7 @@
 <footer class="footer">
   <div class="footer-inner">
     <span>Ecky CAD</span>
-    <span class="footer-dim">v0.0.1 · 54 operations · 3 backends</span>
+    <span class="footer-dim">v0.0.1 pre-release · local desktop CAD</span>
     <a href={repoUrl} target="_blank" rel="noreferrer">github.com/bobishh/ecky</a>
   </div>
 </footer>

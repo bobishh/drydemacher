@@ -1,5 +1,7 @@
 # External Model Import And Component Reuse
 
+> Updated 2026-08-02: Build123d source/runtime support is removed. Any Build123d-specific plan sections below remain historical migration context only.
+
 ## Status
 
 This is product/engineering doctrine for importing external CAD models, adding ports, and reusing them in component packages and assemblies.
@@ -8,9 +10,9 @@ Current implementation:
 
 - FreeCAD `.FCStd` import exists. It persists the source `.FCStd`, produces preview STL, STEP, model manifest, and part artifacts.
 - `.ecky` source can import STL via `(import-stl "...")` and SVG profile/path data via `(svg "...")` where the chosen backend supports it.
-- build123d is a supported source language/runtime path.
+- Legacy persisted Build123d identifiers are migration input only; they resolve to native Ecky authoring/runtime settings.
 - Exact topology handles exist for FreeCAD edge/face targets and Direct OCCT edge/face targets. Accepted component ports can preserve validated `targetIds` against accepted bundle edge/face targets.
-- Generic exact/runtime artifact bundles can now be wrapped into portable component package projects. Packaging prefers reusable source (`.ecky`, build123d `.py`, legacy Python) when the bundle exposes `macroPath`, falls back to STEP when needed, auto-derives full source param surface (`params`, `uiSpec`, `initialParams`) from reusable source when explicit package params are omitted, preserves explicit package-request `uiSpec` and `initialParams` for non-source-backed bundles, allows zero-port decorative/source-backed components, validates explicit port `targetIds` against runtime manifest/bundle topology before writing the package project, backfills empty param surfaces for installed legacy source-backed packages on resolve, merges stored `initialParams` with runtime overrides during installed component and assembly render, exposes cheap installed-component and installed-assembly controls resolve without rendering, and echoes merged values back from installed-component runtime responses.
+- Generic exact/runtime artifact bundles can now be wrapped into portable component package projects. Packaging prefers reusable `.ecky` or legacy Python source when the bundle exposes `macroPath`, falls back to STEP when needed, auto-derives full source param surface (`params`, `uiSpec`, `initialParams`) from reusable source when explicit package params are omitted, preserves explicit package-request `uiSpec` and `initialParams` for non-source-backed bundles, allows zero-port decorative/source-backed components, validates explicit port `targetIds` against runtime manifest/bundle topology before writing the package project, backfills empty param surfaces for installed legacy source-backed packages on resolve, merges stored `initialParams` with runtime overrides during installed component and assembly render, exposes cheap installed-component and installed-assembly controls resolve without rendering, and echoes merged values back from installed-component runtime responses.
 - Component package contracts exist: params, ports, custom port types, mate types, assembly recipes, operations, keepouts, fusion zones, package header, payload archive, local install, and package browser header listing.
 - Assembly/fuse/mold contracts exist, but the geometric solver, assembly editor, boolean execution path, and validation overlays are parked.
 

@@ -10,8 +10,17 @@
     parts,
     size = 360,
     interactive = true,
+    initialYaw = 0.12,
+    initialPitch = -0.08,
     label = 'A real model rendered by Ecky — drag to rotate',
-  }: { parts: Part[]; size?: number; interactive?: boolean; label?: string } = $props();
+  }: {
+    parts: Part[];
+    size?: number;
+    interactive?: boolean;
+    initialYaw?: number;
+    initialPitch?: number;
+    label?: string;
+  } = $props();
 
   let canvas = $state<HTMLCanvasElement | null>(null);
   let status = $state<'loading' | 'ready' | 'error'>('loading');
@@ -35,6 +44,8 @@
     status = 'loading';
     errorMessage = '';
     failedAsset = '';
+    rt.userYaw = initialYaw;
+    rt.userPitch = initialPitch;
 
     let active = true;
     renderScene = null;
@@ -175,7 +186,7 @@
   function moveDrag(e: PointerEvent) {
     if (!interactive || dragPointerId !== e.pointerId) return;
     rt.userYaw = clamp(rt.userYaw + (e.clientX - dragLastX) * 0.01, -2.4, 2.4);
-    rt.userPitch = clamp(rt.userPitch + (e.clientY - dragLastY) * 0.008, -1.0, 1.0);
+    rt.userPitch = clamp(rt.userPitch + (e.clientY - dragLastY) * 0.008, -2.6, 2.6);
     dragLastX = e.clientX;
     dragLastY = e.clientY;
     renderScene?.();

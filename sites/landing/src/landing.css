@@ -13,10 +13,10 @@
   --bg-400: #34345e;
   --text: #e0e0e0;
   --text-dim: #a3a3ad;
-  --primary: #72b982;
-  --primary-dim: #2c5f3c;
-  --secondary: #c8a620;
-  --secondary-dim: #8a7215;
+  --primary: #c8924f;
+  --primary-dim: #6d4b29;
+  --secondary: #e1b766;
+  --secondary-dim: #8a682f;
   --red: #ff6b6b;
   --green: #6bff8a;
 
@@ -32,6 +32,11 @@
 
 html {
   scroll-behavior: smooth;
+}
+
+#models,
+#learn {
+  scroll-margin-top: 5rem;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -50,8 +55,8 @@ body {
   font-size: 16px;
   line-height: 1.7;
   background-image:
-    linear-gradient(rgba(74, 140, 92, 0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(74, 140, 92, 0.04) 1px, transparent 1px);
+    linear-gradient(rgba(200, 146, 79, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(200, 146, 79, 0.035) 1px, transparent 1px);
   background-size: 24px 24px;
   -webkit-font-smoothing: antialiased;
 }
@@ -76,6 +81,7 @@ code {
   background: rgba(26, 26, 46, 0.85);
   backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--border);
+  overflow: hidden;
 }
 
 .nav-inner {
@@ -87,6 +93,7 @@ code {
   align-items: center;
   gap: 1rem;
   padding: 1rem clamp(1.1rem, 5vw, 4rem);
+  overflow: hidden;
 }
 
 .brand {
@@ -152,6 +159,7 @@ code {
   margin: 0 auto;
   padding-left: clamp(1.1rem, 5vw, 4rem);
   padding-right: clamp(1.1rem, 5vw, 4rem);
+  overflow: hidden;
 }
 
 .section {
@@ -213,7 +221,7 @@ code {
 .hero-mascot {
   display: flex;
   justify-content: center;
-  filter: drop-shadow(0 0 40px rgba(74, 140, 92, 0.25));
+  filter: drop-shadow(0 0 40px rgba(200, 146, 79, 0.24));
 }
 
 .stamp {
@@ -228,7 +236,7 @@ code {
 
 .hero-title {
   font-family: var(--font-display);
-  font-size: clamp(2.7rem, 6.5vw, 5rem);
+  font-size: clamp(2.9rem, 7.2vw, 5.8rem);
   font-weight: 700;
   letter-spacing: -0.04em;
   line-height: 0.98;
@@ -237,6 +245,32 @@ code {
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
+}
+
+.hero-invariant-line {
+  margin: 8px 0 14px;
+  min-width: 0;
+  min-height: 1.35em;
+  display: flex;
+  align-items: baseline;
+  gap: 0.55ch;
+  overflow: hidden;
+  color: var(--text-dim);
+  font: 700 clamp(0.78rem, 1.3vw, 0.94rem) var(--font-mono);
+  letter-spacing: 0.035em;
+  text-transform: lowercase;
+}
+
+.hero-invariant-prefix {
+  flex: 0 0 auto;
+  color: var(--secondary);
+}
+
+.hero-invariant-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .hero-lede {
@@ -262,6 +296,19 @@ code {
   flex-wrap: wrap;
 }
 
+.models-head {
+  max-width: 720px;
+  margin: 0 0 1rem;
+  overflow: hidden;
+}
+
+.models-head .kicker { margin-bottom: 0.2rem; }
+
+.models-head p {
+  color: var(--text-dim);
+  font-size: 0.92rem;
+}
+
 /* ---------- Buttons ---------- */
 .btn {
   display: inline-block;
@@ -282,12 +329,12 @@ code {
 
 .btn-primary {
   border-color: var(--primary);
-  background: rgba(74, 140, 92, 0.16);
+  background: rgba(200, 146, 79, 0.16);
   color: var(--primary);
 }
 
 .btn-primary:hover {
-  background: rgba(74, 140, 92, 0.28);
+  background: rgba(200, 146, 79, 0.28);
   border-color: var(--primary);
 }
 
@@ -363,6 +410,7 @@ code {
   padding: 1.6rem;
   border: 1px solid var(--border);
   background: var(--bg-100);
+  overflow: hidden;
 }
 
 .feature-card h3 {
@@ -416,8 +464,9 @@ code {
   padding: 3rem 2rem;
   border: 1px solid var(--border-bright);
   background:
-    radial-gradient(circle at 50% 0%, rgba(74, 140, 92, 0.12), transparent 70%),
+    radial-gradient(circle at 50% 0%, rgba(200, 146, 79, 0.12), transparent 70%),
     var(--bg-100);
+  overflow: hidden;
 }
 
 .cta-card h2 {
@@ -473,6 +522,7 @@ code {
 /* ---------- Footer ---------- */
 .footer {
   border-top: 1px solid var(--border);
+  overflow: hidden;
 }
 
 .footer-inner {
@@ -487,6 +537,7 @@ code {
   padding: 2rem clamp(1.1rem, 5vw, 4rem);
   font-size: 0.78rem;
   color: var(--text-dim);
+  overflow: hidden;
 }
 
 .footer-inner a {
@@ -512,15 +563,16 @@ code {
     padding-top: 2.7rem;
   }
   .hero-intro {
-    display: block;
+    display: flex;
+    flex-direction: column;
     margin-bottom: 2.4rem;
   }
   .hero-mascot {
-    position: absolute;
-    top: -24px;
-    right: -54px;
-    opacity: 0.14;
-    pointer-events: none;
+    position: static;
+    align-self: center;
+    margin-top: 1rem;
+    opacity: 1;
+    pointer-events: auto;
   }
   .hero-title {
     max-width: 330px;

@@ -393,6 +393,7 @@
     rt.userPitch = clamp(rt.userPitch + dy * 0.009, -0.62, 0.62);
     dragLastX = event.clientX;
     dragLastY = event.clientY;
+    renderReducedMotion?.();
   }
 
   function endDrag(event: PointerEvent) {

@@ -1,0 +1,325 @@
+(model
+  (params
+    (number razor-overall-length 101 :label "Assembled razor overall length" :min 96 :max 108 :step 0.5)
+    (number handle-length 95 :label "Handle length" :min 90 :max 102 :step 0.5)
+    (number handle-diameter 14 :label "Measured max handle diameter" :min 12 :max 16 :step 0.1)
+    (number snap-clearance 0.4 :label "Snap clip radial clearance" :min 0.2 :max 0.8 :step 0.05)
+    (number head-width 44 :label "Assembled head width" :min 42 :max 47 :step 0.5)
+    (number head-depth 28 :label "Assembled head depth" :min 24 :max 32 :step 0.5)
+    (number head-thickness 8.35 :label "Assembled head thickness" :min 7 :max 10 :step 0.05)
+    (number blade-count 5 :label "Wrapped blade count" :min 1 :max 8 :step 1)
+    (number fit-clearance 0.35 :label "PETG dovetail clearance" :min 0.2 :max 0.6 :step 0.05)
+    (number blade-cover-detent 0.2 :label "Blade cover detent engagement" :min 0.1 :max 0.3 :step 0.05))
+  (verify
+    (tag preview-exists)
+    (metric preview (manifest has-preview-stl))
+    (expect preview (= true)))
+  (verify
+    (tag printable-mesh)
+    (metric bad-edges (stl non-manifold-edge-count))
+    (expect bad-edges (= 0)))
+  (verify
+    (tag three-printable-parts)
+    (metric components (stl connected-component-count))
+    (expect components (= 3)))
+  (part airy-shell-snap-base
+    (let* (
+      (shell-length (+ razor-overall-length 14))
+      (shell-width (+ head-width 28))
+      (shell-wall 3)
+      (shell-floor 1.8)
+      (shell-corner-radius 6)
+      (case-edge-chamfer 0.8)
+      (inner-length (- shell-length (* shell-wall 2)))
+      (inner-width (- shell-width (* shell-wall 2)))
+      (clip-wall 1.6)
+      (clip-width 3.2)
+      (clip-overlap 0.15)
+      (clip-cutter-overshoot 0.25)
+      (clip-inner-radius (+ (/ handle-diameter 2) snap-clearance))
+      (clip-outer-radius (+ clip-inner-radius clip-wall))
+      (clip-opening-ratio 0.76)
+      (clip-opening-width
+        (* (* clip-inner-radius 2) clip-opening-ratio))
+      (handle-axis-y -14)
+      (handle-axis-z
+        (+ shell-floor clip-outer-radius (- clip-overlap)))
+      (shell-top-clearance 0.9)
+      (shell-height
+        (+ handle-axis-z clip-outer-radius shell-top-clearance))
+      (case-end-margin (/ (- shell-length razor-overall-length) 2))
+      (razor-front-x (- (/ shell-length 2) case-end-margin))
+      (head-center-x (- razor-front-x (/ head-depth 2)))
+      (head-center-y handle-axis-y)
+      (clip-pitch (/ handle-length 3))
+      (clip-start-x (- head-center-x (* clip-pitch 2)))
+      (floor-union-overlap 0.08)
+      (clip-base-length 8)
+      (clip-base-width (+ (* clip-outer-radius 2) 4))
+      (clip-base-height 3)
+      (clip-base-radius 2)
+      (clip-base-local-z (- 0 clip-outer-radius clip-overlap))
+      (clip-bore-cutter-length
+        (+ clip-base-length (* clip-cutter-overshoot 2)))
+      (clip-bore-cutter-start
+        (- (/ clip-width 2) (/ clip-bore-cutter-length 2)))
+      (wrapped-blade-length 45)
+      (wrapped-blade-width 24)
+      (wrapped-blade-thickness 0.7)
+      (blade-stack-height (+ (* blade-count wrapped-blade-thickness) 0.5))
+      (blade-box-wall 1.6)
+      (blade-box-bottom 1.2)
+      (blade-cover-thickness 1.2)
+      (blade-box-clearance 0.8)
+      (blade-pocket-length (+ wrapped-blade-length blade-box-clearance))
+      (blade-pocket-width (+ wrapped-blade-width blade-box-clearance))
+      (blade-box-length (+ blade-pocket-length (* blade-box-wall 2)))
+      (blade-box-width (+ blade-pocket-width (* blade-box-wall 2)))
+      (blade-box-extra-depth 3.5)
+      (blade-box-height
+        (+ blade-box-bottom blade-stack-height blade-cover-thickness
+           blade-box-extra-depth))
+      (blade-box-center-x -18)
+      (blade-box-center-y 18)
+      (blade-box-z (- shell-floor floor-union-overlap))
+      (blade-box-top (+ blade-box-z blade-box-height))
+      (blade-seat-margin 0.8)
+      (blade-seat-length (- blade-box-length (* blade-seat-margin 2)))
+      (blade-seat-width (- blade-box-width (* blade-seat-margin 2)))
+      (blade-seat-floor (- blade-box-top blade-cover-thickness))
+      (blade-thumb-radius 3.5)
+      (small-cover-clearance (/ fit-clearance 2))
+      (blade-cover-width (- blade-seat-width (* small-cover-clearance 2)))
+      (blade-detent-radius 0.55)
+      (blade-detent-pocket-clearance 0.1)
+      (blade-detent-side-offset
+        (+ (/ blade-cover-width 2)
+           blade-detent-radius
+           (- blade-cover-detent)))
+      (blade-detent-side-pitch (* blade-detent-side-offset 2))
+      (blade-detent-z (+ blade-seat-floor 0.4))
+      (rail-root-width 3)
+      (rail-head-width 5)
+      (rail-height 2)
+      (rail-center-offset (- (/ shell-width 2) 4))
+      (rail-pitch (* rail-center-offset 2))
+      (rear-stop-length 3)
+      (groove-root-width (+ rail-root-width (* fit-clearance 2)))
+      (groove-head-width (+ rail-head-width (* fit-clearance 2)))
+      (groove-vertical-overshoot 0.2)
+      (groove-height
+        (+ rail-height fit-clearance groove-vertical-overshoot))
+      (groove-start-x (+ (- 0 (/ shell-length 2)) rear-stop-length))
+      (groove-length (+ (- shell-length rear-stop-length) 2))
+      (groove-z (- shell-height rail-height fit-clearance))
+      (rail-rim-width 7)
+      (rail-rim-height (+ rail-height 1.2))
+      (rail-rim-inner-length (- shell-length (* rail-rim-width 2)))
+      (rail-rim-inner-width (- shell-width (* rail-rim-width 2)))
+      (rail-rim-inner-radius 1)
+      (rail-rim-z (- shell-height rail-rim-height)))
+      (build
+        (shape shell-outer
+          (chamfer case-edge-chamfer :edges "bottom"
+            (extrude
+              (rounded-rect shell-length shell-width shell-corner-radius)
+              shell-height)))
+        (shape shell-cavity
+          (translate 0 0 shell-floor
+            (extrude
+              (rounded-rect inner-length inner-width
+                            (- shell-corner-radius shell-wall))
+              (+ (- shell-height shell-floor) 1))))
+        (shape shell-hollow
+          (difference shell-outer shell-cavity))
+        (shape rail-rim-outer
+          (chamfer case-edge-chamfer :edges "top"
+            (translate 0 0 rail-rim-z
+              (extrude
+                (rounded-rect shell-length shell-width shell-corner-radius)
+                rail-rim-height))))
+        (shape rail-rim-hole
+          (translate 0 0 (- rail-rim-z 0.1)
+            (extrude
+              (rounded-rect rail-rim-inner-length
+                            rail-rim-inner-width
+                            rail-rim-inner-radius)
+              (+ rail-rim-height 0.2))))
+        (shape reinforced-rail-rim
+          (difference rail-rim-outer rail-rim-hole))
+        (shape groove-unit
+          (rotate 0 90 0
+            (extrude
+              (polygon
+                (list
+                  (list 0 (- 0 (/ groove-head-width 2)))
+                  (list 0 (/ groove-head-width 2))
+                  (list (- groove-height) (/ groove-root-width 2))
+                  (list (- groove-height) (- 0 (/ groove-root-width 2)))))
+              groove-length)))
+        (shape female-dovetail-grooves
+          (translate groove-start-x
+                     (- 0 rail-center-offset)
+                     groove-z
+            (linear-array 2 0 rail-pitch 0 groove-unit)))
+        (shape airy-shell
+          (difference
+            (union shell-hollow reinforced-rail-rim)
+            female-dovetail-grooves))
+        (shape clip-outer
+          (rotate 0 90 0
+            (cylinder clip-outer-radius clip-width 64)))
+        (shape clip-inner
+          (translate clip-bore-cutter-start 0 0
+            (rotate 0 90 0
+              (cylinder clip-inner-radius
+                        clip-bore-cutter-length
+                        64))))
+        (shape clip-opening
+          (translate (/ clip-width 2) 0 0
+            (box (+ clip-width (* clip-cutter-overshoot 2))
+                 clip-opening-width
+                 (+ clip-outer-radius 2)
+                 :align (quote (center center min)))))
+        (shape clip-base-blank
+          (translate (/ clip-width 2) 0 clip-base-local-z
+            (box clip-base-length
+                 clip-base-width
+                 clip-base-height
+                 :align (quote (center center min)))))
+        (shape clip-unit
+          (difference
+            (union clip-outer clip-base-blank)
+            (union clip-inner clip-opening)))
+        (shape snap-clips
+          (translate clip-start-x handle-axis-y handle-axis-z
+            (linear-array 2 clip-pitch 0 0 clip-unit)))
+        (shape blade-box-outer
+          (translate blade-box-center-x blade-box-center-y blade-box-z
+            (extrude
+              (rounded-rect blade-box-length blade-box-width 2)
+              blade-box-height)))
+        (shape blade-box-cavity
+          (translate blade-box-center-x
+                     blade-box-center-y
+                     (+ blade-box-z blade-box-bottom)
+            (extrude
+              (rounded-rect blade-pocket-length blade-pocket-width 1.2)
+              (+ (- blade-box-height blade-box-bottom) 1))))
+        (shape blade-cover-seat
+          (translate blade-box-center-x blade-box-center-y blade-seat-floor
+            (extrude
+              (rounded-rect blade-seat-length blade-seat-width 1.5)
+              (+ blade-cover-thickness 1))))
+        (shape blade-thumb-scoop
+          (translate (+ blade-box-center-x (/ blade-box-length 2))
+                     blade-box-center-y
+                     (+ blade-box-z blade-box-bottom)
+            (cylinder blade-thumb-radius
+                      (+ (- blade-box-height blade-box-bottom) 1)
+                      48)))
+        (shape blade-box
+          (difference blade-box-outer
+            (union blade-box-cavity blade-cover-seat blade-thumb-scoop)))
+        (shape blade-detent-unit
+          (sphere blade-detent-radius))
+        (shape blade-cover-detents
+          (translate blade-box-center-x
+                     (- blade-box-center-y blade-detent-side-offset)
+                     blade-detent-z
+            (linear-array 2 0 blade-detent-side-pitch 0
+              blade-detent-unit)))
+        (shape retained-blade-box
+          (union blade-box blade-cover-detents))
+        (result
+          (union airy-shell
+                 snap-clips
+                 retained-blade-box)))))
+  (part flat-large-dovetail-lid
+    (let* (
+      (shell-length (+ razor-overall-length 14))
+      (shell-width (+ head-width 28))
+      (lid-thickness 2.2)
+      (lid-corner-radius 6)
+      (lid-edge-chamfer 0.7)
+      (layout-y 90)
+      (rail-overlap 0.1)
+      (rail-root-width 3)
+      (rail-head-width 5)
+      (rail-height 2)
+      (rail-center-offset (- (/ shell-width 2) 4))
+      (rail-pitch (* rail-center-offset 2))
+      (rail-end-margin 3)
+      (rail-length (- shell-length (* rail-end-margin 2)))
+      (rail-start-x (- 0 (/ rail-length 2))))
+      (build
+        (shape lid-plate
+          (chamfer lid-edge-chamfer :edges "bottom"
+            (translate 0 layout-y 0
+              (extrude
+                (rounded-rect shell-length shell-width lid-corner-radius)
+                lid-thickness))))
+        (shape rail-unit
+          (rotate 0 90 0
+            (extrude
+              (polygon
+                (list
+                  (list 0 (- 0 (/ rail-root-width 2)))
+                  (list 0 (/ rail-root-width 2))
+                  (list (- rail-height) (/ rail-head-width 2))
+                  (list (- rail-height) (- 0 (/ rail-head-width 2)))))
+              rail-length)))
+        (shape male-dovetail-rails
+          (translate rail-start-x
+                     (+ layout-y (- 0 rail-center-offset))
+                     (- lid-thickness rail-overlap)
+            (linear-array 2 0 rail-pitch 0 rail-unit)))
+        (result
+          (union lid-plate
+                 male-dovetail-rails)))))
+(part blade-box-cover
+    (let* (
+      (wrapped-blade-length 45)
+      (wrapped-blade-width 24)
+      (blade-box-clearance 0.8)
+      (blade-pocket-length (+ wrapped-blade-length blade-box-clearance))
+      (blade-pocket-width (+ wrapped-blade-width blade-box-clearance))
+      (blade-box-wall 1.6)
+      (blade-box-length (+ blade-pocket-length (* blade-box-wall 2)))
+      (blade-box-width (+ blade-pocket-width (* blade-box-wall 2)))
+      (blade-seat-margin 0.8)
+      (blade-seat-length (- blade-box-length (* blade-seat-margin 2)))
+      (blade-seat-width (- blade-box-width (* blade-seat-margin 2)))
+      (small-cover-clearance (/ fit-clearance 2))
+      (cover-length (- blade-seat-length (* small-cover-clearance 2)))
+      (cover-width (- blade-seat-width (* small-cover-clearance 2)))
+      (cover-thickness 1.2)
+      (blade-detent-radius 0.55)
+      (blade-detent-pocket-clearance 0.1)
+      (blade-detent-pocket-radius
+        (+ blade-detent-radius blade-detent-pocket-clearance))
+      (blade-detent-side-offset
+        (+ (/ cover-width 2)
+           blade-detent-radius
+           (- blade-cover-detent)))
+      (blade-detent-side-pitch (* blade-detent-side-offset 2))
+      (blade-detent-pocket-z 0.4)
+      (layout-x 30)
+      (layout-y -52))
+      (build
+        (shape cover-blank
+          (translate layout-x layout-y 0
+            (extrude
+              (rounded-rect cover-length cover-width 1.4)
+              cover-thickness)))
+        (shape cover-detent-pocket-unit
+          (sphere blade-detent-pocket-radius))
+        (shape cover-detent-pockets
+          (translate layout-x
+                     (+ layout-y (- blade-detent-side-offset))
+                     blade-detent-pocket-z
+            (linear-array 2 0 blade-detent-side-pitch 0
+              cover-detent-pocket-unit)))
+        (result
+          (difference cover-blank cover-detent-pockets)))))
+  (meta :title "King C. Gillette assembled snap shell case"))
