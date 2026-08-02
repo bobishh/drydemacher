@@ -1,0 +1,320 @@
+(model
+  (params
+    (number airtag-radial-clearance 0.35mm
+      :label "AirTag radial clearance"
+      :min 0.2mm :max 0.8mm :step 0.05mm :unit length)
+    (number airtag-height-clearance 0.4mm
+      :label "AirTag height clearance"
+      :min 0.2mm :max 1mm :step 0.05mm :unit length)
+    (number shell-wall 2mm
+      :label "Capsule wall"
+      :min 1.8mm :max 3mm :step 0.1mm :unit length)
+    (number bottom-thickness 1.8mm
+      :label "Back thickness"
+      :min 1.6mm :max 2.8mm :step 0.1mm :unit length)
+    (number petal-radius 6.2mm
+      :label "Petal radius"
+      :min 5mm :max 7.5mm :step 0.1mm :unit length)
+    (number petal-plate-thickness 2.8mm
+      :label "Petal base thickness"
+      :min 2.4mm :max 3.6mm :step 0.1mm :unit length)
+    (number center-decoration-width 24mm
+      :label "Ladybug width"
+      :min 18mm :max 28mm :step 0.5mm :unit length)
+    (number center-decoration-embed 0.9mm
+      :label "Ladybug dome embed"
+      :min 0.6mm :max 1.4mm :step 0.1mm :unit length)
+    (number strap-length 150mm
+      :label "TPU strap length"
+      :min 130mm :max 180mm :step 2mm :unit length)
+    (number strap-width 10mm
+      :label "TPU strap width"
+      :min 8mm :max 12mm :step 0.5mm :unit length)
+    (number strap-thickness 1.4mm
+      :label "TPU strap thickness"
+      :min 1.1mm :max 2mm :step 0.1mm :unit length)
+    (number strap-clearance 0.4mm
+      :label "Strap slot clearance"
+      :min 0.25mm :max 0.8mm :step 0.05mm :unit length)
+    (number snap-head-overhang 0.35mm
+      :label "Breakaway snap overhang"
+      :min 0.2mm :max 0.6mm :step 0.05mm :unit length)
+    (number thread-pitch 2mm
+      :label "Thread pitch"
+      :min 1.6mm :max 2.5mm :step 0.1mm :unit length)
+    (number thread-depth 0.8mm
+      :label "Thread depth"
+      :min 0.6mm :max 1mm :step 0.05mm :unit length)
+    (number thread-engagement 4mm
+      :label "Thread engagement"
+      :min 3.5mm :max 5mm :step 0.25mm :unit length)
+    (number thread-clearance 0.3mm
+      :label "Thread clearance"
+      :min 0.2mm :max 0.5mm :step 0.05mm :unit length)
+    :relations
+      ((> shell-wall thread-depth)
+       (> thread-engagement thread-pitch)
+       (> strap-width 7.5mm)
+       (> strap-thickness 1mm)
+       (> petal-plate-thickness strap-thickness)))
+
+  (verify
+    (tag preview_exists)
+    (metric preview (manifest has-preview-stl))
+    (expect preview (= true)))
+  (verify
+    (tag capsule_lid_and_strap)
+    (metric parts (manifest part-count))
+    (expect parts (= 3)))
+  (verify
+    (tag watertight_parts)
+    (metric bad_edges (stl non-manifold-edge-count))
+    (expect bad_edges (= 0)))
+
+  (part daughter-flower-body
+    (let*
+      ((airtag-d 31.9mm)
+       (airtag-h 8mm)
+       (airtag-cavity-r (+ (/ airtag-d 2) airtag-radial-clearance))
+       (airtag-cavity-h (+ airtag-h airtag-height-clearance))
+       (thread-r (+ airtag-cavity-r 1.1mm))
+       (thread-outer-r (+ thread-r thread-depth))
+       (center-body-r (+ thread-outer-r shell-wall))
+       (thread-start-z
+         (+ bottom-thickness (- airtag-cavity-h thread-engagement) 0.2mm))
+       (body-seat-z (+ bottom-thickness airtag-cavity-h 0.6mm))
+       (petal-center-r (+ center-body-r 1.2mm))
+       (petal-radial-scale 1.9)
+       (petal-tangent-scale 1.05)
+       (petal-outer-z (+ petal-plate-thickness 0.9mm))
+       (petal-inner-z 8.5mm)
+       (petal-inner-offset (- (* petal-radius 1.2)))
+       (petal-fit-keepout-r (+ thread-outer-r 0.6mm))
+       (strap-slot-length (+ strap-width strap-clearance))
+       (strap-slot-width (+ strap-thickness strap-clearance))
+       (slot-wall 2.2mm)
+       (strap-wing-radial-width (+ strap-slot-width (* slot-wall 2)))
+       (strap-wing-tangent-length (+ strap-slot-length (* slot-wall 2)))
+       (strap-slot-x (+ center-body-r 2.9mm))
+       (thread-bore-r (+ thread-r thread-clearance))
+       (thread-cutter-start-z (- thread-start-z 0.3mm))
+       (thread-cutter-height (+ thread-engagement 0.6mm))
+       (airtag-cutter-height (+ airtag-cavity-h 0.6mm))
+       (slot-cutter-start-z -0.3mm)
+       (slot-cutter-height 11.5mm))
+
+      (build
+        (shape center-body
+          (cone
+            center-body-r
+            (+ thread-outer-r 1mm)
+            body-seat-z
+            128))
+
+        (shape petal-seed
+          (scale petal-radial-scale petal-tangent-scale 1
+            (cylinder petal-radius petal-plate-thickness 72)))
+
+        (shape petal-bases
+          (radial-array 10 36deg petal-center-r petal-seed))
+
+        (shape petal-outer-lobe
+          (translate 0 0 petal-outer-z
+            (scale 1.9 1.05 0.38
+              (sphere petal-radius))))
+
+        (shape petal-inner-lobe
+          (translate petal-inner-offset 0 petal-inner-z
+            (scale 1.0 0.9 0.48
+              (sphere petal-radius))))
+
+        (shape petal-crown-seed
+          (hull petal-outer-lobe petal-inner-lobe))
+
+        (shape petal-crowns
+          (radial-array 10 36deg petal-center-r petal-crown-seed))
+
+        (shape petal-fit-keepout
+          (translate 0 0 -0.2mm
+            (cylinder
+              petal-fit-keepout-r
+              (+ body-seat-z 1.5mm)
+              128)))
+
+        (shape petal-crowns-clear
+          (difference petal-crowns petal-fit-keepout))
+
+        (shape strap-wings
+          (repeat-union i 2
+            (translate
+              (* (- (* i 2) 1) strap-slot-x)
+              0
+              0
+              (extrude
+                (rounded-rect
+                  strap-wing-radial-width
+                  strap-wing-tangent-length
+                  (/ strap-wing-radial-width 2))
+                petal-plate-thickness))))
+
+        (shape flower-positive
+          (union
+            center-body
+            petal-bases
+            petal-crowns-clear
+            strap-wings))
+
+        (shape airtag-cavity
+          (translate 0 0 bottom-thickness
+            (cylinder airtag-cavity-r airtag-cutter-height 128)))
+
+        (shape female-thread-cutter
+          (translate 0 0 thread-cutter-start-z
+            (thread
+              :radius thread-r
+              :pitch thread-pitch
+              :length thread-cutter-height
+              :depth thread-depth
+              :female #t
+              :clearance thread-clearance)))
+
+        (shape thread-bore
+          (translate 0 0 thread-cutter-start-z
+            (cylinder thread-bore-r thread-cutter-height 128)))
+
+        (shape strap-slots
+          (repeat-union i 2
+            (translate
+              (* (- (* i 2) 1) strap-slot-x)
+              0
+              slot-cutter-start-z
+              (rotate 0 0 90deg
+                (extrude
+                  (slot-overall strap-slot-length strap-slot-width)
+                  slot-cutter-height)))))
+
+        (shape body-cavity-open
+          (difference flower-positive airtag-cavity))
+
+        (shape body-threaded
+          (difference body-cavity-open female-thread-cutter))
+
+        (shape body-bore-open
+          (difference body-threaded thread-bore))
+
+        (result
+          (difference body-bore-open strap-slots)))))
+
+  (part daughter-flower-center-lid
+    (let*
+      ((airtag-d 31.9mm)
+       (airtag-cavity-r (+ (/ airtag-d 2) airtag-radial-clearance))
+       (airtag-cavity-h (+ 8mm airtag-height-clearance))
+       (thread-r (+ airtag-cavity-r 1.1mm))
+       (thread-outer-r (+ thread-r thread-depth))
+       (thread-start-z
+         (+ bottom-thickness (- airtag-cavity-h thread-engagement) 0.2mm))
+       (body-seat-z (+ bottom-thickness airtag-cavity-h 0.6mm))
+       (male-thread-start-z (+ thread-start-z 0.25mm))
+       (male-thread-length (- thread-engagement 0.15mm))
+       (lid-outer-r (+ thread-outer-r 1.25mm))
+       (lid-seat-height 1.3mm)
+       (dome-height 4.4mm)
+       (dome-center-z (+ body-seat-z 0.8mm))
+       (dome-z-scale (/ dome-height lid-outer-r))
+       (ladybug-native-width 46.606mm)
+       (ladybug-native-center-x 12mm)
+       (ladybug-native-center-y 4mm)
+       (ladybug-scale (/ center-decoration-width ladybug-native-width))
+       (ladybug-seat-z
+         (- (+ dome-center-z dome-height) center-decoration-embed)))
+
+      (build
+        (shape male-thread
+          (translate 0 0 male-thread-start-z
+            (thread
+              :radius thread-r
+              :pitch thread-pitch
+              :length male-thread-length
+              :depth thread-depth)))
+
+        (shape lid-seat
+          (translate 0 0 body-seat-z
+            (cylinder lid-outer-r lid-seat-height 128)))
+
+        (shape dome-ellipsoid
+          (translate 0 0 dome-center-z
+            (scale 1 1 dome-z-scale
+              (sphere lid-outer-r))))
+
+        (shape dome-upper-clip
+          (translate 0 0 dome-center-z
+            (cylinder (+ lid-outer-r 0.2mm) (+ dome-height 0.2mm) 128)))
+
+        (shape flower-center-dome
+          (intersection dome-ellipsoid dome-upper-clip))
+
+        (shape ladybug-decoration
+          (translate 0 0 ladybug-seat-z
+            (scale ladybug-scale ladybug-scale ladybug-scale
+              (translate
+                (- ladybug-native-center-x)
+                (- ladybug-native-center-y)
+                0
+                (solidify
+                  (import-stl
+                    "assets/reference-meshes/ladybug-cc0.stl"))))))
+
+        (result
+          (union
+            male-thread
+            lid-seat
+            flower-center-dome
+            ladybug-decoration)))))
+
+  (part daughter-tpu-breakaway-strap
+    (let*
+      ((strap-layout-z (- strap-thickness))
+       (adjustment-hole-count 6)
+       (adjustment-hole-pitch 8mm)
+       (adjustment-hole-start-x 26mm)
+       (adjustment-hole-d 3.8mm)
+       (adjustment-hole-r (/ adjustment-hole-d 2))
+       (snap-neck-r 1.45mm)
+       (snap-neck-height 1.8mm)
+       (snap-head-r (+ adjustment-hole-r snap-head-overhang))
+       (snap-head-height 1.2mm)
+       (snap-tip-r 0.8mm)
+       (snap-x (+ (- (/ strap-length 2)) 15mm))
+       (hole-cutter-start-z (- 0mm strap-thickness 0.3mm))
+       (hole-cutter-height (+ strap-thickness 0.6mm)))
+
+      (build
+        (shape strap-blank
+          (translate 0 0 strap-layout-z
+            (extrude
+              (rounded-rect strap-length strap-width (/ strap-width 2))
+              strap-thickness)))
+
+        (shape adjustment-holes
+          (repeat-union i adjustment-hole-count
+            (translate
+              (+ adjustment-hole-start-x (* i adjustment-hole-pitch))
+              0
+              hole-cutter-start-z
+              (cylinder adjustment-hole-r hole-cutter-height 64))))
+
+        (shape strap-with-holes
+          (difference strap-blank adjustment-holes))
+
+        (shape snap-neck
+          (translate snap-x 0 0
+            (cylinder snap-neck-r snap-neck-height 64)))
+
+        (shape snap-head
+          (translate snap-x 0 (- snap-neck-height 0.2mm)
+            (cone snap-head-r snap-tip-r snap-head-height 64)))
+
+        (result
+          (union strap-with-holes snap-neck snap-head)))))
+)

@@ -195,11 +195,18 @@ struct Part {
 struct PartialBooleanGroupPlan {
     std::string part_key;
     std::uint64_t parent_output = 0;
+    std::string key;
     std::string operation;
     std::vector<std::uint32_t> input_indices;
     std::uint32_t ordinal = 0;
     std::uint32_t version = 0;
 };
+
+enum class ParallelPolicy { OuterOnly, Adaptive };
+
+const char* parallel_policy_name(ParallelPolicy policy) {
+    return policy == ParallelPolicy::Adaptive ? "adaptive" : "outer-only";
+}
 
 struct Plan {
     std::uint32_t schema_version = 0;
@@ -284,6 +291,13 @@ struct CommandTimingEvidence {
     std::string op;
     std::uint64_t elapsed_ms = 0;
 };
+struct PartialBooleanGroupEvidence {
+    std::string part_id;
+    std::uint64_t parent_output = 0;
+    std::string key;
+    bool cache_hit = false;
+    std::uint32_t recompute_count = 0;
+};
 struct PartMeshEvidence {
     std::string identity;
     std::uint64_t facet_count = 0;
@@ -307,10 +321,17 @@ struct ExecutionContext {
     std::uint32_t mesh_launcher_budget = 1;
     std::uint32_t peak_dag_concurrency = 0;
     std::uint32_t active_dag_nodes = 0;
+    ParallelPolicy parallel_policy = ParallelPolicy::Adaptive;
+    std::uint32_t nested_kernel_units_in_use = 0;
+    std::uint32_t serial_boolean_count = 0;
+    std::uint32_t parallel_boolean_count = 0;
+    std::uint32_t max_nested_kernel_lease = 0;
+    std::uint32_t peak_total_allocated_cpu_units = 0;
     std::map<std::string, std::uint32_t> part_executed_commands;
     std::map<std::string, bool> part_cache_hits;
     std::vector<CommandCacheEvidence> command_cache_evidence;
     std::vector<CommandTimingEvidence> command_timing_evidence;
+    std::vector<PartialBooleanGroupEvidence> partial_boolean_group_evidence;
     std::map<std::string, std::vector<std::string>> part_executed_command_ids;
     std::map<std::string, PartMeshEvidence> part_mesh_evidence;
     std::uint32_t mesh_build_count = 0;
@@ -340,13 +361,72 @@ struct ExecutionContext {
     }
 };
 
-// The outer scheduler and OCCT's Boolean pool share one process CPU budget.
-// Parallelize inside OCCT only for a singleton DAG batch; otherwise each ready
-// node owns its outer worker and nested pools would oversubscribe the host.
-bool boolean_runs_parallel(const ExecutionContext& context) {
-    std::lock_guard<std::mutex> lock(context.mutex);
-    return context.active_dag_nodes <= 1;
-}
+class BooleanParallelLease {
+public:
+    explicit BooleanParallelLease(ExecutionContext& context) : context_(context) {
+        {
+            std::lock_guard<std::mutex> lock(context_.mutex);
+            const std::uint32_t outer = std::max(1u, context_.active_dag_nodes);
+            const std::uint32_t available = context_.worker_budget >
+                    outer + context_.nested_kernel_units_in_use
+                ? context_.worker_budget - outer - context_.nested_kernel_units_in_use
+                : 0;
+            const std::uint32_t fair_share = outer > 0
+                ? (context_.worker_budget - std::min(context_.worker_budget, outer)) / outer
+                : 0;
+            if (context_.parallel_policy == ParallelPolicy::Adaptive &&
+                available > 0 && fair_share > 0) {
+                // OCCT's Boolean filler scales negatively beyond six launch
+                // threads on the reference Apple host. Lease only the proven
+                // useful width; leave the remaining process budget idle or
+                // available to independent outer DAG work.
+                nested_units_ = std::min({available, fair_share, 5u});
+                context_.nested_kernel_units_in_use += nested_units_;
+                context_.max_nested_kernel_lease = std::max(
+                    context_.max_nested_kernel_lease, nested_units_);
+                ++context_.parallel_boolean_count;
+            } else {
+                ++context_.serial_boolean_count;
+            }
+            context_.peak_total_allocated_cpu_units = std::max(
+                context_.peak_total_allocated_cpu_units,
+                outer + context_.nested_kernel_units_in_use);
+            if (context_.peak_total_allocated_cpu_units > context_.worker_budget) {
+                throw EvalError("Direct OCCT CPU lease exceeded worker budget");
+            }
+        }
+        if (nested_units_ > 0) {
+            try {
+                OSD_Parallel::SetUseOcctThreads(Standard_True);
+                if (!OSD_Parallel::ToUseOcctThreads()) {
+                    throw EvalError(
+                        "Direct OCCT runtime cannot enable shared Boolean thread pool");
+                }
+                const std::uint32_t launch_units = nested_units_ + 1;
+                const Handle(OSD_ThreadPool)& pool =
+                    OSD_ThreadPool::DefaultPool(static_cast<int>(launch_units));
+                pool->SetNbDefaultThreadsToLaunch(static_cast<int>(launch_units));
+            } catch (...) {
+                std::lock_guard<std::mutex> lock(context_.mutex);
+                context_.nested_kernel_units_in_use -= nested_units_;
+                nested_units_ = 0;
+                throw;
+            }
+        }
+    }
+
+    ~BooleanParallelLease() {
+        std::lock_guard<std::mutex> lock(context_.mutex);
+        context_.nested_kernel_units_in_use -= nested_units_;
+    }
+
+    bool runs_parallel() const { return nested_units_ > 0; }
+    std::uint32_t nested_units() const { return nested_units_; }
+
+private:
+    ExecutionContext& context_;
+    std::uint32_t nested_units_ = 0;
+};
 
 class StageExecutionTimer {
 public:
@@ -377,6 +457,11 @@ void write_stage_report(const fs::path& path, ExecutionContext& context) {
     std::lock_guard<std::mutex> lock(context.mutex);
     out << "{\"schemaVersion\":1,\"totalElapsedMs\":" << total_elapsed
         << ",\"workerBudget\":" << context.worker_budget
+        << ",\"parallelPolicy\":" << quote_json_string(parallel_policy_name(context.parallel_policy))
+        << ",\"serialBooleanCount\":" << context.serial_boolean_count
+        << ",\"parallelBooleanCount\":" << context.parallel_boolean_count
+        << ",\"maxNestedKernelLease\":" << context.max_nested_kernel_lease
+        << ",\"peakTotalAllocatedCpuUnits\":" << context.peak_total_allocated_cpu_units
         << ",\"meshOuterWorkerBudget\":" << context.mesh_outer_worker_budget
         << ",\"meshPoolBudget\":" << context.mesh_pool_budget
         << ",\"meshLauncherBudget\":" << context.mesh_launcher_budget
@@ -444,6 +529,17 @@ void write_stage_report(const fs::path& path, ExecutionContext& context) {
         out << "{\"commandId\":" << quote_json_string(evidence.command_id)
             << ",\"op\":" << quote_json_string(evidence.op)
             << ",\"elapsedMs\":" << evidence.elapsed_ms << "}";
+    }
+    out << "],\"partialBooleanGroups\":[";
+    for (std::size_t index = 0; index < context.partial_boolean_group_evidence.size(); ++index) {
+        if (index != 0) out << ',';
+        const PartialBooleanGroupEvidence& evidence =
+            context.partial_boolean_group_evidence[index];
+        out << "{\"partId\":" << quote_json_string(evidence.part_id)
+            << ",\"parentOutput\":" << evidence.parent_output
+            << ",\"key\":" << quote_json_string(evidence.key)
+            << ",\"cacheHit\":" << (evidence.cache_hit ? "true" : "false")
+            << ",\"recomputeCount\":" << evidence.recompute_count << "}";
     }
     out << "],\"stages\":[";
     for (std::size_t index = 0; index < kStageReportNames.size(); ++index) {
@@ -773,6 +869,7 @@ PartialBooleanGroupPlan parse_partial_boolean_group(yyjson_val* value) {
     group.part_key = json_string(json_require(value, "partKey"), "partialBooleanGroup.partKey");
     group.parent_output = static_cast<std::uint64_t>(
         json_number(json_require(value, "parentOutput"), "partialBooleanGroup.parentOutput"));
+    group.key = json_string(json_require(value, "key"), "partialBooleanGroup.key");
     group.operation = json_string(json_require(value, "operation"), "partialBooleanGroup.operation");
     group.ordinal = static_cast<std::uint32_t>(
         json_number(json_require(value, "ordinal"), "partialBooleanGroup.ordinal"));
@@ -785,7 +882,8 @@ PartialBooleanGroupPlan parse_partial_boolean_group(yyjson_val* value) {
     yyjson_arr_foreach(indices, index, max, item) {
         group.input_indices.push_back(static_cast<std::uint32_t>(json_number(item, "partialBooleanGroup.inputIndex")));
     }
-    if (group.operation != "union" || group.version != 1 || group.input_indices.size() != 2) {
+    if (group.key.empty() || group.operation != "union" || group.version != 2 ||
+        group.input_indices.size() != 2 || group.input_indices[0] == group.input_indices[1]) {
         throw SchemaError("unsupported partialBooleanGroup");
     }
     return group;
@@ -816,6 +914,40 @@ Plan parse_plan(yyjson_val* value) {
         yyjson_val* group;
         yyjson_arr_foreach(groups, group_index, group_max, group) {
             plan.partial_boolean_groups.push_back(parse_partial_boolean_group(group));
+        }
+    }
+    std::map<std::pair<std::string, std::uint64_t>, std::vector<const PartialBooleanGroupPlan*>>
+        groups_by_parent;
+    for (const PartialBooleanGroupPlan& group : plan.partial_boolean_groups) {
+        groups_by_parent[{group.part_key, group.parent_output}].push_back(&group);
+    }
+    for (const auto& [parent, groups] : groups_by_parent) {
+        const std::string parent_part = parent.first;
+        const std::uint64_t parent_output = parent.second;
+        const auto part = std::find_if(plan.parts.begin(), plan.parts.end(), [&](const Part& item) {
+            return item.part_id == parent_part;
+        });
+        if (part == plan.parts.end()) throw SchemaError("partialBooleanGroup part does not exist");
+        const auto command = std::find_if(
+            part->commands.begin(), part->commands.end(), [&](const Command& item) {
+                return item.output == parent_output;
+            });
+        if (command == part->commands.end() || command->op != "union" ||
+            command->args.size() != 4 || groups.size() != 2) {
+            throw SchemaError("partialBooleanGroups require one four-input union and two groups");
+        }
+        std::set<std::uint32_t> ordinals;
+        std::set<std::uint32_t> covered_indices;
+        std::set<std::string> keys;
+        for (const PartialBooleanGroupPlan* group : groups) {
+            ordinals.insert(group->ordinal);
+            keys.insert(group->key);
+            for (std::uint32_t index : group->input_indices) covered_indices.insert(index);
+        }
+        if (ordinals != std::set<std::uint32_t>{0, 1} ||
+            covered_indices != std::set<std::uint32_t>{0, 1, 2, 3} || keys.size() != 2) {
+            throw SchemaError(
+                "partialBooleanGroups must have unique keys and exactly cover inputs 0..3");
         }
     }
     return plan;
@@ -2682,7 +2814,8 @@ TopoDS_Shape checked_boolean_shapes(
     const bool inputs_valid = boolean_inputs_are_valid_solids(argument_shapes) &&
         boolean_inputs_are_valid_solids(tool_shapes);
     builder.SetCheckInverted(inputs_valid ? Standard_False : Standard_True);
-    builder.SetRunParallel(boolean_runs_parallel(context));
+    BooleanParallelLease parallel_lease(context);
+    builder.SetRunParallel(parallel_lease.runs_parallel());
     builder.SetUseOBB(true);
     builder.Build();
     if (!builder.IsDone()) {
@@ -2707,9 +2840,12 @@ struct PreparedUnionResult {
 };
 
 PreparedUnionResult prepare_four_way_union(
-    const std::vector<TopoDS_Shape>& shapes, ExecutionContext& context
+    const std::vector<TopoDS_Shape>& shapes,
+    const std::vector<PartialBooleanGroupPlan>& groups,
+    ExecutionContext& context
 ) {
     if (shapes.size() != 4) throw EvalError("prepared four-way union requires four operands");
+    if (groups.size() != 2) throw EvalError("prepared four-way union requires two groups");
     StageExecutionTimer stage_timer(context, "boolean");
     TopTools_ListOfShape arguments;
     std::vector<TopoDS_Shape> prepared;
@@ -2721,24 +2857,40 @@ PreparedUnionResult prepare_four_way_union(
     BOPAlgo_PaveFiller filler;
     filler.SetArguments(arguments);
     filler.SetFuzzyValue(1.0e-5);
-    filler.SetRunParallel(boolean_runs_parallel(context));
+    BooleanParallelLease parallel_lease(context);
+    filler.SetRunParallel(parallel_lease.runs_parallel());
     filler.Perform();
-    if (filler.HasErrors()) throw EvalError("Direct OCCT boolean `union` intersection failed");
-
-    const auto materialize = [&](const std::vector<std::size_t>& indices) {
+    if (filler.HasErrors()) {
+        throw EvalError("Direct OCCT boolean `union` intersection failed");
+    }
+    const auto materialize = [&](const std::vector<std::uint32_t>& indices) {
+        if (indices.empty()) throw EvalError("prepared union group is empty");
         BOPAlgo_Builder builder;
         builder.SetArguments(arguments);
         builder.PerformWithFiller(filler);
-        if (builder.HasErrors()) throw EvalError("Direct OCCT union could not use prepared intersections");
+        if (builder.HasErrors()) {
+            throw EvalError("Direct OCCT union could not use prepared intersections");
+        }
         TopTools_ListOfShape objects;
-        objects.Append(prepared[indices.front()]);
+        objects.Append(prepared.at(indices.front()));
         TopTools_ListOfShape tools;
-        for (std::size_t offset = 1; offset < indices.size(); ++offset) tools.Append(prepared[indices[offset]]);
+        for (std::size_t offset = 1; offset < indices.size(); ++offset) {
+            tools.Append(prepared.at(indices[offset]));
+        }
         builder.BuildBOP(objects, tools, BOPAlgo_FUSE, Message_ProgressRange());
-        if (builder.HasErrors() || builder.Shape().IsNull()) throw EvalError("Direct OCCT union materialization failed");
+        if (builder.HasErrors() || builder.Shape().IsNull()) {
+            throw EvalError("Direct OCCT union materialization failed");
+        }
         return builder.Shape();
     };
-    return {materialize({0, 1, 2, 3}), {materialize({0, 1}), materialize({2, 3})}};
+    std::vector<TopoDS_Shape> partials(2);
+    for (const PartialBooleanGroupPlan& group : groups) {
+        if (group.ordinal >= partials.size()) {
+            throw EvalError("prepared union group ordinal out of range");
+        }
+        partials[group.ordinal] = materialize(group.input_indices);
+    }
+    return {materialize({0, 1, 2, 3}), std::move(partials)};
 }
 
 TopoDS_Shape fuse_shapes(const std::vector<TopoDS_Shape>& shapes, ExecutionContext& context) {
@@ -2748,7 +2900,6 @@ TopoDS_Shape fuse_shapes(const std::vector<TopoDS_Shape>& shapes, ExecutionConte
     if (shapes.size() == 1) {
         return shapes.front();
     }
-    if (shapes.size() == 4) return prepare_four_way_union(shapes, context).full;
     StageExecutionTimer stage_timer(context, "boolean");
     TopTools_ListOfShape arguments;
     std::vector<TopoDS_Shape> prepared;
@@ -2760,7 +2911,8 @@ TopoDS_Shape fuse_shapes(const std::vector<TopoDS_Shape>& shapes, ExecutionConte
     BOPAlgo_PaveFiller filler;
     filler.SetArguments(arguments);
     filler.SetFuzzyValue(1.0e-5);
-    filler.SetRunParallel(boolean_runs_parallel(context));
+    BooleanParallelLease parallel_lease(context);
+    filler.SetRunParallel(parallel_lease.runs_parallel());
     filler.Perform();
     if (filler.HasErrors()) {
         throw EvalError("Direct OCCT boolean `union` intersection failed");
@@ -4954,6 +5106,25 @@ std::string partial_group_id(
         std::to_string(ordinal);
 }
 
+void record_partial_group_recompute(
+    ExecutionContext& context,
+    const std::string& part_id,
+    std::uint64_t parent_output,
+    const std::string& key
+) {
+    std::lock_guard<std::mutex> lock(context.mutex);
+    const auto evidence = std::find_if(
+        context.partial_boolean_group_evidence.begin(),
+        context.partial_boolean_group_evidence.end(),
+        [&](const PartialBooleanGroupEvidence& item) {
+            return item.part_id == part_id && item.parent_output == parent_output &&
+                item.key == key;
+        });
+    if (evidence != context.partial_boolean_group_evidence.end()) {
+        ++evidence->recompute_count;
+    }
+}
+
 std::uint32_t configured_worker_budget() {
     const char* raw = std::getenv("ECKY_DIRECT_OCCT_WORKERS");
     if (!raw || !*raw) return std::max(1u, std::thread::hardware_concurrency());
@@ -4965,12 +5136,22 @@ std::uint32_t configured_worker_budget() {
     }
 }
 
+ParallelPolicy configured_parallel_policy() {
+    const char* raw = std::getenv("ECKY_DIRECT_OCCT_PARALLEL_POLICY");
+    if (!raw || !*raw || std::string(raw) == "adaptive") return ParallelPolicy::Adaptive;
+    if (std::string(raw) == "outer-only") return ParallelPolicy::OuterOnly;
+    throw ParseError(
+        "ECKY_DIRECT_OCCT_PARALLEL_POLICY must be `outer-only` or `adaptive`");
+}
+
 void configure_mesh_parallelism_budget(std::size_t final_part_count, ExecutionContext& context) {
     if (final_part_count == 0) throw EvalError("part mesh scheduler needs at least one final part");
     if (context.worker_budget == 1) {
         context.mesh_outer_worker_budget = 1;
         context.mesh_pool_budget = 1;
         context.mesh_launcher_budget = 1;
+        context.peak_total_allocated_cpu_units = std::max(
+            context.peak_total_allocated_cpu_units, 1u);
         return;
     }
     // OSD's default pool counts its caller. M outer mesh callers plus P-1
@@ -4982,6 +5163,8 @@ void configure_mesh_parallelism_budget(std::size_t final_part_count, ExecutionCo
         context.worker_budget - context.mesh_outer_worker_budget + 1;
     context.mesh_launcher_budget = 1 +
         (context.mesh_pool_budget - 1) / context.mesh_outer_worker_budget;
+    context.peak_total_allocated_cpu_units = std::max(
+        context.peak_total_allocated_cpu_units, context.worker_budget);
     OSD_Parallel::SetUseOcctThreads(Standard_True);
     if (!OSD_Parallel::ToUseOcctThreads()) {
         throw EvalError("Direct OCCT runtime cannot enable its shared OSD thread pool");
@@ -5132,7 +5315,8 @@ std::string partial_boolean_group_cache_key(
     const std::map<std::uint64_t, std::string>& dependencies,
     const ExecutionContext& context
 ) {
-    ecky::ExecutionIdentityInput input = execution_identity_base("partial-union-v1", context);
+    ecky::ExecutionIdentityInput input = execution_identity_base("partial-union-v2", context);
+    input.resolved_args.push_back("key:" + group.key);
     input.resolved_args.push_back("operation:" + group.operation);
     input.resolved_args.push_back("version:" + std::to_string(group.version));
     for (std::uint32_t index : group.input_indices) {
@@ -5332,7 +5516,10 @@ std::vector<ShapeRecord> evaluate_plan(
             for (const Command& command : part.commands) {
                 const std::string key = command_cache_key(command, fingerprints, context);
                 command_cache_keys[part_index].push_back(key);
-                for (const PartialBooleanGroupPlan& group : plan.partial_boolean_groups) {
+                for (const PartialBooleanGroupPlan& group :
+                     context.parallel_policy == ParallelPolicy::Adaptive
+                         ? plan.partial_boolean_groups
+                         : std::vector<PartialBooleanGroupPlan>{}) {
                     if (group.part_key != part.part_id || group.parent_output != command.output) continue;
                     const std::string group_id = partial_group_id(part_index, command.output, group.ordinal);
                     const std::string group_key = partial_boolean_group_cache_key(
@@ -5343,9 +5530,13 @@ std::vector<ShapeRecord> evaluate_plan(
                             cached_partial_groups.emplace(group_id, std::move(*shape));
                             std::lock_guard<std::mutex> lock(context.mutex);
                             ++context.partial_boolean_cache_hit_count;
+                            context.partial_boolean_group_evidence.push_back(
+                                {part.part_id, command.output, group.key, true, 0});
                         } else {
                             std::lock_guard<std::mutex> lock(context.mutex);
                             ++context.partial_boolean_cache_miss_count;
+                            context.partial_boolean_group_evidence.push_back(
+                                {part.part_id, command.output, group.key, false, 0});
                         }
                     }
                 }
@@ -5362,6 +5553,35 @@ std::vector<ShapeRecord> evaluate_plan(
             }
         }
     }
+
+    const auto execution_refs = [&](std::size_t part_index, const Command& command) {
+        std::vector<std::uint64_t> refs;
+        std::set<std::uint32_t> cached_group_indices;
+        if (context.parallel_policy == ParallelPolicy::Adaptive &&
+            command.op == "union" && command.args.size() == 4) {
+            for (const PartialBooleanGroupPlan& group : plan.partial_boolean_groups) {
+                if (group.part_key != plan.parts[part_index].part_id ||
+                    group.parent_output != command.output) {
+                    continue;
+                }
+                const std::string group_id = partial_group_id(
+                    part_index, command.output, group.ordinal);
+                if (cached_partial_groups.find(group_id) != cached_partial_groups.end()) {
+                    cached_group_indices.insert(
+                        group.input_indices.begin(), group.input_indices.end());
+                }
+            }
+        }
+        for (std::size_t index = 0; index < command.args.size(); ++index) {
+            if (cached_group_indices.find(static_cast<std::uint32_t>(index)) !=
+                cached_group_indices.end()) {
+                continue;
+            }
+            collect_arg_refs(command.args[index], refs);
+        }
+        for (const Keyword& keyword : command.keywords) collect_arg_refs(keyword.value, refs);
+        return refs;
+    };
 
     std::vector<DagNode> nodes;
     std::vector<std::map<std::uint64_t, std::size_t>> producers(plan.parts.size());
@@ -5386,7 +5606,7 @@ std::vector<ShapeRecord> evaluate_plan(
     for (std::size_t node_index = 0; node_index < nodes.size(); ++node_index) {
         DagNode& node = nodes[node_index];
         const Command& command = plan.parts[node.part_index].commands[node.command_index];
-        for (std::uint64_t ref : command_refs(command)) {
+        for (std::uint64_t ref : execution_refs(node.part_index, command)) {
             auto producer = producers[node.part_index].find(ref);
             if (producer == producers[node.part_index].end()) {
                 if (cached_command_slots[node.part_index].find(ref) != cached_command_slots[node.part_index].end()) {
@@ -5416,7 +5636,7 @@ std::vector<ShapeRecord> evaluate_plan(
         required[node_index] = true;
         const DagNode& node = nodes[node_index];
         const Command& command = plan.parts[node.part_index].commands[node.command_index];
-        for (std::uint64_t ref : command_refs(command)) {
+        for (std::uint64_t ref : execution_refs(node.part_index, command)) {
             auto producer = producers[node.part_index].find(ref);
             if (producer != producers[node.part_index].end()) pending.push_back(producer->second);
         }
@@ -5431,7 +5651,7 @@ std::vector<ShapeRecord> evaluate_plan(
         ++required_count;
         DagNode& node = nodes[node_index];
         const Command& command = plan.parts[node.part_index].commands[node.command_index];
-        for (std::uint64_t ref : command_refs(command)) {
+        for (std::uint64_t ref : execution_refs(node.part_index, command)) {
             auto producer = producers[node.part_index].find(ref);
             if (producer != producers[node.part_index].end() && required[producer->second]) {
                 ++node.unmet_dependencies;
@@ -5448,7 +5668,9 @@ std::vector<ShapeRecord> evaluate_plan(
         if (!required[node_index]) continue;
         const DagNode& node = nodes[node_index];
         const Command& command = plan.parts[node.part_index].commands[node.command_index];
-        for (std::uint64_t ref : command_refs(command)) ++remaining_uses[node.part_index][ref];
+        for (std::uint64_t ref : execution_refs(node.part_index, command)) {
+            ++remaining_uses[node.part_index][ref];
+        }
     }
 
     std::vector<std::map<std::uint64_t, SlotValue>> slots = std::move(cached_command_slots);
@@ -5488,6 +5710,8 @@ std::vector<ShapeRecord> evaluate_plan(
             context.active_dag_nodes = static_cast<std::uint32_t>(batch.size());
             context.peak_dag_concurrency = std::max(
                 context.peak_dag_concurrency, context.active_dag_nodes);
+            context.peak_total_allocated_cpu_units = std::max(
+                context.peak_total_allocated_cpu_units, context.active_dag_nodes);
         }
         std::vector<std::future<CompletedDagNode>> running;
         running.reserve(batch.size());
@@ -5499,8 +5723,9 @@ std::vector<ShapeRecord> evaluate_plan(
             std::vector<PartialBooleanGroupPlan> task_groups;
             std::map<std::uint32_t, TopoDS_Shape> task_cached_groups;
             for (const PartialBooleanGroupPlan& group :
-                 cache_root.has_value() ? plan.partial_boolean_groups
-                                        : std::vector<PartialBooleanGroupPlan>{}) {
+                 cache_root.has_value() && context.parallel_policy == ParallelPolicy::Adaptive
+                     ? plan.partial_boolean_groups
+                     : std::vector<PartialBooleanGroupPlan>{}) {
                 if (group.part_key != part.part_id || group.parent_output != command.output) continue;
                 task_groups.push_back(group);
                 const std::string group_id = partial_group_id(node.part_index, command.output, group.ordinal);
@@ -5518,10 +5743,6 @@ std::vector<ShapeRecord> evaluate_plan(
                     std::vector<std::pair<std::string, TopoDS_Shape>> partial_outputs;
                     if (task_command.op == "union" && task_groups.size() == 2 &&
                         task_command.args.size() == 4) {
-                        std::vector<TopoDS_Shape> operands;
-                        for (const Arg& arg : task_command.args) {
-                            operands.push_back(lookup_shape(inputs, arg.ref_value, "union"));
-                        }
                         if (task_cached_groups.size() == 2) {
                             value = SlotValue::shape_value(fuse_shapes(
                                 {task_cached_groups.at(0), task_cached_groups.at(1)}, context));
@@ -5532,9 +5753,17 @@ std::vector<ShapeRecord> evaluate_plan(
                                 task_groups.begin(), task_groups.end(), [&](const auto& group) {
                                     return group.ordinal == dirty_ordinal;
                                 });
+                            std::vector<TopoDS_Shape> dirty_operands;
+                            for (std::uint32_t input_index : dirty_group.input_indices) {
+                                dirty_operands.push_back(lookup_shape(
+                                    inputs,
+                                    task_command.args[input_index].ref_value,
+                                    "union"));
+                            }
                             TopoDS_Shape dirty = fuse_shapes(
-                                operands[dirty_group.input_indices[0]],
-                                operands[dirty_group.input_indices[1]], context);
+                                dirty_operands[0], dirty_operands[1], context);
+                            record_partial_group_recompute(
+                                context, task_part.part_id, task_command.output, dirty_group.key);
                             const std::string dirty_id = partial_group_id(
                                 task.part_index, task_command.output, dirty_ordinal);
                             partial_outputs.emplace_back(partial_group_cache_keys.at(dirty_id), dirty);
@@ -5542,13 +5771,20 @@ std::vector<ShapeRecord> evaluate_plan(
                                 ? fuse_shapes(task_cached_groups.begin()->second, dirty, context)
                                 : fuse_shapes(dirty, task_cached_groups.begin()->second, context));
                         } else {
+                            std::vector<TopoDS_Shape> operands;
+                            for (const Arg& arg : task_command.args) {
+                                operands.push_back(lookup_shape(inputs, arg.ref_value, "union"));
+                            }
                             {
                                 std::lock_guard<std::mutex> lock(context.mutex);
                                 ++context.four_way_intersection_count;
                             }
-                            PreparedUnionResult prepared = prepare_four_way_union(operands, context);
+                            PreparedUnionResult prepared = prepare_four_way_union(
+                                operands, task_groups, context);
                             value = SlotValue::shape_value(prepared.full);
                             for (const PartialBooleanGroupPlan& group : task_groups) {
+                                record_partial_group_recompute(
+                                    context, task_part.part_id, task_command.output, group.key);
                                 const std::string group_id = partial_group_id(
                                     task.part_index, task_command.output, group.ordinal);
                                 partial_outputs.emplace_back(
@@ -5607,7 +5843,7 @@ std::vector<ShapeRecord> evaluate_plan(
                 context.part_executed_command_ids[part.part_id].push_back(
                     part.part_id + ":" + std::to_string(command.output));
             }
-            for (std::uint64_t ref : command_refs(command)) {
+            for (std::uint64_t ref : execution_refs(node.part_index, command)) {
                 auto remaining = remaining_uses[node.part_index].find(ref);
                 if (remaining == remaining_uses[node.part_index].end() || remaining->second == 0) {
                     throw EvalError("slot consumer count underflow for slot " + std::to_string(ref));
@@ -6121,6 +6357,7 @@ void run_occt_export_stage(
 
 int run(int argc, char** argv, ExecutionContext& context) {
     context.worker_budget = configured_worker_budget();
+    context.parallel_policy = configured_parallel_policy();
     context.report_started_at = std::chrono::steady_clock::now();
     context.set_stage("parse-arguments");
     fs::path plan_path;

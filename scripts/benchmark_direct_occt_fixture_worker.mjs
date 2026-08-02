@@ -21,7 +21,12 @@ function main() {
   const execution = spawnSync(command[0], command.slice(1), {
     cwd: root,
     encoding: 'utf8',
-    env: { ...process.env, ECKY_DIRECT_OCCT_WORKERS: String(request.workers), ECKY_DIRECT_OCCT_CACHE_DIR: request.cacheDir },
+    env: {
+      ...process.env,
+      ECKY_DIRECT_OCCT_WORKERS: String(request.workers),
+      ECKY_DIRECT_OCCT_CACHE_DIR: request.cacheDir,
+      ECKY_DIRECT_OCCT_PARALLEL_POLICY: request.parallelPolicy ?? 'adaptive',
+    },
   });
   const snapshot = snapshotFromCli({
     cliResult: { status: execution.status, signal: execution.signal, stdout: execution.stdout || '', stderr: execution.stderr || '', elapsedMs: performance.now() - started },
