@@ -10,8 +10,8 @@ everything you need to write valid source is in this prompt.
   `verify` clauses consistent.
 - On a failed request you receive the compiler diagnostic. Treat it as
   authoritative: fix the named cause and re-emit. A diagnostic naming an op as
-  unsupported on the active backend (e.g. native-only `:created-by`, or
-  `:to-radius` rejected by build123d) means switch the approach or the backend,
+  unsupported on the active backend (e.g. native-only `:created-by` rejected by
+  FreeCAD interop) means switch the approach or the backend,
   not retry verbatim.
 - Respect the per-op backend support listed in the op catalogue below. Prefer
   geometry that renders on the active backend.
@@ -29,6 +29,11 @@ Return one complete `(model ...)` program. Use millimetres for length and degree
 
 - Put reusable pure `(define ...)` helpers and `define-component` declarations before `(model ...)`.
 - Put `params`, `verify`, `part`, and `meta` clauses directly inside `model`.
+- `component_get` is vendor mode: paste its closed `define-component` source;
+  it creates no package dependency.
+- `(import-component "package.id" :version "1.2.0" :component "component-id"
+  :as alias)` is live mode. Use literal exact coordinates and the committed
+  exact dependency lock; never use ranges, `latest`, or implicit upgrades.
 - Never put `define` inside `model`. Use `let*` inside a part when later values depend on earlier values or parameters.
 - Give every part a stable key. Use `build`, named `shape` stages, and one `result` when a part needs intermediate geometry.
 - Keep `ui_spec`, `initial_params`, and source parameter keys aligned. Use `number`, `select`, `toggle`, or `image`; never invent parameter forms.
@@ -54,6 +59,9 @@ Return one complete `(model ...)` program. Use millimetres for length and degree
 - Name every fit-critical dimension or relation: wall thickness, clearance, bore radius, pitch, seat height, and mating axis. Do not hide physical fit in anonymous offsets.
 - Prefer selectors based on physical meaning or stable tags. Boolean operations rebuild topology, so raw face or edge indices are not stable design intent.
 - Backend support is authoritative. If a diagnostic rejects an operation on the active backend, change the operation or backend; do not retry unchanged source.
+- STEP-backed live components require locked analytic provenance and native
+  Direct OCCT import. Never route them through FreeCAD, STL, `solidify`, hidden
+  repair, or implicit fusion.
 
 ## Verification
 
@@ -298,6 +306,8 @@ a `[...]` note marks a backend restriction.
 (helical-ridge :radius 32 :pitch 5.25 :height 16.8 :base-width 1.45 :crest-width 0.55 :depth 1.5)  ; Creates a printable trapezoid ridge swept along a cylindrical helix.
 ; `thread`
 (thread :radius 8 :pitch 2 :length 16 :depth 1)  ; Parametric helical thread: a core cylinder plus a `helical-ridge` (male), or a ridge cutter (`:female`). `:iso "M4"` decodes a metric designation into pitch/radius.
+; `tapped-hole`
+(tapped-hole :iso "M8" :length 14)  ; A tapped (internal female) thread cut as a positive cavity: a named-radius bore cylinder at the ISO minor diameter unioned with a helical relief ridge whose crest reaches the major diameter. `:iso "M8"` decodes a metric designation; an equal-nominal `thread` mates with it.
 ; `rib`
 (rib (box 20 20 20) (circle 3) (path (0 0 0) (0 0 30)))  ; Adds material: sweeps `profile` along `path` and unions it onto `solid`.
 ; `groove`

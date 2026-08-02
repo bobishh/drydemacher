@@ -1,5 +1,7 @@
 # AST-Native CAD Agent Trenches
 
+> Historical planning record. Build123d runtime and lowering were removed on 2026-08-02; references below describe retired implementation, not current architecture.
+
 ## Purpose
 
 Turn Ecky into agent-editable CAD system.

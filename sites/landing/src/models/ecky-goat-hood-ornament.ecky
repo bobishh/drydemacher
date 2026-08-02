@@ -1,0 +1,159 @@
+;; Ecky goat — original low-poly leaping mascot.
+;; Genuine faceted 3D geometry: animal anatomy uses closed polyhedra only.
+;; No imported mesh, cylinders, spheres, flat silhouette, scaffold, or plinth.
+
+;; Closed six-sided frustum along local +X. Coarse rings stay visibly faceted.
+(define-component faceted-limb
+  ((number span 10.0)
+   (number root-radius 4.0)
+   (number tip-radius 3.0))
+  (polyhedron
+    :vertices
+      ((0.0 0.0 root-radius)
+       (0.0 (* 0.866 root-radius) (* 0.5 root-radius))
+       (0.0 (* 0.866 root-radius) (* -0.5 root-radius))
+       (0.0 0.0 (- root-radius))
+       (0.0 (* -0.866 root-radius) (* -0.5 root-radius))
+       (0.0 (* -0.866 root-radius) (* 0.5 root-radius))
+       (span 0.0 tip-radius)
+       (span (* 0.866 tip-radius) (* 0.5 tip-radius))
+       (span (* 0.866 tip-radius) (* -0.5 tip-radius))
+       (span 0.0 (- tip-radius))
+       (span (* -0.866 tip-radius) (* -0.5 tip-radius))
+       (span (* -0.866 tip-radius) (* 0.5 tip-radius)))
+    :triangles
+      (;; root cap
+       (0 1 2) (0 2 3) (0 3 4) (0 4 5)
+       ;; tip cap
+       (6 8 7) (6 9 8) (6 10 9) (6 11 10)
+       ;; six quad sides, split into triangles
+       (0 6 7) (0 7 1)
+       (1 7 8) (1 8 2)
+       (2 8 9) (2 9 3)
+       (3 9 10) (3 10 4)
+       (4 10 11) (4 11 5)
+       (5 11 6) (5 6 0))))
+
+;; A slightly broader eight-vertex wedge for the torso. Front and rear faces
+;; differ in height and width, giving shoulder, belly, and rump distinct planes.
+(define-component faceted-torso
+  ((number span 38.0)
+   (number rear-width 9.0)
+   (number front-width 8.0)
+   (number rear-height 10.0)
+   (number front-height 11.0))
+  (polyhedron
+    :vertices
+      ((0.0 (- rear-width) 0.0)
+       (0.0 0.0 (- rear-height))
+       (0.0 rear-width 0.0)
+       (0.0 0.0 rear-height)
+       (span (- front-width) 1.0)
+       (span 0.0 (- front-height))
+       (span front-width 1.0)
+       (span 0.0 front-height))
+    :triangles
+      ((0 1 2) (0 2 3)
+       (4 6 5) (4 7 6)
+       (0 4 5) (0 5 1)
+       (1 5 6) (1 6 2)
+       (2 6 7) (2 7 3)
+       (3 7 4) (3 4 0))))
+
+(model
+  (params
+    (number scale 1.0 :min 0.65 :max 1.6 :step 0.05 :label "Overall Scale")
+    (number body_length 38.0 :min 31.0 :max 46.0 :step 1.0 :label "Torso Length")
+    (number horn_length 15.0 :min 10.0 :max 21.0 :step 1.0 :label "Horn Length")
+    (number leg_spread 1.0 :min 0.75 :max 1.3 :step 0.05 :label "Leap Spread"))
+
+  (part "LeapingGoat"
+    (let* (
+      (s scale)
+      (body_z (* 34.0 s))
+
+      ;; Long torso. Shoulder and rump remain angular rather than tubular.
+      (torso
+        (place (location (plane :origin (list (* -21.0 s) 0.0 body_z)))
+          (faceted-torso
+            :span (* body_length s)
+            :rear-width (* 9.5 s)
+            :front-width (* 8.5 s)
+            :rear-height (* 9.5 s)
+            :front-height (* 11.0 s))))
+
+      ;; Chest overlaps torso and rising neck by several millimetres.
+      (chest
+        (place (location (plane :origin (list (* 8.0 s) 0.0 (* 34.0 s))) :rotate '(0.0 -24.0 0.0))
+          (faceted-limb :span (* 17.0 s) :root-radius (* 9.0 s) :tip-radius (* 6.2 s))))
+      (neck
+        (place (location (plane :origin (list (* 10.0 s) 0.0 (* 38.0 s))) :rotate '(0.0 -47.0 0.0))
+          (faceted-limb :span (* 21.0 s) :root-radius (* 6.8 s) :tip-radius (* 5.2 s))))
+
+      ;; Brow and muzzle overlap. Muzzle tips slightly down, matching a goat profile.
+      (head
+        (place (location (plane :origin (list (* 23.0 s) 0.0 (* 52.0 s))) :rotate '(0.0 8.0 0.0))
+          (faceted-limb :span (* 15.0 s) :root-radius (* 6.3 s) :tip-radius (* 4.7 s))))
+      (muzzle
+        (place (location (plane :origin (list (* 33.0 s) 0.0 (* 50.5 s))) :rotate '(0.0 13.0 0.0))
+          (faceted-limb :span (* 12.0 s) :root-radius (* 4.8 s) :tip-radius (* 3.2 s))))
+
+      ;; Paired horns start inside the crown, then sweep backward and upward.
+      (horn_left
+        (place (location (plane :origin (list (* 25.0 s) (* 3.8 s) (* 56.0 s))) :rotate '(0.0 -126.0 5.0))
+          (faceted-limb :span (* horn_length s) :root-radius (* 2.5 s) :tip-radius (* 0.7 s))))
+      (horn_right
+        (place (location (plane :origin (list (* 25.0 s) (* -3.8 s) (* 56.0 s))) :rotate '(0.0 -126.0 -5.0))
+          (faceted-limb :span (* horn_length s) :root-radius (* 2.5 s) :tip-radius (* 0.7 s))))
+
+      ;; Short ears spread sideways behind horn roots.
+      (ear_left
+        (place (location (plane :origin (list (* 24.0 s) (* 3.0 s) (* 53.5 s))) :rotate '(0.0 -12.0 72.0))
+          (faceted-limb :span (* 9.0 s) :root-radius (* 2.7 s) :tip-radius (* 0.65 s))))
+      (ear_right
+        (place (location (plane :origin (list (* 24.0 s) (* -3.0 s) (* 53.5 s))) :rotate '(0.0 -12.0 -72.0))
+          (faceted-limb :span (* 9.0 s) :root-radius (* 2.7 s) :tip-radius (* 0.65 s))))
+
+      ;; Beard anchors under the jaw with a wide overlap.
+      (beard
+        (place (location (plane :origin (list (* 30.0 s) 0.0 (* 48.5 s))) :rotate '(0.0 91.0 0.0))
+          (faceted-limb :span (* 10.0 s) :root-radius (* 2.8 s) :tip-radius (* 0.6 s))))
+
+      ;; Two forelegs reach forward/down at different angles. Roots bury into chest.
+      (front_leg_left
+        (place (location (plane :origin (list (* 10.0 s) (* 4.5 s) (* 31.0 s))) :rotate '(0.0 54.0 0.0))
+          (faceted-limb :span (* 25.0 s leg_spread) :root-radius (* 4.2 s) :tip-radius (* 2.0 s))))
+      (front_leg_right
+        (place (location (plane :origin (list (* 7.0 s) (* -4.5 s) (* 30.0 s))) :rotate '(0.0 69.0 0.0))
+          (faceted-limb :span (* 23.0 s leg_spread) :root-radius (* 4.0 s) :tip-radius (* 1.9 s))))
+      (front_hoof_left
+        (place (location (plane :origin (list (* 24.5 s leg_spread) (* 4.5 s) (* 10.8 s))) :rotate '(0.0 18.0 0.0))
+          (faceted-limb :span (* 7.0 s) :root-radius (* 2.2 s) :tip-radius (* 1.5 s))))
+      (front_hoof_right
+        (place (location (plane :origin (list (* 15.3 s leg_spread) (* -4.5 s) (* 8.5 s))) :rotate '(0.0 24.0 0.0))
+          (faceted-limb :span (* 7.0 s) :root-radius (* 2.1 s) :tip-radius (* 1.4 s))))
+
+      ;; Hind legs kick backward/down; separate Y offsets keep all four gestures legible.
+      (rear_leg_left
+        (place (location (plane :origin (list (* -13.0 s) (* 5.0 s) (* 30.0 s))) :rotate '(0.0 132.0 0.0))
+          (faceted-limb :span (* 25.0 s leg_spread) :root-radius (* 4.8 s) :tip-radius (* 2.2 s))))
+      (rear_leg_right
+        (place (location (plane :origin (list (* -8.0 s) (* -5.0 s) (* 28.5 s))) :rotate '(0.0 116.0 0.0))
+          (faceted-limb :span (* 23.0 s leg_spread) :root-radius (* 4.5 s) :tip-radius (* 2.1 s))))
+      (rear_hoof_left
+        (place (location (plane :origin (list (* -29.8 s leg_spread) (* 5.0 s) (* 11.4 s))) :rotate '(0.0 161.0 0.0))
+          (faceted-limb :span (* 7.5 s) :root-radius (* 2.4 s) :tip-radius (* 1.5 s))))
+      (rear_hoof_right
+        (place (location (plane :origin (list (* -18.1 s leg_spread) (* -5.0 s) (* 7.8 s))) :rotate '(0.0 153.0 0.0))
+          (faceted-limb :span (* 7.0 s) :root-radius (* 2.3 s) :tip-radius (* 1.5 s))))
+
+      ;; Small upright tail: broad root inside rump, pointed tip behind it.
+      (tail
+        (place (location (plane :origin (list (* -20.0 s) 0.0 (* 38.0 s))) :rotate '(0.0 -151.0 0.0))
+          (faceted-limb :span (* 12.0 s) :root-radius (* 3.6 s) :tip-radius (* 0.8 s)))))
+
+      (union torso chest neck head muzzle
+             horn_left horn_right ear_left ear_right beard
+             front_leg_left front_leg_right front_hoof_left front_hoof_right
+             rear_leg_left rear_leg_right rear_hoof_left rear_hoof_right tail)))
+)

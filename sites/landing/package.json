@@ -4,9 +4,7 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
-    "predev": "node ../../scripts/sync_animal_cap_catalog.mjs --check",
     "dev": "vite",
-    "prebuild": "node ../../scripts/sync_animal_cap_catalog.mjs --check",
     "build": "vite build",
     "preview": "vite preview",
     "test:e2e": "playwright test"

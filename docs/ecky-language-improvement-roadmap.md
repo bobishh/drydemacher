@@ -1,5 +1,7 @@
 # Ecky Language Improvement Roadmap
 
+> Historical roadmap note: Build123d runtime/lowering was removed on 2026-08-02. Backend references below are old planning context; current targets are native OCCT and optional FreeCAD interop.
+
 **Status:** Trackable proposal  
 **Scope:** `.ecky` language surface, Core IR contracts, selector semantics, units/types, component interfaces, and earlier lowerer errors
 

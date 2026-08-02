@@ -1,5 +1,7 @@
 # EckyRust CAD VM Roadmap
 
+> Historical roadmap. Build123d runtime and lowering were removed on 2026-08-02. Current Ecky execution uses native OCCT, with FreeCAD only as optional interop.
+
 ## Meaning
 
 EckyRust CAD VM means controlled CAD runtime, not JVM-scale virtual machine.

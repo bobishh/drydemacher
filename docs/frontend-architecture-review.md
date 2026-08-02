@@ -1,5 +1,7 @@
 # Frontend Architecture Review & Split Plan
 
+> Historical review. File counts and Build123d references describe the 2026-04 codebase; Build123d was removed on 2026-08-02.
+
 **Date:** 2026-04-20
 **Status:** Plan doc. Current progress below.
 
