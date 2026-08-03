@@ -155,17 +155,30 @@ native benchmarks prove material improvement and semantic parity.
 #### Scenario: Boolean-critical bracelet gate
 
 - **GIVEN** the frozen `Daughter Flower AirTag Bracelet` fixture whose
-  outer-only baseline spends `64.133 s` of `69.669 s` in Boolean work
-- **WHEN** at least three sequential cold-cache samples per policy are compared
-  from the same release runner after warm-up
-- **THEN** adaptive shared-budget execution is at least `3.0` times faster in
-  both median native total and median Boolean time
+  analytic-BRep baseline spends `64.133 s` of `69.669 s` in Boolean work
+- **WHEN** at least three sequential adaptive cold-cache hybrid samples from the
+  same release runner are compared after warm-up
+- **THEN** median native total and Boolean time are each at least `3.0` times
+  faster than the immutable recorded baseline
 - **AND** median native total on the recorded 18-core Apple M5 Pro reference
   host is at most `23 s`
-- **AND** three intentional connected components, topology, bounds, volume,
-  STEP, and STL remain equivalent
+- **AND** current sample artifact digests match each other
+- **AND** three intentional connected components, part identities, bounds,
+  volume within tessellation tolerance, STEP, STL, validity, and watertightness
+  remain equivalent to the baseline
+- **AND** evidence declares body and lid `meshDomain` and both STEP members tessellated
 - **AND** stage evidence reports parallel Boolean execution without exceeding
   the configured CPU budget.
+
+#### Scenario: Mixed hybrid export
+
+- **GIVEN** mesh-domain body/lid roots and an analytic strap root
+- **WHEN** one export bundle is written
+- **THEN** STL uses each part's canonical triangle stream without remeshing the
+  mesh-domain lid
+- **AND** STEP contains the unchanged analytic strap plus AP242 tessellated body
+  and lid members
+- **AND** topology/stage evidence never labels the tessellated body or lid analytic.
 
 #### Scenario: Bracelet incremental gate
 

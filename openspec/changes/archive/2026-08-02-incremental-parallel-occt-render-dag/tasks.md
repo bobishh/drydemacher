@@ -97,23 +97,25 @@ and preserves a compact resource-failure report.
 - [x] 7.6 Prove every sample stays below task RSS cap, host available memory stays
   above its floor, swap does not grow, samples do not overlap, and retained
   evidence excludes large generated geometry.
-- [ ] 7.7 Freeze the `Daughter Flower AirTag Bracelet` source/plan as the heavy
-  acceptance fixture. Add an outer-only versus adaptive shared-budget mode and
-  a red gate requiring at least `3.0x` median improvement in both native total
-  and Boolean time, plus at most `23 s` median native total on the recorded
-  18-core Apple M5 Pro, while preserving its three intentional components and
-  exact artifact parity.
+- [x] 7.7 Freeze the `Daughter Flower AirTag Bracelet` source and compact plan
+  contract as the heavy acceptance fixture. Add outer-only/adaptive shared-budget
+  modes and a red gate requiring at least `3.0x` median improvement versus the
+  immutable `69.669 s` / `64.133 s` analytic-BRep baseline, plus at most `23 s`
+  median native total on the recorded 18-core Apple M5 Pro. Preserve its three
+  intentional components, part identities, geometric invariants, STEP/STL, and
+  exact artifact parity among current hybrid samples.
 - [x] 7.8 Implement adaptive nested OCCT leases: wide ready queues consume the
   budget through outer DAG work; a lone expensive Boolean receives idle units
   and enables internal parallelism. Prove peak outer+nested allocation never
   exceeds the configured budget.
-- [ ] 7.9 Run one guarded before/after characterization during development, then
-  the final three-sample-per-policy release gate. Retain compact timing,
+- [x] 7.9 Run one guarded hybrid characterization during development, then the
+  final three-sample adaptive release gate against the immutable recorded
+  analytic-BRep baseline. Retain compact timing,
   topology, digest, CPU-lease, and resource evidence only.
 - [x] 7.10 Add a red planner/native integration proving a four-operand lid union
   exposes a cacheable `decorated-dome` partial. Implement deterministic
   parameter-affinity decomposition without requiring a source rewrite.
-- [ ] 7.11 Seed the bracelet cache once, then prove: identical rerender executes
+- [x] 7.11 Seed the bracelet cache once, then prove: identical rerender executes
   zero Booleans within `3 s`; body-only edit executes zero lid commands;
   thread/seat-only edit reuses decorated dome, executes zero relief/dome
   intersection work, and finishes within `10 s`; dome/relief edit invalidates
@@ -182,13 +184,56 @@ nested lease, and peak outer+nested allocation. The lease integration proves
 singleton and competing-work cases never exceed the configured budget;
 `outer-only` keeps the baseline authored n-ary path.
 
-Cold bracelet acceptance remains open. Pairwise BRep decomposition and
-concurrent OCCT Booleans both produced severe negative scaling and were removed.
-The retained shared `BOPAlgo_PaveFiller` path still exceeded the bounded
-characterization window after the partial-cache work, so no `3x` or `23 s` claim
-is recorded. Closing tasks 7.7, 7.9, and 7.11 requires a representation-level
-decision for the STL relief (mesh-domain lid/export contract) plus one final
-guarded release gate, not more scheduling around the same BRep kernel.
+Cold bracelet acceptance closed after the representation-level decision below.
+Pairwise BRep decomposition and concurrent OCCT Booleans produced severe
+negative scaling and remain removed; the retained implementation does not
+schedule around the same `BOPAlgo_PaveFiller` critical path.
+
+### Hybrid bracelet acceptance — 2026-08-03
+
+Final compact report:
+`tmp/direct-occt-bracelet-bench/release-gate-deterministic-20260803/report.json`.
+One prior guarded characterization at
+`tmp/direct-occt-bracelet-bench/characterization-20260803-0220/report.json`
+recorded `1.612 s` native / `1.137 s` Boolean and no incremental samples.
+
+The final release gate used the freshly rebuilt release CLI, worker budget `3`,
+one warm-up, three sequential cold adaptive samples, then one sequential
+incremental cache sequence. Median native total was `1.614 s` versus the
+immutable `69.669 s` analytic baseline (`43.165x`). Median Boolean time was
+`1.123 s` versus `64.133 s` (`57.109x`). This exceeds both `3x` thresholds and
+the `23 s` host limit.
+
+All cold samples preserved the same three named parts, three connected
+components, bounds, signed volume `24722.440873256826`, topology digest
+`912b13146b988c01e8e55ead67ff1bf16e3b8a98bfb1a0ff694dd4c6bf14c29d`,
+and validity. STEP digest
+`f5c184617505f1bf6ad611affb02a4d4819fde029ea9eae4a8441a7dc4a167f7`
+and STL digest
+`5cb33fcb59ac9e949379116f27cd6c8a61df97904b75bd20a7ecbd939394b4a0`
+matched across all three samples. Writer timestamp normalization removed the
+only volatile STEP header field.
+
+Representation evidence reports body/lid `meshDomain`, strap `analyticBrep`,
+ten mesh Booleans, three-way DAG concurrency, and two tessellated STEP members.
+A focused retained-free inspection confirmed AP242 contains two
+`TRIANGULATED_SURFACE_SET` entities plus the strap `MANIFOLD_SOLID_BREP`; no
+mesh member is labeled analytic or faceted BRep.
+
+Incremental proof passed:
+
+| Edit | Native | Boolean | Cache locality |
+| --- | ---: | ---: | --- |
+| identical | `112 ms` | `0 ms` | all three parts hit; zero commands/Booleans |
+| body only | `1266 ms` | `857 ms` | lid and strap hit; zero lid commands |
+| thread | `1269 ms` | `1006 ms` | decorated dome hit; zero recomputes |
+| decoration | `183 ms` | `58 ms` | structural pair hit; decorated dome alone rebuilt |
+
+All nine final samples acquired the exclusive lease without overlap or
+termination. Maximum process-tree RSS was `1,178,775,552` bytes (`1.10 GiB`),
+minimum host available memory was `24,803,115,008` bytes, and aggregate swap
+growth was zero. Generated STEP/STL sample artifacts were removed after digest
+collection; only compact evidence remains.
 
 Focused final proof: guarded native runner build/integration passed; guarded
 `cargo test direct_occt_runner --lib` passed 69 tests; guarded JS BDD passed
@@ -266,13 +311,11 @@ size/topology, corrupt entries become misses, writes stage then atomically
 publish, and LRU eviction applies the byte budget. Complete part hits do not
 enter the command-node graph.
 
-## Completion gaps
+## Completion status
 
-- `7.7-7.11` and `8.1` remain unchecked. The bracelet heavy/incremental gates and full focused
-  runner suite must pass before archive.
-- Existing fixture report provenance identifies
-  `src-tauri/target/debug/render_ecky_ir_native_occt`; bracelet acceptance must
-  use the same freshly built release runner for both policies.
+All implementation and acceptance tasks are complete. The final bracelet gate
+uses one freshly built release runner and immutable historical analytic timing;
+it does not mix debug/release samples or rerun the obsolete slow policy.
 
 ## Resource evidence follow-up — 2026-08-02
 

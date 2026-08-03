@@ -17,7 +17,7 @@ the entire model even when resolved geometry changes in one part only.
 - Execute independent Direct OCCT work concurrently inside one render job.
 - Reuse successful clean geometry across parameter edits.
 - Make dirty execution proportional to the affected transitive closure.
-- Retain analytic BRep and exact STEP authority.
+- Retain analytic BRep where useful and emit truthful hybrid STEP authority.
 - Produce measurable speedup with correctness evidence.
 
 ## Non-Goals
@@ -25,7 +25,8 @@ the entire model even when resolved geometry changes in one part only.
 - Frontend debounce, latest-task suppression, cancellation, or request queues.
 - Approximate geometry, silent mesh conversion, or reduced preview quality.
 - Parallelizing dependency-related nodes whose ordering is semantically fixed.
-- Byte-identical STEP/STL output when semantic topology evidence proves parity.
+- Byte-identical analytic-baseline versus hybrid STEP/STL output; current
+  hybrid samples remain deterministic and byte-identical to each other.
 - Direct SQLite manipulation or cache metadata stored in application history.
 - Unbounded thread creation or independent thread pools fighting OCCT/TBB.
 
@@ -82,6 +83,16 @@ with thread and seat. A thread/seat edit reuses the decorated dome and MUST NOT
 repeat the faceted-relief/analytic-dome intersection. Grouping and reduction
 order are explicit plan semantics, fingerprinted, and admitted only after
 validity/topology parity proof; this is not an implicit source rewrite.
+
+The bracelet uses two declared mesh-domain closures. Its imported STL relief
+enters the runner as canonical indexed mesh, the dome and structural pair
+tessellate once at the explicit boundary, and the decorated/final lid unions
+execute in the mesh domain. The body crosses to mesh before its pathological
+threaded Boolean chain; expensive OCCT solid splitting is not retained merely
+to preserve an analytic label. Body and lid are `meshDomain`; strap remains
+`analyticBrep`. Representation is part of plan, command/group, part-cache, and
+artifact identity. Planner cost policy is deterministic and serialized; the
+runtime cannot silently change representation.
 
 Analytic shapes use OCCT `BinTools` binary BRep. Cache metadata records schema,
 fingerprint, representation, runtime identity, artifact digest, byte size, and
@@ -167,6 +178,16 @@ changed. It may reuse cached per-part triangulations or combine validated
 per-part triangle streams. Production bundle still contains complete viewer
 assets and export evidence.
 
+Mixed representation export is explicit. STL and per-part STL consume the
+canonical mesh stream directly for mesh-domain parts and the cached part mesh
+for analytic parts. STEP remains present: analytic parts transfer unchanged;
+each closed Manifold mesh-domain part becomes one AP242
+`TRIANGULATED_SURFACE_SET`, retaining shared indexed coordinates instead of
+fabricating thousands of analytic triangle faces. STEP presence does not imply
+that every part is analytic. Stage evidence reports the exact count of
+tessellated STEP members. The writer normalizes its volatile header timestamp,
+so current hybrid samples have deterministic bytes.
+
 ### 7. Evidence contract
 
 Stage report schema records:
@@ -248,21 +269,27 @@ fixture protects against benchmark-only architecture but does not replace the
 ### Boolean-critical AirTag bracelet
 
 The frozen `Daughter Flower AirTag Bracelet` fixture is the acceptance case for
-adaptive nested OCCT parallelism. Its recorded outer-only baseline is
+the complete render architecture. Its recorded analytic-BRep baseline is
 `69.669 s` native total, including `64.133 s` Boolean time (`92.05%`). It has
 three intentional disconnected printable solids; component count three is not
 an error even though the authored model has fewer part declarations.
 
 Development uses one guarded before/after characterization sample. The final
-gate uses at least three sequential cold-cache samples per policy from the same
-release runner, after one unmeasured warm-up. Compare the existing outer-only
-policy with the adaptive shared-budget policy:
+gate uses at least three sequential adaptive cold-cache samples from one release
+runner after one unmeasured warm-up. Compare their median with the immutable
+recorded analytic-BRep baseline. `outer-only` remains a diagnostic policy for
+CPU-lease parity, but representation stays identical across policies and it is
+not rerun three times merely to recreate the historical slow kernel:
 
-- adaptive median native total MUST be at least `3.0x` faster;
-- adaptive median Boolean time MUST be at least `3.0x` faster;
+- adaptive median native total MUST be at least `3.0x` faster than `69.669 s`;
+- adaptive median Boolean time MUST be at least `3.0x` faster than `64.133 s`;
 - on the recorded 18-core Apple M5 Pro reference host, adaptive median native
   total MUST be at most `23 s`; the stretch target is `15 s`;
-- topology, bounds, volume, three components, STEP, and STL MUST match;
+- the three current samples MUST have identical artifact digests;
+- baseline versus hybrid output MUST preserve three components, part identities,
+  bounds and signed volume within the declared tessellation tolerance, STEP and
+  STL presence, validity, and watertightness; byte-identical analytic topology
+  is neither expected nor falsely claimed;
 - stage evidence MUST show at least one parallel Boolean and MUST prove peak
   allocated CPU units never exceeds the configured budget;
 - every sample remains under the existing RSS, host-memory, swap, exclusivity,

@@ -97,6 +97,28 @@ changed.
 - **AND** only changed geometry incurs tessellation work
 - **AND** the final preview still represents every part.
 
+### Requirement: Explicit hybrid part representation
+
+The runner SHALL execute a planner-declared mesh-domain Boolean boundary and
+cache its canonical indexed result without presenting it as analytic BRep.
+
+#### Scenario: Decorated bracelet lid
+
+- **GIVEN** a planner-declared `decorated-dome` mesh-domain group
+- **WHEN** imported indexed relief and analytic dome are united
+- **THEN** the Boolean executes in the mesh domain
+- **AND** the mesh-domain partial and final lid are eligible for immutable cache
+- **AND** representation participates in every cache identity.
+
+#### Scenario: Mixed STEP export
+
+- **GIVEN** one mesh-domain part and one or more analytic BRep parts
+- **WHEN** STEP export is requested
+- **THEN** the mesh-domain part is emitted as an AP242 tessellated surface set
+- **AND** analytic parts retain their native BRep
+- **AND** the artifact reports both representations truthfully
+- **AND** no mesh-domain part is presented as analytic or faceted BRep.
+
 ### Requirement: Localized rerender performance evidence
 
 The system SHALL prove localized parameter reuse with kernel counters and
@@ -109,4 +131,3 @@ release timing.
 - **AND** localized rerender median is no more than 50 percent of cold full
   render median
 - **AND** topology, bounds, volume, STEP, and STL contracts remain valid.
-
