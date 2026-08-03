@@ -157,6 +157,8 @@ pub struct KernelPartialBooleanGroupPlan {
     pub part_key: String,
     pub parent_output: u64,
     pub key: String,
+    #[serde(default)]
+    pub representation: KernelRepresentation,
     pub operation: String,
     pub input_indices: Vec<u32>,
     pub ordinal: u32,
@@ -169,7 +171,17 @@ pub struct KernelPart {
     pub key: String,
     pub label: String,
     pub root: u64,
+    #[serde(default)]
+    pub representation: KernelRepresentation,
     pub commands: Vec<KernelCommand>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum KernelRepresentation {
+    #[default]
+    AnalyticBrep,
+    MeshDomain,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

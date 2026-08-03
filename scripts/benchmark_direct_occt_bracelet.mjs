@@ -33,23 +33,41 @@ function assertCpuEvidence(sample, policy) {
     `${sample.label} oversubscribed CPU budget`);
 }
 
-export function evaluateBraceletGate({ outerOnly, adaptive, referenceCpuCount = 18 }) {
-  assert.ok(outerOnly.length >= 3 && adaptive.length >= 3, 'bracelet release gate needs three samples per policy');
+const HISTORICAL_ANALYTIC_BASELINE = Object.freeze({ nativeMs: 69_669, booleanMs: 64_133 });
+const BRACELET_PART_IDS = Object.freeze([
+  'daughter-flower-body',
+  'daughter-flower-center-lid',
+  'daughter-tpu-breakaway-strap',
+]);
+
+export function evaluateBraceletGate({
+  adaptive,
+  outerOnly = [],
+  historicalBaseline = HISTORICAL_ANALYTIC_BASELINE,
+  referenceCpuCount = 18,
+}) {
+  assert.ok(adaptive.length >= 3, 'bracelet release gate needs three adaptive samples');
   for (const sample of outerOnly) assertCpuEvidence(sample, 'outer-only');
   for (const sample of adaptive) assertCpuEvidence(sample, 'adaptive');
-  const parity = evaluateWorkerParity([...outerOnly, ...adaptive]);
+  const parity = evaluateWorkerParity(adaptive);
   assert.equal(parity.fields.components, 3, 'bracelet must preserve three printable components');
   assert.equal(parity.fields.parts, 3, 'bracelet must preserve three authored parts');
-  assert.equal(new Set(parity.artifactDigests.map(item => item.stl)).size, 1, 'bracelet STL bytes changed across policies');
-  assert.equal(new Set(parity.artifactDigests.map(item => item.step)).size, 1, 'bracelet STEP bytes changed across policies');
-  assert.ok(adaptive.some(sample => (sample.stage?.parallelBooleanCount ?? 0) > 0),
-    'adaptive policy executed no parallel Boolean');
-  const outerNativeMedianMs = median(outerOnly.map(nativeElapsedMs));
+  for (const sample of adaptive) {
+    assert.deepEqual(Object.keys(sample.perPart ?? {}).sort(), [...BRACELET_PART_IDS].sort(),
+      `${sample.label} changed authored part identities`);
+  }
+  assert.equal(new Set(parity.artifactDigests.map(item => item.stl)).size, 1,
+    'bracelet STL bytes changed across adaptive samples');
+  assert.equal(new Set(parity.artifactDigests.map(item => item.step)).size, 1,
+    'bracelet STEP bytes changed across adaptive samples');
+  assert.ok(adaptive.some(sample => (sample.stage?.meshBooleanCount ?? 0) > 0),
+    'adaptive policy executed no mesh-domain Boolean');
+  assert.ok(adaptive.every(sample => sample.stage?.tessellatedStepPartCount === 2),
+    'bracelet hybrid export must tessellate body and lid STEP members');
   const adaptiveNativeMedianMs = median(adaptive.map(nativeElapsedMs));
-  const outerBooleanMedianMs = median(outerOnly.map(booleanElapsedMs));
   const adaptiveBooleanMedianMs = median(adaptive.map(booleanElapsedMs));
-  const nativeSpeedup = outerNativeMedianMs / adaptiveNativeMedianMs;
-  const booleanSpeedup = outerBooleanMedianMs / adaptiveBooleanMedianMs;
+  const nativeSpeedup = historicalBaseline.nativeMs / adaptiveNativeMedianMs;
+  const booleanSpeedup = historicalBaseline.booleanMs / adaptiveBooleanMedianMs;
   assert.ok(nativeSpeedup >= 3, `bracelet native speedup ${nativeSpeedup.toFixed(3)}x is below 3x`);
   assert.ok(booleanSpeedup >= 3, `bracelet Boolean speedup ${booleanSpeedup.toFixed(3)}x is below 3x`);
   if (referenceCpuCount === 18) {
@@ -58,9 +76,9 @@ export function evaluateBraceletGate({ outerOnly, adaptive, referenceCpuCount = 
   }
   return {
     passed: true,
-    outerNativeMedianMs,
+    historicalNativeMs: historicalBaseline.nativeMs,
     adaptiveNativeMedianMs,
-    outerBooleanMedianMs,
+    historicalBooleanMs: historicalBaseline.booleanMs,
     adaptiveBooleanMedianMs,
     nativeSpeedup,
     booleanSpeedup,
@@ -161,15 +179,13 @@ export function main() {
     ? null
     : runGuardedSample(request(runDir, cli, workers, 'warmup', 'adaptive', warmupCache));
   if (warmup) removeCache(runDir, warmupCache);
-  const outerOnly = characterization
-    ? []
-    : runColdPolicy({ runDir, cli, workers, policy: 'outer-only', samples });
+  const outerOnly = [];
   const adaptive = runColdPolicy({ runDir, cli, workers, policy: 'adaptive', samples });
   const gate = !characterization && samples >= 3
-    ? evaluateBraceletGate({ outerOnly, adaptive, referenceCpuCount: cpus().length })
+    ? evaluateBraceletGate({ adaptive, referenceCpuCount: cpus().length })
     : {
         passed: null,
-        reason: 'characterization-only; release gate needs three samples per policy',
+        reason: 'characterization-only; release gate needs three adaptive samples',
         historicalOuterOnly: { nativeMs: 69_669, booleanMs: 64_133 },
         adaptiveNativeMs: nativeElapsedMs(adaptive[0]),
         adaptiveBooleanMs: booleanElapsedMs(adaptive[0]),

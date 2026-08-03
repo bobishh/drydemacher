@@ -148,10 +148,13 @@ pub enum NativeExportOutcome {
         step_path: PathBuf,
         stl_path: PathBuf,
         part_stl_paths: Vec<(String, PathBuf)>,
+        tessellated_step: bool,
+        source_mesh_digests: Vec<String>,
     },
     MeshExported {
         stl_path: PathBuf,
         part_stl_paths: Vec<(String, PathBuf)>,
+        source_mesh_digests: Vec<String>,
     },
     Blocked {
         blockers: Vec<String>,

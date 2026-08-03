@@ -39,7 +39,7 @@ const DIRECT_OCCT_HOT_CACHE_CAPACITY: usize = 2;
 /// on top of [`DIRECT_OCCT_HOT_CACHE_CAPACITY`]; it guards a couple of
 /// pathological oversized renders from pinning the hot cache.
 const DIRECT_OCCT_HOT_CACHE_BYTE_BUDGET: u64 = 128 * 1024 * 1024;
-const DIRECT_OCCT_CACHE_SCHEMA: &str = "direct-occt-v5-analytic-brep-cache-contract";
+const DIRECT_OCCT_CACHE_SCHEMA: &str = "direct-occt-v6-explicit-hybrid-cache-contract";
 const DIGESTS_FILE_NAME: &str = "digests.json";
 const CACHED_ARTIFACT_DIGEST_SCHEMA_VERSION: u32 = 1;
 
@@ -47,6 +47,18 @@ fn direct_occt_analytic_brep_provenance() -> GeometryProvenance {
     GeometryProvenance {
         representation: GeometryRepresentation::AnalyticBrep,
         source_mesh_digests: Vec::new(),
+        closed: None,
+        boundary_or_non_manifold_edge_count: None,
+    }
+}
+
+fn direct_occt_provenance(
+    representation: GeometryRepresentation,
+    source_mesh_digests: Vec<String>,
+) -> GeometryProvenance {
+    GeometryProvenance {
+        representation,
+        source_mesh_digests,
         closed: None,
         boundary_or_non_manifold_edge_count: None,
     }
@@ -188,16 +200,33 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
         }
     };
 
-    let (step_path, stl_path, part_stl_paths) = match export_outcome {
+    let (step_path, stl_path, part_stl_paths, geometry_provenance) = match export_outcome {
         NativeExportOutcome::Exported {
             step_path,
             stl_path,
             part_stl_paths,
-        } => (Some(step_path), stl_path, part_stl_paths),
+            tessellated_step,
+            source_mesh_digests,
+        } => (
+            Some(step_path),
+            stl_path,
+            part_stl_paths,
+            if tessellated_step {
+                direct_occt_provenance(GeometryRepresentation::Hybrid, source_mesh_digests)
+            } else {
+                direct_occt_analytic_brep_provenance()
+            },
+        ),
         NativeExportOutcome::MeshExported {
             stl_path,
             part_stl_paths,
-        } => (None, stl_path, part_stl_paths),
+            source_mesh_digests,
+        } => (
+            None,
+            stl_path,
+            part_stl_paths,
+            direct_occt_provenance(GeometryRepresentation::MeshNative, source_mesh_digests),
+        ),
         NativeExportOutcome::Blocked { blockers } => {
             let _ = fs::remove_dir_all(&bundle_dir);
             return Err(AppError::render(format!(
@@ -266,6 +295,7 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
         &part_root_node_ids,
         &part_asset_paths,
     )?;
+    manifest.geometry_provenance = Some(geometry_provenance.clone());
     let thread_warnings = super::direct_occt::thread_printability_warnings(&program, parameters)?;
     manifest
         .document
@@ -282,6 +312,10 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
         topology_report,
         &manifest,
     )?;
+    bundle.geometry_provenance = Some(geometry_provenance.clone());
+    for artifact in &mut bundle.export_artifacts {
+        artifact.geometry_provenance = Some(geometry_provenance.clone());
+    }
     if step_path.is_none() {
         bundle.export_artifacts.clear();
     }
@@ -321,23 +355,29 @@ fn cached_direct_occt_bundle_is_current(
     model_id: &str,
     content_hash: &str,
 ) -> bool {
-    let is_analytic_brep = |provenance: Option<&GeometryProvenance>| {
+    let bundle_provenance = bundle.geometry_provenance.as_ref();
+    let manifest_provenance = manifest.geometry_provenance.as_ref();
+    let supported = |provenance: Option<&GeometryProvenance>| {
         matches!(
-            provenance.map(|provenance| &provenance.representation),
-            Some(GeometryRepresentation::AnalyticBrep)
+            provenance.map(|value| &value.representation),
+            Some(
+                GeometryRepresentation::AnalyticBrep
+                    | GeometryRepresentation::Hybrid
+                    | GeometryRepresentation::MeshNative
+            )
         )
     };
 
     bundle.content_hash == content_hash
         && bundle.model_id == model_id
         && manifest.model_id == model_id
-        && is_analytic_brep(bundle.geometry_provenance.as_ref())
-        && is_analytic_brep(manifest.geometry_provenance.as_ref())
+        && supported(bundle_provenance)
+        && bundle_provenance == manifest_provenance
         && bundle
             .export_artifacts
             .iter()
             .filter(|artifact| artifact.format.eq_ignore_ascii_case("step"))
-            .all(|artifact| is_analytic_brep(artifact.geometry_provenance.as_ref()))
+            .all(|artifact| artifact.geometry_provenance.as_ref() == bundle_provenance)
         && runtime_bundle_artifacts_ready(bundle)
 }
 
@@ -2122,7 +2162,7 @@ echo "fake runner plan: $plan"
     }
 
     #[test]
-    fn rejects_cached_direct_occt_bundle_without_analytic_brep_provenance() {
+    fn rejects_cached_direct_occt_bundle_without_explicit_provenance() {
         let root = temp_root("direct-occt-cache-legacy-provenance");
         let resolver = TestResolver { root: root.clone() };
         let source = "(model (part body (box 10 20 30)))";
@@ -2181,8 +2221,119 @@ echo "fake runner plan: $plan"
 
         assert!(
             read_complete_cached_bundle(&resolver, &model_id, &hash).is_none(),
-            "Direct OCCT cache must reject artifacts without analytic BRep provenance"
+            "Direct OCCT cache must reject artifacts without explicit provenance"
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reuses_cached_hybrid_bundle_when_all_provenance_matches() {
+        let root = temp_root("direct-occt-cache-hybrid-provenance");
+        let resolver = TestResolver { root: root.clone() };
+        let source = "(model (part body (box 10 20 30)))";
+        let hash = content_hash(source, "{}");
+        let model_id = model_id_from_hash(&hash);
+        let bundle_dir =
+            crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
+        fs::create_dir_all(&bundle_dir).expect("bundle dir");
+        let source_path = bundle_dir.join(SOURCE_FILE_NAME);
+        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let step_path = bundle_dir.join(STEP_FILE_NAME);
+        fs::write(&source_path, source).expect("source");
+        fs::write(&preview_path, b"solid hybrid preview").expect("preview");
+        fs::write(&step_path, b"ISO-10303-21; hybrid step").expect("step");
+
+        let provenance = direct_occt_provenance(
+            GeometryRepresentation::Hybrid,
+            vec!["sha256:relief".to_string()],
+        );
+        let mut manifest = build_direct_occt_manifest(
+            &model_id,
+            &source_path,
+            &[("body".to_string(), "Body".to_string())],
+            &[],
+            &[],
+            None,
+            &HashMap::new(),
+        )
+        .expect("manifest");
+        manifest.geometry_provenance = Some(provenance.clone());
+        let mut bundle = build_direct_occt_bundle(
+            &model_id,
+            &hash,
+            &source_path,
+            &preview_path,
+            &step_path,
+            None,
+            &manifest,
+        )
+        .expect("bundle");
+        bundle.geometry_provenance = Some(provenance.clone());
+        for artifact in &mut bundle.export_artifacts {
+            artifact.geometry_provenance = Some(provenance.clone());
+        }
+        let stored =
+            crate::model_runtime::write_runtime_bundle(&resolver, &model_id, &bundle, &manifest)
+                .expect("write hybrid runtime bundle");
+        write_complete_cached_bundle_digests(&bundle_dir, &stored.0).expect("write digests");
+
+        let cached = read_complete_cached_bundle(&resolver, &model_id, &hash)
+            .expect("matching hybrid cache must be reusable");
+        assert_eq!(cached.0.geometry_provenance, Some(provenance));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_cached_hybrid_bundle_when_step_provenance_mismatches() {
+        let root = temp_root("direct-occt-cache-hybrid-mismatch");
+        let resolver = TestResolver { root: root.clone() };
+        let source = "(model (part body (box 10 20 30)))";
+        let hash = content_hash(source, "{}");
+        let model_id = model_id_from_hash(&hash);
+        let bundle_dir =
+            crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
+        fs::create_dir_all(&bundle_dir).expect("bundle dir");
+        let source_path = bundle_dir.join(SOURCE_FILE_NAME);
+        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let step_path = bundle_dir.join(STEP_FILE_NAME);
+        fs::write(&source_path, source).expect("source");
+        fs::write(&preview_path, b"solid hybrid preview").expect("preview");
+        fs::write(&step_path, b"ISO-10303-21; hybrid step").expect("step");
+
+        let provenance = direct_occt_provenance(
+            GeometryRepresentation::Hybrid,
+            vec!["sha256:relief".to_string()],
+        );
+        let mut manifest = build_direct_occt_manifest(
+            &model_id,
+            &source_path,
+            &[("body".to_string(), "Body".to_string())],
+            &[],
+            &[],
+            None,
+            &HashMap::new(),
+        )
+        .expect("manifest");
+        manifest.geometry_provenance = Some(provenance.clone());
+        let mut bundle = build_direct_occt_bundle(
+            &model_id,
+            &hash,
+            &source_path,
+            &preview_path,
+            &step_path,
+            None,
+            &manifest,
+        )
+        .expect("bundle");
+        bundle.geometry_provenance = Some(provenance);
+        let stored =
+            crate::model_runtime::write_runtime_bundle(&resolver, &model_id, &bundle, &manifest)
+                .expect("write mismatched hybrid runtime bundle");
+        write_complete_cached_bundle_digests(&bundle_dir, &stored.0).expect("write digests");
+
+        assert!(read_complete_cached_bundle(&resolver, &model_id, &hash).is_none());
 
         let _ = fs::remove_dir_all(root);
     }

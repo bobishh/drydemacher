@@ -64,6 +64,7 @@ fn kernel_plan_is_a_public_versioned_protocol() {
             key: "body".into(),
             label: "Body".into(),
             root: 2,
+            representation: ecky_render::KernelRepresentation::AnalyticBrep,
             commands: vec![KernelCommand {
                 output: 2,
                 op: "box".into(),
