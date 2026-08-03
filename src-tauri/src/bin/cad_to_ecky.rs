@@ -17,19 +17,13 @@ use ecky_cad_lib::llm::{extract_openai_message_content, send_openai_request};
 use ecky_cad_lib::steel_data::parse_steel_data;
 
 fn usage() -> &'static str {
-    "Usage: cad_to_ecky <input> [--backend mesh|freecad] [--model M] \
+    "Usage: cad_to_ecky <input> [--backend mesh|freecad|build123d] [--model M] \
 [--base-url URL] [--api-key K] [--config config.edn] [--out out.ecky] [--dump-prompt]"
 }
 
 fn parse_backend(s: &str) -> Result<GeometryBackend, String> {
     serde_json::from_value(serde_json::Value::String(s.to_string()))
-        .map_err(|_| format!("unknown backend '{s}' (use mesh|freecad)"))
-        .and_then(|backend| match backend {
-            GeometryBackend::Build123d => {
-                Err("build123d was removed; use mesh or freecad".to_string())
-            }
-            backend => Ok(backend),
-        })
+        .map_err(|_| format!("unknown backend '{s}' (use mesh|freecad|build123d)"))
 }
 
 /// Route source formats through text-only adapters. No adapter emits Ecky.
@@ -52,11 +46,11 @@ fn config_path(explicit: Option<PathBuf>) -> Result<(PathBuf, bool), String> {
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var_os("HOME").ok_or("HOME not set; pass --config")?;
-        return Ok((
+        Ok((
             PathBuf::from(home)
                 .join("Library/Application Support/com.alcoholics-audacious.ecky-cad/config.edn"),
             false,
-        ));
+        ))
     }
     #[cfg(target_os = "windows")]
     {

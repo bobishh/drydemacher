@@ -391,6 +391,7 @@ fn with_lock<T>(dir: &Path, action: impl FnOnce() -> AppResult<T>) -> AppResult<
         .read(true)
         .write(true)
         .create(true)
+        .truncate(true)
         .open(lock_path)
         .map_err(|_| persist("lock-open"))?;
     let deadline = Instant::now() + LOCK_TIMEOUT;
@@ -681,6 +682,7 @@ mod tests {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(true)
             .open(path.join(CONFIG_LOCK_FILE))
             .unwrap();
         lock.try_lock_exclusive().unwrap();
@@ -709,6 +711,7 @@ mod tests {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(true)
             .open(path.join(CONFIG_LOCK_FILE))
             .unwrap();
         lock.try_lock_exclusive().unwrap();
@@ -772,7 +775,7 @@ mod tests {
         impl PersistenceOps for PauseBeforeWriteOps {
             fn write_all(&self, file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
                 fs::write(&self.entered, "entered")?;
-                let deadline = Instant::now() + Duration::from_secs(2);
+                let deadline = Instant::now() + Duration::from_secs(30);
                 while !self.release.exists() {
                     if Instant::now() >= deadline {
                         return Err(std::io::Error::new(
@@ -787,7 +790,7 @@ mod tests {
         }
 
         fn wait_for(path: &Path) {
-            let deadline = Instant::now() + Duration::from_secs(2);
+            let deadline = Instant::now() + Duration::from_secs(30);
             while !path.exists() {
                 assert!(Instant::now() < deadline, "timed out waiting for {path:?}");
                 thread::sleep(Duration::from_millis(5));

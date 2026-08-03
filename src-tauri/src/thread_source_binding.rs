@@ -18,10 +18,10 @@
 //!
 //! Sync-direction mapping (constraint from product review):
 //!   - `FileChanged`        -> external edit -> existing watcher applies it
-//!                              as a new version.
+//!     as a new version.
 //!   - `ThreadAdvanced`     -> Ecky advanced; refresh the file from the new
-//!                              Ecky source ONLY when the file digest is
-//!                              still clean vs the manifest.
+//!     Ecky source ONLY when the file digest is
+//!     still clean vs the manifest.
 //!   - `Conflict`           -> refuse; no overwrite, no version.
 //!
 //! See `openspec/changes/thread-source-binding`.

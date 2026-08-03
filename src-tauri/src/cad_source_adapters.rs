@@ -213,10 +213,7 @@ fn step_points(text: &str) -> Vec<[f64; 3]> {
     text.lines()
         .filter(|line| line.to_ascii_uppercase().contains("CARTESIAN_POINT"))
         .filter_map(|line| {
-            let values = line
-                .rsplit_once('(')?
-                .1
-                .trim_end_matches(|character| character == ')' || character == ';');
+            let values = line.rsplit_once('(')?.1.trim_end_matches([')', ';']);
             triple_from_values(values)
         })
         .collect()

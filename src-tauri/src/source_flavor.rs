@@ -39,7 +39,7 @@ mod tests {
         );
         assert_eq!(
             authored_source_file_name(SourceLanguage::Build123d, GeometryBackend::Build123d),
-            "source.py"
+            "source.ecky"
         );
         assert_eq!(
             authored_source_file_name(SourceLanguage::LegacyPython, GeometryBackend::Freecad),
@@ -51,7 +51,7 @@ mod tests {
     fn lowered_source_names_stay_backend_specific() {
         assert_eq!(
             lowered_source_file_name(GeometryBackend::Build123d),
-            "lowered.py"
+            "source.ecky"
         );
         assert_eq!(
             lowered_source_file_name(GeometryBackend::Freecad),

@@ -511,12 +511,10 @@ fn decode_mcp(v: &SteelDataValue) -> AppResult<McpConfig> {
         .optional("mode")
         .map(decode_mode)
         .transpose()?
-        .unwrap_or_else(|| {
-            if agents.is_empty() {
-                McpMode::Passive
-            } else {
-                McpMode::Active
-            }
+        .unwrap_or(if agents.is_empty() {
+            McpMode::Passive
+        } else {
+            McpMode::Active
         });
     Ok(McpConfig {
         port: f

@@ -71,13 +71,11 @@ test('parseDocsDocument reads tutorial campaign as six ordered levels', () => {
 
 test('parseDocsDocument reads section status and extracts snippets', () => {
   const parsed = parseDocsDocument(docsFixture());
-  const constraintDojo = resolveSection(parsed.sections, 'constraint-dojo');
   const forms = resolveSection(parsed.sections, 'forms-and-structure');
   const params = resolveSection(parsed.sections, 'params-and-controls');
   const verify = resolveSection(parsed.sections, 'verify-clauses');
 
-  assert.equal(constraintDojo?.status, 'ready');
-  assert.ok(constraintDojo?.bodyHtml.includes('fit/tolerance checklist'));
+  assert.ok(!parsed.sections.some((section) => section.slug === 'constraint-dojo'));
   assert.match(forms?.snippet ?? '', /\(model/);
   assert.match(forms?.bodyHtml ?? '', /top-level authoring grammar/i);
   assert.match(forms?.bodyHtml ?? '', /<code>assembly<\/code> \(planned\)/i);

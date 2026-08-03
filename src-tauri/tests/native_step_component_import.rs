@@ -124,13 +124,19 @@ fn package_representation_evidence_merges_conservatively() {
     );
 
     assert_eq!(
-        merge_step_geometry_provenance(GeometryRepresentation::AnalyticBrep, &[analytic.clone()])
-            .representation,
+        merge_step_geometry_provenance(
+            GeometryRepresentation::AnalyticBrep,
+            std::slice::from_ref(&analytic)
+        )
+        .representation,
         GeometryRepresentation::AnalyticBrep
     );
     assert_eq!(
-        merge_step_geometry_provenance(GeometryRepresentation::FacetedPolyBrep, &[faceted.clone()])
-            .representation,
+        merge_step_geometry_provenance(
+            GeometryRepresentation::FacetedPolyBrep,
+            std::slice::from_ref(&faceted)
+        )
+        .representation,
         GeometryRepresentation::FacetedPolyBrep
     );
     assert_eq!(

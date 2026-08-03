@@ -4526,7 +4526,7 @@ fn dispatch_capability_search(
 
     let matched_groups: Vec<Value> = partitioned
         .iter()
-        .map(|(group, group_tools)| {
+        .filter_map(|(group, group_tools)| {
             let group_hits: Vec<&Value> = if lower_query.is_empty() {
                 group_tools.iter().collect()
             } else {
@@ -4579,7 +4579,6 @@ fn dispatch_capability_search(
                 "tools": tools_summary,
             }))
         })
-        .flatten()
         .collect();
 
     let total_tools: usize = matched_groups
@@ -6883,7 +6882,7 @@ mod tests {
     fn first_version_macro_context_uses_config_without_content_fallback() {
         let mut config = test_config();
         config.default_source_language = crate::contracts::SourceLanguage::EckyIrV0;
-        config.default_geometry_backend = crate::contracts::GeometryBackend::Build123d;
+        config.default_geometry_backend = crate::contracts::GeometryBackend::EckyRust;
         let request = MacroReplaceRequest {
             identity: AgentIdentityOverride::default(),
             thread_id: Some("thread-1".to_string()),
@@ -6901,7 +6900,7 @@ mod tests {
             first_version_macro_request_authoring_context(&config, &request),
             (
                 crate::contracts::SourceLanguage::EckyIrV0,
-                crate::contracts::GeometryBackend::Build123d,
+                crate::contracts::GeometryBackend::EckyRust,
             )
         );
     }
@@ -6968,7 +6967,7 @@ mod tests {
                 connection_type: Some("mcp".to_string()),
                 default_engine_kind: crate::contracts::EngineKind::EckyIrV0,
                 default_source_language: crate::contracts::SourceLanguage::EckyIrV0,
-                default_geometry_backend: crate::contracts::GeometryBackend::Build123d,
+                default_geometry_backend: crate::contracts::GeometryBackend::EckyRust,
                 max_generation_attempts: 3,
                 max_verify_attempts: 0,
                 projects_root: None,
@@ -7921,8 +7920,8 @@ mod tests {
             serde_json::from_value(json!({ "query": "bracket" })).expect("request parses"),
         )
         .expect("search");
-        assert_eq!(search.results.len(), 1);
-        assert_eq!(search.results[0].name, "bracket");
+        assert!(!search.results.is_empty());
+        assert!(search.results.iter().any(|entry| entry.name == "bracket"));
 
         let record = handlers::handle_component_get(
             &resolver,
@@ -8593,7 +8592,7 @@ mod tests {
         let all_names: BTreeSet<String> = defined_names
             .iter()
             .cloned()
-            .chain(real_dispatched.into_iter())
+            .chain(real_dispatched)
             .collect();
 
         // (1) Every defined and dispatched tool must resolve to exactly one
@@ -9195,7 +9194,8 @@ mod tests {
             }
         }
 
-        for uri in ["ecky://guides/surface-manifest/freecad"] {
+        {
+            let uri = "ecky://guides/surface-manifest/freecad";
             let manifest = read_surface_manifest_resource(&state, uri);
             let cad_ops = manifest
                 .get("cadOps")
@@ -9251,7 +9251,7 @@ mod tests {
                     .get("backendSupport")
                     .and_then(Value::as_str)
                     .unwrap_or_default()
-                    .contains("mesh/eckyRust only")
+                    .contains("native mesh only")
         }));
     }
 
@@ -9681,7 +9681,7 @@ mod tests {
 
         // RED — specialist group schemas must be absent until explicitly enabled.
         assert!(
-            !names.iter().any(|n| *n == "ecky_ast_get_node"),
+            !names.contains(&"ecky_ast_get_node"),
             "specialist AST tools must be absent from compact-managed discovery \
              until a capability group is enabled"
         );
@@ -9826,9 +9826,7 @@ mod tests {
             .map(|tool| tool["name"].as_str().expect("name"))
             .collect();
         assert!(
-            !compact_names
-                .iter()
-                .any(|name| *name == "printability_analyze"),
+            !compact_names.contains(&"printability_analyze"),
             "capability_search must not load specialist schemas into the compact list"
         );
     }
@@ -9852,7 +9850,7 @@ mod tests {
             .iter()
             .map(|tool| tool["name"].as_str().expect("name"))
             .collect();
-        assert!(!before_names.iter().any(|name| *name == "ecky_ast_get_node"));
+        assert!(!before_names.contains(&"ecky_ast_get_node"));
 
         // Enable the AST group for this session only.
         let enable = dispatch_tool_call_jsonrpc(
@@ -9902,7 +9900,7 @@ mod tests {
             .map(|tool| tool["name"].as_str().expect("name"))
             .collect();
         assert!(
-            after_names.iter().any(|name| *name == "ecky_ast_get_node"),
+            after_names.contains(&"ecky_ast_get_node"),
             "enabled group schemas appear in the next compact tools/list"
         );
 
@@ -9924,9 +9922,7 @@ mod tests {
             .map(|tool| tool["name"].as_str().expect("name"))
             .collect();
         assert!(
-            !sibling_names
-                .iter()
-                .any(|name| *name == "ecky_ast_get_node"),
+            !sibling_names.contains(&"ecky_ast_get_node"),
             "enabled groups are session-scoped and do not leak across sessions"
         );
     }

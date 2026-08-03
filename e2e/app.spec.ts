@@ -19,7 +19,7 @@ test('Given app opens When workbench loads Then bottom icon dock controls are av
   expect(dockBox!.y + dockBox!.height).toBeLessThanOrEqual(viewport!.height);
 
   await expect(dock.getByRole('button', { name: 'Projects', exact: true })).toBeVisible();
-  await expect(dock.getByRole('button', { name: 'Parameters', exact: true })).toBeVisible();
+  await expect(dock.getByRole('button', { name: /(PARAMS|Parameters)/i, exact: true })).toBeVisible();
   await expect(dock.getByRole('button', { name: 'Dialogue', exact: true })).toBeVisible();
   await expect(dock.getByRole('button', { name: 'Ecky IR docs', exact: true })).toBeVisible();
   await expect(dock.getByRole('button', { name: 'Code inspector', exact: true })).toBeVisible();
@@ -41,7 +41,7 @@ test('Given workbench dock When groups are checked Then workspace windows preced
   const utility = dock.locator('.dock-group--utility');
 
   await expect(primary.getByRole('button', { name: 'Projects', exact: true })).toBeVisible();
-  await expect(primary.getByRole('button', { name: 'Parameters', exact: true })).toBeVisible();
+  await expect(primary.getByRole('button', { name: /(PARAMS|Parameters)/i, exact: true })).toBeVisible();
   await expect(primary.getByRole('button', { name: 'Ecky IR docs', exact: true })).toBeVisible();
   await expect(primary.getByRole('button', { name: /AUDIO ON|AUDIO OFF/i })).toHaveCount(0);
   await expect(utility.getByRole('button', { name: /Draw annotations/i })).toBeVisible();
@@ -66,11 +66,11 @@ test('Given workbench dock When settings opens and closes Then workbench control
   const settingsWindow = page.locator('[data-window-id="settings"]');
   await expect(settingsWindow).toBeVisible();
   await expect(settingsWindow.getByText('CONNECTION TYPE')).toBeVisible();
-  await expect(dock.getByRole('button', { name: 'Parameters', exact: true })).toBeVisible();
+  await expect(dock.getByRole('button', { name: /(PARAMS|Parameters)/i, exact: true })).toBeVisible();
 
   await settingsWindow.locator('.window-close').click();
   await expect(settingsWindow).toBeHidden();
-  await expect(dock.getByRole('button', { name: 'Parameters', exact: true })).toBeVisible();
+  await expect(dock.getByRole('button', { name: /(PARAMS|Parameters)/i, exact: true })).toBeVisible();
 });
 
 test('Given workbench dock When focused Code repeats Then inspector closes and reopens', async ({ page }) => {
@@ -122,11 +122,11 @@ test('Given workbench dock When docs opens Then floating docs window renders les
   await expect(codeModal).toBeHidden();
   await expect(docsWindow).toHaveClass(/window--focused/);
 
-  await docsWindow.getByRole('button', { name: 'Level 03: Parametric Pattern' }).click();
-  await expect(docsWindow.getByRole('heading', { name: 'Level 03: Parametric Pattern' })).toBeVisible();
-  await expect(docsWindow.locator('pre').first()).toContainText('(repeat-union');
+  await docsWindow.getByRole('button', { name: 'Level 05: Perforated Toothbrush Holder' }).click();
+  await expect(docsWindow.getByRole('heading', { name: 'Level 05: Perforated Toothbrush Holder' })).toBeVisible();
+  await expect(docsWindow.locator('pre').first()).toContainText('(model');
   await docsWindow.getByRole('button', { name: 'OPEN ATTEMPT IN CODE' }).click();
-  const tutorialModal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR: Parametric Pattern.ecky' });
+  const tutorialModal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR: Perforated Toothbrush Holder.ecky' });
   await expect(tutorialModal).toBeVisible();
   await expect(tutorialModal.getByRole('button', { name: 'COPY CODE' })).toBeVisible();
   await expect(tutorialModal.getByRole('button', { name: 'APPLY' })).toBeVisible();

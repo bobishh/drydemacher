@@ -63,7 +63,16 @@
     terminalContent?: Snippet;
   } = $props();
 
-  const shell = (id: ShellId) => windowStates[id];
+  const shell = (id: ShellId) =>
+    windowStates[id] ?? {
+      visible: false,
+      active: false,
+      hasUnsavedChanges: false,
+      pinned: false,
+      minimized: false,
+      focused: false,
+      zIndex: 0,
+    };
   const renderedControls = $derived(dockControls(Boolean(terminalDock)));
   const persistentControls = $derived(renderedControls.filter((control) => control.group === 'persistent'));
   const utilityControls = $derived(renderedControls.filter((control) => control.group === 'utility'));

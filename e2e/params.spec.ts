@@ -6,7 +6,7 @@ async function openSeededMacroMap(page: Page) {
   await page
     .locator('textarea.prompt-input')
     .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
-  await page.getByRole('button', { name: 'Parameters', exact: true }).click();
+  await page.getByRole('button', { name: /(PARAMS|Parameters)/i, exact: true }).click();
   await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
   await page.getByRole('button', { name: 'new params', exact: true }).click();
   await expect(page.locator('.macro-ast-map-shell')).toBeVisible();
@@ -785,7 +785,7 @@ endsolid mock
     await page.fill('textarea.prompt-input', 'make a lithophane (mock)');
     await page.locator('textarea.prompt-input').press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
-    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
     await expect(page.getByPlaceholder('Search controls...')).toBeVisible();
 
@@ -795,8 +795,8 @@ endsolid mock
 
     await page.getByRole('button', { name: /CANCEL/i }).click();
     await page.getByRole('button', { name: 'RAW', exact: true }).click();
-    await expect(page.locator('.panel-code-btn:not(.panel-file-btn)')).toBeVisible();
-    await expect(page.locator('.panel-file-btn')).toBeVisible();
+    await expect(page.locator('.panel-code-btn')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'OPEN FILE', exact: true })).toHaveCount(0);
   });
 
   test('Given seeded macro When New Params opens Then syntax markers reflect block types', async ({
@@ -842,11 +842,11 @@ endsolid mock
       .locator('textarea.prompt-input')
       .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
-    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
     await page.getByRole('button', { name: 'VIEWS' }).click();
 
-    await expect.soft(page.getByRole('button', { name: 'PARAMS', exact: true })).toBeVisible();
+    await expect.soft(page.getByRole('button', { name: /^(?:PARAMS|Parameters)$/i })).toBeVisible();
     await expect.soft(page.getByRole('button', { name: 'new params', exact: true })).toBeVisible();
     await expect.soft(page.locator('.param-panel .context-strip-head + .part-strip-list .view-chip')).toContainText([
       'model',
@@ -1002,7 +1002,7 @@ endsolid mock
       .locator('textarea.prompt-input')
       .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
-    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
 
     await page.getByRole('button', { name: 'VIEWS' }).click();
@@ -1023,7 +1023,7 @@ endsolid mock
       .locator('textarea.prompt-input')
       .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
-    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
 
     const tabsFitPanel = await page.locator('.panel-mode-tabs').evaluate((node) => {
@@ -1065,7 +1065,7 @@ endsolid mock
       .locator('textarea.prompt-input')
       .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
-    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
     await page.locator('.live-toggle').click();
 
@@ -1110,7 +1110,7 @@ endsolid mock
       .locator('textarea.prompt-input')
       .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
-    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
     await page.getByRole('button', { name: 'RAW', exact: true }).click();
     await expect(page.locator('#p600')).toBeVisible();
@@ -1145,7 +1145,7 @@ endsolid mock
       .locator('textarea.prompt-input')
       .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
-    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
     await page.getByRole('button', { name: 'RAW', exact: true }).click();
     await expect(page.locator('#p600')).toBeVisible();
@@ -1172,7 +1172,7 @@ endsolid mock
       .locator('textarea.prompt-input')
       .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
-    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
     await page.getByRole('button', { name: 'RAW', exact: true }).click();
     await expect(page.locator('#p600')).toBeVisible();
@@ -1204,7 +1204,7 @@ endsolid mock
       .locator('textarea.prompt-input')
       .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
-    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
     await page.locator('.param-panel input.param-input').first().fill('42');
     await page.getByRole('button', { name: 'APPLY' }).click();
@@ -1231,7 +1231,7 @@ endsolid mock
       .locator('textarea.prompt-input')
       .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
-    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
     await expect
       .poll(async () =>
@@ -1284,7 +1284,7 @@ endsolid mock
       .locator('textarea.prompt-input')
       .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
-    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
     await page.locator('.param-panel input.param-input').first().fill('42');
     await page.getByRole('button', { name: 'COMMIT' }).click();
@@ -1311,7 +1311,7 @@ endsolid mock
       .locator('textarea.prompt-input')
       .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
-    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
     const width = page.locator('.param-panel input.param-input').first();
     await width.fill('42');
@@ -1355,7 +1355,7 @@ endsolid mock
       .locator('textarea.prompt-input')
       .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
-    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
     await page.getByRole('button', { name: 'new params', exact: true }).click();
     await expect(page.locator('.macro-ast-map-shell')).toBeVisible();
@@ -1399,7 +1399,7 @@ endsolid mock
       .locator('textarea.prompt-input')
       .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
-    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
     await page.getByRole('button', { name: 'new params', exact: true }).click();
     await expect(page.locator('.macro-ast-map-shell')).toBeVisible();
@@ -1427,7 +1427,7 @@ endsolid mock
       .locator('textarea.prompt-input')
       .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
-    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
     await page.getByRole('button', { name: 'new params', exact: true }).click();
     await expect(page.locator('.macro-ast-map-shell')).toBeVisible();
@@ -1458,7 +1458,7 @@ endsolid mock
       .locator('textarea.prompt-input')
       .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
-    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
     await page.getByRole('button', { name: 'new params', exact: true }).click();
     await expect(page.locator('.macro-ast-map-shell')).toBeVisible();
@@ -1496,7 +1496,7 @@ endsolid mock
       .locator('textarea.prompt-input')
       .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
-    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
     await page.getByRole('button', { name: 'new params', exact: true }).click();
     await expect(page.locator('.macro-ast-map-shell')).toBeVisible();
@@ -1539,7 +1539,7 @@ endsolid mock
       .locator('textarea.prompt-input')
       .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
-    await page.getByRole('button', { name: 'PARAMS' }).click();
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
     await page.getByRole('button', { name: 'new params', exact: true }).click();
     await expect(page.locator('.macro-ast-map-shell')).toBeVisible();

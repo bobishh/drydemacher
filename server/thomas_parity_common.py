@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -15,23 +16,16 @@ SURFACE_FIXTURES = FIXTURES / "surface"
 REFERENCE_FIXTURES = FIXTURES / "reference"
 LEGACY_MACRO = REFERENCE_FIXTURES / "thomas_modular_ramp_legacy.py"
 TAURI_MANIFEST = ROOT / "src-tauri" / "Cargo.toml"
-BUILD123D_RUNNER = ROOT / "server" / "build123d_runner.py"
 FREECAD_RUNNER = ROOT / "server" / "freecad_runner.py"
 COMPARE_SCRIPT = ROOT / "server" / "compare_metric.py"
 
 
-def resolve_build123d_python() -> str:
-    for env_key in ("BUILD123D_PYTHON", "PYTHON_CMD"):
+def resolve_python() -> str:
+    for env_key in ("PYTHON_CMD", "BUILD123D_PYTHON"):
         value = os.environ.get(env_key)
         if value:
             return value
-    bundled = ROOT / ".dist" / "build123d-runtime" / "bin" / "python3"
-    if bundled.exists():
-        return str(bundled)
-    bundled_fallback = ROOT / ".dist" / "build123d-runtime" / "bin" / "python"
-    if bundled_fallback.exists():
-        return str(bundled_fallback)
-    return sys.executable
+    return shutil.which("python3") or sys.executable
 
 
 def run(cmd: list[str], *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -68,6 +62,59 @@ def write_legacy_full(source: Path, out: Path) -> None:
     out.write_text(source.read_text())
 
 
+def lower_to_freecad(source: Path, out: Path) -> None:
+    cmd = [
+        "cargo",
+        "run",
+        "--quiet",
+        "--manifest-path",
+        str(TAURI_MANIFEST),
+        "--bin",
+        "ecky",
+        "--",
+        "lower",
+        "--backend",
+        "freecad",
+        str(source),
+        "--out",
+        str(out),
+    ]
+    require_ok(run(cmd), f"lower {source.name} to FreeCAD")
+
+
+def resolve_freecad_cmd() -> str:
+    return os.environ.get(
+        "FREECAD_CMD",
+        "/Applications/FreeCAD.app/Contents/Resources/bin/freecadcmd",
+    )
+
+
+def render_freecad_macro(
+    freecad_cmd: str,
+    macro_path: Path,
+    stl_path: Path,
+    fcstd_path: Path,
+    parts_dir: Path,
+    report_path: Path,
+    *,
+    params: dict[str, object],
+    label: str,
+) -> None:
+    env = os.environ.copy()
+    env.update(
+        {
+            "ECKYCAD_MODE": "generate",
+            "ECKYCAD_MACRO": str(macro_path),
+            "ECKYCAD_STL": str(stl_path),
+            "ECKYCAD_FCSTD": str(fcstd_path),
+            "ECKYCAD_PARTS_DIR": str(parts_dir),
+            "ECKYCAD_REPORT": str(report_path),
+            "ECKYCAD_PARAMS": json.dumps(params),
+        }
+    )
+    require_ok(run([freecad_cmd, str(FREECAD_RUNNER)], env=env), label)
+
+
 def run_thomas_phase(
     *,
     surface_source: Path,
@@ -83,61 +130,36 @@ def run_thomas_phase(
         ref_parts = tmp / "ref_parts"
         ref_report = tmp / "ref_report.json"
         generated_stl = tmp / "thomas_generated.stl"
+        generated_fcstd = tmp / "thomas_generated.FCStd"
         generated_parts = tmp / "gen_parts"
         generated_report = tmp / "gen_report.json"
 
         prepare_legacy(LEGACY_MACRO, legacy_macro)
+        lower_to_freecad(surface_source, lowered_python)
 
-        lower = run(
-            [
-                "cargo",
-                "run",
-                "--quiet",
-                "--manifest-path",
-                str(TAURI_MANIFEST),
-                "--bin",
-                "lower_ecky_ir_to_build123d",
-                "--",
-                str(surface_source),
-                "--out",
-                str(lowered_python),
-            ]
+        freecad_cmd = resolve_freecad_cmd()
+        render_freecad_macro(
+            freecad_cmd,
+            legacy_macro,
+            ref_stl,
+            ref_fcstd,
+            ref_parts,
+            ref_report,
+            params=params,
+            label="render FreeCAD reference",
         )
-        require_ok(lower, "lower authored Thomas source")
+        render_freecad_macro(
+            freecad_cmd,
+            lowered_python,
+            generated_stl,
+            generated_fcstd,
+            generated_parts,
+            generated_report,
+            params=params,
+            label="render lowered FreeCAD model",
+        )
 
-        freecad_env = os.environ.copy()
-        freecad_env.update(
-            {
-                "ECKYCAD_MODE": "generate",
-                "ECKYCAD_MACRO": str(legacy_macro),
-                "ECKYCAD_STL": str(ref_stl),
-                "ECKYCAD_FCSTD": str(ref_fcstd),
-                "ECKYCAD_PARTS_DIR": str(ref_parts),
-                "ECKYCAD_REPORT": str(ref_report),
-                "ECKYCAD_PARAMS": json.dumps(params),
-            }
-        )
-        freecad_cmd = os.environ.get(
-            "FREECAD_CMD", "/Applications/FreeCAD.app/Contents/Resources/bin/freecadcmd"
-        )
-        freecad_render = run([freecad_cmd, str(FREECAD_RUNNER)], env=freecad_env)
-        require_ok(freecad_render, "render FreeCAD reference")
-
-        build123d_env = os.environ.copy()
-        build123d_env.update(
-            {
-                "ECKYCAD_SOURCE": str(lowered_python),
-                "ECKYCAD_STL": str(generated_stl),
-                "ECKYCAD_PARTS_DIR": str(generated_parts),
-                "ECKYCAD_REPORT": str(generated_report),
-                "ECKYCAD_PARAMS": json.dumps(params),
-            }
-        )
-        python_cmd = resolve_build123d_python()
-        build123d_render = run([python_cmd, str(BUILD123D_RUNNER)], env=build123d_env)
-        require_ok(build123d_render, "render build123d model")
-
-        compare = run([python_cmd, str(COMPARE_SCRIPT), "--json", str(ref_stl), str(generated_stl)])
+        compare = run([resolve_python(), str(COMPARE_SCRIPT), "--json", str(ref_stl), str(generated_stl)])
         require_ok(compare, "compare models")
         comparison = json.loads(compare.stdout)
 

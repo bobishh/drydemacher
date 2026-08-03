@@ -600,15 +600,13 @@ fn load_framework_contract(app: &AppHandle) -> Option<String> {
 /// stable system prefix. A new thread with no current output defaults to the
 /// FreeCAD CAD-SDK path (the historical default).
 fn should_use_framework_for_generation(ctx: &PromptContext) -> bool {
-    match ctx
-        .last_output
-        .as_ref()
-        .map(|output| output.source_language)
-    {
+    !matches!(
+        ctx.last_output
+            .as_ref()
+            .map(|output| output.source_language),
         Some(crate::contracts::SourceLanguage::EckyIrV0)
-        | Some(crate::contracts::SourceLanguage::Build123d) => false,
-        _ => true,
-    }
+            | Some(crate::contracts::SourceLanguage::Build123d)
+    )
 }
 
 fn prepend_follow_up_context(prompt: String, follow_up_question: Option<&str>) -> String {
@@ -1578,15 +1576,10 @@ mod tests {
 
     #[test]
     fn guide_lists_only_manifest_cad_ops_for_backend_specific_surface() {
-        let build123d = build123d_guide_text();
         let freecad = freecad_guide_text();
         let mesh = ecky_ir_v0_guide_text(crate::contracts::GeometryBackend::EckyRust);
 
         for op in crate::ecky_language_surface::CAD_OPS_PORTABLE {
-            assert!(
-                build123d.contains(&format!("`{op}`")),
-                "build123d missing {op}"
-            );
             assert!(freecad.contains(&format!("`{op}`")), "freecad missing {op}");
             assert!(mesh.contains(&format!("`{op}`")), "mesh missing {op}");
             assert!(
@@ -1594,9 +1587,7 @@ mod tests {
                 "manifest op not exported: {op}"
             );
         }
-        assert!(!build123d.contains("`align`"));
         assert!(!freecad.contains("`align`"));
-        assert!(!build123d.contains("`wall-pattern`"));
         assert!(!freecad.contains("`wall-pattern`"));
         assert!(mesh.contains("`wall-pattern`"));
     }

@@ -106,7 +106,7 @@ mod tests {
     fn macro_source_window_guard_rejects_truncated_window_without_acknowledgement() {
         // Construct a truncated TargetMacroResponse-shaped window: the full
         // target has 6 lines, the read window observed only lines 3..4.
-        let window_lines = vec!["line three", "line four"];
+        let window_lines = ["line three", "line four"];
         let submitted_macro_code = window_lines.join("\n");
         let declared = window(6, 3, 4, window_lines.len(), false);
 
@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn macro_source_window_guard_accepts_truncated_window_with_explicit_acknowledgement() {
-        let window_lines = vec!["line three", "line four"];
+        let window_lines = ["line three", "line four"];
         let submitted_macro_code = window_lines.join("\n");
         let declared = window(6, 3, 4, window_lines.len(), true);
 
@@ -139,7 +139,7 @@ mod tests {
     fn macro_source_window_guard_accepts_non_truncated_full_window_without_acknowledgement() {
         // Non-truncated compatibility case: the read window covered the whole
         // target, so no acknowledgement is required.
-        let window_lines = vec!["one", "two", "three"];
+        let window_lines = ["one", "two", "three"];
         let submitted_macro_code = window_lines.join("\n");
         let declared = window(3, 1, 3, window_lines.len(), false);
 

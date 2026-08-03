@@ -38,7 +38,7 @@ pub const CHARS_PER_APPROX_TOKEN: usize = 4;
 /// `ceil(chars / CHARS_PER_APPROX_TOKEN)` — metric only, never an enforcement
 /// boundary.
 pub fn approx_tokens(chars: usize) -> usize {
-    (chars + CHARS_PER_APPROX_TOKEN - 1) / CHARS_PER_APPROX_TOKEN
+    chars.div_ceil(CHARS_PER_APPROX_TOKEN)
 }
 
 /// Deterministic Unicode scalar-value count. This is the enforcement unit.
@@ -1414,7 +1414,7 @@ mod tests {
             "SOURCE-SECRET sk-leak-AAAAAAAAAAAAAAAA Bearer abc123authz",
         );
         let reference = ContextSection::new(
-            &section_id::reference(0),
+            section_id::reference(0),
             SectionPriority::Optional,
             Sensitivity::Sensitive,
             "REFERENCE-BODY-SECRET /Users/bogdan/secret/file.ecky",
@@ -1469,7 +1469,7 @@ mod tests {
         // A reference/asset section whose content is a fake base64 image blob.
         // Telemetry must record only the shape, never the bytes.
         let image_section = ContextSection::new(
-            &section_id::asset(0),
+            section_id::asset(0),
             SectionPriority::Optional,
             Sensitivity::Safe,
             "IMAGE-BYTES-SECRET-/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQ==",
@@ -1504,13 +1504,13 @@ mod tests {
             section_id::DESIGN_DIGEST,
             SectionPriority::Relevant,
             Sensitivity::Safe,
-            &"d".repeat(4_000),
+            "d".repeat(4_000),
         );
         let asset = ContextSection::new(
-            &section_id::asset(0),
+            section_id::asset(0),
             SectionPriority::Optional,
             Sensitivity::Safe,
-            &"y".repeat(4_000),
+            "y".repeat(4_000),
         );
         let envelope =
             assemble_envelope(EnvelopeStage::Classifier, vec![request, digest, asset]).unwrap();

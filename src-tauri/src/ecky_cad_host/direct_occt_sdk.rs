@@ -232,7 +232,10 @@ pub fn bundled_occt_runtime_root_from_repo(repo_root: impl AsRef<Path>) -> PathB
 mod tests {
     #[test]
     fn generated_cpp_export_surface_is_absent() {
-        let source = include_str!("direct_occt_sdk.rs");
+        let source = include_str!("direct_occt_sdk.rs")
+            .split_once("#[cfg(test)]")
+            .map(|(head, _)| head)
+            .unwrap_or_else(|| include_str!("direct_occt_sdk.rs"));
         assert!(!source.contains("run_native_export_source"));
         assert!(!source.contains("Command::new(compiler)"));
     }

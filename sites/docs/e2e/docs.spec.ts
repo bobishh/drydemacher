@@ -18,7 +18,7 @@ test.describe('Ecky language reference — paged docs reader', () => {
 
     const toc = page.locator('nav[aria-label="Reference contents"]');
     const links = toc.locator('.docs-toc__link');
-    await expect(links).toHaveCount(19);
+    await expect(links).toHaveCount(14);
     await expect(toc.getByRole('link', { name: 'Operation Index' })).toHaveAttribute('href', '/docs/');
     await expect(toc.getByRole('link', { name: 'Verify Clauses' })).toHaveAttribute(
       'href',
@@ -73,7 +73,7 @@ test.describe('Ecky language reference — paged docs reader', () => {
   });
 
   test('Given a phone viewport When Contents is open Then the menu owns vertical scrolling', async ({ page }) => {
-    await page.setViewportSize({ width: 390, height: 844 });
+    await page.setViewportSize({ width: 390, height: 480 });
     await page.goto('/docs/');
 
     await page.getByRole('button', { name: '☰ Contents', exact: true }).click();

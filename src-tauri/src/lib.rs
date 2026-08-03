@@ -861,7 +861,7 @@ mod tests {
         );
         assert_eq!(
             status.warnings,
-            vec!["[BOOT] Config load failed; running with defaults: config.edn: invalid-shape"]
+            vec!["[BOOT] Config load failed; running with defaults: config.edn: invalid-data"]
         );
         fs::remove_dir_all(root).unwrap();
     }

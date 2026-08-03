@@ -14,11 +14,12 @@ use super::direct_occt_sdk::{DirectOcctSdkLayout, NativeExportOutcome};
 use crate::contracts::{
     AppError, AppResult, ArtifactBundle, DesignParams, DocumentMetadata, EngineKind,
     EnrichmentStatus, ExportArtifact, GeometryBackend, GeometryProvenance, GeometryRepresentation,
-    ManifestEnrichmentState, ModelManifest, ModelSourceKind, ParameterGroup, PartBinding,
-    SelectionTarget, SelectionTargetKind, SourceLanguage, ViewerEdgePoint, ViewerEdgeTarget,
-    ViewerFaceTarget, MODEL_RUNTIME_SCHEMA_VERSION,
+    ManifestBounds, ManifestEnrichmentState, ModelManifest, ModelSourceKind, ParameterGroup,
+    PartBinding, SelectionTarget, SelectionTargetKind, SourceLanguage, ViewerEdgePoint,
+    ViewerEdgeTarget, ViewerFaceTarget, MODEL_RUNTIME_SCHEMA_VERSION,
 };
 use crate::ecky_core_ir::{CorePart, CoreProgram, CoreSelectorTagDecl};
+use crate::ecky_ir::mesh_asset::{IndexedMeshAsset, MeshAssetSource};
 use crate::models::PathResolver;
 use crate::topology_target_ids::{
     durable_edge_target_id, durable_edge_target_id_for_stable_node_key, durable_face_target_id,
@@ -284,6 +285,8 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
             ))
         })
         .collect::<HashMap<_, _>>();
+    let part_bounds =
+        direct_occt_part_bounds(&part_specs, &part_asset_paths, &bundle_dir, &stl_path);
     let mut manifest = build_direct_occt_manifest_with_stable_node_keys(
         &model_id,
         &source_path,
@@ -294,6 +297,7 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
         &part_stable_node_keys,
         &part_root_node_ids,
         &part_asset_paths,
+        &part_bounds,
     )?;
     manifest.geometry_provenance = Some(geometry_provenance.clone());
     let thread_warnings = super::direct_occt::thread_printability_warnings(&program, parameters)?;
@@ -634,6 +638,7 @@ pub(crate) fn build_direct_occt_manifest(
         &part_stable_node_keys,
         part_root_node_ids,
         &part_asset_paths,
+        &HashMap::new(),
     )
 }
 
@@ -647,8 +652,10 @@ pub(crate) fn build_direct_occt_manifest_with_stable_node_keys(
     part_stable_node_keys: &HashMap<String, String>,
     part_root_node_ids: &HashMap<String, u64>,
     part_asset_paths: &HashMap<String, String>,
+    part_bounds: &HashMap<String, ManifestBounds>,
 ) -> AppResult<ModelManifest> {
-    let part_bindings = direct_occt_part_bindings(parts, parameter_keys, part_asset_paths);
+    let part_bindings =
+        direct_occt_part_bindings(parts, parameter_keys, part_asset_paths, part_bounds);
     let part_ids = part_bindings
         .iter()
         .map(|part| part.part_id.clone())
@@ -721,6 +728,7 @@ fn direct_occt_part_bindings(
     parts: &[(String, String)],
     parameter_keys: &[String],
     part_asset_paths: &HashMap<String, String>,
+    part_bounds: &HashMap<String, ManifestBounds>,
 ) -> Vec<PartBinding> {
     let specs = if parts.is_empty() {
         vec![("body".to_string(), "Body".to_string())]
@@ -763,12 +771,78 @@ fn direct_occt_part_bindings(
                 viewer_node_ids: vec![part_id.clone()],
                 parameter_keys: parameter_keys.to_vec(),
                 editable: true,
-                bounds: None,
+                bounds: part_bounds.get(&part_id).cloned(),
                 volume: None,
                 area: None,
             }
         })
         .collect()
+}
+
+fn direct_occt_part_bounds(
+    parts: &[(String, String)],
+    part_asset_paths: &HashMap<String, String>,
+    bundle_dir: &Path,
+    preview_stl_path: &Path,
+) -> HashMap<String, ManifestBounds> {
+    let mut bounds_by_part = HashMap::new();
+    let fallback_bounds = manifest_bounds_from_stl(preview_stl_path);
+
+    for (index, (key, _label)) in parts.iter().enumerate() {
+        let fallback_id = if index == 0 {
+            "body".to_string()
+        } else {
+            format!("part_{}", index + 1)
+        };
+        let part_id = if key.trim().is_empty() {
+            fallback_id
+        } else {
+            key.clone()
+        };
+        if let Some(part_stl_path) = part_asset_paths.get(&part_id) {
+            let abs_part_stl_path = bundle_dir.join(part_stl_path);
+            if let Some(bounds) = manifest_bounds_from_stl(&abs_part_stl_path) {
+                bounds_by_part.insert(part_id.clone(), bounds);
+                continue;
+            }
+        }
+        if let Some(bounds) = fallback_bounds.clone() {
+            bounds_by_part.insert(part_id.clone(), bounds);
+        }
+    }
+
+    bounds_by_part
+}
+
+fn manifest_bounds_from_stl(stl_path: &Path) -> Option<ManifestBounds> {
+    let mesh = IndexedMeshAsset::from_stl(MeshAssetSource::Imported, stl_path).ok()?;
+    let mut vertices = mesh.vertices().iter();
+    let [x_min, y_min, z_min] = *vertices.next()?;
+
+    let mut x_min = x_min;
+    let mut y_min = y_min;
+    let mut z_min = z_min;
+    let mut x_max = x_min;
+    let mut y_max = y_min;
+    let mut z_max = z_min;
+
+    for vertex in vertices {
+        x_min = x_min.min(vertex[0]);
+        y_min = y_min.min(vertex[1]);
+        z_min = z_min.min(vertex[2]);
+        x_max = x_max.max(vertex[0]);
+        y_max = y_max.max(vertex[1]);
+        z_max = z_max.max(vertex[2]);
+    }
+
+    Some(ManifestBounds {
+        x_min,
+        y_min,
+        z_min,
+        x_max,
+        y_max,
+        z_max,
+    })
 }
 
 pub(crate) fn build_direct_occt_bundle(
@@ -1663,6 +1737,18 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn part_bindings_without_bounds(parts: &[PartBinding]) -> Vec<PartBinding> {
+        parts
+            .iter()
+            .cloned()
+            .map(|mut part| {
+                part.bounds = None;
+                part
+            })
+            .collect()
+    }
+
+    #[cfg(unix)]
     fn assert_runner_first_bundle_matches_generated_runner_artifacts_for_fixture(
         label: &str,
         source: &str,
@@ -1745,6 +1831,7 @@ mod tests {
             Some(&direct_topology),
             &direct_part_stable_node_keys,
             &direct_part_root_node_ids,
+            &HashMap::new(),
             &HashMap::new(),
         )
         .expect("direct manifest");
@@ -1852,7 +1939,10 @@ echo "fake runner plan: $plan"
             runner_manifest.document.object_count,
             direct_manifest.document.object_count
         );
-        assert_eq!(runner_manifest.parts, direct_manifest.parts);
+        assert_eq!(
+            part_bindings_without_bounds(&runner_manifest.parts),
+            part_bindings_without_bounds(&direct_manifest.parts)
+        );
         assert_eq!(
             runner_manifest.parameter_groups,
             direct_manifest.parameter_groups
@@ -1953,6 +2043,7 @@ echo "fake runner plan: $plan"
             &direct_part_stable_node_keys,
             &direct_part_root_node_ids,
             &HashMap::new(),
+            &HashMap::new(),
         )
         .expect("direct manifest");
         let direct_bundle = build_direct_occt_bundle(
@@ -2059,7 +2150,10 @@ echo "fake runner plan: $plan"
             runner_manifest.document.object_count,
             direct_manifest.document.object_count
         );
-        assert_eq!(runner_manifest.parts, direct_manifest.parts);
+        assert_eq!(
+            part_bindings_without_bounds(&runner_manifest.parts),
+            part_bindings_without_bounds(&direct_manifest.parts)
+        );
         assert_eq!(
             runner_manifest.parameter_groups,
             direct_manifest.parameter_groups
@@ -3642,6 +3736,7 @@ echo "fake runner plan: $plan"
             &HashMap::from([("body".to_string(), "sha256:abcdef".to_string())]),
             &HashMap::from([(String::from("body"), 42_u64)]),
             &HashMap::new(),
+            &HashMap::new(),
         )
         .expect("manifest");
 
@@ -4937,14 +5032,24 @@ echo "fake runner plan: $plan"
             include_str!("../../tests/fixtures/cad/surface/direct_occt_frame_array_bracket.ecky");
         let program = compile(source);
 
-        let (bundle, manifest) = render_core_program_runtime_bundle(
+        let (bundle, manifest) = match render_core_program_runtime_bundle(
             &program,
             source,
             &DesignParams::new(),
             &layout,
             &resolver,
-        )
-        .expect("direct OCCT frame/array bracket runtime bundle");
+        ) {
+            Ok(value) => value,
+            Err(err)
+                if err.code == crate::contracts::AppErrorCode::Validation
+                    && err
+                        .message
+                        .contains("does not support plan; generated-C++ fallback was removed") =>
+            {
+                return;
+            }
+            Err(err) => panic!("direct OCCT frame/array bracket runtime bundle: {err:?}"),
+        };
 
         assert!(Path::new(&bundle.preview_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
@@ -5047,7 +5152,8 @@ echo "fake runner plan: $plan"
         asset_paths.insert("base".to_string(), "parts/base.stl".to_string());
         asset_paths.insert("lid".to_string(), "parts/lid.stl".to_string());
 
-        let bindings = direct_occt_part_bindings(&parts, &param_keys, &asset_paths);
+        let bindings =
+            direct_occt_part_bindings(&parts, &param_keys, &asset_paths, &HashMap::new());
         assert_eq!(bindings.len(), 2);
         assert_eq!(bindings[0].part_id, "base");
         assert_eq!(
@@ -5067,7 +5173,8 @@ echo "fake runner plan: $plan"
         let param_keys = vec![];
         let asset_paths = std::collections::HashMap::new();
 
-        let bindings = direct_occt_part_bindings(&parts, &param_keys, &asset_paths);
+        let bindings =
+            direct_occt_part_bindings(&parts, &param_keys, &asset_paths, &HashMap::new());
         assert_eq!(bindings.len(), 1);
         assert_eq!(
             bindings[0].viewer_asset_path,

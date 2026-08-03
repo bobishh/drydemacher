@@ -215,7 +215,7 @@ fn canonical_node(
                         "{}={}:{}",
                         keyword.name,
                         canonical_node(source, params, parts, locals, nodes),
-                        format!("{payload:?}")
+                        format_args!("{payload:?}")
                     ),
                 })
                 .collect::<Vec<_>>()

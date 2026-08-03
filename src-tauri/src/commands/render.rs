@@ -2120,8 +2120,7 @@ mod tests {
             bundle.components().iter().zip(objects.iter())
         {
             assert_eq!(name, component.label());
-            let canonical_vertices: Vec<[f64; 3]> =
-                component.asset().vertices().iter().map(|v| *v).collect();
+            let canonical_vertices = component.asset().vertices().to_vec();
             assert_eq!(
                 vertices, &canonical_vertices,
                 "object '{}' vertices must match the canonical indexed mesh",

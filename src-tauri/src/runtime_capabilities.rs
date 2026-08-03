@@ -319,10 +319,19 @@ mod tests {
         assert_eq!(build123d.source_language, SourceLanguage::EckyIrV0);
         assert_eq!(build123d.geometry_backend, GeometryBackend::EckyRust);
 
-        let freecad = recommended_authoring_context(true, false);
-        assert_eq!(freecad.engine_kind, EngineKind::EckyIrV0);
-        assert_eq!(freecad.source_language, SourceLanguage::EckyIrV0);
-        assert_eq!(freecad.geometry_backend, GeometryBackend::Freecad);
+        let ecky_with_freecad_available = recommended_authoring_context(true, false);
+        assert_eq!(
+            ecky_with_freecad_available.engine_kind,
+            EngineKind::EckyIrV0
+        );
+        assert_eq!(
+            ecky_with_freecad_available.source_language,
+            SourceLanguage::EckyIrV0
+        );
+        assert_eq!(
+            ecky_with_freecad_available.geometry_backend,
+            GeometryBackend::EckyRust
+        );
 
         let ecky_rust = recommended_authoring_context(false, false);
         assert_eq!(ecky_rust.engine_kind, EngineKind::EckyIrV0);
@@ -498,6 +507,6 @@ mod tests {
         );
 
         let recommended = recommended_authoring_context(false, true);
-        assert_eq!(recommended.geometry_backend, GeometryBackend::Build123d);
+        assert_eq!(recommended.geometry_backend, GeometryBackend::EckyRust);
     }
 }

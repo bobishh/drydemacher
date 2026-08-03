@@ -591,8 +591,8 @@ pub fn attach_resolved_component_evidence(
     )
 }
 
-fn collect_core_nodes<'a>(
-    node: &'a ecky_render::core_ir::CoreNode,
+fn collect_core_nodes(
+    node: &ecky_render::core_ir::CoreNode,
     nodes: &mut Vec<(u64, Option<ecky_render::core_ir::SourceSpan>)>,
 ) {
     use ecky_render::core_ir::CoreNodeKind;
@@ -964,8 +964,7 @@ fn import_keyword_name(expr: &ExprKind) -> Option<String> {
 }
 
 fn string_literal_arg(expr: Option<&ExprKind>, field: &str) -> AppResult<String> {
-    expr.and_then(|e| Some(e))
-        .map(|e| string_literal_value(e, field))
+    expr.map(|e| string_literal_value(e, field))
         .unwrap_or_else(|| {
             Err(AppError::validation(format!(
                 "`import-component` requires a literal {field} string."
@@ -1445,10 +1444,10 @@ fn inspect_package_source(source: &str, symbol: &str) -> AppResult<()> {
             continue;
         };
         match head.as_str() {
-            "define-component" => {
-                if items.get(1).and_then(expr_identifier).as_deref() == Some(symbol) {
-                    exported = true;
-                }
+            "define-component"
+                if items.get(1).and_then(expr_identifier).as_deref() == Some(symbol) =>
+            {
+                exported = true;
             }
             "import-component" => {
                 return Err(AppError::validation(

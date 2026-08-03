@@ -115,7 +115,7 @@ test.describe('Configuration Panel', () => {
   test('Given workbench When settings toggles Then config window opens and closes', async ({ page }) => {
     await page.goto('/');
 
-    await expect(page.getByRole('button', { name: 'PARAMS' })).toBeVisible();
+    await expect(page.getByRole('button', { name: /(PARAMS|Parameters)/i })).toBeVisible();
 
     await page.getByRole('button', { name: 'Settings' }).click();
     const settingsWindow = page.locator('[data-window-id="settings"]');
@@ -124,7 +124,7 @@ test.describe('Configuration Panel', () => {
 
     await settingsWindow.locator('.window-close').click();
     await expect(settingsWindow).toBeHidden();
-    await expect(page.getByRole('button', { name: 'PARAMS' })).toBeVisible();
+    await expect(page.getByRole('button', { name: /(PARAMS|Parameters)/i })).toBeVisible();
   });
 
   test('Given settings opens When default section renders Then connection type is visible', async ({ page }) => {

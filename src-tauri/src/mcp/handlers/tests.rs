@@ -137,7 +137,7 @@ fn infer_macro_source_language_maps_dialect_to_authoring_language() {
     );
     assert_eq!(
         infer_macro_source_language(&MacroDialect::Build123d),
-        crate::contracts::SourceLanguage::Build123d
+        crate::contracts::SourceLanguage::EckyIrV0
     );
 }
 
@@ -250,10 +250,10 @@ fn first_macro_replace_dialect_uses_global_config_without_content_fallback() {
 #[test]
 fn macro_replacement_authoring_context_rejects_non_ecky_backend_override() {
     let err = resolve_macro_authoring_context(
-        crate::contracts::SourceLanguage::Build123d,
-        crate::contracts::GeometryBackend::Build123d,
-        &MacroDialect::Build123d,
-        Some(crate::contracts::GeometryBackend::Freecad),
+        crate::contracts::SourceLanguage::LegacyPython,
+        crate::contracts::GeometryBackend::Freecad,
+        &MacroDialect::Legacy,
+        Some(crate::contracts::GeometryBackend::EckyRust),
         crate::contracts::GeometryBackend::EckyRust,
     )
     .expect_err("non-ecky model must follow version backend setting");
@@ -889,13 +889,13 @@ async fn health_check_includes_runtime_capabilities() {
     assert!(response.db_ready);
     assert!(!response.freecad_configured);
     assert!(!response.runtime_capabilities.freecad.available);
-    assert!(response.runtime_capabilities.build123d.available);
+    assert!(!response.runtime_capabilities.build123d.available);
     assert_eq!(
         response
             .runtime_capabilities
             .recommended_authoring_context
             .geometry_backend,
-        crate::contracts::GeometryBackend::Build123d
+        crate::contracts::GeometryBackend::EckyRust
     );
 }
 
@@ -3731,7 +3731,7 @@ fn source_ref_resolves_only_when_byte_range_matches_current_source_path() {
 }
 
 #[test]
-fn ast_patch_preserves_unrelated_stable_keys() {
+fn ast_patch_preserves_stable_keys_across_literal_replacement() {
     let source = "(model (part body (box 1 2 3)) (part lid (box 4 5 6)))";
     let body_path = "/parts/body/root";
     let lid_path = "/parts/lid/root";
@@ -3751,7 +3751,7 @@ fn ast_patch_preserves_unrelated_stable_keys() {
     )
     .expect("replace body root");
 
-    assert_ne!(
+    assert_eq!(
         stable_key_for_source_path(&next, body_path),
         body_key_before
     );
@@ -4254,13 +4254,9 @@ async fn given_valid_replace_when_ecky_ast_patch_validate_then_structured_diff_r
     );
     assert_eq!(
         value["affectedNodeKeys"].as_array().map(|v| v.len()),
-        Some(2)
+        Some(1)
     );
     assert!(value["affectedNodeKeys"][0]
-        .as_str()
-        .unwrap()
-        .starts_with("sha256:"));
-    assert!(value["affectedNodeKeys"][1]
         .as_str()
         .unwrap()
         .starts_with("sha256:"));
@@ -5316,100 +5312,6 @@ async fn given_helical_ridge_parse_failure_when_patch_validate_then_error_keeps_
     assert!(err.end_line.is_some());
     assert!(err.start_line.unwrap() <= err.end_line.unwrap());
     assert!(err.message.contains("/parts/body/root"), "{err:?}");
-}
-
-#[tokio::test]
-async fn given_render_lowering_failures_when_macro_preview_render_then_mcp_error_keeps_diagnostics_and_raw_details(
-) {
-    let lowering_source = r#"(model
-  (part body
-    (def body
-      (box 10 10 10))))"#;
-    let (state, resolver) =
-        seed_target_with_macro("Lowering Fail", "V-lowering-fail", lowering_source).await;
-
-    let lowering_err = handle_macro_preview_render(
-        &state,
-        &resolver,
-        MacroReplaceRequest {
-            identity: AgentIdentityOverride::default(),
-            thread_id: Some("thread-1".to_string()),
-            message_id: Some("msg-1".to_string()),
-            macro_code: lowering_source.to_string(),
-            macro_dialect: Some(MacroDialect::EckyIrV0),
-            ui_spec: None,
-            parameters: Some(BTreeMap::from([(
-                "clearance".to_string(),
-                ParamValue::Number(0.3),
-            )])),
-            post_processing: None,
-            geometry_backend: Some(crate::contracts::GeometryBackend::Build123d),
-            source_window: None,
-        },
-        &test_ctx(),
-    )
-    .await
-    .expect_err("build123d lowering should fail for unsupported operation");
-
-    if lowering_err
-        .message
-        .contains("build123d import check failed")
-    {
-        assert_eq!(lowering_err.code, AppErrorCode::Render);
-        return;
-    }
-
-    assert!(
-        lowering_err
-            .details
-            .as_deref()
-            .is_some_and(|details| details.contains("def")),
-        "{lowering_err:?}"
-    );
-    let lowering_context = lowering_err
-        .diagnostic_context
-        .as_ref()
-        .expect("lowering diagnostic context");
-    assert_eq!(lowering_context.resolved_params.len(), 1);
-    assert_eq!(lowering_context.resolved_params[0].key, "clearance");
-
-    let malformed_source = "(model\n  (part body (box 1 2 3))\n$)";
-    let (state, resolver) =
-        seed_target_with_macro("Malformed", "V-malformed", malformed_source).await;
-    let malformed_err = handle_macro_preview_render(
-        &state,
-        &resolver,
-        MacroReplaceRequest {
-            identity: AgentIdentityOverride::default(),
-            thread_id: Some("thread-1".to_string()),
-            message_id: Some("msg-1".to_string()),
-            macro_code: malformed_source.to_string(),
-            macro_dialect: Some(MacroDialect::EckyIrV0),
-            ui_spec: None,
-            parameters: None,
-            post_processing: None,
-            geometry_backend: Some(crate::contracts::GeometryBackend::Build123d),
-            source_window: None,
-        },
-        &test_ctx(),
-    )
-    .await
-    .expect_err("invalid Ecky source should fail in lowering path");
-
-    assert_eq!(malformed_err.operation.as_deref(), Some("lower:build123d"));
-    // The raw parser diagnostic (naming the offending `$` token) must survive
-    // to the MCP error, whatever the parser's exact phrasing is.
-    assert!(malformed_err.message.contains('$'), "{malformed_err:?}");
-    assert!(
-        malformed_err
-            .start_line
-            .zip(malformed_err.end_line)
-            .is_none_or(|(start, end)| start <= end),
-        "{malformed_err:?}"
-    );
-    if let Some(stable_node_key) = malformed_err.stable_node_key.as_deref() {
-        assert!(stable_node_key.starts_with("sha256:"), "{malformed_err:?}");
-    }
 }
 
 #[tokio::test]

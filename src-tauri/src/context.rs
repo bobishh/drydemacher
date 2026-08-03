@@ -1453,12 +1453,12 @@ mod tests {
             available_assets: String::new(),
             last_output: Some(mock_design_with_authoring(
                 "Dense Params",
-                SourceLanguage::Build123d,
-                GeometryBackend::Build123d,
-                "from build123d import *\nBox(1, 2, 3)\n",
+                SourceLanguage::EckyIrV0,
+                GeometryBackend::EckyRust,
+                "(model (part body (box p1 p2 p3)))\n",
                 initial_params,
             )),
-            design_digest: "Current working snapshot\nDense Params [V7] (build123d)\n\nCurrent params: 14\n- p1: number = 1\n- … 2 more params".to_string(),
+            design_digest: "Current working snapshot\nDense Params [V7] (ecky)\n\nCurrent params: 14\n- p1: number = 1\n- … 2 more params".to_string(),
             artifact_digest: String::new(),
         };
 
@@ -1467,16 +1467,16 @@ mod tests {
             "keep editing",
             "DESIGN_EDIT",
             ResolvedAuthoringContext {
-                engine_kind: EngineKind::Freecad,
-                source_language: SourceLanguage::Build123d,
-                geometry_backend: GeometryBackend::Build123d,
+                engine_kind: EngineKind::EckyIrV0,
+                source_language: SourceLanguage::EckyIrV0,
+                geometry_backend: GeometryBackend::EckyRust,
             },
         )
         .expect("normal-sized context assembles without overflow");
 
         assert!(result.contains("\"p1\": 1.0"));
         assert!(result.contains("\"p14\": 14.0"));
-        assert!(result.contains("sourceFence: python"));
+        assert!(result.contains("sourceFence: scheme"));
     }
 
     // --- 2.6: legacy optional sections routed behind the typed envelope ---

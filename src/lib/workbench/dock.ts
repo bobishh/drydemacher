@@ -35,7 +35,7 @@ export type DockControl = {
 
 const BASE_CONTROLS: readonly DockControl[] = [
   { id: 'projects', group: 'persistent', accessibleName: 'Projects', shortLabel: 'PROJ', iconId: 'projects' },
-  { id: 'params', group: 'persistent', accessibleName: 'Parameters', shortLabel: 'PARAM', iconId: 'params' },
+  { id: 'params', group: 'persistent', accessibleName: 'Parameters', shortLabel: 'PARAMS', iconId: 'params' },
   { id: 'dialogue', group: 'persistent', accessibleName: 'Dialogue', shortLabel: 'TALK', iconId: 'dialogue' },
   { id: 'code', group: 'persistent', accessibleName: 'Code inspector', shortLabel: 'CODE', iconId: 'code' },
   { id: 'docs', group: 'persistent', accessibleName: 'Ecky IR docs', shortLabel: 'DOCS', iconId: 'docs' },

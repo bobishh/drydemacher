@@ -50,7 +50,7 @@ fn lower_to_freecad_large_stack(source: &str) -> String {
     let source = source.to_owned();
     std::thread::Builder::new()
         .stack_size(32 * 1024 * 1024)
-        .spawn(move || ecky_cad_lib::ecky_ir::lower_to_freecad(&source))
+        .spawn(move || ecky_cad_lib::ecky_ir::lower_to_freecad(&source).map_err(Box::new))
         .expect("spawn FreeCAD lowering thread")
         .join()
         .expect("join FreeCAD lowering thread")

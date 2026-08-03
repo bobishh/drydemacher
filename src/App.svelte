@@ -3883,7 +3883,16 @@
     {/snippet}
 
     {#snippet docsContent()}
-      <DocsHub />
+      <DocsHub
+        onOpenAttempt={({ code, title }) => {
+          void openVersionCodeModal({
+            code,
+            title,
+            sourceLanguage: 'ecky',
+            geometryBackend: 'mesh',
+          });
+        }}
+      />
     {/snippet}
 
     {#snippet terminalContent()}

@@ -4,10 +4,20 @@
   import { exportDocsBookEpub } from './tauri/client';
   import { ECKY_IR_EPUB_FILENAME, ECKY_IR_EPUB_PATH, hasTauriInvokeBridge, saveBookEpubNative, triggerBrowserDownload } from './docs/downloadBook';
 
+  type OpenAttemptPayload = {
+    code: string;
+    title: string;
+  };
+
   type DocsTab = 'chapters' | 'reference';
   let activeTab = $state<DocsTab>('chapters');
   let epubState = $state<'idle' | 'saving' | 'failed'>('idle');
   let epubError = $state('');
+  let {
+    onOpenAttempt,
+  }: {
+    onOpenAttempt?: (payload: OpenAttemptPayload) => void;
+  } = $props();
 
   async function downloadEpub() {
     epubState = 'saving';
@@ -42,7 +52,7 @@
   </header>
   <main class="docs-hub__content">
     {#if activeTab === 'chapters'}
-      <ChaptersReader />
+      <ChaptersReader {onOpenAttempt} />
     {:else}
       <DocsSite showHead={false} />
     {/if}

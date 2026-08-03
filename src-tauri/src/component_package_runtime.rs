@@ -1119,6 +1119,7 @@ fn acquire_component_store_mutation_lock(
     let path = root.join(PACKAGE_STORE_MUTATION_LOCK_FILE_NAME);
     let file = OpenOptions::new()
         .create(true)
+        .truncate(true)
         .read(true)
         .write(true)
         .open(&path)
@@ -1171,13 +1172,13 @@ pub struct ValidatedPayload {
 /// - exclude root-level outer-envelope `ecky-header.json` and `ecky-payload.b64`;
 /// - reject `ecky-integrity.json` (reserved), duplicate normalized paths,
 ///   traversal, symlinks, and non-UTF-8 names.
-/// Returns entries sorted by normalized path bytes.
+///   Returns entries sorted by normalized path bytes.
 pub fn validate_payload_archive(payload: &[u8]) -> AppResult<ValidatedPayload> {
     let mut archive = ZipArchive::new(Cursor::new(payload)).map_err(|err| {
         AppError::parse(format!("Failed to parse package payload archive: {err}"))
     })?;
     let mut seen: HashSet<String> = HashSet::new();
-    let mut entries: Vec<ValidatedPayloadEntry> = Vec::with_capacity(archive.len() as usize);
+    let mut entries: Vec<ValidatedPayloadEntry> = Vec::with_capacity(archive.len());
     for index in 0..archive.len() {
         let mut file = archive.by_index(index).map_err(|err| {
             AppError::parse(format!("Failed to read payload entry {index}: {err}"))
@@ -1303,9 +1304,9 @@ pub fn compute_package_payload_digest(
     let mut inventory = Vec::with_capacity(payload.entries.len());
     for entry in &payload.entries {
         let path_bytes = entry.path.as_bytes();
-        hasher.update(&(path_bytes.len() as u64).to_be_bytes());
+        hasher.update((path_bytes.len() as u64).to_be_bytes());
         hasher.update(path_bytes);
-        hasher.update(&(entry.content.len() as u64).to_be_bytes());
+        hasher.update((entry.content.len() as u64).to_be_bytes());
         hasher.update(&entry.content);
         inventory.push(PackagePayloadInventoryEntry {
             path: entry.path.clone(),
@@ -2443,13 +2444,7 @@ mod package_payload_store_tests {
         // Envelope files excluded; only manifest + source remain.
         assert_eq!(validated.entries.len(), 2);
         let paths: Vec<&str> = validated.entries.iter().map(|e| e.path.as_str()).collect();
-        assert_eq!(
-            paths,
-            vec!["components/cage/source.ecky", "ecky-package.json"]
-                .iter()
-                .copied()
-                .collect::<Vec<_>>()
-        );
+        assert_eq!(paths, ["components/cage/source.ecky", "ecky-package.json"]);
     }
 
     #[test]

@@ -190,7 +190,10 @@ fn resolve_arg(arg: &OcctArg, env: &BTreeMap<String, OcctArg>) -> AuthoringResul
 mod tests {
     #[test]
     fn runner_only_executor_has_no_generated_cpp_emitter() {
-        let source = include_str!("direct_occt_executor.rs");
+        let source = include_str!("direct_occt_executor.rs")
+            .split_once("#[cfg(test)]")
+            .map(|(head, _)| head)
+            .unwrap_or_else(|| include_str!("direct_occt_executor.rs"));
         assert!(!source.contains("emit_plan_export_source"));
         assert!(!source.contains("run_native_export_source"));
     }

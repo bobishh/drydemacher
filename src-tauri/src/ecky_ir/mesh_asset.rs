@@ -1262,7 +1262,7 @@ mod tests {
             std::env::temp_dir().join(format!("ecky-indexed-mesh-source-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).expect("temp dir");
 
-        let sources = vec![
+        let sources = [
             MeshAssetSource::EckyMeshPhase {
                 part_id: "body".to_string(),
                 node_id: NodeId::new(7),
