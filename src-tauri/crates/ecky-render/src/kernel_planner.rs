@@ -85,6 +85,7 @@ impl KernelPlanner for PortableKernelPlanner {
                 key: part.key.clone(),
                 label: part.label.clone(),
                 root,
+                representation: crate::KernelRepresentation::AnalyticBrep,
                 commands: lowerer.commands,
             });
         }

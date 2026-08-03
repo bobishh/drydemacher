@@ -29,6 +29,27 @@ Arg ref(std::uint64_t value) {
     return arg;
 }
 
+Arg point3(double x, double y, double z) {
+    Arg arg;
+    arg.kind = Arg::Kind::Point3;
+    arg.point3_value = {x, y, z};
+    return arg;
+}
+
+Arg list(std::vector<Arg> values) {
+    Arg arg;
+    arg.kind = Arg::Kind::List;
+    arg.list_value = std::move(values);
+    return arg;
+}
+
+Arg text_arg(std::string value) {
+    Arg arg;
+    arg.kind = Arg::Kind::Text;
+    arg.text_value = std::move(value);
+    return arg;
+}
+
 Command command(std::uint64_t output, std::string op, std::vector<Arg> args) {
     Command result;
     result.output = output;
@@ -506,6 +527,148 @@ Plan partial_union_plan(double first_width) {
     return plan;
 }
 
+Plan hybrid_partial_union_plan(double first_width) {
+    Plan plan;
+    plan.schema_version = 1;
+    plan.plan_id = "hybrid-partial-union-test";
+    Part part;
+    part.part_id = "lid";
+    part.label = "lid";
+    part.root = 9;
+    part.representation = GeometryRepresentation::MeshDomain;
+    const std::vector<Arg> vertices = {
+        point3(0, 0, 0), point3(4, 0, 0), point3(4, 4, 0), point3(0, 4, 0),
+        point3(0, 0, 4), point3(4, 0, 4), point3(4, 4, 4), point3(0, 4, 4),
+    };
+    const std::vector<Arg> triangles = {
+        list({number(0), number(2), number(1)}), list({number(0), number(3), number(2)}),
+        list({number(4), number(5), number(6)}), list({number(4), number(6), number(7)}),
+        list({number(0), number(1), number(5)}), list({number(0), number(5), number(4)}),
+        list({number(1), number(2), number(6)}), list({number(1), number(6), number(5)}),
+        list({number(2), number(3), number(7)}), list({number(2), number(7), number(6)}),
+        list({number(3), number(0), number(4)}), list({number(3), number(4), number(7)}),
+    };
+    part.commands = {
+        command(1, "box", {number(first_width), number(10), number(4)}),
+        command(2, "box", {number(10), number(10), number(4)}),
+        command(3, "box", {number(6), number(6), number(4)}),
+        command(4, "import-indexed-mesh", {list(vertices), list(triangles), text_arg("sha256:cube")}),
+        command(5, "translate", {number(5), number(0), number(0), ref(2)}),
+        command(6, "translate", {number(2), number(2), number(0), ref(3)}),
+        command(7, "translate", {number(3), number(3), number(0), ref(4)}),
+        command(9, "union", {ref(1), ref(5), ref(6), ref(7)}),
+    };
+    plan.parts = {part};
+    PartialBooleanGroupPlan structural{
+        "lid", 9, "structural-pair", "union", {0, 1}, 0, 2};
+    structural.representation = GeometryRepresentation::AnalyticBrep;
+    PartialBooleanGroupPlan decorated{
+        "lid", 9, "decorated-dome", "union", {2, 3}, 1, 2};
+    decorated.representation = GeometryRepresentation::MeshDomain;
+    plan.partial_boolean_groups = {structural, decorated};
+    return plan;
+}
+
+Plan threaded_body_mesh_closure_plan() {
+    Plan plan;
+    plan.schema_version = 1;
+    plan.plan_id = "threaded-body-mesh-closure-test";
+    Part part;
+    part.part_id = "threaded-body";
+    part.label = "threaded body";
+    part.root = 5;
+    part.representation = GeometryRepresentation::MeshDomain;
+    part.commands = {
+        command(1, "box", {number(20), number(20), number(8)}),
+        command(2, "cylinder", {number(8), number(10), number(64)}),
+        command(3, "union", {ref(1), ref(2)}),
+        command(4, "cylinder", {number(4), number(12), number(64)}),
+        command(5, "difference", {ref(3), ref(4)}),
+    };
+    plan.parts = {part};
+    return plan;
+}
+
+void given_mesh_domain_part_when_brep_operands_reach_boolean_then_closure_stays_mesh() {
+    ExecutionContext context;
+    context.worker_budget = 1;
+    const auto parts = evaluate_plan(
+        threaded_body_mesh_closure_plan(), std::nullopt, nullptr, context);
+    assert(parts.size() == 1);
+    assert(parts[0].kind == ShapeRecord::Kind::Manifold);
+    assert(context.mesh_boolean_count == 2);
+    assert(context.serial_boolean_count == 0);
+    const TopoDS_Shape tessellated = tessellated_step_shape_from_manifold(parts[0].manifold);
+    assert(!tessellated.IsNull());
+    assert(tessellated.ShapeType() == TopAbs_FACE);
+    TopLoc_Location tessellated_location;
+    assert(!BRep_Tool::Triangulation(
+        TopoDS::Face(tessellated), tessellated_location).IsNull());
+}
+
+void given_hybrid_lid_when_cached_and_exported_then_mesh_closure_reuses_and_step_is_faceted() {
+    const fs::path root = fs::temp_directory_path() / "ecky-direct-occt-hybrid-lid-test";
+    fs::remove_all(root);
+    ExecutionContext cold_context;
+    cold_context.worker_budget = 1;
+    cold_context.runner_binary_digest = "sha256:native-test";
+    std::vector<ShapeRecord> cold_parts;
+    {
+        ecky::RenderCacheTransaction transaction(root);
+        cold_parts = evaluate_plan(
+            hybrid_partial_union_plan(10), root, &transaction, cold_context);
+        transaction.commit();
+    }
+    assert(cold_parts.size() == 1);
+    assert(cold_parts[0].kind == ShapeRecord::Kind::Manifold);
+    assert(fs::directory_iterator(root / "parts") != fs::directory_iterator());
+    assert(std::any_of(
+        fs::directory_iterator(root / "parts"), fs::directory_iterator(),
+        [](const fs::directory_entry& entry) { return entry.path().extension() == ".meshbin"; }));
+
+    const TopoDS_Shape tessellated = tessellated_step_shape_from_manifold(cold_parts[0].manifold);
+    assert(!tessellated.IsNull());
+    assert(tessellated.ShapeType() == TopAbs_FACE);
+    TopLoc_Location tessellated_location;
+    assert(!BRep_Tool::Triangulation(
+        TopoDS::Face(tessellated), tessellated_location).IsNull());
+
+    ExecutionContext identical_context;
+    identical_context.worker_budget = 1;
+    identical_context.runner_binary_digest = "sha256:native-test";
+    {
+        ecky::RenderCacheTransaction transaction(root);
+        const auto identical = evaluate_plan(
+            hybrid_partial_union_plan(10), root, &transaction, identical_context);
+        transaction.commit();
+        assert(identical[0].kind == ShapeRecord::Kind::Manifold);
+    }
+    assert(identical_context.part_cache_hits.at("lid"));
+    assert(identical_context.part_executed_commands.find("lid") ==
+           identical_context.part_executed_commands.end());
+
+    ExecutionContext thread_context;
+    thread_context.worker_budget = 1;
+    thread_context.runner_binary_digest = "sha256:native-test";
+    {
+        ecky::RenderCacheTransaction transaction(root);
+        const auto changed = evaluate_plan(
+            hybrid_partial_union_plan(11), root, &transaction, thread_context);
+        transaction.commit();
+        assert(changed[0].kind == ShapeRecord::Kind::Manifold);
+    }
+    const auto decorated = std::find_if(
+        thread_context.partial_boolean_group_evidence.begin(),
+        thread_context.partial_boolean_group_evidence.end(),
+        [](const PartialBooleanGroupEvidence& evidence) {
+            return evidence.key == "decorated-dome";
+        });
+    assert(decorated != thread_context.partial_boolean_group_evidence.end());
+    assert(decorated->cache_hit);
+    assert(decorated->recompute_count == 0);
+    fs::remove_all(root);
+}
+
 void given_partial_union_cache_when_one_half_changes_then_other_half_hits_without_four_way_fill() {
     const fs::path root = fs::temp_directory_path() / "ecky-direct-occt-partial-union-cache-test";
     fs::remove_all(root);
@@ -641,6 +804,8 @@ int main() {
     given_localized_edit_when_other_part_cache_is_clean_then_zero_clean_commands_and_topology_hold();
     given_render_failure_when_cache_staged_then_transaction_publishes_zero_entries();
     given_partial_union_cache_when_one_half_changes_then_other_half_hits_without_four_way_fill();
+    given_hybrid_lid_when_cached_and_exported_then_mesh_closure_reuses_and_step_is_faceted();
+    given_mesh_domain_part_when_brep_operands_reach_boolean_then_closure_stays_mesh();
     given_outer_only_policy_when_grouped_union_executes_then_authored_nary_path_stays_baseline();
     given_partial_union_side_outputs_when_render_fails_then_none_publish_and_corruption_recomputes();
 }

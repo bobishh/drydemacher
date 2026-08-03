@@ -57,8 +57,11 @@
 #include <Geom_Surface.hxx>
 #include <GeomAPI_PointsToBSpline.hxx>
 #include <GProp_GProps.hxx>
+#include <gp_Pln.hxx>
+#include <gp_Vec.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Poly_Triangulation.hxx>
+#include <Poly_Triangle.hxx>
 #include <OSD_Parallel.hxx>
 #include <OSD_ThreadPool.hxx>
 #include <StlAPI_Reader.hxx>
@@ -79,6 +82,8 @@
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
+#include <TopoDS_Shell.hxx>
+#include <TopoDS_Vertex.hxx>
 #include <TopoDS_Wire.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
@@ -185,10 +190,19 @@ struct Keyword {
     std::optional<SelectorPayload> selector_payload;
 };
 
+enum class GeometryRepresentation { AnalyticBrep, MeshDomain };
+
+const char* geometry_representation_name(GeometryRepresentation representation) {
+    return representation == GeometryRepresentation::MeshDomain
+        ? "meshDomain"
+        : "analyticBrep";
+}
+
 struct Part {
     std::string part_id;
     std::string label;
     std::uint64_t root = 0;
+    GeometryRepresentation representation = GeometryRepresentation::AnalyticBrep;
     std::vector<Command> commands;
 };
 
@@ -200,6 +214,7 @@ struct PartialBooleanGroupPlan {
     std::vector<std::uint32_t> input_indices;
     std::uint32_t ordinal = 0;
     std::uint32_t version = 0;
+    GeometryRepresentation representation = GeometryRepresentation::AnalyticBrep;
 };
 
 enum class ParallelPolicy { OuterOnly, Adaptive };
@@ -325,10 +340,13 @@ struct ExecutionContext {
     std::uint32_t nested_kernel_units_in_use = 0;
     std::uint32_t serial_boolean_count = 0;
     std::uint32_t parallel_boolean_count = 0;
+    std::uint32_t mesh_boolean_count = 0;
+    std::uint32_t tessellated_step_part_count = 0;
     std::uint32_t max_nested_kernel_lease = 0;
     std::uint32_t peak_total_allocated_cpu_units = 0;
     std::map<std::string, std::uint32_t> part_executed_commands;
     std::map<std::string, bool> part_cache_hits;
+    std::map<std::string, GeometryRepresentation> part_representations;
     std::vector<CommandCacheEvidence> command_cache_evidence;
     std::vector<CommandTimingEvidence> command_timing_evidence;
     std::vector<PartialBooleanGroupEvidence> partial_boolean_group_evidence;
@@ -460,6 +478,8 @@ void write_stage_report(const fs::path& path, ExecutionContext& context) {
         << ",\"parallelPolicy\":" << quote_json_string(parallel_policy_name(context.parallel_policy))
         << ",\"serialBooleanCount\":" << context.serial_boolean_count
         << ",\"parallelBooleanCount\":" << context.parallel_boolean_count
+        << ",\"meshBooleanCount\":" << context.mesh_boolean_count
+        << ",\"tessellatedStepPartCount\":" << context.tessellated_step_part_count
         << ",\"maxNestedKernelLease\":" << context.max_nested_kernel_lease
         << ",\"peakTotalAllocatedCpuUnits\":" << context.peak_total_allocated_cpu_units
         << ",\"meshOuterWorkerBudget\":" << context.mesh_outer_worker_budget
@@ -486,6 +506,8 @@ void write_stage_report(const fs::path& path, ExecutionContext& context) {
         first_part = false;
         out << "{\"partId\":" << quote_json_string(part_id)
             << ",\"cacheHit\":" << (context.part_cache_hits[part_id] ? "true" : "false")
+            << ",\"representation\":" << quote_json_string(
+                geometry_representation_name(context.part_representations.at(part_id)))
             << ",\"executedCommandCount\":" << count;
         if (const auto mesh = context.part_mesh_evidence.find(part_id);
             mesh != context.part_mesh_evidence.end()) {
@@ -506,6 +528,8 @@ void write_stage_report(const fs::path& path, ExecutionContext& context) {
         first_part = false;
         out << "{\"partId\":" << quote_json_string(part_id)
             << ",\"cacheHit\":" << (cache_hit ? "true" : "false")
+            << ",\"representation\":" << quote_json_string(
+                geometry_representation_name(context.part_representations.at(part_id)))
             << ",\"executedCommandCount\":0";
         if (const auto mesh = context.part_mesh_evidence.find(part_id);
             mesh != context.part_mesh_evidence.end()) {
@@ -578,6 +602,16 @@ std::string json_string(yyjson_val* value, const std::string& label) {
     }
     const char* text = yyjson_get_str(value);
     return text ? text : "";
+}
+
+GeometryRepresentation parse_geometry_representation(
+    yyjson_val* value,
+    const std::string& field
+) {
+    const std::string raw = json_string(value, field);
+    if (raw == "analyticBrep") return GeometryRepresentation::AnalyticBrep;
+    if (raw == "meshDomain") return GeometryRepresentation::MeshDomain;
+    throw SchemaError(field + " must be `analyticBrep` or `meshDomain`");
 }
 
 double json_number(yyjson_val* value, const std::string& label) {
@@ -854,6 +888,10 @@ Part parse_part(yyjson_val* value) {
     part.part_id = json_string(json_require(value, "key"), "key");
     part.label = json_string(json_require(value, "label"), "label");
     part.root = static_cast<std::uint64_t>(json_number(json_require(value, "root"), "root"));
+    if (yyjson_val* representation = yyjson_obj_get(value, "representation")) {
+        part.representation = parse_geometry_representation(
+            representation, "part.representation");
+    }
     yyjson_val* commands = json_array(json_require(value, "commands"), "commands");
     size_t command_index;
     size_t command_max;
@@ -870,6 +908,10 @@ PartialBooleanGroupPlan parse_partial_boolean_group(yyjson_val* value) {
     group.parent_output = static_cast<std::uint64_t>(
         json_number(json_require(value, "parentOutput"), "partialBooleanGroup.parentOutput"));
     group.key = json_string(json_require(value, "key"), "partialBooleanGroup.key");
+    if (yyjson_val* representation = yyjson_obj_get(value, "representation")) {
+        group.representation = parse_geometry_representation(
+            representation, "partialBooleanGroup.representation");
+    }
     group.operation = json_string(json_require(value, "operation"), "partialBooleanGroup.operation");
     group.ordinal = static_cast<std::uint32_t>(
         json_number(json_require(value, "ordinal"), "partialBooleanGroup.ordinal"));
@@ -948,6 +990,15 @@ Plan parse_plan(yyjson_val* value) {
             covered_indices != std::set<std::uint32_t>{0, 1, 2, 3} || keys.size() != 2) {
             throw SchemaError(
                 "partialBooleanGroups must have unique keys and exactly cover inputs 0..3");
+        }
+        const bool mesh_group = std::any_of(
+            groups.begin(), groups.end(), [](const PartialBooleanGroupPlan* group) {
+                return group->representation == GeometryRepresentation::MeshDomain;
+            });
+        if (mesh_group !=
+            (part->representation == GeometryRepresentation::MeshDomain)) {
+            throw SchemaError(
+                "partialBooleanGroup representation conflicts with parent part");
         }
     }
     return plan;
@@ -1117,6 +1168,7 @@ void write_part_topology(
     out << quote_json_string(part_id);
     out << ",\"label\":";
     out << quote_json_string(label);
+    out << ",\"representation\":\"analyticBrep\"";
     out << ",\"edges\":[";
 
     bool first_edge = true;
@@ -1227,6 +1279,12 @@ void write_topology_report(const fs::path& topology_path, const std::vector<Shap
     for (const auto& part : parts) {
         if (part.kind == ShapeRecord::Kind::Shape) {
             write_part_topology(out, part.part_id, part.label, part.shape, first_part);
+        } else {
+            if (!first_part) out << ',';
+            first_part = false;
+            out << "{\"partId\":" << quote_json_string(part.part_id)
+                << ",\"label\":" << quote_json_string(part.label)
+                << ",\"representation\":\"meshDomain\",\"edges\":[],\"faces\":[]}";
         }
     }
     out << "]}";
@@ -4484,7 +4542,7 @@ manifold::Manifold manifold_from_occt_shape(
     const TopoDS_Shape& shape, const std::string& op, ExecutionContext& context
 ) {
     StageExecutionTimer stage_timer(context, "mesh");
-    BRepMesh_IncrementalMesh mesher(shape, 0.04, Standard_False, 0.25, Standard_True);
+    BRepMesh_IncrementalMesh mesher(shape, 0.04, Standard_False, 0.1, Standard_True);
     (void)mesher;
     manifold::MeshGL64 mesh;
     mesh.numProp = 3;
@@ -4524,10 +4582,112 @@ manifold::Manifold manifold_from_occt_shape(
     return result;
 }
 
+TopoDS_Shape tessellated_step_shape_from_manifold(const manifold::Manifold& value) {
+    require_manifold_status(value, "tessellated STEP conversion");
+    const manifold::MeshGL64 mesh = value.GetMeshGL64();
+    if (mesh.numProp < 3 || mesh.triVerts.empty() || mesh.triVerts.size() % 3 != 0) {
+        throw EvalError("tessellated STEP conversion received invalid indexed geometry");
+    }
+    if (mesh.NumVert() > static_cast<std::size_t>(std::numeric_limits<Standard_Integer>::max()) ||
+        mesh.NumTri() > static_cast<std::size_t>(std::numeric_limits<Standard_Integer>::max())) {
+        throw EvalError("tessellated STEP conversion exceeds OCCT index limits");
+    }
+    Handle(Poly_Triangulation) triangulation = new Poly_Triangulation(
+        static_cast<Standard_Integer>(mesh.NumVert()),
+        static_cast<Standard_Integer>(mesh.NumTri()), Standard_False, Standard_False);
+    for (std::size_t index = 0; index < mesh.NumVert(); ++index) {
+        const std::size_t offset = index * mesh.numProp;
+        triangulation->SetNode(static_cast<Standard_Integer>(index + 1), gp_Pnt(
+            mesh.vertProperties[offset], mesh.vertProperties[offset + 1],
+            mesh.vertProperties[offset + 2]));
+    }
+    for (std::size_t triangle = 0; triangle < mesh.NumTri(); ++triangle) {
+        const std::size_t offset = triangle * 3;
+        const auto index = [&](std::size_t side) {
+            const std::uint64_t value = mesh.triVerts[offset + side];
+            if (value >= mesh.NumVert()) {
+                throw EvalError("tessellated STEP conversion triangle index is out of bounds");
+            }
+            return static_cast<Standard_Integer>(value + 1);
+        };
+        triangulation->SetTriangle(static_cast<Standard_Integer>(triangle + 1),
+            Poly_Triangle(index(0), index(1), index(2)));
+    }
+    triangulation->Deflection(0.04);  // Matches canonical STL chord error below.
+    TopoDS_Face face;
+    BRep_Builder builder;
+    builder.MakeFace(face, triangulation);
+    return face;
+}
+
+const SlotValue& lookup_geometry_slot(
+    const std::map<std::uint64_t, SlotValue>& slots,
+    std::uint64_t slot,
+    const std::string& op
+) {
+    auto found = slots.find(slot);
+    if (found == slots.end()) throw EvalError(op + " references unknown slot");
+    if (found->second.kind == SlotValue::Kind::Frame) {
+        throw EvalError(op + " expects shape or Manifold geometry");
+    }
+    return found->second;
+}
+
+SlotValue union_geometry_values(
+    const std::vector<SlotValue>& values,
+    ExecutionContext& context,
+    bool force_mesh = false
+) {
+    if (values.empty()) throw EvalError("union requires at least one geometry operand");
+    if (values.size() == 1) return values.front();
+    const bool mesh_domain = force_mesh ||
+        std::any_of(values.begin(), values.end(), [](const SlotValue& value) {
+            return value.kind == SlotValue::Kind::Manifold;
+        });
+    if (!mesh_domain) {
+        std::vector<TopoDS_Shape> shapes;
+        shapes.reserve(values.size());
+        for (const SlotValue& value : values) shapes.push_back(value.shape);
+        return SlotValue::shape_value(fuse_shapes(shapes, context));
+    }
+    StageExecutionTimer stage_timer(context, "boolean");
+    std::vector<manifold::Manifold> operands;
+    operands.reserve(values.size());
+    for (const SlotValue& value : values) {
+        operands.push_back(value.kind == SlotValue::Kind::Manifold
+            ? value.manifold
+            : manifold_from_occt_shape(value.shape, "union", context));
+    }
+    manifold::Manifold result = manifold::Manifold::BatchBoolean(
+        operands, manifold::OpType::Add);
+    require_manifold_status(result, "union");
+    {
+        std::lock_guard<std::mutex> lock(context.mutex);
+        ++context.mesh_boolean_count;
+    }
+    return SlotValue::manifold_value(result);
+}
+
+void require_geometry_representation(
+    const SlotValue& value,
+    GeometryRepresentation expected,
+    const std::string& label
+) {
+    const bool mesh = value.kind == SlotValue::Kind::Manifold;
+    if (value.kind == SlotValue::Kind::Frame ||
+        mesh != (expected == GeometryRepresentation::MeshDomain)) {
+        throw EvalError(
+            label + " produced representation `" +
+            (mesh ? "meshDomain" : "analyticBrep") + "`, expected `" +
+            geometry_representation_name(expected) + "`");
+    }
+}
+
 SlotValue evaluate_command(
     const Command& command,
     const std::map<std::uint64_t, SlotValue>& slots,
     const std::string& part_id,
+    bool force_mesh_booleans,
     ExecutionContext& context
 ) {
     const std::string op = command.op;
@@ -4874,7 +5034,7 @@ SlotValue evaluate_command(
             }
             return compound_shapes(shapes_to_compound);
         }
-        bool has_manifold = false;
+        bool has_manifold = force_mesh_booleans;
         for (const Arg& arg : refs) {
             auto input = slots.find(arg.ref_value);
             if (input == slots.end()) throw EvalError(op + " references unknown slot");
@@ -4884,6 +5044,12 @@ SlotValue evaluate_command(
             }
         }
         if (has_manifold) {
+            if (op == "union") {
+                std::vector<SlotValue> values;
+                values.reserve(refs.size());
+                for (const Arg& arg : refs) values.push_back(slots.at(arg.ref_value));
+                return union_geometry_values(values, context, true);
+            }
             StageExecutionTimer stage_timer(context, "boolean");
             auto input_manifold = [&](const Arg& arg) {
                 const SlotValue& input = slots.at(arg.ref_value);
@@ -4898,6 +5064,10 @@ SlotValue evaluate_command(
                 else if (op == "difference") result = result - next;
                 else result = result ^ next;
                 require_manifold_status(result, op);
+            }
+            {
+                std::lock_guard<std::mutex> lock(context.mutex);
+                ++context.mesh_boolean_count;
             }
             return SlotValue::manifold_value(result);
         }
@@ -5096,7 +5266,7 @@ struct DagNode {
 struct CompletedDagNode {
     std::size_t node_index = 0;
     SlotValue value;
-    std::vector<std::pair<std::string, TopoDS_Shape>> partial_boolean_outputs;
+    std::vector<std::pair<std::string, SlotValue>> partial_boolean_outputs;
 };
 
 std::string partial_group_id(
@@ -5182,8 +5352,8 @@ std::optional<fs::path> selective_cache_root() {
     return root;
 }
 
-constexpr char kSelectiveCacheSchema[] = "direct-occt-selective-brep-v3";
-constexpr char kDirectOcctRunnerAbi[] = "direct-occt-runner-abi-3";
+constexpr char kSelectiveCacheSchema[] = "direct-occt-selective-geometry-v4";
+constexpr char kDirectOcctRunnerAbi[] = "direct-occt-runner-abi-4";
 std::string direct_occt_runner_abi_digest() {
     return "sha256:" + ecky::sha256_hex(kDirectOcctRunnerAbi);
 }
@@ -5317,6 +5487,8 @@ std::string partial_boolean_group_cache_key(
 ) {
     ecky::ExecutionIdentityInput input = execution_identity_base("partial-union-v2", context);
     input.resolved_args.push_back("key:" + group.key);
+    input.resolved_args.push_back(
+        std::string("representation:") + geometry_representation_name(group.representation));
     input.resolved_args.push_back("operation:" + group.operation);
     input.resolved_args.push_back("version:" + std::to_string(group.version));
     for (std::uint32_t index : group.input_indices) {
@@ -5337,7 +5509,7 @@ std::string part_cache_key(const Part& part, const ExecutionContext& context) {
     if (root == signatures.end()) throw EvalError("cache identity missing part root");
     ecky::ExecutionIdentityInput input = execution_identity_base("part-root", context);
     input.resolved_args = {
-        "representation:analytic-brep",
+        std::string("representation:") + geometry_representation_name(part.representation),
         "export:step+part-mesh-stl",
         "root:" + root->second,
     };
@@ -5369,9 +5541,10 @@ std::optional<TopoDS_Shape> read_cached_shape(
     const fs::path metadata = cache_dir / (key + ".meta");
     try {
         std::ifstream meta(metadata);
-        std::string schema, stored_key, stored_digest, stored_size;
-        if (!(meta >> schema >> stored_key >> stored_digest >> stored_size) ||
+        std::string schema, stored_key, stored_representation, stored_digest, stored_size;
+        if (!(meta >> schema >> stored_key >> stored_representation >> stored_digest >> stored_size) ||
             schema != kSelectiveCacheSchema || stored_key != key ||
+            stored_representation != "analyticBrep" ||
             !fs::is_regular_file(artifact) || file_digest(artifact) != stored_digest ||
             std::to_string(fs::file_size(artifact)) != stored_size) {
             fs::remove(artifact);
@@ -5421,13 +5594,15 @@ void evict_cache_to_budget(const fs::path& root) {
     struct Entry { fs::path artifact; fs::path metadata; fs::file_time_type used; std::uintmax_t bytes; };
     std::vector<Entry> entries;
     std::uintmax_t total = 0;
-    for (const auto& [kind, extension] : std::array<std::pair<const char*, const char*>, 4>{{
-             {"parts", ".brepbin"}, {"commands", ".brepbin"},
-             {"partial-booleans", ".brepbin"}, {"part-meshes", ".partmesh"}}}) {
+    for (const char* kind : {"parts", "commands", "partial-booleans", "part-meshes"}) {
         const fs::path dir = root / kind;
         if (!fs::is_directory(dir)) continue;
         for (const auto& item : fs::directory_iterator(dir)) {
-            if (item.path().extension() != extension) continue;
+            const std::string extension = item.path().extension().string();
+            if (extension != ".brepbin" && extension != ".meshbin" &&
+                extension != ".partmesh") {
+                continue;
+            }
             const fs::path metadata = item.path().parent_path() /
                 (item.path().stem().string() + ".meta");
             std::error_code error;
@@ -5467,7 +5642,7 @@ void write_cached_shape(
     {
         std::ofstream meta(metadata_tmp);
         if (!meta) { fs::remove(artifact_tmp); return; }
-        meta << kSelectiveCacheSchema << ' ' << key << ' ' << digest << ' '
+        meta << kSelectiveCacheSchema << ' ' << key << " analyticBrep " << digest << ' '
              << fs::file_size(artifact_tmp) << '\n';
     }
     std::error_code error;
@@ -5477,6 +5652,211 @@ void write_cached_shape(
     if (error) { fs::remove(metadata_tmp); fs::remove(artifact); return; }
     std::lock_guard<std::mutex> lock(context.mutex);
     ++context.cache_write_count;
+}
+
+std::string serialize_cached_manifold(const manifold::Manifold& value) {
+    require_manifold_status(value, "mesh cache write");
+    const manifold::MeshGL64 mesh = value.GetMeshGL64();
+    if (mesh.numProp < 3 || mesh.vertProperties.empty() || mesh.triVerts.empty() ||
+        mesh.vertProperties.size() % static_cast<std::size_t>(mesh.numProp) != 0 ||
+        mesh.triVerts.size() % 3 != 0) {
+        throw EvalError("mesh cache write received invalid indexed geometry");
+    }
+    std::string bytes("ECKYMESH", 8);
+    const auto append_u64 = [&](std::uint64_t value_to_append) {
+        for (int offset = 0; offset < 8; ++offset) {
+            bytes.push_back(static_cast<char>((value_to_append >> (offset * 8)) & 0xff));
+        }
+    };
+    append_u64(static_cast<std::uint64_t>(mesh.numProp));
+    append_u64(static_cast<std::uint64_t>(mesh.vertProperties.size()));
+    append_u64(static_cast<std::uint64_t>(mesh.triVerts.size()));
+    for (double value_to_append : mesh.vertProperties) {
+        std::uint64_t bits = 0;
+        static_assert(sizeof(bits) == sizeof(value_to_append));
+        std::memcpy(&bits, &value_to_append, sizeof(bits));
+        append_u64(bits);
+    }
+    for (const auto index : mesh.triVerts) {
+        append_u64(static_cast<std::uint64_t>(index));
+    }
+    return bytes;
+}
+
+manifold::Manifold deserialize_cached_manifold(const std::string& bytes) {
+    if (bytes.size() < 32 || bytes.compare(0, 8, "ECKYMESH") != 0) {
+        throw EvalError("mesh cache artifact has invalid header");
+    }
+    std::size_t cursor = 8;
+    const auto read_u64 = [&]() {
+        if (cursor + 8 > bytes.size()) throw EvalError("mesh cache artifact is truncated");
+        std::uint64_t value = 0;
+        for (int offset = 0; offset < 8; ++offset) {
+            value |= static_cast<std::uint64_t>(
+                static_cast<unsigned char>(bytes[cursor + offset])) << (offset * 8);
+        }
+        cursor += 8;
+        return value;
+    };
+    const std::uint64_t num_prop = read_u64();
+    const std::uint64_t vertex_property_count = read_u64();
+    const std::uint64_t triangle_index_count = read_u64();
+    if (num_prop < 3 || num_prop > 64 || vertex_property_count == 0 ||
+        vertex_property_count % num_prop != 0 || triangle_index_count == 0 ||
+        triangle_index_count % 3 != 0 ||
+        vertex_property_count > (bytes.size() - cursor) / 8 ||
+        triangle_index_count > (bytes.size() - cursor) / 8 - vertex_property_count ||
+        cursor + (vertex_property_count + triangle_index_count) * 8 != bytes.size()) {
+        throw EvalError("mesh cache artifact has invalid dimensions");
+    }
+    manifold::MeshGL64 mesh;
+    mesh.numProp = static_cast<int>(num_prop);
+    mesh.vertProperties.reserve(static_cast<std::size_t>(vertex_property_count));
+    for (std::uint64_t index = 0; index < vertex_property_count; ++index) {
+        const std::uint64_t bits = read_u64();
+        double value = 0.0;
+        std::memcpy(&value, &bits, sizeof(value));
+        if (!std::isfinite(value)) throw EvalError("mesh cache vertex is non-finite");
+        mesh.vertProperties.push_back(value);
+    }
+    using MeshIndex = typename decltype(mesh.triVerts)::value_type;
+    mesh.triVerts.reserve(static_cast<std::size_t>(triangle_index_count));
+    for (std::uint64_t index = 0; index < triangle_index_count; ++index) {
+        const std::uint64_t value = read_u64();
+        if (value >= mesh.NumVert() || value > std::numeric_limits<MeshIndex>::max()) {
+            throw EvalError("mesh cache triangle index is out of bounds");
+        }
+        mesh.triVerts.push_back(static_cast<MeshIndex>(value));
+    }
+    manifold::Manifold result(mesh);
+    require_manifold_status(result, "mesh cache read");
+    return result;
+}
+
+std::optional<manifold::Manifold> read_cached_manifold(
+    const fs::path& root,
+    const std::string& kind,
+    const std::string& key,
+    ExecutionContext& context
+) {
+    {
+        std::lock_guard<std::mutex> lock(context.mutex);
+        ++context.cache_read_count;
+    }
+    const fs::path cache_dir = root / kind;
+    const fs::path artifact = cache_dir / (key + ".meshbin");
+    const fs::path metadata = cache_dir / (key + ".meta");
+    try {
+        std::ifstream meta(metadata);
+        std::string schema, stored_key, stored_representation, stored_digest, stored_size;
+        if (!(meta >> schema >> stored_key >> stored_representation >> stored_digest >> stored_size) ||
+            schema != kSelectiveCacheSchema || stored_key != key ||
+            stored_representation != "meshDomain" || !fs::is_regular_file(artifact) ||
+            file_digest(artifact) != stored_digest ||
+            std::to_string(fs::file_size(artifact)) != stored_size) {
+            throw EvalError("mesh cache metadata mismatch");
+        }
+        manifold::Manifold result = deserialize_cached_manifold(read_binary_file(artifact));
+        const auto now = fs::file_time_type::clock::now();
+        std::error_code touch_error;
+        fs::last_write_time(artifact, now, touch_error);
+        fs::last_write_time(metadata, now, touch_error);
+        return result;
+    } catch (...) {
+        std::error_code ignored;
+        fs::remove(artifact, ignored);
+        fs::remove(metadata, ignored);
+        std::lock_guard<std::mutex> lock(context.mutex);
+        ++context.cache_rejection_count;
+        return std::nullopt;
+    }
+}
+
+void write_cached_manifold(
+    const fs::path& root,
+    const std::string& kind,
+    const std::string& key,
+    const manifold::Manifold& value,
+    ExecutionContext& context
+) {
+    const std::string bytes = serialize_cached_manifold(value);
+    const fs::path cache_dir = root / kind;
+    fs::create_directories(cache_dir);
+    const fs::path artifact = cache_dir / (key + ".meshbin");
+    const fs::path metadata = cache_dir / (key + ".meta");
+    const std::string suffix = ".tmp-" + std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    const fs::path artifact_tmp = artifact.string() + suffix;
+    const fs::path metadata_tmp = metadata.string() + suffix;
+    {
+        std::ofstream output(artifact_tmp, std::ios::binary);
+        if (!output) return;
+        output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        if (!output.good()) {
+            fs::remove(artifact_tmp);
+            return;
+        }
+    }
+    const std::string digest = file_digest(artifact_tmp);
+    {
+        std::ofstream meta(metadata_tmp);
+        if (!meta) {
+            fs::remove(artifact_tmp);
+            return;
+        }
+        meta << kSelectiveCacheSchema << ' ' << key << " meshDomain " << digest << ' '
+             << fs::file_size(artifact_tmp) << '\n';
+    }
+    std::error_code error;
+    fs::rename(artifact_tmp, artifact, error);
+    if (error) {
+        fs::remove(artifact_tmp);
+        fs::remove(metadata_tmp);
+        return;
+    }
+    fs::rename(metadata_tmp, metadata, error);
+    if (error) {
+        fs::remove(metadata_tmp);
+        fs::remove(artifact);
+        return;
+    }
+    std::lock_guard<std::mutex> lock(context.mutex);
+    ++context.cache_write_count;
+}
+
+std::optional<SlotValue> read_cached_geometry(
+    const fs::path& root,
+    const std::string& kind,
+    const std::string& key,
+    GeometryRepresentation representation,
+    ExecutionContext& context
+) {
+    if (representation == GeometryRepresentation::MeshDomain) {
+        if (auto value = read_cached_manifold(root, kind, key, context)) {
+            return SlotValue::manifold_value(*value);
+        }
+        return std::nullopt;
+    }
+    if (auto value = read_cached_shape(root, kind, key, context)) {
+        return SlotValue::shape_value(*value);
+    }
+    return std::nullopt;
+}
+
+void write_cached_geometry(
+    const fs::path& root,
+    const std::string& kind,
+    const std::string& key,
+    const SlotValue& value,
+    ExecutionContext& context
+) {
+    if (value.kind == SlotValue::Kind::Manifold) {
+        write_cached_manifold(root, kind, key, value.manifold, context);
+    } else if (value.kind == SlotValue::Kind::Shape) {
+        write_cached_shape(root, kind, key, value.shape, context);
+    } else {
+        throw EvalError("geometry cache cannot store a frame slot");
+    }
 }
 
 std::vector<ShapeRecord> evaluate_plan(
@@ -5489,21 +5869,34 @@ std::vector<ShapeRecord> evaluate_plan(
     if (cache_root.has_value() != (cache_transaction != nullptr)) {
         throw EvalError("selective cache transaction must match cache configuration");
     }
+    {
+        std::lock_guard<std::mutex> lock(context.mutex);
+        for (const Part& part : plan.parts) {
+            context.part_representations[part.part_id] = part.representation;
+        }
+    }
     std::vector<std::string> cache_keys(plan.parts.size());
     std::vector<std::optional<ShapeRecord>> cached_parts(plan.parts.size());
     std::vector<std::vector<std::string>> command_cache_keys(plan.parts.size());
     std::vector<std::map<std::uint64_t, SlotValue>> cached_command_slots(plan.parts.size());
     std::map<std::string, std::string> partial_group_cache_keys;
-    std::map<std::string, TopoDS_Shape> cached_partial_groups;
+    std::map<std::string, SlotValue> cached_partial_groups;
     if (cache_root.has_value()) {
         for (std::size_t part_index = 0; part_index < plan.parts.size(); ++part_index) {
             const Part& part = plan.parts[part_index];
             cache_keys[part_index] = part_cache_key(part, context);
-            if (auto shape = read_cached_shape(*cache_root, "parts", cache_keys[part_index], context)) {
+            if (auto value = read_cached_geometry(
+                    *cache_root, "parts", cache_keys[part_index],
+                    part.representation, context)) {
                 ShapeRecord record;
                 record.part_id = part.part_id;
                 record.label = part.label;
-                record.shape = std::move(*shape);
+                if (value->kind == SlotValue::Kind::Manifold) {
+                    record.kind = ShapeRecord::Kind::Manifold;
+                    record.manifold = std::move(value->manifold);
+                } else {
+                    record.shape = std::move(value->shape);
+                }
                 cached_parts[part_index] = std::move(record);
                 std::lock_guard<std::mutex> lock(context.mutex);
                 context.part_cache_hits[part.part_id] = true;
@@ -5526,8 +5919,10 @@ std::vector<ShapeRecord> evaluate_plan(
                         command, group, fingerprints, context);
                     partial_group_cache_keys.emplace(group_id, group_key);
                     if (!cached_parts[part_index].has_value()) {
-                        if (auto shape = read_cached_shape(*cache_root, "partial-booleans", group_key, context)) {
-                            cached_partial_groups.emplace(group_id, std::move(*shape));
+                        if (auto value = read_cached_geometry(
+                                *cache_root, "partial-booleans", group_key,
+                                group.representation, context)) {
+                            cached_partial_groups.emplace(group_id, std::move(*value));
                             std::lock_guard<std::mutex> lock(context.mutex);
                             ++context.partial_boolean_cache_hit_count;
                             context.partial_boolean_group_evidence.push_back(
@@ -5721,7 +6116,7 @@ std::vector<ShapeRecord> evaluate_plan(
             const Command& command = part.commands[node.command_index];
             const std::map<std::uint64_t, SlotValue> inputs = slots[node.part_index];
             std::vector<PartialBooleanGroupPlan> task_groups;
-            std::map<std::uint32_t, TopoDS_Shape> task_cached_groups;
+            std::map<std::uint32_t, SlotValue> task_cached_groups;
             for (const PartialBooleanGroupPlan& group :
                  cache_root.has_value() && context.parallel_policy == ParallelPolicy::Adaptive
                      ? plan.partial_boolean_groups
@@ -5740,12 +6135,18 @@ std::vector<ShapeRecord> evaluate_plan(
                 try {
                     const auto command_started_at = std::chrono::steady_clock::now();
                     SlotValue value;
-                    std::vector<std::pair<std::string, TopoDS_Shape>> partial_outputs;
+                    std::vector<std::pair<std::string, SlotValue>> partial_outputs;
                     if (task_command.op == "union" && task_groups.size() == 2 &&
                         task_command.args.size() == 4) {
+                        const bool hybrid = std::any_of(
+                            task_groups.begin(), task_groups.end(),
+                            [](const PartialBooleanGroupPlan& group) {
+                                return group.representation ==
+                                    GeometryRepresentation::MeshDomain;
+                            });
                         if (task_cached_groups.size() == 2) {
-                            value = SlotValue::shape_value(fuse_shapes(
-                                {task_cached_groups.at(0), task_cached_groups.at(1)}, context));
+                            value = union_geometry_values(
+                                {task_cached_groups.at(0), task_cached_groups.at(1)}, context);
                         } else if (task_cached_groups.size() == 1) {
                             const std::uint32_t hit_ordinal = task_cached_groups.begin()->first;
                             const std::uint32_t dirty_ordinal = hit_ordinal == 0 ? 1 : 0;
@@ -5753,23 +6154,53 @@ std::vector<ShapeRecord> evaluate_plan(
                                 task_groups.begin(), task_groups.end(), [&](const auto& group) {
                                     return group.ordinal == dirty_ordinal;
                                 });
-                            std::vector<TopoDS_Shape> dirty_operands;
+                            std::vector<SlotValue> dirty_operands;
                             for (std::uint32_t input_index : dirty_group.input_indices) {
-                                dirty_operands.push_back(lookup_shape(
+                                dirty_operands.push_back(lookup_geometry_slot(
                                     inputs,
                                     task_command.args[input_index].ref_value,
                                     "union"));
                             }
-                            TopoDS_Shape dirty = fuse_shapes(
-                                dirty_operands[0], dirty_operands[1], context);
+                            SlotValue dirty = union_geometry_values(dirty_operands, context);
+                            require_geometry_representation(
+                                dirty, dirty_group.representation,
+                                "partial Boolean group `" + dirty_group.key + "`");
                             record_partial_group_recompute(
                                 context, task_part.part_id, task_command.output, dirty_group.key);
                             const std::string dirty_id = partial_group_id(
                                 task.part_index, task_command.output, dirty_ordinal);
-                            partial_outputs.emplace_back(partial_group_cache_keys.at(dirty_id), dirty);
-                            value = SlotValue::shape_value(hit_ordinal == 0
-                                ? fuse_shapes(task_cached_groups.begin()->second, dirty, context)
-                                : fuse_shapes(dirty, task_cached_groups.begin()->second, context));
+                            partial_outputs.emplace_back(
+                                partial_group_cache_keys.at(dirty_id), dirty);
+                            value = hit_ordinal == 0
+                                ? union_geometry_values(
+                                    {task_cached_groups.begin()->second, dirty}, context)
+                                : union_geometry_values(
+                                    {dirty, task_cached_groups.begin()->second}, context);
+                        } else if (hybrid) {
+                            std::map<std::uint32_t, SlotValue> group_results;
+                            for (const PartialBooleanGroupPlan& group : task_groups) {
+                                std::vector<SlotValue> group_operands;
+                                for (std::uint32_t input_index : group.input_indices) {
+                                    group_operands.push_back(lookup_geometry_slot(
+                                        inputs,
+                                        task_command.args[input_index].ref_value,
+                                        "union"));
+                                }
+                                SlotValue group_result = union_geometry_values(
+                                    group_operands, context);
+                                require_geometry_representation(
+                                    group_result, group.representation,
+                                    "partial Boolean group `" + group.key + "`");
+                                record_partial_group_recompute(
+                                    context, task_part.part_id, task_command.output, group.key);
+                                const std::string group_id = partial_group_id(
+                                    task.part_index, task_command.output, group.ordinal);
+                                partial_outputs.emplace_back(
+                                    partial_group_cache_keys.at(group_id), group_result);
+                                group_results.emplace(group.ordinal, std::move(group_result));
+                            }
+                            value = union_geometry_values(
+                                {group_results.at(0), group_results.at(1)}, context);
                         } else {
                             std::vector<TopoDS_Shape> operands;
                             for (const Arg& arg : task_command.args) {
@@ -5788,11 +6219,25 @@ std::vector<ShapeRecord> evaluate_plan(
                                 const std::string group_id = partial_group_id(
                                     task.part_index, task_command.output, group.ordinal);
                                 partial_outputs.emplace_back(
-                                    partial_group_cache_keys.at(group_id), prepared.groups.at(group.ordinal));
+                                    partial_group_cache_keys.at(group_id),
+                                    SlotValue::shape_value(prepared.groups.at(group.ordinal)));
                             }
                         }
                     } else {
-                        value = evaluate_command(task_command, inputs, task_part.part_id, context);
+                        const bool force_mesh_booleans =
+                            task_part.representation == GeometryRepresentation::MeshDomain &&
+                            std::none_of(
+                                plan.partial_boolean_groups.begin(),
+                                plan.partial_boolean_groups.end(),
+                                [&](const PartialBooleanGroupPlan& group) {
+                                    return group.part_key == task_part.part_id;
+                                });
+                        value = evaluate_command(
+                            task_command,
+                            inputs,
+                            task_part.part_id,
+                            force_mesh_booleans,
+                            context);
                     }
                     if (task_command.op == "union" || task_command.op == "difference" ||
                         task_command.op == "intersection") {
@@ -5829,9 +6274,10 @@ std::vector<ShapeRecord> evaluate_plan(
                     command_cache_keys[node.part_index][node.command_index], result.value.shape, context);
             }
             if (cache_root.has_value()) {
-                for (const auto& [key, shape] : result.partial_boolean_outputs) {
-                    write_cached_shape(
-                        cache_transaction->staging_root(), "partial-booleans", key, shape, context);
+                for (const auto& [key, value] : result.partial_boolean_outputs) {
+                    write_cached_geometry(
+                        cache_transaction->staging_root(), "partial-booleans",
+                        key, value, context);
                     std::lock_guard<std::mutex> lock(context.mutex);
                     ++context.partial_boolean_cache_write_count;
                 }
@@ -5879,6 +6325,8 @@ std::vector<ShapeRecord> evaluate_plan(
         if (root->second.kind == SlotValue::Kind::Frame) {
             throw EvalError("root slot for part `" + part.part_id + "` is not geometry");
         }
+        require_geometry_representation(
+            root->second, part.representation, "part `" + part.part_id + "` root");
         ShapeRecord record;
         record.part_id = part.part_id;
         record.label = part.label;
@@ -5887,22 +6335,53 @@ std::vector<ShapeRecord> evaluate_plan(
             record.manifold = root->second.manifold;
         } else {
             record.shape = root->second.shape;
-            if (cache_root.has_value()) {
-                write_cached_shape(
-                    cache_transaction->staging_root(), "parts", cache_keys[part_index], record.shape, context);
-            }
+        }
+        if (cache_root.has_value()) {
+            write_cached_geometry(
+                cache_transaction->staging_root(), "parts", cache_keys[part_index],
+                root->second, context);
         }
         parts.push_back(std::move(record));
     }
     return parts;
 }
 
-void write_step_file(const fs::path& path, const TopoDS_Shape& shape) {
-    STEPControl_Writer writer;
-    writer.Transfer(shape, STEPControl_AsIs);
-    if (writer.Write(path.string().c_str()) != IFSelect_RetDone) {
+void write_step_file(const fs::path& path, const std::vector<TopoDS_Shape>& shapes) {
+    if (shapes.empty()) throw IoError("cannot write STEP without shapes");
+    // OCCT 7.9 corrupts a TCollection_AsciiString while destroying an AP242
+    // writer that translated a triangulation-only face. This runner handles
+    // exactly one plan, so keep writer state process-scoped and let the OS
+    // reclaim it at exit. Peak memory remains bounded by the render guard.
+    auto* writer = new STEPControl_Writer();
+    auto* parameters = new DESTEP_Parameters();
+    parameters->WriteSchema = DESTEP_Parameters::WriteMode_StepSchema_AP242DIS;
+    parameters->WriteTessellated = DESTEP_Parameters::RWMode_Tessellated_OnNoBRep;
+    const TopoDS_Shape export_shape = shapes.size() == 1
+        ? shapes.front()
+        : compound_shapes(shapes);
+    if (writer->Transfer(export_shape, STEPControl_AsIs, *parameters) != IFSelect_RetDone) {
+        throw IoError("failed to transfer STEP shape");
+    }
+    if (writer->Write(path.string().c_str()) != IFSelect_RetDone) {
         throw IoError("failed to write STEP");
     }
+    std::ifstream input(path, std::ios::binary);
+    std::string bytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    const std::string timestamp_prefix = "FILE_NAME('Open CASCADE Shape Model','";
+    const std::size_t timestamp_start = bytes.find(timestamp_prefix);
+    if (timestamp_start == std::string::npos) {
+        throw IoError("failed to locate STEP timestamp for deterministic export");
+    }
+    const std::size_t value_start = timestamp_start + timestamp_prefix.size();
+    const std::size_t value_end = bytes.find('\'', value_start);
+    if (value_end == std::string::npos) {
+        throw IoError("failed to parse STEP timestamp for deterministic export");
+    }
+    bytes.replace(value_start, value_end - value_start, "1970-01-01T00:00:00");
+    input.close();
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    if (!output) throw IoError("failed to normalize STEP timestamp");
 }
 
 // Preview/export STL tessellation quality. Use FreeCAD-style adaptive angular
@@ -6055,6 +6534,43 @@ ecky::PartMesh tessellate_brep_part_mesh(
     return mesh;
 }
 
+ecky::PartMesh manifold_part_mesh(
+    const manifold::Manifold& value,
+    const std::string& part_id,
+    ExecutionContext& context
+) {
+    StageExecutionTimer stage_timer(context, "mesh");
+    require_manifold_status(value, "part mesh");
+    const manifold::MeshGL64 source = value.GetMeshGL64();
+    if (source.numProp < 3 || source.triVerts.empty() || source.triVerts.size() % 3 != 0) {
+        throw EvalError("Manifold part produced invalid indexed mesh");
+    }
+    ecky::PartMesh mesh;
+    mesh.part_id = part_id;
+    mesh.triangles.reserve(source.NumTri());
+    const auto point = [&](std::uint64_t index) {
+        if (index >= source.NumVert()) {
+            throw EvalError("Manifold part triangle index is out of bounds");
+        }
+        const std::size_t offset = static_cast<std::size_t>(index) * source.numProp;
+        return ecky::MeshPoint{
+            source.vertProperties[offset],
+            source.vertProperties[offset + 1],
+            source.vertProperties[offset + 2]};
+    };
+    for (std::size_t triangle = 0; triangle < source.NumTri(); ++triangle) {
+        mesh.triangles.push_back({{
+            point(source.triVerts[triangle * 3]),
+            point(source.triVerts[triangle * 3 + 1]),
+            point(source.triVerts[triangle * 3 + 2]),
+        }});
+    }
+    if (mesh.resident_bytes() > kPartMeshReservationBytes) {
+        throw EvalError("Manifold part mesh exceeded the bounded mesh reservation");
+    }
+    return mesh;
+}
+
 void write_part_mesh_stl_file(const fs::path& path, const std::vector<const ecky::PartMesh*>& meshes) {
     std::uint64_t triangle_count = 0;
     for (const ecky::PartMesh* mesh : meshes) {
@@ -6094,7 +6610,7 @@ void write_part_mesh_stl_file(const fs::path& path, const std::vector<const ecky
     if (!out.good()) throw IoError("failed to write STL: I/O error after writing part mesh triangles");
 }
 
-std::vector<ecky::PartMesh> build_brep_part_meshes(
+std::vector<ecky::PartMesh> build_part_meshes(
     const Plan& plan,
     const std::vector<ShapeRecord>& parts,
     const std::optional<fs::path>& cache_root,
@@ -6142,13 +6658,14 @@ std::vector<ecky::PartMesh> build_brep_part_meshes(
                 --next_part;
                 break;
             }
-            const TopoDS_Shape shape = parts[index].shape;
-            const std::string part_id = parts[index].part_id;
+            const ShapeRecord part = parts[index];
             in_flight.push_back({
                 index,
                 identities[index],
-                std::async(std::launch::async, [shape, part_id, &context, lease = std::move(*lease)]() mutable {
-                    return tessellate_brep_part_mesh(shape, part_id, context);
+                std::async(std::launch::async, [part, &context, lease = std::move(*lease)]() mutable {
+                    return part.kind == ShapeRecord::Kind::Manifold
+                        ? manifold_part_mesh(part.manifold, part.part_id, context)
+                        : tessellate_brep_part_mesh(part.shape, part.part_id, context);
                 })
             });
         }
@@ -6261,54 +6778,6 @@ void write_stl_file(const fs::path& path, const TopoDS_Shape& shape, ExecutionCo
     if (!out.good()) {
         throw IoError("failed to write STL: I/O error after writing triangles");
     }
-}
-
-void write_manifold_stl_file(
-    const fs::path& path, const manifold::Manifold& value, ExecutionContext& context
-) {
-    StageExecutionTimer stage_timer(context, "mesh");
-    require_manifold_status(value, "mesh export");
-    const manifold::MeshGL64 mesh = value.GetMeshGL64();
-    if (mesh.numProp < 3 || mesh.triVerts.empty() || mesh.triVerts.size() % 3 != 0 ||
-        mesh.NumTri() > std::numeric_limits<std::uint32_t>::max()) {
-        throw IoError("failed to write STL: Manifold produced invalid mesh");
-    }
-    std::ofstream out(path, std::ios::binary);
-    if (!out) throw IoError("failed to write STL");
-    std::string header(80, '\0');
-    out.write(header.data(), 80);
-    const std::uint32_t count = static_cast<std::uint32_t>(mesh.NumTri());
-    out.write(reinterpret_cast<const char*>(&count), 4);
-    auto write_float = [&](double number) {
-        const float value = static_cast<float>(number);
-        out.write(reinterpret_cast<const char*>(&value), 4);
-    };
-    for (std::size_t triangle = 0; triangle < mesh.NumTri(); ++triangle) {
-        const auto a = mesh.triVerts[triangle * 3];
-        const auto b = mesh.triVerts[triangle * 3 + 1];
-        const auto c = mesh.triVerts[triangle * 3 + 2];
-        if (a >= mesh.NumVert() || b >= mesh.NumVert() || c >= mesh.NumVert()) {
-            throw IoError("failed to write STL: Manifold triangle index is out of bounds");
-        }
-        const auto point = [&](std::uint64_t index, int component) {
-            return mesh.vertProperties[static_cast<std::size_t>(index) * mesh.numProp + component];
-        };
-        const double ax = point(a, 0), ay = point(a, 1), az = point(a, 2);
-        const double bx = point(b, 0), by = point(b, 1), bz = point(b, 2);
-        const double cx = point(c, 0), cy = point(c, 1), cz = point(c, 2);
-        double nx = (by - ay) * (cz - az) - (bz - az) * (cy - ay);
-        double ny = (bz - az) * (cx - ax) - (bx - ax) * (cz - az);
-        double nz = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
-        const double length = std::sqrt(nx * nx + ny * ny + nz * nz);
-        if (length > 0.0) { nx /= length; ny /= length; nz /= length; }
-        write_float(nx); write_float(ny); write_float(nz);
-        write_float(ax); write_float(ay); write_float(az);
-        write_float(bx); write_float(by); write_float(bz);
-        write_float(cx); write_float(cy); write_float(cz);
-        const std::uint16_t attribute = 0;
-        out.write(reinterpret_cast<const char*>(&attribute), 2);
-    }
-    if (!out.good()) throw IoError("failed to write STL: I/O error after writing triangles");
 }
 
 std::string read_text_file(const fs::path& path) {
@@ -6427,64 +6896,45 @@ int run(int argc, char** argv, ExecutionContext& context) {
     const bool mesh_only = std::all_of(parts.begin(), parts.end(), [](const ShapeRecord& part) {
         return part.kind == ShapeRecord::Kind::Manifold;
     });
-    if (!mesh_only && std::any_of(parts.begin(), parts.end(), [](const ShapeRecord& part) {
-            return part.kind == ShapeRecord::Kind::Manifold;
-        })) {
-        throw EvalError("mixed BRep and Manifold part roots cannot share one export bundle");
-    }
 
-    std::vector<ecky::PartMesh> brep_part_meshes;
-    if (mesh_only) {
-        context.set_stage("assemble-manifold-preview");
-        manifold::Manifold preview = parts.front().manifold;
-        if (parts.size() > 1) {
-            std::vector<manifold::Manifold> manifolds;
-            manifolds.reserve(parts.size());
-            for (const auto& part : parts) {
-                manifolds.push_back(part.manifold);
-            }
-            preview = manifold::Manifold::BatchBoolean(manifolds, manifold::OpType::Add);
-            require_manifold_status(preview, "multipart Manifold preview");
-        }
-        run_occt_export_stage("write-preview-stl", [&]() {
-            StageExecutionTimer stage_timer(context, "export");
-            write_manifold_stl_file(stl_path, preview, context);
-        }, context);
-    } else {
+    if (!mesh_only) {
         context.set_stage("assemble-export-shape");
-        TopoDS_Shape export_shape = parts.size() == 1 ? parts.front().shape : compound_shapes([&]() {
-            std::vector<TopoDS_Shape> shapes;
-            shapes.reserve(parts.size());
-            for (const auto& part : parts) {
-                shapes.push_back(part.shape);
+        std::vector<TopoDS_Shape> export_shapes;
+        export_shapes.reserve(parts.size());
+        for (const ShapeRecord& part : parts) {
+            if (part.kind == ShapeRecord::Kind::Manifold) {
+                export_shapes.push_back(tessellated_step_shape_from_manifold(part.manifold));
+                std::lock_guard<std::mutex> lock(context.mutex);
+                ++context.tessellated_step_part_count;
+            } else {
+                export_shapes.push_back(part.shape);
             }
-            return shapes;
-        }());
+        }
         run_occt_export_stage("write-step", [&]() {
             StageExecutionTimer stage_timer(context, "export");
-            write_step_file(step_path, export_shape);
-        }, context);
-        // Final BRep parts tessellate once. The immutable per-part streams are
-        // then reused by deterministic preview assembly and multipart STL.
-        brep_part_meshes = build_brep_part_meshes(
-            plan, parts, cache_root, cache_transaction ? &*cache_transaction : nullptr, context);
-        std::vector<const ecky::PartMesh*> preview_meshes;
-        preview_meshes.reserve(brep_part_meshes.size());
-        for (const ecky::PartMesh& mesh : brep_part_meshes) {
-            preview_meshes.push_back(&mesh);
-        }
-        {
-            std::lock_guard<std::mutex> lock(context.mutex);
-            context.preview_facet_count = 0;
-            for (const ecky::PartMesh& mesh : brep_part_meshes) {
-                context.preview_facet_count += mesh.triangles.size();
-            }
-        }
-        run_occt_export_stage("write-preview-stl", [&]() {
-            StageExecutionTimer stage_timer(context, "export");
-            write_part_mesh_stl_file(stl_path, preview_meshes);
+            write_step_file(step_path, export_shapes);
         }, context);
     }
+
+    // Every part contributes one immutable triangle stream. Analytic BRep parts
+    // tessellate through the bounded/cacheable OCCT path; mesh-domain parts copy
+    // their canonical Manifold triangles without a remesh or cross-part union.
+    std::vector<ecky::PartMesh> part_meshes = build_part_meshes(
+        plan, parts, cache_root, cache_transaction ? &*cache_transaction : nullptr, context);
+    std::vector<const ecky::PartMesh*> preview_meshes;
+    preview_meshes.reserve(part_meshes.size());
+    for (const ecky::PartMesh& mesh : part_meshes) preview_meshes.push_back(&mesh);
+    {
+        std::lock_guard<std::mutex> lock(context.mutex);
+        context.preview_facet_count = 0;
+        for (const ecky::PartMesh& mesh : part_meshes) {
+            context.preview_facet_count += mesh.triangles.size();
+        }
+    }
+    run_occt_export_stage("write-preview-stl", [&]() {
+        StageExecutionTimer stage_timer(context, "export");
+        write_part_mesh_stl_file(stl_path, preview_meshes);
+    }, context);
 // Write per-part binary STL files so multipart export (3MF / zip) has
 // distinct geometry per part instead of duplicating the merged mesh. Same
 // adaptive tessellation policy as the merged preview/export path.
@@ -6502,11 +6952,7 @@ int run(int argc, char** argv, ExecutionContext& context) {
             const fs::path part_stl = parts_dir / (name + ".stl");
             run_occt_export_stage("write-part-stl:" + name, [&]() {
                 StageExecutionTimer stage_timer(context, "export");
-                if (parts[i].kind == ShapeRecord::Kind::Manifold) {
-                    write_manifold_stl_file(part_stl, parts[i].manifold, context);
-                } else {
-                    write_part_mesh_stl_file(part_stl, {&brep_part_meshes[i]});
-                }
+                write_part_mesh_stl_file(part_stl, {&part_meshes[i]});
             }, context);
         }
     }

@@ -167,7 +167,7 @@ public:
         const std::filesystem::path metadata = dir / (identity + ".meta");
         std::ofstream output(artifact, std::ios::binary); output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
         if (!output.good()) throw std::runtime_error("cannot stage cache artifact");
-        std::ofstream meta(metadata); meta << "direct-occt-selective-brep-v3 " << identity << " sha256:" << sha256_hex(bytes) << " " << bytes.size() << '\n';
+        std::ofstream meta(metadata); meta << "direct-occt-selective-geometry-v4 " << identity << " analyticBrep sha256:" << sha256_hex(bytes) << " " << bytes.size() << '\n';
         if (!meta.good()) throw std::runtime_error("cannot stage cache metadata");
     }
 

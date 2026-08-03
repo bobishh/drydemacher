@@ -15,6 +15,11 @@ function sample(label, policy, totalElapsedMs, booleanMs, overrides = {}) {
     rawErrors: [],
     step: { exists: true, digest: 'step' },
     stl: { exists: true, digest: 'stl' },
+    perPart: {
+      'daughter-flower-body': {},
+      'daughter-flower-center-lid': {},
+      'daughter-tpu-breakaway-strap': {},
+    },
     stage: {
       totalElapsedMs,
       parallelPolicy: policy,
@@ -22,6 +27,8 @@ function sample(label, policy, totalElapsedMs, booleanMs, overrides = {}) {
       peakTotalAllocatedCpuUnits: 18,
       serialBooleanCount: policy === 'outer-only' ? 4 : 0,
       parallelBooleanCount: policy === 'adaptive' ? 4 : 0,
+      meshBooleanCount: policy === 'adaptive' ? 2 : 0,
+      tessellatedStepPartCount: policy === 'adaptive' ? 2 : 0,
       stages: [{ name: 'boolean', elapsedMs: booleanMs }],
       parts: [],
       partialBooleanGroups: [],
@@ -34,13 +41,24 @@ test('BDD Given frozen bracelet source When acceptance loads Then fixture is tra
   assert.equal(existsSync(braceletFixture), true);
 });
 
-test('BDD Given three samples per policy When adaptive is 3x faster Then bracelet release gate passes', () => {
-  const outerOnly = [1, 2, 3].map(index => sample(`outer-${index}`, 'outer-only', 69_000, 63_000));
+test('BDD Given immutable analytic baseline When three adaptive hybrid samples are 3x faster Then bracelet release gate passes', () => {
   const adaptive = [1, 2, 3].map(index => sample(`adaptive-${index}`, 'adaptive', 22_000, 20_000));
-  const gate = evaluateBraceletGate({ outerOnly, adaptive });
+  const gate = evaluateBraceletGate({
+    adaptive,
+    historicalBaseline: { nativeMs: 69_669, booleanMs: 64_133 },
+  });
   assert.equal(gate.passed, true);
   assert.ok(gate.nativeSpeedup >= 3);
   assert.ok(gate.booleanSpeedup >= 3);
+});
+
+test('BDD Given current hybrid samples When artifact bytes diverge Then bracelet release gate fails', () => {
+  const adaptive = [1, 2, 3].map(index => sample(`adaptive-${index}`, 'adaptive', 22_000, 20_000));
+  adaptive[2].stl.digest = 'different';
+  assert.throws(
+    () => evaluateBraceletGate({ adaptive }),
+    /bracelet STL bytes changed across adaptive samples/,
+  );
 });
 
 test('BDD Given cached bracelet variants When unrelated parameters change Then only required partial closure runs', () => {

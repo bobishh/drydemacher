@@ -6,7 +6,7 @@ use std::process::Command;
 use ecky_render::{
     KernelArg as RunnerArg, KernelCommand as RunnerCommand, KernelKeyword as RunnerKeyword,
     KernelPart as RunnerPart, KernelPartialBooleanGroupPlan as RunnerPartialBooleanGroupPlan,
-    KernelPlan as RunnerPlan,
+    KernelPlan as RunnerPlan, KernelRepresentation,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -71,6 +71,10 @@ struct RunnerStageReport {
     #[serde(default)]
     parallel_boolean_count: Option<u32>,
     #[serde(default)]
+    mesh_boolean_count: Option<u32>,
+    #[serde(default)]
+    tessellated_step_part_count: Option<u32>,
+    #[serde(default)]
     max_nested_kernel_lease: Option<u32>,
     #[serde(default)]
     peak_total_allocated_cpu_units: Option<u32>,
@@ -111,6 +115,8 @@ struct RunnerPartExecutionEvidence {
     part_id: String,
     cache_hit: bool,
     executed_command_count: u32,
+    #[serde(default)]
+    representation: Option<KernelRepresentation>,
     #[serde(default)]
     mesh_identity: Option<String>,
     #[serde(default)]
@@ -253,12 +259,28 @@ pub(crate) fn run_plan_step_stl_with_mode(
         ));
     }
 
-    let Some(plan_json) = serialize_runner_plan(plan)? else {
+    let Some(serialized_plan) = runner_plan(plan)? else {
         return Err(AppError::validation(
             "Direct OCCT runner support gate accepted plan, but runner serialization rejected it."
                 .to_string(),
         ));
     };
+    let source_mesh_digests = serialized_plan
+        .parts
+        .iter()
+        .flat_map(|part| &part.commands)
+        .filter(|command| command.op == "import-indexed-mesh")
+        .filter_map(|command| command.args.get(2))
+        .filter_map(|arg| arg.value.as_str())
+        .map(str::to_string)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let plan_json = serde_json::to_string_pretty(&serialized_plan).map_err(|err| {
+        AppError::validation(format!(
+            "Direct OCCT runner plan serialization failed: {err}"
+        ))
+    })?;
 
     let output_dir = output_dir.as_ref();
     fs::create_dir_all(output_dir).map_err(|err| {
@@ -328,7 +350,7 @@ pub(crate) fn run_plan_step_stl_with_mode(
         ));
     }
 
-    read_runner_stage_report(output_dir)?;
+    let stage_report = read_runner_stage_report(output_dir)?;
 
     // Scan for per-part binary STL files written by the runner into parts/.
     let mut part_stl_paths = Vec::new();
@@ -354,11 +376,14 @@ pub(crate) fn run_plan_step_stl_with_mode(
             step_path: output_dir.join(MODEL_STEP_FILE_NAME),
             stl_path,
             part_stl_paths,
+            tessellated_step: stage_report.tessellated_step_part_count.unwrap_or(0) > 0,
+            source_mesh_digests,
         }
     } else {
         super::direct_occt_sdk::NativeExportOutcome::MeshExported {
             stl_path,
             part_stl_paths,
+            source_mesh_digests,
         }
     }))
 }
@@ -428,6 +453,7 @@ fn runner_fallback_paths() -> &'static [&'static str] {
     }
 }
 
+#[cfg(test)]
 fn serialize_runner_plan(plan: &OcctPlan) -> AppResult<Option<String>> {
     let Some(plan) = runner_plan(plan)? else {
         return Ok(None);
@@ -447,10 +473,40 @@ fn runner_plan(plan: &OcctPlan) -> AppResult<Option<RunnerPlan>> {
     let mut partial_boolean_groups = Vec::new();
     for part in &plan.parts {
         let indexed_imports = indexed_mesh_imports_for_root_boolean(part)?;
+        let hybrid_lid = part.commands.iter().any(|command| {
+            command.output == part.root
+                && command.op == OcctOp::Union
+                && command.args.len() == 4
+                && decorated_dome_pair(command, &part.commands)
+                && command.args[2..4].iter().any(|arg| match arg {
+                    OcctArg::Ref(root) => {
+                        slot_depends_on_any(*root, &part.commands, indexed_imports.keys().copied())
+                    }
+                    _ => false,
+                })
+        });
+        let threaded_mesh_closure = part
+            .commands
+            .iter()
+            .any(|command| command.op == OcctOp::HelixPath)
+            && part
+                .commands
+                .iter()
+                .filter(|command| {
+                    matches!(
+                        command.op,
+                        OcctOp::Union | OcctOp::Difference | OcctOp::Intersection
+                    )
+                })
+                .count()
+                >= 4
+            && mesh_domain_boolean_closure_supported(part);
         let mut commands = Vec::with_capacity(part.commands.len());
         for command in &part.commands {
             if command.op == OcctOp::Union
+                && command.output == part.root
                 && command.args.len() == 4
+                && hybrid_lid
                 && command
                     .args
                     .iter()
@@ -466,6 +522,11 @@ fn runner_plan(plan: &OcctPlan) -> AppResult<Option<RunnerPlan>> {
                             "decorated-dome".to_string()
                         } else {
                             "operand-pair-0".to_string()
+                        },
+                        representation: if ordinal == 1 {
+                            KernelRepresentation::MeshDomain
+                        } else {
+                            KernelRepresentation::AnalyticBrep
                         },
                         operation: "union".to_string(),
                         input_indices: input_indices.to_vec(),
@@ -488,6 +549,11 @@ fn runner_plan(plan: &OcctPlan) -> AppResult<Option<RunnerPlan>> {
             key: part.key.clone(),
             label: part.label.clone(),
             root: part.root.0,
+            representation: if !indexed_imports.is_empty() || threaded_mesh_closure {
+                KernelRepresentation::MeshDomain
+            } else {
+                KernelRepresentation::AnalyticBrep
+            },
             commands,
         });
     }
@@ -499,6 +565,33 @@ fn runner_plan(plan: &OcctPlan) -> AppResult<Option<RunnerPlan>> {
         partial_boolean_groups,
     };
     Ok(Some(body))
+}
+
+fn mesh_domain_boolean_closure_supported(part: &super::direct_occt::OcctPartPlan) -> bool {
+    let mut mesh_outputs = HashSet::new();
+    for command in &part.commands {
+        let consumes_mesh = command
+            .args
+            .iter()
+            .chain(command.keywords.iter().map(OcctKeyword::source_arg))
+            .any(|arg| matches!(arg, OcctArg::Ref(slot) if mesh_outputs.contains(slot)));
+        if matches!(
+            command.op,
+            OcctOp::Union | OcctOp::Difference | OcctOp::Intersection
+        ) {
+            mesh_outputs.insert(command.output);
+        } else if consumes_mesh {
+            if matches!(
+                command.op,
+                OcctOp::Translate | OcctOp::Rotate | OcctOp::Scale
+            ) {
+                mesh_outputs.insert(command.output);
+            } else {
+                return false;
+            }
+        }
+    }
+    mesh_outputs.contains(&part.root)
 }
 
 fn decorated_dome_pair(command: &OcctCommand, commands: &[OcctCommand]) -> bool {
@@ -539,6 +632,42 @@ fn decorated_dome_pair(command: &OcctCommand, commands: &[OcctCommand]) -> bool 
     let is_analytic_clip = |op| op == OcctOp::Intersection;
     (contains(*left, is_import) && contains(*right, is_analytic_clip))
         || (contains(*right, is_import) && contains(*left, is_analytic_clip))
+}
+
+fn slot_depends_on_any(
+    root: OcctSlot,
+    commands: &[OcctCommand],
+    targets: impl IntoIterator<Item = u64>,
+) -> bool {
+    let targets = targets.into_iter().collect::<HashSet<_>>();
+    let by_output = commands
+        .iter()
+        .map(|command| (command.output, command))
+        .collect::<HashMap<_, _>>();
+    let mut pending = vec![root];
+    let mut visited = HashSet::new();
+    while let Some(slot) = pending.pop() {
+        if !visited.insert(slot) {
+            continue;
+        }
+        if targets.contains(&slot.0) {
+            return true;
+        }
+        let Some(command) = by_output.get(&slot) else {
+            continue;
+        };
+        for arg in &command.args {
+            if let OcctArg::Ref(dependency) = arg {
+                pending.push(*dependency);
+            }
+        }
+        for keyword in &command.keywords {
+            if let OcctArg::Ref(dependency) = keyword.source_arg() {
+                pending.push(*dependency);
+            }
+        }
+    }
+    false
 }
 
 fn indexed_mesh_imports_for_root_boolean(
@@ -587,13 +716,19 @@ fn indexed_mesh_imports_for_root_boolean(
             break Some(*consumer);
         };
         let Some(boolean) = boolean else { continue };
-        if !matches!(
+        let binary_root_chain = matches!(
             boolean.op,
             OcctOp::Union | OcctOp::Difference | OcctOp::Intersection
-        ) || boolean.args.len() != 2
-            || boolean.args.first() != Some(&OcctArg::Ref(current))
-            || !binary_boolean_chain_reaches_root(boolean.output, part.root, &consumers)
-        {
+        ) && boolean.args.len() == 2
+            && boolean.args.first() == Some(&OcctArg::Ref(current))
+            && binary_boolean_chain_reaches_root(boolean.output, part.root, &consumers);
+        let decorated_root_union = boolean.output == part.root
+            && boolean.op == OcctOp::Union
+            && boolean.args.len() == 4
+            && boolean.args[2..4].contains(&OcctArg::Ref(current))
+            && decorated_dome_pair(boolean, &part.commands)
+            && !consumers.contains_key(&part.root.0);
+        if !binary_root_chain && !decorated_root_union {
             continue;
         }
 
@@ -1567,6 +1702,8 @@ mod tests {
             parallel_policy: None,
             serial_boolean_count: None,
             parallel_boolean_count: None,
+            mesh_boolean_count: None,
+            tessellated_step_part_count: None,
             max_nested_kernel_lease: None,
             peak_total_allocated_cpu_units: None,
             peak_dag_concurrency: None,
@@ -1639,7 +1776,7 @@ mod tests {
     }
 
     #[test]
-    fn runner_plan_names_imported_relief_plus_analytic_clip_as_decorated_dome() {
+    fn runner_plan_does_not_cache_decorated_group_without_indexed_relief_admission() {
         let command = |output, op, args| OcctCommand {
             output: OcctSlot(output),
             op,
@@ -1700,8 +1837,203 @@ mod tests {
             }],
         };
         let runner = runner_plan(&plan).expect("runner plan").expect("supported");
-        assert_eq!(runner.partial_boolean_groups[1].key, "decorated-dome");
-        assert_eq!(runner.partial_boolean_groups[1].input_indices, vec![2, 3]);
+        assert!(runner.partial_boolean_groups.is_empty());
+        assert_eq!(
+            runner.parts[0].representation,
+            KernelRepresentation::AnalyticBrep
+        );
+    }
+
+    #[test]
+    fn runner_plan_declares_bracelet_lid_hybrid_and_keeps_relief_indexed() {
+        let root = temp_root("decorated-lid-hybrid-plan");
+        fs::create_dir_all(&root).expect("fixture dir");
+        let stl_path = root.join("relief.stl");
+        write_indexed_cube_sidecar(&stl_path);
+        let command = |output, op, args| OcctCommand {
+            output: OcctSlot(output),
+            op,
+            args,
+            keywords: Vec::new(),
+        };
+        let plan = OcctPlan {
+            parameters: Vec::new(),
+            parts: vec![OcctPartPlan {
+                key: "lid".to_string(),
+                label: "Lid".to_string(),
+                root: OcctSlot(9),
+                commands: vec![
+                    command(1, OcctOp::Box, vec![OcctArg::Number(10.0); 3]),
+                    command(2, OcctOp::Box, vec![OcctArg::Number(10.0); 3]),
+                    command(3, OcctOp::Sphere, vec![OcctArg::Number(6.0)]),
+                    command(
+                        4,
+                        OcctOp::Cylinder,
+                        vec![
+                            OcctArg::Number(6.0),
+                            OcctArg::Number(6.0),
+                            OcctArg::Number(64.0),
+                        ],
+                    ),
+                    command(
+                        5,
+                        OcctOp::Intersection,
+                        vec![OcctArg::Ref(OcctSlot(3)), OcctArg::Ref(OcctSlot(4))],
+                    ),
+                    command(
+                        6,
+                        OcctOp::ImportStl,
+                        vec![OcctArg::Text(stl_path.to_string_lossy().to_string())],
+                    ),
+                    command(7, OcctOp::Solidify, vec![OcctArg::Ref(OcctSlot(6))]),
+                    command(
+                        8,
+                        OcctOp::Translate,
+                        vec![
+                            OcctArg::Number(0.0),
+                            OcctArg::Number(0.0),
+                            OcctArg::Number(1.0),
+                            OcctArg::Ref(OcctSlot(7)),
+                        ],
+                    ),
+                    command(
+                        9,
+                        OcctOp::Union,
+                        vec![
+                            OcctArg::Ref(OcctSlot(1)),
+                            OcctArg::Ref(OcctSlot(2)),
+                            OcctArg::Ref(OcctSlot(5)),
+                            OcctArg::Ref(OcctSlot(8)),
+                        ],
+                    ),
+                ],
+            }],
+        };
+
+        let runner = runner_plan(&plan).expect("runner plan").expect("supported");
+        assert_eq!(
+            runner.parts[0].representation,
+            KernelRepresentation::MeshDomain
+        );
+        assert_eq!(runner.parts[0].commands[5].op, "import-indexed-mesh");
+        assert_eq!(
+            runner.partial_boolean_groups[0].representation,
+            KernelRepresentation::AnalyticBrep
+        );
+        assert_eq!(
+            runner.partial_boolean_groups[1].representation,
+            KernelRepresentation::MeshDomain
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn runner_plan_does_not_label_invalid_relief_as_mesh_domain() {
+        let root = temp_root("invalid-decorated-lid-plan");
+        fs::create_dir_all(&root).expect("fixture dir");
+        let stl_path = root.join("open-relief.stl");
+        fs::write(
+            &stl_path,
+            b"solid open\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid open\n",
+        )
+        .expect("open STL");
+        let mut source = indexed_mesh_boolean_plan(&stl_path, false);
+        let make = |output, op, args| OcctCommand {
+            output: OcctSlot(output),
+            op,
+            args,
+            keywords: Vec::new(),
+        };
+        source.parts[0].commands = vec![
+            make(
+                1,
+                OcctOp::ImportStl,
+                vec![OcctArg::Text(stl_path.to_string_lossy().to_string())],
+            ),
+            make(2, OcctOp::Solidify, vec![OcctArg::Ref(OcctSlot(1))]),
+            make(3, OcctOp::Box, vec![OcctArg::Number(10.0); 3]),
+            make(4, OcctOp::Box, vec![OcctArg::Number(10.0); 3]),
+            make(5, OcctOp::Sphere, vec![OcctArg::Number(6.0)]),
+            make(
+                6,
+                OcctOp::Cylinder,
+                vec![OcctArg::Number(6.0), OcctArg::Number(6.0)],
+            ),
+            make(
+                7,
+                OcctOp::Intersection,
+                vec![OcctArg::Ref(OcctSlot(5)), OcctArg::Ref(OcctSlot(6))],
+            ),
+            make(
+                9,
+                OcctOp::Union,
+                vec![
+                    OcctArg::Ref(OcctSlot(3)),
+                    OcctArg::Ref(OcctSlot(4)),
+                    OcctArg::Ref(OcctSlot(7)),
+                    OcctArg::Ref(OcctSlot(2)),
+                ],
+            ),
+        ];
+        source.parts[0].root = OcctSlot(9);
+
+        let runner = runner_plan(&source)
+            .expect("runner plan")
+            .expect("supported");
+        assert_eq!(
+            runner.parts[0].representation,
+            KernelRepresentation::AnalyticBrep
+        );
+        assert_eq!(runner.parts[0].commands[0].op, "import-stl");
+        assert!(runner.partial_boolean_groups.is_empty());
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn runner_plan_moves_pathological_threaded_boolean_closure_to_mesh_domain() {
+        let plan = compiled_plan(
+            r#"
+            (model
+              (part threaded-body
+                (difference
+                  (difference
+                    (difference
+                      (union (box 40 40 12) (cylinder 22 12 96))
+                      (cylinder 15 14 96))
+                    (translate 8 0 -1 (cylinder 2 14 48)))
+                  (thread :radius 16 :pitch 1.5 :length 6 :depth 0.6))))
+            "#,
+        );
+
+        let runner = runner_plan(&plan).expect("runner plan").expect("supported");
+        assert_eq!(
+            runner.parts[0].representation,
+            KernelRepresentation::MeshDomain
+        );
+    }
+
+    #[test]
+    fn runner_plan_keeps_threaded_boolean_closure_analytic_when_post_op_needs_brep() {
+        let plan = compiled_plan(
+            r#"
+            (model
+              (part threaded-body
+                (fillet 0.2
+                  (difference
+                    (difference
+                      (difference
+                        (union (box 40 40 12) (cylinder 22 12 96))
+                        (cylinder 15 14 96))
+                      (translate 8 0 -1 (cylinder 2 14 48)))
+                    (thread :radius 16 :pitch 1.5 :length 6 :depth 0.6)))))
+            "#,
+        );
+
+        let runner = runner_plan(&plan).expect("runner plan").expect("supported");
+        assert_eq!(
+            runner.parts[0].representation,
+            KernelRepresentation::AnalyticBrep
+        );
     }
 
     #[test]
@@ -3790,6 +4122,52 @@ mod tests {
             !bundle.join("model.step").exists(),
             "mesh-native multipart export must not fabricate STEP"
         );
+
+        fs::remove_dir_all(root).expect("cleanup runner");
+        fs::remove_dir_all(fixture).expect("cleanup fixture");
+    }
+
+    #[test]
+    fn native_runner_exports_mixed_analytic_and_mesh_parts_with_tessellated_step_member() {
+        let fixture = temp_root("mixed-representation-fixture");
+        fs::create_dir_all(&fixture).expect("fixture dir");
+        let stl_path = fixture.join("island.stl");
+        write_closed_tetra_stl(&stl_path);
+        let mut source = indexed_mesh_boolean_plan(&stl_path, false);
+        source.parts[0].key = "mesh-lid".to_string();
+        source.parts[0].label = "Mesh Lid".to_string();
+        source.parts.push(OcctPartPlan {
+            key: "analytic-body".to_string(),
+            label: "Analytic Body".to_string(),
+            root: OcctSlot(10),
+            commands: vec![OcctCommand {
+                output: OcctSlot(10),
+                op: OcctOp::Box,
+                args: vec![
+                    OcctArg::Number(2.0),
+                    OcctArg::Number(2.0),
+                    OcctArg::Number(2.0),
+                ],
+                keywords: Vec::new(),
+            }],
+        });
+
+        let Some((root, topology)) =
+            run_real_runner_plan_json("mixed-representation-export", &source)
+        else {
+            fs::remove_dir_all(fixture).expect("cleanup fixture");
+            return;
+        };
+        let bundle = root.join("bundle");
+        assert!(bundle.join("model.step").is_file());
+        assert!(bundle.join("preview.stl").is_file());
+        assert!(bundle.join("parts/mesh-lid.stl").is_file());
+        assert!(bundle.join("parts/analytic-body.stl").is_file());
+        assert_eq!(topology["parts"].as_array().expect("parts").len(), 2);
+        assert_eq!(topology["parts"][0]["representation"], "meshDomain");
+        assert_eq!(topology["parts"][1]["representation"], "analyticBrep");
+        let report = read_runner_stage_report(&bundle).expect("stage report");
+        assert_eq!(report.tessellated_step_part_count, Some(1));
 
         fs::remove_dir_all(root).expect("cleanup runner");
         fs::remove_dir_all(fixture).expect("cleanup fixture");
