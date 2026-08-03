@@ -206,21 +206,36 @@ function installProjectSwitcherMocks(options?: {
 }
 
 test.describe('Projects', () => {
-  test('Given campaign projects When Campaigns opens Then definition and run cards show a canonical preview', async ({ page }) => {
+  test('Given campaign projects When Campaigns opens Then each run shows its current mission preview', async ({ page }) => {
     await installProjectSwitcherMocks({
-      campaignRuns: [{
-        id: 'campaign-run-1',
-        kind: 'campaignRun',
-        title: 'My Ecky campaign',
-        definitionId: 'ecky-ir-build-missions',
-        definitionVersion: 'sha256:test',
-        currentStepId: 'mission-01-bracket-enclosure/brief',
-        completedStepIds: [],
-        passedChallengeIds: [],
-        draftOverridesByStepId: {},
-        createdAt: Date.UTC(2026, 7, 2) / 1000,
-        updatedAt: Date.UTC(2026, 7, 2) / 1000,
-      }],
+      campaignRuns: [
+        {
+          id: 'campaign-run-1',
+          kind: 'campaignRun',
+          title: 'Bottle cage mission',
+          definitionId: 'ecky-ir-build-missions',
+          definitionVersion: 'sha256:test',
+          currentStepId: 'mission-02-bottle-cage-dovetail/clamp',
+          completedStepIds: [],
+          passedChallengeIds: [],
+          draftOverridesByStepId: {},
+          createdAt: Date.UTC(2026, 7, 2) / 1000,
+          updatedAt: Date.UTC(2026, 7, 2) / 1000,
+        },
+        {
+          id: 'campaign-run-stale',
+          kind: 'campaignRun',
+          title: 'Stale campaign',
+          definitionId: 'retired-definition',
+          definitionVersion: 'sha256:stale',
+          currentStepId: 'retired-mission/missing',
+          completedStepIds: [],
+          passedChallengeIds: [],
+          draftOverridesByStepId: {},
+          createdAt: Date.UTC(2026, 7, 2) / 1000,
+          updatedAt: Date.UTC(2026, 7, 2) / 1000,
+        },
+      ],
     })({ page });
 
     await page.goto('/');
@@ -229,12 +244,14 @@ test.describe('Projects', () => {
     await projectsWindow.getByRole('button', { name: 'CAMPAIGNS' }).click();
 
     const definitionPreview = projectsWindow.getByAltText('Ecky IR campaign preview');
-    const runPreview = projectsWindow.getByAltText('My Ecky campaign preview');
+    const runPreview = projectsWindow.getByAltText('Bottle cage mission preview');
     await expect(definitionPreview).toBeVisible();
     await expect(runPreview).toBeVisible();
     await expect(definitionPreview).toHaveAttribute('src', /\/docs\/assets\/corner-bracket\.png$/);
-    await expect(runPreview).toHaveAttribute('src', /\/docs\/assets\/corner-bracket\.png$/);
+    await expect(runPreview).toHaveAttribute('src', /\/docs\/assets\/dovetail-fit\.png$/);
     await expect.poll(() => definitionPreview.evaluate((image) => (image as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+    const staleCard = projectsWindow.locator('[data-project-id="campaign-run-stale"]');
+    await expect(staleCard.locator('[data-preview-state="error"]')).toContainText('PREVIEW UNAVAILABLE');
   });
 
   test('shows search input', async ({ page }) => {

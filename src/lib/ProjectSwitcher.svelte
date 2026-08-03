@@ -32,6 +32,7 @@
   import ManualImportModal from './ManualImportModal.svelte';
   import Modal from './Modal.svelte';
   import type { CampaignRun } from './projects/campaignRunClient';
+  import { campaignRunPreviewSrc } from './projects/campaignCardPreview';
   import { campaignRunProjectDriver } from './projects/projectDriverRegistry';
 
   let {
@@ -466,13 +467,18 @@
         </article>
         {#each visibleCampaignRuns as run (run.id)}
           {@const card = campaignRunProjectDriver.card(run)}
+          {@const campaignPreview = campaignRunPreviewSrc(run.currentStepId)}
           <article
             class="project-card"
             class:active={activeCampaignRunId === run.id}
             data-project-kind="campaign"
             data-project-id={run.id}
           >
-            <PreviewFrame src={CAMPAIGN_PREVIEW_SRC} alt={`${run.title} preview`} />
+            <PreviewFrame
+              src={campaignPreview}
+              state={campaignPreview ? 'ready' : 'error'}
+              alt={`${run.title} preview`}
+            />
             <div class="card-body">
               <div class="card-header">
                 <h3>{run.title}</h3>
