@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+  <title>Ecky Capture</title>
+  <style>
+    :root { color-scheme: dark; --bg:#090c12; --panel:#111722; --line:#303744; --text:#e7e1d6; --dim:#9299a6; --primary:#c89a58; --danger:#e16d64; }
+    * { box-sizing:border-box; border-radius:0; letter-spacing:0; }
+    html,body,#app { width:100%; height:100%; margin:0; overflow:hidden; background:var(--bg); color:var(--text); font:13px ui-monospace,SFMono-Regular,Menlo,monospace; }
+    #app { position:relative; }
+    video { width:100%; height:100%; object-fit:cover; background:#000; }
+    .shade { position:absolute; inset:0; pointer-events:none; box-shadow:inset 0 0 0 1px var(--line); }
+    .top,.bottom { position:absolute; left:0; right:0; display:flex; gap:8px; align-items:center; padding:calc(10px + env(safe-area-inset-top)) 12px 10px; background:rgba(9,12,18,.84); overflow:hidden; }
+    .top { top:0; flex-wrap:wrap; }
+    .bottom { bottom:0; padding:10px 12px calc(10px + env(safe-area-inset-bottom)); flex-wrap:wrap; }
+    #instruction { flex:1 0 100%; color:var(--primary); font-weight:800; text-transform:uppercase; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    #detail { width:100%; color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .stat { color:var(--dim); white-space:nowrap; }
+    button { min-height:42px; border:1px solid var(--line); background:var(--panel); color:var(--text); padding:0 14px; font:700 12px ui-monospace,SFMono-Regular,Menlo,monospace; text-transform:uppercase; }
+    button.primary { border-color:var(--primary); color:var(--primary); }
+    button:disabled { opacity:.45; }
+    #launcher { position:absolute; inset:0; margin:auto; width:210px; height:max-content; display:grid; gap:10px; }
+    #launcher button { width:100%; min-height:48px; }
+    [hidden] { display:none !important; }
+    .error { color:var(--danger) !important; white-space:normal !important; }
+    canvas { display:none; }
+  </style>
+</head>
+<body>
+  <main id="app">
+    <video id="camera" playsinline muted></video>
+    <canvas id="sample" width="160" height="120"></canvas>
+    <canvas id="still"></canvas>
+    <div class="shade"></div>
+    <div class="top">
+      <strong id="instruction">PAIRING</strong>
+      <span class="stat" id="accepted">0 accepted</span>
+      <span class="stat">Preview after 20+ frames</span>
+      <span class="stat" id="pending">0 pending</span>
+    </div>
+    <div id="launcher">
+      <button id="start" class="primary">Start camera</button>
+      <button id="upload">Upload photos</button>
+    </div>
+    <input id="photo-files" type="file" accept="image/jpeg,image/png,.jpg,.jpeg,.png" multiple hidden>
+    <div class="bottom">
+      <button id="retry" hidden>Retry</button>
+      <button id="finish" class="primary" disabled>Build preview</button>
+      <span id="detail">Connecting to Ecky...</span>
+    </div>
+  </main>
+  <script type="module">
+    import { assessPixels, selectCaptureGuidance, sharpestCandidateIndex } from '/capture-assets/capture_metrics.mjs';
+    (() => {
+      const token = decodeURIComponent(location.pathname.split('/').filter(Boolean).pop() || '');
+      const api = `/api/capture/${encodeURIComponent(token)}`;
+      const video = document.querySelector('#camera');
+      const sample = document.querySelector('#sample');
+      const still = document.querySelector('#still');
+      const instruction = document.querySelector('#instruction');
+      const detail = document.querySelector('#detail');
+      const launcher = document.querySelector('#launcher');
+      const start = document.querySelector('#start');
+      const upload = document.querySelector('#upload');
+      const photoFiles = document.querySelector('#photo-files');
+      const retry = document.querySelector('#retry');
+      const finish = document.querySelector('#finish');
+      const acceptedLabel = document.querySelector('#accepted');
+      const pendingLabel = document.querySelector('#pending');
+      const queue = [];
+      const MAX_PENDING_FRAMES = 40;
+      const FOCUS_CANDIDATE_COUNT = 4;
+      let stream = null;
+      let accepted = 0;
+      let previousPixels = null;
+      let lastAcceptedPixels = null;
+      let lastAcceptedAt = 0;
+      let assessmentTimer = null;
+      let transferRunning = false;
+      let transferPendingReason = '';
+      let focusCandidates = [];
+      let focusCaptureRunning = false;
+      let focusBurstId = 0;
+      let screenWakeLock = null;
+      let importRunning = false;
+      let batchStartAccepted = 0;
+
+      async function acquireScreenWakeLock() {
+        if (screenWakeLock || document.visibilityState !== 'visible' || !navigator.wakeLock?.request) return;
+        try {
+          const lock = await navigator.wakeLock.request('screen');
+          screenWakeLock = lock;
+          lock.addEventListener('release', () => {
+            if (screenWakeLock === lock) screenWakeLock = null;
+          });
+        } catch {}
+      }
+
+      async function releaseScreenWakeLock() {
+        const lock = screenWakeLock;
+        screenWakeLock = null;
+        if (!lock || lock.released) return;
+        try { await lock.release(); } catch {}
+      }
+
+      const rawFailure = (error) => error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+      const setMessage = (primary, secondary = '', isError = false) => {
+        instruction.textContent = primary;
+        detail.textContent = secondary;
+        instruction.classList.toggle('error', isError);
+        detail.classList.toggle('error', isError);
+      };
+      const request = async (url, options = {}) => {
+        const response = await fetch(url, options);
+        if (!response.ok) throw new Error(await response.text() || `${response.status} ${response.statusText}`);
+        return response.headers.get('content-type')?.includes('json') ? response.json() : response.text();
+      };
+      const digest = async (blob) => {
+        const bytes = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
+        return [...new Uint8Array(bytes)].map(value => value.toString(16).padStart(2, '0')).join('');
+      };
+      const updateCounts = () => {
+        acceptedLabel.textContent = `${accepted} accepted`;
+        pendingLabel.textContent = `${queue.length} pending`;
+        finish.disabled = accepted < 20 || accepted <= batchStartAccepted || queue.length > 0;
+      };
+      async function reconcile() {
+        const manifest = await request(`${api}/frames`);
+        const known = new Set(manifest.frames.map(frame => frame.contentDigest));
+        for (let index = queue.length - 1; index >= 0; index -= 1) {
+          if (known.has(queue[index].digest)) queue.splice(index, 1);
+        }
+        accepted = manifest.frames.length;
+        updateCounts();
+      }
+      async function transfer() {
+        if (transferRunning || !queue.length) return;
+        transferRunning = true;
+        try {
+          await reconcile();
+          while (queue.length) {
+            const frame = queue[0];
+            let response;
+            try {
+              response = await request(`${api}/frames/${encodeURIComponent(frame.id)}`, {
+                method: 'POST', body: frame.blob,
+                headers: {
+                  'Content-Type': frame.blob.type,
+                  'X-Content-Digest': frame.digest,
+                  'X-Captured-At': String(frame.capturedAt),
+                  'X-Image-Width': String(frame.width),
+                  'X-Image-Height': String(frame.height),
+                  'X-Luminance': String(frame.metrics.luminance),
+                  'X-Sharpness': String(frame.metrics.sharpness),
+                  'X-Subject-Coverage': String(frame.metrics.subjectCoverage),
+                  'X-Motion': String(frame.metrics.motion),
+                },
+              });
+            } catch (error) {
+              const reason = rawFailure(error);
+              if (reason.includes('Duplicate view rejected')) {
+                queue.shift(); updateCounts(); setMessage('NEW ANGLE', reason); continue;
+              }
+              if (reason.includes('Frame overlap too low')) {
+                queue.shift(); updateCounts(); setMessage('RETURN TOWARD LAST VIEW', reason); continue;
+              }
+              throw error;
+            }
+            queue.shift(); accepted += 1; updateCounts();
+            const assessment = response.frame?.serverAssessment;
+            updateCounts();
+            setMessage('FRAME ACCEPTED', assessment?.guidance ?? `${accepted} frames stored by Ecky`);
+          }
+          transferPendingReason = '';
+        } catch (error) {
+          transferPendingReason = rawFailure(error);
+          setMessage('TRANSFER PENDING', transferPendingReason, true);
+        } finally {
+          transferRunning = false;
+        }
+      }
+      function resetFocusCandidates() {
+        focusCandidates = [];
+        focusBurstId += 1;
+      }
+      function stillBlob() {
+        still.width = video.videoWidth; still.height = video.videoHeight;
+        still.getContext('2d').drawImage(video, 0, 0);
+        return new Promise(resolve => still.toBlob(resolve, 'image/jpeg', 0.94));
+      }
+      async function collectFocusCandidate(metrics, readyToAccept) {
+        if (focusCaptureRunning) return;
+        if (queue.length >= MAX_PENDING_FRAMES) {
+          setMessage('TRANSFER PENDING', `Local queue full (${MAX_PENDING_FRAMES} frames)`, true);
+          return;
+        }
+        focusCaptureRunning = true;
+        const burstId = focusBurstId;
+        try {
+          if (focusCandidates.length < FOCUS_CANDIDATE_COUNT) {
+            const blob = await stillBlob();
+            if (!blob || burstId !== focusBurstId) return;
+            focusCandidates.push({ blob, width: still.width, height: still.height, metrics });
+          }
+          if (focusCandidates.length < FOCUS_CANDIDATE_COUNT) {
+            if (!transferPendingReason) {
+              setMessage('HOLD FOCUS', `${focusCandidates.length}/${FOCUS_CANDIDATE_COUNT} focus samples`);
+            }
+            return;
+          }
+          if (!readyToAccept) {
+            if (!transferPendingReason) setMessage('HOLD STILL', 'Stable focus burst ready');
+            return;
+          }
+
+          const selected = sharpestCandidateIndex(focusCandidates.map(candidate => candidate.metrics.sharpness));
+          const candidate = focusCandidates[selected];
+          resetFocusCandidates();
+          lastAcceptedAt = Date.now();
+          lastAcceptedPixels = candidate.metrics.signature;
+          const frame = {
+            id: crypto.randomUUID(), blob: candidate.blob, digest: await digest(candidate.blob), capturedAt: Date.now(),
+            width: candidate.width, height: candidate.height, metrics: candidate.metrics,
+          };
+          if (queue.some(item => item.digest === frame.digest)) return;
+          queue.push(frame); updateCounts();
+          if (!transferPendingReason) setMessage('HOLD STILL', 'Sharpest burst frame queued');
+          transfer();
+        } finally {
+          focusCaptureRunning = false;
+        }
+      }
+      function assess() {
+        if (!video.videoWidth) return;
+        const context = sample.getContext('2d', { willReadFrequently: true });
+        context.drawImage(video, 0, 0, sample.width, sample.height);
+        const pixels = context.getImageData(0, 0, sample.width, sample.height).data;
+        const metrics = assessPixels(pixels, sample.width, sample.height, previousPixels, lastAcceptedPixels);
+        previousPixels = metrics.signature;
+        const guidance = selectCaptureGuidance(metrics, Date.now() - lastAcceptedAt);
+        if (transferPendingReason) setMessage('TRANSFER PENDING', transferPendingReason, true);
+        else setMessage(guidance.primary, guidance.detail);
+        if (guidance.blocking && guidance.code !== 'holdStill') {
+          resetFocusCandidates();
+          return;
+        }
+        collectFocusCandidate(metrics, guidance.code === 'accepted');
+      }
+      const pairSession = () => request(`${api}/pair`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ protocolVersion: 1, capabilities: {
+          metricDepth: false, cameraIntrinsics: false, cameraPose: false, depthSidecars: false,
+        } }),
+      });
+      async function startCamera() {
+        launcher.hidden = true; retry.hidden = true;
+        resetFocusCandidates();
+        setMessage('REQUESTING CAMERA', 'Safari camera permission required');
+        try {
+          await pairSession();
+          if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+            throw new Error('Camera API unavailable: Safari requires a trusted HTTPS capture URL.');
+          }
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal: 'environment' }, width: { ideal: 4032 }, height: { ideal: 3024 } }, audio: false,
+          });
+          video.srcObject = stream; await video.play();
+          await acquireScreenWakeLock();
+          setMessage('MOVE AROUND OBJECT', 'Keep visible surface detailed and well lit');
+          assessmentTimer = setInterval(assess, 500);
+        } catch (error) {
+          setMessage('CAMERA FAILED', rawFailure(error), true); retry.hidden = false;
+        }
+      }
+      async function fileFrame(file) {
+        if (!['image/jpeg', 'image/png'].includes(file.type)) {
+          throw new Error(`Unsupported image MIME ${file.type || '(missing)'}; use JPEG or PNG.`);
+        }
+        const bitmap = await createImageBitmap(file);
+        try {
+          const context = sample.getContext('2d', { willReadFrequently: true });
+          context.drawImage(bitmap, 0, 0, sample.width, sample.height);
+          const pixels = context.getImageData(0, 0, sample.width, sample.height).data;
+          const metrics = assessPixels(pixels, sample.width, sample.height, null, null);
+          return {
+            id: crypto.randomUUID(), blob: file, digest: await digest(file),
+            capturedAt: file.lastModified || Date.now(), width: bitmap.width, height: bitmap.height, metrics,
+          };
+        } finally {
+          bitmap.close?.();
+        }
+      }
+      async function importPhotos(files) {
+        if (importRunning || !files.length) return;
+        importRunning = true;
+        launcher.hidden = true;
+        finish.disabled = true;
+        try {
+          await pairSession();
+          for (let index = 0; index < files.length; index += 1) {
+            setMessage('UPLOADING PHOTOS', `${index + 1}/${files.length}`);
+            const frame = await fileFrame(files[index]);
+            if (queue.some(item => item.digest === frame.digest)) continue;
+            queue.push(frame);
+            updateCounts();
+            await transfer();
+            if (transferPendingReason) break;
+          }
+          if (!transferPendingReason) setMessage('PHOTOS READY', `${accepted} source frames stored by Ecky`);
+        } catch (error) {
+          setMessage('UPLOAD FAILED', rawFailure(error), true);
+        } finally {
+          importRunning = false;
+          photoFiles.value = '';
+          launcher.hidden = false;
+          updateCounts();
+        }
+      }
+      function pollPreviewState() {
+        const timer = setInterval(async () => {
+          try {
+            const session = await request(api);
+            if (session.state === 'reconstructing') {
+              const progress = Math.round((session.reconstructionProgress || 0) * 100);
+              setMessage('BUILDING PREVIEW', progress ? `${progress}% on Mac` : 'Reconstruction running on Mac');
+              return;
+            }
+            if (session.state === 'preview') {
+              setMessage('PREVIEW READY ON MAC', 'Inspect mesh in Ecky Capture');
+              return;
+            }
+            if (session.state === 'failed') {
+              clearInterval(timer);
+              setMessage('RECONSTRUCTION FAILED', session.rawError || 'See Ecky Capture on Mac', true);
+              return;
+            }
+            if (session.state !== 'capturing') return;
+            clearInterval(timer);
+            batchStartAccepted = accepted;
+            start.textContent = 'Resume camera';
+            launcher.hidden = false;
+            updateCounts();
+            setMessage('MORE PHOTOS REQUESTED', 'Previous source frames retained');
+          } catch {}
+        }, 1000);
+      }
+      start.addEventListener('click', startCamera);
+      upload.addEventListener('click', () => photoFiles.click());
+      photoFiles.addEventListener('change', () => importPhotos([...photoFiles.files]));
+      retry.addEventListener('click', startCamera);
+      finish.addEventListener('click', async () => {
+        finish.disabled = true;
+        try {
+          await transfer(); await request(`${api}/finish`, { method: 'POST' });
+          clearInterval(assessmentTimer); stream?.getTracks().forEach(track => track.stop());
+          stream = null;
+          await releaseScreenWakeLock();
+          launcher.hidden = true;
+          batchStartAccepted = accepted;
+          setMessage('BUILDING PREVIEW', `${accepted} source frames retained by Ecky`);
+          pollPreviewState();
+        } catch (error) {
+          setMessage('FINISH FAILED', rawFailure(error), true); finish.disabled = false;
+        }
+      });
+      window.addEventListener('online', transfer);
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && stream) acquireScreenWakeLock();
+      });
+      window.addEventListener('pagehide', releaseScreenWakeLock);
+      request(api).then(reconcile).then(() => setMessage('READY', 'Tap Start camera')).catch(error => {
+        setMessage('PAIRING FAILED', rawFailure(error), true); start.hidden = true;
+      });
+    })();
+  </script>
+</body>
+</html>
