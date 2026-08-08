@@ -1,0 +1,46 @@
+** Ecky independent reference: linear-static 10 mm bracket block.
+** Units: mm, N, MPa. Six C3D4 elements share body diagonal 1-7.
+*HEADING
+Ecky FEM differential bracket reference v1
+*NODE
+1, 0, 0, 0
+2, 10, 0, 0
+3, 10, 10, 0
+4, 0, 10, 0
+5, 0, 0, 10
+6, 10, 0, 10
+7, 10, 10, 10
+8, 0, 10, 10
+*ELEMENT, TYPE=C3D4, ELSET=EALL
+1, 1, 2, 3, 7
+2, 1, 3, 4, 7
+3, 1, 4, 8, 7
+4, 1, 8, 5, 7
+5, 1, 5, 6, 7
+6, 1, 6, 2, 7
+*NSET, NSET=FIXED
+1, 4, 5, 8
+*NSET, NSET=LOADED
+2, 3, 6, 7
+*MATERIAL, NAME=ALUMINUM_6061
+*ELASTIC
+68900, 0.33
+*DENSITY
+2.7E-9
+*SOLID SECTION, ELSET=EALL, MATERIAL=ALUMINUM_6061
+*STEP
+*STATIC
+*BOUNDARY
+FIXED, 1, 3, 0
+*CLOAD
+2, 3, -33.333333333333336
+3, 3, -16.666666666666668
+6, 3, -16.666666666666668
+7, 3, -33.333333333333336
+*NODE PRINT, NSET=LOADED
+U
+*NODE PRINT, NSET=FIXED
+RF
+*EL PRINT, ELSET=EALL
+S
+*END STEP

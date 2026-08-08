@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "fixtureId": "calculix-bracket-v1",
+  "generatedAt": "2026-08-09",
+  "inputSha256": "12086c80cb804f017d4ed0ca68f499b5713f0147124a44a105e45c43a4ddf059",
+  "rawOutputSha256": "d6748c05feafc6c949ae1641cd5e62404bb86c40a3704b97e8199220a3119b66",
+  "generator": {
+    "program": "CalculiX CrunchiX",
+    "version": "2.20",
+    "debianPackage": "calculix-ccx 2.20-1",
+    "linearSolver": "symmetric SPOOLES",
+    "containerImage": "debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241",
+    "runtimeRequiredByTests": false
+  },
+  "model": {
+    "units": "mm-N-MPa",
+    "element": "C3D4",
+    "nodeCount": 8,
+    "elementCount": 6,
+    "youngModulusMpa": 68900.0,
+    "poissonRatio": 0.33,
+    "totalForceN": [0.0, 0.0, -100.0]
+  },
+  "loadedNodeDisplacementsMm": [
+    { "nodeId": 2, "value": [-0.00008287963, 0.00004040355, -0.0005497589] },
+    { "nodeId": 3, "value": [-0.0001743248, 0.00002897414, -0.0005298920] },
+    { "nodeId": 6, "value": [0.0001055669, 0.00003170694, -0.0004689197] },
+    { "nodeId": 7, "value": [0.00007321989, 0.000007325456, -0.0004508035] }
+  ],
+  "elementStressMpa": [
+    { "elementId": 1, "voigt": [-0.5058841, -0.1357398, 0.3331837, -0.1322092, -0.7828030, -0.004615217] },
+    { "elementId": 2, "voigt": [-1.3819370, -0.4788561, -0.06914216, 0.07504956, -0.7313432, -0.05607498] },
+    { "elementId": 3, "voigt": [0.7474679, 0.3681558, 0.3681558, 0.01897458, -1.1676830, 0.0] },
+    { "elementId": 4, "voigt": [0.7474679, 0.3681558, 0.3681558, 0.01897458, -1.1676830, 0.0] },
+    { "elementId": 5, "voigt": [0.9550910, 0.2818999, 0.4082070, -0.001657842, -1.2146080, 0.04692504] },
+    { "elementId": 6, "voigt": [-0.5622056, -0.2591589, 0.2859317, 0.02086832, -0.9358805, 0.02439887] }
+  ],
+  "fixedNodeReactionsN": [
+    { "nodeId": 1, "value": [55.93927, 2.918603, 16.63993] },
+    { "nodeId": 4, "value": [44.06073, -3.095831, 5.118541] },
+    { "nodeId": 5, "value": [-55.93927, -5.326216, 33.18284] },
+    { "nodeId": 8, "value": [-44.06073, 5.503444, 45.05869] }
+  ],
+  "summary": {
+    "maximumDisplacementMm": 0.0005585822843125082,
+    "maximumVonMisesMpa": 2.194662349768662,
+    "reactionResultantN": [0.0, 0.0, 100.000001]
+  },
+  "comparisonTolerances": {
+    "displacementRelative": 0.000005,
+    "stressRelative": 0.000005,
+    "reactionAbsoluteN": 0.00001,
+    "extremumCoordinateAbsoluteMm": 0.000001
+  }
+}

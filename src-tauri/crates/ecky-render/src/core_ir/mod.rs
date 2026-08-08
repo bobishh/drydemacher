@@ -27,6 +27,8 @@ macro_rules! opaque_id {
 
 opaque_id!(ProgramId);
 opaque_id!(PartId);
+opaque_id!(AnalysisId);
+opaque_id!(AnalysisClauseId);
 opaque_id!(ParamId);
 opaque_id!(NodeId);
 opaque_id!(SourceFileId);
@@ -320,6 +322,7 @@ pub struct CoreFeatureDecl {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreSelectorTagKind {
+    Vertex,
     Face,
     Edge,
 }
@@ -346,11 +349,162 @@ pub struct CorePreviewViewDecl {
     pub part_offsets: Vec<CorePreviewPartOffset>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreAnalysisKind {
+    LinearStatic,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoreAnalysisClause {
+    pub id: AnalysisClauseId,
+    pub kind: CoreAnalysisClauseKind,
+    pub span: Option<SourceSpan>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CoreAnalysisScalarExpr {
+    Literal { value: f64, unit: String },
+    Parameter { key: String, scale: f64 },
+}
+
+impl CoreAnalysisScalarExpr {
+    pub fn literal_value(&self, unit: &str) -> Option<f64> {
+        match self {
+            Self::Literal {
+                value,
+                unit: actual_unit,
+            } if actual_unit == unit => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn parameter_key(&self) -> Option<&str> {
+        match self {
+            Self::Parameter { key, scale } if *scale == 1.0 => Some(key),
+            _ => None,
+        }
+    }
+
+    pub fn parameter_scale(&self, expected_key: &str) -> Option<f64> {
+        match self {
+            Self::Parameter { key, scale } if key == expected_key => Some(*scale),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoreAnalysisLocalRefinement {
+    pub face_tag: String,
+    pub size: CoreAnalysisScalarExpr,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CoreAnalysisClauseKind {
+    LinearStatic {
+        part: String,
+    },
+    Question {
+        question_id: String,
+        statement: String,
+        decision: String,
+        acceptance_metric_ids: Vec<String>,
+    },
+    AcceptanceCriterion {
+        metric_id: String,
+        field: String,
+        comparison: String,
+        limit: String,
+        unit: String,
+        requires_convergence: bool,
+    },
+    Idealization {
+        kind: String,
+        justification: String,
+        accepted_by_user: bool,
+    },
+    Evidence {
+        evidence_id: String,
+        subject: String,
+        source: String,
+        authority: String,
+        uncertainty_percent: f64,
+        decision_critical: bool,
+    },
+    InputEvidence {
+        input_name: String,
+        evidence_id: String,
+    },
+    Assumption {
+        assumption_id: String,
+        category: String,
+        statement: String,
+        status: String,
+        evidence_ids: Vec<String>,
+    },
+    ValidationEvidence {
+        validation_id: String,
+        kind: String,
+        source: String,
+        result_digest: String,
+    },
+    Material {
+        name: String,
+        young_modulus: CoreAnalysisScalarExpr,
+        poisson_ratio: CoreAnalysisScalarExpr,
+        density: CoreAnalysisScalarExpr,
+        yield_strength: CoreAnalysisScalarExpr,
+    },
+    VolumeMesh {
+        element: String,
+        size: CoreAnalysisScalarExpr,
+        local_refinements: Vec<CoreAnalysisLocalRefinement>,
+    },
+    Refine {
+        face_tag: String,
+        size: CoreAnalysisScalarExpr,
+    },
+    Fixed {
+        face_tag: String,
+    },
+    PrescribedDisplacement {
+        face_tag: String,
+        displacement: [Option<CoreAnalysisScalarExpr>; 3],
+    },
+    SurfaceForce {
+        face_tag: String,
+        total: [CoreAnalysisScalarExpr; 3],
+    },
+    Traction {
+        face_tag: String,
+        vector: [CoreAnalysisScalarExpr; 3],
+    },
+    Pressure {
+        face_tag: String,
+        pressure: CoreAnalysisScalarExpr,
+    },
+    Solve {
+        method: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoreAnalysisDecl {
+    pub id: AnalysisId,
+    pub name: String,
+    pub kind: CoreAnalysisKind,
+    pub part: String,
+    pub element: String,
+    pub clauses: Vec<CoreAnalysisClause>,
+    pub span: Option<SourceSpan>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CoreProgram {
     pub id: ProgramId,
     pub parameters: Vec<CoreParameter>,
     pub parts: Vec<CorePart>,
+    pub analyses: Vec<CoreAnalysisDecl>,
     pub feature_decls: BTreeMap<String, CoreFeatureDecl>,
     pub selector_tags: Vec<CoreSelectorTagDecl>,
     pub preview_views: Vec<CorePreviewViewDecl>,
@@ -363,11 +517,17 @@ impl CoreProgram {
             id,
             parameters,
             parts,
+            analyses: Vec::new(),
             feature_decls: BTreeMap::new(),
             selector_tags: Vec::new(),
             preview_views: Vec::new(),
             constraints: CoreProgramConstraints::default(),
         }
+    }
+
+    pub fn with_analyses(mut self, analyses: Vec<CoreAnalysisDecl>) -> Self {
+        self.analyses = analyses;
+        self
     }
 
     pub fn with_feature_decls(mut self, feature_decls: BTreeMap<String, CoreFeatureDecl>) -> Self {
@@ -586,6 +746,7 @@ pub enum CoreFrameOp {
     PathFrame,
     Place,
     ClipBox,
+    ClipPlane,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

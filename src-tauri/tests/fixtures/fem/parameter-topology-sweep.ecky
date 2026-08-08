@@ -1,0 +1,13 @@
+(model
+  (params
+    (number width 10 :min 8 :max 12 :step 1 :unit length)
+    (number cut-radius 0 :min 0 :max 2 :step 1 :unit length))
+  (tag-face mounting :faces "bottom" bracket)
+  (tag-face load-pad :faces "top" bracket)
+  (part bracket
+    (if (> cut-radius 0)
+      (difference
+        (box width 10 10)
+        (translate (/ width 2) 5 0
+          (cylinder cut-radius 10)))
+      (box width 10 10))))

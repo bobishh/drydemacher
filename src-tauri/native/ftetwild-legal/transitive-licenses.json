@@ -1,0 +1,65 @@
+[
+  {
+    "name": "fTetWild",
+    "version": "d7d99bb4387a07895b9adce058dc7305f6b6e5ab",
+    "license": "MPL-2.0",
+    "sourceUrl": "https://github.com/wildmeshing/fTetWild",
+    "sourceRevision": "d7d99bb4387a07895b9adce058dc7305f6b6e5ab"
+  },
+  {
+    "name": "libigl",
+    "version": "2.6.0",
+    "license": "MPL-2.0",
+    "sourceUrl": "https://github.com/libigl/libigl",
+    "sourceRevision": "v2.6.0"
+  },
+  {
+    "name": "Eigen",
+    "version": "3.4.0",
+    "license": "MPL-2.0",
+    "sourceUrl": "https://gitlab.com/libeigen/eigen",
+    "sourceRevision": "3.4.0"
+  },
+  {
+    "name": "Geogram",
+    "version": "1.9.6",
+    "license": "BSD-3-Clause",
+    "sourceUrl": "https://github.com/BrunoLevy/geogram",
+    "sourceRevision": "v1.9.6"
+  },
+  {
+    "name": "fmt",
+    "version": "11.2.0",
+    "license": "MIT",
+    "sourceUrl": "https://github.com/fmtlib/fmt",
+    "sourceRevision": "11.2.0"
+  },
+  {
+    "name": "spdlog",
+    "version": "1.15.3",
+    "license": "MIT",
+    "sourceUrl": "https://github.com/gabime/spdlog",
+    "sourceRevision": "v1.15.3"
+  },
+  {
+    "name": "nlohmann-json",
+    "version": "0901d33bf6e7dfe6f70fd9d142c8f5c6695c6c5b",
+    "license": "MIT",
+    "sourceUrl": "https://github.com/jdumas/json",
+    "sourceRevision": "0901d33bf6e7dfe6f70fd9d142c8f5c6695c6c5b"
+  },
+  {
+    "name": "libigl-predicates",
+    "version": "decb7bc1260e689cbe008109e3cc5d3a5a433aea",
+    "license": "Public-Domain",
+    "sourceUrl": "https://github.com/libigl/libigl-predicates",
+    "sourceRevision": "decb7bc1260e689cbe008109e3cc5d3a5a433aea"
+  },
+  {
+    "name": "GMP",
+    "version": "6.3.0",
+    "license": "LGPL-3.0-or-later OR GPL-2.0-or-later",
+    "sourceUrl": "https://gmplib.org/",
+    "sourceRevision": "6.3.0"
+  }
+]

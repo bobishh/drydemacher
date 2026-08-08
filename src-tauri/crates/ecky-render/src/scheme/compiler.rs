@@ -9,9 +9,11 @@ use steel_core::parser::tokens::TokenType;
 use steel_core::rvals::SteelVal;
 
 use crate::core_ir::{
-    parse_core_edge_selector_payload, parse_core_face_selector_payload, CompilerError,
-    CompilerErrorKind, CoreArrayOp, CoreBinding, CoreBooleanOp, CoreFeatureDecl, CoreFrameOp,
-    CoreKeywordArg, CoreLiteral, CoreMetaOp, CoreNode, CoreNodeKind, CoreOperation, CoreParameter,
+    parse_core_edge_selector_payload, parse_core_face_selector_payload, AnalysisClauseId,
+    AnalysisId, CompilerError, CompilerErrorKind, CoreAnalysisClause, CoreAnalysisClauseKind,
+    CoreAnalysisDecl, CoreAnalysisKind, CoreAnalysisLocalRefinement, CoreAnalysisScalarExpr,
+    CoreArrayOp, CoreBinding, CoreBooleanOp, CoreFeatureDecl, CoreFrameOp, CoreKeywordArg,
+    CoreLiteral, CoreMetaOp, CoreNode, CoreNodeKind, CoreOperation, CoreParameter,
     CoreParameterConstraints, CoreParameterKind, CoreParameterValue, CorePart, CorePathOp,
     CorePreviewPartOffset, CorePreviewViewDecl, CorePrimitive, CoreProgram, CoreProgramConstraints,
     CoreReference, CoreRelationConstraint, CoreRelationOperand, CoreRelationOperator, CoreResult,
@@ -181,8 +183,12 @@ fn compile_to_core_program_inner(source: &str) -> CoreResult<CoreProgram> {
         let legacy_source = lower_component_definitions_source(&legacy_source)?;
 
         if can_use_expanded_ast(&legacy_source) {
-            if let Ok(program) = compile_to_core_program_from_expanded_ast_legacy(&legacy_source) {
-                return verify_compiled_core_program(program, source, strict_units);
+            match compile_to_core_program_from_expanded_ast_legacy(&legacy_source) {
+                Ok(program) => return verify_compiled_core_program(program, source, strict_units),
+                Err(error) if error.message.contains("analysis-to-geometry cycle") => {
+                    return Err(error)
+                }
+                Err(_) => {}
             }
         }
 
@@ -196,8 +202,12 @@ fn compile_to_core_program_inner(source: &str) -> CoreResult<CoreProgram> {
     let runtime_source = lower_component_definitions_source(&runtime_source)?;
 
     if can_use_expanded_ast(&expanded_source) {
-        if let Ok(program) = compile_to_core_program_from_expanded_ast(&expanded_source) {
-            return verify_compiled_core_program(program, source, strict_units);
+        match compile_to_core_program_from_expanded_ast(&expanded_source) {
+            Ok(program) => return verify_compiled_core_program(program, source, strict_units),
+            Err(error) if error.message.contains("analysis-to-geometry cycle") => {
+                return Err(error)
+            }
+            Err(_) => {}
         }
     }
 
@@ -680,6 +690,9 @@ fn rewrite_runtime_expr_source(expr: &ExprKind) -> String {
             if expr_list_head_is(&list.args, "define-syntax") {
                 return expr.to_string();
             }
+            if expr_list_head_is(&list.args, "analysis") {
+                return "analysis".to_string();
+            }
             if let Some(rewritten_repeat) = rewrite_runtime_repeat_call_source(&list.args) {
                 return rewritten_repeat;
             }
@@ -810,6 +823,7 @@ fn rewrite_runtime_model_clause_group_source(expr: &ExprKind) -> String {
             );
             format!("({} {} {})", head, items[1], body)
         }
+        "analysis" => format!("(list (quote {}))", rewrite_runtime_expr_source(expr)),
         _ => format!("(list {})", rewrite_runtime_expr_source(expr)),
     }
 }
@@ -2347,6 +2361,7 @@ struct ExpandedModelClause {
     items: Vec<ExprKind>,
     helpers: ExpandedHelperMap,
     component: Option<ComponentClause>,
+    span: Option<SourceSpan>,
 }
 
 impl ExpandedModelClause {
@@ -2544,10 +2559,13 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
     let mut next_param = 1u64;
     let mut next_part = 1u64;
     let mut next_node = 1u64;
+    let mut analyses = Vec::new();
     let mut feature_decls = BTreeMap::new();
     let mut verify_clauses = Vec::new();
     let mut selector_tags = Vec::new();
     let mut preview_views = Vec::new();
+    let mut next_analysis = 1u64;
+    let mut next_analysis_clause = 1u64;
 
     let clauses = collect_expanded_model_clauses(&forms[1..], helpers)?;
     let mut raw_parts = Vec::new();
@@ -2568,10 +2586,16 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
                 pending_relations.append(&mut parsed_relations);
             }
             "verify" => verify_clauses.push(parse_expanded_verify_clause(&clause_form.items)?),
-            "tag-face" | "tag-edge" | "tag-edges" => {
+            "tag-vertex" | "tag-face" | "tag-edge" | "tag-edges" => {
                 selector_tags.push(parse_expanded_selector_tag_decl(&clause_form.items)?)
             }
             "view" => preview_views.push(parse_expanded_preview_view_decl(&clause_form.items)?),
+            "analysis" => analyses.push(parse_expanded_analysis_decl(
+                &clause_form.items,
+                clause_form.span,
+                &mut next_analysis,
+                &mut next_analysis_clause,
+            )?),
             "part" | "feature" => raw_parts.push(clause_form),
             "meta" => {}
             "map" | "range" => return Err(model_level_sequence_form_error(&clause)),
@@ -2653,6 +2677,7 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
     let _ = part_components;
 
     Ok(CoreProgram::new(ProgramId::new(1), params, parts)
+        .with_analyses(analyses)
         .with_feature_decls(feature_decls)
         .with_selector_tags(selector_tags)
         .with_preview_views(preview_views)
@@ -2678,7 +2703,7 @@ fn parse_expanded_selector_tag_decl(items: &[ExprKind]) -> CoreResult<CoreSelect
     if items.len() < 5 {
         return Err(CompilerError::new(
             CompilerErrorKind::Parse,
-            "`tag-face`/`tag-edges` expects a name, selector keyword/value, and target shape.",
+            "`tag-vertex`/`tag-face`/`tag-edges` expects a name, selector keyword/value, and target shape.",
         ));
     }
     let clause = expr_name(items.first().ok_or_else(|| {
@@ -2691,12 +2716,19 @@ fn parse_expanded_selector_tag_decl(items: &[ExprKind]) -> CoreResult<CoreSelect
         .ok_or_else(|| {
             CompilerError::new(
                 CompilerErrorKind::Parse,
-                "`tag-face`/`tag-edges` selector keyword must be `:face`, `:faces`, `:edge`, or `:edges`.",
+                "Selector tag keyword must be `:vertex`, `:face`, `:faces`, `:edge`, or `:edges`.",
             )
         })?;
     let kind = match (clause.as_str(), keyword.as_str()) {
+        ("tag-vertex", ":vertex") => CoreSelectorTagKind::Vertex,
         ("tag-face", ":face" | ":faces") => CoreSelectorTagKind::Face,
         ("tag-edge" | "tag-edges", ":edge" | ":edges") => CoreSelectorTagKind::Edge,
+        ("tag-vertex", _) => {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Parse,
+                "`tag-vertex` requires `:vertex`.",
+            ))
+        }
         ("tag-face", _) => {
             return Err(CompilerError::new(
                 CompilerErrorKind::Parse,
@@ -3010,6 +3042,7 @@ fn push_expanded_model_clauses(
                                 role: ComponentRole::Output,
                                 spelling: "part".to_string(),
                             }),
+                            span: expr_source_span(form),
                         });
                         return Ok(());
                     }
@@ -3021,6 +3054,7 @@ fn push_expanded_model_clauses(
                                 role: ComponentRole::Output,
                                 spelling: "feature".to_string(),
                             }),
+                            span: expr_source_span(form),
                         });
                         return Ok(());
                     }
@@ -3031,6 +3065,7 @@ fn push_expanded_model_clauses(
                 items,
                 helpers: helpers.clone(),
                 component: None,
+                span: expr_source_span(form),
             });
         }
         _ => {
@@ -3038,6 +3073,7 @@ fn push_expanded_model_clauses(
                 items: expr_list_items(form, "model clause")?,
                 helpers: helpers.clone(),
                 component: None,
+                span: expr_source_span(form),
             });
         }
     }
@@ -3392,6 +3428,585 @@ fn parse_expanded_feature_decl(
     ))
 }
 
+fn parse_expanded_analysis_decl(
+    items: &[ExprKind],
+    span: Option<SourceSpan>,
+    next_analysis: &mut u64,
+    next_clause: &mut u64,
+) -> CoreResult<CoreAnalysisDecl> {
+    if items.len() < 2 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            "Each `(analysis ...)` needs a name and at least one clause.",
+        ));
+    }
+
+    let name = expr_value_symbol_or_text(&items[1], "analysis id")?;
+    let mut clauses = Vec::new();
+    let mut part = String::new();
+    let mut element = String::new();
+
+    for item in items.iter().skip(2) {
+        let clause = parse_expanded_analysis_clause(item, next_clause)?;
+        match &clause.kind {
+            CoreAnalysisClauseKind::LinearStatic { part: clause_part } if part.is_empty() => {
+                part = clause_part.clone();
+            }
+            CoreAnalysisClauseKind::VolumeMesh {
+                element: clause_element,
+                ..
+            } if element.is_empty() => {
+                element = clause_element.clone();
+            }
+            _ => {}
+        }
+        clauses.push(clause);
+    }
+
+    let analysis = CoreAnalysisDecl {
+        id: AnalysisId::new(*next_analysis),
+        name,
+        kind: CoreAnalysisKind::LinearStatic,
+        part,
+        element,
+        clauses,
+        span,
+    };
+    *next_analysis += 1;
+    Ok(analysis)
+}
+
+fn parse_expanded_analysis_clause(
+    value: &ExprKind,
+    next_clause: &mut u64,
+) -> CoreResult<CoreAnalysisClause> {
+    let items = expr_list_items(value, "analysis clause")?;
+    let head =
+        expr_name(items.first().ok_or_else(|| {
+            CompilerError::new(CompilerErrorKind::Parse, "Empty analysis clause.")
+        })?)?;
+    validate_analysis_clause_name(&head)?;
+    let kind = match head.as_str() {
+        "linear-static" => CoreAnalysisClauseKind::LinearStatic {
+            part: parse_expanded_analysis_keyword_value(&items, ":part", "analysis part")?,
+        },
+        "question" => CoreAnalysisClauseKind::Question {
+            question_id: expr_value_symbol_or_text(
+                items.get(1).ok_or_else(|| {
+                    CompilerError::new(
+                        CompilerErrorKind::Parse,
+                        "`question` expects a question id.",
+                    )
+                })?,
+                "analysis question id",
+            )?,
+            statement: parse_expanded_named_analysis_keyword_value(
+                &items,
+                ":statement",
+                "analysis question statement",
+            )?,
+            decision: parse_expanded_named_analysis_keyword_value(
+                &items,
+                ":decision",
+                "analysis question decision",
+            )?,
+            acceptance_metric_ids: parse_expanded_named_analysis_keyword_list(
+                &items,
+                ":acceptance-metrics",
+                "analysis acceptance metrics",
+            )?,
+        },
+        "acceptance-criterion" => CoreAnalysisClauseKind::AcceptanceCriterion {
+            metric_id: parse_expanded_analysis_item_id(&items, "acceptance criterion")?,
+            field: parse_expanded_named_analysis_keyword_value(
+                &items,
+                ":field",
+                "acceptance field",
+            )?,
+            comparison: parse_expanded_named_analysis_keyword_value(
+                &items,
+                ":comparison",
+                "acceptance comparison",
+            )?,
+            limit: parse_expanded_named_analysis_keyword_value(
+                &items,
+                ":limit",
+                "acceptance limit",
+            )?,
+            unit: parse_expanded_named_analysis_keyword_value(&items, ":unit", "acceptance unit")?,
+            requires_convergence: parse_expanded_named_analysis_keyword_bool(
+                &items,
+                ":requires-convergence",
+                "acceptance convergence requirement",
+            )?,
+        },
+        "idealization" => CoreAnalysisClauseKind::Idealization {
+            kind: parse_expanded_analysis_item_id(&items, "idealization")?,
+            justification: parse_expanded_named_analysis_keyword_value(
+                &items,
+                ":justification",
+                "idealization justification",
+            )?,
+            accepted_by_user: parse_expanded_named_analysis_keyword_bool(
+                &items,
+                ":accepted",
+                "idealization acceptance",
+            )?,
+        },
+        "evidence" => CoreAnalysisClauseKind::Evidence {
+            evidence_id: parse_expanded_analysis_item_id(&items, "evidence")?,
+            subject: parse_expanded_named_analysis_keyword_value(
+                &items,
+                ":subject",
+                "evidence subject",
+            )?,
+            source: parse_expanded_named_analysis_keyword_value(
+                &items,
+                ":source",
+                "evidence source",
+            )?,
+            authority: parse_expanded_named_analysis_keyword_value(
+                &items,
+                ":authority",
+                "evidence authority",
+            )?,
+            uncertainty_percent: parse_expanded_named_analysis_keyword_number(
+                &items,
+                ":uncertainty-percent",
+                "evidence uncertainty percent",
+            )?,
+            decision_critical: parse_expanded_named_analysis_keyword_bool(
+                &items,
+                ":decision-critical",
+                "decision-critical evidence flag",
+            )?,
+        },
+        "input-evidence" => CoreAnalysisClauseKind::InputEvidence {
+            input_name: parse_expanded_analysis_item_id(&items, "input evidence")?,
+            evidence_id: parse_expanded_named_analysis_keyword_value(
+                &items,
+                ":evidence",
+                "input evidence reference",
+            )?,
+        },
+        "assumption" => CoreAnalysisClauseKind::Assumption {
+            assumption_id: parse_expanded_analysis_item_id(&items, "assumption")?,
+            category: parse_expanded_named_analysis_keyword_value(
+                &items,
+                ":category",
+                "assumption category",
+            )?,
+            statement: parse_expanded_named_analysis_keyword_value(
+                &items,
+                ":statement",
+                "assumption statement",
+            )?,
+            status: parse_expanded_named_analysis_keyword_value(
+                &items,
+                ":status",
+                "assumption status",
+            )?,
+            evidence_ids: parse_expanded_named_analysis_keyword_list(
+                &items,
+                ":evidence",
+                "assumption evidence",
+            )?,
+        },
+        "validation-evidence" => CoreAnalysisClauseKind::ValidationEvidence {
+            validation_id: parse_expanded_analysis_item_id(&items, "validation evidence")?,
+            kind: parse_expanded_named_analysis_keyword_value(
+                &items,
+                ":kind",
+                "validation evidence kind",
+            )?,
+            source: parse_expanded_named_analysis_keyword_value(
+                &items,
+                ":source",
+                "validation evidence source",
+            )?,
+            result_digest: parse_expanded_named_analysis_keyword_value(
+                &items,
+                ":result-digest",
+                "validation result digest",
+            )?,
+        },
+        "material" => CoreAnalysisClauseKind::Material {
+            name: expr_value_symbol_or_text(
+                items.get(1).ok_or_else(|| {
+                    CompilerError::new(
+                        CompilerErrorKind::Parse,
+                        "`material` expects a material name.",
+                    )
+                })?,
+                "analysis material name",
+            )?,
+            young_modulus: parse_expanded_fem_scalar_keyword(
+                &items,
+                ":young-modulus",
+                "material Young's modulus",
+            )?,
+            poisson_ratio: parse_expanded_fem_scalar_keyword(
+                &items,
+                ":poisson-ratio",
+                "material Poisson ratio",
+            )?,
+            density: parse_expanded_fem_scalar_keyword(&items, ":density", "material density")?,
+            yield_strength: parse_expanded_fem_scalar_keyword(
+                &items,
+                ":yield-strength",
+                "material yield strength",
+            )?,
+        },
+        "volume-mesh" => CoreAnalysisClauseKind::VolumeMesh {
+            element: parse_expanded_analysis_keyword_value(&items, ":element", "analysis element")?,
+            size: parse_expanded_fem_scalar_keyword(&items, ":size", "volume mesh size")?,
+            local_refinements: items
+                .iter()
+                .filter(|item| {
+                    expr_list_items(item, "local refinement")
+                        .ok()
+                        .and_then(|values| values.first().cloned())
+                        .and_then(|head| expr_name(&head).ok())
+                        .as_deref()
+                        == Some("refine")
+                })
+                .map(parse_expanded_local_refinement)
+                .collect::<CoreResult<Vec<_>>>()?,
+        },
+        "refine" => {
+            let refinement = parse_expanded_local_refinement(value)?;
+            CoreAnalysisClauseKind::Refine {
+                face_tag: refinement.face_tag,
+                size: refinement.size,
+            }
+        }
+        "fixed" => CoreAnalysisClauseKind::Fixed {
+            face_tag: parse_expanded_face_tag_keyword(&items)?,
+        },
+        "prescribed-displacement" => CoreAnalysisClauseKind::PrescribedDisplacement {
+            face_tag: parse_expanded_face_tag_keyword(&items)?,
+            displacement: parse_expanded_optional_fem_vector_keyword(
+                &items,
+                ":displacement",
+                "prescribed displacement",
+            )?,
+        },
+        "surface-force" => CoreAnalysisClauseKind::SurfaceForce {
+            face_tag: parse_expanded_face_tag_keyword(&items)?,
+            total: parse_expanded_fem_vector_keyword(&items, ":total", "surface force total")?,
+        },
+        "traction" => CoreAnalysisClauseKind::Traction {
+            face_tag: parse_expanded_face_tag_keyword(&items)?,
+            vector: parse_expanded_fem_vector_keyword(&items, ":vector", "traction vector")?,
+        },
+        "pressure" => CoreAnalysisClauseKind::Pressure {
+            face_tag: parse_expanded_face_tag_keyword(&items)?,
+            pressure: parse_expanded_fem_scalar_keyword(&items, ":value", "pressure")?,
+        },
+        "solve" => CoreAnalysisClauseKind::Solve {
+            method: parse_expanded_analysis_keyword_value(&items, ":method", "analysis method")?,
+        },
+        other => {
+            return Err(CompilerError::new(
+                CompilerErrorKind::UnsupportedFeature,
+                format!("Unsupported analysis clause `{}`.", other),
+            ))
+        }
+    };
+
+    let clause = CoreAnalysisClause {
+        id: AnalysisClauseId::new(*next_clause),
+        kind,
+        span: expr_source_span(value),
+    };
+    *next_clause += 1;
+    Ok(clause)
+}
+
+fn parse_expanded_analysis_keyword_value(
+    items: &[ExprKind],
+    keyword: &str,
+    label: &str,
+) -> CoreResult<String> {
+    let mut index = 1usize;
+    while index + 1 < items.len() {
+        let name = expr_name(&items[index])
+            .ok()
+            .map(|name| normalize_keyword(&name))
+            .unwrap_or_default();
+        if name == keyword {
+            return expr_value_symbol_or_text(&items[index + 1], label);
+        }
+        index += 2;
+    }
+    Ok(String::new())
+}
+
+fn parse_fem_scalar_token(token: &str) -> Option<(f64, String)> {
+    for unit in ["kg-per-mm3", "kg-per-m3", "MPa", "mm", "N"] {
+        if let Some(number) = token.strip_suffix(unit) {
+            if !number.is_empty() && number != "+" && number != "-" {
+                if let Ok(value) = number.parse::<f64>() {
+                    return Some((value, unit.to_string()));
+                }
+            }
+        }
+    }
+    token
+        .parse::<f64>()
+        .ok()
+        .map(|value| (value, String::new()))
+}
+
+fn parse_expanded_fem_scalar(value: &ExprKind, label: &str) -> CoreResult<CoreAnalysisScalarExpr> {
+    if let ExprKind::Atom(atom) = value {
+        let token = match &atom.syn.ty {
+            TokenType::Number(number) => number.resolve().to_string(),
+            TokenType::Identifier(name) | TokenType::Keyword(name) => name.to_string(),
+            other => {
+                return Err(CompilerError::new(
+                    CompilerErrorKind::TypeMismatch,
+                    format!("{label} expected a FEM scalar, received {other:?}"),
+                ))
+            }
+        };
+        if let Some((value, unit)) = parse_fem_scalar_token(&token) {
+            return Ok(CoreAnalysisScalarExpr::Literal { value, unit });
+        }
+        return Ok(CoreAnalysisScalarExpr::Parameter {
+            key: token,
+            scale: 1.0,
+        });
+    }
+    let items = expr_list_items(value, label)?;
+    if items.len() == 2 && expr_name(&items[0]).ok().as_deref() == Some("-") {
+        return match parse_expanded_fem_scalar(&items[1], label)? {
+            CoreAnalysisScalarExpr::Literal { value, unit } => {
+                Ok(CoreAnalysisScalarExpr::Literal {
+                    value: -value,
+                    unit,
+                })
+            }
+            CoreAnalysisScalarExpr::Parameter { key, scale } => {
+                Ok(CoreAnalysisScalarExpr::Parameter { key, scale: -scale })
+            }
+        };
+    }
+    Err(CompilerError::new(
+        CompilerErrorKind::UnsupportedFeature,
+        format!("{label} supports a literal, parameter, or unary negated parameter."),
+    ))
+}
+
+fn find_expanded_fem_keyword<'a>(
+    items: &'a [ExprKind],
+    keyword: &str,
+    label: &str,
+) -> CoreResult<&'a ExprKind> {
+    items
+        .windows(2)
+        .find(|pair| {
+            expr_name(&pair[0])
+                .ok()
+                .is_some_and(|name| normalize_keyword(&name) == keyword)
+        })
+        .map(|pair| &pair[1])
+        .ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                format!("Missing required {label}."),
+            )
+        })
+}
+
+fn parse_expanded_fem_scalar_keyword(
+    items: &[ExprKind],
+    keyword: &str,
+    label: &str,
+) -> CoreResult<CoreAnalysisScalarExpr> {
+    parse_expanded_fem_scalar(find_expanded_fem_keyword(items, keyword, label)?, label)
+}
+
+fn parse_expanded_face_tag_keyword(items: &[ExprKind]) -> CoreResult<String> {
+    let selector = find_expanded_fem_keyword(items, ":faces", "FEM face selector")?;
+    let selector_items = expr_list_items(selector, "FEM face selector")?;
+    if selector_items.len() != 2 || expr_name(&selector_items[0]).ok().as_deref() != Some("tag") {
+        return Err(CompilerError::new(
+            CompilerErrorKind::UnsupportedFeature,
+            "FEM face selector must be `(tag name)`.",
+        ));
+    }
+    expr_value_symbol_or_text(&selector_items[1], "FEM face tag")
+}
+
+fn parse_expanded_fem_vector_keyword(
+    items: &[ExprKind],
+    keyword: &str,
+    label: &str,
+) -> CoreResult<[CoreAnalysisScalarExpr; 3]> {
+    let values = expr_list_items(find_expanded_fem_keyword(items, keyword, label)?, label)?;
+    if values.len() != 3 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            format!("{label} must contain exactly three components."),
+        ));
+    }
+    Ok([
+        parse_expanded_fem_scalar(&values[0], label)?,
+        parse_expanded_fem_scalar(&values[1], label)?,
+        parse_expanded_fem_scalar(&values[2], label)?,
+    ])
+}
+
+fn parse_expanded_optional_fem_vector_keyword(
+    items: &[ExprKind],
+    keyword: &str,
+    label: &str,
+) -> CoreResult<[Option<CoreAnalysisScalarExpr>; 3]> {
+    let values = expr_list_items(find_expanded_fem_keyword(items, keyword, label)?, label)?;
+    if values.len() != 3 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            format!("{label} must contain exactly three components."),
+        ));
+    }
+    let parse_component = |value: &ExprKind| -> CoreResult<Option<CoreAnalysisScalarExpr>> {
+        if expr_name(value)
+            .ok()
+            .is_some_and(|name| matches!(name.as_str(), "free" | "_"))
+        {
+            Ok(None)
+        } else {
+            parse_expanded_fem_scalar(value, label).map(Some)
+        }
+    };
+    Ok([
+        parse_component(&values[0])?,
+        parse_component(&values[1])?,
+        parse_component(&values[2])?,
+    ])
+}
+
+fn parse_expanded_local_refinement(value: &ExprKind) -> CoreResult<CoreAnalysisLocalRefinement> {
+    let items = expr_list_items(value, "local FEM refinement")?;
+    Ok(CoreAnalysisLocalRefinement {
+        face_tag: parse_expanded_face_tag_keyword(&items)?,
+        size: parse_expanded_fem_scalar_keyword(&items, ":size", "local refinement size")?,
+    })
+}
+
+fn parse_expanded_named_analysis_keyword_value(
+    items: &[ExprKind],
+    keyword: &str,
+    label: &str,
+) -> CoreResult<String> {
+    let mut index = 2usize;
+    while index + 1 < items.len() {
+        let name = expr_name(&items[index])
+            .ok()
+            .map(|name| normalize_keyword(&name))
+            .unwrap_or_default();
+        if name == keyword {
+            let value = expr_value_symbol_or_text(&items[index + 1], label)?;
+            if value.trim().is_empty() {
+                return Err(CompilerError::new(
+                    CompilerErrorKind::Parse,
+                    format!("{label} must not be empty."),
+                ));
+            }
+            return Ok(value);
+        }
+        index += 2;
+    }
+    Err(CompilerError::new(
+        CompilerErrorKind::Parse,
+        format!("Missing required {label}."),
+    ))
+}
+
+fn parse_expanded_named_analysis_keyword_list(
+    items: &[ExprKind],
+    keyword: &str,
+    label: &str,
+) -> CoreResult<Vec<String>> {
+    let mut index = 2usize;
+    while index + 1 < items.len() {
+        let name = expr_name(&items[index])
+            .ok()
+            .map(|name| normalize_keyword(&name))
+            .unwrap_or_default();
+        if name == keyword {
+            let values = expr_list_items(&items[index + 1], label)?
+                .iter()
+                .map(|value| expr_value_symbol_or_text(value, label))
+                .collect::<CoreResult<Vec<_>>>()?;
+            if values.is_empty() {
+                return Err(CompilerError::new(
+                    CompilerErrorKind::Parse,
+                    format!("{label} must not be empty."),
+                ));
+            }
+            return Ok(values);
+        }
+        index += 2;
+    }
+    Err(CompilerError::new(
+        CompilerErrorKind::Parse,
+        format!("Missing required {label}."),
+    ))
+}
+
+fn parse_expanded_analysis_item_id(items: &[ExprKind], label: &str) -> CoreResult<String> {
+    expr_value_symbol_or_text(
+        items.get(1).ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                format!("`{label}` expects an id."),
+            )
+        })?,
+        &format!("{label} id"),
+    )
+}
+
+fn parse_expanded_named_analysis_keyword_number(
+    items: &[ExprKind],
+    keyword: &str,
+    label: &str,
+) -> CoreResult<f64> {
+    let value = find_expanded_analysis_keyword(items, keyword, label)?;
+    expr_number_value(value, label)
+}
+
+fn parse_expanded_named_analysis_keyword_bool(
+    items: &[ExprKind],
+    keyword: &str,
+    label: &str,
+) -> CoreResult<bool> {
+    let value = find_expanded_analysis_keyword(items, keyword, label)?;
+    expr_bool_value(value, label)
+}
+
+fn find_expanded_analysis_keyword<'a>(
+    items: &'a [ExprKind],
+    keyword: &str,
+    label: &str,
+) -> CoreResult<&'a ExprKind> {
+    let mut index = 2usize;
+    while index + 1 < items.len() {
+        if expr_name(&items[index])
+            .ok()
+            .is_some_and(|name| normalize_keyword(&name) == keyword)
+        {
+            return Ok(&items[index + 1]);
+        }
+        index += 2;
+    }
+    Err(CompilerError::new(
+        CompilerErrorKind::Parse,
+        format!("Missing required {label}."),
+    ))
+}
+
 fn parse_expanded_node(
     value: &ExprKind,
     next_node: &mut u64,
@@ -3562,6 +4177,16 @@ fn parse_expanded_node(
                         (build, CoreValueKind::Solid)
                     } else if op_name == "hole" {
                         parse_expanded_typed_hole_call(&items[1..], next_node)?
+                    } else if op_name == "analysis" {
+                        return Err(CompilerError::new(
+                            CompilerErrorKind::TypeMismatch,
+                            "Analysis declarations are top-level metadata and cannot be used as geometry.",
+                        ));
+                    } else if matches!(op_name.as_str(), "fem-max" | "fem-min") {
+                        return Err(CompilerError::new(
+                            CompilerErrorKind::TypeMismatch,
+                            "FEM results cannot drive same-version geometry: analysis-to-geometry cycle. Run parameter edit -> geometry preview -> FEM -> metric inspection as an outer sequence.",
+                        ));
                     } else if op_name == "verify" {
                         return Err(CompilerError::new(
                             CompilerErrorKind::UnsupportedFeature,
@@ -7335,7 +7960,7 @@ fn visit_runtime_source_tokens(source: &str, mut visit: impl FnMut(&str)) {
 
 fn seed_symbol_bindings(engine: &mut steel_core::steel_vm::engine::Engine, source: &str) {
     let binding_re =
-        Regex::new(r#"\((number|toggle|select|image|part|shape|tag-face|tag-edge|tag-edges)\s+([A-Za-z][A-Za-z0-9_-]*)"#)
+        Regex::new(r#"\((number|toggle|select|image|part|shape|tag-vertex|tag-face|tag-edge|tag-edges)\s+([A-Za-z][A-Za-z0-9_-]*)"#)
             .expect("binding regex");
     for capture in binding_re.captures_iter(source) {
         if let Some(name) = capture.get(2).map(|m| m.as_str()) {
@@ -7388,10 +8013,13 @@ fn parse_program(value: &SteelVal) -> CoreResult<CoreProgram> {
     let mut next_param = 1u64;
     let mut next_part = 1u64;
     let mut next_node = 1u64;
+    let mut analyses = Vec::new();
     let mut feature_decls = BTreeMap::new();
     let mut verify_clauses = Vec::new();
     let mut selector_tags = Vec::new();
     let mut preview_views = Vec::new();
+    let mut next_analysis = 1u64;
+    let mut next_analysis_clause = 1u64;
 
     for form in forms.into_iter().skip(1) {
         let items = list_items(&form, "model clause")?;
@@ -7407,10 +8035,15 @@ fn parse_program(value: &SteelVal) -> CoreResult<CoreProgram> {
                 pending_relations.append(&mut parsed_relations);
             }
             "verify" => verify_clauses.push(parse_verify_clause(&items)?),
-            "tag-face" | "tag-edge" | "tag-edges" => {
+            "tag-vertex" | "tag-face" | "tag-edge" | "tag-edges" => {
                 selector_tags.push(parse_selector_tag_decl(&items)?)
             }
             "view" => preview_views.push(parse_preview_view_decl(&items)?),
+            "analysis" => analyses.push(parse_analysis_decl(
+                &items,
+                &mut next_analysis,
+                &mut next_analysis_clause,
+            )?),
             "part" | "feature" => {
                 part_spellings.insert(raw_parts.len(), clause.to_string());
                 raw_parts.push(items);
@@ -7497,6 +8130,7 @@ fn parse_program(value: &SteelVal) -> CoreResult<CoreProgram> {
     let _ = part_components;
 
     Ok(CoreProgram::new(ProgramId::new(1), params, parts)
+        .with_analyses(analyses)
         .with_feature_decls(feature_decls)
         .with_selector_tags(selector_tags)
         .with_preview_views(preview_views)
@@ -7522,7 +8156,7 @@ fn parse_selector_tag_decl(items: &[SteelVal]) -> CoreResult<CoreSelectorTagDecl
     if items.len() < 5 {
         return Err(CompilerError::new(
             CompilerErrorKind::Parse,
-            "`tag-face`/`tag-edges` expects a name, selector keyword/value, and target shape.",
+            "`tag-vertex`/`tag-face`/`tag-edges` expects a name, selector keyword/value, and target shape.",
         ));
     }
     let clause = symbol_name(items.first().ok_or_else(|| {
@@ -7535,12 +8169,19 @@ fn parse_selector_tag_decl(items: &[SteelVal]) -> CoreResult<CoreSelectorTagDecl
         .ok_or_else(|| {
             CompilerError::new(
                 CompilerErrorKind::Parse,
-                "`tag-face`/`tag-edges` selector keyword must be `:face`, `:faces`, `:edge`, or `:edges`.",
+                "Selector tag keyword must be `:vertex`, `:face`, `:faces`, `:edge`, or `:edges`.",
             )
         })?;
     let kind = match (clause.as_str(), keyword.as_str()) {
+        ("tag-vertex", ":vertex") => CoreSelectorTagKind::Vertex,
         ("tag-face", ":face" | ":faces") => CoreSelectorTagKind::Face,
         ("tag-edge" | "tag-edges", ":edge" | ":edges") => CoreSelectorTagKind::Edge,
+        ("tag-vertex", _) => {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Parse,
+                "`tag-vertex` requires `:vertex`.",
+            ))
+        }
         ("tag-face", _) => {
             return Err(CompilerError::new(
                 CompilerErrorKind::Parse,
@@ -7860,7 +8501,8 @@ fn parse_param_unit(value: &SteelVal) -> CoreResult<String> {
 
 fn parse_param_unit_name(unit: String) -> CoreResult<String> {
     match unit.as_str() {
-        "length" | "angle" | "ratio" | "count" | "text" => Ok(unit),
+        "length" | "mm" | "angle" | "ratio" | "count" | "text" | "N" | "MPa" | "kg-per-m3"
+        | "kg-per-mm3" => Ok(unit),
         other => Err(CompilerError::new(
             CompilerErrorKind::UnsupportedFeature,
             format!("Unsupported param unit `{}`.", other),
@@ -8023,6 +8665,586 @@ fn parse_feature_decl(
     ))
 }
 
+fn parse_analysis_decl(
+    items: &[SteelVal],
+    next_analysis: &mut u64,
+    next_clause: &mut u64,
+) -> CoreResult<CoreAnalysisDecl> {
+    if items.len() < 2 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            "Each `(analysis ...)` needs a name and at least one clause.",
+        ));
+    }
+
+    let name = value_symbol_or_text(&items[1], "analysis id")?;
+    let mut clauses = Vec::new();
+    let mut part = String::new();
+    let mut element = String::new();
+
+    for item in items.iter().skip(2) {
+        let clause = parse_analysis_clause(item, next_clause)?;
+        match &clause.kind {
+            CoreAnalysisClauseKind::LinearStatic { part: clause_part } if part.is_empty() => {
+                part = clause_part.clone();
+            }
+            CoreAnalysisClauseKind::VolumeMesh {
+                element: clause_element,
+                ..
+            } if element.is_empty() => {
+                element = clause_element.clone();
+            }
+            _ => {}
+        }
+        clauses.push(clause);
+    }
+
+    let analysis = CoreAnalysisDecl {
+        id: AnalysisId::new(*next_analysis),
+        name,
+        kind: CoreAnalysisKind::LinearStatic,
+        part,
+        element,
+        clauses,
+        span: None,
+    };
+    *next_analysis += 1;
+    Ok(analysis)
+}
+
+fn parse_analysis_clause(
+    value: &SteelVal,
+    next_clause: &mut u64,
+) -> CoreResult<CoreAnalysisClause> {
+    let items = list_items(value, "analysis clause")?;
+    let head =
+        symbol_name(items.first().ok_or_else(|| {
+            CompilerError::new(CompilerErrorKind::Parse, "Empty analysis clause.")
+        })?)?;
+    validate_analysis_clause_name(&head)?;
+    let kind = match head.as_str() {
+        "linear-static" => CoreAnalysisClauseKind::LinearStatic {
+            part: parse_analysis_keyword_value(&items, ":part", "analysis part")?,
+        },
+        "question" => CoreAnalysisClauseKind::Question {
+            question_id: value_symbol_or_text(
+                items.get(1).ok_or_else(|| {
+                    CompilerError::new(
+                        CompilerErrorKind::Parse,
+                        "`question` expects a question id.",
+                    )
+                })?,
+                "analysis question id",
+            )?,
+            statement: parse_named_analysis_keyword_value(
+                &items,
+                ":statement",
+                "analysis question statement",
+            )?,
+            decision: parse_named_analysis_keyword_value(
+                &items,
+                ":decision",
+                "analysis question decision",
+            )?,
+            acceptance_metric_ids: parse_named_analysis_keyword_list(
+                &items,
+                ":acceptance-metrics",
+                "analysis acceptance metrics",
+            )?,
+        },
+        "acceptance-criterion" => CoreAnalysisClauseKind::AcceptanceCriterion {
+            metric_id: parse_analysis_item_id(&items, "acceptance criterion")?,
+            field: parse_named_analysis_keyword_value(&items, ":field", "acceptance field")?,
+            comparison: parse_named_analysis_keyword_value(
+                &items,
+                ":comparison",
+                "acceptance comparison",
+            )?,
+            limit: parse_named_analysis_keyword_value(&items, ":limit", "acceptance limit")?,
+            unit: parse_named_analysis_keyword_value(&items, ":unit", "acceptance unit")?,
+            requires_convergence: parse_named_analysis_keyword_bool(
+                &items,
+                ":requires-convergence",
+                "acceptance convergence requirement",
+            )?,
+        },
+        "idealization" => CoreAnalysisClauseKind::Idealization {
+            kind: parse_analysis_item_id(&items, "idealization")?,
+            justification: parse_named_analysis_keyword_value(
+                &items,
+                ":justification",
+                "idealization justification",
+            )?,
+            accepted_by_user: parse_named_analysis_keyword_bool(
+                &items,
+                ":accepted",
+                "idealization acceptance",
+            )?,
+        },
+        "evidence" => CoreAnalysisClauseKind::Evidence {
+            evidence_id: parse_analysis_item_id(&items, "evidence")?,
+            subject: parse_named_analysis_keyword_value(&items, ":subject", "evidence subject")?,
+            source: parse_named_analysis_keyword_value(&items, ":source", "evidence source")?,
+            authority: parse_named_analysis_keyword_value(
+                &items,
+                ":authority",
+                "evidence authority",
+            )?,
+            uncertainty_percent: parse_named_analysis_keyword_number(
+                &items,
+                ":uncertainty-percent",
+                "evidence uncertainty percent",
+            )?,
+            decision_critical: parse_named_analysis_keyword_bool(
+                &items,
+                ":decision-critical",
+                "decision-critical evidence flag",
+            )?,
+        },
+        "input-evidence" => CoreAnalysisClauseKind::InputEvidence {
+            input_name: parse_analysis_item_id(&items, "input evidence")?,
+            evidence_id: parse_named_analysis_keyword_value(
+                &items,
+                ":evidence",
+                "input evidence reference",
+            )?,
+        },
+        "assumption" => CoreAnalysisClauseKind::Assumption {
+            assumption_id: parse_analysis_item_id(&items, "assumption")?,
+            category: parse_named_analysis_keyword_value(
+                &items,
+                ":category",
+                "assumption category",
+            )?,
+            statement: parse_named_analysis_keyword_value(
+                &items,
+                ":statement",
+                "assumption statement",
+            )?,
+            status: parse_named_analysis_keyword_value(&items, ":status", "assumption status")?,
+            evidence_ids: parse_named_analysis_keyword_list(
+                &items,
+                ":evidence",
+                "assumption evidence",
+            )?,
+        },
+        "validation-evidence" => CoreAnalysisClauseKind::ValidationEvidence {
+            validation_id: parse_analysis_item_id(&items, "validation evidence")?,
+            kind: parse_named_analysis_keyword_value(&items, ":kind", "validation evidence kind")?,
+            source: parse_named_analysis_keyword_value(
+                &items,
+                ":source",
+                "validation evidence source",
+            )?,
+            result_digest: parse_named_analysis_keyword_value(
+                &items,
+                ":result-digest",
+                "validation result digest",
+            )?,
+        },
+        "material" => CoreAnalysisClauseKind::Material {
+            name: value_symbol_or_text(
+                items.get(1).ok_or_else(|| {
+                    CompilerError::new(
+                        CompilerErrorKind::Parse,
+                        "`material` expects a material name.",
+                    )
+                })?,
+                "analysis material name",
+            )?,
+            young_modulus: parse_fem_scalar_keyword(
+                &items,
+                ":young-modulus",
+                "material Young's modulus",
+            )?,
+            poisson_ratio: parse_fem_scalar_keyword(
+                &items,
+                ":poisson-ratio",
+                "material Poisson ratio",
+            )?,
+            density: parse_fem_scalar_keyword(&items, ":density", "material density")?,
+            yield_strength: parse_fem_scalar_keyword(
+                &items,
+                ":yield-strength",
+                "material yield strength",
+            )?,
+        },
+        "volume-mesh" => CoreAnalysisClauseKind::VolumeMesh {
+            element: parse_analysis_keyword_value(&items, ":element", "analysis element")?,
+            size: parse_fem_scalar_keyword(&items, ":size", "volume mesh size")?,
+            local_refinements: items
+                .iter()
+                .filter(|item| {
+                    list_items(item, "local refinement")
+                        .ok()
+                        .and_then(|values| values.first().cloned())
+                        .and_then(|head| symbol_name(&head).ok())
+                        .as_deref()
+                        == Some("refine")
+                })
+                .map(parse_local_refinement)
+                .collect::<CoreResult<Vec<_>>>()?,
+        },
+        "refine" => {
+            let refinement = parse_local_refinement(value)?;
+            CoreAnalysisClauseKind::Refine {
+                face_tag: refinement.face_tag,
+                size: refinement.size,
+            }
+        }
+        "fixed" => CoreAnalysisClauseKind::Fixed {
+            face_tag: parse_face_tag_keyword(&items)?,
+        },
+        "prescribed-displacement" => CoreAnalysisClauseKind::PrescribedDisplacement {
+            face_tag: parse_face_tag_keyword(&items)?,
+            displacement: parse_optional_fem_vector_keyword(
+                &items,
+                ":displacement",
+                "prescribed displacement",
+            )?,
+        },
+        "surface-force" => CoreAnalysisClauseKind::SurfaceForce {
+            face_tag: parse_face_tag_keyword(&items)?,
+            total: parse_fem_vector_keyword(&items, ":total", "surface force total")?,
+        },
+        "traction" => CoreAnalysisClauseKind::Traction {
+            face_tag: parse_face_tag_keyword(&items)?,
+            vector: parse_fem_vector_keyword(&items, ":vector", "traction vector")?,
+        },
+        "pressure" => CoreAnalysisClauseKind::Pressure {
+            face_tag: parse_face_tag_keyword(&items)?,
+            pressure: parse_fem_scalar_keyword(&items, ":value", "pressure")?,
+        },
+        "solve" => CoreAnalysisClauseKind::Solve {
+            method: parse_analysis_keyword_value(&items, ":method", "analysis method")?,
+        },
+        other => {
+            return Err(CompilerError::new(
+                CompilerErrorKind::UnsupportedFeature,
+                format!("Unsupported analysis clause `{}`.", other),
+            ))
+        }
+    };
+
+    let clause = CoreAnalysisClause {
+        id: AnalysisClauseId::new(*next_clause),
+        kind,
+        span: None,
+    };
+    *next_clause += 1;
+    Ok(clause)
+}
+
+const ANALYSIS_CLAUSE_NAMES: &[&str] = &[
+    "linear-static",
+    "question",
+    "acceptance-criterion",
+    "idealization",
+    "evidence",
+    "input-evidence",
+    "assumption",
+    "validation-evidence",
+    "material",
+    "volume-mesh",
+    "refine",
+    "fixed",
+    "prescribed-displacement",
+    "surface-force",
+    "traction",
+    "pressure",
+    "solve",
+];
+
+fn validate_analysis_clause_name(head: &str) -> CoreResult<()> {
+    if ANALYSIS_CLAUSE_NAMES.contains(&head) {
+        Ok(())
+    } else {
+        Err(CompilerError::new(
+            CompilerErrorKind::UnsupportedFeature,
+            format!(
+                "Unsupported analysis clause `{head}`. Supported clauses: {}.",
+                ANALYSIS_CLAUSE_NAMES.join(", ")
+            ),
+        ))
+    }
+}
+
+fn parse_analysis_keyword_value(
+    items: &[SteelVal],
+    keyword: &str,
+    label: &str,
+) -> CoreResult<String> {
+    let mut index = 1usize;
+    while index + 1 < items.len() {
+        let name = symbol_name(&items[index])
+            .ok()
+            .map(|name| normalize_keyword(&name))
+            .unwrap_or_default();
+        if name == keyword {
+            return value_symbol_or_text(&items[index + 1], label);
+        }
+        index += 2;
+    }
+    Ok(String::new())
+}
+
+fn parse_fem_scalar(value: &SteelVal, label: &str) -> CoreResult<CoreAnalysisScalarExpr> {
+    match value {
+        SteelVal::IntV(value) => Ok(CoreAnalysisScalarExpr::Literal {
+            value: *value as f64,
+            unit: String::new(),
+        }),
+        SteelVal::NumV(value) => Ok(CoreAnalysisScalarExpr::Literal {
+            value: *value,
+            unit: String::new(),
+        }),
+        SteelVal::SymbolV(symbol) => {
+            let token = symbol.to_string();
+            if let Some((value, unit)) = parse_fem_scalar_token(&token) {
+                Ok(CoreAnalysisScalarExpr::Literal { value, unit })
+            } else {
+                Ok(CoreAnalysisScalarExpr::Parameter {
+                    key: token,
+                    scale: 1.0,
+                })
+            }
+        }
+        SteelVal::ListV(_) => {
+            let values = list_items(value, label)?;
+            if values.len() == 2 && symbol_name(&values[0]).ok().as_deref() == Some("-") {
+                return match parse_fem_scalar(&values[1], label)? {
+                    CoreAnalysisScalarExpr::Literal { value, unit } => {
+                        Ok(CoreAnalysisScalarExpr::Literal {
+                            value: -value,
+                            unit,
+                        })
+                    }
+                    CoreAnalysisScalarExpr::Parameter { key, scale } => {
+                        Ok(CoreAnalysisScalarExpr::Parameter { key, scale: -scale })
+                    }
+                };
+            }
+            Err(CompilerError::new(
+                CompilerErrorKind::UnsupportedFeature,
+                format!("{label} supports a literal, parameter, or unary negated parameter."),
+            ))
+        }
+        other => Err(CompilerError::new(
+            CompilerErrorKind::TypeMismatch,
+            format!("{label} expected a FEM scalar, received {other:?}"),
+        )),
+    }
+}
+
+fn find_fem_keyword<'a>(
+    items: &'a [SteelVal],
+    keyword: &str,
+    label: &str,
+) -> CoreResult<&'a SteelVal> {
+    items
+        .windows(2)
+        .find(|pair| {
+            symbol_name(&pair[0])
+                .ok()
+                .is_some_and(|name| normalize_keyword(&name) == keyword)
+        })
+        .map(|pair| &pair[1])
+        .ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                format!("Missing required {label}."),
+            )
+        })
+}
+
+fn parse_fem_scalar_keyword(
+    items: &[SteelVal],
+    keyword: &str,
+    label: &str,
+) -> CoreResult<CoreAnalysisScalarExpr> {
+    parse_fem_scalar(find_fem_keyword(items, keyword, label)?, label)
+}
+
+fn parse_face_tag_keyword(items: &[SteelVal]) -> CoreResult<String> {
+    let selector = find_fem_keyword(items, ":faces", "FEM face selector")?;
+    let selector_items = list_items(selector, "FEM face selector")?;
+    if selector_items.len() != 2 || symbol_name(&selector_items[0]).ok().as_deref() != Some("tag") {
+        return Err(CompilerError::new(
+            CompilerErrorKind::UnsupportedFeature,
+            "FEM face selector must be `(tag name)`.",
+        ));
+    }
+    value_symbol_or_text(&selector_items[1], "FEM face tag")
+}
+
+fn parse_fem_vector_keyword(
+    items: &[SteelVal],
+    keyword: &str,
+    label: &str,
+) -> CoreResult<[CoreAnalysisScalarExpr; 3]> {
+    let values = list_items(find_fem_keyword(items, keyword, label)?, label)?;
+    if values.len() != 3 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            format!("{label} must contain exactly three components."),
+        ));
+    }
+    Ok([
+        parse_fem_scalar(&values[0], label)?,
+        parse_fem_scalar(&values[1], label)?,
+        parse_fem_scalar(&values[2], label)?,
+    ])
+}
+
+fn parse_optional_fem_vector_keyword(
+    items: &[SteelVal],
+    keyword: &str,
+    label: &str,
+) -> CoreResult<[Option<CoreAnalysisScalarExpr>; 3]> {
+    let values = list_items(find_fem_keyword(items, keyword, label)?, label)?;
+    if values.len() != 3 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            format!("{label} must contain exactly three components."),
+        ));
+    }
+    let parse_component = |value: &SteelVal| -> CoreResult<Option<CoreAnalysisScalarExpr>> {
+        if symbol_name(value)
+            .ok()
+            .is_some_and(|name| matches!(name.as_str(), "free" | "_"))
+        {
+            Ok(None)
+        } else {
+            parse_fem_scalar(value, label).map(Some)
+        }
+    };
+    Ok([
+        parse_component(&values[0])?,
+        parse_component(&values[1])?,
+        parse_component(&values[2])?,
+    ])
+}
+
+fn parse_local_refinement(value: &SteelVal) -> CoreResult<CoreAnalysisLocalRefinement> {
+    let items = list_items(value, "local FEM refinement")?;
+    Ok(CoreAnalysisLocalRefinement {
+        face_tag: parse_face_tag_keyword(&items)?,
+        size: parse_fem_scalar_keyword(&items, ":size", "local refinement size")?,
+    })
+}
+
+fn parse_named_analysis_keyword_value(
+    items: &[SteelVal],
+    keyword: &str,
+    label: &str,
+) -> CoreResult<String> {
+    let mut index = 2usize;
+    while index + 1 < items.len() {
+        let name = symbol_name(&items[index])
+            .ok()
+            .map(|name| normalize_keyword(&name))
+            .unwrap_or_default();
+        if name == keyword {
+            let value = value_symbol_or_text(&items[index + 1], label)?;
+            if value.trim().is_empty() {
+                return Err(CompilerError::new(
+                    CompilerErrorKind::Parse,
+                    format!("{label} must not be empty."),
+                ));
+            }
+            return Ok(value);
+        }
+        index += 2;
+    }
+    Err(CompilerError::new(
+        CompilerErrorKind::Parse,
+        format!("Missing required {label}."),
+    ))
+}
+
+fn parse_named_analysis_keyword_list(
+    items: &[SteelVal],
+    keyword: &str,
+    label: &str,
+) -> CoreResult<Vec<String>> {
+    let mut index = 2usize;
+    while index + 1 < items.len() {
+        let name = symbol_name(&items[index])
+            .ok()
+            .map(|name| normalize_keyword(&name))
+            .unwrap_or_default();
+        if name == keyword {
+            let values = list_items(&items[index + 1], label)?
+                .iter()
+                .map(|value| value_symbol_or_text(value, label))
+                .collect::<CoreResult<Vec<_>>>()?;
+            if values.is_empty() {
+                return Err(CompilerError::new(
+                    CompilerErrorKind::Parse,
+                    format!("{label} must not be empty."),
+                ));
+            }
+            return Ok(values);
+        }
+        index += 2;
+    }
+    Err(CompilerError::new(
+        CompilerErrorKind::Parse,
+        format!("Missing required {label}."),
+    ))
+}
+
+fn parse_analysis_item_id(items: &[SteelVal], label: &str) -> CoreResult<String> {
+    value_symbol_or_text(
+        items.get(1).ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                format!("`{label}` expects an id."),
+            )
+        })?,
+        &format!("{label} id"),
+    )
+}
+
+fn parse_named_analysis_keyword_number(
+    items: &[SteelVal],
+    keyword: &str,
+    label: &str,
+) -> CoreResult<f64> {
+    let value = find_analysis_keyword(items, keyword, label)?;
+    number_value(value, label)
+}
+
+fn parse_named_analysis_keyword_bool(
+    items: &[SteelVal],
+    keyword: &str,
+    label: &str,
+) -> CoreResult<bool> {
+    let value = find_analysis_keyword(items, keyword, label)?;
+    bool_value(value, label)
+}
+
+fn find_analysis_keyword<'a>(
+    items: &'a [SteelVal],
+    keyword: &str,
+    label: &str,
+) -> CoreResult<&'a SteelVal> {
+    let mut index = 2usize;
+    while index + 1 < items.len() {
+        if symbol_name(&items[index])
+            .ok()
+            .is_some_and(|name| normalize_keyword(&name) == keyword)
+        {
+            return Ok(&items[index + 1]);
+        }
+        index += 2;
+    }
+    Err(CompilerError::new(
+        CompilerErrorKind::Parse,
+        format!("Missing required {label}."),
+    ))
+}
+
 fn parse_node(
     value: &SteelVal,
     next_node: &mut u64,
@@ -8145,6 +9367,16 @@ fn parse_node(
                         (build, CoreValueKind::Solid)
                     } else if op_name == "hole" {
                         parse_typed_hole_call(&items[1..], next_node)?
+                    } else if op_name == "analysis" {
+                        return Err(CompilerError::new(
+                            CompilerErrorKind::TypeMismatch,
+                            "Analysis declarations are top-level metadata and cannot be used as geometry.",
+                        ));
+                    } else if matches!(op_name.as_str(), "fem-max" | "fem-min") {
+                        return Err(CompilerError::new(
+                            CompilerErrorKind::TypeMismatch,
+                            "FEM results cannot drive same-version geometry: analysis-to-geometry cycle. Run parameter edit -> geometry preview -> FEM -> metric inspection as an outer sequence.",
+                        ));
                     } else if op_name == "verify" {
                         return Err(CompilerError::new(
                             CompilerErrorKind::UnsupportedFeature,
@@ -8628,6 +9860,7 @@ fn map_operation(name: &str) -> CoreOperation {
         "path-frame" => CoreOperation::Frame(CoreFrameOp::PathFrame),
         "place" => CoreOperation::Frame(CoreFrameOp::Place),
         "clip-box" => CoreOperation::Frame(CoreFrameOp::ClipBox),
+        "clip-plane" => CoreOperation::Frame(CoreFrameOp::ClipPlane),
         "compound" => CoreOperation::Meta(CoreMetaOp::Group),
         _ => CoreOperation::Custom(name.to_string()),
     }
@@ -9175,6 +10408,7 @@ fn emit_operation(op: &CoreOperation) -> String {
         CoreOperation::Frame(CoreFrameOp::PathFrame) => "path-frame".to_string(),
         CoreOperation::Frame(CoreFrameOp::Place) => "place".to_string(),
         CoreOperation::Frame(CoreFrameOp::ClipBox) => "clip-box".to_string(),
+        CoreOperation::Frame(CoreFrameOp::ClipPlane) => "clip-plane".to_string(),
         CoreOperation::Meta(CoreMetaOp::Group) => "compound".to_string(),
         CoreOperation::Meta(CoreMetaOp::Comment) => "meta".to_string(),
         CoreOperation::Meta(CoreMetaOp::Annotate) => "build".to_string(),
@@ -11513,6 +12747,26 @@ mod tests {
                 "tag:mounting_top".into()
             ]))
             .as_ref()
+        );
+    }
+
+    #[test]
+    fn compiles_exact_vertex_tag_for_capture_validation() {
+        let program = compile_to_core_program(
+            r#"
+            (model
+              (tag-vertex datum_origin :vertex "target-id:body:vertex:0:0-0-0" body)
+              (part body (box 10 10 10)))
+            "#,
+        )
+        .expect("compile vertex tag");
+
+        assert_eq!(program.selector_tags.len(), 1);
+        assert_eq!(program.selector_tags[0].name, "datum_origin");
+        assert_eq!(program.selector_tags[0].kind, CoreSelectorTagKind::Vertex);
+        assert_eq!(
+            program.selector_tags[0].authored_selector,
+            "target-id:body:vertex:0:0-0-0"
         );
     }
 
