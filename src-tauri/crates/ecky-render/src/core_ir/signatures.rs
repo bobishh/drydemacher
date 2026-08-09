@@ -477,6 +477,17 @@ fn verify_call(
         CoreOperation::Custom(custom) if custom == "heightfield" => {
             verify_heightfield(&name, args, keywords, node, env)
         }
+        CoreOperation::Custom(custom) if custom == "mesh-anchor" => {
+            verify_exact(
+                &name,
+                args,
+                &[num("triangle-index"), num("barycentric-0"), num("barycentric-1"), num("barycentric-2")],
+                env,
+            )
+        }
+        CoreOperation::Custom(custom) if custom == "surface-trim" => {
+            verify_surface_trim(&name, args, keywords, node, env)
+        }
         CoreOperation::Custom(custom)
             if matches!(
                 custom.as_str(),
@@ -495,6 +506,30 @@ fn verify_call(
     }?;
     verify_keywords(&name, keywords, env)?;
     verify_call_dimensions(op, &name, args, env, warnings)
+}
+
+fn verify_surface_trim(
+    name: &str,
+    args: &[CoreNode],
+    keywords: &[CoreKeywordArg],
+    node: &CoreNode,
+    env: &KindEnv,
+) -> CoreResult<()> {
+    verify_exact(name, args, &[shape("mesh")], env)?;
+    verify_keyword_contract(
+        name,
+        keywords,
+        &[
+            KeywordSpec { name: "schema-version", expected: ExpectedKind::Number, required: true },
+            KeywordSpec { name: "source-digest", expected: ExpectedKind::Text, required: true },
+            KeywordSpec { name: "loop", expected: ExpectedKind::List, required: true },
+            KeywordSpec { name: "keep-seed", expected: ExpectedKind::Any, required: true },
+            KeywordSpec { name: "path-mode", expected: ExpectedKind::Text, required: true },
+            KeywordSpec { name: "cap", expected: ExpectedKind::Text, required: true },
+        ],
+        env,
+    )?;
+    verify_result(name, ExpectedKind::Shape, node, env)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1405,12 +1440,13 @@ fn verify_frame(
         CoreFrameOp::PathFrame => verify_exact(name, args, &[path("path")], env)?,
         CoreFrameOp::Place => verify_exact(name, args, &[frame_arg("frame"), shape("shape")], env)?,
         CoreFrameOp::ClipBox => verify_exact(name, args, &[shape("shape")], env)?,
+        CoreFrameOp::ClipPlane => verify_exact(name, args, &[shape("shape")], env)?,
     }
     match frame {
         CoreFrameOp::Plane | CoreFrameOp::Location | CoreFrameOp::PathFrame => {
             verify_result(name, ExpectedKind::Frame, node, env)
         }
-        CoreFrameOp::Place | CoreFrameOp::ClipBox => {
+        CoreFrameOp::Place | CoreFrameOp::ClipBox | CoreFrameOp::ClipPlane => {
             verify_result(name, ExpectedKind::Shape, node, env)
         }
     }
@@ -1510,6 +1546,7 @@ fn verify_keywords(name: &str, keywords: &[CoreKeywordArg], env: &KindEnv) -> Co
         }
         let expected = match (name, keyword.name.as_str()) {
             ("clip-box", "x" | "y" | "z") => Some(ExpectedKind::List),
+            ("clip-plane", "keep") => Some(ExpectedKind::Text),
             (_, "offset" | "rotate" | "origin" | "x" | "normal") => Some(ExpectedKind::Point3),
             (_, _) => None,
         };
@@ -2413,6 +2450,7 @@ fn operation_name(op: &CoreOperation) -> String {
         CoreOperation::Frame(CoreFrameOp::PathFrame) => "path-frame".to_string(),
         CoreOperation::Frame(CoreFrameOp::Place) => "place".to_string(),
         CoreOperation::Frame(CoreFrameOp::ClipBox) => "clip-box".to_string(),
+        CoreOperation::Frame(CoreFrameOp::ClipPlane) => "clip-plane".to_string(),
         CoreOperation::Meta(CoreMetaOp::Group) => "compound".to_string(),
         CoreOperation::Meta(CoreMetaOp::Comment) => "comment".to_string(),
         CoreOperation::Meta(CoreMetaOp::Annotate) => "annotate".to_string(),
@@ -2779,6 +2817,7 @@ mod tests {
             CoreOperation::Frame(crate::core_ir::CoreFrameOp::PathFrame),
             CoreOperation::Frame(crate::core_ir::CoreFrameOp::Place),
             CoreOperation::Frame(crate::core_ir::CoreFrameOp::ClipBox),
+            CoreOperation::Frame(crate::core_ir::CoreFrameOp::ClipPlane),
             CoreOperation::Meta(crate::core_ir::CoreMetaOp::Group),
             CoreOperation::Meta(crate::core_ir::CoreMetaOp::Comment),
             CoreOperation::Meta(crate::core_ir::CoreMetaOp::Annotate),
