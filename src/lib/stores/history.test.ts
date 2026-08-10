@@ -50,6 +50,7 @@ function sampleManifest(modelId: string): ModelManifest {
       warnings: [],
     },
     taggedAnchors: {},
+    analysisDeclarations: [],
     parts: [],
     parameterGroups: [],
     selectionTargets: [],
@@ -416,7 +417,7 @@ test('Given active version is removed When fallback version is still resolving T
   assert.equal(get(session).modelManifest, null);
 });
 
-test('Given stale thread messages are loading When blank thread starts Then loading state is cleared', () => {
+test('Given stale thread messages are loading When backend opens the reusable empty thread Then loading state is cleared', async () => {
   activeThreadIdStore.set('thread-old');
   activeVersionId.set('message-old');
   activeThreadLoadingId.set('thread-old');
@@ -431,11 +432,23 @@ test('Given stale thread messages are loading When blank thread starts Then load
     },
   });
 
-  createNewThread({ mode: 'blank' });
+  await createNewThread(
+    { mode: 'blank' },
+    {
+      openBlank: async () => ({
+        threadId: 'thread-empty',
+        slug: 'untitled-thread-empty',
+        folder: '/tmp/untitled-thread-empty',
+        file: '/tmp/untitled-thread-empty/model.ecky',
+        source: '(model (part body (box 20 20 20)))',
+      }),
+    },
+  );
 
   const newThreadId = get(activeThreadIdStore);
   assert.ok(newThreadId);
   assert.notEqual(newThreadId, 'thread-old');
+  assert.equal(newThreadId, 'thread-empty');
   assert.equal(get(activeVersionId), null);
   assert.equal(get(activeThreadLoadingId), null);
   assert.equal(get(activeThreadMessagesLoading), false);

@@ -7,6 +7,40 @@ import {
   type CampaignStepPayload,
   type CampaignSummary,
   type CreateCampaignRunInput,
+  type CaptureSessionInfo,
+  type CaptureSessionState,
+  type CaptureRun,
+  type ExternalShapeSource,
+  type ApplyExternalShapePlaneCropRequest,
+  type ApplyExternalShapePlaneCropResult,
+  type RemoveExternalShapePlaneCropRequest,
+  type RemoveExternalShapePlaneCropResult,
+  type SurfaceTrimPathPreviewRequest,
+  type SurfaceTrimPathPreviewResponse,
+  type SurfaceTrimLoopPreviewRequest,
+  type SurfaceTrimLoopPreviewResponse,
+  type SurfaceTrimRegionPreviewRequest,
+  type SurfaceTrimRegionPreviewResponse,
+  type ApplySurfaceTrimRequest,
+  type ApplySurfaceTrimResult,
+  type RemoveSurfaceTrimRequest,
+  type RemoveSurfaceTrimResult,
+  type CaptureReconstructionGuide,
+  type CaptureReconstructionGuideState,
+  type CaptureGuideSourceMesh,
+  type CaptureGuideContext,
+  type ReopenedCaptureRun,
+  type QueuedCaptureGuidedReconstruction,
+  type FemCancelResponse,
+  type FemConvergenceRequest,
+  type FemConvergenceResponse,
+  type FemMeshPreviewResponse,
+  type FemResultReadRequest,
+  type FemResultReadResponse,
+  type FemRunResponse,
+  type FemStudyRequest,
+  type FemStudyValidationResponse,
+  type FemVtuExportResponse,
   type DeletedThreadsPage,
   type MissionCoreIrEvaluation,
   type Result,
@@ -105,6 +139,17 @@ import type {
 } from './contracts';
 
 export type { ThreadAgentState };
+export type {
+  FemResultReadRequest,
+  FemResultReadResponse,
+  FemRunResponse,
+  FemConvergenceRequest,
+  FemConvergenceResponse,
+  FemMeshPreviewResponse,
+  FemStudyRequest,
+  FemStudyValidationResponse,
+  FemVtuExportResponse,
+};
 
 export type AppErrorDiagnosticField = {
   key: string;
@@ -495,6 +540,73 @@ export async function openProjectInEditor(
   messageId: string | null,
 ): Promise<import('./contracts').ProjectEditorLink> {
   return invokeCommand(commands.openProjectInEditor(threadId, messageId));
+}
+
+export async function getProjectSource(
+  threadId: string,
+): Promise<import('./contracts').ProjectSourceDocument> {
+  return invokeCommand(commands.getProjectSource(threadId));
+}
+
+export async function listExternalShapeSources(
+  threadId: string,
+): Promise<ExternalShapeSource[]> {
+  return invokeCommand(commands.listExternalShapeSources(threadId));
+}
+
+export async function applyExternalShapePlaneCrop(
+  request: ApplyExternalShapePlaneCropRequest,
+): Promise<ApplyExternalShapePlaneCropResult> {
+  return invokeCommand(commands.applyExternalShapePlaneCrop(request));
+}
+
+export async function removeExternalShapePlaneCrop(
+  request: RemoveExternalShapePlaneCropRequest,
+): Promise<RemoveExternalShapePlaneCropResult> {
+  return invokeCommand(commands.removeExternalShapePlaneCrop(request));
+}
+
+export async function previewExternalShapeSurfaceTrimPath(
+  request: SurfaceTrimPathPreviewRequest,
+): Promise<SurfaceTrimPathPreviewResponse> {
+  return invokeCommand(commands.previewExternalShapeSurfaceTrimPath(request));
+}
+
+export async function previewExternalShapeSurfaceTrimLoop(
+  request: SurfaceTrimLoopPreviewRequest,
+): Promise<SurfaceTrimLoopPreviewResponse> {
+  return invokeCommand(commands.previewExternalShapeSurfaceTrimLoop(request));
+}
+
+export async function previewExternalShapeSurfaceTrimRegion(
+  request: SurfaceTrimRegionPreviewRequest,
+): Promise<SurfaceTrimRegionPreviewResponse> {
+  return invokeCommand(commands.previewExternalShapeSurfaceTrimRegion(request));
+}
+
+export async function applyExternalShapeSurfaceTrim(
+  request: ApplySurfaceTrimRequest,
+): Promise<ApplySurfaceTrimResult> {
+  return invokeCommand(commands.applyExternalShapeSurfaceTrim(request));
+}
+
+export async function removeExternalShapeSurfaceTrim(
+  request: RemoveSurfaceTrimRequest,
+): Promise<RemoveSurfaceTrimResult> {
+  return invokeCommand(commands.removeExternalShapeSurfaceTrim(request));
+}
+
+export async function saveProjectSource(
+  threadId: string,
+  source: string,
+): Promise<import('./contracts').ProjectSourceDocument> {
+  return invokeCommand(commands.saveProjectSource(threadId, source));
+}
+
+export async function openOrCreateBlankDesignThread(
+  title: string | null = null,
+): Promise<import('./contracts').ProjectSourceDocument> {
+  return invokeCommand(commands.openOrCreateBlankDesignThread(title));
 }
 
 export async function revealProjectFolder(
@@ -940,6 +1052,195 @@ export async function getMcpServerStatus(): Promise<McpServerStatus> {
 
 export async function getAgentTerminalSnapshots(): Promise<AgentTerminalSnapshot[]> {
   return invokeCommand(commands.getAgentTerminalSnapshots());
+}
+
+export async function startCaptureSession(
+  threadId: string,
+  messageId: string | null,
+  title: string,
+  targetSource: string,
+  targetSourceLanguage: string,
+  startedFromEmpty: boolean,
+): Promise<CaptureSessionInfo> {
+  return invokeCommand(commands.startCaptureSession(
+    threadId,
+    messageId,
+    title,
+    targetSource,
+    targetSourceLanguage,
+    startedFromEmpty,
+  ));
+}
+
+export async function listCaptureRuns(threadId: string): Promise<CaptureRun[]> {
+  return invokeCommand(commands.listCaptureRuns(threadId));
+}
+
+export async function reopenCaptureRun(runId: string): Promise<ReopenedCaptureRun> {
+  return invokeCommand(commands.reopenCaptureRun(runId));
+}
+
+export async function adoptLatestCaptureRun(
+  threadId: string,
+  messageId: string | null,
+  title: string,
+  targetSource: string,
+  targetSourceLanguage: string,
+  startedFromEmpty: boolean,
+): Promise<ReopenedCaptureRun> {
+  return invokeCommand(commands.adoptLatestCaptureRun(
+    threadId,
+    messageId,
+    title,
+    targetSource,
+    targetSourceLanguage,
+    startedFromEmpty,
+  ));
+}
+
+export async function saveCapturePreviewSettings(
+  runId: string,
+  cropBounds: import('./contracts').CaptureCropBounds | null,
+  previewScale: number,
+): Promise<void> {
+  await invokeCommand(commands.saveCapturePreviewSettings(runId, cropBounds, previewScale));
+}
+
+export async function getCaptureReconstructionGuide(
+  runId: string,
+): Promise<CaptureReconstructionGuide | null> {
+  return invokeCommand(commands.getCaptureReconstructionGuide(runId));
+}
+
+export async function getCaptureGuideSourceIdentity(
+  runId: string,
+): Promise<CaptureGuideSourceMesh> {
+  return invokeCommand(commands.getCaptureGuideSourceIdentity(runId));
+}
+
+export async function getCaptureGuideContext(
+  runId: string,
+): Promise<CaptureGuideContext> {
+  return invokeCommand(commands.getCaptureGuideContext(runId));
+}
+
+export async function saveCaptureReconstructionGuide(
+  runId: string,
+  expectedRevision: number,
+  expectedMeshDigest: string,
+  guide: CaptureReconstructionGuide,
+  guideState: CaptureReconstructionGuideState,
+): Promise<CaptureReconstructionGuide> {
+  return invokeCommand(commands.saveCaptureReconstructionGuide(
+    runId,
+    expectedRevision,
+    expectedMeshDigest,
+    guide,
+    guideState,
+  ));
+}
+
+export async function evaluateCaptureReconstructionGuide(
+  runId: string,
+  expectedMeshDigest: string,
+  guide: CaptureReconstructionGuide,
+): Promise<CaptureReconstructionGuide> {
+  return invokeCommand(commands.evaluateCaptureReconstructionGuide(
+    runId,
+    expectedMeshDigest,
+    guide,
+  ));
+}
+
+export async function queueCaptureGuidedReconstruction(
+  runId: string,
+  expectedGuideRevision: number,
+  expectedTargetSourceDigest: string,
+): Promise<QueuedCaptureGuidedReconstruction> {
+  return invokeCommand(commands.queueCaptureGuidedReconstruction(
+    runId,
+    expectedGuideRevision,
+    expectedTargetSourceDigest,
+  ));
+}
+
+export async function showSafeSaveDialog(
+  defaultPath: string,
+  filterName: string,
+  extensions: string[],
+): Promise<string | null> {
+  return invokeCommand(commands.safeSaveDialog(defaultPath, filterName, extensions));
+}
+
+export async function getCaptureSessionStatus(token: string): Promise<CaptureSessionInfo | null> {
+  return invokeCommand(commands.getCaptureSessionStatus(token));
+}
+
+export async function pairCaptureSession(token: string): Promise<CaptureSessionInfo> {
+  return invokeCommand(commands.pairCaptureSession(token));
+}
+
+export async function cancelCaptureSession(token: string): Promise<CaptureSessionInfo> {
+  return invokeCommand(commands.cancelCaptureSession(token));
+}
+
+export async function resumeCaptureSession(token: string): Promise<CaptureSessionInfo> {
+  return invokeCommand(commands.resumeCaptureSession(token));
+}
+
+export async function retryCaptureReconstruction(token: string): Promise<CaptureSessionInfo> {
+  return invokeCommand(commands.retryCaptureReconstruction(token));
+}
+
+export async function prepareCapturePreview(
+  token: string,
+  cropBounds: import('./contracts').CaptureCropBounds | null,
+): Promise<{
+  artifactBundle: ArtifactBundle;
+  modelManifest: ModelManifest;
+}> {
+  const prepared = await invokeCommand(commands.prepareCapturePreview(token, cropBounds));
+  return {
+    artifactBundle: normalizeArtifactBundle(prepared.artifactBundle),
+    modelManifest: normalizeModelManifest(prepared.modelManifest),
+  };
+}
+
+export async function validateFemStudy(
+  request: FemStudyRequest,
+): Promise<FemStudyValidationResponse> {
+  return invokeCommand(commands.validateFemStudy(request));
+}
+
+export async function runFemStudy(request: FemStudyRequest): Promise<FemRunResponse> {
+  return invokeCommand(commands.runFemStudy(request));
+}
+
+export async function previewFemMesh(request: FemStudyRequest): Promise<FemMeshPreviewResponse> {
+  return invokeCommand(commands.previewFemMesh(request));
+}
+
+export async function runFemConvergence(
+  request: FemConvergenceRequest,
+): Promise<FemConvergenceResponse> {
+  return invokeCommand(commands.runFemConvergence(request));
+}
+
+export async function cancelFemStudy(jobId: string): Promise<FemCancelResponse> {
+  return invokeCommand(commands.cancelFemStudy(jobId));
+}
+
+export async function readFemResult(
+  request: FemResultReadRequest,
+): Promise<FemResultReadResponse> {
+  return invokeCommand(commands.readFemResult(request));
+}
+
+export async function exportFemResultVtu(
+  request: FemResultReadRequest,
+  targetPath: string,
+): Promise<FemVtuExportResponse> {
+  return invokeCommand(commands.exportFemResultVtu(request, targetPath));
 }
 
 export async function sendAgentTerminalInput(input: AgentTerminalInput): Promise<void> {

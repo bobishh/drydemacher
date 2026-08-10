@@ -11,6 +11,7 @@
   import { resolveVersionLoupeRuntime } from './versionLoupeRuntime';
   import type {
     Attachment,
+    CaptureRun,
     Message,
     Request,
     UsageSummary,
@@ -68,6 +69,7 @@
     imageAttachmentUnavailableReason = null,
     dialogueState = { mode: 'generate' } as DialogueState,
     messages = [],
+    captureRuns = [],
     messagesLoading = false,
     messagesHasMore = false,
     messagesPageLoading = false,
@@ -84,6 +86,7 @@
     onDeleteVersion,
     onRestoreVersion,
     onAuthoredVerifyFocus,
+    onOpenCapture,
   }: {
     onGenerate: (prompt: string, attachments: Attachment[]) => Promise<unknown>;
     isGenerating?: boolean;
@@ -91,6 +94,7 @@
     imageAttachmentUnavailableReason?: string | null;
     dialogueState?: DialogueState;
     messages?: Message[];
+    captureRuns?: CaptureRun[];
     messagesLoading?: boolean;
     messagesHasMore?: boolean;
     messagesPageLoading?: boolean;
@@ -107,6 +111,7 @@
     onDeleteVersion?: (messageId: string) => void;
     onRestoreVersion?: (messageId: string) => void;
     onAuthoredVerifyFocus?: (message: VersionMessage, stableNodeId: string) => Promise<void> | void;
+    onOpenCapture?: (runId: string) => Promise<void> | void;
   } = $props();
 
   const PROMPT_DRAFTS_STORAGE_KEY = 'ecky:prompt-drafts:v1';
@@ -871,6 +876,20 @@
   {/if}
 
   <div class="trail-list" bind:this={trailListEl}>
+    {#if captureRuns.length > 0}
+      <section class="trail-captures" aria-label="Capture history">
+        <div class="trail-captures__title">CAPTURES</div>
+        {#each captureRuns as run (run.id)}
+          <div class="trail-capture" data-capture-run-id={run.id}>
+            <div class="trail-capture__meta">
+              <strong>{run.title}</strong>
+              <span>{run.state.toUpperCase()} · {run.acceptedFrameCount} FRAMES · {formatDate(run.updatedAt)}</span>
+            </div>
+            <button type="button" onclick={() => onOpenCapture?.(run.id)}>OPEN CAPTURE</button>
+          </div>
+        {/each}
+      </section>
+    {/if}
     {#if messagesHasMore}
       <button
         class="load-older-btn"
@@ -1505,6 +1524,65 @@
   @keyframes thread-loading-pulse {
     0%, 100% { opacity: 0.35; transform: scaleX(0.45); }
     50% { opacity: 1; transform: scaleX(1); }
+  }
+
+  .trail-captures {
+    display: grid;
+    gap: 6px;
+    overflow: hidden;
+  }
+
+  .trail-captures__title {
+    color: var(--primary);
+    font-family: var(--font-mono);
+    font-size: 0.64rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+  }
+
+  .trail-capture {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 7px 10px;
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--primary) 55%, var(--bg-300));
+    background: color-mix(in srgb, var(--primary) 8%, var(--bg-100));
+    font-family: var(--font-mono);
+  }
+
+  .trail-capture__meta {
+    display: grid;
+    min-width: 0;
+    gap: 3px;
+    overflow: hidden;
+  }
+
+  .trail-capture__meta strong {
+    overflow: hidden;
+    color: var(--text);
+    font-size: 0.72rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .trail-capture__meta span {
+    color: var(--text-dim);
+    font-size: 0.61rem;
+  }
+
+  .trail-capture button {
+    flex: 0 0 auto;
+    height: 30px;
+    padding: 0 8px;
+    border: 1px solid var(--primary);
+    border-radius: 0;
+    background: color-mix(in srgb, var(--primary) 16%, var(--bg-100));
+    color: var(--primary);
+    font: inherit;
+    font-size: 0.65rem;
+    font-weight: 700;
   }
 
   .trail-item {

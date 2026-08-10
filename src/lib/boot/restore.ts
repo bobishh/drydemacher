@@ -26,7 +26,12 @@ import {
   listModels,
   saveConfig as persistConfig,
 } from '../tauri/client';
-import { activeThreadMessagesLoading, loadVersion, threadMessagePageState } from '../stores/history';
+import {
+  activeThreadMessagesLoading,
+  loadFromHistory,
+  loadVersion,
+  threadMessagePageState,
+} from '../stores/history';
 import { isRenderableVersionTimelineMessage } from '../threadTimeline';
 import type { LastDesignSnapshot, Message, Thread, ThreadMessagesPage } from '../types/domain';
 import { BOOT_LOAD_VERSION_OPTIONS } from './loadVersionOptions';
@@ -324,7 +329,12 @@ async function restoreLastDesign() {
       'Last design lookup timed out',
     );
     if (!last?.threadId || !last?.messageId) {
-      await resetToBlankSession(Boolean(last));
+      const latestAuthoredThread = get(history).find((thread) => !thread.isBlank);
+      if (latestAuthoredThread) {
+        await loadFromHistory(latestAuthoredThread);
+      } else {
+        await resetToBlankSession(Boolean(last));
+      }
       return;
     }
 

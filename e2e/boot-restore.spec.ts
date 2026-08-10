@@ -77,6 +77,7 @@ const design = {
 };
 
 type BootMockOptions = {
+  history?: Array<Record<string, unknown>>;
   runtimeDelayMs?: number;
   messagesPageMode?: 'full' | 'skinny-active' | 'omits-active';
   runtimeFilesExist?: boolean;
@@ -86,6 +87,7 @@ type BootMockOptions = {
   renderDelayMs?: number;
   lastSnapshotMode?: 'full' | 'missing-manifest' | 'missing-design' | 'none';
   pointedMessageMode?: 'full' | 'missing';
+  threadWindowLayout?: Record<string, unknown> | null;
 };
 
 const MOCK_STL = `solid mock
@@ -123,7 +125,7 @@ async function installBaseBootMock(page: Page, options: BootMockOptions = {}) {
     await route.fulfill({ status: 200, contentType: 'model/stl', body: MOCK_STL });
   });
 
-  return page.addInitScript(({ runtimeCapabilities, config, artifactBundle, modelManifest, design, runtimeDelayMs, messagesPageMode, runtimeFilesExist, allowBootRebuild, rebuildSameArtifact, renderDelayMs, lastSnapshotMode, pointedMessageMode }) => {
+  return page.addInitScript(({ runtimeCapabilities, config, artifactBundle, modelManifest, design, history, runtimeDelayMs, messagesPageMode, runtimeFilesExist, allowBootRebuild, rebuildSameArtifact, renderDelayMs, lastSnapshotMode, pointedMessageMode, threadWindowLayout }) => {
     (window as any).__BOOT_CALLS__ = [];
     (window as any).__BOOT_CAPABILITIES_RESOLVED__ = false;
     window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
@@ -139,7 +141,7 @@ async function installBaseBootMock(page: Page, options: BootMockOptions = {}) {
         return runtimeCapabilities;
       }
       if (cmd === 'get_history') {
-        return [
+        return history ?? [
           {
             id: 'thread-boot',
             title: 'Cached Thread',
@@ -252,6 +254,8 @@ async function installBaseBootMock(page: Page, options: BootMockOptions = {}) {
       if (cmd === 'get_thread_agent_state') {
         return { connectionState: 'disconnected', agentLabel: null, phase: null, statusText: '', busy: false, waitingOnPrompt: false, updatedAt: null };
       }
+      if (cmd === 'get_thread_window_layout') return threadWindowLayout;
+      if (cmd === 'save_thread_window_layout') return null;
       if (cmd === 'get_active_agent_sessions') return [];
       if (cmd === 'get_agent_terminal_snapshots') return [];
       if (cmd === 'plugin:fs|exists') return runtimeFilesExist;
@@ -286,6 +290,7 @@ async function installBaseBootMock(page: Page, options: BootMockOptions = {}) {
     artifactBundle,
     modelManifest,
     design,
+    history: options.history ?? null,
     runtimeDelayMs: options.runtimeDelayMs ?? 0,
     messagesPageMode: options.messagesPageMode ?? 'full',
     runtimeFilesExist: options.runtimeFilesExist ?? true,
@@ -294,10 +299,84 @@ async function installBaseBootMock(page: Page, options: BootMockOptions = {}) {
     renderDelayMs: options.renderDelayMs ?? 0,
     lastSnapshotMode: options.lastSnapshotMode ?? 'full',
     pointedMessageMode: options.pointedMessageMode ?? 'full',
+    threadWindowLayout: options.threadWindowLayout ?? null,
   });
 }
 
 test.describe('Boot restore', () => {
+  test('Given no saved snapshot and a newer reusable blank thread When app boots Then it opens the latest authored thread', async ({ page }) => {
+    await installBaseBootMock(page, {
+      lastSnapshotMode: 'none',
+      history: [
+        {
+          id: 'blank-thread',
+          title: 'Untitled design',
+          summary: 'Thread: Untitled design',
+          messages: [],
+          updatedAt: 200,
+          versionCount: 0,
+          pendingCount: 0,
+          queuedCount: 0,
+          errorCount: 0,
+          status: 'active',
+          isBlank: true,
+        },
+        {
+          id: 'thread-boot',
+          title: 'Cached Thread',
+          summary: 'cached summary',
+          messages: [],
+          updatedAt: 100,
+          versionCount: 1,
+          pendingCount: 0,
+          queuedCount: 0,
+          errorCount: 0,
+          status: 'active',
+          isBlank: false,
+        },
+      ],
+    });
+
+    await page.goto('/');
+    await expect(page.locator('.viewer-shell canvas')).toBeVisible({ timeout: 5000 });
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          ((window as any).__BOOT_CALLS__ as Array<{ cmd: string; args?: Record<string, unknown> }>).some(
+            (entry) => entry.cmd === 'get_thread_latest_version' && entry.args?.threadId === 'thread-boot',
+          ),
+        ),
+      )
+      .toBe(true);
+  });
+
+  test('Given a campaign was active before restart When app boots Then campaign is not auto-restored', async ({ page }) => {
+    await installBaseBootMock(page);
+
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0, { timeout: 5000 });
+    const calls = await page.evaluate(() => (window as any).__BOOT_CALLS__.map((entry: { cmd: string }) => entry.cmd));
+    expect(calls).not.toContain('get_active_project_navigation');
+    await expect(page.locator('.campaign-project-page')).toHaveCount(0);
+  });
+
+  test('Given Docs was visible in saved layout When app restarts Then campaign docs stays closed', async ({ page }) => {
+    await installBaseBootMock(page, {
+      threadWindowLayout: {
+        schemaVersion: 1,
+        rememberLayout: true,
+        windows: {
+          docs: { visible: true, minimized: false, x: 170, y: 100, width: 1000, height: 700, z: 8 },
+        },
+      },
+    });
+
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0, { timeout: 5000 });
+    await expect(page.locator('[data-window-id="docs"]')).toBeHidden();
+    await expect(page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Ecky IR docs' })).toBeVisible();
+  });
+
   test('Given runtime capability probe is slow When cached version exists Then boot restores before probe finishes', async ({ page }) => {
     await installBaseBootMock(page, { runtimeDelayMs: 8000 });
 

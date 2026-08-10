@@ -35,6 +35,7 @@ function sampleManifest(modelId: string): ModelManifest {
       warnings: [],
     },
     taggedAnchors: {},
+    analysisDeclarations: [],
     parts: [],
     parameterGroups: [],
     controlPrimitives: [],

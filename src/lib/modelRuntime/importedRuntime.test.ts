@@ -15,6 +15,7 @@ test('buildImportedUiSpec defaults imported numeric controls to number inputs', 
       warnings: [],
     },
     taggedAnchors: {},
+    analysisDeclarations: [],
     parameterGroups: [
       {
         groupId: 'group-shell',

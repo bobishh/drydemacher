@@ -770,10 +770,10 @@
   const manifestWarnings = $derived.by(() => {
     const warnings = new Set<string>();
     for (const warning of modelManifest?.warnings || []) {
-      if (warning?.trim()) warnings.add(warning);
+      if (warning?.trim() && !warning.startsWith('Hybrid poly BRep bridge:')) warnings.add(warning);
     }
     for (const warning of modelManifest?.document?.warnings || []) {
-      if (warning?.trim()) warnings.add(warning);
+      if (warning?.trim() && !warning.startsWith('Hybrid poly BRep bridge:')) warnings.add(warning);
     }
     return [...warnings];
   });

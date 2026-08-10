@@ -1,6 +1,7 @@
 <script lang="ts">
   import ChaptersReader from './ChaptersReader.svelte';
   import DocsSite from './DocsSite.svelte';
+  import { safeSaveDialog } from './safeSaveDialog';
   import { exportDocsBookEpub } from './tauri/client';
   import { ECKY_IR_EPUB_FILENAME, ECKY_IR_EPUB_PATH, hasTauriInvokeBridge, saveBookEpubNative, triggerBrowserDownload } from './docs/downloadBook';
 
@@ -26,8 +27,7 @@
       if (!hasTauriInvokeBridge()) {
         triggerBrowserDownload(document, ECKY_IR_EPUB_PATH, ECKY_IR_EPUB_FILENAME);
       } else {
-        const { save } = await import('@tauri-apps/plugin-dialog');
-        await saveBookEpubNative({ saveDialog: save, exportNativeFile: exportDocsBookEpub });
+        await saveBookEpubNative({ saveDialog: safeSaveDialog, exportNativeFile: exportDocsBookEpub });
       }
       epubState = 'idle';
     } catch (error) {

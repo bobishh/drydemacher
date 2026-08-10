@@ -14,7 +14,7 @@
     type DockNavigationKey,
   } from './dock';
 
-  type ShellId = 'code' | 'projects' | 'library' | 'params' | 'settings' | 'activity' | 'dialogue' | 'docs' | 'terminal' | 'sketch';
+  type ShellId = 'code' | 'projects' | 'library' | 'capture' | 'analysis' | 'params' | 'settings' | 'activity' | 'dialogue' | 'docs' | 'terminal' | 'sketch';
   type TerminalDock = { agentLabel: string; attentionRequired: boolean };
 
   let {
@@ -34,6 +34,8 @@
     projectsContent,
     libraryContent,
     paramsContent,
+    captureContent,
+    analysisContent,
     settingsContent,
     activityContent,
     dialogueContent,
@@ -56,6 +58,8 @@
     projectsContent?: Snippet;
     libraryContent?: Snippet;
     paramsContent?: Snippet;
+    captureContent?: Snippet;
+    analysisContent?: Snippet;
     settingsContent?: Snippet;
     activityContent?: Snippet;
     dialogueContent?: Snippet;
@@ -291,6 +295,8 @@
 {#if shell('projects').visible}<Window windowId="projects" {...shell('projects')} minWidth={320} minHeight={300} title="Projects" focused={shell('projects').active} hidden={!shell('projects').visible} highlighted={highlightTarget === 'projects'} onclose={() => onCloseWindow('projects')}>{#if projectsContent}{@render projectsContent()}{/if}</Window>{/if}
 {#if shell('library').visible}<Window windowId="library" {...shell('library')} minWidth={320} minHeight={320} title="Library" focused={shell('library').active} hidden={!shell('library').visible} onclose={() => onCloseWindow('library')}>{#if libraryContent}{@render libraryContent()}{/if}</Window>{/if}
 {#if mountedWindows.params}<Window windowId="params" {...shell('params')} minWidth={280} minHeight={250} title="Parameters" focused={shell('params').active} hidden={!shell('params').visible} highlighted={highlightTarget === 'params'} onclose={() => onCloseWindow('params')}>{#if paramsContent}{@render paramsContent()}{/if}</Window>{/if}
+{#if mountedWindows.capture}<Window windowId="capture" {...shell('capture')} minWidth={720} minHeight={520} title="External Shapes" focused={shell('capture').active} hidden={!shell('capture').visible} highlighted={highlightTarget === 'capture'} onclose={() => onCloseWindow('capture')}>{#if captureContent}{@render captureContent()}{/if}</Window>{/if}
+{#if mountedWindows.analysis}<Window windowId="analysis" {...shell('analysis')} minWidth={340} minHeight={360} title="Structural Analysis" focused={shell('analysis').active} hidden={!shell('analysis').visible} onclose={() => onCloseWindow('analysis')}>{#if analysisContent}{@render analysisContent()}{/if}</Window>{/if}
 {#if shell('settings').visible}<Window windowId="settings" {...shell('settings')} minWidth={400} minHeight={350} title="Settings" focused={shell('settings').active} hidden={!shell('settings').visible} highlighted={false} onclose={() => onCloseWindow('settings')}>{#if settingsContent}{@render settingsContent()}{/if}</Window>{/if}
 {#if mountedWindows.activity}<Window windowId="activity" {...shell('activity')} minWidth={440} minHeight={320} title="Session Activity" focused={shell('activity').active} hidden={!shell('activity').visible} highlighted={false} onclose={() => onCloseWindow('activity')}>{#if activityContent}{@render activityContent()}{/if}</Window>{/if}
 {#if mountedWindows.dialogue}<Window windowId="dialogue" {...shell('dialogue')} minWidth={350} minHeight={260} title="Dialogue" focused={shell('dialogue').active} hidden={!shell('dialogue').visible} highlighted={highlightTarget === 'dialogue'} onclose={() => onCloseWindow('dialogue')}>{#if dialogueContent}{@render dialogueContent()}{/if}</Window>{/if}

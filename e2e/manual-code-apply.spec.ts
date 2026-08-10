@@ -5,6 +5,7 @@ declare global {
     __manualCodeApplyMock?: {
       addManualVersionCalls: Array<{ input: Record<string, unknown> }>;
       renderModelCalls: Array<{ macroCode: string; parameters: Record<string, unknown> }>;
+      saveProjectSourceCalls: Array<{ threadId: string; source: string }>;
       updateParametersCalls: Array<{ messageId: string; parameters: Record<string, unknown> }>;
       historyCallCount: number;
       latestThreadId: string | null;
@@ -41,6 +42,7 @@ function manualCodeApplyMockScript() {
   window.__manualCodeApplyMock = {
     addManualVersionCalls: [],
     renderModelCalls: [],
+    saveProjectSourceCalls: [],
     updateParametersCalls: [],
     historyCallCount: 0,
     latestThreadId: null,
@@ -58,6 +60,7 @@ function manualCodeApplyMockScript() {
     summary: '',
     messages: [],
   };
+  let canonicalSource = window.__manualCodeApplyMockConfig?.macroCode ?? 'print("base bracket")';
 
   window.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: Record<string, unknown>) => {
     if (cmd === 'plugin:event|listen') {
@@ -96,6 +99,39 @@ function manualCodeApplyMockScript() {
       return [historyThread];
     }
     if (cmd === 'get_last_design') return null;
+    if (cmd === 'open_or_create_blank_design_thread') {
+      return {
+        threadId: 'mock-thread-1',
+        slug: 'bracket-thread-1',
+        folder: '/mock/bracket-thread-1',
+        file: '/mock/bracket-thread-1/model.ecky',
+        source: canonicalSource,
+      };
+    }
+    if (cmd === 'get_project_source') {
+      return {
+        threadId: String(args?.threadId ?? 'mock-thread-1'),
+        slug: 'bracket-thread-1',
+        folder: '/mock/bracket-thread-1',
+        file: '/mock/bracket-thread-1/model.ecky',
+        source: canonicalSource,
+      };
+    }
+    if (cmd === 'save_project_source') {
+      const write = {
+        threadId: String(args?.threadId ?? ''),
+        source: String(args?.source ?? ''),
+      };
+      window.__manualCodeApplyMock!.saveProjectSourceCalls.push(write);
+      canonicalSource = write.source;
+      return {
+        threadId: write.threadId,
+        slug: 'bracket-thread-1',
+        folder: '/mock/bracket-thread-1',
+        file: '/mock/bracket-thread-1/model.ecky',
+        source: canonicalSource,
+      };
+    }
     if (cmd === 'get_default_macro') return '# mock macro';
     if (cmd === 'init_generation_attempt') {
       window.__manualCodeApplyMock!.latestThreadId = String(args?.threadId ?? '') || null;
@@ -298,7 +334,7 @@ endsolid mock
   await expect
     .poll(() => page.evaluate(() => window.__manualCodeApplyMock?.renderModelCalls.length ?? 0))
     .toBeGreaterThan(0);
-  await page.getByRole('button', { name: 'PARAMS' }).click({ force: true });
+  await page.getByRole('button', { name: 'Parameters', exact: true }).click({ force: true });
   const paramPanel = page.locator('.param-panel');
   await expect(paramPanel).toBeVisible({ timeout: 10000 });
   await page.locator('[data-window-id="params"] .window-header').click({ force: true });
@@ -567,16 +603,48 @@ test.describe('Manual code apply/version coverage', () => {
       .poll(async () =>
         page.evaluate(() => ({
           addManualVersionCount: window.__manualCodeApplyMock?.addManualVersionCalls.length ?? -1,
+          savedSource: window.__manualCodeApplyMock?.saveProjectSourceCalls.at(-1) ?? null,
           renderModel: window.__manualCodeApplyMock?.renderModelCalls.at(-1) ?? null,
         })),
       )
       .toMatchObject({
         addManualVersionCount: 0,
+        savedSource: {
+          threadId: 'mock-thread-1',
+          source: 'print("draft bracket")',
+        },
         renderModel: {
           macroCode: 'print("draft bracket")',
           parameters: { width: 10 },
         },
       });
+
+    await modal.locator('.window-close').click();
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: /CODE/i }).click();
+    await expect(page.locator('.cm-content').first()).toContainText('print("draft bracket")');
+  });
+
+  test('Given canonical source write succeeds but render fails When inspector reopens Then failed source remains the one visible file', async ({ page }) => {
+    await bootManualCodeFlow(page);
+    await page.evaluate(() => {
+      window.__manualCodeApplyMockConfig = { renderModelError: 'mock apply render exploded' };
+    });
+
+    await page.locator('.param-panel').getByRole('button', { name: 'CODE' }).click();
+    const modal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR:' });
+    const editor = modal.locator('.cm-content');
+    await editor.click();
+    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A');
+    await page.keyboard.type('print("failed but canonical")');
+    await modal.getByRole('button', { name: 'APPLY', exact: true }).click();
+
+    await expect(modal.locator('.commit-error')).toContainText('mock apply render exploded');
+    await expect.poll(() => page.evaluate(() => window.__manualCodeApplyMock?.saveProjectSourceCalls.at(-1)?.source ?? null))
+      .toBe('print("failed but canonical")');
+
+    await modal.locator('.window-close').click();
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: /CODE/i }).click();
+    await expect(page.locator('.cm-content').first()).toContainText('print("failed but canonical")');
   });
 
   test('Given applied code draft When macro patch event exists Then code editor shows LAST MACRO DIFF with actor and changed lines', async ({

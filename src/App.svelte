@@ -8,7 +8,8 @@
   import ViewportWorkspace from './lib/workbench/ViewportWorkspace.svelte';
   import WorkbenchWindows from './lib/workbench/WorkbenchWindows.svelte';
   import { convertFileSrc } from '@tauri-apps/api/core';
-  import { open, save } from '@tauri-apps/plugin-dialog';
+  import { open } from '@tauri-apps/plugin-dialog';
+  import { safeSaveDialog } from './lib/safeSaveDialog';
   import { writeTextFile } from '@tauri-apps/plugin-fs';
   import { onDestroy, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
@@ -24,6 +25,10 @@
   import Window from './lib/Window.svelte';
   import ProjectSwitcher from './lib/ProjectSwitcher.svelte';
   import CampaignWorkbench from './lib/CampaignWorkbench.svelte';
+  import CapturePanel from './lib/CapturePanel.svelte';
+  import AnalysisPanel from './lib/AnalysisPanel.svelte';
+  import { getProjectSource, type FemMeshPreviewResponse, type FemRunResponse } from './lib/tauri/client';
+  import type { FemDisplayOptions } from './lib/femDisplay';
   import LibraryPanel from './lib/LibraryPanel.svelte';
   import { campaignDefinitionClient, type CampaignCurrentStepPayload, type CampaignDefinitionSummary } from './lib/projects/campaignDefinitionClient';
   import { campaignRunClient, type CampaignRun } from './lib/projects/campaignRunClient';
@@ -73,6 +78,7 @@
     threadMessagePageState,
   } from './lib/stores/history';
   import { workingCopy, isDirty } from './lib/stores/workingCopy';
+  import type { WorkingCopyState } from './lib/stores/workingCopy';
   import {
     historyStore as history,
     activeThreadIdStore as activeThreadId,
@@ -222,6 +228,25 @@
     resolveActiveAuthoringContext,
   } from './lib/runtimeCapabilities';
   import { isRenderableVersionTimelineMessage } from './lib/threadTimeline';
+  import { buildCaptureSolidifySource } from './lib/capture/captureSolidifySource';
+  import {
+    addCaptureLandmark,
+    applyCaptureGuideDraftEdit,
+    configureCaptureProfile,
+    createCaptureGuideDraft,
+    createCaptureGuideDraftHistory,
+    finalizeMechanicalGuideDraft,
+    mechanicalGuideReadiness,
+    moveCaptureProfileLandmark,
+    removeCaptureLandmark,
+    undoCaptureGuideDraftEdit,
+    updateCaptureFeatureExpectation,
+    updateCaptureLandmark,
+    type CaptureFeatureExpectationEdit,
+    type CaptureGuideDraftHistory,
+    type CaptureLandmarkEdit,
+    type CaptureProfileEdit,
+  } from './lib/capture/captureGuideDraft';
   import {
     clearSketchPreviewDraft,
     saveSketchPreviewDraft,
@@ -234,12 +259,37 @@
     getAgentTerminalSnapshots,
     getMessageAttachments,
     getThread,
+    getThreadMessageVersion,
     getThreadAgentState,
     getModelManifest,
+    macroAstSourceMap,
     importFreecadLibraryPart,
     importFcstd,
     preparePromptAttachments,
     preparePromptWorkspaceCapture,
+    prepareCapturePreview,
+    adoptLatestCaptureRun,
+    listCaptureRuns,
+    listExternalShapeSources,
+    applyExternalShapePlaneCrop,
+    removeExternalShapePlaneCrop,
+    previewExternalShapeSurfaceTrimPath,
+    previewExternalShapeSurfaceTrimLoop,
+    previewExternalShapeSurfaceTrimRegion,
+    applyExternalShapeSurfaceTrim,
+    removeExternalShapeSurfaceTrim,
+    reopenCaptureRun,
+    saveCapturePreviewSettings,
+    getCaptureGuideContext,
+    getCaptureReconstructionGuide,
+    evaluateCaptureReconstructionGuide,
+    saveCaptureReconstructionGuide,
+    queueCaptureGuidedReconstruction,
+    retryCaptureReconstruction,
+    resumeCaptureSession,
+    startCaptureSession as startCaptureSessionCommand,
+    getCaptureSessionStatus as getCaptureSessionStatusCommand,
+    cancelCaptureSession as cancelCaptureSessionCommand,
     rejectAgentViewportScreenshot,
     renderModel,
     restartPrimaryAutoAgent,
@@ -259,7 +309,28 @@
     type ThreadAgentState,
   } from './lib/tauri/client';
   import { listen } from '@tauri-apps/api/event';
-  import type { FreecadLibraryItem, SketchDocument, SketchDraftSource } from './lib/tauri/contracts';
+  import type {
+    CaptureCropBounds,
+    CaptureGuideResultProvenance,
+    CaptureGuideSourceMesh,
+    CaptureLandmarkRole,
+    CaptureMeshPreview,
+    CaptureObservedDeviationReport,
+    CaptureReconstructionGuide,
+    CaptureReconstructionGuideState,
+    CaptureRun,
+    ExternalShapeSource,
+    CaptureSurfaceAnchor,
+    SurfaceTrimCapMode,
+    SurfaceTrimLoopPreviewResponse,
+    SurfaceTrimPathMode,
+    SurfaceTrimPathPreviewResponse,
+    SurfaceTrimRegionPreviewResponse,
+    ReopenedCaptureRun,
+    FreecadLibraryItem,
+    SketchDocument,
+    SketchDraftSource,
+  } from './lib/tauri/contracts';
   import type {
     AgentSession,
     AgentTerminalInput,
@@ -388,6 +459,17 @@
     messageId: string;
     modelId: string | null;
   };
+  type ProjectFolderWatchEvent =
+    | { kind: 'detected'; slug: string; threadId: string }
+    | { kind: 'applied'; slug: string; threadId: string; messageId: string; modelId?: string | null }
+    | { kind: 'applyFailed'; slug: string; threadId: string; messageId: string; error: string };
+  type ProjectFolderNotice = {
+    tone: 'pending' | 'success' | 'error';
+    title: string;
+    body: string;
+    threadId: string;
+    messageId: string | null;
+  };
   type HiddenViewerSpec = {
     requestId: string;
     targetKey: string;
@@ -500,7 +582,7 @@
   }) {
     const shouldReopenDocs = $windowStore.docs.visible;
     if (!$activeThreadId) {
-      createNewThread({ mode: 'blank' });
+      await createNewThread({ mode: 'blank' });
       await tick();
       if (shouldReopenDocs) {
         showWindow('docs');
@@ -508,9 +590,19 @@
       }
     }
 
+    const activeId = $activeThreadId;
+    const sourceThreadId = projectFolderNotice?.threadId ?? activeId;
+    if (!sourceThreadId) return;
+    let boundSource;
+    try {
+      boundSource = await getProjectSource(sourceThreadId);
+    } catch (error) {
+      session.setError(`Source Error: ${formatBackendError(error)}`);
+      return;
+    }
+
     const current = get(workingCopy);
-    const hasSeedCode = seed ? Object.prototype.hasOwnProperty.call(seed, 'code') : false;
-    const nextCode = hasSeedCode ? seed?.code ?? '' : current.macroCode;
+    const nextCode = boundSource.source;
     const nextTitle = seed?.title ?? (current.title || 'Manual Edit');
     const nextSourceLanguage = seed?.sourceLanguage ?? current.sourceLanguage ?? 'legacyPython';
     const nextGeometryBackend = seed?.geometryBackend ?? current.geometryBackend ?? 'freecad';
@@ -536,6 +628,7 @@
     }
 
     codeModalMode = 'version';
+    codeModalSourceThreadId = boundSource.threadId;
     codeModalSourceLanguage = nextSourceLanguage;
     codeModalDraftSerial += 1;
     codeModalDraftScopeKey = [
@@ -662,10 +755,12 @@
   let campaignRuns = $state<CampaignRun[]>([]);
   let activeCampaignRun = $state<CampaignRun | null>(null);
   let campaignRunError = $state<string | null>(null);
+  let projectFolderNotice = $state<ProjectFolderNotice | null>(null);
   let sketchPreview = $state<SketchPreviewState | null>(null);
   let sketchPreviewDraft = $state<SketchPreviewDraftState | null>(null);
   const sketchWorkspaceAvailable = false;
   let codeModalMode = $state<'version' | 'sketch-preview' | 'docs-snippet'>('version');
+  let codeModalSourceThreadId = $state<string | null>(null);
   let codeModalSourceLanguage = $state<SourceLanguage | null>(null);
   let codeModalDraftSerial = $state(0);
   let codeModalDraftScopeKey = $state('');
@@ -970,7 +1065,7 @@
   const multipartExportParts = $derived.by(() => exportState.multipartExportParts);
   const canExportModel = $derived.by(() => exportState.canExportModel);
   const modelIo = createModelIo({
-    save,
+    save: safeSaveDialog,
     exportFile,
     exportMultipart3mf,
     exportMultipartStlZip,
@@ -1046,15 +1141,155 @@
   const codeWindowState = $derived($windowStore.code);
   const projectsWindowState = $derived($windowStore.projects);
   const libraryWindowState = $derived($windowStore.library);
+  const captureWindowState = $derived($windowStore.capture);
+  const analysisWindowState = $derived($windowStore.analysis);
   const paramsWindowState = $derived($windowStore.params);
   const dialogueWindowState = $derived($windowStore.dialogue);
   const docsWindowState = $derived($windowStore.docs);
   const settingsWindowState = $derived($windowStore.settings);
   const activityWindowState = $derived($windowStore.activity);
+  let femResult = $state<FemRunResponse | null>(null);
+  let femResultSource = $state('');
+  let femMeshPreview = $state<FemMeshPreviewResponse | null>(null);
+  let femMeshPreviewSource = $state('');
+  let femDisplay = $state<FemDisplayOptions>({
+    field: 'vonMises', deformationScale: 1, showMesh: true, showOutline: true, clipFraction: 1,
+  });
+  const visibleFemResult = $derived(
+    femResult
+      && femResult.modelId === activeArtifactBundle?.modelId
+      && femResultSource === ($workingCopy.macroCode || activeVersionMessage?.output?.macroCode || '')
+      ? femResult
+      : null,
+  );
+  const visibleFemMeshPreview = $derived(
+    femMeshPreview
+      && femMeshPreview.modelId === activeArtifactBundle?.modelId
+      && femMeshPreviewSource === ($workingCopy.macroCode || activeVersionMessage?.output?.macroCode || '')
+      ? femMeshPreview
+      : null,
+  );
+  let captureSessionState = $state<'pairing' | 'capturing' | 'reconstructing' | 'preview' | 'failed' | 'cancelled'>('pairing');
+  let captureSessionToken = $state('');
+  let captureRunId = $state('');
+  let capturePairingUrl = $state('No pairing session yet');
+  let captureTrustUrl = $state('');
+  let captureGuidance = $state('PAIR PHONE');
+  let captureCameraStatus = $state('Camera permission pending');
+  let captureAcceptedFrameCount = $state(0);
+  let captureMeshPreview = $state<CaptureMeshPreview | null>(null);
+  let capturePreviewBundle = $state<ArtifactBundle | null>(null);
+  let capturePreviewManifest = $state<ModelManifest | null>(null);
+  let capturePreviewApplied = $state(false);
+  let capturePreviewScale = $state(0.05);
+  let captureCropEnabled = $state(false);
+  let captureCropMode = $state<'translate' | 'scale'>('scale');
+  let captureCropBounds = $state<CaptureCropBounds | null>(null);
+  let capturePreviewCropBounds = $state<CaptureCropBounds | null>(null);
+  let captureCropDirty = $state(false);
+  let capturePreparedCropKey = $state<string | null>(null);
+  let captureHistoryRuns = $state<CaptureRun[]>([]);
+  let captureHistoryLoadToken = 0;
+  let externalShapeSources = $state<ExternalShapeSource[]>([]);
+  let selectedExternalShapeNodeId = $state<number | null>(null);
+  let externalShapeError = $state('');
+  let externalShapeLoadToken = 0;
+  let externalShapeRefreshKey = '';
+  let captureSolidifySource = $state('');
+  let captureTargetThreadId = $state('');
+  let captureTargetMessageId = $state<string | null>(null);
+  let captureTargetSource = $state('');
+  let captureTargetSourceLanguage = $state('ecky');
+  let captureTargetTitle = $state('');
+  let captureTargetDraft = $state<WorkingCopyState | null>(null);
+  let captureStartedFromUnboundWorkspace = $state(false);
+  let capturePreviewPromptedToken = $state('');
+  let pendingCaptureProjectSwitch = $state<{
+    sessionToken: string;
+    targetThreadId: string;
+    targetMessageId: string | null;
+    message: string;
+  } | null>(null);
+  let capturePreviewPrepareError = $state('');
+  let capturePreviewPreparePromise: Promise<boolean> | null = null;
+  let captureGuideMode = $state(false);
+  let captureGuideSource = $state<CaptureGuideSourceMesh | null>(null);
+  let captureGuide = $state<CaptureReconstructionGuide | null>(null);
+  let captureGuideState = $state<CaptureReconstructionGuideState | null>(null);
+  let captureGuidePickRole = $state<CaptureLandmarkRole>('calibrationEndpoint');
+  let captureGuideKnownDistanceMm = $state(40);
+  let captureGuideFeatureDepthMm = $state(18);
+  let captureGuideInstruction = $state('');
+  let captureGuideError = $state('');
+  let captureGuideHistory = $state<CaptureGuideDraftHistory | null>(null);
+  let captureGuideSelectedLandmarkId = $state<string | null>(null);
+  let captureGuideBackendRevision = 0;
+  let captureGuidedMessageId = $state<string | null>(null);
+  let captureGuidedModelId = $state<string | null>(null);
+  let captureGuidedMessage = $state<Message | null>(null);
+  let captureGuidedMessageRequestKey = '';
+  let captureComparisonError = $state('');
+  let captureGuidedResult = $state<CaptureGuideResultProvenance | null>(null);
+  let captureGuidedDeviation = $state<CaptureObservedDeviationReport | null>(null);
+  let captureReferenceVisible = $state(true);
+  let captureReferenceOpacity = $state(0.28);
+  let captureGeneratedVisible = $state(true);
+  let captureGeneratedOpacity = $state(1);
+  let captureDeviationVisible = $state(true);
+  let captureGuideSaveChain: Promise<void> = Promise.resolve();
+  const captureGuideReadiness = $derived(
+    captureGuide ? mechanicalGuideReadiness(captureGuide) : { ready: false, reasons: ['Start guided CAD.'] },
+  );
+  const capturePreviewUrl = $derived(
+    capturePreviewBundle ? toAssetUrl(capturePreviewBundle.previewStlPath) : null,
+  );
+  const selectedExternalShape = $derived(
+    externalShapeSources.find(source => source.nodeId === selectedExternalShapeNodeId) ?? null,
+  );
+  const externalShapePreviewIsCropped = $derived(Boolean(
+    selectedExternalShape
+      && (
+        (selectedExternalShape.planeCrops?.length ?? 0) > 0
+        || (selectedExternalShape.surfaceTrims?.length ?? 0) > 0
+      )
+      && sessionModelManifest?.sourceDigest === selectedExternalShape.sourceDigest
+      && stlUrl,
+  ));
+  const externalShapePreviewUrl = $derived(
+    selectedExternalShape?.exists
+      ? (
+          externalShapePreviewIsCropped
+            ? stlUrl
+            : toAssetUrl(selectedExternalShape.path)
+        )
+      : null,
+  );
+  const externalShapeRawPreviewUrl = $derived(
+    selectedExternalShape?.exists ? toAssetUrl(selectedExternalShape.path) : null,
+  );
+  const captureGeneratedComparisonBundle = $derived.by<ArtifactBundle | null>(() => {
+    if (!captureGuidedMessageId || captureGuidedMessage?.id !== captureGuidedMessageId) return null;
+    const bundle = captureGuidedMessage.artifactBundle ?? null;
+    if (!bundle || (captureGuidedModelId && bundle.modelId !== captureGuidedModelId)) return null;
+    return bundle;
+  });
+  const captureGeneratedComparisonUrl = $derived(
+    captureGeneratedComparisonBundle
+      ? toAssetUrl(captureGeneratedComparisonBundle.previewStlPath)
+      : null,
+  );
+  let capturePollTimer: ReturnType<typeof setInterval> | null = null;
+  const captureStats = $derived([
+    { label: 'State', value: captureSessionState.toUpperCase() },
+    { label: 'Frames', value: String(captureAcceptedFrameCount) },
+    { label: 'Mode', value: 'BATCH PREVIEW' },
+  ]);
   let mountedWindows = $state<Record<WindowId, boolean>>({
     code: false,
     projects: false,
     library: false,
+    capture: false,
+    analysis: false,
     params: false,
     dialogue: false,
     docs: false,
@@ -1082,15 +1317,34 @@
     if (windowFitAnimationFrame !== null) {
       cancelAnimationFrame(windowFitAnimationFrame);
     }
+    if (capturePollTimer !== null) clearInterval(capturePollTimer);
   });
 
   $effect(() => {
     const s = $windowStore;
-    for (const id of ['code', 'projects', 'library', 'params', 'dialogue', 'docs', 'settings', 'terminal', 'activity', 'sketch'] as WindowId[]) {
+    for (const id of ['code', 'projects', 'library', 'capture', 'analysis', 'params', 'dialogue', 'docs', 'settings', 'terminal', 'activity', 'sketch'] as WindowId[]) {
       if (s[id].visible) {
         mountedWindows[id] = true;
       }
     }
+  });
+
+  $effect(() => {
+    const threadId = $activeThreadId;
+    const sourceIdentity = $workingCopy.macroCode || activeVersionMessage?.output?.macroCode || '';
+    if (!captureWindowState.visible || !threadId) {
+      if (!threadId) {
+        externalShapeSources = [];
+        selectedExternalShapeNodeId = null;
+        externalShapeError = '';
+        externalShapeRefreshKey = '';
+      }
+      return;
+    }
+    const refreshKey = `external-shapes-v2:${threadId}:${sourceIdentity}`;
+    if (externalShapeRefreshKey === refreshKey) return;
+    externalShapeRefreshKey = refreshKey;
+    void refreshExternalShapeSources(threadId);
   });
 
   $effect(() => {
@@ -1113,6 +1367,1129 @@
   let lastFocusedAgentWorkingVersionKey = $state('');
   let activeMcpMicrowaveKey = $state('');
   let ownsMcpPhraseLoop = $state(false);
+
+  function captureSessionStateFromBackend(
+    state: string,
+  ): 'pairing' | 'capturing' | 'reconstructing' | 'preview' | 'failed' | 'cancelled' {
+    switch (state) {
+      case 'pairing':
+        return 'pairing';
+      case 'capturing':
+        return 'capturing';
+      case 'reconstructing':
+        return 'reconstructing';
+      case 'preview':
+        return 'preview';
+      case 'failed':
+        return 'failed';
+      case 'cancelled':
+        return 'cancelled';
+      default:
+        return 'failed';
+    }
+  }
+
+  async function refreshCaptureHistoryRuns(threadId: string | null = get(activeThreadId)) {
+    const token = ++captureHistoryLoadToken;
+    if (!threadId) {
+      captureHistoryRuns = [];
+      return;
+    }
+    try {
+      const runs = await listCaptureRuns(threadId);
+      if (token === captureHistoryLoadToken) {
+        const currentRun = runs.find(run => run.id === captureRunId);
+        if (currentRun) syncCaptureGuidedResult(currentRun);
+        if (get(activeThreadId) === threadId) captureHistoryRuns = runs;
+      }
+    } catch (error) {
+      if (token === captureHistoryLoadToken) {
+        captureHistoryRuns = [];
+        console.error('Failed to load capture history:', formatBackendError(error));
+      }
+    }
+  }
+
+  async function refreshExternalShapeSources(threadId: string, authoritative = false) {
+    const token = ++externalShapeLoadToken;
+    try {
+      const sources = await listExternalShapeSources(threadId);
+      if ((!authoritative && token !== externalShapeLoadToken) || get(activeThreadId) !== threadId) return;
+      externalShapeSources = sources;
+      externalShapeError = '';
+      if (sources.length === 1) {
+        selectedExternalShapeNodeId = sources[0].nodeId;
+      } else if (!sources.some(source => source.nodeId === selectedExternalShapeNodeId)) {
+        selectedExternalShapeNodeId = null;
+      }
+    } catch (error) {
+      if (token !== externalShapeLoadToken) return;
+      externalShapeSources = [];
+      selectedExternalShapeNodeId = null;
+      externalShapeError = formatBackendError(error);
+    }
+  }
+
+  async function applySelectedExternalShapePlaneCrop(
+    anchors: CaptureSurfaceAnchor[],
+    keepPositive: boolean,
+    replaceCropNodeId: number | null,
+  ) {
+    const threadId = get(activeThreadId);
+    const selected = selectedExternalShape;
+    if (!threadId || !selected || !selected.contentDigest) {
+      throw new Error('Plane crop requires one readable bound STL source.');
+    }
+    const result = await applyExternalShapePlaneCrop({
+      threadId,
+      nodeId: selected.nodeId,
+      expectedSourceDigest: selected.sourceDigest,
+      expectedMeshContentDigest: selected.contentDigest,
+      anchors,
+      keepPositive,
+      replaceCropNodeId,
+    });
+    await applyManualCodeDraft(result.source);
+    externalShapeRefreshKey = '';
+    await refreshExternalShapeSources(threadId, true);
+  }
+
+  async function removeSelectedExternalShapePlaneCrop(cropNodeId: number) {
+    const threadId = get(activeThreadId);
+    const selected = selectedExternalShape;
+    if (!threadId || !selected) {
+      throw new Error('Plane crop removal requires one bound STL source.');
+    }
+    const result = await removeExternalShapePlaneCrop({
+      threadId,
+      nodeId: selected.nodeId,
+      cropNodeId,
+      expectedSourceDigest: selected.sourceDigest,
+    });
+    await applyManualCodeDraft(result.source);
+    externalShapeRefreshKey = '';
+    await refreshExternalShapeSources(threadId, true);
+  }
+
+  function requireSelectedExternalShape(operation: string) {
+    const threadId = get(activeThreadId);
+    const selected = selectedExternalShape;
+    if (!threadId || !selected || !selected.contentDigest) {
+      throw new Error(`${operation} requires one readable bound STL source.`);
+    }
+    return { threadId, selected, contentDigest: selected.contentDigest };
+  }
+
+  async function previewSelectedExternalShapeSurfaceTrimPath(
+    fromAnchor: CaptureSurfaceAnchor,
+    toAnchor: CaptureSurfaceAnchor,
+    pathMode: SurfaceTrimPathMode,
+    previewId: number,
+    targetMessageId: string | null,
+  ): Promise<SurfaceTrimPathPreviewResponse> {
+    const { threadId, selected, contentDigest } = requireSelectedExternalShape('Surface trim path preview');
+    return previewExternalShapeSurfaceTrimPath({
+      schemaVersion: 1,
+      threadId,
+      targetMessageId,
+      nodeId: selected.nodeId,
+      expectedSourceDigest: selected.sourceDigest,
+      expectedMeshContentDigest: contentDigest,
+      fromAnchor,
+      toAnchor,
+      pathMode,
+      previewId,
+    });
+  }
+
+  async function previewSelectedExternalShapeSurfaceTrimLoop(
+    loopAnchors: CaptureSurfaceAnchor[],
+    pathMode: SurfaceTrimPathMode,
+    previewId: number,
+    targetMessageId: string | null,
+  ): Promise<SurfaceTrimLoopPreviewResponse> {
+    const { threadId, selected, contentDigest } = requireSelectedExternalShape('Surface trim loop preview');
+    return previewExternalShapeSurfaceTrimLoop({
+      schemaVersion: 1,
+      threadId,
+      targetMessageId,
+      nodeId: selected.nodeId,
+      expectedSourceDigest: selected.sourceDigest,
+      expectedMeshContentDigest: contentDigest,
+      loopAnchors,
+      pathMode,
+      previewId,
+    });
+  }
+
+  async function previewSelectedExternalShapeSurfaceTrimRegion(
+    loopAnchors: CaptureSurfaceAnchor[],
+    keepSeed: CaptureSurfaceAnchor,
+    pathMode: SurfaceTrimPathMode,
+    capMode: SurfaceTrimCapMode,
+    previewId: number,
+    targetMessageId: string | null,
+  ): Promise<SurfaceTrimRegionPreviewResponse> {
+    const { threadId, selected, contentDigest } = requireSelectedExternalShape('Surface trim region preview');
+    return previewExternalShapeSurfaceTrimRegion({
+      schemaVersion: 1,
+      threadId,
+      targetMessageId,
+      nodeId: selected.nodeId,
+      expectedSourceDigest: selected.sourceDigest,
+      expectedMeshContentDigest: contentDigest,
+      loopAnchors,
+      keepSeed,
+      pathMode,
+      capMode,
+      previewId,
+    });
+  }
+
+  async function applySelectedExternalShapeSurfaceTrim(
+    loopAnchors: CaptureSurfaceAnchor[],
+    keepSeed: CaptureSurfaceAnchor,
+    pathMode: SurfaceTrimPathMode,
+    capMode: SurfaceTrimCapMode,
+    replaceTrimNodeId: number | null,
+    targetMessageId: string | null,
+  ) {
+    const { threadId, selected, contentDigest } = requireSelectedExternalShape('Surface trim');
+    const sourceSnapshot = externalShapeSources;
+    const result = await applyExternalShapeSurfaceTrim({
+      schemaVersion: 1,
+      threadId,
+      targetMessageId,
+      nodeId: selected.nodeId,
+      expectedSourceDigest: selected.sourceDigest,
+      expectedMeshContentDigest: contentDigest,
+      loopAnchors,
+      keepSeed,
+      pathMode,
+      capMode,
+      replaceTrimNodeId,
+    });
+    await applyManualCodeDraft(result.source);
+    externalShapeRefreshKey = '';
+    await refreshExternalShapeSources(threadId, true);
+    if (get(activeThreadId) === threadId) {
+      const appliedTrim = {
+        nodeId: result.trimNodeId,
+        schemaVersion: 1,
+        sourceDigest: contentDigest,
+        loopAnchors: loopAnchors.map(({ triangleIndex, barycentric, sourcePosition, sourceNormal }) => ({
+          triangleIndex,
+          barycentric,
+          sourcePosition,
+          sourceNormal,
+        })),
+        keepSeed: {
+          triangleIndex: keepSeed.triangleIndex,
+          barycentric: keepSeed.barycentric,
+          sourcePosition: keepSeed.sourcePosition,
+          sourceNormal: keepSeed.sourceNormal,
+        },
+        pathMode,
+        capMode,
+      } satisfies ExternalShapeSource['surfaceTrims'][number];
+      const refreshedSelected = externalShapeSources.find(source => source.path === selected.path);
+      const refreshedHasAppliedTrim = refreshedSelected?.sourceDigest === result.sourceDigest
+        && refreshedSelected.surfaceTrims.some(trim => trim.nodeId === result.trimNodeId);
+      if (refreshedHasAppliedTrim && refreshedSelected) {
+        selectedExternalShapeNodeId = refreshedSelected.nodeId;
+        return;
+      }
+      const currentSources = refreshedSelected ? externalShapeSources : sourceSnapshot;
+      externalShapeSources = currentSources.map((source) => source.path === selected.path
+        ? {
+            ...source,
+            sourceDigest: result.sourceDigest,
+            surfaceTrims: [appliedTrim],
+          }
+        : source);
+      selectedExternalShapeNodeId = (refreshedSelected ?? selected).nodeId;
+    }
+  }
+
+  async function removeSelectedExternalShapeSurfaceTrim(trimNodeId: number) {
+    const { threadId, selected } = requireSelectedExternalShape('Surface trim removal');
+    const sourceSnapshot = externalShapeSources;
+    const result = await removeExternalShapeSurfaceTrim({
+      threadId,
+      targetMessageId: get(activeVersionId),
+      nodeId: selected.nodeId,
+      trimNodeId,
+      expectedSourceDigest: selected.sourceDigest,
+    });
+    await applyManualCodeDraft(result.source);
+    externalShapeRefreshKey = '';
+    await refreshExternalShapeSources(threadId, true);
+    if (get(activeThreadId) === threadId) {
+      const refreshedSelected = externalShapeSources.find(source => source.path === selected.path);
+      const refreshedHasRemovedTrim = refreshedSelected?.sourceDigest === result.sourceDigest
+        && refreshedSelected.surfaceTrims.every(trim => trim.nodeId !== trimNodeId);
+      if (refreshedHasRemovedTrim && refreshedSelected) {
+        selectedExternalShapeNodeId = refreshedSelected.nodeId;
+        return;
+      }
+      const currentSources = refreshedSelected ? externalShapeSources : sourceSnapshot;
+      externalShapeSources = currentSources.map((source) => source.path === selected.path
+        ? {
+            ...source,
+            sourceDigest: result.sourceDigest,
+            surfaceTrims: [],
+          }
+        : source);
+      selectedExternalShapeNodeId = (refreshedSelected ?? selected).nodeId;
+    }
+  }
+
+  function syncCaptureGuidedResult(run: CaptureRun) {
+    captureGuidedMessageId = run.guidedReconstructionMessageId ?? null;
+    captureGuidedModelId = run.guidedReconstructionModelId ?? null;
+    captureGuidedResult = run.guidedReconstructionResult ?? null;
+    captureGuidedDeviation = run.guidedReconstructionDeviation ?? null;
+    void loadCaptureGuidedMessage(run);
+  }
+
+  async function loadCaptureGuidedMessage(run: CaptureRun) {
+    const messageId = run.guidedReconstructionMessageId ?? null;
+    const modelId = run.guidedReconstructionModelId ?? null;
+    if (!messageId) {
+      captureGuidedMessageRequestKey = '';
+      captureGuidedMessage = null;
+      captureComparisonError = '';
+      return;
+    }
+    const requestKey = `${run.id}:${run.targetThreadId}:${messageId}:${modelId ?? ''}`;
+    if (captureGuidedMessageRequestKey === requestKey) return;
+    captureGuidedMessageRequestKey = requestKey;
+    captureGuidedMessage = null;
+    captureComparisonError = '';
+    try {
+      const message = await getThreadMessageVersion(run.targetThreadId, messageId);
+      if (captureGuidedMessageRequestKey !== requestKey) return;
+      if (!message) {
+        throw new Error(`Committed guided reconstruction message ${messageId} is missing from task ${run.targetThreadId}.`);
+      }
+      const bundle = message.artifactBundle ?? null;
+      if (!bundle) {
+        throw new Error(`Committed guided reconstruction message ${messageId} has no artifact bundle.`);
+      }
+      if (modelId && bundle.modelId !== modelId) {
+        throw new Error(`Committed guided reconstruction model mismatch: expected ${modelId}, received ${bundle.modelId}.`);
+      }
+      captureGuidedMessage = message;
+    } catch (error) {
+      if (captureGuidedMessageRequestKey === requestKey) {
+        captureComparisonError = formatBackendError(error);
+      }
+    }
+  }
+
+  $effect(() => {
+    const threadId = $activeThreadId;
+    void refreshCaptureHistoryRuns(threadId);
+  });
+
+  async function hydrateReopenedCapture(reopened: ReopenedCaptureRun) {
+    const { run, session: reopenedSession } = reopened;
+    captureSessionToken = reopenedSession.pairingToken;
+    captureRunId = run.id;
+    captureTargetThreadId = run.targetThreadId;
+    captureTargetMessageId = run.targetMessageId ?? null;
+    captureTargetSource = run.targetSource;
+    captureTargetSourceLanguage = run.targetSourceLanguage;
+    captureTargetTitle = run.title;
+    captureStartedFromUnboundWorkspace = run.startedFromEmpty;
+    const currentDraft = get(workingCopy);
+    captureTargetDraft = {
+      ...currentDraft,
+      title: run.title,
+      versionName: 'Capture Draft',
+      macroCode: run.targetSource,
+      sourceLanguage: run.targetSourceLanguage as WorkingCopyState['sourceLanguage'],
+      sourceVersionId: run.targetMessageId ?? null,
+      dirty: false,
+    };
+    capturePairingUrl = reopenedSession.pairingUrl;
+    captureTrustUrl = reopenedSession.trustUrl;
+    captureSessionState = captureSessionStateFromBackend(reopenedSession.state);
+    captureAcceptedFrameCount = reopenedSession.acceptedFrameCount ?? run.acceptedFrameCount;
+    captureMeshPreview = reopenedSession.meshPreview ?? run.meshPreview ?? null;
+    capturePreviewBundle = null;
+    capturePreviewManifest = null;
+    capturePreviewApplied = false;
+    capturePreviewScale = run.previewScale;
+    capturePreparedCropKey = null;
+    captureSolidifySource = '';
+    capturePreviewPrepareError = '';
+    captureGuide = run.reconstructionGuide ?? null;
+    captureGuideInstruction = captureGuide?.instruction ?? '';
+    captureGuideHistory = captureGuide ? createCaptureGuideDraftHistory(captureGuide) : null;
+    captureGuideSelectedLandmarkId = null;
+    captureGuideSource = captureGuide?.sourceMesh ?? null;
+    captureGuideState = run.reconstructionGuideState ?? (captureGuide ? { status: 'draft' } : null);
+    captureGuideBackendRevision = captureGuide?.revision ?? 0;
+    captureGuideMode = captureGuide !== null;
+    captureGuideError = captureGuideState?.status === 'stale' ? captureGuideState.reason : '';
+    syncCaptureGuidedResult(run);
+    capturePreviewPromptedToken = '';
+    pendingCaptureProjectSwitch = null;
+    if (run.cropBounds) {
+      captureCropEnabled = true;
+      captureCropMode = 'scale';
+      captureCropBounds = cloneCaptureCropBounds(run.cropBounds);
+      capturePreviewCropBounds = cloneCaptureCropBounds(run.cropBounds);
+      captureCropDirty = false;
+    } else {
+      resetCaptureCropState();
+    }
+    captureGuidance = captureMeshPreview ? 'PREPARING PREVIEW' : 'ADD PHOTOS';
+    captureCameraStatus = `${captureAcceptedFrameCount} source frames restored`;
+    showWindow('capture');
+    if (capturePollTimer !== null) clearInterval(capturePollTimer);
+    capturePollTimer = setInterval(() => void pollCaptureSession(), 1000);
+    if (captureMeshPreview) await ensureCapturePreviewPrepared();
+  }
+
+  async function openCaptureRunFromHistory(runId: string) {
+    try {
+      await hydrateReopenedCapture(await reopenCaptureRun(runId));
+    } catch (error) {
+      showWindow('capture');
+      captureSessionState = 'failed';
+      captureGuidance = 'CAPTURE RESTORE FAILED';
+      captureCameraStatus = formatBackendError(error);
+    }
+  }
+
+  async function openLastStoredCapture() {
+    const currentThreadId = get(activeThreadId);
+    const startedFromEmpty = currentThreadId === null;
+    const targetThreadId = currentThreadId ?? crypto.randomUUID();
+    const targetMessageId = get(activeVersionId);
+    const draft = get(workingCopy);
+    const title = draft.title || activeThread?.title || `Capture ${targetThreadId.slice(0, 8)}`;
+    try {
+      const reopened = await adoptLatestCaptureRun(
+        targetThreadId,
+        targetMessageId,
+        title,
+        draft.macroCode,
+        draft.sourceLanguage,
+        startedFromEmpty,
+      );
+      await hydrateReopenedCapture(reopened);
+      await refreshHistory();
+      void refreshCaptureHistoryRuns(reopened.run.targetThreadId);
+    } catch (error) {
+      captureSessionState = 'failed';
+      captureGuidance = 'CAPTURE RESTORE FAILED';
+      captureCameraStatus = formatBackendError(error);
+    }
+  }
+
+  async function startCaptureSession() {
+    captureSessionState = 'capturing';
+    captureGuidance = 'PAIRING';
+    captureCameraStatus = 'Starting capture session...';
+    try {
+      const currentThreadId = get(activeThreadId);
+      captureStartedFromUnboundWorkspace = currentThreadId === null;
+      const targetThreadId = currentThreadId ?? crypto.randomUUID();
+      const targetMessageId = get(activeVersionId);
+      const draft = get(workingCopy);
+      captureTargetDraft = currentThreadId
+        ? { ...draft, params: { ...draft.params }, uiSpec: { ...draft.uiSpec, fields: [...draft.uiSpec.fields] } }
+        : {
+            title: `Capture ${targetThreadId.slice(0, 8)}`,
+            versionName: 'Capture Draft',
+            macroCode: '',
+            macroDialect: 'ecky',
+            engineKind: 'ecky',
+            sourceLanguage: 'ecky',
+            geometryBackend: 'mesh',
+            uiSpec: { fields: [] },
+            params: {},
+            postProcessing: null,
+            dirty: false,
+            sourceVersionId: null,
+          };
+      const captureTitle = captureTargetDraft.title || activeThread?.title || `Capture ${targetThreadId.slice(0, 8)}`;
+      const session = await startCaptureSessionCommand(
+        targetThreadId,
+        targetMessageId,
+        captureTitle,
+        captureTargetDraft.macroCode,
+        captureTargetDraft.sourceLanguage,
+        captureStartedFromUnboundWorkspace,
+      );
+      captureSessionToken = session.pairingToken;
+      captureRunId = session.sessionId;
+      captureTargetThreadId = session.targetThreadId;
+      captureTargetMessageId = session.targetMessageId ?? null;
+      captureTargetSource = captureTargetDraft.macroCode;
+      captureTargetSourceLanguage = captureTargetDraft.sourceLanguage;
+      captureTargetTitle = captureTitle;
+      capturePairingUrl = session.pairingUrl;
+      captureTrustUrl = session.trustUrl;
+      captureSessionState = captureSessionStateFromBackend(session.state);
+      captureAcceptedFrameCount = session.acceptedFrameCount ?? 0;
+      captureMeshPreview = null;
+      capturePreviewBundle = null;
+      capturePreviewManifest = null;
+      capturePreviewApplied = false;
+      capturePreviewScale = 0.05;
+      resetCaptureCropState();
+      captureSolidifySource = '';
+      capturePreviewPromptedToken = '';
+      pendingCaptureProjectSwitch = null;
+      capturePreviewPrepareError = '';
+      captureGuideMode = false;
+      captureGuideInstruction = '';
+      captureGuideSource = null;
+      captureGuide = null;
+      captureGuideState = null;
+      captureGuideBackendRevision = 0;
+      captureGuideError = '';
+      captureGuideHistory = null;
+      captureGuideSelectedLandmarkId = null;
+      captureGuidedMessageId = null;
+      captureGuidedModelId = null;
+      captureGuidedMessage = null;
+      captureGuidedMessageRequestKey = '';
+      captureComparisonError = '';
+      captureGuidedResult = null;
+      captureGuidedDeviation = null;
+      captureGuidance = 'OPEN LINK ON PHONE';
+      captureCameraStatus = 'Waiting for phone camera';
+      void refreshCaptureHistoryRuns(targetThreadId);
+      void refreshHistory();
+      if (capturePollTimer !== null) clearInterval(capturePollTimer);
+      capturePollTimer = setInterval(() => void pollCaptureSession(), 1000);
+    } catch (error) {
+      captureSessionState = 'failed';
+      captureGuidance = 'PAIR PHONE';
+      captureCameraStatus = formatBackendError(error);
+    }
+  }
+
+  async function ensureCapturePreviewPrepared(): Promise<boolean> {
+    const requestedCropKey = captureCropBoundsKey(capturePreviewCropBounds);
+    if (
+      capturePreviewBundle &&
+      capturePreviewManifest &&
+      capturePreparedCropKey === requestedCropKey
+    ) return true;
+    if (!captureSessionToken || capturePreviewPrepareError) return false;
+    if (capturePreviewPreparePromise) return capturePreviewPreparePromise;
+
+    capturePreviewPreparePromise = (async () => {
+      try {
+        const prepared = await prepareCapturePreview(captureSessionToken, capturePreviewCropBounds);
+        capturePreviewBundle = prepared.artifactBundle;
+        capturePreviewManifest = prepared.modelManifest;
+        capturePreparedCropKey = requestedCropKey;
+        captureGuidance = 'INSPECT MESH';
+        captureCameraStatus = 'Preview ready inside Capture window';
+        return true;
+      } catch (error) {
+        capturePreviewPrepareError = formatBackendError(error);
+        captureCameraStatus = capturePreviewPrepareError;
+        return false;
+      } finally {
+        capturePreviewPreparePromise = null;
+      }
+    })();
+    return capturePreviewPreparePromise;
+  }
+
+  async function pollCaptureSession() {
+    if (!captureSessionToken) return;
+    try {
+      const session = await getCaptureSessionStatusCommand(captureSessionToken);
+      if (!session) throw new Error('Capture session expired or was revoked.');
+      captureSessionState = captureSessionStateFromBackend(session.state);
+      captureAcceptedFrameCount = session.acceptedFrameCount ?? 0;
+      captureMeshPreview = session.meshPreview ?? null;
+      if (captureSessionState === 'capturing') {
+        captureGuidance = session.guidance || 'CAPTURING';
+        captureCameraStatus = `${captureAcceptedFrameCount} source frames stored`;
+      } else if (captureSessionState === 'reconstructing') {
+        captureGuidance = `RECONSTRUCTING ${Math.round((session.reconstructionProgress ?? 0) * 100)}%`;
+        captureCameraStatus = `${captureAcceptedFrameCount} source frames retained`;
+      } else if (captureSessionState === 'preview') {
+        captureGuidance = capturePreviewBundle ? 'INSPECT MESH' : 'PREPARING PREVIEW';
+        captureCameraStatus = capturePreviewPrepareError
+          || (capturePreviewApplied
+            ? 'Capture solidify draft applied'
+            : 'Source frames retained; no version committed');
+        if (
+          captureTargetThreadId &&
+          !isCaptureTargetCurrent() &&
+          capturePreviewPromptedToken !== captureSessionToken
+        ) {
+          pendingCaptureProjectSwitch = {
+            sessionToken: captureSessionToken,
+            targetThreadId: captureTargetThreadId,
+            targetMessageId: captureTargetMessageId,
+            message: `Capture preview ready for ${captureTargetTitle || 'bound project'}. Switch to project?`,
+          };
+          capturePreviewPromptedToken = captureSessionToken;
+          dismissedBubbleText = '';
+        }
+        void ensureCapturePreviewPrepared();
+        if (captureGuideMode && captureTargetThreadId) {
+          void refreshCaptureHistoryRuns(captureTargetThreadId);
+        }
+      } else if (captureSessionState === 'failed') {
+        captureGuidance = 'RECONSTRUCTION FAILED';
+        captureCameraStatus = session.rawError || 'Capture failed';
+      }
+    } catch (error) {
+      captureSessionState = 'failed';
+      captureGuidance = 'CAPTURE FAILED';
+      captureCameraStatus = formatBackendError(error);
+      if (capturePollTimer !== null) clearInterval(capturePollTimer);
+      capturePollTimer = null;
+    }
+  }
+
+  async function cancelCaptureSession() {
+    if (!captureSessionToken) {
+      captureSessionState = 'cancelled';
+      captureGuidance = 'PAIR PHONE';
+      captureCameraStatus = 'Session cancelled';
+      return;
+    }
+
+    try {
+      const session = await cancelCaptureSessionCommand(captureSessionToken);
+      captureSessionState = captureSessionStateFromBackend(session.state);
+      capturePairingUrl = 'No pairing session yet';
+      captureTrustUrl = '';
+      captureAcceptedFrameCount = 0;
+      captureMeshPreview = null;
+      capturePreviewBundle = null;
+      capturePreviewManifest = null;
+      capturePreviewApplied = false;
+      resetCaptureCropState();
+      capturePreviewPrepareError = '';
+      captureGuideMode = false;
+      captureGuideSource = null;
+      captureGuide = null;
+      captureGuideState = null;
+      captureGuideBackendRevision = 0;
+      captureGuideError = '';
+      captureGuideHistory = null;
+      captureGuideSelectedLandmarkId = null;
+      captureGuidedMessageId = null;
+      captureGuidedModelId = null;
+      captureGuidedResult = null;
+      captureGuidedDeviation = null;
+      if (capturePollTimer !== null) clearInterval(capturePollTimer);
+      capturePollTimer = null;
+      captureGuidance = 'PAIR PHONE';
+      captureCameraStatus = 'Session cancelled';
+    } catch (error) {
+      captureSessionState = 'failed';
+      captureGuidance = 'PAIR PHONE';
+      captureCameraStatus = formatBackendError(error);
+    }
+  }
+
+  async function startCaptureGuidedCad() {
+    if (!captureRunId || !captureMeshPreview) {
+      captureGuideError = 'Capture mesh is not ready.';
+      return;
+    }
+    try {
+      const context = await getCaptureGuideContext(captureRunId);
+      const restored = await getCaptureReconstructionGuide(captureRunId);
+      if (restored && restored.sourceMesh.contentDigest !== context.sourceMesh.contentDigest) {
+        captureGuideError = 'Guide is stale: selected crop/source mesh digest changed.';
+        captureGuideState = { status: 'stale', reason: captureGuideError };
+        captureGuideMode = true;
+        captureCropEnabled = false;
+        return;
+      }
+      captureGuideSource = context.sourceMesh;
+      captureGuide = restored ?? createCaptureGuideDraft(
+        captureRunId,
+        captureTargetThreadId,
+        captureTargetMessageId,
+        context.targetSourceDigest,
+        context.targetVersionId,
+        context.sourceMesh,
+      );
+      captureGuideHistory = createCaptureGuideDraftHistory(captureGuide);
+      captureGuideInstruction = restored?.instruction ?? '';
+      captureGuideSelectedLandmarkId = null;
+      captureGuideBackendRevision = captureGuide.revision;
+      captureGuideState = restored ? (captureGuideState ?? { status: 'draft' }) : { status: 'draft' };
+      captureGuideMode = true;
+      captureCropEnabled = false;
+      captureGuideError = '';
+      captureGuidePickRole = 'calibrationEndpoint';
+      captureCameraStatus = 'Guided CAD: pick digest-bound scan evidence';
+    } catch (error) {
+      captureGuideError = formatBackendError(error);
+      captureCameraStatus = captureGuideError;
+    }
+  }
+
+  function queueCaptureGuideDraftSave(snapshot: CaptureReconstructionGuide) {
+    captureGuideSaveChain = captureGuideSaveChain.then(async () => {
+      if (!captureGuideSource) return;
+      const guarded = JSON.parse(JSON.stringify(snapshot)) as CaptureReconstructionGuide;
+      guarded.revision = captureGuideBackendRevision;
+      const saved = await saveCaptureReconstructionGuide(
+        captureRunId,
+        captureGuideBackendRevision,
+        captureGuideSource.contentDigest,
+        guarded,
+        { status: 'draft' },
+      );
+      captureGuideBackendRevision = saved.revision;
+      if (captureGuide?.guideId === saved.guideId) {
+        captureGuide = {
+          ...captureGuide,
+          revision: saved.revision,
+          canonicalDigest: saved.canonicalDigest,
+        };
+      }
+      captureGuideState = { status: 'draft' };
+      captureGuideError = '';
+    }).catch((error) => {
+      captureGuideError = formatBackendError(error);
+      captureCameraStatus = captureGuideError;
+    });
+  }
+
+  function addCaptureGuideAnchor(anchor: CaptureSurfaceAnchor) {
+    if (!captureGuide || !captureGuideSource || captureGuideState?.status === 'stale') return;
+    try {
+      applyCaptureGuideEdit(addCaptureLandmark(captureGuide, captureGuidePickRole, anchor));
+      captureGuideSelectedLandmarkId = captureGuide?.landmarks.at(-1)?.landmarkId ?? null;
+      captureCameraStatus = `${captureGuide.landmarks.length} guide landmarks; ${captureGuidePickRole}`;
+    } catch (error) {
+      captureGuideError = formatBackendError(error);
+    }
+  }
+
+  function applyCaptureGuideEdit(next: CaptureReconstructionGuide) {
+    if (!captureGuide) return;
+    const history = captureGuideHistory ?? createCaptureGuideDraftHistory(captureGuide);
+    captureGuideHistory = applyCaptureGuideDraftEdit(history, next);
+    captureGuide = captureGuideHistory.present;
+    captureGuideState = { status: 'draft' };
+    queueCaptureGuideDraftSave(captureGuide);
+  }
+
+  function undoCaptureGuideEdit() {
+    if (!captureGuideHistory || captureGuideHistory.past.length === 0) return;
+    captureGuideHistory = undoCaptureGuideDraftEdit(captureGuideHistory);
+    captureGuide = captureGuideHistory.present;
+    if (!captureGuide.landmarks.some(item => item.landmarkId === captureGuideSelectedLandmarkId)) {
+      captureGuideSelectedLandmarkId = null;
+    }
+    captureGuideState = { status: 'draft' };
+    queueCaptureGuideDraftSave(captureGuide);
+  }
+
+  function editCaptureGuideLandmark(landmarkId: string, edit: CaptureLandmarkEdit) {
+    if (!captureGuide) return;
+    try {
+      applyCaptureGuideEdit(updateCaptureLandmark(captureGuide, landmarkId, edit));
+    } catch (error) {
+      captureGuideError = formatBackendError(error);
+    }
+  }
+
+  function deleteCaptureGuideLandmark(landmarkId: string) {
+    if (!captureGuide) return;
+    try {
+      applyCaptureGuideEdit(removeCaptureLandmark(captureGuide, landmarkId));
+      if (captureGuideSelectedLandmarkId === landmarkId) captureGuideSelectedLandmarkId = null;
+    } catch (error) {
+      captureGuideError = formatBackendError(error);
+    }
+  }
+
+  function editCaptureGuideProfile(profileId: string, edit: CaptureProfileEdit) {
+    if (!captureGuide) return;
+    try {
+      applyCaptureGuideEdit(configureCaptureProfile(captureGuide, profileId, edit));
+    } catch (error) {
+      captureGuideError = formatBackendError(error);
+    }
+  }
+
+  function reorderCaptureGuideProfile(profileId: string, landmarkId: string, targetIndex: number) {
+    if (!captureGuide) return;
+    try {
+      applyCaptureGuideEdit(moveCaptureProfileLandmark(captureGuide, profileId, landmarkId, targetIndex));
+    } catch (error) {
+      captureGuideError = formatBackendError(error);
+    }
+  }
+
+  function editCaptureGuideExpectation(expectationId: string, edit: CaptureFeatureExpectationEdit) {
+    if (!captureGuide) return;
+    try {
+      applyCaptureGuideEdit(updateCaptureFeatureExpectation(captureGuide, expectationId, edit));
+    } catch (error) {
+      captureGuideError = formatBackendError(error);
+    }
+  }
+
+  function selectCaptureFeaturePlan(planId: string) {
+    if (!captureGuide) return;
+    const next = JSON.parse(JSON.stringify(captureGuide)) as CaptureReconstructionGuide;
+    next.selectedFeaturePlanId = planId;
+    applyCaptureGuideEdit(next);
+  }
+
+  async function validateCaptureGuide() {
+    if (!captureGuide || !captureGuideSource) return;
+    try {
+      await captureGuideSaveChain;
+      const finalized = finalizeMechanicalGuideDraft(
+        captureGuide,
+        captureGuideKnownDistanceMm,
+        captureGuideInstruction,
+        captureGuideFeatureDepthMm,
+      );
+      finalized.revision = captureGuideBackendRevision;
+      const evaluated = await evaluateCaptureReconstructionGuide(
+        captureRunId,
+        captureGuideSource.contentDigest,
+        finalized,
+      );
+      captureGuide = evaluated;
+      captureGuideHistory = createCaptureGuideDraftHistory(evaluated);
+      if (!evaluated.reconstructionReadiness?.ready) {
+        captureGuideState = { status: 'draft' };
+        captureGuideError = '';
+        captureCameraStatus = evaluated.reconstructionReadiness?.detail
+          ?? 'Deterministic reconstruction needs explicit evidence.';
+        return;
+      }
+      const saved = await saveCaptureReconstructionGuide(
+        captureRunId,
+        captureGuideBackendRevision,
+        captureGuideSource.contentDigest,
+        evaluated,
+        { status: 'ready' },
+      );
+      captureGuide = saved;
+      captureGuideHistory = createCaptureGuideDraftHistory(saved);
+      captureGuideBackendRevision = saved.revision;
+      captureGuideState = { status: 'ready' };
+      captureGuideError = '';
+      captureCameraStatus = `Guide revision ${saved.revision} ready for parametric BRep`;
+    } catch (error) {
+      captureGuideState = { status: 'draft' };
+      captureGuideError = formatBackendError(error);
+      captureCameraStatus = captureGuideError;
+    }
+  }
+
+  async function buildCadFromCaptureGuide() {
+    if (!captureGuide || captureGuideState?.status !== 'ready') return;
+    try {
+      const queued = await queueCaptureGuidedReconstruction(
+        captureRunId,
+        captureGuide.revision,
+        captureGuide.targetSourceDigest,
+      );
+      captureGuideError = '';
+      captureCameraStatus = `Guided CAD queued in owning task: ${queued.messageId}`;
+      await refreshHistory();
+    } catch (error) {
+      captureGuideError = formatBackendError(error);
+      captureCameraStatus = captureGuideError;
+    }
+  }
+
+  async function applyCapturePreview() {
+    if (!captureMeshPreview) return;
+    if (captureCropDirty) {
+      if (!captureCropBounds) {
+        captureCameraStatus = 'Crop box is not ready';
+        return;
+      }
+      await previewCaptureCrop();
+      if (captureCropDirty) return;
+    }
+    capturePreviewPrepareError = '';
+    if (!await ensureCapturePreviewPrepared()) return;
+    if (!captureTargetThreadId || !isCaptureTargetCurrent()) {
+      pendingCaptureProjectSwitch = {
+        sessionToken: captureSessionToken,
+        targetThreadId: captureTargetThreadId,
+        targetMessageId: captureTargetMessageId,
+        message: `Capture is bound to ${captureTargetTitle || 'another project'}. Switch before Apply.`,
+      };
+      captureCameraStatus = 'Switch to bound project before Apply';
+      return;
+    }
+    if (captureStartedFromUnboundWorkspace && get(activeThreadId) === null) {
+      activeThreadId.set(captureTargetThreadId);
+      activeVersionId.set(null);
+      currentView.set('workbench');
+      await loadLayoutForThread(captureTargetThreadId);
+      showWindow('capture');
+    }
+
+    const currentSource = get(workingCopy).macroCode;
+    if (currentSource !== captureTargetSource) {
+      captureCameraStatus = 'Capture conflict: bound project source changed after capture started.';
+      return;
+    }
+    if (currentSource.trim() && captureTargetSourceLanguage !== 'ecky') {
+      captureCameraStatus = `Capture conflict: source language ${captureTargetSourceLanguage} cannot accept Ecky AST insertion.`;
+      return;
+    }
+
+    try {
+      const sourceNodes = currentSource.trim() ? await macroAstSourceMap(currentSource) : [];
+      const nextSource = buildCaptureSolidifySource(
+        currentSource,
+        sourceNodes,
+        capturePreviewBundle!.previewStlPath,
+        captureSessionToken.slice(0, 8),
+        capturePreviewScale,
+      );
+      const applied = await applyManualCodeDraft(nextSource);
+      if (!applied) return;
+      captureSolidifySource = nextSource;
+      capturePreviewApplied = true;
+      captureCameraStatus = 'Capture solidify draft applied';
+    } catch (error) {
+      captureCameraStatus = formatBackendError(error);
+    }
+  }
+
+  function updateCapturePreviewScale(scale: number) {
+    capturePreviewScale = scale;
+    capturePreviewApplied = false;
+    captureSolidifySource = '';
+    if (captureRunId) {
+      void saveCapturePreviewSettings(captureRunId, capturePreviewCropBounds, scale).catch((error) => {
+        captureCameraStatus = formatBackendError(error);
+      });
+    }
+  }
+
+  function captureCropBoundsKey(bounds: CaptureCropBounds | null): string {
+    return bounds ? JSON.stringify(bounds) : 'raw';
+  }
+
+  function cloneCaptureCropBounds(bounds: CaptureCropBounds): CaptureCropBounds {
+    return { min: [...bounds.min], max: [...bounds.max] } as CaptureCropBounds;
+  }
+
+  function resetCaptureCropState() {
+    captureCropEnabled = false;
+    captureCropMode = 'scale';
+    captureCropBounds = null;
+    capturePreviewCropBounds = null;
+    captureCropDirty = false;
+    capturePreparedCropKey = null;
+  }
+
+  function updateCaptureCropBounds(bounds: CaptureCropBounds) {
+    captureCropBounds = cloneCaptureCropBounds(bounds);
+    captureCropDirty = captureCropBoundsKey(captureCropBounds) !== captureCropBoundsKey(capturePreviewCropBounds);
+    capturePreviewApplied = false;
+    captureSolidifySource = '';
+  }
+
+  async function updateCaptureCropEnabled(enabled: boolean) {
+    if (enabled) {
+      captureCropEnabled = true;
+      captureCropMode = 'scale';
+      captureCropDirty = true;
+      capturePreviewApplied = false;
+      captureSolidifySource = '';
+      return;
+    }
+    await resetCaptureCrop();
+  }
+
+  async function previewCaptureCrop() {
+    if (!captureCropBounds) return;
+    const previousBundle = capturePreviewBundle;
+    const previousManifest = capturePreviewManifest;
+    const previousPreparedCropKey = capturePreparedCropKey;
+    const previousPreviewCropBounds = capturePreviewCropBounds;
+    capturePreviewCropBounds = cloneCaptureCropBounds(captureCropBounds);
+    capturePreviewBundle = null;
+    capturePreviewManifest = null;
+    capturePreparedCropKey = null;
+    capturePreviewApplied = false;
+    captureSolidifySource = '';
+    capturePreviewPrepareError = '';
+    captureGuidance = 'PREPARING PREVIEW';
+    if (captureGuide) {
+      captureGuideState = { status: 'stale', reason: 'Guide is stale: selected crop/source mesh digest changed.' };
+      captureGuideError = captureGuideState.reason;
+    }
+    if (!await ensureCapturePreviewPrepared()) {
+      capturePreviewBundle = previousBundle;
+      capturePreviewManifest = previousManifest;
+      capturePreparedCropKey = previousPreparedCropKey;
+      capturePreviewCropBounds = previousPreviewCropBounds;
+      captureCropDirty = true;
+      captureGuidance = 'INSPECT MESH';
+      return;
+    }
+    captureCropDirty = false;
+  }
+
+  async function resetCaptureCrop() {
+    const previousBundle = capturePreviewBundle;
+    const previousManifest = capturePreviewManifest;
+    const previousPreparedCropKey = capturePreparedCropKey;
+    const previousPreviewCropBounds = capturePreviewCropBounds;
+    captureCropEnabled = false;
+    captureCropBounds = null;
+    capturePreviewCropBounds = null;
+    captureCropDirty = false;
+    capturePreviewApplied = false;
+    captureSolidifySource = '';
+    capturePreviewPrepareError = '';
+    if (captureGuide) {
+      captureGuideState = { status: 'stale', reason: 'Guide is stale: selected crop/source mesh digest changed.' };
+      captureGuideError = captureGuideState.reason;
+    }
+    if (capturePreparedCropKey === 'raw') return;
+    capturePreviewBundle = null;
+    capturePreviewManifest = null;
+    capturePreparedCropKey = null;
+    captureGuidance = 'PREPARING PREVIEW';
+    if (!await ensureCapturePreviewPrepared()) {
+      capturePreviewBundle = previousBundle;
+      capturePreviewManifest = previousManifest;
+      capturePreparedCropKey = previousPreparedCropKey;
+      capturePreviewCropBounds = previousPreviewCropBounds;
+      captureCropEnabled = previousPreviewCropBounds !== null;
+      captureCropDirty = false;
+      captureGuidance = 'INSPECT MESH';
+    }
+  }
+
+  function isCaptureTargetCurrent(): boolean {
+    const currentThreadId = get(activeThreadId);
+    return currentThreadId === captureTargetThreadId
+      || (captureStartedFromUnboundWorkspace && currentThreadId === null);
+  }
+
+  async function answerCaptureProjectSwitch(choice: 'switch' | 'stay') {
+    const pending = pendingCaptureProjectSwitch;
+    pendingCaptureProjectSwitch = null;
+    if (!pending || choice === 'stay') return;
+
+    try {
+      if (pending.targetMessageId) {
+        const thread = await getThread(pending.targetThreadId);
+        upsertThreadInHistory(thread);
+        const targetMessage = thread.messages.find(
+          (message) => message.id === pending.targetMessageId && isRenderableVersionTimelineMessage(message),
+        );
+        if (!targetMessage) throw new Error(`Capture target version ${pending.targetMessageId} is unavailable.`);
+        activeThreadId.set(thread.id);
+        currentView.set('workbench');
+        await loadVersion(targetMessage, thread.id);
+      } else {
+        activeThreadId.set(pending.targetThreadId);
+        activeVersionId.set(null);
+        workingCopy.reset();
+        paramPanelState.reset();
+        session.setStlUrl(null);
+        session.clearModelRuntime();
+        currentView.set('workbench');
+      }
+      if (captureTargetDraft) {
+        workingCopy.patch({ ...captureTargetDraft });
+        paramPanelState.hydrate({
+          versionId: captureTargetDraft.sourceVersionId,
+          uiSpec: captureTargetDraft.uiSpec,
+          params: captureTargetDraft.params,
+        });
+      }
+      await loadLayoutForThread(pending.targetThreadId);
+      showWindow('capture');
+    } catch (error) {
+      captureCameraStatus = formatBackendError(error);
+    }
+  }
+
+  async function retryCaptureReconstructionFromDesktop() {
+    if (!captureSessionToken) return;
+    try {
+      const sessionInfo = await retryCaptureReconstruction(captureSessionToken);
+      captureSessionState = captureSessionStateFromBackend(sessionInfo.state);
+      capturePreviewBundle = null;
+      capturePreviewManifest = null;
+      capturePreviewApplied = false;
+      resetCaptureCropState();
+      capturePreviewPrepareError = '';
+      if (captureGuide) {
+        captureGuideState = { status: 'stale', reason: 'Guide is stale: capture reconstruction changed.' };
+        captureGuideError = captureGuideState.reason;
+      }
+      captureGuidance = 'RECONSTRUCTING 0%';
+      captureCameraStatus = `${captureAcceptedFrameCount} source frames retained`;
+      if (capturePollTimer === null) capturePollTimer = setInterval(() => void pollCaptureSession(), 1000);
+    } catch (error) {
+      captureCameraStatus = formatBackendError(error);
+    }
+  }
+
+  async function addCapturePhotos() {
+    if (!captureSessionToken) return;
+    try {
+      const sessionInfo = await resumeCaptureSession(captureSessionToken);
+      captureSessionState = captureSessionStateFromBackend(sessionInfo.state);
+      captureMeshPreview = null;
+      capturePreviewBundle = null;
+      capturePreviewManifest = null;
+      capturePreviewApplied = false;
+      resetCaptureCropState();
+      captureSolidifySource = '';
+      capturePreviewPrepareError = '';
+      if (captureGuide) {
+        captureGuideState = { status: 'stale', reason: 'Guide is stale: capture reconstruction changed.' };
+        captureGuideError = captureGuideState.reason;
+      }
+      captureGuidance = 'ADD PHOTOS';
+      captureCameraStatus = `${captureAcceptedFrameCount} frames retained; continue on same phone link`;
+      if (capturePollTimer === null) capturePollTimer = setInterval(() => void pollCaptureSession(), 1000);
+    } catch (error) {
+      captureCameraStatus = formatBackendError(error);
+    }
+  }
+
+  async function commitCapturePreview() {
+    if (!capturePreviewApplied || !captureSolidifySource || !captureTargetThreadId) return;
+    if (get(activeThreadId) !== captureTargetThreadId) {
+      captureCameraStatus = 'Capture conflict: bound project is not active.';
+      return;
+    }
+    try {
+      await commitManualVersion({
+        code: captureSolidifySource,
+        title: captureTargetTitle || `Capture ${captureSessionToken.slice(0, 8)}`,
+        versionName: 'Capture Mesh',
+      });
+      captureCameraStatus = 'Capture model committed';
+    } catch (error) {
+      captureCameraStatus = formatBackendError(error);
+    }
+  }
 
   async function collectQueuedThreadBatch(threadId: string): Promise<{
     messageIds: string[];
@@ -2254,9 +3631,9 @@
     triggerMacroNodeFocus(requestedNodeId);
   }
 
-  function startBlankProject() {
+  async function startBlankProject() {
     showNewProjectChooser = false;
-    createNewThread({ mode: 'blank' });
+    await createNewThread({ mode: 'blank' });
   }
 
   async function loadCampaignRuns() {
@@ -2354,27 +3731,6 @@
     showWindow('projects');
   }
 
-  async function restoreCampaignProject() {
-    try {
-      const navigation = await campaignRunClient.getActiveProjectNavigation();
-      if (!navigation || navigation.kind !== 'campaign' || navigation.view !== 'campaign') return;
-      await loadAppWindowLayout();
-      const run = await campaignRunClient.get(navigation.id);
-      activeCampaignRun = run;
-      await loadCampaignStep(run.definitionId, run.currentStepId);
-      campaignRuns = [run, ...campaignRuns.filter((candidate) => candidate.id !== run.id)];
-      campaignRunError = null;
-      currentView.set('campaign');
-    } catch (error) {
-      activeCampaignRun = null;
-      campaignRunError = `Campaign run is unavailable: ${formatBackendError(error)}`;
-      await campaignRunClient.clearActiveProjectNavigation().catch(() => {});
-      currentView.set('workbench');
-      await loadAppWindowLayout();
-      showWindow('projects');
-    }
-  }
-
   async function handleTopImportFcstd() {
     showNewProjectChooser = false;
     if (freecadUnavailableReason) {
@@ -2395,8 +3751,8 @@
     showNewProjectImport = true;
   }
 
-  function handleTopMacroImport(data: { code: string; title: string }) {
-    createNewThread({ mode: 'macro', ...data });
+  async function handleTopMacroImport(data: { code: string; title: string }) {
+    await createNewThread({ mode: 'macro', ...data });
     showNewProjectImport = false;
   }
 
@@ -2405,7 +3761,6 @@
       await boot();
       await loadCampaignDefinitions();
       await loadCampaignRuns();
-      await restoreCampaignProject();
     })();
     // Initial fetch of agent sessions (push events only fire on changes, not on load)
     void getActiveAgentSessions().then(sessions => { activeAgentSessions = sessions; }).catch(() => {});
@@ -2463,6 +3818,38 @@
       }
       void refreshThreadAgentState();
     }) : noopUnlisten;
+    const unlistenProjectFolderSync = canListenToTauri ? listen<ProjectFolderWatchEvent[]>(
+      'project-folder-sync',
+      (event) => {
+        const latest = event.payload.at(-1);
+        if (!latest) return;
+        if (latest.kind === 'detected') {
+          projectFolderNotice = {
+            tone: 'pending',
+            title: 'SOURCE CHANGED',
+            body: `${latest.slug}/model.ecky changed externally. Waiting for validation.`,
+            threadId: latest.threadId,
+            messageId: null,
+          };
+        } else if (latest.kind === 'applied') {
+          projectFolderNotice = {
+            tone: 'success',
+            title: 'SOURCE APPLIED',
+            body: `${latest.slug}/model.ecky validated and committed as a new version.`,
+            threadId: latest.threadId,
+            messageId: latest.messageId,
+          };
+        } else {
+          projectFolderNotice = {
+            tone: 'error',
+            title: 'SOURCE APPLY FAILED',
+            body: latest.error,
+            threadId: latest.threadId,
+            messageId: latest.messageId,
+          };
+        }
+      },
+    ) : noopUnlisten;
     const unlistenDraftPreview = canListenToTauri ? listen<AgentDraftPreviewUpdatedEvent>(
       'agent-draft-preview-updated',
       (event) => {
@@ -2591,6 +3978,7 @@
       void unlistenPromptClosed.then(fn => fn());
       void unlistenViewportScreenshot.then(fn => fn());
       void unlistenHistory.then(fn => fn());
+      void unlistenProjectFolderSync.then(fn => fn());
       void unlistenDraftPreview.then(fn => fn());
       void unlistenSessions.then(fn => fn());
       void unlistenTerminal.then(fn => fn());
@@ -2797,6 +4185,7 @@
 
   const genieMode = $derived.by(() => {
     if ($onboarding.isActive) return 'speaking';
+    if (pendingCaptureProjectSwitch) return 'speaking';
     if (activeViewportScreenshotChoice) return 'speaking';
     if (activeConfirm) return 'speaking';
     if (isActiveMcpMode && activeAgentTerminalAttention) return 'speaking';
@@ -2827,7 +4216,8 @@
       sessionError: errorText,
       sessionAuthoringError,
       onboardingText: $onboarding.isActive ? $onboarding.text : null,
-      viewportScreenshotMessage: activeViewportScreenshotChoice?.message ?? null,
+      viewportScreenshotMessage:
+        pendingCaptureProjectSwitch?.message ?? activeViewportScreenshotChoice?.message ?? null,
       confirmMessage: activeConfirm?.message ?? null,
       terminalAttentionSummary:
         isActiveMcpMode && activeAgentTerminalAttention
@@ -2989,6 +4379,12 @@
       return [
         { label: 'NEXT', onclick: () => onboarding.next() },
         { label: 'SKIP', onclick: () => onboarding.skip() }
+      ];
+    }
+    if (pendingCaptureProjectSwitch) {
+      return [
+        { label: 'SWITCH TO PROJECT', onclick: () => void answerCaptureProjectSwitch('switch') },
+        { label: 'STAY HERE', onclick: () => void answerCaptureProjectSwitch('stay') },
       ];
     }
     if (activeViewportScreenshotChoice) {
@@ -3462,6 +4858,9 @@
                 modelKey={effectiveViewerModelKey}
                 stlUrl={effectiveViewerStlUrl}
                 viewerAssets={effectiveViewerAssets}
+                femResult={visibleFemResult}
+                femMeshPreview={visibleFemMeshPreview}
+                {femDisplay}
                 manifestParts={hasSketchPreview ? [] : activeModelManifest?.parts ?? []}
                 edgeTargets={hasSketchPreview ? sketchPreview?.artifactBundle?.edgeTargets ?? [] : activeArtifactBundle?.edgeTargets ?? []}
                 faceTargets={hasSketchPreview ? sketchPreview?.artifactBundle?.faceTargets ?? [] : activeArtifactBundle?.faceTargets ?? []}
@@ -3566,7 +4965,11 @@
                 busyText={null}
               />
             </div>
-            <div class="genie-layer" class:onboarding-active={$onboarding.isActive}>
+            <div
+              class="genie-layer"
+              class:onboarding-active={$onboarding.isActive}
+              class:choice-active={Boolean(pendingCaptureProjectSwitch || activeViewportScreenshotChoice)}
+            >
               <VertexGenie 
                 mode={genieMode} 
                 bubble={genieBubble}
@@ -3676,6 +5079,29 @@
     {/if}
   </div>
 
+  {#if projectFolderNotice}
+    <div
+      class="project-folder-notice"
+      class:project-folder-notice--pending={projectFolderNotice.tone === 'pending'}
+      class:project-folder-notice--success={projectFolderNotice.tone === 'success'}
+      class:project-folder-notice--error={projectFolderNotice.tone === 'error'}
+      data-testid="project-folder-notice"
+      role={projectFolderNotice.tone === 'error' ? 'alert' : 'status'}
+      aria-live={projectFolderNotice.tone === 'error' ? 'assertive' : 'polite'}
+    >
+      <div class="project-folder-notice__copy">
+        <strong>{projectFolderNotice.title}</strong>
+        <span>{projectFolderNotice.body}</span>
+      </div>
+      <button
+        class="project-folder-notice__dismiss"
+        onclick={() => projectFolderNotice = null}
+        aria-label="Dismiss source change notice"
+        title="Dismiss"
+      >×</button>
+    </div>
+  {/if}
+
   {#if showNewProjectChooser}
     <Modal title="Start New Project" onclose={() => showNewProjectChooser = false}>
       <div class="new-project-chooser">
@@ -3716,6 +5142,8 @@
       code: codeWindowState,
       projects: projectsWindowState,
       library: libraryWindowState,
+      capture: captureWindowState,
+      analysis: analysisWindowState,
       params: paramsWindowState,
       dialogue: dialogueWindowState,
       docs: docsWindowState,
@@ -3762,6 +5190,115 @@
         onImportFreecadLibraryPart={handleImportFreecadLibraryPart}
         authoredSource={$workingCopy.macroCode || activeVersionMessage?.output?.macroCode || ''}
         onApplyComponentImport={handleApplyComponentImport}
+      />
+    {/snippet}
+
+    {#snippet captureContent()}
+      <CapturePanel
+        sessionState={captureSessionState}
+        pairingUrl={capturePairingUrl}
+        trustUrl={captureTrustUrl}
+        cameraStatus={captureCameraStatus}
+        guidance={captureGuidance}
+        stats={captureStats}
+        onStartCapture={startCaptureSession}
+        onOpenLastCapture={openLastStoredCapture}
+        onCancelCapture={cancelCaptureSession}
+        onApplyPreview={applyCapturePreview}
+        onCommitPreview={commitCapturePreview}
+        onRetryReconstruction={retryCaptureReconstructionFromDesktop}
+        onAddPhotos={addCapturePhotos}
+        onPreviewLoadError={(message) => captureCameraStatus = message}
+        meshPreview={captureMeshPreview}
+        previewModelKey={capturePreviewBundle?.modelId ?? null}
+        previewUrl={capturePreviewUrl}
+        {externalShapeSources}
+        {selectedExternalShapeNodeId}
+        {externalShapePreviewUrl}
+        {externalShapeRawPreviewUrl}
+        externalShapeTargetMessageId={$activeVersionId}
+        {externalShapePreviewIsCropped}
+        {externalShapeError}
+        onSelectExternalShape={(nodeId) => selectedExternalShapeNodeId = nodeId}
+        onApplyExternalPlaneCrop={applySelectedExternalShapePlaneCrop}
+        onRemoveExternalPlaneCrop={removeSelectedExternalShapePlaneCrop}
+        onPreviewExternalSurfaceTrimPath={previewSelectedExternalShapeSurfaceTrimPath}
+        onPreviewExternalSurfaceTrimLoop={previewSelectedExternalShapeSurfaceTrimLoop}
+        onPreviewExternalSurfaceTrimRegion={previewSelectedExternalShapeSurfaceTrimRegion}
+        onApplyExternalSurfaceTrim={applySelectedExternalShapeSurfaceTrim}
+        onRemoveExternalSurfaceTrim={removeSelectedExternalShapeSurfaceTrim}
+        previewApplied={capturePreviewApplied}
+        previewScale={capturePreviewScale}
+        cropEnabled={captureCropEnabled}
+        cropMode={captureCropMode}
+        cropBounds={captureCropBounds}
+        cropDirty={captureCropDirty}
+        onPreviewScaleChange={updateCapturePreviewScale}
+        onCropEnabledChange={updateCaptureCropEnabled}
+        onCropModeChange={(mode) => captureCropMode = mode}
+        onCropBoundsChange={updateCaptureCropBounds}
+        onPreviewCrop={previewCaptureCrop}
+        onResetCrop={resetCaptureCrop}
+        guideMode={captureGuideMode}
+        guide={captureGuide}
+        guideState={captureGuideState}
+        guidePickRole={captureGuidePickRole}
+        guideReady={captureGuideReadiness.ready}
+        guideReadinessReasons={captureGuideReadiness.reasons}
+        guideKnownDistanceMm={captureGuideKnownDistanceMm}
+        guideFeatureDepthMm={captureGuideFeatureDepthMm}
+        guideInstruction={captureGuideInstruction}
+        guideError={captureGuideError}
+        guideComparisonError={captureComparisonError}
+        guideComparisonModelKey={captureGeneratedComparisonBundle?.modelId ?? null}
+        guideComparisonUrl={captureGeneratedComparisonUrl}
+        guideResult={captureGuidedResult}
+        guideDeviation={captureGuidedDeviation}
+        guideDeviationVisible={captureDeviationVisible}
+        guideReferenceVisible={captureReferenceVisible}
+        guideReferenceOpacity={captureReferenceOpacity}
+        guideGeneratedVisible={captureGeneratedVisible}
+        guideGeneratedOpacity={captureGeneratedOpacity}
+        guideCanUndo={(captureGuideHistory?.past.length ?? 0) > 0}
+        guideSelectedLandmarkId={captureGuideSelectedLandmarkId}
+        onStartGuidedCad={startCaptureGuidedCad}
+        onGuidePickRoleChange={(role) => captureGuidePickRole = role}
+        onGuideAnchor={addCaptureGuideAnchor}
+        onGuideAnchorError={(message) => captureGuideError = message}
+        onGuideSelectLandmark={(landmarkId) => captureGuideSelectedLandmarkId = landmarkId}
+        onGuideEditLandmark={editCaptureGuideLandmark}
+        onGuideDeleteLandmark={deleteCaptureGuideLandmark}
+        onGuideUndo={undoCaptureGuideEdit}
+        onGuideEditProfile={editCaptureGuideProfile}
+        onGuideMoveProfileLandmark={reorderCaptureGuideProfile}
+        onGuideEditExpectation={editCaptureGuideExpectation}
+        onGuideSelectFeaturePlan={selectCaptureFeaturePlan}
+        onGuideReferenceVisibleChange={(visible) => captureReferenceVisible = visible}
+        onGuideReferenceOpacityChange={(opacity) => captureReferenceOpacity = opacity}
+        onGuideGeneratedVisibleChange={(visible) => captureGeneratedVisible = visible}
+        onGuideGeneratedOpacityChange={(opacity) => captureGeneratedOpacity = opacity}
+        onGuideDeviationVisibleChange={(visible) => captureDeviationVisible = visible}
+        onGuideKnownDistanceChange={(value) => captureGuideKnownDistanceMm = value}
+        onGuideFeatureDepthChange={(value) => captureGuideFeatureDepthMm = value}
+        onGuideInstructionChange={(value) => captureGuideInstruction = value}
+        onValidateGuide={validateCaptureGuide}
+        onBuildCadFromGuide={buildCadFromCaptureGuide}
+      />
+    {/snippet}
+
+    {#snippet analysisContent()}
+      <AnalysisPanel
+        modelId={activeArtifactBundle?.modelId ?? null}
+        source={$workingCopy.macroCode || activeVersionMessage?.output?.macroCode || ''}
+        onResultChange={(result) => {
+          femResult = result;
+          femResultSource = result ? ($workingCopy.macroCode || activeVersionMessage?.output?.macroCode || '') : '';
+        }}
+        onMeshChange={(mesh) => {
+          femMeshPreview = mesh;
+          femMeshPreviewSource = mesh ? ($workingCopy.macroCode || activeVersionMessage?.output?.macroCode || '') : '';
+        }}
+        onDisplayChange={(display) => femDisplay = display}
       />
     {/snippet}
 
@@ -3855,6 +5392,7 @@
           imageAttachmentUnavailableReason: imageInputUnavailableReason,
           dialogueState,
           messages: activeThreadDialogueMessages,
+          captureRuns: captureHistoryRuns,
           messagesLoading: $activeThreadMessagesLoading,
           messagesHasMore: activeThread ? ($threadMessagePageState[activeThread.id]?.hasMore ?? false) : false,
           messagesPageLoading: activeThread ? ($threadMessagePageState[activeThread.id]?.isLoading ?? false) : false,
@@ -3878,6 +5416,7 @@
           onRestoreVersion: restoreVersion,
           onAuthoredVerifyFocus: handlePromptPanelAuthoredVerifyFocus,
           onVersionChange: loadVersion,
+          onOpenCapture: openCaptureRunFromHistory,
         }}
       />
     {/snippet}
@@ -3979,7 +5518,7 @@
       draftScopeKey={codeModalDraftScopeKey}
       defaultTitle={$workingCopy.title}
       defaultVersionName={$workingCopy.versionName || 'V-manual'}
-      sourceThreadId={$activeThreadId}
+      sourceThreadId={codeModalSourceThreadId}
       sourceMessageId={$activeVersionId}
       onApply={codeModalMode === 'version' ? applyManualCodeDraft : undefined}
       onCommit={codeModalMode === 'version' ? commitManualVersionAndClose : undefined}
@@ -4123,7 +5662,64 @@
     border-color: var(--primary);
     color: var(--primary);
   }
+  .project-folder-notice {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    z-index: 7000;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    width: min(420px, calc(100vw - 24px));
+    padding: 10px 12px;
+    overflow: hidden;
+    border: 1px solid var(--secondary);
+    background: color-mix(in srgb, var(--bg-100) 96%, black);
+    color: var(--text);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  }
+  .project-folder-notice--pending { border-color: var(--primary); }
+  .project-folder-notice--error { border-color: var(--red); }
+  .project-folder-notice__copy {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    flex-direction: column;
+    gap: 4px;
+    overflow: hidden;
+    font-family: var(--font-mono);
+  }
+  .project-folder-notice__copy strong {
+    color: var(--secondary);
+    font-size: 0.68rem;
+    letter-spacing: 0.08em;
+  }
+  .project-folder-notice--pending .project-folder-notice__copy strong { color: var(--primary); }
+  .project-folder-notice--error .project-folder-notice__copy strong { color: var(--red); }
+  .project-folder-notice__copy span {
+    overflow-wrap: anywhere;
+    color: var(--text-dim);
+    font-size: 0.7rem;
+    line-height: 1.4;
+  }
+  .project-folder-notice__dismiss {
+    flex: 0 0 28px;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid var(--bg-300);
+    background: var(--bg-200);
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+  }
+  .project-folder-notice__dismiss:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+  }
   .genie-layer { position: absolute; left: 10px; top: 10px; z-index: 120; pointer-events: auto; max-width: min(56vw, 380px); }
+  .genie-layer.choice-active { z-index: 7000; }
 
   /* STL Cafeteria — multi-microwave strip */
   .cafeteria-strip { position: absolute; bottom: 48px; left: 12px; right: 12px; z-index: 100; display: flex; gap: 8px; flex-wrap: wrap; pointer-events: auto; }

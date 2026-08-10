@@ -21,6 +21,7 @@ test('buildMacroAstMapProjection projects a stable source-backed tree', () => {
         warnings: [],
       },
       taggedAnchors: {},
+      analysisDeclarations: [],
       parts: [
         {
           partId: 'part-model',
@@ -148,6 +149,7 @@ test('leaves sourceRange undefined without backend entries', () => {
       modelManifest: {
         parts: [{ partId: 'body', label: 'Body', parameterKeys: [] }],
         taggedAnchors: {},
+        analysisDeclarations: [],
       } as any,
     uiSpec: { fields: [] } as any,
     parameters: {},
@@ -161,6 +163,7 @@ test('Given verify source nodes When projecting New Params map Then verify claus
       modelManifest: {
         parts: [{ partId: 'body', label: 'Body', parameterKeys: [] }],
         taggedAnchors: {},
+        analysisDeclarations: [],
       } as any,
     uiSpec: { fields: [] } as any,
     parameters: {},
@@ -239,6 +242,7 @@ test('findOwningPartId locates the part node that owns a param fieldKey', () => 
       sourceKind: 'generated',
       document: { documentName: 'Owning Part', documentLabel: 'Owning Part', objectCount: 1, warnings: [] },
       taggedAnchors: {},
+      analysisDeclarations: [],
       parts: [
         {
           partId: 'part-a',

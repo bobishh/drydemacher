@@ -72,6 +72,21 @@ test('activity window is registered and can be opened', () => {
   _resetWindowStoreForTest();
 });
 
+test('capture window is registered and can be opened', () => {
+  _resetWindowStoreForTest();
+
+  assert.ok(ALL_WINDOW_IDS.includes('capture'));
+  assert.equal(windowRegistry.capture.title, 'Capture Session');
+
+  showWindow('capture');
+  const state = get(windowStore);
+  assert.equal(state.capture.visible, true);
+  assert.equal(state.capture.minimized, false);
+  assert.ok(state.capture.width >= windowRegistry.capture.minSize.width);
+
+  _resetWindowStoreForTest();
+});
+
 test('docs window is registered and can be opened', () => {
   _resetWindowStoreForTest();
 
@@ -83,6 +98,26 @@ test('docs window is registered and can be opened', () => {
   assert.equal(state.docs.visible, true);
   assert.equal(state.docs.minimized, false);
   assert.ok(state.docs.width >= windowRegistry.docs.minSize.width);
+
+  _resetWindowStoreForTest();
+});
+
+test('saved docs geometry restores without reopening the transient docs window', () => {
+  _resetWindowStoreForTest();
+
+  const restored = _mergeDbLayout({
+    schemaVersion: 1,
+    rememberLayout: true,
+    windows: {
+      docs: { visible: true, minimized: false, x: 170, y: 100, width: 1000, height: 700, z: 8 },
+    },
+  });
+
+  assert.equal(restored.docs.visible, false);
+  assert.deepEqual(
+    { x: restored.docs.x, y: restored.docs.y, width: restored.docs.width, height: restored.docs.height },
+    { x: 170, y: 100, width: 1000, height: 700 },
+  );
 
   _resetWindowStoreForTest();
 });

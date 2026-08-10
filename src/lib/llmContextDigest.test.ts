@@ -33,6 +33,7 @@ test('llmContextDigest summarizes manifest parts without asset paths', () => {
       geometryBackend: 'freecad',
       document: { documentName: 'doc', documentLabel: 'doc', objectCount: 1, warnings: [] },
       taggedAnchors: {},
+      analysisDeclarations: [],
       parts: [
         {
           partId: 'basket',

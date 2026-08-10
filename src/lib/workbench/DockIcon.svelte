@@ -20,6 +20,10 @@
     <path d="M3 5h7a3 3 0 0 1 2 1 3 3 0 0 1 2-1h7v15h-7a3 3 0 0 0-2 1 3 3 0 0 0-2-1H3V5Z M12 6v15" />
   {:else if icon === 'library'}
     <path d="M4 4h7v16H4V4Z M13 4h7v16h-7V4Z M7 8v8 M16 8v8" />
+  {:else if icon === 'capture'}
+    <path d="M4 8h4l2-3h4l2 3h4v10H4V8Z M8 12h8 M12 9v6" />
+  {:else if icon === 'analysis'}
+    <path d="M4 19 8 5l4 14 4-14 4 14 M6 13h12 M9 19h6" />
   {:else if icon === 'draw'}
     <path d="m5 18 1-5 9-9 5 5-9 9-6 1Z M14 6l4 4 M4 21h16" />
   {:else if icon === 'terminal'}

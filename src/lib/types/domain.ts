@@ -8,6 +8,7 @@ export type MessageRole = Contract.MessageRole;
 export type MessageStatus = Contract.MessageStatus;
 export type InteractionMode = Contract.InteractionMode;
 export type MessageVisualKind = Contract.MessageVisualKind;
+export type CaptureRun = Contract.CaptureRun;
 export type MacroDialect = Contract.MacroDialect;
 export type SourceLanguage = Contract.SourceLanguage;
 export type GeometryBackend = Contract.GeometryBackend;
@@ -191,6 +192,7 @@ export interface Thread {
   pendingCount: number;
   queuedCount: number;
   errorCount: number;
+  isBlank?: boolean;
   genieTraits?: GenieTraits | null;
   status?: ThreadStatus;
   finalizedAt?: number | null;
@@ -1110,6 +1112,7 @@ export function normalizeThread(thread: Contract.Thread | Thread): Thread {
     pendingCount: thread.pendingCount ?? 0,
     queuedCount: thread.queuedCount ?? 0,
     errorCount: thread.errorCount ?? 0,
+    isBlank: thread.isBlank ?? false,
     genieTraits: genieTraits ? normalizeGenieTraits(genieTraits) : null,
     status: thread.status ?? "active",
     finalizedAt: thread.finalizedAt ?? null,

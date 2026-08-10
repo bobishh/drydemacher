@@ -12,11 +12,22 @@ test('dock metadata preserves work sequence, groups, stable names, short labels,
 
   assert.deepEqual(
     controls.map(({ id }) => id),
-    ['projects', 'params', 'dialogue', 'code', 'docs', 'library', 'draw', 'settings'],
+    ['projects', 'params', 'dialogue', 'code', 'docs', 'library', 'capture', 'analysis', 'draw', 'settings'],
   );
   assert.deepEqual(
     controls.map(({ group }) => group),
-    ['persistent', 'persistent', 'persistent', 'persistent', 'persistent', 'persistent', 'utility', 'utility'],
+    [
+      'persistent',
+      'persistent',
+      'persistent',
+      'persistent',
+      'persistent',
+      'persistent',
+      'persistent',
+      'persistent',
+      'utility',
+      'utility',
+    ],
   );
   assert.deepEqual(
     controls.map(({ accessibleName }) => accessibleName),
@@ -27,6 +38,8 @@ test('dock metadata preserves work sequence, groups, stable names, short labels,
       'Code inspector',
       'Ecky IR docs',
       'Reusable component library',
+      'Work with external shapes',
+      'Structural analysis',
       'Draw annotations',
       'Settings',
     ],

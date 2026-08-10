@@ -1,8 +1,10 @@
 <script lang="ts">
   import { open } from '@tauri-apps/plugin-dialog';
+  import { convertFileSrc } from '@tauri-apps/api/core';
   import { onDestroy, onMount, untrack } from 'svelte';
   import * as THREE from 'three';
   import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+  import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
   import { ThreeMFLoader } from 'three/examples/jsm/loaders/3MFLoader.js';
   import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
   import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
@@ -35,8 +37,24 @@
   } from './viewerDisplayMode';
   import { resolveViewerTone, type ViewerTone } from './viewerLook';
   import { resolveViewerAssetUrl } from './viewerAssetUrl';
+  import { resolveViewerClipPlanes } from './viewerCameraPolicy';
+  import { materializeViewerTopology } from './viewerTopologyBudget';
   import { shouldHandleSelectionClick, shouldHandleViewerClick } from './viewerInteraction';
   import { prepareStlDisplayGeometry } from './viewerStlNormals';
+  import {
+    captureSurfaceAnchorFromIntersection,
+    type CaptureSurfaceAnchorValue,
+  } from './capture/captureSurfaceAnchor';
+  import { buildCaptureGuideOverlayPrimitives } from './capture/captureGuideOverlay';
+  import { buildCaptureDeviationDisplayPoints } from './capture/captureDeviationOverlay';
+  import type {
+    CaptureObservedDeviationReport,
+    CaptureReconstructionGuide,
+    SurfaceTrimCapPreview,
+    SurfaceTrimLoopSegmentPreview,
+  } from './tauri/contracts';
+  import type { FemMeshPreviewResponse, FemRunResponse } from './tauri/client';
+  import { femColorRamp, normalizeFemField, type FemDisplayOptions } from './femDisplay';
 
   type ViewportBusyPhase = 'generating' | 'repairing' | 'rendering' | 'committing' | null;
 
@@ -67,6 +85,31 @@
     topologyMode = 'mesh',
     viewerMode = 'orbit',
     persistedCameraState = null,
+    cropBoxEnabled = false,
+    cropBoxMode = 'translate',
+    cropBounds = null,
+    captureLandmarkMode = false,
+    captureSourceMeshContentDigest = null,
+    capturePlaneAnchors = [],
+    surfaceTrimActive = false,
+    surfaceTrimAnchors = [],
+    surfaceTrimKeepSeed = null,
+    surfaceTrimLoopSegments = [],
+    surfaceTrimRetainedTriangleIndices = [],
+    surfaceTrimCapPreview = null,
+    surfaceTrimSelectedAnchorIndex = null,
+    captureGuide = null,
+    captureSelectedLandmarkId = null,
+    captureComparisonStlUrl = null,
+    captureDeviation = null,
+    captureDeviationVisible = true,
+    captureReferenceVisible = true,
+    captureReferenceOpacity = 0.28,
+    captureGeneratedVisible = true,
+    captureGeneratedOpacity = 1,
+    femResult = null,
+    femMeshPreview = null,
+    femDisplay = null,
     onSearchQueryChange,
     onSelectTarget,
     onOverlayChange,
@@ -74,6 +117,12 @@
     onCameraStateChange,
     onModelLoaded,
     onModelLoadError,
+    onCropBoundsChange,
+    onCaptureSurfaceAnchor,
+    onCaptureSurfaceHover,
+    onCaptureSurfaceAnchorError,
+    onCaptureSelectLandmark,
+    onSurfaceTrimPointSelect,
   }: {
     modelKey?: string | null;
     stlUrl?: string | null;
@@ -101,6 +150,31 @@
     topologyMode?: TopologyMode;
     viewerMode?: 'orbit' | 'select' | 'measure';
     persistedCameraState?: ViewportCameraState | null;
+    cropBoxEnabled?: boolean;
+    cropBoxMode?: 'translate' | 'scale';
+    cropBounds?: { min: [number, number, number]; max: [number, number, number] } | null;
+    captureLandmarkMode?: boolean;
+    captureSourceMeshContentDigest?: string | null;
+    capturePlaneAnchors?: CaptureSurfaceAnchorValue[];
+    surfaceTrimActive?: boolean;
+    surfaceTrimAnchors?: CaptureSurfaceAnchorValue[];
+    surfaceTrimKeepSeed?: CaptureSurfaceAnchorValue | null;
+    surfaceTrimLoopSegments?: SurfaceTrimLoopSegmentPreview[];
+    surfaceTrimRetainedTriangleIndices?: number[];
+    surfaceTrimCapPreview?: SurfaceTrimCapPreview | null;
+    surfaceTrimSelectedAnchorIndex?: number | null;
+    captureGuide?: CaptureReconstructionGuide | null;
+    captureSelectedLandmarkId?: string | null;
+    captureComparisonStlUrl?: string | null;
+    captureDeviation?: CaptureObservedDeviationReport | null;
+    captureDeviationVisible?: boolean;
+    captureReferenceVisible?: boolean;
+    captureReferenceOpacity?: number;
+    captureGeneratedVisible?: boolean;
+    captureGeneratedOpacity?: number;
+    femResult?: FemRunResponse | null;
+    femMeshPreview?: FemMeshPreviewResponse | null;
+    femDisplay?: FemDisplayOptions | null;
     onSearchQueryChange?: (query: string) => void;
     onSelectTarget?: (target: ContextSelectionTarget | null) => void;
     onOverlayChange?: (primitiveId: string, value: ParamValue) => Promise<void> | void;
@@ -108,6 +182,12 @@
     onCameraStateChange?: (camera: ViewportCameraState) => void;
     onModelLoaded?: () => void;
     onModelLoadError?: (message: string) => void;
+    onCropBoundsChange?: (bounds: { min: [number, number, number]; max: [number, number, number] }) => void;
+    onCaptureSurfaceAnchor?: (anchor: CaptureSurfaceAnchorValue) => void;
+    onCaptureSurfaceHover?: (anchor: CaptureSurfaceAnchorValue | null) => void;
+    onCaptureSurfaceAnchorError?: (message: string) => void;
+    onCaptureSelectLandmark?: (landmarkId: string) => void;
+    onSurfaceTrimPointSelect?: (index: number) => void;
   } = $props();
 
   type RuntimeMesh = {
@@ -115,8 +195,10 @@
     baseBounds: THREE.Box3 | null;
     outline: THREE.LineSegments<THREE.EdgesGeometry, THREE.LineBasicMaterial> | null;
     mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>;
+    sourcePickMesh?: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
     topology: THREE.LineSegments<THREE.WireframeGeometry, THREE.LineBasicMaterial> | null;
     tone: ViewerTone;
+    captureLayer?: 'reference' | 'generated';
   };
 
   type RuntimeEdge = {
@@ -143,6 +225,10 @@
   let camera: THREE.PerspectiveCamera | null = null;
   let renderer: THREE.WebGLRenderer | null = null;
   let controls: OrbitControls | null = null;
+  let cropTransformControls: TransformControls | null = null;
+  let cropTransformHelper: THREE.Object3D | null = null;
+  let cropBoxMesh: THREE.Mesh<THREE.BoxGeometry, THREE.MeshBasicMaterial> | null = null;
+  let appliedCropBoundsSignature = '';
   let modelRoot: THREE.Group | null = null;
   let runtimeMeshes: RuntimeMesh[] = [];
   let runtimeEdges: RuntimeEdge[] = [];
@@ -166,13 +252,53 @@
     label: string;
     explanation: string | null;
   } | null>(null);
+  let captureGuideProjected = $state<{
+    points: Array<{
+      landmarkId: string;
+      ordinal: number;
+      label: string;
+      role: string;
+      x: number;
+      y: number;
+    }>;
+    segments: Array<{ key: string; kind: 'profile' | 'axis'; x1: number; y1: number; x2: number; y2: number }>;
+    planePolygons: Array<{ key: string; points: string }>;
+  }>({ points: [], segments: [], planePolygons: [] });
+  let capturePlaneProjected = $state<Array<{ x: number; y: number }>>([]);
+  let capturePlaneNormalProjected = $state<{
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+  } | null>(null);
+  let surfaceTrimProjected = $state<{
+    points: Array<{ x: number; y: number }>;
+    keepSeed: { x: number; y: number } | null;
+    segments: Array<{ key: string; x1: number; y1: number; x2: number; y2: number }>;
+  }>({ points: [], keepSeed: null, segments: [] });
+  let surfaceTrimRegionOverlay: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial> | null = null;
+  let surfaceTrimCapOverlay: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial> | null = null;
+  let captureComparisonLoaded = $state(false);
+  let captureDeviationOverlay: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial> | null = null;
+  let captureDeviationPointCount = $state(0);
+  let femOverlay = $state.raw<THREE.Group | null>(null);
+  let femOverlayKind = $state<'mesh' | 'result' | null>(null);
+  let femLoadToken = 0;
+  let femOverlayError = $state('');
+  let femLegend = $state<{ label: string; minimum: number; maximum: number; unit: string } | null>(null);
   const viewerAssetSignature = $derived.by(() =>
     viewerAssets.map((asset) => `${asset.partId}:${asset.nodeId}:${asset.path}`).join('|'),
   );
   const manifestPartSignature = $derived.by(() =>
     manifestParts.map((part) => `${part.partId}:${part.label}:${part.kind}:${part.semanticRole ?? ''}`).join('|'),
   );
+  const topologyMaterialization = $derived(
+    materializeViewerTopology(edgeTargets.length, faceTargets.length),
+  );
   const edgeTargetSignature = $derived.by(() =>
+    !topologyMaterialization.materialize
+      ? `query-only:${edgeTargets.length}`
+      :
     edgeTargets
       .map((target) => [
         target.targetId,
@@ -189,6 +315,9 @@
       .join('|'),
   );
   const faceTargetSignature = $derived.by(() =>
+    !topologyMaterialization.materialize
+      ? `query-only:${faceTargets.length}`
+      :
     faceTargets
       .map((target) => [
         target.targetId,
@@ -204,10 +333,38 @@
       .join('|'),
   );
   const modelLoadSignature = $derived.by(
-    () => `${modelKey ?? ''}::${stlUrl ?? ''}::${viewerAssetSignature}::${manifestPartSignature}`,
+    () => `${modelKey ?? ''}::${stlUrl ?? ''}::${captureComparisonStlUrl ?? ''}::${viewerAssetSignature}::${manifestPartSignature}`,
   );
   const showEditableCallouts = $derived(false);
   const selectionMode = $derived.by(() => viewerMode === 'select');
+  const capturePickingMode = $derived.by(() => captureLandmarkMode && Boolean(captureSourceMeshContentDigest));
+  const captureGuidePrimitives = $derived.by(() =>
+    captureGuide ? buildCaptureGuideOverlayPrimitives(captureGuide) : null,
+  );
+  const captureGuideSignature = $derived.by(() => captureGuide
+    ? [
+        captureGuide.guideId,
+        captureGuide.revision,
+        captureGuide.canonicalDigest,
+        ...captureGuide.landmarks.map(item => `${item.landmarkId}:${item.role}:${item.anchor.sourcePosition.join(',')}`),
+        ...captureGuide.profiles.map(item => `${item.profileId}:${item.kind}:${item.landmarkIds.join(',')}`),
+        ...captureGuide.axes.map(item => `${item.axisId}:${item.landmarkIds.join(',')}`),
+        ...captureGuide.planes.map(item => `${item.planeId}:${item.landmarkIds.join(',')}`),
+      ].join('|')
+    : '');
+  const capturePlaneSignature = $derived.by(() => capturePlaneAnchors
+    .map(anchor => `${anchor.triangleIndex}:${anchor.barycentric.join(',')}:${anchor.sourcePosition.join(',')}`)
+    .join('|'));
+  const surfaceTrimSignature = $derived.by(() => [
+    surfaceTrimActive ? 'active' : 'inactive',
+    ...surfaceTrimAnchors.map(anchor => `${anchor.triangleIndex}:${anchor.barycentric.join(',')}:${anchor.sourcePosition.join(',')}`),
+    surfaceTrimKeepSeed ? `seed:${surfaceTrimKeepSeed.triangleIndex}:${surfaceTrimKeepSeed.sourcePosition.join(',')}` : 'no-seed',
+    ...surfaceTrimLoopSegments.flatMap(segment => segment.continuousPolyline.map((point, index) => `${segment.segmentIndex}:${index}:${point.sourcePosition.join(',')}`)),
+    `retained:${surfaceTrimRetainedTriangleIndices.join(',')}`,
+    surfaceTrimCapPreview
+      ? `cap:${surfaceTrimCapPreview.vertices.map(vertex => vertex.join(',')).join(';')}:${surfaceTrimCapPreview.triangles.map(triangle => triangle.join(',')).join(';')}`
+      : 'no-cap',
+  ].join('|'));
   const showPartOverlay = $derived.by(
     () => selectedTarget?.kind === 'part' && shouldDisplayViewportControlList(selectedTarget),
   );
@@ -216,6 +373,7 @@
   const pointer = new THREE.Vector2();
   let pointerDownAt: { x: number; y: number } | null = null;
   let isOrbitDragging = false;
+  let lastCaptureHoverAt = 0;
 
   function currentCameraState(): ViewportCameraState | null {
     if (!camera || !controls) return null;
@@ -235,7 +393,19 @@
     camera.updateProjectionMatrix();
     controls.target.set(...nextState.target);
     controls.update();
+    updateCameraClipPlanes();
     updateOverlayAnchor();
+  }
+
+  function updateCameraClipPlanes(object: THREE.Object3D | null = modelRoot) {
+    if (!camera || !object) return;
+    object.updateMatrixWorld(true);
+    const bounds = new THREE.Box3().setFromObject(object);
+    if (bounds.isEmpty()) return;
+    const clipPlanes = resolveViewerClipPlanes(bounds, camera.position);
+    camera.near = clipPlanes.near;
+    camera.far = clipPlanes.far;
+    camera.updateProjectionMatrix();
   }
 
   function emitCameraStateChange() {
@@ -486,6 +656,119 @@
     return 'x';
   }
 
+  function runtimeLocalBounds(): THREE.Box3 | null {
+    const bounds = new THREE.Box3();
+    let found = false;
+    for (const runtime of runtimeMeshes) {
+      if (!runtime.baseBounds || runtime.baseBounds.isEmpty()) continue;
+      bounds.union(runtime.baseBounds);
+      found = true;
+    }
+    return found ? bounds : null;
+  }
+
+  function normalizedCropBounds() {
+    const fullBounds = runtimeLocalBounds();
+    if (!fullBounds) return null;
+    return cropBounds ?? {
+      min: fullBounds.min.toArray() as [number, number, number],
+      max: fullBounds.max.toArray() as [number, number, number],
+    };
+  }
+
+  function emitCropBoxBounds() {
+    if (!cropBoxMesh) return;
+    const halfSize = cropBoxMesh.scale.clone();
+    halfSize.set(Math.abs(halfSize.x), Math.abs(halfSize.y), Math.abs(halfSize.z)).multiplyScalar(0.5);
+    const minimum = cropBoxMesh.position.clone().sub(halfSize);
+    const maximum = cropBoxMesh.position.clone().add(halfSize);
+    onCropBoundsChange?.({
+      min: minimum.toArray() as [number, number, number],
+      max: maximum.toArray() as [number, number, number],
+    });
+  }
+
+  function handleCropDraggingChanged(event: { value?: unknown }) {
+    if (controls) controls.enabled = !Boolean(event.value);
+  }
+
+  function handleCropMouseUp() {
+    if (!cropBoxMesh) return;
+    const fullBounds = runtimeLocalBounds();
+    const minimumSize = fullBounds
+      ? Math.max(fullBounds.getSize(new THREE.Vector3()).length() * 0.002, 1.0e-6)
+      : 1.0e-6;
+    cropBoxMesh.scale.set(
+      Math.max(Math.abs(cropBoxMesh.scale.x), minimumSize),
+      Math.max(Math.abs(cropBoxMesh.scale.y), minimumSize),
+      Math.max(Math.abs(cropBoxMesh.scale.z), minimumSize),
+    );
+    emitCropBoxBounds();
+  }
+
+  function disposeCropBox() {
+    if (cropTransformControls) {
+      cropTransformControls.removeEventListener('dragging-changed', handleCropDraggingChanged);
+      cropTransformControls.removeEventListener('mouseUp', handleCropMouseUp);
+      cropTransformControls.detach();
+      cropTransformControls.dispose();
+    }
+    if (cropTransformHelper) scene?.remove(cropTransformHelper);
+    if (cropBoxMesh) {
+      cropBoxMesh.parent?.remove(cropBoxMesh);
+      cropBoxMesh.geometry.dispose();
+      cropBoxMesh.material.dispose();
+    }
+    cropTransformControls = null;
+    cropTransformHelper = null;
+    cropBoxMesh = null;
+    appliedCropBoundsSignature = '';
+    if (controls) controls.enabled = !selectionMode && !hideModelWhileBusy;
+  }
+
+  function syncCropBox() {
+    if (!cropBoxEnabled || !scene || !camera || !renderer || !modelRoot) {
+      disposeCropBox();
+      return;
+    }
+    const bounds = normalizedCropBounds();
+    if (!bounds) return;
+    if (!cropBoxMesh) {
+      cropBoxMesh = new THREE.Mesh(
+        new THREE.BoxGeometry(1, 1, 1),
+        new THREE.MeshBasicMaterial({
+          color: 0xc89a58,
+          wireframe: true,
+          transparent: true,
+          opacity: 0.9,
+          depthTest: false,
+        }),
+      );
+      cropBoxMesh.renderOrder = 20;
+      cropBoxMesh.userData.ignoreRaycast = true;
+      modelRoot.add(cropBoxMesh);
+
+      cropTransformControls = new TransformControls(camera, renderer.domElement);
+      cropTransformControls.setSpace('local');
+      cropTransformControls.size = 0.8;
+      cropTransformControls.addEventListener('dragging-changed', handleCropDraggingChanged);
+      cropTransformControls.addEventListener('mouseUp', handleCropMouseUp);
+      cropTransformHelper = cropTransformControls.getHelper();
+      scene.add(cropTransformHelper);
+      cropTransformControls.attach(cropBoxMesh);
+    }
+    cropTransformControls?.setMode(cropBoxMode);
+    const signature = JSON.stringify(bounds);
+    if (signature !== appliedCropBoundsSignature) {
+      const minimum = new THREE.Vector3(...bounds.min);
+      const maximum = new THREE.Vector3(...bounds.max);
+      cropBoxMesh.position.copy(minimum).add(maximum).multiplyScalar(0.5);
+      cropBoxMesh.scale.copy(maximum).sub(minimum);
+      appliedCropBoundsSignature = signature;
+    }
+    if (!cropBounds) emitCropBoxBounds();
+  }
+
   onMount(() => {
     setupViewer();
 
@@ -509,6 +792,7 @@
     }
     controls?.removeEventListener?.('start', handleOrbitStart);
     controls?.removeEventListener?.('end', handleOrbitEnd);
+    controls?.removeEventListener?.('change', handleControlsChange);
     disposeModel();
     controls?.dispose?.();
     if (renderer) {
@@ -535,6 +819,13 @@
   });
 
   $effect(() => {
+    void cropBoxEnabled;
+    void cropBoxMode;
+    void cropBounds;
+    syncCropBox();
+  });
+
+  $effect(() => {
     const root = modelRoot;
     const targetSignature = `${edgeTargetSignature}::${faceTargetSignature}`;
     void targetSignature;
@@ -555,14 +846,60 @@
   $effect(() => {
     applyPreviewTransforms();
     updateOverlayAnchor();
+    updateCaptureGuideOverlay();
+  });
+
+  $effect(() => {
+    const signature = captureGuideSignature;
+    const planeSignature = capturePlaneSignature;
+    const trimSignature = surfaceTrimSignature;
+    void signature;
+    void planeSignature;
+    void trimSignature;
+    untrack(applyCaptureComparisonState);
+    untrack(updateCaptureGuideOverlay);
+    untrack(syncSurfaceTrimRegionOverlay);
+  });
+
+  $effect(() => {
+    void captureReferenceVisible;
+    void captureReferenceOpacity;
+    void captureGeneratedVisible;
+    void captureGeneratedOpacity;
+    untrack(applyCaptureComparisonState);
+  });
+
+  $effect(() => {
+    void captureDeviation?.contentDigest;
+    void captureDeviationVisible;
+    untrack(syncCaptureDeviationOverlay);
+  });
+
+  $effect(() => {
+    void femResult?.resultDigest;
+    void femMeshPreview?.meshContentDigest;
+    void femDisplay?.field;
+    void femDisplay?.deformationScale;
+    void femDisplay?.showMesh;
+    void femDisplay?.showOutline;
+    void femDisplay?.clipFraction;
+    if (!modelRoot) return;
+    void untrack(syncFemOverlay);
   });
 
   $effect(() => {
     void outlineEnabled;
     void topologyMode;
     void viewerMode;
+    void surfaceTrimActive;
     if (controls) {
       controls.enabled = !selectionMode && !hideModelWhileBusy;
+      controls.mouseButtons.LEFT = surfaceTrimActive
+        ? (-1 as THREE.MOUSE)
+        : THREE.MOUSE.ROTATE;
+      controls.mouseButtons.RIGHT = surfaceTrimActive
+        ? THREE.MOUSE.ROTATE
+        : THREE.MOUSE.PAN;
     }
     applySelectionStyles();
   });
@@ -578,13 +915,218 @@
     }
   });
 
+  function disposeFemOverlay() {
+    femLoadToken += 1;
+    if (femOverlay) {
+      femOverlay.parent?.remove(femOverlay);
+      disposeDetachedGroup(femOverlay);
+    }
+    femOverlay = null;
+    femOverlayKind = null;
+    femLegend = null;
+    femOverlayError = '';
+  }
+
+  async function readFemArray(path: string, scalarType: string): Promise<Float64Array | Uint32Array> {
+    const response = await fetch(convertFileSrc(path));
+    if (!response.ok) throw new Error(`FEM array '${path}' returned HTTP ${response.status}.`);
+    const buffer = await response.arrayBuffer();
+    const view = new DataView(buffer);
+    if (scalarType === 'float64Le') {
+      if (buffer.byteLength % 8 !== 0) throw new Error(`FEM Float64 array '${path}' is truncated.`);
+      const values = new Float64Array(buffer.byteLength / 8);
+      for (let index = 0; index < values.length; index += 1) values[index] = view.getFloat64(index * 8, true);
+      return values;
+    }
+    if (scalarType === 'uint32Le') {
+      if (buffer.byteLength % 4 !== 0) throw new Error(`FEM Uint32 array '${path}' is truncated.`);
+      const values = new Uint32Array(buffer.byteLength / 4);
+      for (let index = 0; index < values.length; index += 1) values[index] = view.getUint32(index * 4, true);
+      return values;
+    }
+    throw new Error(`Unsupported FEM scalar type '${scalarType}'.`);
+  }
+
+  async function syncFemOverlay() {
+    disposeFemOverlay();
+    if ((!femResult && !femMeshPreview) || !femDisplay || !modelRoot) return;
+    if (!femResult && femMeshPreview) {
+      await syncFemMeshPreviewOverlay(femMeshPreview);
+      return;
+    }
+    if (!femResult) return;
+    const token = femLoadToken;
+    const byName = new Map(femResult.arrays.map((array) => [array.name, array]));
+    const requiredNames = ['nodesMm', 'boundaryTriangles', 'displacementMm', 'nodalDisplayVonMisesMpa'];
+    for (const name of requiredNames) {
+      if (!byName.has(name)) {
+        femOverlayError = `FEM result array '${name}' is missing.`;
+        return;
+      }
+    }
+    try {
+      const [nodes, triangles, displacement, nodalStress] = await Promise.all(requiredNames.map((name) => {
+        const array = byName.get(name)!;
+        return readFemArray(array.path, array.scalarType);
+      }));
+      if (token !== femLoadToken || !modelRoot) return;
+      if (!(nodes instanceof Float64Array)
+        || !(triangles instanceof Uint32Array)
+        || !(displacement instanceof Float64Array)
+        || !(nodalStress instanceof Float64Array)) {
+        throw new Error('FEM result array scalar types do not match manifest roles.');
+      }
+      if (nodes.length % 3 !== 0 || displacement.length !== nodes.length || nodalStress.length !== nodes.length / 3 || triangles.length % 3 !== 0) {
+        throw new Error('FEM result array shapes disagree.');
+      }
+      const nodeCount = nodes.length / 3;
+      const positions = new Float32Array(nodes.length);
+      const fieldValues = new Float64Array(nodeCount);
+      let minimumX = Number.POSITIVE_INFINITY;
+      let maximumX = Number.NEGATIVE_INFINITY;
+      for (let node = 0; node < nodeCount; node += 1) {
+        const offset = node * 3;
+        const dx = displacement[offset];
+        const dy = displacement[offset + 1];
+        const dz = displacement[offset + 2];
+        positions[offset] = nodes[offset] + dx * femDisplay.deformationScale;
+        positions[offset + 1] = nodes[offset + 1] + dy * femDisplay.deformationScale;
+        positions[offset + 2] = nodes[offset + 2] + dz * femDisplay.deformationScale;
+        fieldValues[node] = femDisplay.field === 'displacement' ? Math.hypot(dx, dy, dz) : nodalStress[node];
+        minimumX = Math.min(minimumX, nodes[offset]);
+        maximumX = Math.max(maximumX, nodes[offset]);
+      }
+      const fieldMinimum = fieldValues.reduce((value, next) => Math.min(value, next), Number.POSITIVE_INFINITY);
+      const fieldMaximum = fieldValues.reduce((value, next) => Math.max(value, next), Number.NEGATIVE_INFINITY);
+      const colors = new Float32Array(nodeCount * 3);
+      for (let node = 0; node < nodeCount; node += 1) {
+        colors.set(femColorRamp(normalizeFemField(fieldValues[node], fieldMinimum, fieldMaximum)), node * 3);
+      }
+      const clipX = minimumX + (maximumX - minimumX) * Math.max(0, Math.min(1, femDisplay.clipFraction));
+      const visibleTriangles: number[] = [];
+      for (let index = 0; index < triangles.length; index += 3) {
+        const a = triangles[index];
+        const b = triangles[index + 1];
+        const c = triangles[index + 2];
+        if (a >= nodeCount || b >= nodeCount || c >= nodeCount) throw new Error('FEM boundary triangle references an out-of-range node.');
+        const centroidX = (nodes[a * 3] + nodes[b * 3] + nodes[c * 3]) / 3;
+        if (centroidX <= clipX) visibleTriangles.push(a, b, c);
+      }
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      geometry.setIndex(visibleTriangles);
+      geometry.computeVertexNormals();
+      const overlay = new THREE.Group();
+      overlay.userData.previewOnlyFemOverlay = true;
+      const surface = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
+        vertexColors: true,
+        metalness: 0,
+        roughness: 0.72,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -1,
+      }));
+      surface.userData.ignoreRaycast = true;
+      overlay.add(surface);
+      if (femDisplay.showMesh) {
+        const wireframe = new THREE.LineSegments(
+          new THREE.WireframeGeometry(geometry),
+          new THREE.LineBasicMaterial({ color: 0x101722, transparent: true, opacity: 0.5 }),
+        );
+        wireframe.userData.ignoreRaycast = true;
+        overlay.add(wireframe);
+      }
+      if (femDisplay.showOutline) {
+        const undeformed = new THREE.BufferGeometry();
+        undeformed.setAttribute('position', new THREE.BufferAttribute(Float32Array.from(nodes), 3));
+        undeformed.setIndex(visibleTriangles);
+        const outline = new THREE.LineSegments(
+          new THREE.EdgesGeometry(undeformed, 28),
+          new THREE.LineBasicMaterial({ color: 0xc89a58, transparent: true, opacity: 0.7 }),
+        );
+        undeformed.dispose();
+        outline.userData.ignoreRaycast = true;
+        overlay.add(outline);
+      }
+      femOverlay = overlay;
+      femOverlayKind = 'result';
+      modelRoot.add(overlay);
+      femLegend = {
+        label: femDisplay.field === 'displacement' ? 'DISPLACEMENT' : 'VON MISES',
+        minimum: fieldMinimum,
+        maximum: fieldMaximum,
+        unit: femDisplay.field === 'displacement' ? 'mm' : 'MPa',
+      };
+    } catch (error) {
+      femOverlayError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function syncFemMeshPreviewOverlay(preview: FemMeshPreviewResponse) {
+    const token = femLoadToken;
+    const byName = new Map(preview.arrays.map((array) => [array.name, array]));
+    const nodesAsset = byName.get('nodesMm');
+    const trianglesAsset = byName.get('boundaryTriangles');
+    if (!nodesAsset || !trianglesAsset) {
+      femOverlayError = 'FEM mesh preview requires nodesMm and boundaryTriangles arrays.';
+      return;
+    }
+    try {
+      const [nodes, triangles] = await Promise.all([
+        readFemArray(nodesAsset.path, nodesAsset.scalarType),
+        readFemArray(trianglesAsset.path, trianglesAsset.scalarType),
+      ]);
+      if (token !== femLoadToken || !modelRoot) return;
+      if (!(nodes instanceof Float64Array) || !(triangles instanceof Uint32Array)) {
+        throw new Error('FEM mesh preview scalar types do not match manifest roles.');
+      }
+      if (nodes.length % 3 !== 0 || triangles.length % 3 !== 0) {
+        throw new Error('FEM mesh preview array shapes disagree.');
+      }
+      const nodeCount = nodes.length / 3;
+      for (const node of triangles) {
+        if (node >= nodeCount) throw new Error('FEM mesh boundary references an out-of-range node.');
+      }
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(Float32Array.from(nodes), 3));
+      geometry.setIndex(Array.from(triangles));
+      geometry.computeVertexNormals();
+      const overlay = new THREE.Group();
+      overlay.userData.previewOnlyFemMesh = true;
+      const surface = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
+        color: 0xc89a58,
+        transparent: true,
+        opacity: 0.28,
+        metalness: 0,
+        roughness: 0.78,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -1,
+      }));
+      surface.userData.ignoreRaycast = true;
+      overlay.add(surface);
+      const wireframe = new THREE.LineSegments(
+        new THREE.WireframeGeometry(geometry),
+        new THREE.LineBasicMaterial({ color: 0xe1ba7d, transparent: true, opacity: 0.8 }),
+      );
+      wireframe.userData.ignoreRaycast = true;
+      overlay.add(wireframe);
+      femOverlay = overlay;
+      femOverlayKind = 'mesh';
+      modelRoot.add(overlay);
+    } catch (error) {
+      femOverlayError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
   function setupViewer() {
     if (renderer) return;
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0x0b0f1a);
 
     const { width, height } = hostSize();
-    camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 2000);
+    camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 10);
     camera.position.set(140, 120, 140);
 
     renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
@@ -604,8 +1146,15 @@
     controls.autoRotate = false;
     controls.autoRotateSpeed = 0;
     controls.enabled = !selectionMode && !hideModelWhileBusy;
+    controls.mouseButtons.LEFT = surfaceTrimActive
+      ? (-1 as THREE.MOUSE)
+      : THREE.MOUSE.ROTATE;
+    controls.mouseButtons.RIGHT = surfaceTrimActive
+      ? THREE.MOUSE.ROTATE
+      : THREE.MOUSE.PAN;
     controls.addEventListener('start', handleOrbitStart);
     controls.addEventListener('end', handleOrbitEnd);
+    controls.addEventListener('change', handleControlsChange);
 
     const hemi = new THREE.HemisphereLight(0xbfd4ff, 0x182032, 0.78);
     scene.add(hemi);
@@ -651,6 +1200,211 @@
     };
   }
 
+  function projectCaptureSourcePosition(
+    position: [number, number, number],
+  ): { x: number; y: number } | null {
+    if (!camera || !viewerHost) return null;
+    const sourceMesh = runtimeMeshes.find(entry => entry.sourcePickMesh)?.sourcePickMesh;
+    if (!sourceMesh) return null;
+    sourceMesh.updateMatrixWorld(true);
+    const projected = sourceMesh
+      .localToWorld(new THREE.Vector3(...position))
+      .project(camera);
+    if (!Number.isFinite(projected.x) || !Number.isFinite(projected.y) || projected.z < -1 || projected.z > 1) {
+      return null;
+    }
+    const { width, height } = hostSize();
+    return {
+      x: (projected.x * 0.5 + 0.5) * width,
+      y: (-projected.y * 0.5 + 0.5) * height,
+    };
+  }
+
+  function updateSurfaceTrimProjection() {
+    if (!surfaceTrimActive) {
+      surfaceTrimProjected = { points: [], keepSeed: null, segments: [] };
+      return;
+    }
+    const points = surfaceTrimAnchors.flatMap(anchor => {
+      const projected = projectCaptureSourcePosition(anchor.sourcePosition);
+      return projected ? [projected] : [];
+    });
+    const keepSeed = surfaceTrimKeepSeed
+      ? projectCaptureSourcePosition(surfaceTrimKeepSeed.sourcePosition)
+      : null;
+    const segments = surfaceTrimLoopSegments.flatMap(segment =>
+      segment.continuousPolyline.slice(1).flatMap((point, index) => {
+        const from = projectCaptureSourcePosition(
+          segment.continuousPolyline[index].sourcePosition,
+        );
+        const to = projectCaptureSourcePosition(point.sourcePosition);
+        return from && to
+          ? [{
+              key: `${segment.segmentIndex}:${index}`,
+              x1: from.x,
+              y1: from.y,
+              x2: to.x,
+              y2: to.y,
+            }]
+          : [];
+      }),
+    );
+    surfaceTrimProjected = { points, keepSeed, segments };
+  }
+
+  function disposeSurfaceTrimRegionOverlay() {
+    if (surfaceTrimRegionOverlay) {
+      surfaceTrimRegionOverlay.parent?.remove(surfaceTrimRegionOverlay);
+      surfaceTrimRegionOverlay.geometry.dispose();
+      surfaceTrimRegionOverlay.material.dispose();
+      surfaceTrimRegionOverlay = null;
+    }
+    if (surfaceTrimCapOverlay) {
+      surfaceTrimCapOverlay.parent?.remove(surfaceTrimCapOverlay);
+      surfaceTrimCapOverlay.geometry.dispose();
+      surfaceTrimCapOverlay.material.dispose();
+      surfaceTrimCapOverlay = null;
+    }
+  }
+
+  function syncSurfaceTrimRegionOverlay() {
+    disposeSurfaceTrimRegionOverlay();
+    if (!surfaceTrimActive || !modelRoot) return;
+    const sourceMesh = runtimeMeshes.find(entry => entry.sourcePickMesh)?.sourcePickMesh;
+    const sourceGeometry = sourceMesh?.geometry;
+    const sourcePositions = sourceGeometry?.getAttribute('position');
+    if (!sourceMesh || !sourceGeometry || !sourcePositions) return;
+    const sourceIndex = sourceGeometry.getIndex();
+    const positions: number[] = [];
+    for (const triangleIndex of surfaceTrimRetainedTriangleIndices) {
+      if (!Number.isInteger(triangleIndex) || triangleIndex < 0) continue;
+      const cornerBase = triangleIndex * 3;
+      for (let corner = 0; corner < 3; corner += 1) {
+        const vertexIndex = sourceIndex?.getX(cornerBase + corner) ?? cornerBase + corner;
+        if (vertexIndex < 0 || vertexIndex >= sourcePositions.count) continue;
+        positions.push(
+          sourcePositions.getX(vertexIndex),
+          sourcePositions.getY(vertexIndex),
+          sourcePositions.getZ(vertexIndex),
+        );
+      }
+    }
+    if (positions.length > 0) {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      geometry.computeVertexNormals();
+      const material = new THREE.MeshBasicMaterial({
+        color: 0x4fa36f,
+        opacity: 0.38,
+        transparent: true,
+        depthTest: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      });
+      surfaceTrimRegionOverlay = new THREE.Mesh(geometry, material);
+      surfaceTrimRegionOverlay.name = 'surface-trim-retained-region-preview';
+      surfaceTrimRegionOverlay.renderOrder = 900;
+      surfaceTrimRegionOverlay.userData.previewDiagnosticOnly = true;
+      modelRoot.add(surfaceTrimRegionOverlay);
+    }
+
+    if (surfaceTrimCapPreview && surfaceTrimCapPreview.triangles.length > 0) {
+      const capPositions: number[] = [];
+      for (const triangle of surfaceTrimCapPreview.triangles) {
+        for (const vertexIndex of triangle) {
+          const vertex = surfaceTrimCapPreview.vertices[vertexIndex];
+          if (!vertex || !vertex.every(Number.isFinite)) continue;
+          capPositions.push(...vertex);
+        }
+      }
+      if (capPositions.length > 0) {
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(capPositions, 3));
+        geometry.computeVertexNormals();
+        const material = new THREE.MeshBasicMaterial({
+          color: 0xc89a58,
+          opacity: 0.64,
+          transparent: true,
+          depthTest: true,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        });
+        surfaceTrimCapOverlay = new THREE.Mesh(geometry, material);
+        surfaceTrimCapOverlay.name = 'surface-trim-cap-preview';
+        surfaceTrimCapOverlay.renderOrder = 910;
+        surfaceTrimCapOverlay.userData.previewDiagnosticOnly = true;
+        modelRoot.add(surfaceTrimCapOverlay);
+      }
+    }
+  }
+
+  function updateCaptureGuideOverlay() {
+    updateSurfaceTrimProjection();
+    capturePlaneProjected = capturePlaneAnchors.flatMap(anchor => {
+      const projected = projectCaptureSourcePosition(anchor.sourcePosition);
+      return projected ? [projected] : [];
+    });
+    capturePlaneNormalProjected = null;
+    if (capturePlaneAnchors.length === 3) {
+      const [a, b, c] = capturePlaneAnchors.map(anchor => anchor.sourcePosition);
+      const ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]] as [number, number, number];
+      const ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]] as [number, number, number];
+      const raw = [
+        ab[1] * ac[2] - ab[2] * ac[1],
+        ab[2] * ac[0] - ab[0] * ac[2],
+        ab[0] * ac[1] - ab[1] * ac[0],
+      ] as [number, number, number];
+      const magnitude = Math.hypot(...raw);
+      const edgeScale = Math.max(Math.hypot(...ab), Math.hypot(...ac)) * 0.7;
+      if (magnitude > 1e-9 && edgeScale > 0) {
+        const origin = [
+          (a[0] + b[0] + c[0]) / 3,
+          (a[1] + b[1] + c[1]) / 3,
+          (a[2] + b[2] + c[2]) / 3,
+        ] as [number, number, number];
+        const endpoint = origin.map((value, axis) =>
+          value + raw[axis] / magnitude * edgeScale,
+        ) as [number, number, number];
+        const start = projectCaptureSourcePosition(origin);
+        const end = projectCaptureSourcePosition(endpoint);
+        if (start && end) {
+          capturePlaneNormalProjected = { x1: start.x, y1: start.y, x2: end.x, y2: end.y };
+        }
+      }
+    }
+    const primitives = captureGuidePrimitives;
+    if (!primitives) {
+      captureGuideProjected = { points: [], segments: [], planePolygons: [] };
+      return;
+    }
+    const pointById = new Map<string, { x: number; y: number }>();
+    const points = primitives.landmarks.flatMap(item => {
+      const projected = projectCaptureSourcePosition(item.sourcePosition);
+      if (!projected) return [];
+      pointById.set(item.landmarkId, projected);
+      return [{ ...item, ...projected }];
+    });
+    const segments = [...primitives.profileSegments, ...primitives.axisSegments].flatMap(segment => {
+      const first = pointById.get(segment.fromLandmarkId);
+      const second = pointById.get(segment.toLandmarkId);
+      return first && second ? [{
+        key: segment.key,
+        kind: segment.kind,
+        x1: first.x,
+        y1: first.y,
+        x2: second.x,
+        y2: second.y,
+      }] : [];
+    });
+    const planePolygons = primitives.planeLoops.flatMap(plane => {
+      const polygon = plane.landmarkIds.map(id => pointById.get(id));
+      return polygon.every((point): point is { x: number; y: number } => Boolean(point))
+        ? [{ key: plane.planeId, points: polygon.map(point => `${point.x},${point.y}`).join(' ') }]
+        : [];
+    });
+    captureGuideProjected = { points, segments, planePolygons };
+  }
+
   function onResize() {
     if (!viewerHost || !camera || !renderer) return;
     const { width, height } = hostSize();
@@ -658,6 +1412,7 @@
     camera.updateProjectionMatrix();
     renderer.setSize(width, height);
     updateOverlayAnchor();
+    updateCaptureGuideOverlay();
   }
 
   async function loadCurrentModel() {
@@ -709,6 +1464,7 @@
       runtimeMeshes = nextMeshes;
       applyPreviewTransforms();
       scene.add(modelRoot);
+      void syncFemOverlay();
       frameModel(modelRoot);
       attachEdgeTargets(modelRoot);
       attachFaceTargets(modelRoot);
@@ -717,6 +1473,9 @@
       applySelectionStyles();
       updateOverlayAnchor();
       emitCameraStateChange();
+      syncCropBox();
+      updateCaptureGuideOverlay();
+      syncSurfaceTrimRegionOverlay();
       await notifyModelLoaded(token);
     } catch (error) {
       console.error('Failed to load multipart STL assets:', error);
@@ -787,6 +1546,96 @@
     return meshes;
   }
 
+  function captureSourceToLocalMatrix(): THREE.Matrix4 {
+    if (!captureComparisonStlUrl || !captureGuide) return new THREE.Matrix4();
+    const scaleMm = captureGuide.calibration.millimetresPerSourceUnit;
+    const { originMm, xAxis, yAxis, zAxis } = captureGuide.reconstructionFrame;
+    const offset = (axis: [number, number, number]) =>
+      -(axis[0] * originMm[0] + axis[1] * originMm[1] + axis[2] * originMm[2]);
+    return new THREE.Matrix4().set(
+      xAxis[0] * scaleMm, xAxis[1] * scaleMm, xAxis[2] * scaleMm, offset(xAxis),
+      yAxis[0] * scaleMm, yAxis[1] * scaleMm, yAxis[2] * scaleMm, offset(yAxis),
+      zAxis[0] * scaleMm, zAxis[1] * scaleMm, zAxis[2] * scaleMm, offset(zAxis),
+      0, 0, 0, 1,
+    );
+  }
+
+  function applyCaptureComparisonState() {
+    const comparing = Boolean(captureComparisonStlUrl);
+    const referenceMatrix = captureSourceToLocalMatrix();
+    const referenceOpacity = Math.max(0.02, Math.min(1, captureReferenceOpacity));
+    for (const entry of runtimeMeshes) {
+      if (entry.captureLayer === 'reference') {
+        entry.mesh.visible = !comparing || captureReferenceVisible;
+        entry.mesh.matrixAutoUpdate = false;
+        entry.mesh.matrix.copy(referenceMatrix);
+        entry.mesh.matrixWorldNeedsUpdate = true;
+        if (entry.sourcePickMesh) {
+          entry.sourcePickMesh.matrixAutoUpdate = false;
+          entry.sourcePickMesh.matrix.copy(referenceMatrix);
+          entry.sourcePickMesh.matrixWorldNeedsUpdate = true;
+        }
+        entry.mesh.material.transparent = comparing;
+        entry.mesh.material.opacity = comparing ? referenceOpacity : 1;
+        entry.mesh.material.depthWrite = !comparing || referenceOpacity >= 0.98;
+        if (entry.outline) {
+          entry.outline.material.transparent = comparing;
+          entry.outline.material.opacity = comparing ? Math.min(0.72, referenceOpacity + 0.18) : 1;
+        }
+      } else if (entry.captureLayer === 'generated') {
+        entry.mesh.visible = captureGeneratedVisible;
+        const generatedOpacity = Math.max(0.02, Math.min(1, captureGeneratedOpacity));
+        entry.mesh.material.transparent = generatedOpacity < 0.98;
+        entry.mesh.material.opacity = generatedOpacity;
+        entry.mesh.material.depthWrite = generatedOpacity >= 0.98;
+      }
+    }
+    modelRoot?.updateMatrixWorld(true);
+    updateCaptureGuideOverlay();
+  }
+
+  function syncCaptureDeviationOverlay() {
+    if (captureDeviationOverlay) {
+      captureDeviationOverlay.removeFromParent();
+      captureDeviationOverlay.geometry.dispose();
+      captureDeviationOverlay.material.dispose();
+      captureDeviationOverlay = null;
+    }
+    captureDeviationPointCount = 0;
+    if (!modelRoot || !captureComparisonStlUrl || !captureDeviation) return;
+    const displayPoints = buildCaptureDeviationDisplayPoints(
+      captureDeviation.displaySamples ?? [],
+      captureDeviation.outlierThresholdMm,
+    );
+    if (displayPoints.length === 0) return;
+    const positions = new Float32Array(displayPoints.length * 3);
+    const colors = new Float32Array(displayPoints.length * 3);
+    displayPoints.forEach((point, index) => {
+      positions.set(point.localPositionMm, index * 3);
+      const color = new THREE.Color(point.color);
+      colors.set([color.r, color.g, color.b], index * 3);
+    });
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    const material = new THREE.PointsMaterial({
+      depthTest: false,
+      depthWrite: false,
+      opacity: 0.92,
+      size: 6,
+      sizeAttenuation: false,
+      transparent: true,
+      vertexColors: true,
+    });
+    captureDeviationOverlay = new THREE.Points(geometry, material);
+    captureDeviationOverlay.name = 'capture-deviation-display-only';
+    captureDeviationOverlay.renderOrder = 1000;
+    captureDeviationOverlay.visible = captureDeviationVisible;
+    captureDeviationOverlay.userData.previewDiagnosticOnly = true;
+    modelRoot.add(captureDeviationOverlay);
+    captureDeviationPointCount = displayPoints.length;
+  }
+
   async function loadSingleStl(token: number, url: string) {
     if (!scene || !camera) return;
     const loader = new STLLoader();
@@ -801,13 +1650,15 @@
       }
 
       const displayGeometry = prepareDisplayGeometry(geometry, true);
-      if (displayGeometry !== geometry) {
-        geometry.dispose();
-      }
       displayGeometry.computeBoundingBox();
       const tone = resolveViewerTone(null, manifestParts);
       const material = createMaterial(tone, false);
       const mesh = new THREE.Mesh(displayGeometry, material);
+      const sourcePickMesh = new THREE.Mesh(
+        geometry,
+        new THREE.MeshBasicMaterial({ visible: false }),
+      );
+      sourcePickMesh.userData.captureSourceGeometry = true;
       const outline = createOutline(displayGeometry, tone, false);
       const topology = createTopologyOverlay(displayGeometry, tone);
       if (outline) {
@@ -817,12 +1668,54 @@
         mesh.add(topology);
       }
       nextRoot.add(mesh);
+      nextRoot.add(sourcePickMesh);
 
+      const captureMeshes: RuntimeMesh[] = [{
+        partId: null,
+        baseBounds: displayGeometry.boundingBox?.clone() ?? null,
+        outline,
+        mesh,
+        sourcePickMesh,
+        topology,
+        tone,
+        captureLayer: 'reference',
+      }];
+      if (captureComparisonStlUrl) {
+        const generatedGeometry = await loadStlGeometry(loader, captureComparisonStlUrl);
+        if (token !== loadToken) {
+          generatedGeometry.dispose();
+          disposeDetachedGroup(nextRoot);
+          return;
+        }
+        const generatedDisplayGeometry = prepareDisplayGeometry(generatedGeometry, true);
+        generatedDisplayGeometry.computeBoundingBox();
+        const generatedTone = resolveViewerTone('generated-brep', manifestParts);
+        const generatedMaterial = createMaterial(generatedTone, false);
+        const generatedMesh = new THREE.Mesh(generatedDisplayGeometry, generatedMaterial);
+        const generatedOutline = createOutline(generatedDisplayGeometry, generatedTone, false);
+        const generatedTopology = createTopologyOverlay(generatedDisplayGeometry, generatedTone);
+        if (generatedOutline) generatedMesh.add(generatedOutline);
+        if (generatedTopology) generatedMesh.add(generatedTopology);
+        nextRoot.add(generatedMesh);
+        captureMeshes.push({
+          partId: null,
+          baseBounds: generatedDisplayGeometry.boundingBox?.clone() ?? null,
+          outline: generatedOutline,
+          mesh: generatedMesh,
+          topology: generatedTopology,
+          tone: generatedTone,
+          captureLayer: 'generated',
+        });
+      }
       disposeModel();
       modelRoot = nextRoot;
-      runtimeMeshes = [{ partId: null, baseBounds: displayGeometry.boundingBox?.clone() ?? null, outline, mesh, topology, tone }];
+      runtimeMeshes = captureMeshes;
+      captureComparisonLoaded = captureMeshes.some((entry) => entry.captureLayer === 'generated');
+      syncCaptureDeviationOverlay();
+      applyCaptureComparisonState();
       applyPreviewTransforms();
       scene.add(modelRoot);
+      void syncFemOverlay();
       frameModel(modelRoot);
       attachEdgeTargets(modelRoot);
       attachFaceTargets(modelRoot);
@@ -830,10 +1723,16 @@
       applyCameraState(persistedCameraState);
       updateOverlayAnchor();
       emitCameraStateChange();
+      syncCropBox();
+      updateCaptureGuideOverlay();
       await notifyModelLoaded(token);
     } catch (error) {
       console.error('Failed to load STL:', error);
-      disposeDetachedGroup(nextRoot);
+      if (modelRoot === nextRoot) {
+        disposeModel();
+      } else {
+        disposeDetachedGroup(nextRoot);
+      }
       notifyModelLoadError(token, 'Failed to load STL', error);
     }
   }
@@ -867,6 +1766,7 @@
 
     camera.position.set(maxDim * 1.3, maxDim * 1.1, maxDim * 1.3);
     controls.target.set(0, maxDim * 0.35, 0);
+    updateCameraClipPlanes(object);
     controls.update();
   }
 
@@ -890,14 +1790,19 @@
       outlineGeometry.dispose();
       return null;
     }
-    return new THREE.LineSegments(
+    const outline = new THREE.LineSegments(
       outlineGeometry,
       new THREE.LineBasicMaterial({
         color: isSelected ? 0xe5ca88 : tone.edge,
         transparent: true,
         opacity: isSelected ? 0.95 : 0.26,
+        depthTest: true,
+        depthWrite: false,
       }),
     );
+    outline.renderOrder = 2;
+    outline.userData.ignoreRaycast = true;
+    return outline;
   }
 
   function createTopologyOverlay(
@@ -984,7 +1889,7 @@
 
   function attachEdgeTargets(root: THREE.Group) {
     disposeRuntimeEdges(root);
-    if (edgeTargets.length === 0) return;
+    if (!topologyMaterialization.materialize || edgeTargets.length === 0) return;
 
     runtimeEdges = edgeTargets.map((target) => {
       const geometry = new THREE.BufferGeometry().setFromPoints([
@@ -1018,7 +1923,7 @@
 
   function attachFaceTargets(root: THREE.Group) {
     disposeRuntimeFaces(root);
-    if (faceTargets.length === 0) return;
+    if (!topologyMaterialization.materialize || faceTargets.length === 0) return;
 
     runtimeFaces = faceTargets.map((target) => {
       const radius = faceTargetRadius(target);
@@ -1498,6 +2403,13 @@
   }
 
   function disposeModel() {
+    disposeCropBox();
+    disposeFemOverlay();
+    disposeSurfaceTrimRegionOverlay();
+    captureComparisonLoaded = false;
+    captureDeviationOverlay = null;
+    captureDeviationPointCount = 0;
+    captureGuideProjected = { points: [], segments: [], planePolygons: [] };
     if (!modelRoot) {
       runtimeMeshes = [];
       runtimeEdges = [];
@@ -1528,18 +2440,28 @@
         child.geometry?.dispose?.();
         child.material?.dispose?.();
       }
+      if (child instanceof THREE.Points) {
+        child.geometry?.dispose?.();
+        child.material?.dispose?.();
+      }
     });
   }
 
   function handlePointerDown(event: PointerEvent) {
     if (hideModelWhileBusy) return;
     if (isInteractiveViewerControl(event.target)) return;
+    if (event.button !== 0) return;
     pointerDownAt = { x: event.clientX, y: event.clientY };
     orbitDraggedSincePointerDown = false;
   }
 
   function isInteractiveViewerControl(target: EventTarget | null) {
     return target instanceof HTMLElement && Boolean(target.closest('button, input, textarea, select, label, a'));
+  }
+
+  function handleControlsChange() {
+    updateCameraClipPlanes();
+    updateCaptureGuideOverlay();
   }
 
   function handleOrbitStart() {
@@ -1702,6 +2624,37 @@
     return nearestDistance <= pickRadius ? nearestPartId : null;
   }
 
+  function captureSurfaceAnchorFromEvent(event: PointerEvent): CaptureSurfaceAnchorValue | null {
+    if (
+      !capturePickingMode
+      || !captureSourceMeshContentDigest
+      || !renderer
+      || !camera
+      || cropTransformControls?.dragging
+      || (cropBoxEnabled && cropTransformControls?.axis)
+    ) return null;
+    const rect = renderer.domElement.getBoundingClientRect();
+    pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointer, camera);
+    const sourceMeshes = runtimeMeshes
+      .map((entry) => entry.sourcePickMesh)
+      .filter((mesh): mesh is THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial> => Boolean(mesh));
+    const hit = raycaster.intersectObjects(sourceMeshes, false)[0];
+    if (!hit || !(hit.object instanceof THREE.Mesh)) return null;
+    try {
+      return captureSurfaceAnchorFromIntersection(
+        captureSourceMeshContentDigest,
+        hit.object.geometry,
+        hit.object,
+        hit,
+      );
+    } catch (error) {
+      onCaptureSurfaceAnchorError?.(error instanceof Error ? error.message : String(error));
+      return null;
+    }
+  }
+
   function selectionTargetFromPartId(partId: string): ContextSelectionTarget {
     const existing = selectionTargets.find((target) => target.kind === 'part' && target.partId === partId) ??
       selectionTargets.find((target) => target.partId === partId);
@@ -1737,7 +2690,14 @@
       }
       return;
     }
-    if (!selectionMode) {
+    if (surfaceTrimActive && capturePickingMode && !isOrbitDragging) {
+      const now = performance.now();
+      if (now - lastCaptureHoverAt >= 50) {
+        lastCaptureHoverAt = now;
+        onCaptureSurfaceHover?.(captureSurfaceAnchorFromEvent(event));
+      }
+    }
+    if (!selectionMode && !capturePickingMode) {
       if (hoveredPartId !== null || hoveredTargetId !== null) {
         hoveredPartId = null;
         hoveredTargetId = null;
@@ -1754,16 +2714,17 @@
       applySelectionStyles();
     }
     if (renderer) {
-      renderer.domElement.style.cursor = selectionMode ? 'crosshair' : isOrbitDragging ? 'grabbing' : 'default';
+      renderer.domElement.style.cursor = selectionMode || capturePickingMode ? 'crosshair' : isOrbitDragging ? 'grabbing' : 'default';
     }
   }
 
   function handlePointerLeave() {
+    if (surfaceTrimActive) onCaptureSurfaceHover?.(null);
     hoveredPartId = null;
     hoveredTargetId = null;
     applySelectionStyles();
     if (renderer) {
-      renderer.domElement.style.cursor = hideModelWhileBusy ? 'progress' : selectionMode ? 'crosshair' : 'default';
+      renderer.domElement.style.cursor = hideModelWhileBusy ? 'progress' : selectionMode || capturePickingMode ? 'crosshair' : 'default';
     }
   }
 
@@ -1777,6 +2738,24 @@
     if (orbitDraggedSincePointerDown) {
       pointerDownAt = null;
       orbitDraggedSincePointerDown = false;
+      return;
+    }
+    if (capturePickingMode) {
+      if (
+        !shouldHandleViewerClick({
+          hideModelWhileBusy,
+          pointerDownAt,
+          current: { x: event.clientX, y: event.clientY },
+        })
+        || cropTransformControls?.dragging
+        || (cropBoxEnabled && cropTransformControls?.axis)
+      ) {
+        pointerDownAt = null;
+        return;
+      }
+      pointerDownAt = null;
+      const anchor = captureSurfaceAnchorFromEvent(event);
+      if (anchor) onCaptureSurfaceAnchor?.(anchor);
       return;
     }
     if (selectionMode) {
@@ -1818,7 +2797,152 @@
   }
 </script>
 
-<div bind:this={viewerHost} class="viewer-host">
+<div
+  bind:this={viewerHost}
+  class="viewer-host"
+  data-window-drag-ignore
+  data-capture-comparison-loaded={captureComparisonLoaded}
+  data-capture-reference-visible={captureReferenceVisible}
+  data-capture-generated-visible={captureGeneratedVisible}
+  data-capture-reference-opacity={captureReferenceOpacity}
+  data-capture-generated-opacity={captureGeneratedOpacity}
+  data-capture-deviation-visible={captureDeviationVisible}
+  data-capture-deviation-point-count={captureDeviationPointCount}
+  data-crop-box-enabled={cropBoxEnabled}
+  data-surface-trim-active={surfaceTrimActive}
+  data-surface-trim-cap-preview={Boolean(surfaceTrimCapPreview?.triangles.length)}
+  data-fem-overlay-visible={Boolean(femOverlay)}
+  data-fem-mesh-overlay-visible={femOverlayKind === 'mesh'}
+>
+  {#if femOverlayKind === 'mesh' && !hideModelWhileBusy}
+    <div class="fem-legend fem-legend--mesh" data-testid="fem-mesh-legend">
+      <strong>TET4 MESH PREVIEW</strong>
+      <small>PREVIEW ONLY · EXPORT GEOMETRY UNCHANGED</small>
+    </div>
+  {/if}
+  {#if femLegend && !hideModelWhileBusy}
+    <div class="fem-legend" data-testid="fem-result-legend">
+      <strong>{femLegend.label}</strong>
+      <div class="fem-legend__ramp" aria-hidden="true"></div>
+      <div class="fem-legend__range">
+        <span>{femLegend.minimum.toPrecision(4)} {femLegend.unit}</span>
+        <span>{femLegend.maximum.toPrecision(4)} {femLegend.unit}</span>
+      </div>
+      <small>PREVIEW ONLY · EXPORT GEOMETRY UNCHANGED</small>
+    </div>
+  {/if}
+  {#if femOverlayError && !hideModelWhileBusy}
+    <pre class="fem-legend fem-legend--error" role="alert">{femOverlayError}</pre>
+  {/if}
+  {#if captureGuidePrimitives && captureGuideProjected.points.length > 0 && !hideModelWhileBusy}
+    <div class="capture-guide-overlay" data-testid="capture-guide-overlay">
+      <svg class="capture-guide-overlay__geometry" aria-hidden="true">
+        {#each captureGuideProjected.planePolygons as polygon (polygon.key)}
+          <polygon class="capture-guide-overlay__plane" points={polygon.points} />
+        {/each}
+        {#each captureGuideProjected.segments as segment (segment.key)}
+          <line
+            class="capture-guide-overlay__segment"
+            data-kind={segment.kind}
+            x1={segment.x1}
+            y1={segment.y1}
+            x2={segment.x2}
+            y2={segment.y2}
+          />
+        {/each}
+      </svg>
+      {#each captureGuideProjected.points as point (point.landmarkId)}
+        <button
+          type="button"
+          class="capture-guide-overlay__point"
+          class:selected={captureSelectedLandmarkId === point.landmarkId}
+          data-role={point.role}
+          data-landmark-id={point.landmarkId}
+          aria-label={`Select guide landmark ${point.ordinal}: ${point.label}`}
+          title={`${point.ordinal}. ${point.label} · ${point.role}`}
+          style={`left:${point.x}px;top:${point.y}px`}
+          onclick={() => onCaptureSelectLandmark?.(point.landmarkId)}
+        >{point.ordinal}</button>
+      {/each}
+      <div class="capture-guide-overlay__scope">{captureGuidePrimitives.evidenceScopeLabel}</div>
+      {#if captureGuidePrimitives.inferredRegionLabel}
+        <div class="capture-guide-overlay__inferred">{captureGuidePrimitives.inferredRegionLabel}</div>
+      {/if}
+    </div>
+  {/if}
+  {#if surfaceTrimActive && (surfaceTrimProjected.points.length > 0 || surfaceTrimProjected.segments.length > 0) && !hideModelWhileBusy}
+    <div class="surface-trim-overlay" data-testid="surface-trim-overlay" data-point-count={surfaceTrimProjected.points.length}>
+      <svg class="capture-guide-overlay__geometry" aria-hidden="true">
+        {#each surfaceTrimProjected.segments as segment (segment.key)}
+          <line
+            class="surface-trim-overlay__segment"
+            x1={segment.x1}
+            y1={segment.y1}
+            x2={segment.x2}
+            y2={segment.y2}
+          />
+        {/each}
+      </svg>
+      {#each surfaceTrimProjected.points as point, index (`${index}:${point.x}:${point.y}`)}
+        <button
+          type="button"
+          class="surface-trim-overlay__point"
+          class:selected={surfaceTrimSelectedAnchorIndex === index}
+          style={`left:${point.x}px;top:${point.y}px`}
+          aria-label={`Select surface trim point ${index + 1}`}
+          title={`Surface trim point ${index + 1}`}
+          onclick={() => onSurfaceTrimPointSelect?.(index)}
+        >{index + 1}</button>
+      {/each}
+      {#if surfaceTrimProjected.keepSeed}
+        <span
+          class="surface-trim-overlay__seed"
+          style={`left:${surfaceTrimProjected.keepSeed.x}px;top:${surfaceTrimProjected.keepSeed.y}px`}
+          aria-label="Surface trim retained region seed"
+          title="Retained region seed"
+        >K</span>
+      {/if}
+    </div>
+  {/if}
+  {#if capturePlaneProjected.length > 0 && !hideModelWhileBusy}
+    <div class="capture-plane-overlay" data-testid="capture-plane-overlay" data-point-count={capturePlaneProjected.length}>
+      <svg class="capture-guide-overlay__geometry" aria-hidden="true">
+        <defs>
+          <marker id="capture-plane-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" class="capture-plane-overlay__arrow-head" />
+          </marker>
+        </defs>
+        {#if capturePlaneProjected.length === 3}
+          <polygon
+            class="capture-guide-overlay__plane capture-plane-overlay__polygon"
+            points={capturePlaneProjected.map(point => `${point.x},${point.y}`).join(' ')}
+          />
+        {/if}
+        {#if capturePlaneNormalProjected}
+          <line
+            class="capture-plane-overlay__normal"
+            x1={capturePlaneNormalProjected.x1}
+            y1={capturePlaneNormalProjected.y1}
+            x2={capturePlaneNormalProjected.x2}
+            y2={capturePlaneNormalProjected.y2}
+            marker-end="url(#capture-plane-arrow)"
+          />
+          <text
+            class="capture-plane-overlay__above-label"
+            x={capturePlaneNormalProjected.x2 + 8}
+            y={capturePlaneNormalProjected.y2 - 6}
+          >ABOVE</text>
+        {/if}
+      </svg>
+      {#each capturePlaneProjected as point, index (`${index}:${point.x}:${point.y}`)}
+        <span
+          class="capture-guide-overlay__point capture-plane-overlay__point"
+          style={`left:${point.x}px;top:${point.y}px`}
+          aria-label={`Crop plane point ${index + 1}`}
+        >{index + 1}</span>
+      {/each}
+    </div>
+  {/if}
   {#if showContextOverlay && overlayVisible && !hideModelWhileBusy}
     <div class="viewer-overlay-layer">
       {#if dimensionFrame && overlayControls.length > 0}
@@ -2108,6 +3232,169 @@
     height: 100%;
     overflow: hidden;
     transition: filter 0.5s ease-in-out;
+  }
+  .fem-legend { position: absolute; right: 14px; bottom: 72px; z-index: 12; width: 190px; padding: 9px; overflow: hidden; border: 1px solid var(--secondary); border-radius: 0; background: color-mix(in srgb, var(--bg-100) 92%, transparent); color: var(--text); font-family: var(--font-mono); pointer-events: none; }
+  .fem-legend strong { display: block; margin-bottom: 6px; color: var(--primary); font-size: .64rem; letter-spacing: .08em; }
+  .fem-legend__ramp { height: 9px; border: 1px solid var(--bg-300); background: linear-gradient(90deg, #143f8c, #14adb8 35%, #e0ba2e 65%, #c71f14); }
+  .fem-legend__range { display: flex; justify-content: space-between; gap: 8px; margin-top: 4px; font-size: .56rem; }
+  .fem-legend small { display: block; margin-top: 6px; color: var(--text-dim); font-size: .5rem; }
+  .fem-legend--error { border-color: var(--danger); color: var(--danger); font-size: .6rem; white-space: pre-wrap; }
+
+  .capture-guide-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    overflow: hidden;
+    pointer-events: none;
+  }
+
+  .surface-trim-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 7;
+    overflow: hidden;
+    pointer-events: none;
+  }
+
+  .surface-trim-overlay__segment {
+    stroke: var(--secondary);
+    stroke-width: 2.5;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .surface-trim-overlay__point,
+  .surface-trim-overlay__seed {
+    position: absolute;
+    display: grid;
+    width: 24px;
+    height: 24px;
+    place-content: center;
+    padding: 0;
+    overflow: hidden;
+    border: 1px solid var(--secondary);
+    border-radius: 0;
+    background: color-mix(in srgb, var(--bg-100) 88%, transparent);
+    color: var(--secondary);
+    font: 800 0.65rem/1 var(--font-mono);
+    transform: translate(-50%, -50%);
+  }
+
+  .surface-trim-overlay__point { pointer-events: auto; }
+  .surface-trim-overlay__point.selected {
+    background: var(--secondary);
+    color: var(--bg-100);
+  }
+  .surface-trim-overlay__seed {
+    border-color: var(--primary);
+    background: var(--primary);
+    color: var(--bg-100);
+    pointer-events: none;
+  }
+
+  .capture-plane-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 6;
+    overflow: hidden;
+    pointer-events: none;
+  }
+
+  .capture-plane-overlay__point {
+    display: grid;
+    place-content: center;
+    border-color: var(--secondary);
+    color: var(--secondary);
+  }
+
+  .capture-plane-overlay__polygon {
+    fill: color-mix(in srgb, var(--primary) 22%, transparent);
+    stroke: var(--primary);
+  }
+
+  .capture-plane-overlay__normal {
+    stroke: var(--secondary);
+    stroke-width: 2;
+  }
+
+  .capture-plane-overlay__arrow-head { fill: var(--secondary); }
+
+  .capture-plane-overlay__above-label {
+    fill: var(--secondary);
+    font: 700 11px/1 var(--font-mono);
+  }
+
+  .capture-guide-overlay__geometry {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .capture-guide-overlay__plane {
+    fill: color-mix(in srgb, var(--secondary) 12%, transparent);
+    stroke: color-mix(in srgb, var(--secondary) 66%, transparent);
+    stroke-width: 1.5;
+    stroke-dasharray: 7 5;
+  }
+
+  .capture-guide-overlay__segment {
+    stroke: var(--primary);
+    stroke-width: 2;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .capture-guide-overlay__segment[data-kind="axis"] {
+    stroke: var(--secondary);
+    stroke-dasharray: 9 4;
+  }
+
+  .capture-guide-overlay__point {
+    position: absolute;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 1px solid var(--primary);
+    border-radius: 0;
+    background: color-mix(in srgb, var(--bg-100) 88%, transparent);
+    color: var(--primary);
+    font: 800 0.65rem/1 var(--font-mono);
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+  }
+
+  .capture-guide-overlay__point.selected {
+    border-color: var(--secondary);
+    background: var(--secondary);
+    color: var(--bg-100);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--secondary) 22%, transparent);
+  }
+
+  .capture-guide-overlay__point[data-role="ignoredDamagedRegion"] {
+    border-color: var(--danger);
+    color: var(--danger);
+  }
+
+  .capture-guide-overlay__scope,
+  .capture-guide-overlay__inferred {
+    position: absolute;
+    bottom: 12px;
+    padding: 5px 7px;
+    overflow: hidden;
+    border: 1px solid var(--bg-300);
+    background: color-mix(in srgb, var(--bg-100) 90%, transparent);
+    font: 700 0.62rem/1 var(--font-mono);
+    letter-spacing: 0.08em;
+  }
+
+  .capture-guide-overlay__scope {
+    left: 12px;
+    color: var(--primary);
+  }
+
+  .capture-guide-overlay__inferred {
+    right: 12px;
+    color: var(--secondary);
   }
 
 

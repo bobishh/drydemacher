@@ -33,6 +33,7 @@ import {
   getModelManifest,
   parseMacroParams,
   renderModel,
+  saveProjectSource,
   saveModelManifest,
 } from '../tauri/client';
 import { closeWindow as closeWindowStore } from '../stores/windowStore';
@@ -953,6 +954,9 @@ export async function applyManualCodeDraft(editedCode: string) {
   session.setStatus('Applying code draft...');
   session.setError(null);
   try {
+    if (!snapshotThreadId) {
+      throw new Error('Code Apply requires a bound design thread.');
+    }
     setManualRenderActive(true, {
       threadId: snapshotThreadId,
       messageId: targetVersionId,
@@ -998,6 +1002,7 @@ export async function applyManualCodeDraft(editedCode: string) {
     if (JSON.stringify(manifest) !== JSON.stringify(rawManifest)) {
       await saveModelManifest(bundle.modelId, manifest, null);
     }
+    await saveProjectSource(snapshotThreadId, editedCode);
 
     const draftDesign = buildManualDesign({
       title: wc.title || 'Manual Edit',

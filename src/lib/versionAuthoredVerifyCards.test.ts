@@ -42,6 +42,7 @@ function versionMessage(id: string): Message {
         warnings: [],
       },
       taggedAnchors: {},
+      analysisDeclarations: [],
       parts: [],
       parameterGroups: [],
       selectionTargets: [],

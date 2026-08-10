@@ -2,7 +2,7 @@ import { get } from 'svelte/store';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { workingCopy } from '../stores/workingCopy';
 import { activeThreadIdStore as activeThreadId, activeVersionId, config, historyStore as history } from '../stores/domainState';
-import { refreshHistory } from '../stores/history';
+import { createNewThread, refreshHistory } from '../stores/history';
 import { requestQueue } from '../stores/requestQueue';
 import { session, syncSessionPhaseFromQueue } from '../stores/sessionStore';
 import { paramPanelState } from '../stores/paramPanelState';
@@ -467,6 +467,10 @@ export async function handleGenerate(
   // Clear drawing immediately so the user sees it disappear on send
   uiDeps.clearDrawing?.();
 
+  if (!get(activeThreadId)) {
+    const createdThreadId = await createNewThread({ mode: 'blank' });
+    if (!createdThreadId) throw new Error('Failed to open a design thread for generation.');
+  }
   const currentThreadId = get(activeThreadId);
   const currentVersionId = get(activeVersionId);
   const currentModelId = get(session).artifactBundle?.modelId ?? null;
@@ -555,15 +559,8 @@ class GenerationPipeline {
     const q = get(requestQueue);
     this.req = q.byId[requestId];
     
-    // Ensure thread ID exists immediately
-    this.snapshotThreadId = this.req.threadId || crypto.randomUUID();
-    if (!this.req.threadId) {
-      requestQueue.patch(requestId, { threadId: this.snapshotThreadId });
-      // If we are in a 'New Session' state (no active thread), claim this new thread as active
-      if (get(activeThreadId) === null) {
-        activeThreadId.set(this.snapshotThreadId);
-      }
-    }
+    if (!this.req.threadId) throw new Error('Generation request requires a backend-owned thread.');
+    this.snapshotThreadId = this.req.threadId;
 
     this.snapshotParentMacroCode = get(workingCopy).macroCode || null;
     this.snapshotWorkingDesign = buildWorkingDesignSnapshot();

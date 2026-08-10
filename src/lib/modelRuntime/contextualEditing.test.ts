@@ -50,6 +50,7 @@ function manifest(overrides: Partial<ModelManifest> = {}): ModelManifest {
       warnings: [],
     },
     taggedAnchors: {},
+    analysisDeclarations: [],
     parts: [
       {
         partId: 'body',

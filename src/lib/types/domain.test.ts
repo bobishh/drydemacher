@@ -38,6 +38,12 @@ test("normalizeThread does not synthesize authoring context", () => {
   assert.equal("geometryBackend" in thread, false);
 });
 
+test("normalizeThread preserves reusable blank classification", () => {
+  const thread = normalizeThread({ isBlank: true } as any);
+
+  assert.equal(thread.isBlank, true);
+});
+
 test("toContractDesignOutput preserves authoring context fields", () => {
   const contract = toContractDesignOutput({
     title: "Threaded",

@@ -11,6 +11,7 @@ function densePartProjection(paramCount: number) {
       sourceKind: 'generated',
       document: { documentName: 'Scene Density', documentLabel: 'Scene Density', objectCount: 1, warnings: [] },
       taggedAnchors: {},
+      analysisDeclarations: [],
       parts: [
         {
           partId: 'part-dense',
@@ -36,6 +37,7 @@ test('buildMacroAstSceneLayout places nodes and connectors for a source-backed s
       sourceKind: 'generated',
       document: { documentName: 'Scene Layout', documentLabel: 'Scene Layout', objectCount: 1, warnings: [] },
       taggedAnchors: {},
+      analysisDeclarations: [],
       parts: [
         {
           partId: 'part-a',
@@ -99,6 +101,7 @@ test('buildMacroAstSceneLayout keeps a single part compact and uses multiple por
       sourceKind: 'generated',
       document: { documentName: 'Scene Compact', documentLabel: 'Scene Compact', objectCount: 1, warnings: [] },
       taggedAnchors: {},
+      analysisDeclarations: [],
       parts: [
         {
           partId: 'part-a',

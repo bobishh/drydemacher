@@ -3,7 +3,8 @@
   import Dropdown from './Dropdown.svelte';
   import VertexGenie from './VertexGenie.svelte';
   import SourceRootField from './components/SourceRootField.svelte';
-  import { open, save } from '@tauri-apps/plugin-dialog';
+  import { open } from '@tauri-apps/plugin-dialog';
+  import { safeSaveDialog } from './safeSaveDialog';
   import { derivePrimaryAgentId, normalizeMcpMode } from './agents/state';
   import { modelSourceFingerprint } from './modelFetchPolicy';
   import { resolveEngineCapabilitySummary, resolveEngineVision } from './modelRuntime/modelCapabilities';
@@ -545,7 +546,7 @@
     skillExporting = true;
     message = 'Exporting Ecky MCP skill...';
     try {
-      const targetPath = await save({
+      const targetPath = await safeSaveDialog({
         defaultPath: 'ecky-mcp-skill.zip',
         filters: [{ name: 'Zip Archive', extensions: ['zip'] }],
       });

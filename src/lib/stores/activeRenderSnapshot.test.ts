@@ -54,6 +54,7 @@ function input(): ActiveRenderSnapshotInput {
       controlViews: [],
       selectionTargets: [],
       taggedAnchors: {},
+      analysisDeclarations: [],
       advisories: [],
       measurementAnnotations: [],
       warnings: [],

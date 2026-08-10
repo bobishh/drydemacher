@@ -201,6 +201,7 @@
     $history.filter(
       (project: Thread) =>
         project.status !== 'finalized' &&
+        !project.isBlank &&
         (
           project.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
           Boolean(project.summary?.toLowerCase().includes(searchQuery.toLowerCase()))
@@ -641,7 +642,7 @@
   {#if !onOpenNewProjectChooser && showNewChooser}
     <Modal title="Start New Project" onclose={() => showNewChooser = false}>
       <div class="new-chooser">
-        <button onclick={() => { createNewThread({ mode: 'blank' }); showNewChooser = false; }}>
+        <button onclick={() => { void createNewThread({ mode: 'blank' }); showNewChooser = false; }}>
           Blank Project
         </button>
         <button
@@ -660,7 +661,7 @@
     <ManualImportModal
       bind:show={showImport}
       onImport={(data) => {
-        createNewThread({ mode: 'macro', ...data });
+        void createNewThread({ mode: 'macro', ...data });
         showImport = false;
       }}
     />

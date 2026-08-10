@@ -58,11 +58,12 @@ export type ResolvedMeasurementCallout = {
 };
 
 const TARGET_KIND_PRIORITY: Record<SelectionTargetKind, number> = {
-  edge: 0,
-  face: 1,
-  object: 2,
-  group: 3,
-  part: 4,
+  vertex: 0,
+  edge: 1,
+  face: 2,
+  object: 3,
+  group: 4,
+  part: 5,
 };
 
 function normalizeList(values: string[] | null | undefined): string[] {

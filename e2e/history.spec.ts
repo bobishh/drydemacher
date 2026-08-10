@@ -296,6 +296,46 @@ test.describe('Projects', () => {
     await expect(page.locator('[data-window-id="projects"] .project-card')).toHaveCount(0);
   });
 
+  test('Given a reusable blank thread and an authored thread When Projects opens Then only the authored thread is listed', async ({ page }) => {
+    await installProjectSwitcherMocks({
+      history: [
+        {
+          id: 'blank-thread',
+          title: 'Untitled design',
+          summary: 'Thread: Untitled design',
+          messages: [],
+          updatedAt: 200,
+          versionCount: 0,
+          pendingCount: 0,
+          queuedCount: 0,
+          errorCount: 0,
+          status: 'active',
+          isBlank: true,
+        },
+        {
+          id: 'authored-thread',
+          title: 'Rocksteady AirTag head',
+          summary: 'Head crop and AirTag enclosure',
+          messages: [],
+          updatedAt: 100,
+          versionCount: 1,
+          pendingCount: 0,
+          queuedCount: 0,
+          errorCount: 0,
+          status: 'active',
+          isBlank: false,
+        },
+      ],
+    })({ page });
+
+    await page.goto('/');
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+
+    const projects = page.locator('[data-window-id="projects"]');
+    await expect(projects.getByText('Rocksteady AirTag head', { exact: true })).toBeVisible();
+    await expect(projects.getByText('Untitled design', { exact: true })).toHaveCount(0);
+  });
+
   test('Given many projects When Projects opens Then only visible cards request lightweight previews', async ({ page }) => {
     await installProjectSwitcherMocks({
       history: Array.from({ length: 40 }, (_, index) => ({

@@ -46,6 +46,7 @@ function message(): Pick<Message, 'id' | 'artifactBundle' | 'modelManifest' | 'o
         warnings: [],
       },
       taggedAnchors: {},
+      analysisDeclarations: [],
       parts: [],
       parameterGroups: [],
       controlPrimitives: [],

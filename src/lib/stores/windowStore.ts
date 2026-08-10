@@ -10,6 +10,8 @@ export type WindowId =
   | 'code'
   | 'projects'
   | 'library'
+  | 'capture'
+  | 'analysis'
   | 'params'
   | 'dialogue'
   | 'docs'
@@ -43,6 +45,18 @@ export const windowRegistry: Record<WindowId, WindowRegistryEntry> = {
     defaultRect: { x: 520, y: 80, width: 620, height: 560 },
     minSize: { width: 320, height: 320 },
     mountPolicy: 'lazy',
+  },
+  capture: {
+    title: 'Capture Session',
+    defaultRect: { x: 220, y: 70, width: 1040, height: 760 },
+    minSize: { width: 720, height: 520 },
+    mountPolicy: 'keepAlive',
+  },
+  analysis: {
+    title: 'Structural Analysis',
+    defaultRect: { x: 860, y: 80, width: 420, height: 620 },
+    minSize: { width: 340, height: 360 },
+    mountPolicy: 'keepAlive',
   },
   params: {
     title: 'Parameters',
@@ -111,6 +125,8 @@ const ALL_WINDOW_IDS: WindowId[] = [
   'code',
   'projects',
   'library',
+  'capture',
+  'analysis',
   'params',
   'dialogue',
   'docs',
@@ -121,6 +137,7 @@ const ALL_WINDOW_IDS: WindowId[] = [
 ];
 
 const HIDDEN_WINDOW_IDS = new Set<WindowId>(['sketch']);
+const TRANSIENT_WINDOW_IDS = new Set<WindowId>(['docs']);
 let windowSafeInsets: ViewportInsets = {};
 
 function isWindowAvailable(id: WindowId): boolean {
@@ -175,8 +192,8 @@ function mergeDbLayout(dbLayout: ThreadWindowLayout | null): WindowStoreState {
       reg.minSize,
     );
     defaults[id] = {
-      visible: saved.visible,
-      minimized: saved.minimized ?? false,
+      visible: TRANSIENT_WINDOW_IDS.has(id) ? false : saved.visible,
+      minimized: TRANSIENT_WINDOW_IDS.has(id) ? false : saved.minimized ?? false,
       active: false,
       ...clamped,
       z: saved.z,

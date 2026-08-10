@@ -29,6 +29,7 @@ import {
   getHistory,
   getMessStlPath,
   getModelManifest,
+  openOrCreateBlankDesignThread,
   getThreadLatestVersion,
   getThreadMessageVersion,
   getThreadMessagesPage,
@@ -799,8 +800,20 @@ export async function restoreVersion(messageId: string) {
   }
 }
 
-export function createNewThread(payload: NewThreadPayload | null | undefined) {
-  const newId = crypto.randomUUID();
+export async function createNewThread(
+  payload: NewThreadPayload | null | undefined,
+  deps: {
+    openBlank?: typeof openOrCreateBlankDesignThread;
+  } = {},
+): Promise<string | null> {
+  let document;
+  try {
+    document = await (deps.openBlank ?? openOrCreateBlankDesignThread)(payload?.title ?? null);
+  } catch (error) {
+    session.setError(`New Thread Error: ${formatBackendError(error)}`);
+    return null;
+  }
+  const newId = document.threadId;
   latestThreadSwitchToken += 1;
   latestLoadVersionToken += 1;
   beginThreadSwitch(newId);
@@ -818,10 +831,11 @@ export function createNewThread(payload: NewThreadPayload | null | undefined) {
   if (payload?.mode === 'macro' && payload.code) {
     session.setStatus(`Initializing thread with macro: ${payload.title}...`);
     // We'll call a special commit function for the initial macro
-    commitInitialMacro(payload.code, payload.title);
+    await commitInitialMacro(payload.code, payload.title);
   } else {
     session.setStatus('New design session started.');
   }
+  return newId;
 }
 
 async function commitInitialMacro(code: string, title: string | undefined) {

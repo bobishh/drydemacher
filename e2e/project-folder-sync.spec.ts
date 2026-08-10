@@ -34,7 +34,7 @@ function projectFolderMockScript() {
   };
 
   window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
-  const eventHandlers = new Map<string, number>();
+  const eventHandlers = new Map<string, number[]>();
   let nextCallbackId = 1;
   window.__TAURI_INTERNALS__.transformCallback = (callback: unknown) => {
     const callbackId = nextCallbackId++;
@@ -42,12 +42,11 @@ function projectFolderMockScript() {
     return callbackId;
   };
   window.__emitTauriEvent = (event, payload) => {
-    const callbackId = eventHandlers.get(event);
-    const callback = callbackId
-      ? (window as unknown as Record<string, unknown>)[`_${callbackId}`]
-      : null;
-    if (typeof callback === 'function') {
-      callback({ event, id: callbackId, payload });
+    for (const callbackId of eventHandlers.get(event) ?? []) {
+      const callback = (window as unknown as Record<string, unknown>)[`_${callbackId}`];
+      if (typeof callback === 'function') {
+        callback({ event, id: callbackId, payload });
+      }
     }
   };
 
@@ -80,7 +79,8 @@ function projectFolderMockScript() {
     (window as any).__PROJECT_FOLDER_CALLS__.push({ cmd, args });
     if (cmd === 'plugin:event|listen') {
       const handler = Number(args?.handler);
-      eventHandlers.set(String(args?.event ?? ''), handler);
+      const event = String(args?.event ?? '');
+      eventHandlers.set(event, [...(eventHandlers.get(event) ?? []), handler]);
       return handler;
     }
     if (cmd === 'plugin:event|unlisten') return null;
@@ -250,6 +250,31 @@ function projectFolderMockScript() {
         manifest: { ...manifest, messageId: 'mock-msg-2', sourceDigest: 'sha256:edited' },
       };
     }
+    if (cmd === 'get_project_source') {
+      return {
+        threadId: String(args?.threadId),
+        slug: 'bracket-abc12345',
+        folder: '/mock/projects/bracket-abc12345',
+        file: '/mock/projects/bracket-abc12345/model.ecky',
+        source: '(model (part body (solidify (import-stl "scan.stl"))))',
+      };
+    }
+    if (cmd === 'open_or_create_blank_design_thread') {
+      return {
+        threadId: 'mock-thread-1',
+        slug: 'bracket-abc12345',
+        folder: '/mock/projects/bracket-abc12345',
+        file: '/mock/projects/bracket-abc12345/model.ecky',
+        source: '(model (part body (box 20 20 20)))',
+      };
+    }
+    if (cmd === 'open_project_in_editor' || cmd === 'reveal_project_folder') {
+      return {
+        slug: 'bracket-abc12345',
+        folder: '/mock/projects/bracket-abc12345',
+        file: '/mock/projects/bracket-abc12345/model.ecky',
+      };
+    }
     return null;
   };
 }
@@ -279,11 +304,60 @@ endsolid mock
   await page
     .locator('textarea.prompt-input')
     .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
-  await page.getByRole('button', { name: 'PARAMS' }).click();
+  await page.getByRole('button', { name: 'Parameters', exact: true }).click();
   await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
+  await expect.poll(() => page.evaluate(() =>
+    (window.__PROJECT_FOLDER_CALLS__ ?? []).some(
+      (call) => call.cmd === 'plugin:event|listen' && call.args?.event === 'project-folder-sync',
+    ),
+  )).toBe(true);
 }
 
 test.describe('Project folder mirror (filesystem-project-mirror T5.2/T5.3)', () => {
+  test('Given model.ecky changes in an editor When the watcher detects it Then a global source notice appears with Params closed', async ({ page }) => {
+    await bootIntoBracketWorkspace(page);
+
+    await page.evaluate(() => {
+      window.__emitTauriEvent?.('project-folder-sync', [
+        { kind: 'detected', slug: 'bracket-abc12345', threadId: 'mock-thread-1' },
+      ]);
+    });
+
+    const notice = page.getByTestId('project-folder-notice');
+    await expect(notice).toBeVisible();
+    await expect(notice).toContainText('SOURCE CHANGED');
+    await expect(notice).toContainText('bracket-abc12345/model.ecky');
+  });
+
+  test('Given an external source edit fails When the watcher reports it Then the raw error is globally visible', async ({ page }) => {
+    await bootIntoBracketWorkspace(page);
+
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'CODE' }).click();
+    const modal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR:' });
+
+    await page.evaluate(() => {
+      window.__emitTauriEvent?.('project-folder-sync', [
+        {
+          kind: 'applyFailed',
+          slug: 'bracket-abc12345',
+          threadId: 'mock-thread-1',
+          messageId: 'mock-msg-1',
+          error: 'line 17: unexpected closing parenthesis',
+        },
+      ]);
+    });
+
+    const notice = page.getByTestId('project-folder-notice');
+    await expect(notice).toHaveAttribute('role', 'alert');
+    await expect(notice).toContainText('line 17: unexpected closing parenthesis');
+    await expect(modal).toContainText('solidify');
+
+    await modal.getByRole('button', { name: 'OPEN FILE' }).click();
+    await expect.poll(() => page.evaluate(() =>
+      (window.__PROJECT_FOLDER_CALLS__ ?? []).find((call) => call.cmd === 'open_project_in_editor')?.args,
+    )).toMatchObject({ threadId: 'mock-thread-1' });
+  });
+
   test('Given a blank UI thread When generation starts Then thread initialization runs before design generation', async ({
     page,
   }) => {
@@ -320,7 +394,13 @@ test.describe('Project folder mirror (filesystem-project-mirror T5.2/T5.3)', () 
     });
     await page.evaluate(() => {
       window.__emitTauriEvent?.('project-folder-sync', [
-        { kind: 'applyFailed', slug: 'bracket-abc12345', error: 'simulated edit pending' },
+        {
+          kind: 'applyFailed',
+          slug: 'bracket-abc12345',
+          threadId: 'mock-thread-1',
+          messageId: 'mock-msg-1',
+          error: 'simulated edit pending',
+        },
       ]);
     });
 

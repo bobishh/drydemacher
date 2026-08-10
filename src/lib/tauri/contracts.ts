@@ -61,6 +61,108 @@ async exportEckyMcpSkillZip(targetPath: string) : Promise<Result<null, AppError>
     else return { status: "error", error: e  as any };
 }
 },
+async openOrCreateBlankDesignThread(title: string | null) : Promise<Result<ProjectSourceDocument, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_or_create_blank_design_thread", { title }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Read the authoritative bound `model.ecky` for a design thread.
+ * Missing legacy bindings are created before the file is read.
+ */
+async getProjectSource(threadId: string) : Promise<Result<ProjectSourceDocument, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_project_source", { threadId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Discover imported mesh nodes from the authoritative bound `model.ecky`.
+ * Returned paths point at raw source assets; previewing them does not render
+ * or solidify the model.
+ */
+async listExternalShapeSources(threadId: string) : Promise<Result<ExternalShapeSource[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_external_shape_sources", { threadId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async applyExternalShapePlaneCrop(request: ApplyExternalShapePlaneCropRequest) : Promise<Result<ApplyExternalShapePlaneCropResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("apply_external_shape_plane_crop", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async removeExternalShapePlaneCrop(request: RemoveExternalShapePlaneCropRequest) : Promise<Result<RemoveExternalShapePlaneCropResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("remove_external_shape_plane_crop", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async previewExternalShapeSurfaceTrimPath(request: SurfaceTrimPathPreviewRequest) : Promise<Result<SurfaceTrimPathPreviewResponse, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("preview_external_shape_surface_trim_path", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async previewExternalShapeSurfaceTrimLoop(request: SurfaceTrimLoopPreviewRequest) : Promise<Result<SurfaceTrimLoopPreviewResponse, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("preview_external_shape_surface_trim_loop", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async previewExternalShapeSurfaceTrimRegion(request: SurfaceTrimRegionPreviewRequest) : Promise<Result<SurfaceTrimRegionPreviewResponse, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("preview_external_shape_surface_trim_region", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async applyExternalShapeSurfaceTrim(request: ApplySurfaceTrimRequest) : Promise<Result<ApplySurfaceTrimResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("apply_external_shape_surface_trim", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async removeExternalShapeSurfaceTrim(request: RemoveSurfaceTrimRequest) : Promise<Result<RemoveSurfaceTrimResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("remove_external_shape_surface_trim", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Atomically replace the one bound source used by editor, renderer, and diff.
+ * This deliberately does not create a history version; COMMIT VERSION owns
+ * that separate action.
+ */
+async saveProjectSource(threadId: string, source: string) : Promise<Result<ProjectSourceDocument, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_project_source", { threadId, source }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * "Open in editor": mirror the active macro to its project folder (unless
  * the folder carries unapplied external edits) and open `model.ecky` with
@@ -414,6 +516,142 @@ async getAppWindowLayout() : Promise<Result<ThreadWindowLayout | null, AppError>
 async saveAppWindowLayout(layout: ThreadWindowLayout) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("save_app_window_layout", { layout }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async startCaptureSession(threadId: string, messageId: string | null, title: string, targetSource: string, targetSourceLanguage: string, startedFromEmpty: boolean) : Promise<Result<CaptureSessionInfo, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("start_capture_session", { threadId, messageId, title, targetSource, targetSourceLanguage, startedFromEmpty }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async listCaptureRuns(threadId: string) : Promise<Result<CaptureRun[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_capture_runs", { threadId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async reopenCaptureRun(runId: string) : Promise<Result<ReopenedCaptureRun, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("reopen_capture_run", { runId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async adoptLatestCaptureRun(threadId: string, messageId: string | null, title: string, targetSource: string, targetSourceLanguage: string, startedFromEmpty: boolean) : Promise<Result<ReopenedCaptureRun, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("adopt_latest_capture_run", { threadId, messageId, title, targetSource, targetSourceLanguage, startedFromEmpty }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async saveCapturePreviewSettings(runId: string, cropBounds: CaptureCropBounds | null, previewScale: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_capture_preview_settings", { runId, cropBounds, previewScale }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getCaptureReconstructionGuide(runId: string) : Promise<Result<CaptureReconstructionGuide | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_capture_reconstruction_guide", { runId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getCaptureGuideSourceIdentity(runId: string) : Promise<Result<CaptureGuideSourceMesh, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_capture_guide_source_identity", { runId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getCaptureGuideContext(runId: string) : Promise<Result<CaptureGuideContext, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_capture_guide_context", { runId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async saveCaptureReconstructionGuide(runId: string, expectedRevision: number, expectedMeshDigest: string, guide: CaptureReconstructionGuide, guideState: CaptureReconstructionGuideState) : Promise<Result<CaptureReconstructionGuide, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_capture_reconstruction_guide", { runId, expectedRevision, expectedMeshDigest, guide, guideState }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async evaluateCaptureReconstructionGuide(runId: string, expectedMeshDigest: string, guide: CaptureReconstructionGuide) : Promise<Result<CaptureReconstructionGuide, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("evaluate_capture_reconstruction_guide", { runId, expectedMeshDigest, guide }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async queueCaptureGuidedReconstruction(runId: string, expectedGuideRevision: number, expectedTargetSourceDigest: string) : Promise<Result<QueuedCaptureGuidedReconstruction, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("queue_capture_guided_reconstruction", { runId, expectedGuideRevision, expectedTargetSourceDigest }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getCaptureSessionStatus(token: string) : Promise<Result<CaptureSessionInfo | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_capture_session_status", { token }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async pairCaptureSession(token: string) : Promise<Result<CaptureSessionInfo, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pair_capture_session", { token }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async cancelCaptureSession(token: string) : Promise<Result<CaptureSessionInfo, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cancel_capture_session", { token }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async resumeCaptureSession(token: string) : Promise<Result<CaptureSessionInfo, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resume_capture_session", { token }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async retryCaptureReconstruction(token: string) : Promise<Result<CaptureSessionInfo, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("retry_capture_reconstruction", { token }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async prepareCapturePreview(token: string, cropBounds: CaptureCropBounds | null) : Promise<Result<CapturePreparedPreview, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("prepare_capture_preview", { token, cropBounds }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -774,6 +1012,70 @@ async exportMultipartStlZip(parts: ExportPartInput[], targetPath: string, modelN
 async exportMultipart3mf(parts: ExportPartInput[], targetPath: string, modelName: string) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("export_multipart_3mf", { parts, targetPath, modelName }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async safeSaveDialog(defaultPath: string, filterName: string, extensions: string[]) : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("safe_save_dialog", { defaultPath, filterName, extensions }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async validateFemStudy(request: FemStudyRequest) : Promise<Result<FemStudyValidationResponse, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("validate_fem_study", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async previewFemMesh(request: FemStudyRequest) : Promise<Result<FemMeshPreviewResponse, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("preview_fem_mesh", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async runFemStudy(request: FemStudyRequest) : Promise<Result<FemRunResponse, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("run_fem_study", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async cancelFemStudy(jobId: string) : Promise<Result<FemCancelResponse, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cancel_fem_study", { jobId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async readFemResult(request: FemResultReadRequest) : Promise<Result<FemResultReadResponse, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("read_fem_result", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async exportFemResultVtu(request: FemResultReadRequest, targetPath: string) : Promise<Result<FemVtuExportResponse, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_fem_result_vtu", { request, targetPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async runFemConvergence(request: FemConvergenceRequest) : Promise<Result<FemConvergenceResponse, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("run_fem_convergence", { request }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1172,9 +1474,14 @@ vtStream?: string;
  * as a full snapshot replacement.
  */
 vtDelta?: string | null; attentionRequired: boolean; busy?: boolean; activityLabel?: string | null; activityStartedAt?: number | null; attentionKind?: string | null; summary?: string | null; active: boolean; updatedAt: number }
+export type AnalysisDeclarationBinding = { analysisId: string; kind: string; partId: string; elementKind: string; sourceStart?: number | null; sourceEnd?: number | null }
 export type AppError = { code: AppErrorCode; message: string; details?: string | null; stableNodeKey?: string | null; startLine?: number | null; endLine?: number | null; operation?: string | null; diagnosticContext?: DiagnosticContext | null; layer?: ErrorLayer | null; fix?: ErrorFix | null }
 export type AppErrorCode = "validation" | "notFound" | "conflict" | "provider" | "persistence" | "render" | "parse" | "internal"
 export type AppLogEntry = { tsMs: number; message: string }
+export type ApplyExternalShapePlaneCropRequest = { threadId: string; nodeId: number; expectedSourceDigest: string; expectedMeshContentDigest: string; anchors: CaptureSurfaceAnchor[]; keepPositive: boolean; replaceCropNodeId?: number | null }
+export type ApplyExternalShapePlaneCropResult = { source: string; sourceDigest: string; origin: [number, number, number]; normal: [number, number, number]; keepPositive: boolean }
+export type ApplySurfaceTrimRequest = { schemaVersion: number; threadId: string; targetMessageId?: string | null; nodeId: number; expectedSourceDigest: string; expectedMeshContentDigest: string; loopAnchors: CaptureSurfaceAnchor[]; keepSeed: CaptureSurfaceAnchor; pathMode: SurfaceTrimPathMode; capMode: SurfaceTrimCapMode; replaceTrimNodeId?: number | null }
+export type ApplySurfaceTrimResult = { source: string; sourceDigest: string; trimNodeId: number; pointCount: number; pathMode: SurfaceTrimPathMode; capMode: SurfaceTrimCapMode; topology: SurfaceTrimMeshDiagnostics; capReports: SurfaceTrimCapReport[] }
 export type ArtifactBundle = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; contentHash: string; artifactVersion?: number; fcstdPath: string; manifestPath: string; macroPath?: string | null; previewStlPath: string; viewerAssets?: ViewerAsset[]; edgeTargets?: ViewerEdgeTarget[]; faceTargets?: ViewerFaceTarget[]; calloutAnchors?: CalloutAnchor[]; measurementGuides?: MeasurementGuide[]; exportArtifacts?: ExportArtifact[]; geometryProvenance?: GeometryProvenance | null; componentDependencyLock?: ComponentDependencyLock | null; componentDependencyLockDigest?: string | null; componentImportOrigins?: ComponentImportOrigin[] }
 export type ArtifactBundleComponentPackageRequest = { packageId: string; version: string; displayName: string; tags?: string[]; componentId: string; componentVersion: string; componentDisplayName: string; sourceRef?: string | null; artifactBundle: ArtifactBundle; portTypes?: PortTypeDefinition[]; params?: ComponentParam[]; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; ports?: ComponentPort[] }
 export type AssemblyComponentRef = { instanceId: string; componentId: string }
@@ -1245,6 +1552,81 @@ export type CampaignRun = { id: string;
 kind?: string; title: string; definitionId: string; definitionVersion: string; currentStepId: string; completedStepIds?: string[]; passedChallengeIds?: string[]; draftOverridesByStepId?: Partial<{ [key in string]: string }>; createdAt: number; updatedAt: number }
 export type CampaignStepPayload = { definitionId: string; definitionVersion: string; currentStep: CampaignCurrentStep | null }
 export type CampaignSummary = { definitionId: string; sectionSlug: string; title: string; stepCount: number; firstStepId: string }
+export type CaptureAnalyticPrimitive = { kind: "line"; originMm: [number, number, number]; direction: [number, number, number] } | { kind: "plane"; originMm: [number, number, number]; normal: [number, number, number] } | { kind: "circle"; centerMm: [number, number, number]; normal: [number, number, number]; radiusMm: number } | { kind: "cylinder"; originMm: [number, number, number]; axisDirection: [number, number, number]; radiusMm: number; minAxisMm: number; maxAxisMm: number } | { kind: "cone"; apexMm: [number, number, number]; axisDirection: [number, number, number]; halfAngleDeg: number; minAxisMm: number; maxAxisMm: number } | { kind: "sphere"; centerMm: [number, number, number]; radiusMm: number }
+export type CaptureAnchorRemapProposal = { proposalId: string; landmarkId: string; oldAnchor: CaptureSurfaceAnchor; newAnchor: CaptureSurfaceAnchor; residualMm: number; confirmed: boolean }
+export type CaptureAuthoredSelector = { kind: "binding"; name: string } | { kind: "tag"; name: string }
+export type CaptureCalibration = { sourceUnits: string; millimetresPerSourceUnit: number; method: CaptureCalibrationMethod; measurements: CaptureKnownDistanceMeasurement[]; residualMm: number }
+export type CaptureCalibrationMethod = { kind: "knownDistance" } | { kind: "trustedMetricMetadata"; provenance: string; acceptedByUser: boolean }
+export type CaptureClientCapabilities = { metricDepth?: boolean; cameraIntrinsics?: boolean; cameraPose?: boolean; depthSidecars?: boolean }
+export type CaptureConstraintGraph = { dimensions: CaptureDimensionEvidence[]; relations: CaptureNamedConstraint[]; contentDigest: string }
+export type CaptureConstraintKind = "symmetry" | "coaxial" | "coplanar" | "parallel" | "perpendicular" | "tangent" | "equalRadius" | "thickness" | "extent" | "clearance" | "tolerance"
+export type CaptureCorrespondenceRelation = "observes" | "constrains" | "profiles" | "definesAxis" | "definesSurface"
+export type CaptureCorrespondenceResidual = { metric: string; maximum: number; rms: number; unit: string; components?: CaptureCorrespondenceResidualComponent[] }
+export type CaptureCorrespondenceResidualComponent = { metric: string; maximum: number; rms: number; unit: string }
+export type CaptureCorrespondenceStatus = "satisfied" | "ambiguous" | "missing" | "wrongKind" | "overTolerance"
+export type CaptureCropBounds = { min: [number, number, number]; max: [number, number, number] }
+export type CaptureDeviationDisplaySample = { sourceVertexIndex: number; localPositionMm: [number, number, number]; distanceMm: number }
+export type CaptureDeviationPartIdentity = { partId: string; sourceGeometryDigest: string; analysisBoundaryDigest: string }
+export type CaptureDimensionEvidence = { dimensionId: string; label: string; landmarkIds: string[]; value: number; unit: string; fitCritical: boolean; parameterName: string | null; constraintKind: CaptureConstraintKind | null }
+export type CaptureEvidenceComputationPolicy = { neighborhoodRadiusMm: number; maxNeighborhoodTriangles: number }
+export type CaptureEvidenceCorrespondence = { expectationId: string; guideItemIds: string[]; partId: string; instancePath: string | null; authoredSelector: CaptureAuthoredSelector; selectorCardinality: CaptureSelectorCardinality; brepTargetKind: CaptureRequiredBrepTopologyKind; canonicalTargetIds: string[]; durableTargetIds: string[]; sourceStableNodeKeys: string[]; sourceGeometryDigest: string; relation: CaptureCorrespondenceRelation; residual: CaptureCorrespondenceResidual | null; status: CaptureCorrespondenceStatus }
+export type CaptureEvidenceView = { viewId: string; label: string; cameraPositionMm: [number, number, number]; cameraTargetMm: [number, number, number]; cameraUp: [number, number, number]; landmarkIds: string[]; profileIds: string[]; artifactDigest: string | null }
+export type CaptureExpectedGeometryKind = "point" | "curve" | "plane" | "cylinder" | "profile"
+export type CaptureFeatureExpectation = { expectationId: string; guideItemIds: string[]; label: string; expectedGeometryKind: CaptureExpectedGeometryKind; requiredBrepTopologyKind: CaptureRequiredBrepTopologyKind; cardinality: CaptureSelectorCardinality; partId: string; instancePath: string | null; expectedAuthoredSelector: CaptureAuthoredSelector; requiredForAcceptance: boolean; positionToleranceMm: number | null; normalToleranceDeg: number | null; radialToleranceMm: number | null }
+export type CaptureFeatureOperation = { kind: "extrude"; profileCandidateId: string; distanceDimensionId: string } | { kind: "revolve"; profileCandidateId: string; axisId: string; angleDeg: number } | { kind: "sweep"; profileCandidateId: string; pathId: string } | { kind: "mirror"; planeId: string } | { kind: "booleanUnion"; operandPlanIds: string[] } | { kind: "booleanDifference"; basePlanId: string; cutterPlanIds: string[] }
+export type CaptureFeatureOperationTrace = { operationIndex: number; operationKind: string; evidenceIds: string[]; authoredNodeKeys: string[]; authoredBindingNames: string[]; brepTargetIds: string[] }
+export type CaptureFeaturePlanCandidate = { planId: string; label: string; operations: CaptureFeatureOperation[]; supportingEvidenceIds: string[]; rejectingEvidence: string[]; score: number; status: CaptureFeaturePlanStatus }
+export type CaptureFeaturePlanStatus = "supported" | "rejected" | "needsConfirmation"
+export type CaptureFitResidual = { rmsMm: number; maxMm: number; toleranceMm: number }
+export type CaptureGuideContext = { sourceMesh: CaptureGuideSourceMesh; targetSourceDigest: string; targetVersionId: string | null }
+export type CaptureGuideResultProvenance = { guideId: string; guideRevision: number; guideCanonicalDigest: string; sourceMeshArtifactDigest: string; sourceMeshContentDigest: string; targetSourceDigest: string; targetVersionId: string | null; generatedSourceDigest: string; geometryDigest: string; assumptions: string[]; inferredRegions: string[]; selectedFeaturePlanId?: string | null; featureOperationTraces?: CaptureFeatureOperationTrace[]; correspondences: CaptureEvidenceCorrespondence[] }
+export type CaptureGuideSourceMesh = { artifactDigest: string; contentDigest: string; selection: CaptureMeshSelection; cropDigest: string | null; triangleCount: number; sourceBounds: CaptureSourceBounds }
+export type CaptureIgnoredRegion = { regionId: string; label: string; landmarkIds: string[]; reason: string }
+export type CaptureKnownDistanceMeasurement = { measurementId: string; label: string; firstLandmarkId: string; secondLandmarkId: string; knownDistanceMm: number; fittedDistanceMm: number; residualMm: number; acceptedToleranceMm: number }
+export type CaptureLandmark = { landmarkId: string; label: string; role: CaptureLandmarkRole; anchor: CaptureSurfaceAnchor; localPositionMm: [number, number, number]; localNormal: [number, number, number]; uncertaintyMm: number | null }
+export type CaptureLandmarkRole = "calibrationEndpoint" | "frameOrigin" | "frameDirection" | "symmetrySample" | "rotationAxisEndpoint" | "profileVertex" | "matingSurfaceSample" | "boreSample" | "outerExtent" | "clearanceBoundary" | "ignoredDamagedRegion" | "namedReference"
+export type CaptureMeshPreview = { stlPath: string; triangleCount: number; boundsMm: [number, number, number]; scaleLabel: string; warnings?: string[] }
+export type CaptureMeshSelection = "raw" | "crop"
+export type CaptureNamedAxis = { axisId: string; label: string; landmarkIds: string[]; originMm: [number, number, number]; direction: [number, number, number]; fit: CaptureFitResidual }
+export type CaptureNamedConstraint = { constraintId: string; label: string; kind: CaptureConstraintKind; entityIds: string[]; parameterName: string | null; value: number | null; unit: string | null; tolerance: number; residual: number | null; userConfirmed: boolean }
+export type CaptureNamedMeasurement = { measurementId: string; label: string; landmarkIds: string[]; value: number; unit: string; fitCritical: boolean; authoredParameterName: string | null; constraintKind?: CaptureConstraintKind | null }
+export type CaptureNamedPlane = { planeId: string; label: string; role: CapturePlaneRole; landmarkIds: string[]; originMm: [number, number, number]; normal: [number, number, number]; fit: CaptureFitResidual }
+export type CaptureObservedDeviationReport = { schemaVersion: number; guideId: string; guideRevision: number; guideCanonicalDigest: string; sourceMeshContentDigest: string; generatedGeometryDigest: string; parts: CaptureDeviationPartIdentity[]; sourceVertexCount: number; sampleCount: number; maximumMm: number; rmsMm: number; percentile95Mm: number; outlierThresholdMm: number; outlierCount: number; evidenceScope: string; displaySamples?: CaptureDeviationDisplaySample[]; contentDigest: string }
+export type CaptureOrderedProfile = { profileId: string; label: string; kind: CaptureProfileKind; supportPlaneId: string; landmarkIds: string[]; operationHint: CaptureProfileOperationHint; featureLabel: string | null; fitRole: string | null }
+export type CapturePlaneRole = "symmetry" | "matingSurface" | "support" | "reference"
+export type CapturePreparedPreview = { artifactBundle: ArtifactBundle; modelManifest: ModelManifest }
+export type CapturePrimitiveCandidate = { candidateId: string; label: string; guideItemIds: string[]; neighborhoodIds: string[]; geometry: CaptureAnalyticPrimitive; fit: CaptureFitResidual; supportSampleCount: number }
+export type CapturePrimitiveFitDomain = { parameterName: string | null; minimum: number | null; maximum: number | null; observedOnly: boolean }
+export type CapturePrimitiveHypothesis = { hypothesisId: string; guideItemIds: string[]; kind: CapturePrimitiveKind; status: CapturePrimitiveHypothesisStatus; candidateId: string | null; domain: CapturePrimitiveFitDomain; fit: CaptureFitResidual | null; robustEvidence?: CapturePrimitiveRobustEvidence | null; reason: string }
+export type CapturePrimitiveHypothesisStatus = "supported" | "rejected"
+export type CapturePrimitiveKind = "line" | "plane" | "circle" | "cylinder" | "cone" | "sphere"
+export type CapturePrimitiveRobustEvidence = { method: string; excludedGuideItemIds: string[] }
+export type CaptureProfileKind = "open" | "closed"
+export type CaptureProfileOperationHint = "extrude" | "revolve" | "sweep" | "referenceOnly" | "agentDecide"
+export type CaptureProfileSegment = { segmentId: string; sourceLandmarkIds: string[]; neighborhoodIds: string[]; parameterRange: [number, number]; geometry: CaptureProfileSegmentGeometry; fit: CaptureFitResidual }
+export type CaptureProfileSegmentGeometry = { kind: "line"; startMm: [number, number, number]; endMm: [number, number, number] } | { kind: "arc"; centerMm: [number, number, number]; normal: [number, number, number]; radiusMm: number; startAngleDeg: number; endAngleDeg: number } | { kind: "circle"; centerMm: [number, number, number]; normal: [number, number, number]; radiusMm: number } | { kind: "spline"; degree: number; controlPointsMm: ([number, number, number])[]; knots: number[] }
+export type CaptureReadinessStageEvidence = { stage: CaptureReconstructionStage; status: CaptureReadinessStageStatus; affectedEvidenceIds: string[]; detail: string }
+export type CaptureReadinessStageStatus = "satisfied" | "missing" | "ambiguous" | "bypassed"
+export type CaptureReconstructedProfile = { candidateId: string; sourceProfileId: string; supportPlaneId: string; segments: CaptureProfileSegment[]; closed: boolean; continuous: boolean; closureErrorMm: number; maximumContinuityGapMm: number; supportPlaneMaxMm: number; supportingEvidenceIds: string[]; rejectedHypotheses: string[] }
+export type CaptureReconstructionFrame = { originMm: [number, number, number]; xAxis: [number, number, number]; yAxis: [number, number, number]; zAxis: [number, number, number]; sourceLandmarkIds: string[] }
+export type CaptureReconstructionGuide = { schemaVersion: number; guideId: string; revision: number; captureRunId: string; targetThreadId: string; targetMessageId: string | null; targetSourceDigest: string; targetVersionId: string | null; sourceMesh: CaptureGuideSourceMesh; calibration: CaptureCalibration; reconstructionFrame: CaptureReconstructionFrame; landmarks: CaptureLandmark[]; evidenceComputationPolicy?: CaptureEvidenceComputationPolicy; surfaceNeighborhoods?: CaptureSurfaceNeighborhood[]; primitiveCandidates?: CapturePrimitiveCandidate[]; primitiveHypotheses?: CapturePrimitiveHypothesis[]; surfaceRegions?: CaptureSurfaceRegion[]; regionAdjacency?: CaptureRegionAdjacency[]; reconstructedProfiles?: CaptureReconstructedProfile[]; featureExpectations: CaptureFeatureExpectation[]; measurements: CaptureNamedMeasurement[]; axes: CaptureNamedAxis[]; planes: CaptureNamedPlane[]; profiles: CaptureOrderedProfile[]; ignoredRegions: CaptureIgnoredRegion[]; authoredConstraints?: CaptureNamedConstraint[]; constraintGraph?: CaptureConstraintGraph; featurePlanCandidates?: CaptureFeaturePlanCandidate[]; selectedFeaturePlanId?: string | null; stageBypasses?: CaptureStageBypass[]; reconstructionReadiness?: CaptureReconstructionReadiness; remapProposals: CaptureAnchorRemapProposal[]; symmetryCompletion: CaptureSymmetryCompletion; instruction: string; evidenceViews: CaptureEvidenceView[]; canonicalDigest: string }
+export type CaptureReconstructionGuideState = { status: "draft" } | { status: "ready" } | { status: "stale"; reason: string }
+export type CaptureReconstructionReadiness = { ready: boolean; stages: CaptureReadinessStageEvidence[]; missingStages: CaptureReconstructionStage[]; ambiguousStages: CaptureReconstructionStage[]; selectedFeaturePlanId: string | null; detail: string }
+export type CaptureReconstructionStage = "neighborhood" | "primitiveFit" | "segmentation" | "profileReconstruction" | "constraintGraph" | "featurePlan"
+export type CaptureRegionAdjacency = { firstRegionId: string; secondRegionId: string; sharedEdgeCount: number; relation: CaptureRegionRelation; maximumNormalAngleDeg: number }
+export type CaptureRegionRelation = "smooth" | "sharp" | "unknown"
+export type CaptureRequiredBrepTopologyKind = "vertex" | "edge" | "face" | "orderedEdges"
+export type CaptureRun = { id: string; targetThreadId: string; targetMessageId?: string | null; title: string; state: CaptureSessionState; createdAt: number; updatedAt: number; acceptedFrameCount: number; meshPreview?: CaptureMeshPreview | null; derivedStlPath?: string | null; cropBounds?: CaptureCropBounds | null; previewScale: number; targetSource: string; targetSourceLanguage: string; startedFromEmpty: boolean; rawError?: string | null; reconstructionGuide?: CaptureReconstructionGuide | null; reconstructionGuideState?: CaptureReconstructionGuideState | null; guidedReconstructionMessageId?: string | null; guidedReconstructionModelId?: string | null; guidedReconstructionResult?: CaptureGuideResultProvenance | null; guidedReconstructionDeviation?: CaptureObservedDeviationReport | null }
+export type CaptureSelectorCardinality = "one" | "oneOrMore"
+export type CaptureSessionInfo = { sessionId: string; targetThreadId: string; targetMessageId?: string | null; pairingToken: string; pairingUrl: string; trustUrl: string; protocolVersion: number; clientCapabilities: CaptureClientCapabilities; state: CaptureSessionState; createdAt: number; expiresAt: number; acceptedFrameCount?: number; coveragePercent?: number; guidance?: string; rawError?: string | null; reconstructionProgress?: number | null; meshPreview?: CaptureMeshPreview | null }
+export type CaptureSessionState = "pairing" | "capturing" | "reconstructing" | "preview" | "failed" | "cancelled"
+export type CaptureSourceBounds = { min: [number, number, number]; max: [number, number, number] }
+export type CaptureStageBypass = { stage: CaptureReconstructionStage; affectedEvidenceIds: string[]; explicitConstraintIds: string[]; rationale: string; acceptedByUser: boolean }
+export type CaptureSurfaceAnchor = { sourceMeshContentDigest: string; triangleIndex: number; barycentric: [number, number, number]; sourcePosition: [number, number, number]; sourceNormal: [number, number, number] }
+export type CaptureSurfaceNeighborhood = { neighborhoodId: string; landmarkId: string; sourceMeshContentDigest: string; seedTriangleIndex: number; triangleIndices: number[]; adjacencyEdges: ([number, number])[]; vertexIndices: number[]; sampleCount: number; radiusSourceUnits: number; sampledAreaSourceUnitsSquared: number; radialCoverageRatio: number; centroidSource: [number, number, number]; meanNormal: [number, number, number]; normalSpreadDeg: number; normalVariationRmsDeg: number; estimatedCurvaturePerSourceUnit: number; positionRmsSourceUnits: number; planarityRmsSourceUnits: number; planarityMaxSourceUnits: number; positionUncertaintySourceUnits: number; reachedMeshBoundary: boolean; truncatedByBudget: boolean }
+export type CaptureSurfaceRegion = { regionId: string; sourceMeshContentDigest: string; triangleIndices: number[]; landmarkIds: string[]; primitiveCandidateIds: string[]; kind: CaptureSurfaceRegionKind; areaSourceUnitsSquared: number; boundaryEdgeCount: number; ignored: boolean }
+export type CaptureSurfaceRegionKind = "plane" | "cylinder" | "cone" | "sphere" | "freeform" | "ignoredDamage"
+export type CaptureSymmetryCompletion = { kind: "none" } | { kind: "half"; planeId: string } | { kind: "quarter"; firstPlaneId: string; secondPlaneId: string }
 export type ClearSketchPreviewDraftRequest = { scopeId?: string | null }
 export type ComponentDefinition = { componentId: string; version: string; displayName: string; sourceRef?: string | null;
 /**
@@ -1408,11 +1790,44 @@ export type ErrorLayer =
 "backend"
 export type ExportArtifact = { label: string; format: string; path: string; role: string; geometryProvenance?: GeometryProvenance | null }
 export type ExportPartInput = { label: string; path: string; objectName?: string | null; partId?: string | null; displayColor?: string | null; placementFrame?: PortFrame | null }
+export type ExternalShapePlaneCrop = { nodeId: number; origin: [number, number, number]; normal: [number, number, number]; keepPositive: boolean }
+export type ExternalShapeSource = { nodeId: number; partKey: string; path: string; displayName: string; sourceDigest: string; contentDigest: string | null; byteLength: number | null; exists: boolean; planeCrops: ExternalShapePlaneCrop[]; surfaceTrims: ExternalShapeSurfaceTrim[] }
+export type ExternalShapeSurfaceTrim = { nodeId: number; schemaVersion: number; sourceDigest: string; loopAnchors: ExternalShapeSurfaceTrimAnchor[]; keepSeed: ExternalShapeSurfaceTrimAnchor; pathMode: SurfaceTrimPathMode; capMode: SurfaceTrimCapMode }
+export type ExternalShapeSurfaceTrimAnchor = { triangleIndex: number; barycentric: [number, number, number]; sourcePosition: [number, number, number] | null; sourceNormal: [number, number, number] | null }
 export type EyeStyle = "dot" | "bar" | "slant"
 export type FeatureGraph = { nodes: FeatureNode[] }
 export type FeatureNode = { featureId: string; kind: string; label: string; sourceRef?: SourceRef | null; dependencyIds: string[]; outputRefs: FeatureOutputRef[]; ports: FeaturePort[] }
 export type FeatureOutputRef = { featureId: string; outputId: string; targetIds: string[] }
 export type FeaturePort = { portId: string; typeId: string; targetIds: string[]; frame?: PortFrame | null; interfaces: string[]; params: Partial<{ [key in string]: ComponentInterfaceValue }>; sourceRef?: SourceRef | null; confidence?: number | null; targetRole?: string | null }
+export type FemAcceptanceEvaluationDto = { studyName: string; metricId: string; field: string; status: string; observed: number | null; unit: string; threshold: number; comparison: string; meshSizeMm: number; nodeId: number | null; elementId: number | null; coordinateMm: [number, number, number] | null; analysisIdentityDigest: string; meshContentDigest: string; resultDigest: string; convergenceStatus: string | null; evidenceChain: FemAcceptanceEvidenceChainDto; detail: string }
+export type FemAcceptanceEvidenceChainDto = { sourceGeometryDigest: string; analysisGeometryDigest: string; idealizationAccepted: boolean; inputEvidenceIds: string[]; applicabilityCheckIds: string[]; convergenceStatus: string | null; sensitivityResultDigests: string[]; validationEvidenceIds: string[]; gaps: string[] }
+export type FemApplicabilityCheckDto = { checkId: string; kind: string; status: string; observed: number | null; limit: number | null; unit: string | null; evidenceIds: string[]; detail: string }
+export type FemAssumptionDto = { assumptionId: string; category: string; statement: string; status: string; evidenceIds: string[] }
+export type FemBudgetLimitsDto = { boundaryTriangles: number; tet4Cells: number; nodes: number; dofs: number; sparseNonzeros: number; resultBytes: number; convergenceLevels: number }
+export type FemCancelResponse = { jobId: string; cancellationRequested: boolean }
+export type FemConvergenceLevelDto = { meshSizeMm: number; status: string; error: string | null; analysisIdentityDigest: string | null; solutionDigest: string | null; resultDigest: string | null; meshContentDigest: string | null; nodeCount: number | null; tet4CellCount: number | null; minimumScaledJacobian: number | null; equilibriumRelativeImbalance: number | null; solverRelativeResidual: number | null; maximumDisplacementMm: number | null; maximumVonMisesMpa: number | null; displacementRelativeDelta: number | null; stressRelativeDelta: number | null }
+export type FemConvergenceRequest = { study: FemStudyRequest; meshSizesMm: number[]; displacementRelativeTolerance: number; stressRelativeTolerance: number }
+export type FemConvergenceResponse = { jobId: string; modelId: string; analysisName: string; sequenceStatus: string; levels: FemConvergenceLevelDto[]; displacementStatus: string; stressStatus: string; acceptanceEvaluations: FemAcceptanceEvaluationDto[] }
+export type FemEngineeringEvidenceDto = { question: FemEngineeringQuestionDto; idealization: FemIdealizationDto; inputs: FemInputEvidenceDto[]; assumptions: FemAssumptionDto[]; applicability: FemApplicabilityCheckDto[]; sensitivity: FemSensitivityEvidenceDto | null; validationEvidence: FemValidationEvidenceDto[]; verificationLayers: FemVerificationLayerDto[] }
+export type FemEngineeringQuestionDto = { questionId: string; statement: string; decision: string; acceptanceMetricIds: string[] }
+export type FemExtremumDto = { fieldKind: string; value: number; unit: string; nodeId: number | null; elementId: number | null; coordinateMm: [number, number, number]; meshContentDigest: string; sourceBoundaryDigest: string }
+export type FemIdealizationDto = { artifactDigest: string; kind: string; sourceGeometryDigest: string; analysisGeometryDigest: string; manufacturingGeometryDigest: string; affectedTopologyIds: string[]; justification: string; expectedInfluencePercent: number; acceptedByUser: boolean }
+export type FemInputEvidenceDto = { inputName: string; evidenceId: string; subject: string; source: string; authority: string; uncertaintyPercent: number | null; decisionCritical: boolean }
+export type FemMeshPreviewResponse = { jobId: string; modelId: string; analysisName: string; analysisIdentityDigest: string; meshContentDigest: string; sourceBoundaryDigest: string; manifestPath: string; arrays: FemResultArrayDto[]; nodeCount: number; tet4CellCount: number; boundaryTriangleCount: number; faceGroupCount: number; minimumScaledJacobian: number; minimumRadiusRatio: number; connectedComponentCount: number; boundaryAreaMm2ByGroup: number[] }
+export type FemPipelineControlDto = { envelopeMm: number; minimumScaledJacobian: number; maximumRuntimeMs: number; relativeSolverTolerance: number }
+export type FemResultArrayDto = { name: string; path: string; scalarType: string; shape: number[]; byteLength: number; sha256: string }
+export type FemResultReadRequest = { analysisIdentityDigest: string; solutionDigest: string; maximumResultBytes: number }
+export type FemResultReadResponse = { sourceDigest: string; analysisIdentityDigest: string; solutionDigest: string; resultDigest: string; meshContentDigest: string; sourceBoundaryDigest: string; decisionReady: boolean; decisionReadinessError: string | null; manifestPath: string; arrays: FemResultArrayDto[]; summary: FemResultSummaryDto; supportReactions: FemSupportReactionDto[]; engineeringEvidence: FemEngineeringEvidenceDto; acceptanceEvaluations: FemAcceptanceEvaluationDto[] }
+export type FemResultSummaryDto = { maximumDisplacementMm: number; maximumVonMisesMpa: number; maximumPrincipalStressMpa: number; volumeMm3: number; massKg: number; minimumYieldSafetyFactor: number | null; equilibriumRelativeImbalance: number; solverRelativeResidual: number; minimumScaledJacobian: number; nodeCount: number; tet4CellCount: number; extrema: FemExtremumDto[] }
+export type FemRunResponse = { jobId: string; modelId: string; analysisName: string; sourceDigest: string; analysisIdentityDigest: string; solutionDigest: string; resultDigest: string; meshContentDigest: string; sourceBoundaryDigest: string; decisionReady: boolean; decisionReadinessError: string | null; manifestPath: string; arrays: FemResultArrayDto[]; summary: FemResultSummaryDto; supportReactions: FemSupportReactionDto[]; engineeringEvidence: FemEngineeringEvidenceDto; acceptanceEvaluations: FemAcceptanceEvaluationDto[] }
+export type FemSensitivityEvidenceDto = { completed: boolean; caseResultDigests: string[]; metricRanges: FemSensitivityMetricDto[] }
+export type FemSensitivityMetricDto = { metricId: string; nominal: number; minimum: number; maximum: number; unit: string; dominantInputName: string | null; decisionChanged: boolean }
+export type FemStudyRequest = { jobId: string; modelId: string; source: string; analysisName: string; budgets: FemBudgetLimitsDto; control: FemPipelineControlDto }
+export type FemStudyValidationResponse = { jobId: string; modelId: string; analysisName: string; partId: string; sourceDigest: string; sourceGeometryDigest: string; boundaryDigest: string; boundaryNodeCount: number; boundaryTriangleCount: number; faceGroupCount: number; decisionReadinessError: string | null }
+export type FemSupportReactionDto = { name: string; faceGroupIndices: number[]; resultantN: [number, number, number] }
+export type FemValidationEvidenceDto = { validationId: string; kind: string; source: string; resultDigest: string }
+export type FemVerificationLayerDto = { layer: string; status: string; evidenceIds: string[]; detail: string }
+export type FemVtuExportResponse = { path: string; byteLength: number; sha256: string; resultDigest: string }
 export type FinalizeStatus = "success" | "error" | "discarded"
 export type FreecadLibraryImportRequest = { item: FreecadLibraryItem; threadId?: string | null; title?: string | null }
 export type FreecadLibraryItem = { id: string; name: string; categoryPath: string; rootPath: string; relativePath: string; formats: string[]; preferredFormat: string; importPath: string; previewPath?: string | null; tags: string[] }
@@ -1502,7 +1917,7 @@ export type MessageStatus = "pending" | "working" | "success" | "error" | "disca
 export type MessageVisualKind = "conceptPreview"
 export type MicrowaveConfig = { humId?: string | null; dingId?: string | null; muted?: boolean }
 export type MissionCoreIrEvaluation = { matched: boolean }
-export type ModelManifest = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; sourceDigest?: string | null; coreDigest?: string | null; astSchemaVersion?: number | null; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; document: DocumentMetadata; parts?: PartBinding[]; parameterGroups?: ParameterGroup[]; controlPrimitives?: ControlPrimitive[]; controlRelations?: ControlRelation[]; controlViews?: ControlView[]; previewViews?: PreviewView[]; advisories?: Advisory[]; selectionTargets?: SelectionTarget[]; measurementAnnotations?: MeasurementAnnotation[]; taggedAnchors: Partial<{ [key in string]: TaggedAnchorBinding }>; featureGraph?: FeatureGraph | null; correspondenceGraph?: CorrespondenceGraph | null; warnings?: string[]; enrichmentState?: ManifestEnrichmentState; geometryProvenance?: GeometryProvenance | null; componentImportOrigins?: ComponentImportOrigin[] }
+export type ModelManifest = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; sourceDigest?: string | null; coreDigest?: string | null; astSchemaVersion?: number | null; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; document: DocumentMetadata; parts?: PartBinding[]; parameterGroups?: ParameterGroup[]; controlPrimitives?: ControlPrimitive[]; controlRelations?: ControlRelation[]; controlViews?: ControlView[]; previewViews?: PreviewView[]; advisories?: Advisory[]; selectionTargets?: SelectionTarget[]; measurementAnnotations?: MeasurementAnnotation[]; taggedAnchors: Partial<{ [key in string]: TaggedAnchorBinding }>; featureGraph?: FeatureGraph | null; correspondenceGraph?: CorrespondenceGraph | null; analysisDeclarations: AnalysisDeclarationBinding[]; warnings?: string[]; enrichmentState?: ManifestEnrichmentState; geometryProvenance?: GeometryProvenance | null; componentImportOrigins?: ComponentImportOrigin[] }
 export type ModelSourceKind = "generated" | "importedFcstd" | "importedStep" | "importedMesh"
 export type OperationKind = "place" | "mate" | "join" | "cut" | "fuse" | "mold" | "blend"
 export type OverflowMode = "contain" | "cover" | "clamp" | "bleed"
@@ -1533,6 +1948,7 @@ export type ProjectManifest = { schemaVersion: number; projectId: string; thread
  * thing distinguishing "user edited the file" from "clean".
  */
 sourceDigest: string; exportedAt: number }
+export type ProjectSourceDocument = { threadId: string; slug: string; folder: string; file: string; source: string }
 export type ProjectSyncState =
 /**
  * No `model.ecky` or no manifest in the folder.
@@ -1559,6 +1975,7 @@ export type ProjectionType = "planar" | "auto" | "cylindrical" | "spherical"
 export type PromptTranscription = { text: string; provider: string; model: string }
 export type QueueAgentPromptInput = { threadId?: string | null; promptText: string; attachments?: Attachment[] }
 export type QueuedAgentPrompt = { threadId: string; messageId: string }
+export type QueuedCaptureGuidedReconstruction = { requestId: string; threadId: string; messageId: string }
 export type RasterTraceAssetIdentity = { imagePath: string; digest: string; widthPixels: number; heightPixels: number }
 export type RasterTraceCalibration = { physicalWidth: number; physicalHeight: number }
 export type RasterTraceContour = { contourId: string; points: ([number, number])[]; closed: boolean; foregroundPixelCount: number; signedArea: number; provenance: RasterTraceProvenance }
@@ -1566,6 +1983,11 @@ export type RasterTraceProvenance = { kind: string; asset: RasterTraceAssetIdent
 export type RasterTraceRequest = { imagePath: string; view: SketchView; calibration: RasterTraceCalibration; threshold: number; invert?: boolean; maxContours?: number | null }
 export type RasterTraceResponse = { asset: RasterTraceAssetIdentity; contours: RasterTraceContour[]; connectedComponentCount: number; extractorVersion: string; evidence?: string[] }
 export type RejectViewportScreenshotInput = { requestId: string; error: string }
+export type RemoveExternalShapePlaneCropRequest = { threadId: string; nodeId: number; cropNodeId: number; expectedSourceDigest: string }
+export type RemoveExternalShapePlaneCropResult = { source: string; sourceDigest: string; removedCropNodeId: number }
+export type RemoveSurfaceTrimRequest = { threadId: string; targetMessageId?: string | null; nodeId: number; trimNodeId: number; expectedSourceDigest: string }
+export type RemoveSurfaceTrimResult = { source: string; sourceDigest: string; removedTrimNodeId: number }
+export type ReopenedCaptureRun = { run: CaptureRun; session: CaptureSessionInfo }
 export type ResolveAgentPromptInput = { requestId: string; promptText: string; messageIds: string[]; messageId?: string | null; attachments?: Attachment[] }
 export type ResolveViewportScreenshotInput = { requestId: string; dataUrl: string; width: number; height: number; camera: ViewportCameraState; source: string; threadId: string; messageId: string; modelId?: string | null; includeOverlays: boolean }
 export type RuntimeAuthoringContext = { engineKind: EngineKind; sourceLanguage: SourceLanguage; geometryBackend: GeometryBackend }
@@ -1575,7 +1997,7 @@ export type SaveSketchPreviewDraftRequest = { scopeId?: string | null; draftSour
 export type SelectOption = { label: string; value: SelectValue }
 export type SelectValue = string | number
 export type SelectionTarget = { targetId?: string | null; durableTargetId?: string | null; canonicalTargetId?: string | null; aliasIds?: string[]; partId: string; viewerNodeId: string; label: string; kind: SelectionTargetKind; editable: boolean; parameterKeys?: string[]; primitiveIds?: string[]; viewIds?: string[] }
-export type SelectionTargetKind = "part" | "object" | "group" | "edge" | "face"
+export type SelectionTargetKind = "part" | "object" | "group" | "vertex" | "edge" | "face"
 export type SketchAcceptedBrepComponentPackageRequest = { packageId: string; version: string; displayName: string; tags?: string[]; componentId: string; componentVersion: string; componentDisplayName: string; sourceRef: string; artifactBundle?: ArtifactBundle | null; document: SketchDocument; solutionId: string; portTypes?: PortTypeDefinition[]; params?: ComponentParam[]; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; ports?: ComponentPort[] }
 export type SketchBrepCandidateAcceptRequest = { partId: string; document: SketchDocument; solutionId: string; tolerance?: number | null }
 export type SketchBrepCandidateAcceptResponse = { draftSource: SketchDraftSource; artifactBundle: ArtifactBundle; hiddenLineResponse: BrepHiddenLineProjectionResponse; candidateResponse: SketchBrepCandidateResponse; acceptedSolution: SketchBrepCandidateSolution; evidence?: string[] }
@@ -1617,9 +2039,30 @@ export type StructuralIssue = { code: string; message: string;
 partId?: string | null; numericPayload?: number | null; diagnosticContext?: DiagnosticContext | null }
 export type StructuralMetrics = { partCount: number; previewStlSizeBytes?: number | null; previewStlTriangleCount?: number | null; previewStlComponentCount?: number | null; previewStlNonManifoldEdgeCount?: number | null; previewStlOverhangTriangleCount?: number | null; previewStlOverhangRatio?: number | null; totalVolume?: number | null; totalArea?: number | null; bbox?: ManifestBounds | null }
 export type StructuralVerificationResult = { passed: boolean; summary: string; issues: StructuralIssue[]; authoredVerifyChecks?: AuthoredVerifyCheck[]; metrics: StructuralMetrics; verifierStatus: VerifierStatus; verifierSource?: VerifierSource | null }
+export type SurfaceTrimBoundaryPoint = { sourcePosition: [number, number, number]; sharedEdge: [number, number] | null }
+export type SurfaceTrimCapMode = "open" | "flat" | "surfaceFill"
+export type SurfaceTrimCapPreview = { vertices: ([number, number, number])[]; triangles: ([number, number, number])[] }
+export type SurfaceTrimCapReport = { mode: SurfaceTrimCapMode; boundaryPointCount: number; addedVertexCount: number; addedTriangleCount: number; maxPlanarityDeviation: number | null; rmsPlanarityDeviation: number | null; explicitlyOpen: boolean }
+export type SurfaceTrimLoopPreviewRequest = { schemaVersion: number; threadId: string; targetMessageId?: string | null; nodeId: number; expectedSourceDigest: string; expectedMeshContentDigest: string; loopAnchors: CaptureSurfaceAnchor[]; pathMode: SurfaceTrimPathMode; previewId: number }
+export type SurfaceTrimLoopPreviewResponse = { previewId: number; sourceMeshContentDigest: string; pathMode: SurfaceTrimPathMode; loopTrianglePath: number[]; loopSegments: SurfaceTrimLoopSegmentPreview[] }
+export type SurfaceTrimLoopSegmentPreview = { segmentIndex: number; fromTriangleIndex: number; toTriangleIndex: number; trianglePath: number[]; edgeSegments: SurfaceTrimPathSegment[]; continuousPolyline: SurfaceTrimBoundaryPoint[] }
+export type SurfaceTrimMeshDiagnostics = { retainedArea: number; outputVertexCount: number; outputTriangleCount: number; duplicatePositionCount: number; boundaryEdgeCount: number; nonManifoldEdgeCount: number; orientationMismatchCount: number; invalidCutVertexDegreeCount: number; closedBoundaryLoops: number[][]; openBoundaryChains: number[][] }
+export type SurfaceTrimPathDiagnostics = { sourceMeshContentDigest: string; pathMode: SurfaceTrimPathMode; schemaVersion: number; triangles: number; connectedComponents: number; boundaryEdges: number; nonManifoldEdges: number; anchorStartTriangle: number; anchorEndTriangle: number }
+export type SurfaceTrimPathMode = "shortest" | "feature"
+export type SurfaceTrimPathPreviewRequest = { schemaVersion: number; threadId: string; targetMessageId?: string | null; nodeId: number; expectedSourceDigest: string; expectedMeshContentDigest: string; fromAnchor: CaptureSurfaceAnchor; toAnchor: CaptureSurfaceAnchor; pathMode: SurfaceTrimPathMode; previewId: number }
+export type SurfaceTrimPathPreviewResponse = { previewId: number; path: SurfaceTrimPathResult }
+export type SurfaceTrimPathResult = { sourceMeshContentDigest: string; sourceMeshTriangles: number; pathMode: SurfaceTrimPathMode; startTriangleIndex: number; endTriangleIndex: number; totalCost: number; triangleCorridor: number[]; edgeSegments: SurfaceTrimPathSegment[]; continuousPolyline: SurfaceTrimBoundaryPoint[]; diagnostics: SurfaceTrimPathDiagnostics }
+export type SurfaceTrimPathSegment = { fromTriangle: number; toTriangle: number; sharedEdge: [number, number]; cost: number }
+export type SurfaceTrimRegionPreview = { sourceMeshContentDigest: string; pathMode: SurfaceTrimPathMode; loopSegmentCount: number; loopTrianglePath: number[]; keepSeedTriangleIndex: number; retainedTriangleIndices: number[]; retainedTriangleCount: number; excludedTriangleCount: number; loopSegments: SurfaceTrimLoopSegmentPreview[] }
+export type SurfaceTrimRegionPreviewRequest = { schemaVersion: number; threadId: string; targetMessageId?: string | null; nodeId: number; expectedSourceDigest: string; expectedMeshContentDigest: string; loopAnchors: CaptureSurfaceAnchor[]; keepSeed: CaptureSurfaceAnchor; pathMode: SurfaceTrimPathMode; capMode: SurfaceTrimCapMode; previewId: number }
+export type SurfaceTrimRegionPreviewResponse = { previewId: number; preview: SurfaceTrimRegionPreview; topology: SurfaceTrimMeshDiagnostics; capReports: SurfaceTrimCapReport[]; capPreview: SurfaceTrimCapPreview | null }
 export type TaggedAnchorBinding = { kind: TaggedAnchorKind; authoredSelector: string; target: string; targetIds: string[]; durableTargetIds: string[]; canonicalTargetIds: string[]; aliasIds: string[] }
-export type TaggedAnchorKind = "face" | "edge"
-export type Thread = { id: string; title: string; summary?: string; messages: Message[]; updatedAt: number; genieTraits?: GenieTraits | null; versionCount?: number; pendingCount?: number; queuedCount?: number; errorCount?: number; status?: ThreadStatus; finalizedAt?: number | null; pendingConfirm?: string | null }
+export type TaggedAnchorKind = "vertex" | "face" | "edge"
+export type Thread = { id: string; title: string; summary?: string; messages: Message[]; updatedAt: number; genieTraits?: GenieTraits | null; versionCount?: number; pendingCount?: number; queuedCount?: number; errorCount?: number;
+/**
+ * Technical reusable blank: no visible messages and blank bound source.
+ */
+isBlank?: boolean; status?: ThreadStatus; finalizedAt?: number | null; pendingConfirm?: string | null }
 export type ThreadAgentState = {
 /**
  * "none" | "sleeping" | "waking" | "waiting" | "active" | "disconnected" | "error"
