@@ -1,13 +1,15 @@
+use rusqlite::OptionalExtension;
 use std::{
     env, fs,
     io::{Read, Write},
     path::{Path, PathBuf},
     process::Command,
 };
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
-use crate::contracts::{AppResult, Config};
+use crate::contracts::{AppError, AppResult, Config};
 use crate::models::AppState;
+#[cfg(test)]
 use crate::thread_source_binding::ThreadSourceBinding;
 
 fn persist_config_transaction(
@@ -95,6 +97,7 @@ fn command_status(status: std::process::ExitStatus) -> std::io::Result<()> {
 
 /// Resolve the exact stored paths for OPEN FILE. The binding is authoritative
 /// after backfill, so title and projects-root changes cannot redirect it.
+#[cfg(test)]
 fn resolve_editor_paths(binding: &ThreadSourceBinding) -> (PathBuf, PathBuf) {
     (
         PathBuf::from(&binding.folder_path),
@@ -628,6 +631,41 @@ mod tests {
         assert_eq!(source, PathBuf::from("/stored/root/bracket/model.ecky"));
     }
 
+    #[test]
+    fn new_blank_reuses_only_latest_thread_with_zero_messages() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY, title TEXT NOT NULL, updated_at INTEGER NOT NULL,
+                deleted_at INTEGER, status TEXT, finalized_at INTEGER
+             );
+             CREATE TABLE messages (
+                id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, status TEXT NOT NULL,
+                deleted_at INTEGER
+             );
+             CREATE TABLE thread_source_bindings (
+                thread_id TEXT PRIMARY KEY, folder_path TEXT NOT NULL,
+                source_path TEXT NOT NULL, source_digest TEXT NOT NULL,
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+             );
+             INSERT INTO threads VALUES
+                ('empty-old', 'Empty old', 10, NULL, 'active', NULL),
+                ('has-code', 'Has code', 30, NULL, 'active', NULL),
+                ('empty-new', 'Empty new', 20, NULL, 'active', NULL);
+             INSERT INTO thread_source_bindings VALUES
+                ('empty-old', '/p/old', '/p/old/model.ecky', 'a', 1, 1),
+                ('has-code', '/p/code', '/p/code/model.ecky', 'b', 1, 1),
+                ('empty-new', '/p/new', '/p/new/model.ecky', 'c', 1, 1);
+             INSERT INTO messages VALUES ('message-1', 'has-code', 'success', NULL);",
+        )
+        .unwrap();
+
+        assert_eq!(
+            latest_empty_bound_thread_id(&conn).unwrap().as_deref(),
+            Some("empty-new")
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn bdd_macos_unknown_ecky_extension_uses_text_editor_launch_mode() {
@@ -651,29 +689,480 @@ pub struct ProjectEditorLink {
     pub file: String,
 }
 
-fn prepare_project_editor_link(
+#[derive(serde::Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSourceDocument {
+    pub thread_id: String,
+    pub slug: String,
+    pub folder: String,
+    pub file: String,
+    pub source: String,
+}
+
+fn latest_empty_bound_thread_id(conn: &rusqlite::Connection) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT t.id
+         FROM threads t
+         JOIN thread_source_bindings b ON b.thread_id = t.id
+         WHERE t.deleted_at IS NULL
+           AND COALESCE(t.status, 'active') = 'active'
+           AND t.finalized_at IS NULL
+           AND NOT EXISTS (
+               SELECT 1 FROM messages m
+               WHERE m.thread_id = t.id
+                 AND m.deleted_at IS NULL
+                 AND m.status != 'discarded'
+           )
+         ORDER BY t.updated_at DESC, t.id DESC
+         LIMIT 1",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn open_or_create_blank_design_thread(
+    title: Option<String>,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<ProjectSourceDocument> {
+    let title = title
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "Untitled design".to_string());
+    let projects_root = state.config.lock().unwrap().projects_root.clone();
+    let conn = state.db.lock().await;
+    let reusable_thread_id = latest_empty_bound_thread_id(&conn)
+        .map_err(|err| crate::contracts::AppError::persistence(err.to_string()))?;
+    if let Some(thread_id) = reusable_thread_id {
+        let document =
+            ensure_project_source_document(&app, &conn, projects_root.as_deref(), &thread_id)?;
+        if crate::thread_source_binding::is_blank_thread_source(&document.source) {
+            if document.source != crate::thread_source_binding::DEFAULT_THREAD_SOURCE {
+                let binding = crate::thread_source_binding::get_binding(&conn, &thread_id)
+                    .map_err(|err| crate::contracts::AppError::persistence(err.to_string()))?
+                    .ok_or_else(|| {
+                        crate::contracts::AppError::not_found(format!(
+                            "Source binding for design thread '{thread_id}' not found."
+                        ))
+                    })?;
+                crate::thread_source_binding::migrate_legacy_blank_source(&conn, &binding)?;
+                return ensure_project_source_document(
+                    &app,
+                    &conn,
+                    projects_root.as_deref(),
+                    &thread_id,
+                );
+            }
+            return Ok(document);
+        }
+    }
+
+    let thread_id = uuid::Uuid::new_v4().to_string();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    crate::db::create_or_update_thread(&conn, &thread_id, &title, now, None)
+        .map_err(|err| crate::contracts::AppError::persistence(err.to_string()))?;
+    crate::thread_source_binding::bind_new_thread(
+        &app,
+        &conn,
+        projects_root.as_deref(),
+        &thread_id,
+        &title,
+    )?;
+    ensure_project_source_document(&app, &conn, projects_root.as_deref(), &thread_id)
+}
+
+/// Read the authoritative bound `model.ecky` for a design thread.
+/// Missing legacy bindings are created before the file is read.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_project_source(
+    thread_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<ProjectSourceDocument> {
+    let projects_root = state.config.lock().unwrap().projects_root.clone();
+    let conn = state.db.lock().await;
+    ensure_project_source_document(&app, &conn, projects_root.as_deref(), &thread_id)
+}
+
+/// Discover imported mesh nodes from the authoritative bound `model.ecky`.
+/// Returned paths point at raw source assets; previewing them does not render
+/// or solidify the model.
+#[tauri::command]
+#[specta::specta]
+pub async fn list_external_shape_sources(
+    thread_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<crate::external_shapes::ExternalShapeSource>> {
+    let projects_root = state.config.lock().unwrap().projects_root.clone();
+    let conn = state.db.lock().await;
+    let document =
+        ensure_project_source_document(&app, &conn, projects_root.as_deref(), &thread_id)?;
+    let sources = crate::external_shapes::discover_bound_external_shapes(
+        &document.source,
+        Path::new(&document.folder),
+    )?;
+    let scope = app.asset_protocol_scope();
+    for source in sources.iter().filter(|source| source.exists) {
+        scope.allow_file(&source.path).map_err(|error| {
+            crate::contracts::AppError::validation(format!(
+                "Bound external shape cannot be exposed to Viewer '{}': {error}",
+                source.path
+            ))
+        })?;
+    }
+    Ok(sources)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn apply_external_shape_plane_crop(
+    request: crate::external_shapes::ApplyExternalShapePlaneCropRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<crate::external_shapes::ApplyExternalShapePlaneCropResult> {
+    let projects_root = state.config.lock().unwrap().projects_root.clone();
+    let conn = state.db.lock().await;
+    let document =
+        ensure_project_source_document(&app, &conn, projects_root.as_deref(), &request.thread_id)?;
+    let result = crate::external_shapes::apply_plane_crop_to_source(
+        &document.source,
+        Path::new(&document.folder),
+        &request,
+    )?;
+    Ok(result)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn remove_external_shape_plane_crop(
+    request: crate::external_shapes::RemoveExternalShapePlaneCropRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<crate::external_shapes::RemoveExternalShapePlaneCropResult> {
+    let projects_root = state.config.lock().unwrap().projects_root.clone();
+    let conn = state.db.lock().await;
+    let document =
+        ensure_project_source_document(&app, &conn, projects_root.as_deref(), &request.thread_id)?;
+    let result = crate::external_shapes::remove_plane_crop_from_source(
+        &document.source,
+        Path::new(&document.folder),
+        &request,
+    )?;
+    Ok(result)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn preview_external_shape_surface_trim_path(
+    request: crate::surface_trim_external_shapes::SurfaceTrimPathPreviewRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<crate::surface_trim_external_shapes::SurfaceTrimPathPreviewResponse> {
+    crate::surface_trim_external_shapes::require_surface_trim_schema_version(
+        request.schema_version,
+    )?;
+    let projects_root = state.config.lock().unwrap().projects_root.clone();
+    let conn = state.db.lock().await;
+    validate_surface_trim_target_message(
+        &conn,
+        &request.thread_id,
+        request.target_message_id.as_deref(),
+    )?;
+    let document =
+        ensure_project_source_document(&app, &conn, projects_root.as_deref(), &request.thread_id)?;
+    let source_path = crate::surface_trim_source::resolve_surface_trim_source_path(
+        &document.source,
+        Path::new(&document.folder),
+        request.node_id,
+        &request.expected_source_digest,
+        &request.expected_mesh_content_digest,
+    )?;
+    let path = crate::surface_trim_external_shapes::surface_trim_path(
+        &source_path,
+        &request.from_anchor,
+        &request.to_anchor,
+        request.path_mode,
+    )?;
+    Ok(
+        crate::surface_trim_external_shapes::SurfaceTrimPathPreviewResponse {
+            preview_id: request.preview_id,
+            path,
+        },
+    )
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn preview_external_shape_surface_trim_loop(
+    request: crate::surface_trim_external_shapes::SurfaceTrimLoopPreviewRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<crate::surface_trim_external_shapes::SurfaceTrimLoopPreviewResponse> {
+    crate::surface_trim_external_shapes::require_surface_trim_schema_version(
+        request.schema_version,
+    )?;
+    let projects_root = state.config.lock().unwrap().projects_root.clone();
+    let conn = state.db.lock().await;
+    validate_surface_trim_target_message(
+        &conn,
+        &request.thread_id,
+        request.target_message_id.as_deref(),
+    )?;
+    let document =
+        ensure_project_source_document(&app, &conn, projects_root.as_deref(), &request.thread_id)?;
+    let source_path = crate::surface_trim_source::resolve_surface_trim_source_path(
+        &document.source,
+        Path::new(&document.folder),
+        request.node_id,
+        &request.expected_source_digest,
+        &request.expected_mesh_content_digest,
+    )?;
+    crate::surface_trim_external_shapes::preview_surface_trim_loop(
+        &source_path,
+        &request.loop_anchors,
+        request.path_mode,
+        request.preview_id,
+    )
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn preview_external_shape_surface_trim_region(
+    request: crate::surface_trim_external_shapes::SurfaceTrimRegionPreviewRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<crate::surface_trim_external_shapes::SurfaceTrimRegionPreviewResponse> {
+    crate::surface_trim_external_shapes::require_surface_trim_schema_version(
+        request.schema_version,
+    )?;
+    let projects_root = state.config.lock().unwrap().projects_root.clone();
+    let conn = state.db.lock().await;
+    validate_surface_trim_target_message(
+        &conn,
+        &request.thread_id,
+        request.target_message_id.as_deref(),
+    )?;
+    let document =
+        ensure_project_source_document(&app, &conn, projects_root.as_deref(), &request.thread_id)?;
+    let source_path = crate::surface_trim_source::resolve_surface_trim_source_path(
+        &document.source,
+        Path::new(&document.folder),
+        request.node_id,
+        &request.expected_source_digest,
+        &request.expected_mesh_content_digest,
+    )?;
+    let preview = crate::surface_trim_external_shapes::preview_surface_trim_region(
+        &source_path,
+        &request.loop_anchors,
+        &request.keep_seed,
+        request.path_mode,
+    )?;
+    let loop_anchors = request
+        .loop_anchors
+        .iter()
+        .map(
+            |anchor| crate::surface_trim_runtime::CanonicalSurfaceTrimAnchor {
+                triangle_index: anchor.triangle_index,
+                barycentric: anchor.barycentric,
+            },
+        )
+        .collect::<Vec<_>>();
+    let keep_seed = crate::surface_trim_runtime::CanonicalSurfaceTrimAnchor {
+        triangle_index: request.keep_seed.triangle_index,
+        barycentric: request.keep_seed.barycentric,
+    };
+    let runtime = crate::surface_trim_runtime::execute_surface_trim(
+        &source_path,
+        &request.expected_mesh_content_digest,
+        &loop_anchors,
+        &keep_seed,
+        request.path_mode,
+        request.cap_mode,
+    )?;
+    let cap_triangle_count = runtime
+        .cap_reports
+        .iter()
+        .map(|report| report.added_triangle_count as usize)
+        .sum::<usize>();
+    let cap_preview = if cap_triangle_count == 0 {
+        None
+    } else {
+        let cap_start = runtime
+            .triangles
+            .len()
+            .checked_sub(cap_triangle_count)
+            .ok_or_else(|| {
+                AppError::internal("Surface trim cap report exceeds runtime triangle output.")
+            })?;
+        Some(crate::surface_trim_external_shapes::SurfaceTrimCapPreview {
+            vertices: runtime.vertices.clone(),
+            triangles: runtime.triangles[cap_start..].to_vec(),
+        })
+    };
+    Ok(
+        crate::surface_trim_external_shapes::SurfaceTrimRegionPreviewResponse {
+            preview_id: request.preview_id,
+            preview,
+            topology: runtime.diagnostics,
+            cap_reports: runtime.cap_reports,
+            cap_preview,
+        },
+    )
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn apply_external_shape_surface_trim(
+    request: crate::surface_trim_source::ApplySurfaceTrimRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<crate::surface_trim_source::ApplySurfaceTrimResult> {
+    let projects_root = state.config.lock().unwrap().projects_root.clone();
+    let conn = state.db.lock().await;
+    validate_surface_trim_target_message(
+        &conn,
+        &request.thread_id,
+        request.target_message_id.as_deref(),
+    )?;
+    let document =
+        ensure_project_source_document(&app, &conn, projects_root.as_deref(), &request.thread_id)?;
+    let result = crate::surface_trim_source::apply_surface_trim_to_source(
+        &document.source,
+        Path::new(&document.folder),
+        &request,
+    )?;
+    Ok(result)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn remove_external_shape_surface_trim(
+    request: crate::surface_trim_source::RemoveSurfaceTrimRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<crate::surface_trim_source::RemoveSurfaceTrimResult> {
+    let projects_root = state.config.lock().unwrap().projects_root.clone();
+    let conn = state.db.lock().await;
+    validate_surface_trim_target_message(
+        &conn,
+        &request.thread_id,
+        request.target_message_id.as_deref(),
+    )?;
+    let document =
+        ensure_project_source_document(&app, &conn, projects_root.as_deref(), &request.thread_id)?;
+    let result =
+        crate::surface_trim_source::remove_surface_trim_from_source(&document.source, &request)?;
+    Ok(result)
+}
+
+fn validate_surface_trim_target_message(
+    conn: &rusqlite::Connection,
+    thread_id: &str,
+    target_message_id: Option<&str>,
+) -> AppResult<()> {
+    let Some(message_id) = target_message_id else {
+        return Ok(());
+    };
+    let owner = crate::db::get_visible_message_thread_id(conn, message_id).map_err(|error| {
+        AppError::internal(format!(
+            "Failed to validate surface trim target snapshot: {error}"
+        ))
+    })?;
+    match owner.as_deref() {
+        Some(owner_thread_id) if owner_thread_id == thread_id => Ok(()),
+        Some(owner_thread_id) => Err(AppError::conflict(format!(
+            "Surface trim target message '{}' belongs to thread '{}', not '{}'.",
+            message_id, owner_thread_id, thread_id
+        ))),
+        None => Err(AppError::conflict(format!(
+            "Surface trim target message '{}' is missing or no longer visible.",
+            message_id
+        ))),
+    }
+}
+
+/// Atomically replace the one bound source used by editor, renderer, and diff.
+/// This deliberately does not create a history version; COMMIT VERSION owns
+/// that separate action.
+#[tauri::command]
+#[specta::specta]
+pub async fn save_project_source(
+    thread_id: String,
+    source: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<ProjectSourceDocument> {
+    let projects_root = state.config.lock().unwrap().projects_root.clone();
+    let conn = state.db.lock().await;
+    let mut document =
+        ensure_project_source_document(&app, &conn, projects_root.as_deref(), &thread_id)?;
+    crate::project_mirror::write_bound_source(Path::new(&document.file), &source)?;
+    document.source = source;
+    Ok(document)
+}
+
+fn ensure_project_source_document(
     app: &dyn crate::models::PathResolver,
     conn: &rusqlite::Connection,
     projects_root: Option<&str>,
-    target: &crate::services::target::EditableTarget,
-) -> AppResult<ProjectEditorLink> {
-    let model_id = target.model_id();
-    let binding = crate::thread_source_binding::prepare_editor_source(
-        app,
-        conn,
-        projects_root,
-        &target.thread_id,
-        &target.design_output.title,
-        &target.design_output.macro_code,
-        &target.message_id,
-        model_id.as_deref(),
-    )?;
-    let (dir, file) = resolve_editor_paths(&binding);
-    let (_, slug) = crate::thread_source_binding::stored_folder_export_args(&dir)?;
-    Ok(ProjectEditorLink {
+    thread_id: &str,
+) -> AppResult<ProjectSourceDocument> {
+    let binding = match crate::thread_source_binding::get_binding(conn, thread_id)
+        .map_err(|err| crate::contracts::AppError::persistence(err.to_string()))?
+    {
+        Some(binding) => binding,
+        None => {
+            if crate::db::get_thread_title(conn, thread_id)
+                .map_err(|err| crate::contracts::AppError::persistence(err.to_string()))?
+                .is_none()
+            {
+                return Err(crate::contracts::AppError::not_found(format!(
+                    "Design thread '{thread_id}' not found."
+                )));
+            } else {
+                let target = crate::services::target::resolve_editable_target(
+                    conn,
+                    app,
+                    Some(thread_id.to_string()),
+                    None,
+                )?;
+                crate::thread_source_binding::prepare_editor_source(
+                    app,
+                    conn,
+                    projects_root,
+                    &target.thread_id,
+                    &target.design_output.title,
+                    &target.design_output.macro_code,
+                    &target.message_id,
+                    target.model_id().as_deref(),
+                )?
+            }
+        }
+    };
+    let folder = PathBuf::from(&binding.folder_path);
+    let file = PathBuf::from(&binding.source_path);
+    let (_, slug) = crate::thread_source_binding::stored_folder_export_args(&folder)?;
+    let source = fs::read_to_string(&file).map_err(|err| {
+        crate::contracts::AppError::persistence(format!(
+            "Failed to read bound source '{}': {}",
+            file.display(),
+            err
+        ))
+    })?;
+    Ok(ProjectSourceDocument {
+        thread_id: binding.thread_id,
         slug,
-        folder: dir.to_string_lossy().to_string(),
+        folder: folder.to_string_lossy().to_string(),
         file: file.to_string_lossy().to_string(),
+        source,
     })
 }
 
@@ -684,16 +1173,22 @@ fn prepare_project_editor_link(
 #[specta::specta]
 pub async fn open_project_in_editor(
     thread_id: Option<String>,
-    message_id: Option<String>,
+    _message_id: Option<String>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<ProjectEditorLink> {
+    let thread_id = thread_id.ok_or_else(|| {
+        crate::contracts::AppError::validation("Source file requires a design thread.")
+    })?;
     let projects_root = state.config.lock().unwrap().projects_root.clone();
-    let link = {
+    let document = {
         let conn = state.db.lock().await;
-        let target =
-            crate::services::target::resolve_editable_target(&conn, &app, thread_id, message_id)?;
-        prepare_project_editor_link(&app, &conn, projects_root.as_deref(), &target)?
+        ensure_project_source_document(&app, &conn, projects_root.as_deref(), &thread_id)?
+    };
+    let link = ProjectEditorLink {
+        slug: document.slug,
+        folder: document.folder,
+        file: document.file,
     };
     let file = Path::new(&link.file);
     open_path_in_system_editor(&file).map_err(|err| {
@@ -712,16 +1207,22 @@ pub async fn open_project_in_editor(
 #[specta::specta]
 pub async fn reveal_project_folder(
     thread_id: Option<String>,
-    message_id: Option<String>,
+    _message_id: Option<String>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<ProjectEditorLink> {
+    let thread_id = thread_id.ok_or_else(|| {
+        crate::contracts::AppError::validation("Source folder requires a design thread.")
+    })?;
     let projects_root = state.config.lock().unwrap().projects_root.clone();
-    let link = {
+    let document = {
         let conn = state.db.lock().await;
-        let target =
-            crate::services::target::resolve_editable_target(&conn, &app, thread_id, message_id)?;
-        prepare_project_editor_link(&app, &conn, projects_root.as_deref(), &target)?
+        ensure_project_source_document(&app, &conn, projects_root.as_deref(), &thread_id)?
+    };
+    let link = ProjectEditorLink {
+        slug: document.slug,
+        folder: document.folder,
+        file: document.file,
     };
     let folder = Path::new(&link.folder);
     reveal_path_in_file_manager(folder).map_err(|err| {

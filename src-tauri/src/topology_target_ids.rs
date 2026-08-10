@@ -30,6 +30,17 @@ pub(crate) fn resolve_tagged_anchors(
             )));
         }
         let binding = match selector_tag.kind {
+            CoreSelectorTagKind::Vertex => {
+                let target_ids = parse_vertex_target_ids(&selector_tag.authored_selector)?;
+                tagged_anchor_binding_from_selection_targets(
+                    selector_tag,
+                    &resolve_requested_selection_targets(
+                        selector_tag,
+                        selection_targets,
+                        &target_ids,
+                    )?,
+                )
+            }
             CoreSelectorTagKind::Face => {
                 match parse_face_selector_value(&selector_tag.authored_selector)? {
                     FaceSelector::TargetIds(target_ids) => {
@@ -70,6 +81,36 @@ pub(crate) fn resolve_tagged_anchors(
         tagged_anchors.insert(selector_tag.name.clone(), binding);
     }
     Ok(tagged_anchors)
+}
+
+fn parse_vertex_target_ids(selector: &str) -> AppResult<Vec<String>> {
+    let raw = selector.trim();
+    let lower = raw.to_ascii_lowercase();
+    let payload = if lower.starts_with("target-id:") {
+        &raw["target-id:".len()..]
+    } else if lower.starts_with("target-ids:") {
+        &raw["target-ids:".len()..]
+    } else {
+        return Err(AppError::validation(
+            "Vertex tags require exact `target-id:<id>` or `target-ids:<id>|<id>` selector.",
+        ));
+    };
+    let target_ids = payload
+        .split('|')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if target_ids.is_empty()
+        || target_ids
+            .iter()
+            .any(|target_id| !target_id.contains(":vertex:"))
+    {
+        return Err(AppError::validation(
+            "Vertex tag selector contains empty or non-vertex target ID.",
+        ));
+    }
+    Ok(target_ids)
 }
 
 fn resolve_requested_selection_targets<'a>(
@@ -299,6 +340,7 @@ struct FaceTargetBounds {
 
 fn selector_tag_binding_kind(kind: CoreSelectorTagKind) -> TaggedAnchorKind {
     match kind {
+        CoreSelectorTagKind::Vertex => TaggedAnchorKind::Vertex,
         CoreSelectorTagKind::Face => TaggedAnchorKind::Face,
         CoreSelectorTagKind::Edge => TaggedAnchorKind::Edge,
     }
@@ -601,7 +643,7 @@ pub(crate) fn viewer_target_alias_ids(
 }
 
 pub(crate) fn is_stable_topology_target_id(target_id: &str) -> bool {
-    [":edge:", ":face:"].into_iter().any(|marker| {
+    [":vertex:", ":edge:", ":face:"].into_iter().any(|marker| {
         let Some((_, payload)) = target_id.split_once(marker) else {
             return false;
         };
@@ -610,6 +652,10 @@ pub(crate) fn is_stable_topology_target_id(target_id: &str) -> bool {
         };
         !first.chars().all(|ch| ch.is_ascii_digit())
     })
+}
+
+pub(crate) fn stable_vertex_target_id(target_id: &str) -> String {
+    stable_topology_target_id(target_id, ":vertex:", 2)
 }
 
 pub(crate) fn stable_edge_target_id(target_id: &str) -> String {
@@ -626,6 +672,22 @@ pub(crate) fn durable_edge_target_id(
     target_id: &str,
 ) -> Option<String> {
     durable_topology_target_id(part_id, root_node_id, target_id, ":edge:")
+}
+
+pub(crate) fn durable_vertex_target_id(
+    part_id: &str,
+    root_node_id: u64,
+    target_id: &str,
+) -> Option<String> {
+    durable_topology_target_id(part_id, root_node_id, target_id, ":vertex:")
+}
+
+pub(crate) fn durable_vertex_target_id_for_stable_node_key(
+    part_id: &str,
+    stable_node_key: &str,
+    target_id: &str,
+) -> Option<String> {
+    durable_topology_target_id_for_stable_node_key(part_id, stable_node_key, target_id, ":vertex:")
 }
 
 pub(crate) fn durable_edge_target_id_for_stable_node_key(
@@ -660,7 +722,8 @@ pub(crate) fn topology_target_aliases(
 }
 
 pub(crate) fn portable_topology_target_id(target_id: &str) -> Option<String> {
-    portable_topology_target_id_with_marker(target_id, ":edge:")
+    portable_topology_target_id_with_marker(target_id, ":vertex:")
+        .or_else(|| portable_topology_target_id_with_marker(target_id, ":edge:"))
         .or_else(|| portable_topology_target_id_with_marker(target_id, ":face:"))
 }
 
@@ -781,6 +844,7 @@ fn format_point_signature(point: &[f64; 3]) -> String {
 
 fn selector_tag_selection_kind(kind: CoreSelectorTagKind) -> SelectionTargetKind {
     match kind {
+        CoreSelectorTagKind::Vertex => SelectionTargetKind::Vertex,
         CoreSelectorTagKind::Face => SelectionTargetKind::Face,
         CoreSelectorTagKind::Edge => SelectionTargetKind::Edge,
     }
@@ -1015,6 +1079,7 @@ fn resolve_tagged_selector_payload(
     if let Some(previous_manifest) = previous_manifest {
         if let Some(anchor) = previous_manifest.tagged_anchors.get(tag_name) {
             let anchor_kind = match anchor.kind {
+                TaggedAnchorKind::Vertex => CoreSelectorTagKind::Vertex,
                 TaggedAnchorKind::Face => CoreSelectorTagKind::Face,
                 TaggedAnchorKind::Edge => CoreSelectorTagKind::Edge,
             };
@@ -1027,6 +1092,11 @@ fn resolve_tagged_selector_payload(
             }
             if !anchor.target_ids.is_empty() {
                 return Ok(match anchor_kind {
+                    CoreSelectorTagKind::Vertex => {
+                        return Err(AppError::validation(
+                            "Vertex tags cannot be used as edge/face operation selector payloads.",
+                        ));
+                    }
                     CoreSelectorTagKind::Face => {
                         CoreSelectorPayload::FaceTargetIds(anchor.target_ids.clone())
                     }
@@ -1059,6 +1129,11 @@ fn resolve_tagged_selector_payload(
     }
 
     let rebound_payload = match selector_tag.kind {
+        CoreSelectorTagKind::Vertex => {
+            return Err(AppError::validation(
+                "Vertex tags cannot be used as edge/face operation selector payloads.",
+            ));
+        }
         CoreSelectorTagKind::Face => {
             parse_core_face_selector_payload(&selector_tag.authored_selector)?
         }
@@ -1081,6 +1156,7 @@ fn resolve_tagged_selector_payload(
 
 fn selector_tag_kind_label(kind: CoreSelectorTagKind) -> &'static str {
     match kind {
+        CoreSelectorTagKind::Vertex => "vertex",
         CoreSelectorTagKind::Face => "face",
         CoreSelectorTagKind::Edge => "edge",
     }
@@ -1346,6 +1422,37 @@ mod tests {
     }
 
     #[test]
+    fn resolve_tagged_anchors_records_exact_vertex_target() {
+        let selector_tags = vec![CoreSelectorTagDecl {
+            name: "datum_origin".to_string(),
+            kind: CoreSelectorTagKind::Vertex,
+            authored_selector: "target-id:body:vertex:0:0-0-0".to_string(),
+            target: "body".to_string(),
+        }];
+        let selection_targets = vec![SelectionTarget {
+            target_id: Some("body:vertex:0-0-0".to_string()),
+            durable_target_id: Some("body:stable-node-key:sha256:node:vertex:0-0-0".to_string()),
+            canonical_target_id: Some("body:vertex:0:0-0-0".to_string()),
+            alias_ids: Vec::new(),
+            part_id: "body".to_string(),
+            viewer_node_id: "body".to_string(),
+            label: "Body.Vertex1".to_string(),
+            kind: SelectionTargetKind::Vertex,
+            editable: false,
+            parameter_keys: Vec::new(),
+            primitive_ids: Vec::new(),
+            view_ids: Vec::new(),
+        }];
+
+        let anchors = resolve_tagged_anchors(&selector_tags, &selection_targets, &[], &[])
+            .expect("vertex anchor");
+        let anchor = anchors.get("datum_origin").expect("datum origin");
+        assert_eq!(anchor.kind, TaggedAnchorKind::Vertex);
+        assert_eq!(anchor.target_ids, vec!["body:vertex:0-0-0"]);
+        assert_eq!(anchor.canonical_target_ids, vec!["body:vertex:0:0-0-0"]);
+    }
+
+    #[test]
     fn resolve_tagged_anchors_records_clause_face_targets() {
         let selector_tags = vec![CoreSelectorTagDecl {
             name: "mounting_top".to_string(),
@@ -1557,6 +1664,7 @@ mod tests {
             )]),
             feature_graph: None,
             correspondence_graph: None,
+            analysis_declarations: Vec::new(),
             warnings: Vec::new(),
             enrichment_state: ManifestEnrichmentState {
                 status: EnrichmentStatus::None,

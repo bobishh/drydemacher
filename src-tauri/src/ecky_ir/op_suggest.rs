@@ -151,6 +151,7 @@ fn known_op_names() -> Vec<&'static str> {
         CoreFrameOp::PathFrame,
         CoreFrameOp::Place,
         CoreFrameOp::ClipBox,
+        CoreFrameOp::ClipPlane,
     ];
     names.extend(frames.map(|f| core_operation_name(&CoreOperation::Frame(f))));
 
@@ -225,6 +226,7 @@ fn core_operation_name(op: &CoreOperation) -> &'static str {
         CoreOperation::Frame(CoreFrameOp::PathFrame) => "path-frame",
         CoreOperation::Frame(CoreFrameOp::Place) => "place",
         CoreOperation::Frame(CoreFrameOp::ClipBox) => "clip-box",
+        CoreOperation::Frame(CoreFrameOp::ClipPlane) => "clip-plane",
         CoreOperation::Meta(CoreMetaOp::Group) => "compound",
         CoreOperation::Meta(CoreMetaOp::Comment) => "comment",
         CoreOperation::Meta(CoreMetaOp::Annotate) => "annotate",

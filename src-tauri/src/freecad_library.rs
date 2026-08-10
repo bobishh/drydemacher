@@ -7,9 +7,11 @@ use sha2::{Digest, Sha256};
 use crate::contracts::{
     AppError, AppResult, ArtifactBundle, DocumentMetadata, EngineKind, EnrichmentStatus,
     ExportArtifact, FreecadLibraryImportRequest, FreecadLibraryItem, FreecadLibrarySearchRequest,
-    GeometryBackend, ManifestEnrichmentState, ModelManifest, ModelSourceKind, PartBinding,
-    SourceLanguage, ViewerAsset, ViewerAssetFormat, MODEL_RUNTIME_SCHEMA_VERSION,
+    GeometryBackend, GeometryProvenance, GeometryRepresentation, ManifestEnrichmentState,
+    ModelManifest, ModelSourceKind, PartBinding, SourceLanguage, ViewerAsset, ViewerAssetFormat,
+    MODEL_RUNTIME_SCHEMA_VERSION,
 };
+use crate::ecky_ir::mesh_asset::{IndexedMeshAsset, MeshAssetSource};
 use crate::models::PathResolver;
 
 const SUPPORTED_EXTENSIONS: &[&str] = &["fcstd", "step", "stp", "stl", "obj", "3mf", "brep", "brp"];
@@ -17,6 +19,7 @@ const CAD_IMPORTABLE_EXTENSIONS: &[&str] = &["step", "stp", "fcstd"];
 const MESH_IMPORTABLE_EXTENSIONS: &[&str] = &["stl", "obj", "3mf"];
 const MODEL_RUNTIME_ROOT: &str = "model-runtime";
 const IMPORTED_MESH_ARTIFACT_DIR: &str = "imported-mesh";
+const GENERATED_CAPTURE_ARTIFACT_DIR: &str = "generated-capture";
 const BUNDLE_FILE_NAME: &str = "bundle.json";
 const MANIFEST_FILE_NAME: &str = "manifest.json";
 
@@ -120,18 +123,57 @@ pub fn import_mesh_from_request(
     let source_bytes =
         fs::read(&source_path).map_err(|err| AppError::persistence(err.to_string()))?;
     let content_hash = digest_segments([source_bytes.as_slice()]);
-    let model_id = format!("imported-mesh-{}", short_digest(&content_hash));
+    let label = if request.item.name.trim().is_empty() {
+        source_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(humanize_name)
+            .unwrap_or_else(|| "Imported Mesh".to_string())
+    } else {
+        request.item.name.clone()
+    };
+    let warning = "Imported mesh models are reference-only; CAD booleans and topology selectors are unavailable.".to_string();
+    let (bundle, _) = persist_mesh_runtime(
+        &source_path,
+        &ext,
+        &content_hash,
+        format!("imported-mesh-{}", short_digest(&content_hash)),
+        IMPORTED_MESH_ARTIFACT_DIR,
+        ModelSourceKind::ImportedMesh,
+        label,
+        warning,
+        None,
+        None,
+        app,
+    )?;
+    Ok(bundle)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_mesh_runtime(
+    source_path: &Path,
+    ext: &str,
+    content_hash: &str,
+    model_id: String,
+    artifact_dir: &str,
+    source_kind: ModelSourceKind,
+    label: String,
+    warning: String,
+    source_digest: Option<String>,
+    provenance: Option<GeometryProvenance>,
+    app: &dyn PathResolver,
+) -> AppResult<(ArtifactBundle, ModelManifest)> {
     let bundle_dir = app
         .app_data_dir()
         .join(MODEL_RUNTIME_ROOT)
-        .join(IMPORTED_MESH_ARTIFACT_DIR)
+        .join(artifact_dir)
         .join(&model_id);
     fs::create_dir_all(&bundle_dir).map_err(|err| AppError::persistence(err.to_string()))?;
 
     let mesh_file_name = format!("source.{}", ext);
     let mesh_path = bundle_dir.join(mesh_file_name);
     if !mesh_path.exists() {
-        fs::copy(&source_path, &mesh_path).map_err(|err| {
+        fs::copy(source_path, &mesh_path).map_err(|err| {
             AppError::persistence(format!(
                 "Failed to persist imported mesh '{}': {}",
                 source_path.display(),
@@ -143,26 +185,14 @@ pub fn import_mesh_from_request(
     let manifest_path = bundle_dir.join(MANIFEST_FILE_NAME);
     let bundle_path = bundle_dir.join(BUNDLE_FILE_NAME);
     let mesh_path_string = path_to_string(&mesh_path)?;
-    let label = if request.item.name.trim().is_empty() {
-        source_path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .map(humanize_name)
-            .unwrap_or_else(|| "Imported Mesh".to_string())
-    } else {
-        request.item.name.clone()
-    };
     let part_id = "mesh-body".to_string();
-    let warning =
-        "Imported mesh models are reference-only; CAD booleans and topology selectors are unavailable."
-            .to_string();
     let manifest = ModelManifest {
-        geometry_provenance: None,
+        geometry_provenance: provenance.clone(),
         component_import_origins: Vec::new(),
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.clone(),
-        source_kind: ModelSourceKind::ImportedMesh,
-        source_digest: None,
+        source_kind: source_kind.clone(),
+        source_digest,
         core_digest: None,
         ast_schema_version: None,
         engine_kind: EngineKind::EckyIrV0,
@@ -200,6 +230,7 @@ pub fn import_mesh_from_request(
         tagged_anchors: std::collections::BTreeMap::new(),
         feature_graph: None,
         correspondence_graph: None,
+        analysis_declarations: Vec::new(),
         warnings: vec![warning],
         enrichment_state: ManifestEnrichmentState {
             status: EnrichmentStatus::None,
@@ -215,17 +246,17 @@ pub fn import_mesh_from_request(
         format: viewer_asset_format(&ext)?,
     };
     let bundle = ArtifactBundle {
-        geometry_provenance: None,
+        geometry_provenance: provenance.clone(),
         component_dependency_lock: None,
         component_dependency_lock_digest: None,
         component_import_origins: Vec::new(),
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id,
-        source_kind: ModelSourceKind::ImportedMesh,
+        source_kind,
         engine_kind: EngineKind::EckyIrV0,
         source_language: SourceLanguage::EckyIrV0,
         geometry_backend: GeometryBackend::EckyRust,
-        content_hash,
+        content_hash: content_hash.to_string(),
         artifact_version: 1,
         fcstd_path: String::new(),
         manifest_path: path_to_string(&manifest_path)?,
@@ -241,9 +272,9 @@ pub fn import_mesh_from_request(
         callout_anchors: Vec::new(),
         measurement_guides: Vec::new(),
         export_artifacts: vec![ExportArtifact {
-            geometry_provenance: None,
+            geometry_provenance: provenance.clone(),
             label: "Source mesh".to_string(),
-            format: ext,
+            format: ext.to_string(),
             path: mesh_path_string,
             role: "source".to_string(),
         }],
@@ -251,7 +282,55 @@ pub fn import_mesh_from_request(
     crate::contracts::validate_model_runtime_bundle(&manifest, &bundle)?;
     write_json(&manifest_path, &manifest)?;
     write_json(&bundle_path, &bundle)?;
-    Ok(bundle)
+    Ok((bundle, manifest))
+}
+
+pub fn import_generated_capture_mesh(
+    source_path: &Path,
+    label: &str,
+    session_id: &str,
+    app: &dyn PathResolver,
+) -> AppResult<crate::contracts::CapturePreparedPreview> {
+    let source_bytes =
+        fs::read(source_path).map_err(|error| AppError::persistence(error.to_string()))?;
+    let content_hash = digest_segments([source_bytes.as_slice()]);
+    let indexed = IndexedMeshAsset::from_stl(
+        MeshAssetSource::Generated {
+            provider: "apple-object-capture".into(),
+            model: Some(session_id.into()),
+        },
+        source_path,
+    )?;
+    let topology = indexed.topology();
+    let provenance = GeometryProvenance {
+        representation: GeometryRepresentation::MeshNative,
+        source_mesh_digests: vec![indexed.content_digest().to_string()],
+        closed: Some(topology.closed),
+        boundary_or_non_manifold_edge_count: Some(
+            (topology.boundary_edge_count + topology.non_manifold_edge_count) as u64,
+        ),
+    };
+    let identity = digest_segments([content_hash.as_bytes(), session_id.as_bytes()]);
+    let warning =
+        "Photogrammetry mesh dimensions are approximate; verify critical sizes with calipers."
+            .to_string();
+    let (bundle, manifest) = persist_mesh_runtime(
+        source_path,
+        "stl",
+        &content_hash,
+        format!("generated-capture-{}", short_digest(&identity)),
+        GENERATED_CAPTURE_ARTIFACT_DIR,
+        ModelSourceKind::Generated,
+        label.to_string(),
+        warning,
+        Some(indexed.content_digest().to_string()),
+        Some(provenance),
+        app,
+    )?;
+    Ok(crate::contracts::CapturePreparedPreview {
+        artifact_bundle: bundle,
+        model_manifest: manifest,
+    })
 }
 
 fn resolve_roots(request_roots: &[String], configured_roots: &[String]) -> AppResult<Vec<PathBuf>> {
@@ -696,6 +775,58 @@ mod tests {
         assert!(Path::new(&bundle.viewer_assets[0].path).exists());
         assert!(Path::new(&bundle.manifest_path).exists());
 
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(app_root);
+    }
+
+    #[test]
+    fn generated_capture_mesh_preserves_mesh_provenance_and_accuracy_warning() {
+        let root = temp_root("capture-generated");
+        let app_root = temp_root("capture-generated-app");
+        fs::create_dir_all(&root).unwrap();
+        let mesh_path = root.join("preview.stl");
+        fs::write(&mesh_path, b"solid capture\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid capture\n").unwrap();
+
+        let prepared = import_generated_capture_mesh(
+            &mesh_path,
+            "Capture test",
+            "session-test",
+            &TestResolver {
+                root: app_root.clone(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepared.artifact_bundle.source_kind,
+            ModelSourceKind::Generated
+        );
+        assert!(prepared
+            .artifact_bundle
+            .manifest_path
+            .contains("generated-capture"));
+        assert!(!app_root
+            .join(MODEL_RUNTIME_ROOT)
+            .join(IMPORTED_MESH_ARTIFACT_DIR)
+            .exists());
+        assert_eq!(
+            prepared.model_manifest.source_kind,
+            ModelSourceKind::Generated
+        );
+        assert_eq!(
+            prepared
+                .model_manifest
+                .geometry_provenance
+                .as_ref()
+                .unwrap()
+                .representation,
+            GeometryRepresentation::MeshNative
+        );
+        assert!(prepared
+            .model_manifest
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Photogrammetry")));
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(app_root);
     }

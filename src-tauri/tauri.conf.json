@@ -6,6 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev:web",
     "devUrl": "http://localhost:5173",
+    "additionalWatchFolders": ["assets"],
     "beforeBuildCommand": "bash scripts/cleanup_tauri_dmg_mounts.sh && npm run runtimes:prepare && npm run build:book && npm run build",
     "frontendDist": "../dist"
   },
@@ -39,6 +40,7 @@
       "../docs": "campaign-content",
       "../sites/landing/src/models": "campaign-content/sites/landing/src/models",
       "../.dist/runtime/occt": "runtime/occt",
+      "../.dist/runtime/ftetwild": "runtime/ftetwild",
       "../.dist/speech-runtime": "runtime/speech"
     },
     "icon": [

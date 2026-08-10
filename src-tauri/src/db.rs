@@ -232,6 +232,8 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
         [],
     )?;
 
+    crate::capture_runs::ensure_schema(&conn)?;
+
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_messages_thread_visible_timestamp
          ON messages(thread_id, timestamp DESC)
@@ -477,7 +479,8 @@ pub fn get_all_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND agent_origin IS NULL AND deleted_at IS NULL) as e_count,
         COALESCE(status, 'active') as thread_status,
         finalized_at,
-        pending_confirm
+        pending_confirm,
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND deleted_at IS NULL AND status != 'discarded') as message_count
         FROM threads
         WHERE deleted_at IS NULL AND COALESCE(status, 'active') = 'active'
         ORDER BY last_used_at DESC, id DESC
@@ -488,6 +491,7 @@ pub fn get_all_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
         let status_str: String = row
             .get::<_, String>(9)
             .unwrap_or_else(|_| "active".to_string());
+        let message_count = row.get::<_, i64>(12)? as usize;
         Ok(Thread {
             id: id.clone(),
             title: row.get(1)?,
@@ -499,6 +503,7 @@ pub fn get_all_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
             pending_count: row.get::<_, i64>(6)? as usize,
             queued_count: row.get::<_, i64>(7)? as usize,
             error_count: row.get::<_, i64>(8)? as usize,
+            is_blank: message_count == 0,
             status: status_str
                 .parse()
                 .unwrap_or(crate::contracts::ThreadStatus::Active),
@@ -535,7 +540,8 @@ pub fn get_recent_threads_limited(conn: &Connection, limit: usize) -> SqlResult<
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND agent_origin IS NULL AND deleted_at IS NULL) as e_count,
         COALESCE(status, 'active') as thread_status,
         finalized_at,
-        pending_confirm
+        pending_confirm,
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND deleted_at IS NULL AND status != 'discarded') as message_count
         FROM threads
         WHERE deleted_at IS NULL AND COALESCE(status, 'active') = 'active'
         ORDER BY last_used_at DESC, id DESC
@@ -548,6 +554,7 @@ pub fn get_recent_threads_limited(conn: &Connection, limit: usize) -> SqlResult<
         let status_str: String = row
             .get::<_, String>(9)
             .unwrap_or_else(|_| "active".to_string());
+        let message_count = row.get::<_, i64>(12)? as usize;
         Ok(Thread {
             id: id.clone(),
             title: row.get(1)?,
@@ -559,6 +566,7 @@ pub fn get_recent_threads_limited(conn: &Connection, limit: usize) -> SqlResult<
             pending_count: row.get::<_, i64>(6)? as usize,
             queued_count: row.get::<_, i64>(7)? as usize,
             error_count: row.get::<_, i64>(8)? as usize,
+            is_blank: message_count == 0,
             status: status_str
                 .parse()
                 .unwrap_or(crate::contracts::ThreadStatus::Active),
@@ -782,7 +790,8 @@ pub fn get_inventory_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND agent_origin IS NULL AND deleted_at IS NULL) as e_count,
         COALESCE(status, 'active') as thread_status,
         finalized_at,
-        pending_confirm
+        pending_confirm,
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND deleted_at IS NULL AND status != 'discarded') as message_count
         FROM threads
         WHERE deleted_at IS NULL AND COALESCE(status, 'active') = 'finalized'
         ORDER BY finalized_at DESC, id DESC
@@ -793,6 +802,7 @@ pub fn get_inventory_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
         let status_str: String = row
             .get::<_, String>(9)
             .unwrap_or_else(|_| "finalized".to_string());
+        let message_count = row.get::<_, i64>(12)? as usize;
         Ok(Thread {
             id: id.clone(),
             title: row.get(1)?,
@@ -804,6 +814,7 @@ pub fn get_inventory_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
             pending_count: row.get::<_, i64>(6)? as usize,
             queued_count: row.get::<_, i64>(7)? as usize,
             error_count: row.get::<_, i64>(8)? as usize,
+            is_blank: message_count == 0,
             status: status_str
                 .parse()
                 .unwrap_or(crate::contracts::ThreadStatus::Finalized),
@@ -4179,6 +4190,7 @@ mod tests {
                 tagged_anchors: std::collections::BTreeMap::new(),
                 feature_graph: None,
                 correspondence_graph: None,
+                analysis_declarations: Vec::new(),
                 warnings: Vec::new(),
                 enrichment_state: crate::contracts::ManifestEnrichmentState {
                     status: crate::contracts::EnrichmentStatus::None,

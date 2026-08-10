@@ -13,8 +13,8 @@
 //!   tessellate → mesh displacement → poly BRep → OCCT hybrid boolean).
 
 use crate::ecky_core_ir::{
-    CoreBooleanOp, CoreKeywordArg, CoreNode, CoreNodeKind, CoreOperation, CoreProgram,
-    CoreReference, CoreSelectorPayload, CoreSurfaceOp, NodeId,
+    CoreBooleanOp, CoreFrameOp, CoreKeywordArg, CoreNode, CoreNodeKind, CoreOperation,
+    CorePrimitive, CoreProgram, CoreReference, CoreSelectorPayload, CoreSurfaceOp, NodeId,
 };
 
 // ---------------------------------------------------------------------------
@@ -347,6 +347,7 @@ fn apply_op_post_boundary(
 /// future import-mesh, relief-from-image, …).
 fn operation_is_mesh_only(op: &CoreOperation) -> bool {
     match op {
+        CoreOperation::Primitive(CorePrimitive::Stl) => true,
         CoreOperation::Custom(name) => crate::ecky_ir::is_ecky_rust_only_cad_head(name),
         _ => false,
     }
@@ -371,12 +372,14 @@ fn operation_requires_brep(op: &CoreOperation) -> bool {
                     | CoreSurfaceOp::Offset
                     | CoreSurfaceOp::OffsetRounded,
             )
-    )
+    ) || matches!(op, CoreOperation::Frame(CoreFrameOp::ClipPlane))
+        || matches!(op, CoreOperation::Custom(name) if name == "solidify")
 }
 
 #[derive(Clone, Default)]
 struct MeshPhaseFlow {
     depends_on_mesh: bool,
+    stopped: bool,
     output_node_ids: Vec<NodeId>,
 }
 
@@ -484,6 +487,7 @@ fn merge_mesh_phase_flows(flows: impl IntoIterator<Item = MeshPhaseFlow>) -> Mes
     let mut merged = MeshPhaseFlow::default();
     for flow in flows {
         merged.depends_on_mesh |= flow.depends_on_mesh;
+        merged.stopped |= flow.stopped;
         merged.output_node_ids.extend(flow.output_node_ids);
     }
     merged
@@ -496,7 +500,9 @@ fn extend_mesh_phase_node(
     stops_mesh_phase: bool,
 ) -> MeshPhaseFlow {
     flow.depends_on_mesh |= is_mesh_only;
-    if flow.depends_on_mesh && !stops_mesh_phase {
+    if flow.depends_on_mesh && stops_mesh_phase {
+        flow.stopped = true;
+    } else if flow.depends_on_mesh && !flow.stopped {
         flow.output_node_ids.clear();
         flow.output_node_ids.push(node.id);
     }
@@ -665,7 +671,8 @@ fn operation_stops_mesh_phase(op: &CoreOperation) -> bool {
                     | CoreSurfaceOp::Offset
                     | CoreSurfaceOp::OffsetRounded,
             )
-    )
+    ) || matches!(op, CoreOperation::Frame(CoreFrameOp::ClipPlane))
+        || matches!(op, CoreOperation::Custom(name) if name == "solidify")
 }
 
 fn collect_mesh_boolean_boundaries<'a>(
@@ -759,7 +766,7 @@ fn collect_mesh_boolean_boundaries<'a>(
 // Tree slicing for hybrid dispatch
 // ---------------------------------------------------------------------------
 
-use crate::ecky_core_ir::{CoreLiteral, CorePrimitive, CoreValueKind};
+use crate::ecky_core_ir::{CoreLiteral, CoreValueKind};
 
 /// Clone a program for the **mesh phase**: for each Hybrid part, replace the
 /// root with just the first boundary subtree (the mesh-only op + everything
@@ -1085,7 +1092,9 @@ fn slice_mesh_phase_root(
                 .iter()
                 .rposition(|b| node_contains_any(&b.value, boundary_ids))
             {
-                let kept_bindings: Vec<_> = bindings[..=last_boundary_idx].to_vec();
+                let mut kept_bindings: Vec<_> = bindings[..=last_boundary_idx].to_vec();
+                kept_bindings[last_boundary_idx].value =
+                    slice_mesh_phase_root(&kept_bindings[last_boundary_idx].value, boundary_ids)?;
                 let binding_name = kept_bindings[last_boundary_idx].name.clone();
                 let binding_id = kept_bindings[last_boundary_idx].value.id;
                 return Some(CoreNode::new(
@@ -1116,7 +1125,9 @@ fn slice_mesh_phase_root(
                 .iter()
                 .rposition(|b| node_contains_any(&b.value, boundary_ids))
             {
-                let kept_bindings: Vec<_> = bindings[..=last_boundary_idx].to_vec();
+                let mut kept_bindings: Vec<_> = bindings[..=last_boundary_idx].to_vec();
+                kept_bindings[last_boundary_idx].value =
+                    slice_mesh_phase_root(&kept_bindings[last_boundary_idx].value, boundary_ids)?;
                 let binding_name = kept_bindings[last_boundary_idx].name.clone();
                 let binding_id = kept_bindings[last_boundary_idx].value.id;
                 return Some(CoreNode::new(
@@ -1527,6 +1538,7 @@ fn brep_operation_label(op: &CoreOperation) -> Option<&'static str> {
         CoreOperation::Surface(CoreSurfaceOp::Shell) => Some("shell"),
         CoreOperation::Surface(CoreSurfaceOp::Offset) => Some("offset"),
         CoreOperation::Surface(CoreSurfaceOp::OffsetRounded) => Some("offset-rounded"),
+        CoreOperation::Custom(name) if name == "solidify" => Some("solidify"),
         _ => None,
     }
 }
@@ -1534,7 +1546,7 @@ fn brep_operation_label(op: &CoreOperation) -> Option<&'static str> {
 fn node_contains_open_mesh(node: &CoreNode) -> bool {
     match &node.kind {
         CoreNodeKind::Call { op, args, keywords } => {
-            matches!(op, CoreOperation::Custom(name) if name == "mesh")
+            call_declares_open_mesh(op, keywords)
                 || args.iter().any(node_contains_open_mesh)
                 || keywords
                     .iter()
@@ -1576,6 +1588,22 @@ fn node_contains_open_mesh(node: &CoreNode) -> bool {
     }
 }
 
+fn call_declares_open_mesh(op: &CoreOperation, keywords: &[CoreKeywordArg]) -> bool {
+    match op {
+        CoreOperation::Custom(name) if name == "mesh" => true,
+        CoreOperation::Custom(name) if name == "surface-trim" => keywords
+            .iter()
+            .find(|keyword| keyword.name == "cap")
+            .is_some_and(|keyword| {
+                matches!(
+                    &keyword.source_node().kind,
+                    CoreNodeKind::Literal(CoreLiteral::Text(value)) if value == "open"
+                )
+            }),
+        _ => false,
+    }
+}
+
 /// Replace a node by ID with `solidify(import-stl(path))` everywhere it appears.
 fn replace_node(node: &mut CoreNode, target: NodeId, id_counter: &mut NodeId, path: &str) {
     if node.id == target {
@@ -1605,9 +1633,14 @@ fn replace_node(node: &mut CoreNode, target: NodeId, id_counter: &mut NodeId, pa
             replace_node(then_branch, target, id_counter, path);
             replace_node(else_branch, target, id_counter, path);
         }
-        CoreNodeKind::Call { args, keywords, .. } => {
+        CoreNodeKind::Call { op, args, keywords } => {
+            let authored_solidify = matches!(op, CoreOperation::Custom(name) if name == "solidify");
             for a in args.iter_mut() {
-                replace_node(a, target, id_counter, path);
+                if authored_solidify && a.id == target {
+                    *a = make_import_stl_node(a.id, path, id_counter);
+                } else {
+                    replace_node(a, target, id_counter, path);
+                }
             }
             for kw in keywords.iter_mut() {
                 let source = kw.source_node_mut();
@@ -1748,6 +1781,200 @@ mod tests {
                     :triangles ((0 1 2)))))"#,
         );
         assert_eq!(strategy, PartRenderStrategy::PureMesh);
+    }
+
+    #[test]
+    fn imported_stl_alone_is_pure_mesh() {
+        let strategy = partition_of(
+            r#"(model
+                (part scanned
+                  (import-stl "/tmp/scanned.stl")))"#,
+        );
+        assert_eq!(strategy, PartRenderStrategy::PureMesh);
+    }
+
+    #[test]
+    fn imported_stl_consumed_by_difference_is_hybrid() {
+        let strategy = partition_of(
+            r#"(model
+                (part scanned
+                  (difference
+                    (import-stl "/tmp/scanned.stl")
+                    (cylinder 3 20))))"#,
+        );
+        assert_eq!(strategy, PartRenderStrategy::Hybrid);
+    }
+
+    #[test]
+    fn explicit_solidify_promotes_imported_stl_to_hybrid_brep() {
+        let strategy = partition_of(
+            r#"(model
+                (part scanned
+                  (solidify (import-stl "/tmp/scanned.stl"))))"#,
+        );
+        assert_eq!(strategy, PartRenderStrategy::Hybrid);
+    }
+
+    #[test]
+    fn explicit_solidify_stays_out_of_mesh_phase() {
+        let program = try_compile_to_core_program(
+            r#"(model
+                (part scanned
+                  (solidify (import-stl "/tmp/scanned.stl"))))"#,
+        )
+        .expect("compiled")
+        .expect("program");
+        let partitions = analyze_program(&program);
+        let mesh_program = clone_program_for_mesh_phase(&program, &partitions);
+
+        assert!(matches!(
+            &mesh_program.parts[0].root.kind,
+            CoreNodeKind::Call {
+                op: CoreOperation::Primitive(CorePrimitive::Stl),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn let_bound_explicit_solidify_stays_out_of_mesh_phase() {
+        let program = try_compile_to_core_program(
+            r#"(model
+                (params
+                  (number neck_cut_z 95 :label "Neck cut Z" :min 88 :max 102 :step 0.5))
+                (part head_only
+                  (let* ((donor (solidify (import-stl "/tmp/scanned.stl")))
+                         (crop_box
+                           (translate -10 -10 neck_cut_z
+                             (box 100 100 200 :align '(min min min)))))
+                    (translate 0 0 (- 0 neck_cut_z)
+                      (intersection donor crop_box)))))"#,
+        )
+        .expect("compiled")
+        .expect("program");
+        let partitions = analyze_program(&program);
+        assert_eq!(partitions[0].mesh_output_node_ids, vec![NodeId::new(3)]);
+        let mesh_program = clone_program_for_mesh_phase(&program, &partitions);
+
+        fn contains_solidify(node: &CoreNode) -> bool {
+            match &node.kind {
+                CoreNodeKind::Call { op, args, keywords } => {
+                    matches!(op, CoreOperation::Custom(name) if name == "solidify")
+                        || args.iter().any(contains_solidify)
+                        || keywords
+                            .iter()
+                            .any(|keyword| contains_solidify(keyword.source_node()))
+                }
+                CoreNodeKind::Build { bindings, result } => {
+                    bindings
+                        .iter()
+                        .any(|binding| contains_solidify(&binding.value))
+                        || contains_solidify(result)
+                }
+                CoreNodeKind::Let { bindings, body } => {
+                    bindings
+                        .iter()
+                        .any(|binding| contains_solidify(&binding.value))
+                        || contains_solidify(body)
+                }
+                CoreNodeKind::If {
+                    condition,
+                    then_branch,
+                    else_branch,
+                } => {
+                    contains_solidify(condition)
+                        || contains_solidify(then_branch)
+                        || contains_solidify(else_branch)
+                }
+                CoreNodeKind::Map { sources, body, .. } => {
+                    sources.iter().any(contains_solidify) || contains_solidify(body)
+                }
+                CoreNodeKind::Apply { args, list, .. } => {
+                    args.iter().any(contains_solidify) || contains_solidify(list)
+                }
+                CoreNodeKind::List(items) | CoreNodeKind::Group(items) => {
+                    items.iter().any(contains_solidify)
+                }
+                CoreNodeKind::Literal(_)
+                | CoreNodeKind::Reference(_)
+                | CoreNodeKind::Range { .. } => false,
+            }
+        }
+
+        assert!(
+            !contains_solidify(&mesh_program.parts[0].root),
+            "mesh root: {:#?}; partitions: {:#?}",
+            mesh_program.parts[0].root,
+            partitions
+        );
+    }
+
+    #[test]
+    fn explicit_solidify_is_not_duplicated_in_occt_phase() {
+        fn count_solidify(node: &CoreNode) -> usize {
+            match &node.kind {
+                CoreNodeKind::Call { op, args, keywords } => {
+                    usize::from(matches!(op, CoreOperation::Custom(name) if name == "solidify"))
+                        + args.iter().map(count_solidify).sum::<usize>()
+                        + keywords
+                            .iter()
+                            .map(|keyword| count_solidify(keyword.source_node()))
+                            .sum::<usize>()
+                }
+                CoreNodeKind::Build { bindings, result } => {
+                    bindings
+                        .iter()
+                        .map(|binding| count_solidify(&binding.value))
+                        .sum::<usize>()
+                        + count_solidify(result)
+                }
+                CoreNodeKind::Let { bindings, body } => {
+                    bindings
+                        .iter()
+                        .map(|binding| count_solidify(&binding.value))
+                        .sum::<usize>()
+                        + count_solidify(body)
+                }
+                CoreNodeKind::If {
+                    condition,
+                    then_branch,
+                    else_branch,
+                } => {
+                    count_solidify(condition)
+                        + count_solidify(then_branch)
+                        + count_solidify(else_branch)
+                }
+                CoreNodeKind::Map { sources, body, .. } => {
+                    sources.iter().map(count_solidify).sum::<usize>() + count_solidify(body)
+                }
+                CoreNodeKind::Apply { args, list, .. } => {
+                    args.iter().map(count_solidify).sum::<usize>() + count_solidify(list)
+                }
+                CoreNodeKind::List(items) | CoreNodeKind::Group(items) => {
+                    items.iter().map(count_solidify).sum()
+                }
+                CoreNodeKind::Literal(_)
+                | CoreNodeKind::Reference(_)
+                | CoreNodeKind::Range { .. } => 0,
+            }
+        }
+
+        let program = try_compile_to_core_program(
+            r#"(model
+                (part scanned
+                  (solidify (import-stl "/tmp/scanned.stl"))))"#,
+        )
+        .expect("compiled")
+        .expect("program");
+        let partitions = analyze_program(&program);
+        let occt_program = clone_program_for_occt_phase(
+            &program,
+            &partitions,
+            "/tmp/mesh-phase.stl",
+            NodeId::new(999_999),
+        );
+
+        assert_eq!(count_solidify(&occt_program.parts[0].root), 1);
     }
 
     #[test]
@@ -2132,6 +2359,157 @@ mod tests {
                 ..
             } if name == "wall-pattern"
         ));
+    }
+
+    #[test]
+    fn closed_flat_surface_trim_inside_solidify_then_difference_is_hybrid_and_outputs_stay_closed()
+    {
+        let program = try_compile_to_core_program(
+            r#"(model
+                (part scanned
+                  (difference
+                    (solidify
+                      (surface-trim
+                        (import-stl "/tmp/scanned.stl")
+                        :schema-version 1
+                        :source-digest "sha256:fixture"
+                        :loop ((mesh-anchor 0 1 0 0) (mesh-anchor 1 0 1 0) (mesh-anchor 2 0 0 1))
+                        :keep-seed (mesh-anchor 3 1 0 0)
+                        :path-mode "feature"
+                        :cap "flat"))
+                    (cylinder 3 20))))"#,
+        )
+        .expect("compiled")
+        .expect("program");
+
+        let partitions = analyze_program(&program);
+        assert_eq!(partitions.len(), 1);
+        assert_eq!(partitions[0].strategy, PartRenderStrategy::Hybrid);
+        assert!(!partitions[0].mesh_output_node_ids.is_empty());
+        assert!(partitions[0]
+            .mesh_output_node_ids
+            .iter()
+            .all(|&node_id| { !mesh_output_contains_open_mesh(&program, 0, node_id) }));
+    }
+
+    #[test]
+    fn open_surface_trim_inside_solidify_is_hybrid_and_reports_open_mesh_consumer() {
+        let program = try_compile_to_core_program(
+            r#"(model
+                (part scanned
+                  (solidify
+                    (surface-trim
+                      (import-stl "/tmp/scanned.stl")
+                      :schema-version 1
+                      :source-digest "sha256:fixture"
+                      :loop ((mesh-anchor 0 1 0 0) (mesh-anchor 1 0 1 0) (mesh-anchor 2 0 0 1))
+                      :keep-seed (mesh-anchor 3 1 0 0)
+                      :path-mode "feature"
+                      :cap "open"))))"#,
+        )
+        .expect("compiled")
+        .expect("program");
+
+        let partitions = analyze_program(&program);
+        assert_eq!(partitions.len(), 1);
+        assert_eq!(partitions[0].strategy, PartRenderStrategy::Hybrid);
+        assert!(!partitions[0].mesh_output_node_ids.is_empty());
+        assert!(partitions[0]
+            .mesh_output_node_ids
+            .iter()
+            .any(|&node_id| mesh_output_contains_open_mesh(&program, 0, node_id)));
+        assert_eq!(
+            open_mesh_brep_consumer_operation(&program, 0),
+            Some("solidify")
+        );
+    }
+
+    #[test]
+    fn clone_program_for_mesh_phase_keeps_surface_trim_and_removes_solidify() {
+        fn count_custom_call(node: &CoreNode, target: &str) -> usize {
+            match &node.kind {
+                CoreNodeKind::Call { op, args, keywords } => {
+                    usize::from(matches!(op, CoreOperation::Custom(name) if name == target))
+                        + args
+                            .iter()
+                            .map(|arg| count_custom_call(arg, target))
+                            .sum::<usize>()
+                        + keywords
+                            .iter()
+                            .map(|keyword| count_custom_call(keyword.source_node(), target))
+                            .sum::<usize>()
+                }
+                CoreNodeKind::Build { bindings, result } => {
+                    bindings
+                        .iter()
+                        .map(|binding| count_custom_call(&binding.value, target))
+                        .sum::<usize>()
+                        + count_custom_call(result, target)
+                }
+                CoreNodeKind::Let { bindings, body } => {
+                    bindings
+                        .iter()
+                        .map(|binding| count_custom_call(&binding.value, target))
+                        .sum::<usize>()
+                        + count_custom_call(body, target)
+                }
+                CoreNodeKind::If {
+                    condition,
+                    then_branch,
+                    else_branch,
+                } => {
+                    count_custom_call(condition, target)
+                        + count_custom_call(then_branch, target)
+                        + count_custom_call(else_branch, target)
+                }
+                CoreNodeKind::Map { sources, body, .. } => {
+                    sources
+                        .iter()
+                        .map(|source| count_custom_call(source, target))
+                        .sum::<usize>()
+                        + count_custom_call(body, target)
+                }
+                CoreNodeKind::Apply { args, list, .. } => {
+                    args.iter()
+                        .map(|arg| count_custom_call(arg, target))
+                        .sum::<usize>()
+                        + count_custom_call(list, target)
+                }
+                CoreNodeKind::List(items) | CoreNodeKind::Group(items) => items
+                    .iter()
+                    .map(|item| count_custom_call(item, target))
+                    .sum(),
+                CoreNodeKind::Literal(_)
+                | CoreNodeKind::Reference(_)
+                | CoreNodeKind::Range { .. } => 0,
+            }
+        }
+
+        let program = try_compile_to_core_program(
+            r#"(model
+                (part scanned
+                  (difference
+                    (solidify
+                      (surface-trim
+                        (import-stl "/tmp/scanned.stl")
+                        :schema-version 1
+                        :source-digest "sha256:fixture"
+                        :loop ((mesh-anchor 0 1 0 0) (mesh-anchor 1 0 1 0) (mesh-anchor 2 0 0 1))
+                        :keep-seed (mesh-anchor 3 1 0 0)
+                        :path-mode "feature"
+                        :cap "flat"))
+                    (cylinder 3 20))))"#,
+        )
+        .expect("compiled")
+        .expect("program");
+        let partitions = analyze_program(&program);
+        let mesh_program = clone_program_for_mesh_phase(&program, &partitions);
+
+        assert!(count_custom_call(&mesh_program.parts[0].root, "surface-trim") >= 1);
+        assert_eq!(
+            count_custom_call(&mesh_program.parts[0].root, "solidify"),
+            0
+        );
     }
 
     #[test]

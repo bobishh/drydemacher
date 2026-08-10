@@ -2501,6 +2501,7 @@ fn selection_target_kind_role(
 ) -> Option<&'static str> {
     match kind {
         crate::contracts::SelectionTargetKind::Object => Some("object"),
+        crate::contracts::SelectionTargetKind::Vertex => Some("vertex"),
         crate::contracts::SelectionTargetKind::Edge => Some("edge"),
         crate::contracts::SelectionTargetKind::Face => Some("face"),
         crate::contracts::SelectionTargetKind::Part

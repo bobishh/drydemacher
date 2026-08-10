@@ -598,7 +598,7 @@ fn build_mcp_thread_title(
     }
 }
 
-async fn queue_agent_prompt_impl(
+pub(crate) async fn queue_agent_prompt_impl(
     input: crate::contracts::QueueAgentPromptInput,
     state: &AppState,
 ) -> AppResult<crate::contracts::QueuedAgentPrompt> {

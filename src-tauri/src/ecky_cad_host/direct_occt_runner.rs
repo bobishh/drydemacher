@@ -11,7 +11,9 @@ use ecky_render::{
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use super::direct_occt::{OcctArg, OcctCommand, OcctKeyword, OcctOp, OcctPlan, OcctSlot};
+use super::direct_occt::{
+    OcctArg, OcctAuthoredShapeBinding, OcctCommand, OcctKeyword, OcctOp, OcctPlan, OcctSlot,
+};
 use crate::contracts::{AppError, AppResult};
 use crate::models::PathResolver;
 
@@ -230,16 +232,34 @@ fn read_runner_stage_report(output_dir: &Path) -> AppResult<RunnerStageReport> {
     Ok(report)
 }
 
-pub(crate) fn run_plan_step_stl_if_available(
+pub(crate) fn run_plan_step_stl_if_available_with_bindings(
     plan: &OcctPlan,
+    authored_shape_bindings: &[OcctAuthoredShapeBinding],
     output_dir: impl AsRef<Path>,
     app: &dyn PathResolver,
 ) -> AppResult<Option<super::direct_occt_sdk::NativeExportOutcome>> {
-    run_plan_step_stl_with_mode(plan, output_dir, app, runner_enabled())
+    run_plan_step_stl_with_mode_and_bindings(
+        plan,
+        authored_shape_bindings,
+        output_dir,
+        app,
+        runner_enabled(),
+    )
 }
 
+#[cfg(test)]
 pub(crate) fn run_plan_step_stl_with_mode(
     plan: &OcctPlan,
+    output_dir: impl AsRef<Path>,
+    app: &dyn PathResolver,
+    enabled: bool,
+) -> AppResult<Option<super::direct_occt_sdk::NativeExportOutcome>> {
+    run_plan_step_stl_with_mode_and_bindings(plan, &[], output_dir, app, enabled)
+}
+
+fn run_plan_step_stl_with_mode_and_bindings(
+    plan: &OcctPlan,
+    authored_shape_bindings: &[OcctAuthoredShapeBinding],
     output_dir: impl AsRef<Path>,
     app: &dyn PathResolver,
     enabled: bool,
@@ -276,6 +296,8 @@ pub(crate) fn run_plan_step_stl_with_mode(
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
+    let serialized_plan =
+        runner_plan_value_with_bindings(&serialized_plan, authored_shape_bindings)?;
     let plan_json = serde_json::to_string_pretty(&serialized_plan).map_err(|err| {
         AppError::validation(format!(
             "Direct OCCT runner plan serialization failed: {err}"
@@ -466,6 +488,77 @@ fn serialize_runner_plan(plan: &OcctPlan) -> AppResult<Option<String>> {
                 err
             ))
         })
+}
+
+#[cfg(test)]
+fn serialize_runner_plan_with_bindings(
+    plan: &OcctPlan,
+    authored_shape_bindings: &[OcctAuthoredShapeBinding],
+) -> AppResult<Option<String>> {
+    let Some(plan) = runner_plan(plan)? else {
+        return Ok(None);
+    };
+    serde_json::to_string_pretty(&runner_plan_value_with_bindings(
+        &plan,
+        authored_shape_bindings,
+    )?)
+    .map(Some)
+    .map_err(|err| {
+        AppError::validation(format!(
+            "Direct OCCT runner plan serialization failed: {err}"
+        ))
+    })
+}
+
+fn runner_plan_value_with_bindings(
+    plan: &RunnerPlan,
+    authored_shape_bindings: &[OcctAuthoredShapeBinding],
+) -> AppResult<serde_json::Value> {
+    let mut value = serde_json::to_value(plan).map_err(|err| {
+        AppError::validation(format!(
+            "Direct OCCT runner plan serialization failed: {err}"
+        ))
+    })?;
+    let parts = value
+        .get_mut("parts")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| AppError::validation("Direct OCCT runner plan has no parts array."))?;
+    for binding in authored_shape_bindings {
+        let part = parts
+            .iter_mut()
+            .find(|part| {
+                part.get("key").and_then(serde_json::Value::as_str)
+                    == Some(binding.part_key.as_str())
+            })
+            .ok_or_else(|| {
+                AppError::validation(format!(
+                    "Direct OCCT authored binding `{}` references missing part `{}`.",
+                    binding.name, binding.part_key
+                ))
+            })?;
+        let object = part
+            .as_object_mut()
+            .ok_or_else(|| AppError::validation("Direct OCCT runner part must be an object."))?;
+        let bindings = object
+            .entry("authoredBindings")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+            .as_array_mut()
+            .ok_or_else(|| {
+                AppError::validation("Direct OCCT authoredBindings must be an array.")
+            })?;
+        bindings.push(serde_json::json!({
+            "name": binding.name,
+            "slot": binding.slot,
+        }));
+    }
+    value["planId"] = serde_json::Value::String(String::new());
+    let body = serde_json::to_vec(&value).map_err(|err| {
+        AppError::validation(format!("Direct OCCT runner plan hashing failed: {err}"))
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(body);
+    value["planId"] = serde_json::Value::String(format!("sha256:{:x}", hasher.finalize()));
+    Ok(value)
 }
 
 fn runner_plan(plan: &OcctPlan) -> AppResult<Option<RunnerPlan>> {
@@ -920,10 +1013,12 @@ fn runner_command_supported(command: &OcctCommand) -> bool {
         OcctOp::Torus => runner_primitive_align_keywords_supported(command, 2),
         OcctOp::Wedge => runner_primitive_align_keywords_supported(command, 7),
         OcctOp::Profile => runner_profile_keywords_supported(command),
+        OcctOp::Extrude => runner_extrude_keywords_supported(command),
         OcctOp::Plane => runner_plane_keywords_supported(command),
         OcctOp::Location => runner_location_keywords_supported(command),
         OcctOp::PathFrame => runner_path_frame_keywords_supported(command),
         OcctOp::ClipBox => runner_clip_box_keywords_supported(command),
+        OcctOp::ClipPlane => runner_clip_plane_keywords_supported(command),
         OcctOp::Fillet | OcctOp::Chamfer => runner_exact_edge_selector_supported(command),
         OcctOp::Shell => runner_shell_supported(command),
         OcctOp::Bspline => runner_bspline_keywords_supported(command),
@@ -931,6 +1026,20 @@ fn runner_command_supported(command: &OcctCommand) -> bool {
         OcctOp::Draft => runner_draft_keywords_supported(command),
         _ => false,
     }
+}
+
+fn runner_extrude_keywords_supported(command: &OcctCommand) -> bool {
+    if command.args.len() != 2
+        || !matches!(command.args[0], OcctArg::Ref(_))
+        || !matches!(command.args[1], OcctArg::Number(_))
+        || command.keywords.len() != 1
+    {
+        return false;
+    }
+    let keyword = &command.keywords[0];
+    keyword.name == "symmetric"
+        && keyword.selector_payload().is_none()
+        && matches!(keyword.source_arg(), OcctArg::Boolean(_))
 }
 
 /// The runner's `draft_shape` honours a single `:neutral-z` (or `:neutral_z`)
@@ -1057,6 +1166,42 @@ fn runner_clip_box_keywords_supported(command: &OcctCommand) -> bool {
         }
     }
     saw_x && saw_y && saw_z
+}
+
+fn runner_clip_plane_keywords_supported(command: &OcctCommand) -> bool {
+    if command.args.len() != 1 || !matches!(command.args[0], OcctArg::Ref(_)) {
+        return false;
+    }
+    let mut saw_origin = false;
+    let mut saw_normal = false;
+    let mut saw_keep = false;
+    for keyword in &command.keywords {
+        if keyword.selector_payload().is_some() {
+            return false;
+        }
+        match keyword.name.as_str() {
+            "origin" => {
+                saw_origin = true;
+                if !runner_point3_like_arg_supported(keyword.source_arg()) {
+                    return false;
+                }
+            }
+            "normal" => {
+                saw_normal = true;
+                if !runner_point3_like_arg_supported(keyword.source_arg()) {
+                    return false;
+                }
+            }
+            "keep" => {
+                saw_keep = true;
+                if !matches!(keyword.source_arg(), OcctArg::Text(_) | OcctArg::Symbol(_)) {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    saw_origin && saw_normal && saw_keep
 }
 
 fn runner_plane_keywords_supported(command: &OcctCommand) -> bool {
@@ -1303,6 +1448,7 @@ fn runner_op_supported(op: OcctOp) -> bool {
             | OcctOp::PathFrame
             | OcctOp::Place
             | OcctOp::ClipBox
+            | OcctOp::ClipPlane
             | OcctOp::LinearArray
             | OcctOp::RadialArray
             | OcctOp::GridArray
@@ -1600,6 +1746,7 @@ fn runner_op_token(op: OcctOp) -> &'static str {
         OcctOp::PathFrame => "path-frame",
         OcctOp::Place => "place",
         OcctOp::ClipBox => "clip-box",
+        OcctOp::ClipPlane => "clip-plane",
         OcctOp::LinearArray => "linear-array",
         OcctOp::RadialArray => "radial-array",
         OcctOp::GridArray => "grid-array",
@@ -2561,6 +2708,14 @@ mod tests {
         label: &str,
         plan: &OcctPlan,
     ) -> Option<(PathBuf, serde_json::Value)> {
+        run_real_runner_plan_json_with_bindings(label, plan, &[])
+    }
+
+    fn run_real_runner_plan_json_with_bindings(
+        label: &str,
+        plan: &OcctPlan,
+        authored_shape_bindings: &[OcctAuthoredShapeBinding],
+    ) -> Option<(PathBuf, serde_json::Value)> {
         let root = temp_root(label);
         let resolver = TestResolver { root: root.clone() };
         let runner = discover_direct_occt_runner_with_mode(&resolver, true)?;
@@ -2570,7 +2725,7 @@ mod tests {
 
         let output_dir = root.join("bundle");
         fs::create_dir_all(&output_dir).expect("output dir");
-        let plan_json = serialize_runner_plan(plan)
+        let plan_json = serialize_runner_plan_with_bindings(plan, authored_shape_bindings)
             .expect("plan serialization")
             .expect("runner plan");
         let plan_path = output_dir.join(PLAN_FILE_NAME);
@@ -4896,6 +5051,20 @@ mod tests {
         )
     }
 
+    fn keyword_clip_plane_plan() -> OcctPlan {
+        compiled_plan(
+            r#"
+            (model
+              (part body
+                (clip-plane
+                  (box 20 20 20 :align '(min min min))
+                  :origin (0 0 8)
+                  :normal (0 1 1)
+                  :keep "positive")))
+            "#,
+        )
+    }
+
     fn exact_fillet_plan() -> OcctPlan {
         sample_plan_for_commands(
             OcctSlot(2),
@@ -5379,6 +5548,37 @@ mod tests {
     }
 
     #[test]
+    fn runner_supports_symmetric_extrude_keyword() {
+        let plan = sample_plan_for_commands(
+            OcctSlot(2),
+            vec![
+                OcctCommand {
+                    output: OcctSlot(1),
+                    op: OcctOp::Polygon,
+                    args: vec![OcctArg::List(vec![
+                        OcctArg::Point2([-4.0, 0.0]),
+                        OcctArg::Point2([0.0, 4.0]),
+                        OcctArg::Point2([4.0, 0.0]),
+                        OcctArg::Point2([0.0, -4.0]),
+                    ])],
+                    keywords: Vec::new(),
+                },
+                OcctCommand {
+                    output: OcctSlot(2),
+                    op: OcctOp::Extrude,
+                    args: vec![OcctArg::Ref(OcctSlot(1)), OcctArg::Number(10.0)],
+                    keywords: vec![OcctKeyword {
+                        name: "symmetric".to_string(),
+                        value: OcctKeywordValue::Arg(OcctArg::Boolean(true)),
+                    }],
+                },
+            ],
+        );
+
+        assert!(runner_supports_plan(&plan));
+    }
+
+    #[test]
     fn runner_supports_plan_accepts_exact_selector_forms() {
         assert!(runner_supports_plan(&shell_plan()));
         assert!(runner_supports_plan(&edge_all_fillet_plan()));
@@ -5586,6 +5786,37 @@ exit 11
             json["parts"][0]["commands"][1]["keywords"][0]["payload"]["type"],
             "clauses"
         );
+    }
+
+    #[test]
+    fn serializes_authored_shape_bindings_for_native_topology_provenance() {
+        let program = crate::ecky_scheme::compile_to_core_program(
+            r#"(model
+              (part body (build
+                (shape base (box 20 10 8))
+                (shape bore (translate 10 5 0 (cylinder 2 8)))
+                (result (difference base bore)))))"#,
+        )
+        .expect("compile fixture");
+        let planned =
+            crate::ecky_cad_host::direct_occt::plan_core_program_with_params_and_bindings(
+                &program,
+                &crate::contracts::DesignParams::new(),
+            )
+            .expect("plan fixture");
+
+        let plan_json =
+            serialize_runner_plan_with_bindings(&planned.plan, &planned.authored_shape_bindings)
+                .expect("plan serialization")
+                .expect("runner plan");
+        let json: serde_json::Value = serde_json::from_str(&plan_json).expect("json");
+
+        assert_eq!(json["parts"][0]["authoredBindings"][0]["name"], "base");
+        assert_eq!(json["parts"][0]["authoredBindings"][1]["name"], "bore");
+        assert!(json["parts"][0]["authoredBindings"][0]["slot"]
+            .as_u64()
+            .is_some());
+        assert!(json["planId"].as_str().unwrap().starts_with("sha256:"));
     }
 
     #[test]
@@ -6309,6 +6540,188 @@ exit 7
             "unexpected face target id: {}",
             faces[0]["targetId"]
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_precompiled_runner_accepts_tilted_clip_plane_when_available() {
+        let Some((root, topology)) =
+            run_real_runner_plan_json("live-runner-clip-plane", &keyword_clip_plane_plan())
+        else {
+            return;
+        };
+
+        assert_eq!(topology["parts"][0]["solidCount"], 1);
+        assert_eq!(topology["parts"][0]["brepValid"], true);
+        let faces = topology["parts"][0]["faces"].as_array().expect("faces");
+        assert!(!faces.is_empty(), "expected clipped solid faces");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_precompiled_runner_maps_authored_binding_to_exact_topology_when_available() {
+        let program = crate::ecky_scheme::compile_to_core_program(
+            r#"(model
+              (part body (build
+                (shape base (box 10 20 30))
+                (result base))))"#,
+        )
+        .expect("compile fixture");
+        let planned =
+            crate::ecky_cad_host::direct_occt::plan_core_program_with_params_and_bindings(
+                &program,
+                &crate::contracts::DesignParams::new(),
+            )
+            .expect("plan fixture");
+        let Some((root, topology)) = run_real_runner_plan_json_with_bindings(
+            "live-runner-authored-binding-topology",
+            &planned.plan,
+            &planned.authored_shape_bindings,
+        ) else {
+            return;
+        };
+
+        assert_eq!(topology["parts"][0]["solidCount"], 1);
+        assert_eq!(topology["parts"][0]["brepValid"], true);
+        for kind in ["vertices", "edges", "faces"] {
+            let targets = topology["parts"][0][kind].as_array().expect("targets");
+            assert!(!targets.is_empty(), "expected {kind}");
+            assert!(
+                targets.iter().all(|target| {
+                    target["authoredBindings"]
+                        .as_array()
+                        .is_some_and(|bindings| bindings.iter().any(|name| name == "base"))
+                }),
+                "every final {kind} target must retain exact base binding provenance"
+            );
+        }
+        let edge_target_ids = topology["parts"][0]["edges"]
+            .as_array()
+            .expect("edges")
+            .iter()
+            .map(|edge| edge["targetId"].as_str().expect("edge target id"))
+            .collect::<std::collections::HashSet<_>>();
+        for face in topology["parts"][0]["faces"].as_array().expect("faces") {
+            if face["exactGeometry"]["kind"] != "planeFace" {
+                continue;
+            }
+            let loops = face["exactGeometry"]["boundaryEdgeTargetIds"]
+                .as_array()
+                .expect("planar face boundary loops");
+            assert!(
+                !loops.is_empty(),
+                "planar face must expose exact trim loops"
+            );
+            assert!(loops.iter().all(|loop_ids| {
+                loop_ids.as_array().is_some_and(|ids| {
+                    !ids.is_empty()
+                        && ids.iter().all(|id| {
+                            id.as_str()
+                                .is_some_and(|target_id| edge_target_ids.contains(target_id))
+                        })
+                })
+            }));
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_precompiled_runner_emits_authored_wire_edge_order_when_available() {
+        let program = crate::ecky_scheme::compile_to_core_program(
+            r#"(model
+              (part body (build
+                (shape outline (polygon ((0 0) (10 0) (10 5) (0 5))))
+                (shape support (make-face outline))
+                (result support))))"#,
+        )
+        .expect("compile fixture");
+        let planned =
+            crate::ecky_cad_host::direct_occt::plan_core_program_with_params_and_bindings(
+                &program,
+                &crate::contracts::DesignParams::new(),
+            )
+            .expect("plan fixture");
+        let Some((root, topology)) = run_real_runner_plan_json_with_bindings(
+            "live-runner-authored-wire-order",
+            &planned.plan,
+            &planned.authored_shape_bindings,
+        ) else {
+            return;
+        };
+
+        let part = &topology["parts"][0];
+        let outline = part["authoredBindingEdgeOrder"]
+            .as_array()
+            .expect("authored binding edge order")
+            .iter()
+            .find(|entry| entry["name"] == "outline")
+            .expect("outline wire order");
+        let ordered_ids = outline["targetIds"].as_array().expect("ordered target ids");
+        assert_eq!(ordered_ids.len(), 4);
+        let edge_ids = part["edges"]
+            .as_array()
+            .expect("edges")
+            .iter()
+            .map(|edge| edge["targetId"].as_str().expect("edge target id"))
+            .collect::<std::collections::HashSet<_>>();
+        assert!(ordered_ids.iter().all(
+            |target_id| edge_ids.contains(target_id.as_str().expect("ordered edge target id"))
+        ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_precompiled_runner_emits_exact_trimmed_circle_edge_metric_when_available() {
+        let plan = compiled_plan("(model (part body (cylinder 5 10)))");
+        let Some((root, topology)) =
+            run_real_runner_plan_json("live-runner-circle-edge-metric", &plan)
+        else {
+            return;
+        };
+
+        let circle = topology["parts"][0]["edges"]
+            .as_array()
+            .expect("edges")
+            .iter()
+            .find(|edge| edge["exactGeometry"]["kind"] == "circleEdge")
+            .expect("exact circle edge");
+        assert_eq!(circle["exactGeometry"]["radius"], 5.0);
+        assert!(circle["exactGeometry"]["firstParameter"].as_f64().is_some());
+        assert!(circle["exactGeometry"]["lastParameter"].as_f64().is_some());
+        assert_eq!(
+            circle["exactGeometry"]["normal"]
+                .as_array()
+                .expect("normal")
+                .len(),
+            3
+        );
+        let cylinder = topology["parts"][0]["faces"]
+            .as_array()
+            .expect("faces")
+            .iter()
+            .find(|face| face["exactGeometry"]["kind"] == "cylinderFace")
+            .expect("exact cylinder face");
+        let boundary_ids = cylinder["exactGeometry"]["boundaryEdgeTargetIds"]
+            .as_array()
+            .expect("cylinder trim loops")
+            .iter()
+            .flat_map(|loop_ids| loop_ids.as_array().expect("trim loop"))
+            .map(|target_id| target_id.as_str().expect("trim target id"))
+            .collect::<Vec<_>>();
+        assert!(!boundary_ids.is_empty());
+        let edge_ids = topology["parts"][0]["edges"]
+            .as_array()
+            .expect("edges")
+            .iter()
+            .map(|edge| edge["targetId"].as_str().expect("edge target id"))
+            .collect::<std::collections::HashSet<_>>();
+        assert!(boundary_ids
+            .iter()
+            .all(|target_id| edge_ids.contains(target_id)));
 
         let _ = fs::remove_dir_all(root);
     }

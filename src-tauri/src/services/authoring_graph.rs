@@ -158,7 +158,7 @@ fn stable_key(path: &str, kind: &str, value_kind: &str, operation: Option<&str>)
         .filter(|segment| !segment.is_empty())
         .map(path_segment_decode)
         .collect::<Vec<_>>();
-    if segments.len() == 2 && matches!(segments[0].as_str(), "params" | "parts") {
+    if segments.len() == 2 && matches!(segments[0].as_str(), "params" | "parts" | "analyses") {
         identity.push(format!("binding={}", segments[1]));
     } else if let Some(binding) = segments.windows(2).find_map(|pair| {
         matches!(pair[0].as_str(), "bindings" | "keywords").then(|| pair[1].clone())
@@ -203,6 +203,13 @@ pub(crate) fn stable_node_key_for_program_path(
     if segments.len() == 2 && segments[0] == "parts" {
         program.parts.iter().find(|part| part.key == segments[1])?;
         return Some(stable_key(path, "Part", "Part", None));
+    }
+    if segments.len() == 2 && segments[0] == "analyses" {
+        program
+            .analyses
+            .iter()
+            .find(|analysis| analysis.name == segments[1])?;
+        return Some(stable_key(path, "Analysis", "Analysis", None));
     }
     let node = find_program_node(program, path)?;
     Some(stable_node_key_from_parts(

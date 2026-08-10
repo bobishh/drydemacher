@@ -28,6 +28,7 @@
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepTools.hxx>
+#include <BRepTools_WireExplorer.hxx>
 #include <BRep_Builder.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
@@ -117,6 +118,8 @@
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Circ.hxx>
+#include <gp_Cylinder.hxx>
+#include <gp_Lin.hxx>
 #include <gp_Elips.hxx>
 #include <gp_Dir.hxx>
 #include <gp_GTrsf.hxx>
@@ -199,11 +202,17 @@ const char* geometry_representation_name(GeometryRepresentation representation) 
 }
 
 struct Part {
+    struct AuthoredBinding {
+        std::string name;
+        std::uint64_t slot = 0;
+    };
+
     std::string part_id;
     std::string label;
     std::uint64_t root = 0;
     GeometryRepresentation representation = GeometryRepresentation::AnalyticBrep;
     std::vector<Command> commands;
+    std::vector<AuthoredBinding> authored_bindings;
 };
 
 struct PartialBooleanGroupPlan {
@@ -238,6 +247,7 @@ struct ShapeRecord {
     Kind kind = Kind::Shape;
     TopoDS_Shape shape;
     manifold::Manifold manifold;
+    std::map<std::string, TopoDS_Shape> authored_bindings;
 };
 
 struct SlotValue {
@@ -899,6 +909,27 @@ Part parse_part(yyjson_val* value) {
     yyjson_arr_foreach(commands, command_index, command_max, command) {
         part.commands.push_back(parse_command(command));
     }
+    if (yyjson_val* authored_bindings = yyjson_obj_get(value, "authoredBindings")) {
+        authored_bindings = json_array(authored_bindings, "part.authoredBindings");
+        std::set<std::string> names;
+        size_t binding_index;
+        size_t binding_max;
+        yyjson_val* binding;
+        yyjson_arr_foreach(authored_bindings, binding_index, binding_max, binding) {
+            if (!yyjson_is_obj(binding)) {
+                throw SchemaError("part.authoredBindings entry must be an object");
+            }
+            Part::AuthoredBinding parsed;
+            parsed.name = json_string(
+                json_require(binding, "name"), "part.authoredBindings.name");
+            parsed.slot = static_cast<std::uint64_t>(json_number(
+                json_require(binding, "slot"), "part.authoredBindings.slot"));
+            if (parsed.name.empty() || !names.insert(parsed.name).second) {
+                throw SchemaError("part.authoredBindings names must be unique and non-empty");
+            }
+            part.authored_bindings.push_back(std::move(parsed));
+        }
+    }
     return part;
 }
 
@@ -1078,6 +1109,19 @@ std::string edge_target_id(const std::string& part_id, int edge_index, const Top
     return part_id + ":edge:" + std::to_string(edge_index);
 }
 
+std::string vertex_target_id(
+    const std::string& part_id,
+    int vertex_index,
+    const TopoDS_Vertex& vertex
+) {
+    try {
+        return part_id + ":vertex:" + std::to_string(vertex_index) + ":" +
+               point_signature(BRep_Tool::Pnt(vertex));
+    } catch (...) {
+    }
+    return part_id + ":vertex:" + std::to_string(vertex_index);
+}
+
 std::string face_target_id(const std::string& part_id, int face_index, const TopoDS_Face& face) {
     try {
         GProp_GProps props;
@@ -1152,11 +1196,22 @@ void write_topology_point(std::ostream& out, const gp_Pnt& point) {
     out << "}";
 }
 
+void write_topology_direction(std::ostream& out, const gp_Dir& direction) {
+    out << "[";
+    write_json_number(out, direction.X());
+    out << ",";
+    write_json_number(out, direction.Y());
+    out << ",";
+    write_json_number(out, direction.Z());
+    out << "]";
+}
+
 void write_part_topology(
     std::ostream& out,
     const std::string& part_id,
     const std::string& label,
     const TopoDS_Shape& shape,
+    const std::map<std::string, TopoDS_Shape>& authored_bindings,
     bool& first_part
 ) {
     if (!first_part) {
@@ -1169,11 +1224,142 @@ void write_part_topology(
     out << ",\"label\":";
     out << quote_json_string(label);
     out << ",\"representation\":\"analyticBrep\"";
-    out << ",\"edges\":[";
+    int solid_count = shape.ShapeType() == TopAbs_SOLID ? 1 : 0;
+    if (solid_count == 0) {
+        for (TopExp_Explorer explorer(shape, TopAbs_SOLID); explorer.More(); explorer.Next()) {
+            ++solid_count;
+        }
+    }
+    const bool brep_valid = !shape.IsNull() && BRepCheck_Analyzer(shape).IsValid();
+    out << ",\"solidCount\":" << solid_count;
+    out << ",\"brepValid\":" << (brep_valid ? "true" : "false");
+
+    const double boundary_linear_deflection = 0.04;
+    const double angular_deflection = std::clamp(
+        boundary_linear_deflection * 5.0 + 0.005, 0.005, 0.1);
+    BRepBuilderAPI_Copy private_topology(shape, Standard_False, Standard_False);
+    const TopoDS_Shape mesh_shape = private_topology.Shape();
+    if (!mesh_shape.IsNull()) {
+        BRepMesh_IncrementalMesh mesher(
+            mesh_shape, boundary_linear_deflection, Standard_False, angular_deflection, Standard_True);
+        (void)mesher;
+    }
+    TopTools_IndexedMapOfShape edge_map;
+    TopExp::MapShapes(mesh_shape, TopAbs_EDGE, edge_map);
+    out << ",\"authoredBindingEdgeOrder\":[";
+    bool first_ordered_binding = true;
+    for (const auto& [name, binding_shape] : authored_bindings) {
+        std::vector<TopoDS_Edge> source_edges;
+        if (binding_shape.ShapeType() == TopAbs_EDGE) {
+            source_edges.push_back(TopoDS::Edge(binding_shape));
+        } else {
+            TopTools_IndexedMapOfShape binding_wires;
+            TopExp::MapShapes(binding_shape, TopAbs_WIRE, binding_wires);
+            if (binding_shape.ShapeType() == TopAbs_WIRE) {
+                binding_wires.Clear();
+                binding_wires.Add(binding_shape);
+            }
+            if (binding_wires.Extent() != 1) {
+                continue;
+            }
+            BRepTools_WireExplorer explorer(TopoDS::Wire(binding_wires.FindKey(1)));
+            while (explorer.More()) {
+                source_edges.push_back(TopoDS::Edge(explorer.Current()));
+                explorer.Next();
+            }
+        }
+        if (source_edges.empty()) {
+            continue;
+        }
+        std::vector<std::string> ordered_target_ids;
+        bool complete_mapping = true;
+        for (const TopoDS_Edge& source_edge : source_edges) {
+            try {
+                const TopoDS_Shape copied = private_topology.ModifiedShape(source_edge);
+                const int copied_index = copied.IsNull() ? 0 : edge_map.FindIndex(copied);
+                if (copied_index <= 0) {
+                    complete_mapping = false;
+                    break;
+                }
+                const TopoDS_Edge copied_edge = TopoDS::Edge(edge_map.FindKey(copied_index));
+                ordered_target_ids.push_back(
+                    edge_target_id(part_id, copied_index - 1, copied_edge));
+            } catch (...) {
+                complete_mapping = false;
+                break;
+            }
+        }
+        if (!complete_mapping || ordered_target_ids.empty()) {
+            continue;
+        }
+        if (!first_ordered_binding) out << ",";
+        first_ordered_binding = false;
+        out << "{\"name\":" << quote_json_string(name) << ",\"targetIds\":[";
+        for (std::size_t index = 0; index < ordered_target_ids.size(); ++index) {
+            if (index > 0) out << ",";
+            out << quote_json_string(ordered_target_ids[index]);
+        }
+        out << "]}";
+    }
+    out << "]";
+    out << ",\"vertices\":[";
+    auto write_authored_bindings = [&](const TopoDS_Shape& target) {
+        out << ",\"authoredBindings\":[";
+        bool first_binding = true;
+        for (const auto& [name, binding_shape] : authored_bindings) {
+            TopTools_IndexedMapOfShape binding_subshapes;
+            TopExp::MapShapes(binding_shape, target.ShapeType(), binding_subshapes);
+            bool matched = false;
+            for (int index = 1; index <= binding_subshapes.Extent(); ++index) {
+                try {
+                    const TopoDS_Shape copied =
+                        private_topology.ModifiedShape(binding_subshapes.FindKey(index));
+                    if (!copied.IsNull() && copied.IsSame(target)) {
+                        matched = true;
+                        break;
+                    }
+                } catch (...) {
+                }
+            }
+            if (!matched) continue;
+            if (!first_binding) out << ",";
+            first_binding = false;
+            out << quote_json_string(name);
+        }
+        out << "]";
+    };
+
+    bool first_vertex = true;
+    TopTools_IndexedMapOfShape vertex_map;
+    TopExp::MapShapes(mesh_shape, TopAbs_VERTEX, vertex_map);
+    for (int vertex_ordinal = 1; vertex_ordinal <= vertex_map.Extent(); ++vertex_ordinal) {
+        try {
+            const TopoDS_Vertex vertex = TopoDS::Vertex(vertex_map.FindKey(vertex_ordinal));
+            const gp_Pnt point = BRep_Tool::Pnt(vertex);
+            if (!first_vertex) {
+                out << ",";
+            }
+            first_vertex = false;
+            const int vertex_index = vertex_ordinal - 1;
+            out << "{\"targetId\":";
+            out << quote_json_string(vertex_target_id(part_id, vertex_index, vertex));
+            out << ",\"vertexIndex\":" << vertex_index;
+            out << ",\"label\":";
+            out << quote_json_string(label + ".Vertex" + std::to_string(vertex_ordinal));
+            out << ",\"point\":";
+            write_topology_point(out, point);
+            out << ",\"exactGeometry\":{\"kind\":\"vertex\",\"point\":";
+            write_topology_point(out, point);
+            out << "}";
+            write_authored_bindings(vertex);
+            out << "}";
+        } catch (...) {
+        }
+    }
+
+    out << "],\"edges\":[";
 
     bool first_edge = true;
-    TopTools_IndexedMapOfShape edge_map;
-    TopExp::MapShapes(shape, TopAbs_EDGE, edge_map);
     for (int edge_ordinal = 1; edge_ordinal <= edge_map.Extent(); ++edge_ordinal) {
         try {
             TopoDS_Edge edge = TopoDS::Edge(edge_map.FindKey(edge_ordinal));
@@ -1199,6 +1385,46 @@ void write_part_topology(
             write_topology_point(out, start);
             out << ",\"end\":";
             write_topology_point(out, end);
+            TopoDS_Vertex first_vertex_shape;
+            TopoDS_Vertex last_vertex_shape;
+            TopExp::Vertices(edge, first_vertex_shape, last_vertex_shape);
+            out << ",\"vertexTargetIds\":[";
+            bool first_endpoint = true;
+            for (const TopoDS_Vertex& endpoint : {first_vertex_shape, last_vertex_shape}) {
+                if (endpoint.IsNull()) continue;
+                const int vertex_ordinal = vertex_map.FindIndex(endpoint);
+                if (vertex_ordinal <= 0) continue;
+                if (!first_endpoint) out << ",";
+                first_endpoint = false;
+                out << quote_json_string(vertex_target_id(
+                    part_id,
+                    vertex_ordinal - 1,
+                    TopoDS::Vertex(vertex_map.FindKey(vertex_ordinal))));
+            }
+            out << "]";
+            if (curve.GetType() == GeomAbs_Line) {
+                out << ",\"exactGeometry\":{\"kind\":\"lineEdge\",\"start\":";
+                write_topology_point(out, start);
+                out << ",\"end\":";
+                write_topology_point(out, end);
+                out << "}";
+            } else if (curve.GetType() == GeomAbs_Circle) {
+                const gp_Circ circle = curve.Circle();
+                out << ",\"exactGeometry\":{\"kind\":\"circleEdge\",\"center\":";
+                write_topology_point(out, circle.Location());
+                out << ",\"normal\":";
+                write_topology_direction(out, circle.Axis().Direction());
+                out << ",\"xDirection\":";
+                write_topology_direction(out, circle.XAxis().Direction());
+                out << ",\"radius\":";
+                write_json_number(out, circle.Radius());
+                out << ",\"firstParameter\":";
+                write_json_number(out, first_param);
+                out << ",\"lastParameter\":";
+                write_json_number(out, last_param);
+                out << "}";
+            }
+            write_authored_bindings(edge);
             out << "}";
         } catch (...) {
         }
@@ -1207,13 +1433,63 @@ void write_part_topology(
     out << "],\"faces\":[";
     bool first_face = true;
     int face_index = 0;
-    for (TopExp_Explorer explorer(shape, TopAbs_FACE); explorer.More(); explorer.Next(), ++face_index) {
+    std::vector<std::array<gp_Pnt, 3>> boundary_triangles;
+    std::vector<int> triangle_face_group_indices;
+    ecky::Sha256 source_geometry_hash;
+    source_geometry_hash.update("ecky-analysis-boundary-source-v1");
+    source_geometry_hash.update("|");
+    source_geometry_hash.update(part_id);
+    source_geometry_hash.update("|");
+    source_geometry_hash.update(label);
+    source_geometry_hash.update("|");
+    auto write_face_boundary_edge_target_ids = [&](const TopoDS_Face& face) {
+        std::vector<std::vector<std::string>> loops;
+        bool complete = true;
+        for (TopExp_Explorer wire_explorer(face, TopAbs_WIRE);
+             wire_explorer.More(); wire_explorer.Next()) {
+            std::vector<std::string> loop;
+            BRepTools_WireExplorer edge_explorer(TopoDS::Wire(wire_explorer.Current()), face);
+            while (edge_explorer.More()) {
+                const TopoDS_Edge edge = TopoDS::Edge(edge_explorer.Current());
+                const int edge_index = edge_map.FindIndex(edge);
+                if (edge_index <= 0) {
+                    complete = false;
+                    break;
+                }
+                loop.push_back(edge_target_id(
+                    part_id,
+                    edge_index - 1,
+                    TopoDS::Edge(edge_map.FindKey(edge_index))));
+                edge_explorer.Next();
+            }
+            if (!complete || loop.empty()) {
+                complete = false;
+                break;
+            }
+            loops.push_back(std::move(loop));
+        }
+        out << ",\"boundaryEdgeTargetIds\":[";
+        if (complete) {
+            for (std::size_t loop_index = 0; loop_index < loops.size(); ++loop_index) {
+                if (loop_index > 0) out << ",";
+                out << "[";
+                for (std::size_t edge_index = 0; edge_index < loops[loop_index].size(); ++edge_index) {
+                    if (edge_index > 0) out << ",";
+                    out << quote_json_string(loops[loop_index][edge_index]);
+                }
+                out << "]";
+            }
+        }
+        out << "]";
+    };
+    for (TopExp_Explorer explorer(mesh_shape, TopAbs_FACE); explorer.More(); explorer.Next(), ++face_index) {
         try {
             TopoDS_Face face = TopoDS::Face(explorer.Current());
             GProp_GProps props;
             BRepGProp::SurfaceProperties(face, props);
             gp_Pnt center = props.CentreOfMass();
             double area = props.Mass();
+            const std::string face_target = face_target_id(part_id, face_index, face);
 
             double normal_x = 0.0;
             double normal_y = 0.0;
@@ -1247,7 +1523,7 @@ void write_part_topology(
             }
             first_face = false;
             out << "{\"targetId\":";
-            out << quote_json_string(face_target_id(part_id, face_index, face));
+            out << quote_json_string(face_target);
             out << ",\"faceIndex\":" << face_index;
             out << ",\"label\":";
             out << quote_json_string(label + ".Face" + std::to_string(face_index + 1));
@@ -1261,12 +1537,110 @@ void write_part_topology(
             write_json_number(out, normal_z);
             out << "],\"area\":";
             write_json_number(out, area);
+            try {
+                BRepAdaptor_Surface exact_surface(face);
+                if (exact_surface.GetType() == GeomAbs_Plane) {
+                    const gp_Pln plane = exact_surface.Plane();
+                    out << ",\"exactGeometry\":{\"kind\":\"planeFace\",\"origin\":";
+                    write_topology_point(out, plane.Location());
+                    out << ",\"normal\":";
+                    write_topology_direction(out, plane.Axis().Direction());
+                    write_face_boundary_edge_target_ids(face);
+                    out << "}";
+                } else if (exact_surface.GetType() == GeomAbs_Cylinder) {
+                    const gp_Cylinder cylinder = exact_surface.Cylinder();
+                    out << ",\"exactGeometry\":{\"kind\":\"cylinderFace\",\"axisOrigin\":";
+                    write_topology_point(out, cylinder.Location());
+                    out << ",\"axisDirection\":";
+                    write_topology_direction(out, cylinder.Axis().Direction());
+                    out << ",\"radius\":";
+                    write_json_number(out, cylinder.Radius());
+                    write_face_boundary_edge_target_ids(face);
+                    out << "}";
+                }
+            } catch (...) {
+            }
+            write_face_boundary_edge_target_ids(face);
+            write_authored_bindings(face);
             out << "}";
+
+            source_geometry_hash.update(face_target);
+            source_geometry_hash.update("|");
+            source_geometry_hash.update(std::to_string(face_index));
+            source_geometry_hash.update("|");
+            source_geometry_hash.update(ecky::canonical_f64(area));
+            source_geometry_hash.update("|");
+
+            TopLoc_Location location;
+            Handle(Poly_Triangulation) triangulation = BRep_Tool::Triangulation(face, location);
+            if (triangulation.IsNull()) {
+                continue;
+            }
+            gp_Trsf transform = location.Transformation();
+            for (Standard_Integer triangle_index = 1;
+                 triangle_index <= triangulation->NbTriangles();
+                 ++triangle_index) {
+                Standard_Integer n1 = 0;
+                Standard_Integer n2 = 0;
+                Standard_Integer n3 = 0;
+                triangulation->Triangle(triangle_index).Get(n1, n2, n3);
+                gp_Pnt p1 = triangulation->Node(n1).Transformed(transform);
+                gp_Pnt p2 = triangulation->Node(n2).Transformed(transform);
+                gp_Pnt p3 = triangulation->Node(n3).Transformed(transform);
+                if (face.Orientation() == TopAbs_REVERSED) std::swap(p2, p3);
+                const gp_Vec normal = gp_Vec(p1, p2).Crossed(gp_Vec(p1, p3));
+                if (normal.SquareMagnitude() <= 1.0e-18) {
+                    continue;
+                }
+                boundary_triangles.push_back({p1, p2, p3});
+                triangle_face_group_indices.push_back(face_index);
+                for (const gp_Pnt& vertex : boundary_triangles.back()) {
+                    source_geometry_hash.update(ecky::canonical_f64(vertex.X()));
+                    source_geometry_hash.update("|");
+                    source_geometry_hash.update(ecky::canonical_f64(vertex.Y()));
+                    source_geometry_hash.update("|");
+                    source_geometry_hash.update(ecky::canonical_f64(vertex.Z()));
+                    source_geometry_hash.update("|");
+                }
+            }
         } catch (...) {
         }
     }
 
-    out << "]}";
+    out << "],\"triangles\":[";
+    auto write_triangle_vertex = [&](const gp_Pnt& point) {
+        out << "[";
+        write_json_number(out, point.X());
+        out << ",";
+        write_json_number(out, point.Y());
+        out << ",";
+        write_json_number(out, point.Z());
+        out << "]";
+    };
+    for (std::size_t index = 0; index < boundary_triangles.size(); ++index) {
+        if (index != 0) {
+            out << ",";
+        }
+        const auto& triangle = boundary_triangles[index];
+        out << "{\"vertices\":";
+        out << "[";
+        write_triangle_vertex(triangle[0]);
+        out << ",";
+        write_triangle_vertex(triangle[1]);
+        out << ",";
+        write_triangle_vertex(triangle[2]);
+        out << "]}";
+    }
+    out << "],\"triangleFaceGroupIndices\":[";
+    for (std::size_t index = 0; index < triangle_face_group_indices.size(); ++index) {
+        if (index != 0) {
+            out << ",";
+        }
+        out << triangle_face_group_indices[index];
+    }
+    out << "],\"sourceGeometryDigest\":";
+    out << quote_json_string("sha256:" + source_geometry_hash.finish_hex());
+    out << "}";
 }
 
 void write_topology_report(const fs::path& topology_path, const std::vector<ShapeRecord>& parts) {
@@ -1274,11 +1648,17 @@ void write_topology_report(const fs::path& topology_path, const std::vector<Shap
     if (!out) {
         throw IoError("failed to open topology file");
     }
-    out << "{\"parts\":[";
+    out << "{\"schemaVersion\":1,\"parts\":[";
     bool first_part = true;
     for (const auto& part : parts) {
         if (part.kind == ShapeRecord::Kind::Shape) {
-            write_part_topology(out, part.part_id, part.label, part.shape, first_part);
+            write_part_topology(
+                out,
+                part.part_id,
+                part.label,
+                part.shape,
+                part.authored_bindings,
+                first_part);
         } else {
             if (!first_part) out << ',';
             first_part = false;
@@ -1497,6 +1877,67 @@ ClipBoxArgs clip_box_args(const Command& command) {
     }
     if (!has_z) {
         throw EvalError("clip-box requires `:z`");
+    }
+    return args;
+}
+
+struct ClipPlaneArgs {
+    std::uint64_t shape_ref = 0;
+    std::array<double, 3> origin{0.0, 0.0, 0.0};
+    std::array<double, 3> normal{0.0, 0.0, 1.0};
+    bool keep_positive = true;
+};
+
+std::array<double, 3> require_point3_like_arg(const Arg& arg, const std::string& label);
+
+ClipPlaneArgs clip_plane_args(const Command& command) {
+    if (command.args.size() != 1 || command.args[0].kind != Arg::Kind::Ref) {
+        throw EvalError("clip-plane expects one shape reference");
+    }
+    ClipPlaneArgs args;
+    args.shape_ref = command.args[0].ref_value;
+    bool has_origin = false;
+    bool has_normal = false;
+    bool has_keep = false;
+    for (const auto& keyword : command.keywords) {
+        if (keyword.kind != Keyword::Kind::Arg) {
+            throw EvalError("clip-plane keywords expect arg values only");
+        }
+        if (keyword.name == "origin") {
+            args.origin = require_point3_like_arg(keyword.value, "clip-plane :origin");
+            has_origin = true;
+            continue;
+        }
+        if (keyword.name == "normal") {
+            args.normal = require_point3_like_arg(keyword.value, "clip-plane :normal");
+            has_normal = true;
+            continue;
+        }
+        if (keyword.name == "keep") {
+            if (keyword.value.kind != Arg::Kind::Text &&
+                keyword.value.kind != Arg::Kind::Symbol) {
+                throw EvalError("clip-plane :keep expects `positive` or `negative`");
+            }
+            if (keyword.value.text_value == "positive") {
+                args.keep_positive = true;
+            } else if (keyword.value.text_value == "negative") {
+                args.keep_positive = false;
+            } else {
+                throw EvalError("clip-plane :keep expects `positive` or `negative`");
+            }
+            has_keep = true;
+            continue;
+        }
+        throw EvalError("clip-plane does not recognize `:" + keyword.name + "`");
+    }
+    if (!has_origin) {
+        throw EvalError("clip-plane requires `:origin`");
+    }
+    if (!has_normal) {
+        throw EvalError("clip-plane requires `:normal`");
+    }
+    if (!has_keep) {
+        throw EvalError("clip-plane requires `:keep`");
     }
     return args;
 }
@@ -2579,7 +3020,13 @@ TopoDS_Shape make_wedge(
 
 TopoDS_Shape compound_shapes(const std::vector<TopoDS_Shape>& shapes);
 
-TopoDS_Shape extrude_shape(const TopoDS_Shape& shape, double height) {
+TopoDS_Shape extrude_shape(const TopoDS_Shape& input_shape, double height, bool symmetric) {
+    TopoDS_Shape shape = input_shape;
+    if (symmetric) {
+        gp_Trsf center_trsf;
+        center_trsf.SetTranslation(gp_Vec(0, 0, -height / 2.0));
+        shape = BRepBuilderAPI_Transform(shape, center_trsf, true).Shape();
+    }
     // Multi-region profiles (glyph text, SVG artwork soup) arrive as compounds
     // whose faces may overlap. Prism of the raw compound keeps the overlapping
     // solids side by side and poisons downstream booleans; extrude per face
@@ -2882,6 +3329,13 @@ TopoDS_Shape checked_boolean_shapes(
     TopoDS_Shape result = builder.Shape();
     if (result.IsNull()) {
         throw EvalError("Direct OCCT boolean `" + op + "` returned a null shape");
+    }
+    TopExp_Explorer face(result, TopAbs_FACE);
+    if (!face.More()) {
+        throw EvalError(
+            "Direct OCCT boolean `" + op +
+            "` produced empty geometry; operands do not overlap or the crop plane lies outside the source bounds"
+        );
     }
     return result;
 }
@@ -3343,6 +3797,67 @@ TopoDS_Shape clip_box_shape(
     if (!shape_has_solid(result) && shape_has_solid(shape)) {
         throw EvalError(
             "clip-box removed all geometry: the clip box keeps no solid of the input shape");
+    }
+    return result;
+}
+
+TopoDS_Shape clip_plane_shape(
+    const TopoDS_Shape& shape,
+    const std::array<double, 3>& origin,
+    const std::array<double, 3>& normal,
+    bool keep_positive
+) {
+    const double magnitude = std::sqrt(
+        normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
+    if (!std::isfinite(magnitude) || magnitude <= 1e-12) {
+        throw EvalError("clip-plane normal must be finite and non-zero");
+    }
+    if (!std::all_of(origin.begin(), origin.end(), [](double value) { return std::isfinite(value); })) {
+        throw EvalError("clip-plane origin must be finite");
+    }
+
+    const double sign = keep_positive ? 1.0 : -1.0;
+    const gp_Dir kept_direction(
+        sign * normal[0] / magnitude,
+        sign * normal[1] / magnitude,
+        sign * normal[2] / magnitude);
+    const gp_Pnt plane_origin(origin[0], origin[1], origin[2]);
+
+    Bnd_Box bounds;
+    BRepBndLib::Add(shape, bounds);
+    if (bounds.IsVoid()) {
+        throw EvalError("clip-plane input shape has no bounds");
+    }
+    double x0, y0, z0, x1, y1, z1;
+    bounds.Get(x0, y0, z0, x1, y1, z1);
+    double farthest = 0.0;
+    for (double x : {x0, x1}) {
+        for (double y : {y0, y1}) {
+            for (double z : {z0, z1}) {
+                farthest = std::max(farthest, plane_origin.Distance(gp_Pnt(x, y, z)));
+            }
+        }
+    }
+    const double extent = std::max(1.0, farthest * 2.0 + 1.0);
+    const gp_Ax2 plane_axis(plane_origin, kept_direction);
+    gp_Vec corner_shift(plane_axis.XDirection());
+    corner_shift *= -extent;
+    gp_Vec y_shift(plane_axis.YDirection());
+    y_shift *= -extent;
+    corner_shift += y_shift;
+    const gp_Pnt tool_corner = plane_origin.Translated(corner_shift);
+    const gp_Ax2 tool_axis(tool_corner, kept_direction, plane_axis.XDirection());
+    const TopoDS_Shape half_space_tool =
+        BRepPrimAPI_MakeBox(tool_axis, 2.0 * extent, 2.0 * extent, 2.0 * extent).Shape();
+
+    BRepAlgoAPI_Common common(shape, half_space_tool);
+    common.Build();
+    if (!common.IsDone()) {
+        throw EvalError("clip-plane boolean intersection failed");
+    }
+    TopoDS_Shape result = common.Shape();
+    if (result.IsNull() || (shape_has_solid(shape) && !shape_has_solid(result))) {
+        throw EvalError("clip-plane removed all geometry: selected half-space keeps no solid");
     }
     return result;
 }
@@ -4730,9 +5245,10 @@ SlotValue evaluate_command(
     };
 
     if (!command.keywords.empty() && op != "box" && op != "sphere" && op != "cylinder" &&
-        op != "cone" && op != "torus" && op != "wedge" && op != "profile" && op != "plane" &&
-        op != "clip-box" && op != "fillet" && op != "chamfer" && op != "shell" && op != "bspline" &&
-        op != "sweep" && op != "draft" && op != "path-frame" && op != "location") {
+        op != "cone" && op != "torus" && op != "wedge" && op != "profile" &&
+        op != "extrude" && op != "plane" && op != "clip-box" && op != "clip-plane" && op != "fillet" &&
+        op != "chamfer" && op != "shell" && op != "bspline" && op != "sweep" &&
+        op != "draft" && op != "path-frame" && op != "location") {
         throw EvalError(op + " keywords unsupported yet");
     }
 
@@ -4909,7 +5425,16 @@ SlotValue evaluate_command(
         return solidify_shape(get_ref_shape(0));
     }
     if (op == "extrude") {
-        return extrude_shape(get_ref_shape(0), require_number_arg(command.args, 1, op));
+        bool symmetric = false;
+        for (const auto& keyword : command.keywords) {
+            if (keyword.name != "symmetric" || keyword.value.kind != Arg::Kind::Boolean) {
+                throw EvalError(op + " only supports boolean :symmetric");
+            }
+            symmetric = keyword.value.bool_value;
+        }
+        return extrude_shape(
+            get_ref_shape(0), require_number_arg(command.args, 1, op), symmetric
+        );
     }
     if (op == "revolve") {
         return revolve_shape(get_ref_shape(0), require_number_arg(command.args, 1, op));
@@ -5188,6 +5713,14 @@ SlotValue evaluate_command(
     if (op == "clip-box") {
         ClipBoxArgs args = clip_box_args(command);
         return clip_box_shape(lookup_shape(slots, args.shape_ref, op), args.x, args.y, args.z);
+    }
+    if (op == "clip-plane") {
+        ClipPlaneArgs args = clip_plane_args(command);
+        return clip_plane_shape(
+            lookup_shape(slots, args.shape_ref, op),
+            args.origin,
+            args.normal,
+            args.keep_positive);
     }
     if (op == "fillet") {
         std::optional<double> to_radius = optional_number_keyword(command, "to-radius");
@@ -5885,17 +6418,21 @@ std::vector<ShapeRecord> evaluate_plan(
         for (std::size_t part_index = 0; part_index < plan.parts.size(); ++part_index) {
             const Part& part = plan.parts[part_index];
             cache_keys[part_index] = part_cache_key(part, context);
-            if (auto value = read_cached_geometry(
+            std::optional<SlotValue> cached_part;
+            if (part.authored_bindings.empty()) {
+                cached_part = read_cached_geometry(
                     *cache_root, "parts", cache_keys[part_index],
-                    part.representation, context)) {
+                    part.representation, context);
+            }
+            if (cached_part.has_value()) {
                 ShapeRecord record;
                 record.part_id = part.part_id;
                 record.label = part.label;
-                if (value->kind == SlotValue::Kind::Manifold) {
+                if (cached_part->kind == SlotValue::Kind::Manifold) {
                     record.kind = ShapeRecord::Kind::Manifold;
-                    record.manifold = std::move(value->manifold);
+                    record.manifold = std::move(cached_part->manifold);
                 } else {
-                    record.shape = std::move(value->shape);
+                    record.shape = std::move(cached_part->shape);
                 }
                 cached_parts[part_index] = std::move(record);
                 std::lock_guard<std::mutex> lock(context.mutex);
@@ -6023,6 +6560,10 @@ std::vector<ShapeRecord> evaluate_plan(
         if (cached_parts[part_index].has_value()) continue;
         auto root = producers[part_index].find(plan.parts[part_index].root);
         if (root != producers[part_index].end()) pending.push_back(root->second);
+        for (const Part::AuthoredBinding& binding : plan.parts[part_index].authored_bindings) {
+            auto producer = producers[part_index].find(binding.slot);
+            if (producer != producers[part_index].end()) pending.push_back(producer->second);
+        }
     }
     while (!pending.empty()) {
         const std::size_t node_index = pending.back();
@@ -6065,6 +6606,11 @@ std::vector<ShapeRecord> evaluate_plan(
         const Command& command = plan.parts[node.part_index].commands[node.command_index];
         for (std::uint64_t ref : execution_refs(node.part_index, command)) {
             ++remaining_uses[node.part_index][ref];
+        }
+    }
+    for (std::size_t part_index = 0; part_index < plan.parts.size(); ++part_index) {
+        for (const Part::AuthoredBinding& binding : plan.parts[part_index].authored_bindings) {
+            ++remaining_uses[part_index][binding.slot];
         }
     }
 
@@ -6335,6 +6881,20 @@ std::vector<ShapeRecord> evaluate_plan(
             record.manifold = root->second.manifold;
         } else {
             record.shape = root->second.shape;
+        }
+        for (const Part::AuthoredBinding& binding : part.authored_bindings) {
+            auto authored = slots[part_index].find(binding.slot);
+            if (authored == slots[part_index].end()) {
+                throw EvalError(
+                    "missing authored binding slot " + std::to_string(binding.slot) +
+                    " (`" + binding.name + "`) in part `" + part.part_id + "`");
+            }
+            if (authored->second.kind != SlotValue::Kind::Shape) {
+                throw EvalError(
+                    "authored binding `" + binding.name + "` in part `" + part.part_id +
+                    "` is not analytic BRep geometry");
+            }
+            record.authored_bindings.emplace(binding.name, authored->second.shape);
         }
         if (cache_root.has_value()) {
             write_cached_geometry(

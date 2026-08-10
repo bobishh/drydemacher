@@ -700,6 +700,7 @@ mod tests {
             tagged_anchors: std::collections::BTreeMap::new(),
             feature_graph: None,
             correspondence_graph: None,
+            analysis_declarations: Vec::new(),
             warnings: vec![],
             enrichment_state: crate::contracts::ManifestEnrichmentState {
                 status: crate::contracts::EnrichmentStatus::None,

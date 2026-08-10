@@ -39,14 +39,70 @@ use crate::project_mirror::{
     self, ProjectFolderStatus, ProjectManifest, ProjectSyncState, PROJECT_SOURCE_FILE_NAME,
 };
 
-/// Default editable Ecky source written for a brand-new blank thread. Small,
-/// valid, and clearly editable: one named param feeding one part.
-pub const DEFAULT_THREAD_SOURCE: &str = "\
+/// Blank thread source. Zero invented geometry or parameters.
+pub const DEFAULT_THREAD_SOURCE: &str = "";
+
+const LEGACY_DEMO_THREAD_SOURCE: &str = "\
 (model\n\
   (params\n\
     (param size 20 :label \"Size\" :min 1 :max 200))\n\
   (part body (box size size size)))\n\
 ";
+
+pub(crate) fn is_blank_thread_source(source: &str) -> bool {
+    source == DEFAULT_THREAD_SOURCE || source == LEGACY_DEMO_THREAD_SOURCE
+}
+
+pub(crate) fn is_blank_source_digest(digest: &str) -> bool {
+    digest == source_digest(DEFAULT_THREAD_SOURCE)
+        || digest == source_digest(LEGACY_DEMO_THREAD_SOURCE)
+}
+
+pub(crate) fn thread_is_blank(
+    conn: &Connection,
+    thread_id: &str,
+    has_visible_messages: bool,
+) -> rusqlite::Result<bool> {
+    if has_visible_messages {
+        return Ok(false);
+    }
+    Ok(get_binding(conn, thread_id)?
+        .map(|binding| is_blank_source_digest(&binding.source_digest))
+        .unwrap_or(true))
+}
+
+pub(crate) fn migrate_legacy_blank_source(
+    conn: &Connection,
+    binding: &ThreadSourceBinding,
+) -> AppResult<()> {
+    let source_path = Path::new(&binding.source_path);
+    let source = std::fs::read_to_string(source_path).map_err(|err| {
+        AppError::persistence(format!(
+            "Failed to read bound source '{}': {}",
+            source_path.display(),
+            err
+        ))
+    })?;
+    if source != LEGACY_DEMO_THREAD_SOURCE {
+        return Ok(());
+    }
+
+    project_mirror::write_bound_source(source_path, DEFAULT_THREAD_SOURCE)?;
+    let digest = project_mirror::source_digest(DEFAULT_THREAD_SOURCE);
+    let folder = Path::new(&binding.folder_path);
+    if let Some(mut manifest) = project_mirror::read_manifest(folder)? {
+        manifest.source_digest = digest.clone();
+        project_mirror::write_manifest(folder, &manifest)?;
+    }
+    conn.execute(
+        "UPDATE thread_source_bindings
+         SET source_digest = ?2, updated_at = CAST(strftime('%s','now') AS INTEGER)
+         WHERE thread_id = ?1",
+        params![binding.thread_id, digest],
+    )
+    .map_err(|err| AppError::persistence(err.to_string()))?;
+    Ok(())
+}
 
 /// Create the `thread_source_bindings` index table if missing. Idempotent.
 /// Called from `db::init_db`.
@@ -1091,10 +1147,9 @@ mod tests {
     }
 
     #[test]
-    fn default_thread_source_is_valid_ecky_with_named_param() {
-        assert!(DEFAULT_THREAD_SOURCE.starts_with("(model"));
-        assert!(DEFAULT_THREAD_SOURCE.contains("(param size"));
-        assert!(DEFAULT_THREAD_SOURCE.contains("(part body"));
+    fn default_thread_source_is_empty_without_invented_geometry() {
+        assert!(DEFAULT_THREAD_SOURCE.is_empty());
+        assert!(is_blank_thread_source(LEGACY_DEMO_THREAD_SOURCE));
     }
 
     // --- retained-path / backfill lifecycle (thread-source-binding) --------

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 
+pub mod analysis_boundary;
 pub mod direct_occt;
 pub mod direct_occt_executor;
 pub mod direct_occt_normalize;

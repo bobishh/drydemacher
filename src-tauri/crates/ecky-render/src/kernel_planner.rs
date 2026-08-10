@@ -454,6 +454,7 @@ fn operation_token(operation: &CoreOperation) -> String {
         CoreOperation::Frame(CoreFrameOp::PathFrame) => "path-frame",
         CoreOperation::Frame(CoreFrameOp::Place) => "place",
         CoreOperation::Frame(CoreFrameOp::ClipBox) => "clip-box",
+        CoreOperation::Frame(CoreFrameOp::ClipPlane) => "clip-plane",
         CoreOperation::Meta(CoreMetaOp::Group) => "compound",
         CoreOperation::Meta(CoreMetaOp::Comment) => "comment",
         CoreOperation::Meta(CoreMetaOp::Annotate) => "annotate",

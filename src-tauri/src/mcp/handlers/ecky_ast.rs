@@ -140,7 +140,7 @@ fn core_node_op_label(node: &crate::ecky_core_ir::CoreNode) -> Option<String> {
     }
 }
 
-pub(super) fn core_node_digest(node: &crate::ecky_core_ir::CoreNode) -> String {
+pub(crate) fn core_node_digest(node: &crate::ecky_core_ir::CoreNode) -> String {
     let mut parts = vec![
         core_node_kind_label(&node.kind).to_string(),
         format!("{:?}", node.value_kind),
@@ -261,6 +261,12 @@ fn editable_ops_for_source_target_kind(kind: &SourcePathTargetKind) -> Vec<EckyA
             EckyAstEditOperation::InsertAfter,
             EckyAstEditOperation::Delete,
         ],
+        SourcePathTargetKind::AnalysisClause { .. } => vec![
+            EckyAstEditOperation::Replace,
+            EckyAstEditOperation::InsertBefore,
+            EckyAstEditOperation::InsertAfter,
+            EckyAstEditOperation::Delete,
+        ],
         SourcePathTargetKind::PartClause { .. }
         | SourcePathTargetKind::ParamDecl { .. }
         | SourcePathTargetKind::BuildBinding { .. }
@@ -327,6 +333,68 @@ fn core_part_digest(part: &crate::ecky_core_ir::CorePart) -> String {
         part.label,
         core_node_digest(&part.root)
     ))
+}
+
+fn core_analysis_digest(analysis: &crate::ecky_core_ir::CoreAnalysisDecl) -> String {
+    let clause_kinds = analysis
+        .clauses
+        .iter()
+        .map(|clause| &clause.kind)
+        .collect::<Vec<_>>();
+    crate::mcp::macro_buffer::source_digest(&format!(
+        "analysis|{}|{:?}|{}|{}|{:?}",
+        analysis.name, analysis.kind, analysis.part, analysis.element, clause_kinds
+    ))
+}
+
+fn collect_core_analysis_ast_nodes(
+    program: &crate::ecky_core_ir::CoreProgram,
+    source: &str,
+    requested_path: Option<&str>,
+    max_nodes: usize,
+    nodes: &mut Vec<EckyAstNode>,
+) -> AppResult<bool> {
+    for analysis in &program.analyses {
+        if nodes.len() >= max_nodes {
+            return Ok(true);
+        }
+        let path = format!("/analyses/{}", path_segment(&analysis.name));
+        if requested_path.is_some_and(|requested| requested != "/" && requested != path) {
+            continue;
+        }
+        let span = source_span_for_ecky_path(source, &path)
+            .ok()
+            .map(|(start, end)| EckyAstSpan {
+                start: start as u32,
+                end: end as u32,
+            });
+        let addressability = ecky_ast_node_addressability(
+            source,
+            &path,
+            "Analysis",
+            "Analysis",
+            None,
+            span.as_ref()
+                .map(|span| (span.start as usize, span.end as usize)),
+        );
+        nodes.push(EckyAstNode {
+            path,
+            stable_node_key: addressability.stable_node_key,
+            digest: core_analysis_digest(analysis),
+            node_id: analysis.id.raw(),
+            kind: "Analysis".into(),
+            value_kind: "Analysis".into(),
+            op: None,
+            part_key: Some(analysis.part.clone()),
+            span,
+            source_addressable: addressability.source_addressable,
+            editable_ops: addressability.editable_ops,
+            non_editable_reason: addressability.non_editable_reason,
+            source: None,
+            child_paths: Vec::new(),
+        });
+    }
+    Ok(nodes.len() >= max_nodes)
 }
 
 fn collect_core_part_clause_ast_nodes(
@@ -695,6 +763,9 @@ fn all_program_ast_paths(program: &crate::ecky_core_ir::CoreProgram) -> Vec<Stri
         let root_path = format!("{part_path}/root");
         collect_program_node_paths(&part.root, &root_path, &mut paths);
     }
+    for analysis in &program.analyses {
+        paths.push(format!("/analyses/{}", path_segment(&analysis.name)));
+    }
     paths
 }
 
@@ -912,6 +983,7 @@ fn selection_target_kind_role(kind: &crate::contracts::SelectionTargetKind) -> S
         crate::contracts::SelectionTargetKind::Part => "part".to_string(),
         crate::contracts::SelectionTargetKind::Object => "object".to_string(),
         crate::contracts::SelectionTargetKind::Group => "group".to_string(),
+        crate::contracts::SelectionTargetKind::Vertex => "vertex".to_string(),
         crate::contracts::SelectionTargetKind::Edge => "edge".to_string(),
         crate::contracts::SelectionTargetKind::Face => "face".to_string(),
     }
@@ -1700,6 +1772,13 @@ fn source_addressable_digest_for_path(
             .find(|part| part.key == segments[1])
             .map(core_part_digest);
     }
+    if segments.len() == 2 && segments[0] == "analyses" {
+        return program
+            .analyses
+            .iter()
+            .find(|analysis| analysis.name == segments[1])
+            .map(core_analysis_digest);
+    }
     find_core_ast_node_in_program(program, requested_path).map(core_node_digest)
 }
 
@@ -1939,6 +2018,17 @@ fn model_part_clause<'a>(
     })
 }
 
+fn model_analysis_clause<'a>(
+    model: &'a SourceExprSpan,
+    source: &str,
+    analysis_name: &str,
+) -> Option<&'a SourceExprSpan> {
+    model.children.iter().find(|expr| {
+        list_head(expr, source) == Some("analysis")
+            && expr.children.get(1).and_then(|item| item.atom_text(source)) == Some(analysis_name)
+    })
+}
+
 fn model_params_form<'a>(model: &'a SourceExprSpan, source: &str) -> Option<&'a SourceExprSpan> {
     model
         .children
@@ -2003,6 +2093,7 @@ enum SourcePathTargetKind {
     KeywordValue { name: String },
     PartClause { name: String },
     ParamDecl { name: String },
+    AnalysisClause { name: String },
     BuildBinding { name: String },
     BuildResult,
     LetBinding { name: String },
@@ -2051,6 +2142,19 @@ fn source_target_for_ecky_path<'a>(
             parent: Some(model),
             scope: Some(model),
             kind: SourcePathTargetKind::PartClause {
+                name: segments[1].clone(),
+            },
+        });
+    }
+    if segments.len() == 2 && segments[0] == "analyses" {
+        let analysis = model_analysis_clause(model, source, &segments[1]).ok_or_else(|| {
+            AppError::validation(format!("Ecky source has no analysis {}.", segments[1]))
+        })?;
+        return Ok(SourcePathTarget {
+            expr: analysis,
+            parent: Some(model),
+            scope: Some(model),
+            kind: SourcePathTargetKind::AnalysisClause {
                 name: segments[1].clone(),
             },
         });
@@ -2205,7 +2309,7 @@ fn source_target_for_ecky_path<'a>(
     })
 }
 
-pub(super) fn source_span_for_ecky_path(source: &str, path: &str) -> AppResult<(usize, usize)> {
+pub(crate) fn source_span_for_ecky_path(source: &str, path: &str) -> AppResult<(usize, usize)> {
     let exprs = SourceExprParser::new(source).parse_all()?;
     let target = source_target_for_ecky_path(&exprs, source, path)?;
     Ok((target.expr.start, target.expr.end))
@@ -2473,7 +2577,7 @@ fn rename_ecky_source_target(source: &str, path: &str, new_name: &str) -> AppRes
     Ok(next_source)
 }
 
-pub(super) fn replace_ecky_ast_source(
+pub(crate) fn replace_ecky_ast_source(
     source: &str,
     expected_source_digest: &str,
     path: &str,
@@ -2494,9 +2598,7 @@ pub(super) fn replace_ecky_ast_source(
         )
     })?;
     let exprs = SourceExprParser::new(source).parse_all()?;
-    let target = source_target_for_ecky_path(&exprs, source, path)?;
-    let target_kind = target.kind.clone();
-    let node = find_core_ast_node_in_program(&program, path);
+    source_target_for_ecky_path(&exprs, source, path)?;
     let diagnostic_stable_node_key = stable_node_key_for_program_path(source, &program, path);
     let actual_node_digest = edit_digest_for_ecky_path(&program, source, path)?;
     if actual_node_digest != expected_node_digest {
@@ -2525,30 +2627,9 @@ pub(super) fn replace_ecky_ast_source(
     };
 
     let (start, end) = match operation {
-        EckyAstEditOperation::Replace => {
-            let core_span = if matches!(
-                target_kind,
-                SourcePathTargetKind::Root
-                    | SourcePathTargetKind::PositionalArg
-                    | SourcePathTargetKind::KeywordValue { .. }
-            ) {
-                node.and_then(|node| node.span)
-                    .map(|span| (span.start as usize, span.end as usize))
-            } else {
-                None
-            };
-            match core_span {
-                Some((start, end))
-                    if start < end
-                        && end <= source.len()
-                        && source.is_char_boundary(start)
-                        && source.is_char_boundary(end) =>
-                {
-                    (start, end)
-                }
-                _ => source_span_for_ecky_path(source, path)?,
-            }
-        }
+        // SourceExpr owns authored byte spans. Core IR spans can refer to a
+        // normalized child after nested wrappers and must not drive edits.
+        EckyAstEditOperation::Replace => source_span_for_ecky_path(source, path)?,
         EckyAstEditOperation::InsertBefore
         | EckyAstEditOperation::InsertAfter
         | EckyAstEditOperation::Delete => source_anchor_span_for_edit(source, path)?,
@@ -2727,4 +2808,59 @@ fn validate_ecky_ast_patch(
         new_path.unwrap_or_default(),
         diff,
     ))
+}
+
+#[cfg(test)]
+mod analysis_ast_tests {
+    use super::*;
+
+    #[test]
+    fn analysis_declaration_is_source_addressable_stable_and_patchable_as_metadata() {
+        let source = r#"(model
+          (part body (box 10 10 10))
+          (analysis body-static
+            (linear-static :part body)
+            (material steel :young-modulus 210000MPa :poisson-ratio 0.3 :density 7850kg-per-m3 :yield-strength 250MPa)
+            (volume-mesh :element tet4 :size 2mm)
+            (fixed :faces (tag mounting))
+            (surface-force :faces (tag load-pad) :total [0N 0N -10N])
+            (solve :method sparse-direct)))"#;
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("analysis source");
+        let path = "/analyses/body-static";
+        let span = source_span_for_ecky_path(source, path).expect("analysis source span");
+        assert!(source[span.0..span.1].starts_with("(analysis body-static"));
+        let stable =
+            stable_node_key_for_program_path(source, &program, path).expect("analysis stable key");
+        assert!(stable.starts_with("sha256:"));
+
+        let mut nodes = Vec::new();
+        collect_core_analysis_ast_nodes(&program, source, Some(path), 10, &mut nodes)
+            .expect("analysis AST read");
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].path, path);
+        assert!(nodes[0].source_addressable);
+        assert!(nodes[0]
+            .editable_ops
+            .contains(&EckyAstEditOperation::Replace));
+
+        let replacement = source[span.0..span.1].replace(":size 2mm", ":size 1mm");
+        let expected_source_digest = crate::mcp::macro_buffer::source_digest(source);
+        let expected_node_digest =
+            edit_digest_for_ecky_path(&program, source, path).expect("analysis edit digest");
+        let patched = replace_ecky_ast_source(
+            source,
+            &expected_source_digest,
+            path,
+            &expected_node_digest,
+            &EckyAstEditOperation::Replace,
+            Some(&replacement),
+            None,
+        )
+        .expect("analysis replacement");
+        let patched_program =
+            crate::ecky_scheme::compile_to_core_program(&patched).expect("patched analysis");
+        assert_eq!(patched_program.parts.len(), 1);
+        assert_eq!(patched_program.analyses.len(), 1);
+        assert!(patched.contains(":size 1mm"));
+    }
 }

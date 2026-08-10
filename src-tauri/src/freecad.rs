@@ -1693,6 +1693,7 @@ fn build_manifest_with_stable_node_keys(
         tagged_anchors,
         feature_graph: None,
         correspondence_graph: None,
+        analysis_declarations: Vec::new(),
         warnings,
         enrichment_state: ManifestEnrichmentState {
             status: if enrichment_proposals.is_empty() {
@@ -3037,6 +3038,7 @@ mod tests {
             tagged_anchors: std::collections::BTreeMap::new(),
             feature_graph: None,
             correspondence_graph: None,
+            analysis_declarations: Vec::new(),
             warnings: Vec::new(),
             enrichment_state: ManifestEnrichmentState {
                 status: EnrichmentStatus::None,

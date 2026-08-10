@@ -1053,6 +1053,7 @@ mod tests {
             tagged_anchors: Default::default(),
             feature_graph: None,
             correspondence_graph: None,
+            analysis_declarations: Vec::new(),
             warnings: Vec::new(),
             enrichment_state: ManifestEnrichmentState {
                 status: EnrichmentStatus::None,

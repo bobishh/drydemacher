@@ -171,6 +171,49 @@ pub struct CompareModelsResponse {
     pub details: String,
 }
 
+// --- native FEM analysis ---
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FemTargetRequest {
+    #[serde(default)]
+    pub job_id: Option<String>,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub message_id: Option<String>,
+    pub analysis_name: String,
+    #[serde(default)]
+    pub budgets: Option<crate::contracts::FemBudgetLimitsDto>,
+    #[serde(default)]
+    pub control: Option<crate::contracts::FemPipelineControlDto>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FemCancelToolRequest {
+    pub job_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FemResultGetToolRequest {
+    pub analysis_identity_digest: String,
+    pub solution_digest: String,
+    #[serde(default)]
+    pub maximum_result_bytes: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FemConvergenceToolRequest {
+    #[serde(flatten)]
+    pub target: FemTargetRequest,
+    pub mesh_sizes_mm: Vec<f64>,
+    pub displacement_relative_tolerance: f64,
+    pub stress_relative_tolerance: f64,
+}
+
 // --- user_confirm_request ---
 
 #[derive(Debug, Deserialize)]
@@ -1596,6 +1639,25 @@ pub struct VersionSaveRequest {
     pub message_id: Option<String>,
     pub title: Option<String>,
     pub version_name: Option<String>,
+    #[serde(default)]
+    pub capture_guided_result: Option<crate::contracts::CaptureGuidedCommitResult>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FemVerifiedCommitRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    pub title: Option<String>,
+    pub version_name: Option<String>,
+    pub analysis_name: String,
+    pub analysis_identity_digest: String,
+    pub solution_digest: String,
+    pub result_digest: String,
+    #[serde(default)]
+    pub capture_guided_result: Option<crate::contracts::CaptureGuidedCommitResult>,
 }
 
 #[derive(Debug, Serialize)]

@@ -22,6 +22,7 @@ pub enum SelectionTargetKind {
     Part,
     Object,
     Group,
+    Vertex,
     Edge,
     Face,
 }
@@ -454,6 +455,7 @@ pub struct CorrespondenceGraph {
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum TaggedAnchorKind {
+    Vertex,
     Face,
     Edge,
 }
@@ -472,6 +474,19 @@ pub struct TaggedAnchorBinding {
     pub canonical_target_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alias_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnalysisDeclarationBinding {
+    pub analysis_id: String,
+    pub kind: String,
+    pub part_id: String,
+    pub element_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_start: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_end: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -518,6 +533,8 @@ pub struct ModelManifest {
     pub feature_graph: Option<FeatureGraph>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correspondence_graph: Option<CorrespondenceGraph>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub analysis_declarations: Vec<AnalysisDeclarationBinding>,
     #[serde(default)]
     pub warnings: Vec<String>,
     #[serde(default = "default_manifest_enrichment_state")]

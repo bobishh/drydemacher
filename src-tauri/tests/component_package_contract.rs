@@ -2065,6 +2065,7 @@ async fn runtime_bundle_component_package_project_preserves_explicit_ui_contract
             tagged_anchors: std::collections::BTreeMap::new(),
             feature_graph: None,
             correspondence_graph: None,
+            analysis_declarations: Vec::new(),
             warnings: Vec::new(),
             enrichment_state: ecky_cad_lib::contracts::ManifestEnrichmentState {
                 status: ecky_cad_lib::contracts::EnrichmentStatus::None,
@@ -2346,6 +2347,7 @@ async fn runtime_bundle_component_package_project_rejects_unknown_runtime_target
             tagged_anchors: std::collections::BTreeMap::new(),
             feature_graph: None,
             correspondence_graph: None,
+            analysis_declarations: Vec::new(),
             warnings: Vec::new(),
             enrichment_state: ecky_cad_lib::contracts::ManifestEnrichmentState {
                 status: ecky_cad_lib::contracts::EnrichmentStatus::None,

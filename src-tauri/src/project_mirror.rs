@@ -245,6 +245,13 @@ fn atomic_write(dest: &Path, bytes: &[u8]) -> AppResult<()> {
     Ok(())
 }
 
+/// Persist the user-visible canonical source without mutating history or the
+/// last-applied manifest digest. The next render/commit decides whether those
+/// derived records advance.
+pub(crate) fn write_bound_source(path: &Path, source: &str) -> AppResult<()> {
+    atomic_write(path, source.as_bytes())
+}
+
 #[cfg(not(windows))]
 fn publish_atomic(temp_path: &Path, dest: &Path) -> std::io::Result<()> {
     fs::rename(temp_path, dest)

@@ -152,7 +152,13 @@ pub const CAD_OPS_PORTABLE: &[&str] = &[
 ];
 // Mesh/EckyRust-only surface. Do not add future CAD VM/OCCT names here until
 // the compiler/runtime actually exports and lowers them.
-pub const ECKY_RUST_ONLY_CAD_OPS: &[&str] = &["mesh", "polyhedron", "heightfield", "wall-pattern"];
+pub const ECKY_RUST_ONLY_CAD_OPS: &[&str] = &[
+    "mesh",
+    "polyhedron",
+    "heightfield",
+    "wall-pattern",
+    "surface-trim",
+];
 // EckyRust direct-OCCT-only surface: rendered natively (no mesh path) and
 // rejected by FreeCAD interop. Unlike `wall-pattern` (mesh), these are BREP
 // ops the interop backend cannot express.

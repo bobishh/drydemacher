@@ -22,6 +22,13 @@ pub mod cad_source_adapters;
 pub mod cad_transpile;
 pub mod campaign_definition;
 pub mod campaign_projects;
+pub mod capture_brep_validation;
+pub mod capture_deviation;
+pub mod capture_guidance;
+pub mod capture_mesh_crop;
+pub mod capture_reconstruction;
+pub mod capture_runs;
+pub mod capture_server;
 pub mod commands;
 pub mod component_extract;
 pub mod component_import_runtime;
@@ -40,6 +47,9 @@ pub mod ecky_ir;
 pub mod ecky_ir_patterns;
 pub mod ecky_language_surface;
 pub mod ecky_scheme;
+pub mod external_shapes;
+pub mod fem_engineering;
+pub mod fem_mesher;
 pub mod freecad;
 pub mod freecad_library;
 mod image_sampling;
@@ -57,6 +67,13 @@ pub mod services;
 pub mod shape_summary;
 pub mod sketch_brep_validation;
 pub mod sketch_draft_runtime;
+pub mod surface_trim_external_shapes;
+pub mod surface_trim_cut;
+pub mod surface_trim_mesh;
+pub mod surface_trim_diagnostics;
+pub mod surface_trim_cap;
+pub mod surface_trim_runtime;
+pub mod surface_trim_source;
 pub mod source_flavor;
 pub mod steel_data;
 pub mod thread_source_binding;
@@ -678,6 +695,20 @@ pub fn run() {
                 });
             }
 
+            {
+                let resolver: Arc<dyn PathResolver + Send + Sync> = Arc::new(app.handle().clone());
+                let capture_state = state.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) =
+                        crate::capture_server::serve(capture_state.clone(), resolver).await
+                    {
+                        let message = format!("[CAPTURE] LAN service stopped: {error}");
+                        eprintln!("{message}");
+                        capture_state.push_log(message);
+                    }
+                });
+            }
+
             crate::mcp::runtime::initialize_auto_agent_supervisors(state.clone());
 
             {
@@ -710,6 +741,7 @@ pub fn run() {
                             if let crate::mcp::handlers::ProjectFolderWatchEvent::ApplyFailed {
                                 slug,
                                 error,
+                                ..
                             } = event
                             {
                                 watcher_state.push_log(format!(

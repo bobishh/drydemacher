@@ -38,6 +38,12 @@ mod render;
 pub use render::*;
 mod manifest;
 pub use manifest::*;
+mod capture;
+pub use capture::*;
+mod capture_reconstruction;
+pub use capture_reconstruction::*;
+mod fem;
+pub use fem::*;
 mod agent;
 pub use agent::*;
 mod mcp;
@@ -1211,6 +1217,9 @@ pub struct Thread {
     pub queued_count: usize,
     #[serde(default, alias = "error_count")]
     pub error_count: usize,
+    /// Technical reusable blank: no visible messages and blank bound source.
+    #[serde(default, alias = "is_blank")]
+    pub is_blank: bool,
     #[serde(default, alias = "thread_status")]
     pub status: ThreadStatus,
     #[serde(default, alias = "finalized_at")]
@@ -3373,6 +3382,7 @@ mod tests {
             tagged_anchors: BTreeMap::new(),
             feature_graph: None,
             correspondence_graph: None,
+            analysis_declarations: Vec::new(),
             warnings: Vec::new(),
             enrichment_state: ManifestEnrichmentState {
                 status: EnrichmentStatus::None,
@@ -3527,6 +3537,7 @@ mod tests {
             tagged_anchors: BTreeMap::new(),
             feature_graph: None,
             correspondence_graph: None,
+            analysis_declarations: Vec::new(),
             warnings: Vec::new(),
             enrichment_state: ManifestEnrichmentState {
                 status: EnrichmentStatus::None,

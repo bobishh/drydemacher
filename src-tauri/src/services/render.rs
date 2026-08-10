@@ -426,6 +426,7 @@ fn core_operation_name(op: &crate::ecky_core_ir::CoreOperation) -> String {
         CoreOperation::Frame(CoreFrameOp::PathFrame) => "path-frame".to_string(),
         CoreOperation::Frame(CoreFrameOp::Place) => "place".to_string(),
         CoreOperation::Frame(CoreFrameOp::ClipBox) => "clip-box".to_string(),
+        CoreOperation::Frame(CoreFrameOp::ClipPlane) => "clip-plane".to_string(),
         CoreOperation::Meta(CoreMetaOp::Group) => "compound".to_string(),
         CoreOperation::Meta(CoreMetaOp::Comment) => "meta".to_string(),
         CoreOperation::Meta(CoreMetaOp::Annotate) => "build".to_string(),
@@ -1253,6 +1254,9 @@ fn try_render_hybrid_poly_brep(
                 manifest.warnings.push(note);
             }
         }
+        manifest.source_digest = Some(
+            crate::services::render_snapshot::canonical_source_digest(&macro_code_owned),
+        );
         let model_id = bundle.model_id.clone();
         let (bundle, _) =
             crate::model_runtime::write_runtime_bundle(&app_clone, &model_id, &bundle, &manifest)?;
@@ -1686,6 +1690,8 @@ fn render_model_unlocked(
             // which config backend was selected.
             let uses_mesh_only_ops = effective_dialect == MacroDialect::EckyIrV0
                 && crate::ecky_ir::source_uses_ecky_rust_only_cad_ops(macro_code);
+            let pure_mesh_source = effective_dialect == MacroDialect::EckyIrV0
+                && source_partitions_are_all_pure_mesh(macro_code);
             let mesh_only_redirect =
                 resolved_backend != GeometryBackend::EckyRust || uses_mesh_only_ops;
             let uses_direct_occt_required = effective_dialect == MacroDialect::EckyIrV0
@@ -1699,7 +1705,9 @@ fn render_model_unlocked(
             let direct_occt_ready = direct_occt_capability
                 .as_ref()
                 .is_some_and(|capability| capability.available);
-            let direct_attempt = if direct_occt_capability
+            let direct_attempt = if pure_mesh_source {
+                Ok(None)
+            } else if direct_occt_capability
                 .as_ref()
                 .is_some_and(|capability| capability.available)
             {
@@ -1717,7 +1725,14 @@ fn render_model_unlocked(
             match direct_attempt {
                 Ok(Some(bundle)) => Ok(bundle),
                 Ok(None) => {
-                    if uses_direct_occt_required {
+                    if pure_mesh_source {
+                        crate::ecky_ir::render_model_with_previous_manifest(
+                            macro_code,
+                            parameters,
+                            previous_manifest,
+                            app,
+                        )
+                    } else if uses_direct_occt_required {
                         Err(attach_diagnostic_context(
                             unsupported_required_direct_occt_error(
                                 "Direct OCCT did not produce a native bundle for native-required CAD ops like `chamfer`, `fillet`, `text`, `svg`, `import-stl`, `import-step`, or `helical-ridge`.".to_string()
@@ -1824,6 +1839,21 @@ fn render_model_unlocked(
     result
         .map_err(|err| attach_diagnostic_context(err, Some(macro_code), parameters, Some("render")))
         .and_then(|bundle| finalize_render_bundle(bundle, parameters, post_processing, app))
+}
+
+fn source_partitions_are_all_pure_mesh(source: &str) -> bool {
+    let Some(result) = crate::ecky_scheme::try_compile_to_core_program(source) else {
+        return false;
+    };
+    let Ok(program) = result else {
+        return false;
+    };
+    !program.parts.is_empty()
+        && crate::ecky_ir::poly_partition::analyze_program(&program)
+            .iter()
+            .all(|partition| {
+                partition.strategy == crate::ecky_ir::poly_partition::PartRenderStrategy::PureMesh
+            })
 }
 
 fn source_has_selector_tags(source: &str) -> bool {
@@ -2060,6 +2090,43 @@ endfacet
 endsolid sample
 "#;
         std::fs::write(path, stl).expect("write stl fixture");
+    }
+
+    fn write_ascii_cube_stl_fixture(path: &std::path::Path) {
+        let vertices = [
+            [-1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0],
+            [1.0, 1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+            [1.0, -1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [-1.0, 1.0, 1.0],
+        ];
+        let triangles = [
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ];
+        let mut stl = String::from("solid cube\n");
+        for triangle in triangles {
+            let [a, b, c] = triangle.map(|index| vertices[index]);
+            stl.push_str(&format!(
+                "facet normal 0 0 0\n  outer loop\n    vertex {} {} {}\n    vertex {} {} {}\n    vertex {} {} {}\n  endloop\nendfacet\n",
+                a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2],
+            ));
+        }
+        stl.push_str("endsolid cube\n");
+        std::fs::write(path, stl).expect("write cube STL fixture");
     }
 
     fn create_direct_occt_runtime_layout(root: &std::path::Path) {
@@ -3039,6 +3106,7 @@ endsolid sample
                 tagged_anchors: std::collections::BTreeMap::new(),
                 feature_graph: None,
                 correspondence_graph: None,
+                analysis_declarations: Vec::new(),
                 warnings: vec![],
                 enrichment_state: crate::contracts::ManifestEnrichmentState {
                     status: crate::contracts::EnrichmentStatus::None,
@@ -3611,8 +3679,8 @@ exit 5
     }
 
     #[tokio::test]
-    async fn ecky_rust_request_fails_closed_for_import_stl_when_direct_occt_unavailable() {
-        let root = temp_root("eckyrust-import-stl-direct-occt-required");
+    async fn plain_import_stl_renders_mesh_native_without_direct_occt() {
+        let root = temp_root("eckyrust-import-stl-mesh-native");
         let resolver = TestResolver { root: root.clone() };
         let direct_capability = crate::runtime_capabilities::probe_direct_occt_runtime(&resolver);
         if direct_capability.available {
@@ -3623,7 +3691,7 @@ exit 5
         let stl_path = root.join("fixture.stl");
         write_ascii_stl_fixture(&stl_path);
 
-        let err = render_model(
+        let bundle = render_model(
             &format!(
                 r#"(model (part body (import-stl {:?})))"#,
                 stl_path.to_string_lossy()
@@ -3636,18 +3704,21 @@ exit 5
             &resolver,
         )
         .await
-        .expect_err("import-stl must fail closed without direct OCCT");
+        .expect("plain import-stl must use the mesh-native preview path");
 
-        let diagnostic = format!("{} {}", err, err.details.as_deref().unwrap_or(""));
-        assert!(
-            diagnostic.contains("Direct OCCT required")
-                || diagnostic.contains("native-required CAD ops"),
-            "unexpected error: {err:?}"
+        assert_eq!(
+            bundle
+                .geometry_provenance
+                .as_ref()
+                .map(|item| &item.representation),
+            Some(&GeometryRepresentation::MeshNative)
         );
-        assert!(
-            !diagnostic.contains("Switch to FreeCAD or build123d"),
-            "must not fall through to mesh runtime: {err:?}"
-        );
+        assert!(bundle.edge_targets.is_empty());
+        assert!(bundle.face_targets.is_empty());
+        assert!(!bundle
+            .export_artifacts
+            .iter()
+            .any(|artifact| artifact.format == "step"));
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -3690,7 +3761,7 @@ exit 5
     }
 
     #[tokio::test]
-    async fn ecky_rust_request_renders_import_stl_without_build123d_fallback() {
+    async fn plain_import_stl_stays_mesh_native_when_direct_occt_is_available() {
         let root = temp_root("eckyrust-import-stl-no-build123d-fallback");
         let resolver = TestResolver { root: root.clone() };
         let direct_capability = crate::runtime_capabilities::probe_direct_occt_runtime(&resolver);
@@ -3715,16 +3786,24 @@ exit 5
             &resolver,
         )
         .await
-        .expect("EckyRust must render import-stl through Direct OCCT");
+        .expect("plain import-stl must render through the mesh-native preview path");
 
         assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
-        assert!(bundle.model_id.starts_with("generated-direct-occt-"));
+        assert!(bundle.model_id.starts_with("generated-ir-"));
         assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
-        assert!(bundle
+        assert_eq!(
+            bundle
+                .geometry_provenance
+                .as_ref()
+                .map(|item| &item.representation),
+            Some(&GeometryRepresentation::MeshNative)
+        );
+        assert!(bundle.edge_targets.is_empty());
+        assert!(bundle.face_targets.is_empty());
+        assert!(!bundle
             .export_artifacts
             .iter()
-            .any(|artifact| artifact.format == "step"
-                && std::path::Path::new(&artifact.path).is_file()));
+            .any(|artifact| artifact.format == "step"));
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -4764,18 +4843,82 @@ exit 5
                 .collect::<Vec<_>>()
         );
 
-        // Manifest must carry the hybrid warning tag.
-        if let Ok(manifest) = crate::model_runtime::read_model_manifest(&resolver, &bundle.model_id)
-        {
-            assert!(
-                manifest
-                    .warnings
-                    .iter()
-                    .any(|w| w.contains("Hybrid poly BRep bridge")),
-                "manifest must tag hybrid bridge usage. warnings: {:?}",
-                manifest.warnings
-            );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn closed_surface_trim_solidifies_before_later_difference() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root =
+            crate::ecky_cad_host::direct_occt_sdk::bundled_occt_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
         }
+        let root = temp_root("surface-trim-solidify-difference");
+        let resolver = TestResolver { root: root.clone() };
+        let stl_path = root.join("cube.stl");
+        write_ascii_cube_stl_fixture(&stl_path);
+        let indexed = crate::ecky_ir::mesh_asset::IndexedMeshAsset::from_stl(
+            crate::ecky_ir::mesh_asset::MeshAssetSource::Imported,
+            &stl_path,
+        )
+        .expect("indexed cube");
+        let source = format!(
+            r#"(model
+  (part scanned
+    (difference
+      (solidify
+        (surface-trim
+          (import-stl {:?})
+          :schema-version 1
+          :source-digest {:?}
+          :loop
+            ((mesh-anchor 4 0.25 0.25 0.5)
+             (mesh-anchor 7 0.5 0.25 0.25)
+             (mesh-anchor 6 0.25 0.25 0.5)
+             (mesh-anchor 9 0.5 0.25 0.25)
+             (mesh-anchor 8 0.25 0.25 0.5)
+             (mesh-anchor 11 0.5 0.25 0.25)
+             (mesh-anchor 10 0.25 0.25 0.5)
+             (mesh-anchor 5 0.5 0.25 0.25))
+          :keep-seed (mesh-anchor 2 0.333333333 0.333333333 0.333333334)
+          :path-mode "shortest"
+          :cap "flat"))
+      (translate 0 0 -0.25 (cylinder 0.25 1.5)))))"#,
+            stl_path.to_string_lossy(),
+            indexed.content_digest(),
+        );
+
+        let bundle = render_model(
+            &source,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &test_state(&root),
+            &resolver,
+        )
+        .await
+        .expect("closed trim must feed later difference");
+
+        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert_eq!(
+            crate::services::structural_verification::preview_stl_non_manifold_edge_count(
+                std::path::Path::new(&bundle.preview_stl_path),
+            )
+            .expect("trimmed Boolean STL topology"),
+            0
+        );
+        let provenance = bundle
+            .geometry_provenance
+            .as_ref()
+            .expect("hybrid provenance");
+        assert_eq!(provenance.closed, Some(true));
+        assert_eq!(provenance.boundary_or_non_manifold_edge_count, Some(0));
+        assert_eq!(provenance.source_mesh_digests.len(), 1);
+        assert_ne!(provenance.source_mesh_digests[0], indexed.content_digest());
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -4964,6 +5107,12 @@ exit 5
         let manifest = crate::model_runtime::read_model_manifest(&resolver, &bundle.model_id)
             .expect("stored manifest");
         assert_eq!(manifest.geometry_provenance.as_ref(), Some(provenance));
+        assert_eq!(
+            manifest.source_digest.as_deref(),
+            Some(
+                crate::services::render_snapshot::canonical_source_digest(source).as_str()
+            )
+        );
         assert!(manifest
             .warnings
             .iter()
@@ -4997,17 +5146,6 @@ exit 5
         .await
         .expect("pure OCCT render");
 
-        // If the hybrid bridge was used, the manifest would carry the tag.
-        if let Ok(manifest) = crate::model_runtime::read_model_manifest(&resolver, &bundle.model_id)
-        {
-            assert!(
-                !manifest
-                    .warnings
-                    .iter()
-                    .any(|w| w.contains("Hybrid poly BRep bridge")),
-                "pure OCCT model must not use hybrid bridge"
-            );
-        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -5108,16 +5246,6 @@ exit 5
             !has_step,
             "pure mesh model must not produce STEP (no OCCT involvement)"
         );
-        if let Ok(manifest) = crate::model_runtime::read_model_manifest(&resolver, &bundle.model_id)
-        {
-            assert!(
-                !manifest
-                    .warnings
-                    .iter()
-                    .any(|w| w.contains("Hybrid poly BRep bridge")),
-                "pure mesh model must not use hybrid bridge"
-            );
-        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

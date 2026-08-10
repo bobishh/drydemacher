@@ -1,12 +1,14 @@
 use crate::contracts::{
-    AgentTerminalSnapshot, AgentWorkingVersionEvent, AppError, AppLogEntry, AppResult, Config,
-    LastDesignSnapshot, McpServerStatus, ResolveAgentPromptInput, ViewportCameraState,
+    AgentTerminalSnapshot, AgentWorkingVersionEvent, AppError, AppLogEntry, AppResult,
+    CaptureClientCapabilities, CaptureFrameManifestEntry, CaptureSessionInfo, CaptureSessionState,
+    Config, LastDesignSnapshot, McpServerStatus, ResolveAgentPromptInput, ViewportCameraState,
 };
 #[cfg(unix)]
 use libc;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
@@ -173,6 +175,12 @@ pub struct AgentTerminalRuntime {
 
 pub type PendingAgentTerminalSessions = Arc<Mutex<HashMap<String, AgentTerminalRuntime>>>;
 
+#[derive(Debug, Clone)]
+pub struct CaptureSessionRecord {
+    pub info: CaptureSessionInfo,
+    pub frames: Vec<CaptureFrameManifestEntry>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConfigPersistenceStatus {
     pub cleanup_pending: bool,
@@ -218,6 +226,21 @@ pub struct AppState {
     pub app_logs: Arc<Mutex<VecDeque<AppLogEntry>>>,
     /// Active PTY-backed terminal bridges for interactive auto-agents.
     pub agent_terminals: PendingAgentTerminalSessions,
+    /// Capture sessions currently available to local capture clients.
+    pub capture_sessions: Arc<tokio::sync::Mutex<HashMap<String, CaptureSessionRecord>>>,
+    /// Running capture reconstructions, keyed by hashed pairing token.
+    pub capture_reconstructions: Arc<
+        tokio::sync::Mutex<
+            HashMap<String, crate::capture_reconstruction::ReconstructionCancellation>,
+        >,
+    >,
+    /// Explicit FEM job cancellation flags. Jobs exist only after an explicit
+    /// validate/mesh/run request; ordinary geometry preview never inserts one.
+    pub fem_cancellations: Arc<tokio::sync::Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    /// Public base URL of the dedicated LAN capture listener.
+    pub capture_server_url: Arc<Mutex<Option<String>>>,
+    /// HTTP bootstrap URL for installing Ecky's persistent local capture CA.
+    pub capture_trust_url: Arc<Mutex<Option<String>>>,
     /// AppState-scoped authoring actor registry. Each `AppState` owns its own
     /// registry so independent instances never share or invalidate each
     /// other's authoring actor state (even with identical `session_id`/
@@ -268,11 +291,377 @@ impl AppState {
             viewport_screenshot_channels: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             app_logs: Arc::new(Mutex::new(VecDeque::new())),
             agent_terminals: Arc::new(Mutex::new(HashMap::new())),
+            capture_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            capture_reconstructions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            fem_cancellations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            capture_server_url: Arc::new(Mutex::new(None)),
+            capture_trust_url: Arc::new(Mutex::new(None)),
             authoring_actor_registry: Arc::new(
                 crate::mcp::handlers::AuthoringActorRegistry::default(),
             ),
             app_handle: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn make_capture_token() -> String {
+        uuid::Uuid::new_v4().to_string()
+    }
+
+    fn capture_token_hash(token: &str) -> String {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(token.as_bytes()))
+    }
+
+    fn now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    async fn cleanup_capture_sessions(&self) {
+        let now = Self::now_secs();
+        let mut sessions = self.capture_sessions.lock().await;
+        sessions.retain(|_, session| session.info.expires_at > now);
+    }
+
+    pub async fn start_capture_session(
+        &self,
+        ttl_seconds: u64,
+        target_thread_id: String,
+        target_message_id: Option<String>,
+    ) -> AppResult<CaptureSessionInfo> {
+        if target_thread_id.trim().is_empty() {
+            return Err(AppError::validation(
+                "Capture target thread id is required.",
+            ));
+        }
+        self.cleanup_capture_sessions().await;
+        let now = Self::now_secs();
+        let session_id = Self::make_capture_token();
+        let pairing_token = Self::make_capture_token();
+        let expires_at = now.saturating_add(ttl_seconds);
+        let pairing_url = self
+            .capture_server_url
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|base| format!("{base}/capture/{pairing_token}"))
+            .ok_or_else(|| AppError::internal("LAN capture service is not ready."))?;
+        let trust_url = self
+            .capture_trust_url
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| AppError::internal("LAN capture trust service is not ready."))?;
+        let session = CaptureSessionInfo {
+            session_id: session_id.clone(),
+            target_thread_id,
+            target_message_id,
+            pairing_token: pairing_token.clone(),
+            pairing_url,
+            trust_url,
+            protocol_version: 1,
+            client_capabilities: CaptureClientCapabilities::default(),
+            state: CaptureSessionState::Pairing,
+            created_at: now,
+            expires_at,
+            accepted_frame_count: 0,
+            coverage_percent: 0,
+            guidance: "Pair phone".into(),
+            raw_error: None,
+            reconstruction_progress: None,
+            mesh_preview: None,
+        };
+        self.capture_sessions.lock().await.insert(
+            Self::capture_token_hash(&session.pairing_token),
+            CaptureSessionRecord {
+                info: session.clone(),
+                frames: Vec::new(),
+            },
+        );
+        Ok(session)
+    }
+
+    pub async fn reopen_capture_session(
+        &self,
+        run: &crate::contracts::CaptureRun,
+        frames: Vec<CaptureFrameManifestEntry>,
+        ttl_seconds: u64,
+    ) -> AppResult<CaptureSessionInfo> {
+        let now = Self::now_secs();
+        let pairing_token = Self::make_capture_token();
+        let expires_at = now.saturating_add(ttl_seconds);
+        let pairing_url = self
+            .capture_server_url
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|base| format!("{base}/capture/{pairing_token}"))
+            .ok_or_else(|| AppError::internal("LAN capture service is not ready."))?;
+        let trust_url = self
+            .capture_trust_url
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| AppError::internal("LAN capture trust service is not ready."))?;
+        let state = if run.mesh_preview.is_some() {
+            CaptureSessionState::Preview
+        } else if run.state == CaptureSessionState::Failed {
+            CaptureSessionState::Failed
+        } else {
+            CaptureSessionState::Capturing
+        };
+        let session = CaptureSessionInfo {
+            session_id: run.id.clone(),
+            target_thread_id: run.target_thread_id.clone(),
+            target_message_id: run.target_message_id.clone(),
+            pairing_token: pairing_token.clone(),
+            pairing_url,
+            trust_url,
+            protocol_version: 1,
+            client_capabilities: CaptureClientCapabilities::default(),
+            state,
+            created_at: run.created_at,
+            expires_at,
+            accepted_frame_count: frames.len().max(run.accepted_frame_count as usize) as u32,
+            coverage_percent: 0,
+            guidance: "Reopened durable capture".into(),
+            raw_error: run.raw_error.clone(),
+            reconstruction_progress: run.mesh_preview.as_ref().map(|_| 1.0),
+            mesh_preview: run.mesh_preview.clone(),
+        };
+        self.capture_sessions.lock().await.insert(
+            Self::capture_token_hash(&pairing_token),
+            CaptureSessionRecord {
+                info: session.clone(),
+                frames,
+            },
+        );
+        Ok(session)
+    }
+
+    async fn persist_capture_session(&self, session: &CaptureSessionInfo) -> AppResult<()> {
+        let db = self.db.lock().await;
+        crate::capture_runs::update_from_session(&db, session)
+            .map_err(|error| AppError::persistence(error.to_string()))
+    }
+
+    pub async fn get_capture_session(&self, token: &str) -> Option<CaptureSessionInfo> {
+        self.cleanup_capture_sessions().await;
+        self.capture_sessions
+            .lock()
+            .await
+            .get(&Self::capture_token_hash(token))
+            .map(|record| record.info.clone())
+    }
+
+    pub async fn set_capture_session_state(
+        &self,
+        token: &str,
+        state: CaptureSessionState,
+    ) -> AppResult<CaptureSessionInfo> {
+        self.cleanup_capture_sessions().await;
+        let info = {
+            let mut sessions = self.capture_sessions.lock().await;
+            let record = sessions
+                .get_mut(&Self::capture_token_hash(token))
+                .ok_or_else(|| {
+                    AppError::not_found(format!("Capture session `{}` not found.", token))
+                })?;
+            record.info.state = state;
+            record.info.clone()
+        };
+        self.persist_capture_session(&info).await?;
+        Ok(info)
+    }
+
+    pub async fn resume_capture_session(&self, token: &str) -> AppResult<CaptureSessionInfo> {
+        self.cleanup_capture_sessions().await;
+        let info = {
+            let mut sessions = self.capture_sessions.lock().await;
+            let record = sessions
+                .get_mut(&Self::capture_token_hash(token))
+                .ok_or_else(|| AppError::not_found("Capture session not found or expired."))?;
+            if !matches!(
+                record.info.state,
+                CaptureSessionState::Preview | CaptureSessionState::Failed
+            ) {
+                return Err(AppError::conflict(
+                    "Capture can add photos only after preview or failure.",
+                ));
+            }
+            record.info.state = CaptureSessionState::Capturing;
+            record.info.raw_error = None;
+            record.info.reconstruction_progress = None;
+            record.info.mesh_preview = None;
+            record.info.guidance = "Add photos, then reconstruct again".into();
+            record.info.clone()
+        };
+        self.persist_capture_session(&info).await?;
+        Ok(info)
+    }
+
+    pub async fn pair_capture_session(
+        &self,
+        token: &str,
+        protocol_version: u16,
+        capabilities: CaptureClientCapabilities,
+    ) -> AppResult<CaptureSessionInfo> {
+        let info = {
+            let mut sessions = self.capture_sessions.lock().await;
+            let record = sessions
+                .get_mut(&Self::capture_token_hash(token))
+                .ok_or_else(|| AppError::not_found("Capture session not found or expired."))?;
+            if protocol_version != 0 && protocol_version != record.info.protocol_version {
+                return Err(AppError::validation(format!(
+                    "Capture protocol version {} is unsupported; expected {}.",
+                    protocol_version, record.info.protocol_version
+                )));
+            }
+            record.info.client_capabilities = capabilities;
+            record.info.state = CaptureSessionState::Capturing;
+            record.info.clone()
+        };
+        self.persist_capture_session(&info).await?;
+        Ok(info)
+    }
+
+    pub async fn set_capture_reconstruction_progress(&self, token: &str, progress: f32) {
+        if let Some(record) = self
+            .capture_sessions
+            .lock()
+            .await
+            .get_mut(&Self::capture_token_hash(token))
+        {
+            record.info.reconstruction_progress = Some(progress.clamp(0.0, 1.0));
+        }
+    }
+
+    pub async fn complete_capture_reconstruction(
+        &self,
+        token: &str,
+        preview: crate::contracts::CaptureMeshPreview,
+    ) -> AppResult<CaptureSessionInfo> {
+        let info = {
+            let mut sessions = self.capture_sessions.lock().await;
+            let record = sessions
+                .get_mut(&Self::capture_token_hash(token))
+                .ok_or_else(|| AppError::not_found("Capture session not found or expired."))?;
+            record.info.state = CaptureSessionState::Preview;
+            record.info.reconstruction_progress = Some(1.0);
+            record.info.raw_error = None;
+            record.info.guidance = "Inspect reconstructed mesh".into();
+            record.info.mesh_preview = Some(preview);
+            record.info.clone()
+        };
+        self.persist_capture_session(&info).await?;
+        Ok(info)
+    }
+
+    pub async fn fail_capture_reconstruction(&self, token: &str, error: String) -> AppResult<()> {
+        let info = {
+            let mut sessions = self.capture_sessions.lock().await;
+            sessions
+                .get_mut(&Self::capture_token_hash(token))
+                .map(|record| {
+                    record.info.state = CaptureSessionState::Failed;
+                    record.info.raw_error = Some(error);
+                    record.info.guidance = "Reconstruction failed".into();
+                    record.info.clone()
+                })
+        };
+        if let Some(info) = info {
+            self.persist_capture_session(&info).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn register_capture_reconstruction(
+        &self,
+        token: &str,
+        cancellation: crate::capture_reconstruction::ReconstructionCancellation,
+    ) {
+        self.capture_reconstructions
+            .lock()
+            .await
+            .insert(Self::capture_token_hash(token), cancellation);
+    }
+
+    pub async fn clear_capture_reconstruction(&self, token: &str) {
+        self.capture_reconstructions
+            .lock()
+            .await
+            .remove(&Self::capture_token_hash(token));
+    }
+
+    pub async fn cancel_capture_session(&self, token: &str) -> AppResult<CaptureSessionInfo> {
+        self.cleanup_capture_sessions().await;
+        if let Some(cancellation) = self
+            .capture_reconstructions
+            .lock()
+            .await
+            .remove(&Self::capture_token_hash(token))
+        {
+            cancellation.cancel();
+        }
+        let info = {
+            let mut sessions = self.capture_sessions.lock().await;
+            let mut record = sessions
+                .remove(&Self::capture_token_hash(token))
+                .ok_or_else(|| AppError::not_found("Capture session not found or expired."))?;
+            record.info.state = CaptureSessionState::Cancelled;
+            record.info
+        };
+        self.persist_capture_session(&info).await?;
+        Ok(info)
+    }
+
+    pub async fn capture_manifest(&self, token: &str) -> AppResult<Vec<CaptureFrameManifestEntry>> {
+        self.cleanup_capture_sessions().await;
+        self.capture_sessions
+            .lock()
+            .await
+            .get(&Self::capture_token_hash(token))
+            .map(|record| record.frames.clone())
+            .ok_or_else(|| AppError::not_found("Capture session not found or expired."))
+    }
+
+    pub async fn add_capture_frame(
+        &self,
+        token: &str,
+        frame: CaptureFrameManifestEntry,
+    ) -> AppResult<(CaptureFrameManifestEntry, bool)> {
+        self.cleanup_capture_sessions().await;
+        let (result, info) = {
+            let mut sessions = self.capture_sessions.lock().await;
+            let record = sessions
+                .get_mut(&Self::capture_token_hash(token))
+                .ok_or_else(|| AppError::not_found("Capture session not found or expired."))?;
+            if matches!(record.info.state, CaptureSessionState::Cancelled) {
+                return Err(AppError::validation("Capture session is cancelled."));
+            }
+            if let Some(existing) = record.frames.iter().find(|existing| {
+                existing.frame_id == frame.frame_id
+                    || existing.content_digest == frame.content_digest
+            }) {
+                if existing.content_digest != frame.content_digest {
+                    return Err(AppError::validation(format!(
+                        "Frame `{}` already exists with a different digest.",
+                        frame.frame_id
+                    )));
+                }
+                return Ok((existing.clone(), false));
+            }
+            record.frames.push(frame.clone());
+            record.info.accepted_frame_count = record.frames.len() as u32;
+            record.info.coverage_percent = frame.server_assessment.coverage_percent;
+            record.info.guidance = frame.server_assessment.guidance.clone();
+            record.info.state = CaptureSessionState::Capturing;
+            ((frame, true), record.info.clone())
+        };
+        self.persist_capture_session(&info).await?;
+        Ok(result)
     }
 
     pub fn set_app_handle(&self, handle: tauri::AppHandle) {
@@ -450,7 +839,7 @@ mod tests {
         SectionPriority, Sensitivity, TelemetryUsage,
     };
     use crate::contracts::{
-        Config, Engine, EngineKind, GeometryBackend, SourceLanguage, UsageSummary,
+        AppErrorCode, Config, Engine, EngineKind, GeometryBackend, SourceLanguage, UsageSummary,
     };
 
     fn minimal_config() -> Config {
@@ -487,6 +876,7 @@ mod tests {
 
     fn state() -> AppState {
         let conn = rusqlite::Connection::open_in_memory().expect("in-memory db");
+        crate::capture_runs::ensure_schema(&conn).expect("capture schema");
         AppState::new(minimal_config(), None, conn)
     }
 
@@ -616,5 +1006,206 @@ mod tests {
         let json = parsed.to_string();
         assert!(!json.contains("observed_chars"));
         assert!(!json.contains("input_tokens"));
+    }
+
+    #[tokio::test]
+    async fn start_capture_session_creates_retrievable_pairing_session() {
+        let state = state();
+        *state.capture_server_url.lock().unwrap() = Some("http://192.0.2.1:44000".into());
+        *state.capture_trust_url.lock().unwrap() = Some("http://192.0.2.1:44001/trust".into());
+        let session = state
+            .start_capture_session(3600, "thread-a".into(), Some("message-a".into()))
+            .await
+            .expect("start capture session");
+
+        assert_eq!(session.state, CaptureSessionState::Pairing);
+        assert!(!session.session_id.is_empty(), "session_id is set");
+        assert_ne!(session.session_id, session.pairing_token);
+        assert_eq!(
+            session.pairing_url,
+            format!("http://192.0.2.1:44000/capture/{}", session.pairing_token)
+        );
+        assert_eq!(session.trust_url, "http://192.0.2.1:44001/trust");
+        assert_eq!(session.target_thread_id, "thread-a");
+        assert_eq!(session.target_message_id.as_deref(), Some("message-a"));
+
+        let fetched = state
+            .get_capture_session(&session.pairing_token)
+            .await
+            .expect("capturing session exists");
+        assert_eq!(fetched, session);
+    }
+
+    #[tokio::test]
+    async fn set_capture_session_state_updates_active_session() {
+        let state = state();
+        *state.capture_server_url.lock().unwrap() = Some("http://192.0.2.1:44000".into());
+        *state.capture_trust_url.lock().unwrap() = Some("http://192.0.2.1:44001/trust".into());
+        let session = state
+            .start_capture_session(3600, "thread-test".into(), None)
+            .await
+            .expect("start capture session");
+
+        let updated = state
+            .set_capture_session_state(&session.pairing_token, CaptureSessionState::Capturing)
+            .await
+            .expect("session state updates");
+        assert_eq!(updated.state, CaptureSessionState::Capturing);
+
+        let after = state
+            .get_capture_session(&session.pairing_token)
+            .await
+            .expect("session still present");
+        assert_eq!(after.state, CaptureSessionState::Capturing);
+    }
+
+    #[tokio::test]
+    async fn set_capture_session_state_fails_for_unknown_token() {
+        let state = state();
+        let error = state
+            .set_capture_session_state("missing-token", CaptureSessionState::Cancelled)
+            .await
+            .expect_err("unknown token fails");
+        assert_eq!(error.code, AppErrorCode::NotFound);
+    }
+
+    #[tokio::test]
+    async fn pairing_records_client_capabilities_and_rejects_wrong_protocol() {
+        let state = state();
+        *state.capture_server_url.lock().unwrap() = Some("http://192.0.2.1:44000".into());
+        *state.capture_trust_url.lock().unwrap() = Some("http://192.0.2.1:44001/trust".into());
+        let session = state
+            .start_capture_session(3600, "thread-test".into(), None)
+            .await
+            .unwrap();
+        let capabilities = CaptureClientCapabilities {
+            metric_depth: true,
+            camera_intrinsics: true,
+            camera_pose: true,
+            depth_sidecars: true,
+        };
+        let paired = state
+            .pair_capture_session(&session.pairing_token, 1, capabilities.clone())
+            .await
+            .unwrap();
+        assert_eq!(paired.client_capabilities, capabilities);
+        assert_eq!(paired.state, CaptureSessionState::Capturing);
+        let error = state
+            .pair_capture_session(&session.pairing_token, 99, Default::default())
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("unsupported"));
+    }
+
+    #[tokio::test]
+    async fn reconstruction_failure_preserves_session_frames_and_raw_error() {
+        let state = state();
+        *state.capture_server_url.lock().unwrap() = Some("http://192.0.2.1:44000".into());
+        *state.capture_trust_url.lock().unwrap() = Some("http://192.0.2.1:44001/trust".into());
+        let session = state
+            .start_capture_session(3600, "thread-test".into(), None)
+            .await
+            .unwrap();
+        let frame = CaptureFrameManifestEntry {
+            frame_id: "frame-1".into(),
+            content_digest: "digest".into(),
+            captured_at: 1,
+            mime_type: "image/jpeg".into(),
+            width: 2,
+            height: 2,
+            image_path: "source/digest.jpg".into(),
+            client_metrics: None,
+            camera_intrinsics: None,
+            camera_transform: None,
+            depth_digest: None,
+            visual_signature: vec![1],
+            server_assessment: Default::default(),
+        };
+        state
+            .add_capture_frame(&session.pairing_token, frame.clone())
+            .await
+            .unwrap();
+
+        state
+            .fail_capture_reconstruction(&session.pairing_token, "provider failed raw".into())
+            .await
+            .unwrap();
+
+        let failed = state
+            .get_capture_session(&session.pairing_token)
+            .await
+            .unwrap();
+        assert_eq!(failed.state, CaptureSessionState::Failed);
+        assert_eq!(failed.raw_error.as_deref(), Some("provider failed raw"));
+        assert_eq!(
+            state
+                .capture_manifest(&session.pairing_token)
+                .await
+                .unwrap(),
+            vec![frame]
+        );
+        state
+            .set_capture_session_state(&session.pairing_token, CaptureSessionState::Preview)
+            .await
+            .unwrap();
+        let resumed = state
+            .resume_capture_session(&session.pairing_token)
+            .await
+            .unwrap();
+        assert_eq!(resumed.state, CaptureSessionState::Capturing);
+        assert_eq!(
+            state
+                .capture_manifest(&session.pairing_token)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_capture_session_revokes_pairing_token() {
+        let state = state();
+        *state.capture_server_url.lock().unwrap() = Some("http://192.0.2.1:44000".into());
+        *state.capture_trust_url.lock().unwrap() = Some("http://192.0.2.1:44001/trust".into());
+        let session = state
+            .start_capture_session(3600, "thread-test".into(), None)
+            .await
+            .expect("start capture session");
+
+        let cancelled = state
+            .cancel_capture_session(&session.pairing_token)
+            .await
+            .expect("cancel capture session");
+
+        assert_eq!(cancelled.state, CaptureSessionState::Cancelled);
+        assert!(state
+            .get_capture_session(&session.pairing_token)
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn expired_capture_sessions_are_cleaned_up() {
+        let state = state();
+        *state.capture_server_url.lock().unwrap() = Some("http://192.0.2.1:44000".into());
+        *state.capture_trust_url.lock().unwrap() = Some("http://192.0.2.1:44001/trust".into());
+        let session = state
+            .start_capture_session(3600, "thread-test".into(), None)
+            .await
+            .expect("start capture session");
+
+        {
+            let mut sessions = state.capture_sessions.lock().await;
+            let stale_session = sessions
+                .get_mut(&AppState::capture_token_hash(&session.pairing_token))
+                .expect("session exists");
+            stale_session.info.expires_at = AppState::now_secs().saturating_sub(1);
+        }
+
+        assert!(state
+            .get_capture_session(&session.pairing_token)
+            .await
+            .is_none());
     }
 }

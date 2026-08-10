@@ -331,7 +331,7 @@ const MCP_RESPONSE_BUDGET_CHARS: usize = 32_000;
 /// shipped honestly, so the envelope fails with observed/allowed sizes instead
 /// of silently truncating authoritative state. Far above the response budget so
 /// every realistic tool result passes while runaway payloads are caught.
-const MCP_TRANSPORT_LIMIT_CHARS: usize = 1_000_000;
+const MCP_TRANSPORT_LIMIT_CHARS: usize = 16_000_000;
 
 /// Build a short, content-free text summary of a generic tool result: identity
 /// keys (threadId/messageId/modelId when present), the top-level key list, and
@@ -1510,6 +1510,35 @@ fn with_identity(extra: &[(&str, Value)], required: &[&str]) -> Value {
     schema
 }
 
+fn capture_guided_result_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "schemaVersion": { "type": "integer", "const": 1 },
+            "requestId": { "type": "string" },
+            "guideCanonicalDigest": { "type": "string" },
+            "unresolvedAssumptions": {
+                "type": "array",
+                "maxItems": 64,
+                "items": { "type": "string", "maxLength": 2048 }
+            },
+            "inferredRegions": {
+                "type": "array",
+                "maxItems": 64,
+                "items": { "type": "string", "maxLength": 2048 }
+            }
+        },
+        "required": [
+            "schemaVersion",
+            "requestId",
+            "guideCanonicalDigest",
+            "unresolvedAssumptions",
+            "inferredRegions"
+        ]
+    })
+}
+
 fn selected_engine_label(state: &AppState) -> String {
     let config = state.config.lock().unwrap();
     let engine = config
@@ -1670,7 +1699,7 @@ fn workflow_guide_text(state: &AppState) -> String {
             "7. If semantic bindings matter, call semantic_manifest_get before changing views or annotations.\n",
             "8. For a bound sourcePath, edit the file and call project_folder_apply with its folder slug; this validates, previews, and commits the edit. Do not export first. Only for an unbound legacy target, mutate with params_preview_render, macro_buffer_replace_and_preview, macro_preview_render, or semantic tools.\n",
             "9. For preview/render tools: Call verify_generated_model on the preview/render draft. If red, repair source/params and preview again until green or repair cap exhausted.\n",
-            "10. Commit green verified preview drafts with commit_preview_version. project_folder_apply already commits its validated source result. Capture returned threadId/messageId/modelId in output evidence. If capped red remains, do not commit; report exact red issues.\n",
+            "10. Commit green verified preview drafts with commit_preview_version. For a FEM-verified claim, use fem_validate -> fem_mesh_preview -> fem_run -> fem_result_get -> fem_commit_verified_preview; stale/red/corrupt FEM evidence cannot use that commit path. project_folder_apply already commits its validated source result. Capture returned threadId/messageId/modelId in output evidence. If capped red remains, do not commit; report exact red issues.\n",
             "11. Never update history.sqlite directly. State mutations must go through MCP tools.\n",
             "12. Use measurement_annotation tools for dimension meaning, and long_action_notice/long_action_clear for slow work.\n"
         ),
@@ -2243,6 +2272,7 @@ pub(crate) enum CapabilityGroup {
     AstEdits,
     SemanticControls,
     VerifyPrintability,
+    FemAnalysis,
     ComponentsLibrary,
     ProjectFiles,
     SessionActivity,
@@ -2259,6 +2289,7 @@ impl CapabilityGroup {
             CapabilityGroup::AstEdits => "ast-edits",
             CapabilityGroup::SemanticControls => "semantic-controls",
             CapabilityGroup::VerifyPrintability => "verify-printability",
+            CapabilityGroup::FemAnalysis => "fem-analysis",
             CapabilityGroup::ComponentsLibrary => "components-library",
             CapabilityGroup::ProjectFiles => "project-files",
             CapabilityGroup::SessionActivity => "session-activity",
@@ -2273,6 +2304,7 @@ impl CapabilityGroup {
             CapabilityGroup::AstEdits => "AST edits (ecky)",
             CapabilityGroup::SemanticControls => "Semantic controls",
             CapabilityGroup::VerifyPrintability => "Verify & printability",
+            CapabilityGroup::FemAnalysis => "Native FEM analysis",
             CapabilityGroup::ComponentsLibrary => "Components & library",
             CapabilityGroup::ProjectFiles => "Project files",
             CapabilityGroup::SessionActivity => "Session activity & notices",
@@ -2305,6 +2337,9 @@ impl CapabilityGroup {
                 "Structural verification, printability analysis/recipes, \
                  screenshots."
             }
+            CapabilityGroup::FemAnalysis => {
+                "Read-only native Tet4 study validation, mesh preview, solve, convergence, cancellation, and immutable artifacts."
+            }
             CapabilityGroup::ComponentsLibrary => {
                 "Component extract/search/get and FreeCAD library search/import."
             }
@@ -2327,6 +2362,7 @@ impl CapabilityGroup {
             CapabilityGroup::AstEdits,
             CapabilityGroup::SemanticControls,
             CapabilityGroup::VerifyPrintability,
+            CapabilityGroup::FemAnalysis,
             CapabilityGroup::ComponentsLibrary,
             CapabilityGroup::ProjectFiles,
             CapabilityGroup::SessionActivity,
@@ -2419,6 +2455,14 @@ pub(crate) fn tool_capability_group(name: &str) -> Option<CapabilityGroup> {
         | "printability_analyze"
         | "printability_transform_recipes_get"
         | "get_model_screenshot" => CapabilityGroup::VerifyPrintability,
+        // ── Native FEM analysis ────────────────────────────────────────────
+        "fem_validate"
+        | "fem_mesh_preview"
+        | "fem_run"
+        | "fem_cancel"
+        | "fem_result_get"
+        | "fem_convergence"
+        | "fem_commit_verified_preview" => CapabilityGroup::FemAnalysis,
         // ── Components & library ───────────────────────────────────────────
         "component_extract"
         | "component_search"
@@ -3120,6 +3164,107 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
             )
         }),
         json!({
+            "name": "fem_validate",
+            "description": "Validate one authored native linear-static study against the current exact rendered model. Resolves durable BRep face tags, units, material, loads, supports, closed OCCT boundary, evidence, budgets, and stale source identity. Does not mesh, solve, edit source, or create history.",
+            "inputSchema": with_identity(
+                &[
+                    ("threadId", json!({ "type": "string" })),
+                    ("messageId", json!({ "type": "string" })),
+                    ("jobId", json!({ "type": "string" })),
+                    ("analysisName", json!({ "type": "string" })),
+                    ("budgets", json!({ "type": "object", "description": "Optional bounded FEM budgets; defaults remain finite." })),
+                    ("control", json!({ "type": "object", "description": "Optional meshing/solver tolerances; defaults remain deterministic." }))
+                ],
+                &["analysisName"],
+            )
+        }),
+        json!({
+            "name": "fem_run",
+            "description": "Run the validated authored study through pinned native fTetWild, Tet4 assembly, Faer sparse solve, postprocess, engineering gates, and atomic immutable publication. Returns compact summaries and artifact paths only; bulk arrays stay outside message JSON. Never edits source or commits history.",
+            "inputSchema": with_identity(
+                &[
+                    ("threadId", json!({ "type": "string" })),
+                    ("messageId", json!({ "type": "string" })),
+                    ("jobId", json!({ "type": "string", "description": "Caller-selected id enables a concurrent fem_cancel request." })),
+                    ("analysisName", json!({ "type": "string" })),
+                    ("budgets", json!({ "type": "object" })),
+                    ("control", json!({ "type": "object" }))
+                ],
+                &["analysisName"],
+            )
+        }),
+        json!({
+            "name": "fem_mesh_preview",
+            "description": "Generate and validate the pinned native Tet4 volume mesh without assembling or solving. Publishes immutable node/cell/boundary arrays plus quality and exact BRep face-group coverage. Never edits source or commits history.",
+            "inputSchema": with_identity(
+                &[
+                    ("threadId", json!({ "type": "string" })),
+                    ("messageId", json!({ "type": "string" })),
+                    ("jobId", json!({ "type": "string", "description": "Caller-selected id enables a concurrent fem_cancel request." })),
+                    ("analysisName", json!({ "type": "string" })),
+                    ("budgets", json!({ "type": "object" })),
+                    ("control", json!({ "type": "object" }))
+                ],
+                &["analysisName"],
+            )
+        }),
+        json!({
+            "name": "fem_cancel",
+            "description": "Request cancellation of one running FEM job at its next declared safe boundary. Returns whether the job was found.",
+            "inputSchema": with_identity(
+                &[("jobId", json!({ "type": "string" }))],
+                &["jobId"],
+            )
+        }),
+        json!({
+            "name": "fem_result_get",
+            "description": "Read and revalidate one immutable FEM result manifest by exact analysis and solution digests. Returns compact metadata and binary artifact paths, never bulk arrays.",
+            "inputSchema": with_identity(
+                &[
+                    ("analysisIdentityDigest", json!({ "type": "string" })),
+                    ("solutionDigest", json!({ "type": "string" })),
+                    ("maximumResultBytes", json!({ "type": "number" }))
+                ],
+                &["analysisIdentityDigest", "solutionDigest"],
+            )
+        }),
+        json!({
+            "name": "fem_convergence",
+            "description": "Run at least three explicit coarse-to-fine native Tet4 levels sequentially. Returns per-level immutable identities, quality, counts, residual, extrema, relative deltas, and separate displacement/stress status. Rising unconverged stress is marked suspectedSingularity.",
+            "inputSchema": with_identity(
+                &[
+                    ("threadId", json!({ "type": "string" })),
+                    ("messageId", json!({ "type": "string" })),
+                    ("jobId", json!({ "type": "string" })),
+                    ("analysisName", json!({ "type": "string" })),
+                    ("meshSizesMm", json!({ "type": "array", "minItems": 3, "items": { "type": "number" } })),
+                    ("displacementRelativeTolerance", json!({ "type": "number" })),
+                    ("stressRelativeTolerance", json!({ "type": "number" })),
+                    ("budgets", json!({ "type": "object" })),
+                    ("control", json!({ "type": "object" }))
+                ],
+                &["analysisName", "meshSizesMm", "displacementRelativeTolerance", "stressRelativeTolerance"],
+            )
+        }),
+        json!({
+            "name": "fem_commit_verified_preview",
+            "description": "Commit a structurally green preview only when an immutable native FEM result remains decision-ready and exactly matches the preview source and OCCT analysis boundary. Reloads and verifies the result server-side; stale, red, corrupt, or caller-mismatched evidence cannot commit.",
+            "inputSchema": with_identity(
+                &[
+                    ("threadId", json!({ "type": "string" })),
+                    ("messageId", json!({ "type": "string" })),
+                    ("title", json!({ "type": "string" })),
+                    ("versionName", json!({ "type": "string" })),
+                    ("analysisName", json!({ "type": "string" })),
+                    ("analysisIdentityDigest", json!({ "type": "string" })),
+                    ("solutionDigest", json!({ "type": "string" })),
+                    ("resultDigest", json!({ "type": "string" })),
+                    ("captureGuidedResult", capture_guided_result_input_schema())
+                ],
+                &["analysisName", "analysisIdentityDigest", "solutionDigest", "resultDigest"],
+            )
+        }),
+        json!({
             "name": "get_model_screenshot",
             "description": "Capture the current model viewport as Ecky can see it. Defaults to the visible workbench view; if the requested target is not open, Ecky asks the user how to proceed.",
             "inputSchema": with_identity(
@@ -3346,13 +3491,14 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "commit_preview_version",
-            "description": "Persist the latest green verified preview draft as a new saved version. Call verify_generated_model first; if verification is red, repair and preview again. Do not commit capped red results.",
+            "description": "Persist the latest green verified preview draft as a new saved version after structural verification. Call verify_generated_model first; if verification is red, repair and preview again. This path makes no FEM-verified claim; use fem_commit_verified_preview when attaching a current native FEM decision. Pending capture-guided reconstruction requires captureGuidedResult with exact request/guide identity and no unresolved assumptions. Do not commit capped red results. Do not commit ambiguous guided reconstruction.",
             "inputSchema": with_identity(
                 &[
                     ("threadId", json!({ "type": "string" })),
                     ("messageId", json!({ "type": "string" })),
                     ("title", json!({ "type": "string" })),
-                    ("versionName", json!({ "type": "string" }))
+                    ("versionName", json!({ "type": "string" })),
+                    ("captureGuidedResult", capture_guided_result_input_schema())
                 ],
                 &[],
             )
@@ -3747,7 +3893,8 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     ("threadId", json!({ "type": "string" })),
                     ("messageId", json!({ "type": "string" })),
                     ("title", json!({ "type": "string" })),
-                    ("versionName", json!({ "type": "string" }))
+                    ("versionName", json!({ "type": "string" })),
+                    ("captureGuidedResult", capture_guided_result_input_schema())
                 ],
                 &[],
             )
@@ -4681,6 +4828,80 @@ pub(crate) async fn drain_pending_mcp_notifications(
     notifications.remove(session_id).unwrap_or_default()
 }
 
+fn default_fem_budgets() -> crate::contracts::FemBudgetLimitsDto {
+    crate::contracts::FemBudgetLimitsDto {
+        boundary_triangles: 250_000,
+        tet4_cells: 500_000,
+        nodes: 150_000,
+        dofs: 450_000,
+        sparse_nonzeros: 30_000_000,
+        result_bytes: 128 * 1024 * 1024,
+        convergence_levels: 3,
+    }
+}
+
+fn default_fem_control() -> crate::contracts::FemPipelineControlDto {
+    crate::contracts::FemPipelineControlDto {
+        envelope_mm: 0.1,
+        minimum_scaled_jacobian: 1.0e-6,
+        maximum_runtime_ms: 10 * 60 * 1000,
+        relative_solver_tolerance: 1.0e-8,
+    }
+}
+
+async fn resolve_mcp_fem_request(
+    server: &HttpServerState,
+    session_id: &str,
+    request: FemTargetRequest,
+    operation: &str,
+) -> AppResult<(crate::contracts::FemStudyRequest, McpTargetRef)> {
+    let target = resolve_target_for_session(
+        &server.state,
+        server.app.as_ref(),
+        session_id,
+        request.thread_id,
+        request.message_id,
+    )
+    .await?;
+    if target.source_language != crate::contracts::SourceLanguage::EckyIrV0 {
+        return Err(AppError::validation(format!(
+            "{operation} requires sourceLanguage=ecky; target is {}.",
+            target.source_language.as_str()
+        )));
+    }
+    let editable = {
+        let conn = server.state.db.lock().await;
+        crate::services::target::resolve_editable_target(
+            &conn,
+            server.app.as_ref(),
+            Some(target.thread_id.clone()),
+            Some(target.message_id.clone()),
+        )?
+    };
+    let model_id = editable.model_id().ok_or_else(|| {
+        AppError::validation(format!("{operation} requires a rendered model artifact."))
+    })?;
+    let lease_target = McpTargetRef {
+        thread_id: editable.thread_id,
+        message_id: editable.message_id,
+        model_id: Some(model_id.clone()),
+    };
+    let job_id = request
+        .job_id
+        .unwrap_or_else(|| format!("fem-mcp-{}", Uuid::new_v4().simple()));
+    Ok((
+        crate::contracts::FemStudyRequest {
+            job_id,
+            model_id,
+            source: editable.design_output.macro_code,
+            analysis_name: request.analysis_name,
+            budgets: request.budgets.unwrap_or_else(default_fem_budgets),
+            control: request.control.unwrap_or_else(default_fem_control),
+        },
+        lease_target,
+    ))
+}
+
 async fn dispatch_tool_call(
     server: &HttpServerState,
     session_id: &str,
@@ -5217,6 +5438,196 @@ async fn dispatch_tool_call(
             let value = serde_json::to_value(&response).unwrap();
             let next_target = target_ref_from_value(&value);
             Ok((value, next_target))
+        }
+        "fem_validate" => {
+            let req_args: FemTargetRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let (request, target) =
+                resolve_mcp_fem_request(server, session_id, req_args, "fem_validate").await?;
+            let response = crate::commands::fem::validate_fem_study_with_resolver(
+                request,
+                server.app.as_ref(),
+            )?;
+            Ok((serde_json::to_value(response).unwrap(), Some(target)))
+        }
+        "fem_run" => {
+            let req_args: FemTargetRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let (request, target) =
+                resolve_mcp_fem_request(server, session_id, req_args, "fem_run").await?;
+            let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            {
+                let mut jobs = server.state.fem_cancellations.lock().await;
+                if jobs.contains_key(&request.job_id) {
+                    return Err(AppError::conflict(format!(
+                        "FEM job '{}' is already running.",
+                        request.job_id
+                    )));
+                }
+                jobs.insert(request.job_id.clone(), cancellation.clone());
+            }
+            let job_id = request.job_id.clone();
+            let resolver = server.app.clone();
+            let joined = tauri::async_runtime::spawn_blocking(move || {
+                crate::commands::fem::run_fem_study_with_resolver_subscribed(
+                    request,
+                    resolver.as_ref(),
+                    cancellation,
+                    |_| {},
+                )
+            })
+            .await;
+            server.state.fem_cancellations.lock().await.remove(&job_id);
+            let response = joined.map_err(|error| {
+                AppError::internal(format!("FEM MCP job thread failed: {error}"))
+            })??;
+            Ok((serde_json::to_value(response).unwrap(), Some(target)))
+        }
+        "fem_mesh_preview" => {
+            let req_args: FemTargetRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let (request, target) =
+                resolve_mcp_fem_request(server, session_id, req_args, "fem_mesh_preview").await?;
+            let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            {
+                let mut jobs = server.state.fem_cancellations.lock().await;
+                if jobs.contains_key(&request.job_id) {
+                    return Err(AppError::conflict(format!(
+                        "FEM job '{}' is already running.",
+                        request.job_id
+                    )));
+                }
+                jobs.insert(request.job_id.clone(), cancellation.clone());
+            }
+            let job_id = request.job_id.clone();
+            let resolver = server.app.clone();
+            let joined = tauri::async_runtime::spawn_blocking(move || {
+                crate::commands::fem::preview_fem_mesh_with_resolver_subscribed(
+                    request,
+                    resolver.as_ref(),
+                    cancellation,
+                    |_| {},
+                )
+            })
+            .await;
+            server.state.fem_cancellations.lock().await.remove(&job_id);
+            let response = joined.map_err(|error| {
+                AppError::internal(format!("FEM MCP mesh thread failed: {error}"))
+            })??;
+            Ok((serde_json::to_value(response).unwrap(), Some(target)))
+        }
+        "fem_cancel" => {
+            let req_args: FemCancelToolRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let jobs = server.state.fem_cancellations.lock().await;
+            let cancellation_requested = jobs.get(&req_args.job_id).is_some_and(|cancelled| {
+                cancelled.store(true, std::sync::atomic::Ordering::Release);
+                true
+            });
+            Ok((
+                json!({
+                    "jobId": req_args.job_id,
+                    "cancellationRequested": cancellation_requested,
+                }),
+                None,
+            ))
+        }
+        "fem_convergence" => {
+            let req_args: FemConvergenceToolRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let (study, target) =
+                resolve_mcp_fem_request(server, session_id, req_args.target, "fem_convergence")
+                    .await?;
+            let request = crate::contracts::FemConvergenceRequest {
+                study,
+                mesh_sizes_mm: req_args.mesh_sizes_mm,
+                displacement_relative_tolerance: req_args.displacement_relative_tolerance,
+                stress_relative_tolerance: req_args.stress_relative_tolerance,
+            };
+            let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let job_id = request.study.job_id.clone();
+            {
+                let mut jobs = server.state.fem_cancellations.lock().await;
+                if jobs.contains_key(&job_id) {
+                    return Err(AppError::conflict(format!(
+                        "FEM job '{job_id}' is already running."
+                    )));
+                }
+                jobs.insert(job_id.clone(), cancellation.clone());
+            }
+            let resolver = server.app.clone();
+            let joined = tauri::async_runtime::spawn_blocking(move || {
+                crate::commands::fem::run_fem_convergence_with_resolver(
+                    request,
+                    resolver.as_ref(),
+                    cancellation.as_ref(),
+                    |_| {},
+                )
+            })
+            .await;
+            server.state.fem_cancellations.lock().await.remove(&job_id);
+            let response = joined.map_err(|error| {
+                AppError::internal(format!("FEM MCP convergence thread failed: {error}"))
+            })??;
+            Ok((serde_json::to_value(response).unwrap(), Some(target)))
+        }
+        "fem_result_get" => {
+            let req_args: FemResultGetToolRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let response = crate::commands::fem::read_fem_result_with_resolver(
+                crate::contracts::FemResultReadRequest {
+                    analysis_identity_digest: req_args.analysis_identity_digest,
+                    solution_digest: req_args.solution_digest,
+                    maximum_result_bytes: req_args
+                        .maximum_result_bytes
+                        .unwrap_or(128 * 1024 * 1024),
+                },
+                server.app.as_ref(),
+            )?;
+            Ok((serde_json::to_value(response).unwrap(), None))
+        }
+        "fem_commit_verified_preview" => {
+            let mut req_args: FemVerifiedCommitRequest = serde_json::from_value(args)
+                .map_err(|error| AppError::validation(error.to_string()))?;
+            let action_ctx = current_ctx.with_override(&req_args.identity);
+            let target = resolve_target_for_session(
+                &server.state,
+                server.app.as_ref(),
+                session_id,
+                req_args.thread_id.clone(),
+                req_args.message_id.clone(),
+            )
+            .await?;
+            let lease_target = McpTargetRef {
+                thread_id: target.thread_id.clone(),
+                message_id: target.message_id.clone(),
+                model_id: target.model_id.clone(),
+            };
+            acquire_lease(&server.state, &action_ctx, &lease_target).await?;
+            req_args.thread_id = Some(target.thread_id.clone());
+            req_args.message_id = Some(target.message_id.clone());
+            match handlers::handle_commit_fem_verified_preview(
+                &server.state,
+                server.app.as_ref(),
+                req_args,
+                &action_ctx,
+            )
+            .await
+            {
+                Ok(response) => {
+                    let value = serde_json::to_value(&response).unwrap();
+                    let next_target = target_ref_from_value(&value).unwrap_or(lease_target.clone());
+                    move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target)
+                        .await?;
+                    emit_history_updated(server);
+                    Ok((value, Some(next_target)))
+                }
+                Err(error) => {
+                    let _ =
+                        release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
+                    Err(error)
+                }
+            }
         }
         "ecky_ast_patch_validate" => {
             let mut req_args: EckyAstPatchValidateRequest =
@@ -6315,6 +6726,7 @@ async fn dispatch_tool_call(
                     message_id: None,
                     title: None,
                     version_name: None,
+                    capture_guided_result: None,
                 });
             let action_ctx = current_ctx.with_override(&req_args.identity);
             let target = resolve_target_for_session(
@@ -7053,6 +7465,7 @@ mod tests {
             tagged_anchors: std::collections::BTreeMap::new(),
             feature_graph: None,
             correspondence_graph: None,
+            analysis_declarations: Vec::new(),
             warnings: Vec::new(),
             enrichment_state: crate::contracts::ManifestEnrichmentState {
                 status: crate::contracts::EnrichmentStatus::None,
@@ -8071,6 +8484,7 @@ mod tests {
             pending_count: 0,
             queued_count: 1,
             error_count: 0,
+            is_blank: false,
             status: crate::contracts::ThreadStatus::default(),
             finalized_at: None,
             pending_confirm: None,
@@ -8832,6 +9246,62 @@ mod tests {
     }
 
     #[test]
+    fn fem_mcp_surface_exposes_guarded_inspect_to_verified_commit_flow() {
+        let tools = tool_definitions_with_ast_enabled(true);
+        for name in [
+            "ecky_ast_get",
+            "fem_validate",
+            "fem_mesh_preview",
+            "fem_run",
+            "fem_result_get",
+            "verify_generated_model",
+            "fem_commit_verified_preview",
+        ] {
+            assert!(
+                tools
+                    .iter()
+                    .any(|tool| tool.get("name").and_then(Value::as_str) == Some(name)),
+                "missing MCP FEM flow stage {name}"
+            );
+        }
+        assert_eq!(
+            tool_capability_group("fem_commit_verified_preview"),
+            Some(CapabilityGroup::FemAnalysis)
+        );
+        let commit = tools
+            .iter()
+            .find(|tool| {
+                tool.get("name").and_then(Value::as_str) == Some("fem_commit_verified_preview")
+            })
+            .expect("FEM verified commit tool");
+        let description = commit["description"].as_str().unwrap();
+        for invariant in [
+            "decision-ready",
+            "source",
+            "OCCT analysis boundary",
+            "stale",
+            "red",
+            "corrupt",
+        ] {
+            assert!(
+                description.contains(invariant),
+                "missing invariant {invariant}"
+            );
+        }
+        let required = commit["inputSchema"]["required"]
+            .as_array()
+            .expect("required fields");
+        for name in [
+            "analysisName",
+            "analysisIdentityDigest",
+            "solutionDigest",
+            "resultDigest",
+        ] {
+            assert!(required.iter().any(|value| value.as_str() == Some(name)));
+        }
+    }
+
+    #[test]
     fn tool_descriptions_explain_step_artifact_truth() {
         let tools = tool_definitions();
         let target_meta = tools
@@ -8954,6 +9424,12 @@ mod tests {
         assert!(description.contains("green verified preview draft"));
         assert!(description.contains("Call verify_generated_model first"));
         assert!(description.contains("Do not commit capped red results"));
+        assert!(description.contains("no unresolved assumptions"));
+        assert!(
+            commit["inputSchema"]["properties"]["captureGuidedResult"]["properties"]
+                ["unresolvedAssumptions"]["maxItems"]
+                == 64
+        );
 
         let printability = tools
             .iter()
@@ -9420,6 +9896,7 @@ mod tests {
             tagged_anchors: std::collections::BTreeMap::new(),
             feature_graph: None,
             correspondence_graph: None,
+            analysis_declarations: Vec::new(),
             warnings: Vec::new(),
             enrichment_state: crate::contracts::ManifestEnrichmentState {
                 status: crate::contracts::EnrichmentStatus::None,
@@ -10214,6 +10691,20 @@ mod tests {
         assert!(structured.get("continuation").is_some());
         let continuation_str = serde_json::to_string(&structured["continuation"]).unwrap();
         assert!(!continuation_str.contains("row-1999"));
+    }
+
+    #[test]
+    fn full_thread_payload_above_one_megabyte_remains_transportable() {
+        let thread = json!({
+            "threadId": "thread-1",
+            "attachment": "x".repeat(3_100_000),
+        });
+
+        let response = mcp_tool_success(Some(json!(1)), &thread);
+        let result = response.result.expect("json-rpc result");
+
+        assert_ne!(result["isError"], true);
+        assert_eq!(result["structuredContent"]["data"], thread);
     }
 
     // ── 6.5 compatibility: tool-origin errors → MCP isError + raw details ──

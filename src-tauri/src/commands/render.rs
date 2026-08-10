@@ -1572,6 +1572,7 @@ mod tests {
             tagged_anchors: std::collections::BTreeMap::new(),
             feature_graph: None,
             correspondence_graph: None,
+            analysis_declarations: Vec::new(),
             warnings: vec![
                 "Imported FCStd bindings were accepted from heuristic proposals.".to_string(),
             ],

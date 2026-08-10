@@ -7,11 +7,11 @@ use csgrs::traits::CSG;
 use sha2::{Digest, Sha256};
 
 use crate::contracts::{
-    AppError, AppResult, ArtifactBundle, DesignParams, DocumentMetadata, EngineKind,
-    ExportArtifact, FeatureGraph, FeatureNode, FeatureOutputRef, GeometryBackend,
-    GeometryProvenance, GeometryRepresentation, ManifestBounds, ModelManifest, ModelSourceKind,
-    ParamValue, ParameterGroup, ParsedParamsResult, PartBinding, SelectionTarget, SourceLanguage,
-    SourceRef, ViewerAsset, ViewerAssetFormat, MODEL_RUNTIME_SCHEMA_VERSION,
+    AnalysisDeclarationBinding, AppError, AppResult, ArtifactBundle, DesignParams,
+    DocumentMetadata, EngineKind, ExportArtifact, FeatureGraph, FeatureNode, FeatureOutputRef,
+    GeometryBackend, GeometryProvenance, GeometryRepresentation, ManifestBounds, ModelManifest,
+    ModelSourceKind, ParamValue, ParameterGroup, ParsedParamsResult, PartBinding, SelectionTarget,
+    SourceLanguage, SourceRef, ViewerAsset, ViewerAssetFormat, MODEL_RUNTIME_SCHEMA_VERSION,
 };
 use crate::models::PathResolver;
 
@@ -933,6 +933,7 @@ fn runtime_core_operation_name(op: &CoreOperation) -> String {
         CoreOperation::Frame(CoreFrameOp::PathFrame) => "path-frame".to_string(),
         CoreOperation::Frame(CoreFrameOp::Place) => "place".to_string(),
         CoreOperation::Frame(CoreFrameOp::ClipBox) => "clip-box".to_string(),
+        CoreOperation::Frame(CoreFrameOp::ClipPlane) => "clip-plane".to_string(),
         CoreOperation::Meta(CoreMetaOp::Group) => "compound".to_string(),
         CoreOperation::Meta(CoreMetaOp::Comment) => "meta".to_string(),
         CoreOperation::Meta(CoreMetaOp::Annotate) => "build".to_string(),
@@ -1053,6 +1054,7 @@ fn render_prepared_parts(
     env: &BTreeMap<String, ParamValue>,
     app: &dyn PathResolver,
     ast_identity: Option<CoreAstIdentity>,
+    analysis_declarations: Vec<AnalysisDeclarationBinding>,
 ) -> AppResult<ArtifactBundle> {
     let exposes_mesh_literal = parts
         .iter()
@@ -1250,6 +1252,7 @@ fn render_prepared_parts(
         tagged_anchors: std::collections::BTreeMap::new(),
         feature_graph: Some(feature_graph),
         correspondence_graph: None,
+        analysis_declarations,
         warnings: mesh_warnings,
         enrichment_state: crate::contracts::ManifestEnrichmentState {
             status: crate::contracts::EnrichmentStatus::None,
@@ -1305,7 +1308,9 @@ fn ir_expr_contains_mesh_literal(expr: &IrExpr) -> bool {
             items
                 .first()
                 .and_then(IrExpr::as_symbol)
-                .is_some_and(|name| matches!(name, "mesh" | "polyhedron" | "heightfield"))
+                .is_some_and(|name| {
+                    matches!(name, "mesh" | "polyhedron" | "heightfield" | "import-stl")
+                })
                 || items.iter().any(ir_expr_contains_mesh_literal)
         }
         IrExpr::Number(_)
@@ -1420,6 +1425,7 @@ pub(crate) fn render_model_from_model(
         &env,
         app,
         None,
+        Vec::new(),
     )
 }
 
@@ -1454,6 +1460,18 @@ pub(crate) fn render_core_program(
         &env,
         app,
         Some(core_ast_identity(program)),
+        program
+            .analyses
+            .iter()
+            .map(|analysis| AnalysisDeclarationBinding {
+                analysis_id: analysis.name.clone(),
+                kind: "linearStatic".into(),
+                part_id: analysis.part.clone(),
+                element_kind: analysis.element.clone(),
+                source_start: analysis.span.map(|span| span.start),
+                source_end: analysis.span.map(|span| span.end),
+            })
+            .collect(),
     )
 }
 
@@ -1818,7 +1836,15 @@ mod tests {
             (model
               (params
                 (number width 10 :label "Width"))
-              (part body (box width 8 6)))
+              (part body (box width 8 6))
+              (analysis body-static
+                (linear-static :part body)
+                (material steel :young-modulus 210000MPa :poisson-ratio 0.3
+                  :density 7850kg-per-m3 :yield-strength 250MPa)
+                (volume-mesh :element tet4 :size 2mm)
+                (fixed :faces (tag mounting))
+                (surface-force :faces (tag load-pad) :total [0N 0N -10N])
+                (solve :method sparse-direct)))
         "#;
         let program = crate::ecky_scheme::compile_to_core_program(source).expect("program");
         let root = render_root();
@@ -1836,6 +1862,12 @@ mod tests {
         assert!(manifest.source_digest.is_some());
         assert!(manifest.core_digest.is_some());
         assert_eq!(manifest.ast_schema_version, Some(1));
+        assert_eq!(manifest.analysis_declarations.len(), 1);
+        assert_eq!(manifest.analysis_declarations[0].analysis_id, "body-static");
+        assert_eq!(manifest.analysis_declarations[0].part_id, "body");
+        assert_eq!(manifest.analysis_declarations[0].element_kind, "tet4");
+        assert!(manifest.analysis_declarations[0].source_start.is_some());
+        assert!(manifest.analysis_declarations[0].source_end.is_some());
         let indexed_path =
             Path::new(&bundle.viewer_assets[0].path).with_extension("indexed-mesh.json");
         let indexed = crate::ecky_ir::mesh_asset::IndexedMeshAsset::read_cache(&indexed_path)

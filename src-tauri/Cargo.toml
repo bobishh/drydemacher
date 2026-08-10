@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/ecky-render"]
+members = [".", "crates/ecky-render", "crates/ecky-fem"]
 resolver = "2"
 
 [package]
@@ -18,26 +18,32 @@ tauri = { version = "2.0", features = ["protocol-asset"] }
 tauri-plugin-shell = "2.0"
 tauri-plugin-dialog = "2.0"
 tauri-plugin-fs = "2.0"
+rfd = { version = "0.16.0", default-features = false, features = ["common-controls-v6"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ecky-render = { path = "crates/ecky-render" }
+ecky-fem = { path = "crates/ecky-fem" }
 specta = { version = "2.0.0-rc.22", features = ["derive"] }
 specta-typescript = "0.0.9"
 tauri-specta = { version = "2.0.0-rc.21", features = ["derive", "typescript"] }
 reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 uuid = { version = "1.0", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 rusqlite = { version = "0.38.0", features = ["bundled"] }
 sha2 = "0.10.9"
 base64 = "0.22.1"
 rand = "0.8"
+qrcode = "0.14"
+rcgen = { version = "0.12", features = ["x509-parser"] }
 regex = "1.12.3"
 rustpython-parser = "0.4.0"
 rustpython-ast = { version = "0.4.0", features = ["visitor"] }
 steel_core = { package = "steel-core", version = "0.8.2" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+mdns-sd = "0.13"
 usvg = "0.40"
 fontdb = "0.16.2"
 rustybuzz = "0.12.1"
@@ -62,6 +68,7 @@ windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 proptest = "1.6"
+tower = { version = "0.5", features = ["util"] }
 
 [lib]
 name = "ecky_cad_lib"

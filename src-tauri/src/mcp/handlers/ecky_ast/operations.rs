@@ -112,6 +112,12 @@ pub async fn handle_ecky_ast_get(
                     .iter()
                     .map(|part| format!("/parts/{}", path_segment(&part.key))),
             )
+            .chain(
+                program
+                    .analyses
+                    .iter()
+                    .map(|analysis| format!("/analyses/{}", path_segment(&analysis.name))),
+            )
             .collect::<Vec<_>>();
         let mut nodes = Vec::new();
         let mut truncated = false;
@@ -123,6 +129,13 @@ pub async fn handle_ecky_ast_get(
             &mut nodes,
         )?;
         truncated |= collect_core_part_clause_ast_nodes(
+            &program,
+            &source,
+            requested_path.as_deref(),
+            max_nodes,
+            &mut nodes,
+        )?;
+        truncated |= collect_core_analysis_ast_nodes(
             &program,
             &source,
             requested_path.as_deref(),

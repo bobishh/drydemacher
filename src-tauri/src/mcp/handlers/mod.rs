@@ -54,11 +54,11 @@ pub use component::{
 #[cfg(test)]
 use ecky_ast::{
     assert_source_ref_resolves_current_source, bounded_ecky_ast_source_slice,
-    core_node_child_paths, core_node_digest, edit_digest_for_ecky_path,
-    find_core_ast_node_in_program, replace_ecky_ast_source, source_span_for_ecky_path,
+    core_node_child_paths, edit_digest_for_ecky_path, find_core_ast_node_in_program,
     stable_node_key_for_program_path, ECKY_AST_SOURCE_MAX_BYTES,
 };
 use ecky_ast::{build_shape_graph_packet, collect_ecky_constraint_authoring_lints};
+pub(crate) use ecky_ast::{core_node_digest, replace_ecky_ast_source, source_span_for_ecky_path};
 pub use ecky_ast::{
     handle_ecky_ast_get, handle_ecky_ast_patch_validate, handle_ecky_ast_replace_and_render,
     handle_ecky_constraints_validate, handle_ecky_dependency_get, handle_ecky_selector_resolve,
@@ -105,8 +105,8 @@ pub use target_read::{handle_target_get, handle_target_macro_get, handle_target_
 pub use thread_read::{handle_agent_identity_set, handle_thread_get, handle_thread_messages_get};
 pub use verify::{handle_structural_verification_summary, handle_verify_generated_model};
 pub use version_write::{
-    handle_commit_preview_version, handle_saved_target_version, handle_thread_fork_from_target,
-    handle_version_restore,
+    handle_commit_fem_verified_preview, handle_commit_preview_version, handle_saved_target_version,
+    handle_thread_fork_from_target, handle_version_restore,
 };
 
 pub(super) const THREAD_MESSAGE_CONTENT_MAX_CHARS: usize = 240;

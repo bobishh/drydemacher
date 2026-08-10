@@ -332,6 +332,7 @@ pub async fn handle_project_folder_apply(
             message_id: Some(preview.message_id.clone()),
             title: req.title,
             version_name: req.version_name,
+            capture_guided_result: None,
         },
         ctx,
     ))
@@ -372,6 +373,8 @@ pub async fn handle_project_folder_apply(
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum ProjectFolderWatchEvent {
+    /// An external edit was observed and is waiting for the settle tick.
+    Detected { slug: String, thread_id: String },
     /// A settled external edit was applied and committed.
     Applied {
         slug: String,
@@ -382,7 +385,12 @@ pub enum ProjectFolderWatchEvent {
     },
     /// A settled external edit failed to compile/render/commit. Reported
     /// once per file digest; editing the file again retries.
-    ApplyFailed { slug: String, error: String },
+    ApplyFailed {
+        slug: String,
+        thread_id: String,
+        message_id: String,
+        error: String,
+    },
 }
 
 /// Polling watcher state. One instance lives in the app's watcher loop;
@@ -453,6 +461,10 @@ impl ProjectFolderWatcher {
             }
             // Two-tick settle before touching the compiler.
             if self.pending.insert(slug.clone(), digest.clone()) != Some(digest.clone()) {
+                events.push(ProjectFolderWatchEvent::Detected {
+                    slug,
+                    thread_id: manifest.thread_id,
+                });
                 continue;
             }
 
@@ -486,6 +498,8 @@ impl ProjectFolderWatcher {
                     self.failed.insert(slug.clone(), digest);
                     events.push(ProjectFolderWatchEvent::ApplyFailed {
                         slug,
+                        thread_id: manifest.thread_id,
+                        message_id: manifest.message_id,
                         error: err.to_string(),
                     });
                 }

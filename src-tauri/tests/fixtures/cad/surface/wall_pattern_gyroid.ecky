@@ -2,4 +2,4 @@
   (part gyroid
     (wall-pattern
       (:mode gyroid :depth 0.6 :uFreq 4 :vFreq 5 :phase 0.2)
-      (shell 1.0 (cylinder 14 30 40)))))
+      (shell 1.0 (cone 14 30 40)))))

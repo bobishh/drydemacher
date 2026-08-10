@@ -4,7 +4,17 @@ use crate::persist_thread_summary;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn get_history(conn: &rusqlite::Connection) -> AppResult<Vec<Thread>> {
-    db::get_all_threads(conn).map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))
+    let mut threads = db::get_all_threads(conn)
+        .map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))?;
+    for thread in &mut threads {
+        thread.is_blank = crate::thread_source_binding::thread_is_blank(
+            conn,
+            &thread.id,
+            !thread.is_blank,
+        )
+        .map_err(|err| AppError::persistence(err.to_string()))?;
+    }
+    Ok(threads)
 }
 
 pub fn get_thread(conn: &rusqlite::Connection, id: &str) -> AppResult<Thread> {
@@ -37,6 +47,8 @@ pub fn get_thread(conn: &rusqlite::Connection, id: &str) -> AppResult<Thread> {
         .iter()
         .filter(|m| m.role == MessageRole::Assistant && m.status == MessageStatus::Error)
         .count();
+    let is_blank = crate::thread_source_binding::thread_is_blank(conn, id, !messages.is_empty())
+        .map_err(|err| AppError::persistence(err.to_string()))?;
 
     let lifecycle = db::get_thread_lifecycle(conn, id)
         .map_err(|err| AppError::persistence(err.to_string()))?
@@ -57,6 +69,7 @@ pub fn get_thread(conn: &rusqlite::Connection, id: &str) -> AppResult<Thread> {
         pending_count,
         queued_count,
         error_count,
+        is_blank,
         status: lifecycle.status,
         finalized_at: lifecycle.finalized_at,
         pending_confirm: lifecycle.pending_confirm,
@@ -164,7 +177,17 @@ pub fn reopen_thread(conn: &rusqlite::Connection, thread_id: &str) -> AppResult<
 }
 
 pub fn get_inventory(conn: &rusqlite::Connection) -> AppResult<Vec<Thread>> {
-    db::get_inventory_threads(conn).map_err(|err| AppError::persistence(err.to_string()))
+    let mut threads = db::get_inventory_threads(conn)
+        .map_err(|err| AppError::persistence(err.to_string()))?;
+    for thread in &mut threads {
+        thread.is_blank = crate::thread_source_binding::thread_is_blank(
+            conn,
+            &thread.id,
+            !thread.is_blank,
+        )
+        .map_err(|err| AppError::persistence(err.to_string()))?;
+    }
+    Ok(threads)
 }
 
 pub fn get_thread_preview(
@@ -421,6 +444,50 @@ mod tests {
         let thread = get_thread(&conn, "thread-queued").unwrap();
         assert_eq!(thread.queued_count, 1);
         assert_eq!(thread.pending_count, 1);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn history_marks_only_message_free_blank_bound_source_as_reusable_blank() {
+        let db_path = std::env::temp_dir().join(format!(
+            "ecky-thread-blank-classification-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let conn = db::init_db(&db_path).unwrap();
+        db::create_or_update_thread(&conn, "blank", "Untitled design", 200, None).unwrap();
+        db::create_or_update_thread(&conn, "authored", "Authored source", 100, None).unwrap();
+
+        let root = std::env::temp_dir().join(format!(
+            "ecky-thread-blank-bindings-{}",
+            uuid::Uuid::new_v4()
+        ));
+        crate::thread_source_binding::upsert_binding_row(
+            &conn,
+            "blank",
+            &root.join("blank"),
+            &crate::thread_source_binding::source_digest(""),
+            None,
+        )
+        .unwrap();
+        crate::thread_source_binding::upsert_binding_row(
+            &conn,
+            "authored",
+            &root.join("authored"),
+            &crate::thread_source_binding::source_digest(
+                "(model (part head (sphere 20)))",
+            ),
+            None,
+        )
+        .unwrap();
+
+        let threads = get_history(&conn).unwrap();
+        assert!(threads.iter().find(|thread| thread.id == "blank").unwrap().is_blank);
+        assert!(!threads
+            .iter()
+            .find(|thread| thread.id == "authored")
+            .unwrap()
+            .is_blank);
 
         let _ = std::fs::remove_file(db_path);
     }

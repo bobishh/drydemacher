@@ -1937,6 +1937,7 @@ mod tests {
             tagged_anchors: std::collections::BTreeMap::new(),
             feature_graph: None,
             correspondence_graph: None,
+            analysis_declarations: Vec::new(),
             warnings: vec!["minor warning".to_string()],
             enrichment_state: ManifestEnrichmentState {
                 status: EnrichmentStatus::Accepted,

@@ -194,6 +194,7 @@ pub enum OcctOp {
     PathFrame,
     Place,
     ClipBox,
+    ClipPlane,
     LinearArray,
     RadialArray,
     GridArray,
@@ -295,6 +296,20 @@ pub struct OcctPlan {
     pub parts: Vec<OcctPartPlan>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OcctAuthoredShapeBinding {
+    pub part_key: String,
+    pub name: String,
+    pub slot: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OcctPlannedProgram {
+    pub plan: OcctPlan,
+    pub authored_shape_bindings: Vec<OcctAuthoredShapeBinding>,
+}
+
 pub fn plan_core_program(program: &CoreProgram) -> AuthoringResult<OcctPlan> {
     plan_core_program_with_params(program, &DesignParams::new())
 }
@@ -303,18 +318,34 @@ pub fn plan_core_program_with_params(
     program: &CoreProgram,
     parameters: &DesignParams,
 ) -> AuthoringResult<OcctPlan> {
+    Ok(plan_core_program_with_params_and_bindings(program, parameters)?.plan)
+}
+
+pub fn plan_core_program_with_params_and_bindings(
+    program: &CoreProgram,
+    parameters: &DesignParams,
+) -> AuthoringResult<OcctPlannedProgram> {
     let normalized =
         super::direct_occt_normalize::normalize_core_program_for_direct_occt(program, parameters)
             .map_err(|err| planner_dependency_error("normalization failed", err))?;
     let expanded = expand_core_program_for_direct_occt(&normalized, parameters)?;
-    plan_expanded_core_program(&expanded, parameters, true)
+    plan_expanded_core_program_with_bindings(&expanded, parameters, true)
 }
 
+#[cfg(test)]
 fn plan_expanded_core_program(
     program: &CoreProgram,
     parameters: &DesignParams,
     optimize_graph: bool,
 ) -> AuthoringResult<OcctPlan> {
+    Ok(plan_expanded_core_program_with_bindings(program, parameters, optimize_graph)?.plan)
+}
+
+fn plan_expanded_core_program_with_bindings(
+    program: &CoreProgram,
+    parameters: &DesignParams,
+    optimize_graph: bool,
+) -> AuthoringResult<OcctPlannedProgram> {
     crate::ecky_core_ir::verify_core_program(program).map_err(|err| {
         backend_error(
             AuthoringReason::Type,
@@ -345,13 +376,14 @@ fn plan_expanded_core_program(
         )
     })?;
 
-    let parts = program
+    let planned_parts = program
         .parts
         .iter()
         .map(|part| {
             let mut planner =
                 PartPlanner::new(&param_names, &scalar_env, max_node_id(&part.root) + 1);
             let root = planner.plan_node(&part.root)?;
+            let authored_shape_bindings = planner.authored_shape_bindings.clone();
             let commands = if optimize_graph {
                 optimize_part_commands(root, planner.commands).map_err(|err| {
                     backend_error(
@@ -362,18 +394,55 @@ fn plan_expanded_core_program(
             } else {
                 planner.commands
             };
-            Ok(OcctPartPlan {
-                key: part.key.clone(),
-                label: part.label.clone(),
-                root,
-                commands,
-            })
+            let retained_slots = commands
+                .iter()
+                .map(|command| command.output)
+                .chain(std::iter::once(root))
+                .collect::<std::collections::HashSet<_>>();
+            let bindings = authored_shape_bindings
+                .into_iter()
+                .filter(|(_, slot)| retained_slots.contains(slot))
+                .map(|(name, slot)| OcctAuthoredShapeBinding {
+                    part_key: part.key.clone(),
+                    name,
+                    slot: slot.0,
+                })
+                .collect::<Vec<_>>();
+            Ok((
+                OcctPartPlan {
+                    key: part.key.clone(),
+                    label: part.label.clone(),
+                    root,
+                    commands,
+                },
+                bindings,
+            ))
         })
         .collect::<AuthoringResult<Vec<_>>>()?;
 
-    Ok(OcctPlan {
-        parameters: occt_parameters,
-        parts,
+    let mut parts = Vec::with_capacity(planned_parts.len());
+    let mut authored_shape_bindings = Vec::new();
+    for (part, bindings) in planned_parts {
+        parts.push(part);
+        authored_shape_bindings.extend(bindings);
+    }
+
+    let mut binding_counts = BTreeMap::<(String, String), usize>::new();
+    for binding in &authored_shape_bindings {
+        *binding_counts
+            .entry((binding.part_key.clone(), binding.name.clone()))
+            .or_default() += 1;
+    }
+    authored_shape_bindings.retain(|binding| {
+        binding_counts.get(&(binding.part_key.clone(), binding.name.clone())) == Some(&1)
+    });
+
+    Ok(OcctPlannedProgram {
+        plan: OcctPlan {
+            parameters: occt_parameters,
+            parts,
+        },
+        authored_shape_bindings,
     })
 }
 
@@ -3813,6 +3882,7 @@ struct PartPlanner<'a> {
     locals: BTreeMap<String, OcctArg>,
     next_node_id: u64,
     commands: Vec<OcctCommand>,
+    authored_shape_bindings: Vec<(String, OcctSlot)>,
 }
 
 impl<'a> PartPlanner<'a> {
@@ -3829,6 +3899,7 @@ impl<'a> PartPlanner<'a> {
             locals: BTreeMap::new(),
             next_node_id,
             commands: Vec::new(),
+            authored_shape_bindings: Vec::new(),
         }
     }
 
@@ -3944,6 +4015,8 @@ impl<'a> PartPlanner<'a> {
             self.locals.insert(binding.name.clone(), value.clone());
             if let OcctArg::Ref(slot) = value {
                 self.node_refs.insert(binding.value.id.raw(), slot);
+                self.authored_shape_bindings
+                    .push((binding.name.clone(), slot));
             }
         }
         let root = self.plan_node(result);
@@ -4539,6 +4612,7 @@ fn occt_op(op: &CoreOperation) -> AuthoringResult<OcctOp> {
         CoreOperation::Frame(CoreFrameOp::PathFrame) => Ok(OcctOp::PathFrame),
         CoreOperation::Frame(CoreFrameOp::Place) => Ok(OcctOp::Place),
         CoreOperation::Frame(CoreFrameOp::ClipBox) => Ok(OcctOp::ClipBox),
+        CoreOperation::Frame(CoreFrameOp::ClipPlane) => Ok(OcctOp::ClipPlane),
         CoreOperation::Array(CoreArrayOp::LinearArray) => Ok(OcctOp::LinearArray),
         CoreOperation::Array(CoreArrayOp::RadialArray) => Ok(OcctOp::RadialArray),
         CoreOperation::Array(CoreArrayOp::GridArray) => Ok(OcctOp::GridArray),
@@ -4701,6 +4775,7 @@ fn operation_name(op: &CoreOperation) -> String {
         CoreOperation::Frame(CoreFrameOp::PathFrame) => "path-frame",
         CoreOperation::Frame(CoreFrameOp::Place) => "place",
         CoreOperation::Frame(CoreFrameOp::ClipBox) => "clip-box",
+        CoreOperation::Frame(CoreFrameOp::ClipPlane) => "clip-plane",
         CoreOperation::Meta(CoreMetaOp::Group) => "compound",
         CoreOperation::Meta(CoreMetaOp::Comment) => "comment",
         CoreOperation::Meta(CoreMetaOp::Annotate) => "annotate",
@@ -4759,7 +4834,8 @@ mod tests {
             "#,
         );
 
-        let plan = plan_core_program(&program).expect("plan");
+        let params = DesignParams::from([("length".to_string(), ParamValue::Number(24.0))]);
+        let plan = plan_core_program_with_params(&program, &params).expect("plan");
         let part = &plan.parts[0];
         // parametric-thread-feature 3.1 binary-cut: base plus three flattened
         // cutter tools becomes a stable-order chain of exactly three binary
@@ -6565,6 +6641,31 @@ mod tests {
     }
 
     #[test]
+    fn preserves_authored_shape_binding_slots_for_topology_provenance() {
+        let program = compile(
+            r#"(model
+              (part body (build
+                (shape base (box 20 10 8))
+                (shape bore (translate 10 5 0 (cylinder 2 8)))
+                (result (difference base bore)))))"#,
+        );
+
+        let planned = plan_core_program_with_params_and_bindings(&program, &DesignParams::new())
+            .expect("plan with authored shape bindings");
+
+        assert_eq!(planned.authored_shape_bindings.len(), 2);
+        assert_eq!(planned.authored_shape_bindings[0].part_key, "body");
+        assert_eq!(planned.authored_shape_bindings[0].name, "base");
+        assert_eq!(planned.authored_shape_bindings[1].name, "bore");
+        for binding in &planned.authored_shape_bindings {
+            assert!(planned.plan.parts[0]
+                .commands
+                .iter()
+                .any(|command| command.output.0 == binding.slot));
+        }
+    }
+
+    #[test]
     fn plans_svg_wire_soup_for_artwork_rejected_by_clean_path() {
         // Two disjoint filled squares = multiple outer loops, which the clean
         // profile path rejects. The tolerant wire-soup fallback must instead
@@ -6867,6 +6968,32 @@ mod tests {
         );
         assert!(ops.contains(&OcctOp::Sweep), "thread ridges: {ops:?}");
         assert!(ops.contains(&OcctOp::Difference), "wall cut: {ops:?}");
+    }
+
+    #[test]
+    fn plans_two_composable_clip_planes_for_direct_occt() {
+        let program = compile(
+            r#"
+            (model
+              (part head
+                (clip-plane
+                  (clip-plane
+                    (box 20 20 20)
+                    :origin (0 0 8)
+                    :normal (0 0 1)
+                    :keep "positive")
+                  :origin (14 0 0)
+                  :normal (-1 0 0)
+                  :keep "positive")))
+            "#,
+        );
+        let plan = plan_core_program(&program).expect("native two-plane crop plan");
+        let ops = plan.parts[0]
+            .commands
+            .iter()
+            .map(|command| command.op)
+            .collect::<Vec<_>>();
+        assert_eq!(ops, vec![OcctOp::Box, OcctOp::ClipPlane, OcctOp::ClipPlane]);
     }
 
     #[test]

@@ -12,20 +12,22 @@ use sha2::{Digest, Sha256};
 use super::direct_occt::{OcctArg, OcctOp};
 use super::direct_occt_sdk::{DirectOcctSdkLayout, NativeExportOutcome};
 use crate::contracts::{
-    AppError, AppResult, ArtifactBundle, DesignParams, DocumentMetadata, EngineKind,
-    EnrichmentStatus, ExportArtifact, GeometryBackend, GeometryProvenance, GeometryRepresentation,
-    ManifestBounds, ManifestEnrichmentState, ModelManifest, ModelSourceKind, ParameterGroup,
-    PartBinding, SelectionTarget, SelectionTargetKind, SourceLanguage, ViewerEdgePoint,
-    ViewerEdgeTarget, ViewerFaceTarget, MODEL_RUNTIME_SCHEMA_VERSION,
+    AnalysisDeclarationBinding, AppError, AppResult, ArtifactBundle, DesignParams,
+    DocumentMetadata, EngineKind, EnrichmentStatus, ExportArtifact, GeometryBackend,
+    GeometryProvenance, GeometryRepresentation, ManifestBounds, ManifestEnrichmentState,
+    ModelManifest, ModelSourceKind, ParameterGroup, PartBinding, SelectionTarget,
+    SelectionTargetKind, SourceLanguage, ViewerEdgePoint, ViewerEdgeTarget, ViewerFaceTarget,
+    MODEL_RUNTIME_SCHEMA_VERSION,
 };
 use crate::ecky_core_ir::{CorePart, CoreProgram, CoreSelectorTagDecl};
 use crate::ecky_ir::mesh_asset::{IndexedMeshAsset, MeshAssetSource};
 use crate::models::PathResolver;
 use crate::topology_target_ids::{
     durable_edge_target_id, durable_edge_target_id_for_stable_node_key, durable_face_target_id,
-    durable_face_target_id_for_stable_node_key, preferred_public_topology_target_id,
-    resolve_tagged_anchors, stable_edge_target_id, stable_face_target_id, topology_target_aliases,
-    viewer_target_alias_ids,
+    durable_face_target_id_for_stable_node_key, durable_vertex_target_id,
+    durable_vertex_target_id_for_stable_node_key, preferred_public_topology_target_id,
+    resolve_tagged_anchors, stable_edge_target_id, stable_face_target_id, stable_vertex_target_id,
+    topology_target_aliases, viewer_target_alias_ids,
 };
 
 const SOURCE_FILE_NAME: &str = "source.ecky";
@@ -91,9 +93,26 @@ struct DirectOcctTopologyPart {
     #[serde(default)]
     label: String,
     #[serde(default)]
+    vertices: Vec<DirectOcctTopologyVertex>,
+    #[serde(default)]
     edges: Vec<DirectOcctTopologyEdge>,
     #[serde(default)]
     faces: Vec<DirectOcctTopologyFace>,
+    #[serde(default)]
+    source_geometry_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DirectOcctTopologyVertex {
+    #[serde(default)]
+    target_id: Option<String>,
+    #[serde(default)]
+    vertex_index: Option<u32>,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    point: Option<DirectOcctTopologyPoint>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -299,6 +318,18 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
         &part_asset_paths,
         &part_bounds,
     )?;
+    manifest.analysis_declarations = program
+        .analyses
+        .iter()
+        .map(|analysis| AnalysisDeclarationBinding {
+            analysis_id: analysis.name.clone(),
+            kind: "linearStatic".to_string(),
+            part_id: analysis.part.clone(),
+            element_kind: analysis.element.clone(),
+            source_start: analysis.span.map(|span| span.start),
+            source_end: analysis.span.map(|span| span.end),
+        })
+        .collect();
     manifest.geometry_provenance = Some(geometry_provenance.clone());
     let thread_warnings = super::direct_occt::thread_printability_warnings(&program, parameters)?;
     manifest
@@ -716,6 +747,7 @@ pub(crate) fn build_direct_occt_manifest_with_stable_node_keys(
         tagged_anchors,
         feature_graph: None,
         correspondence_graph: None,
+        analysis_declarations: Vec::new(),
         warnings: Vec::new(),
         enrichment_state: ManifestEnrichmentState {
             status: EnrichmentStatus::None,
@@ -1087,6 +1119,399 @@ fn read_direct_occt_topology_report(path: &Path) -> AppResult<DirectOcctTopology
         .map_err(|err| AppError::validation(format!("Direct OCCT topology report invalid: {err}")))
 }
 
+pub(crate) fn direct_occt_part_source_geometry_digests(
+    topology_path: &Path,
+) -> AppResult<std::collections::BTreeMap<String, String>> {
+    let report = read_direct_occt_topology_report(topology_path)?;
+    let mut digests = std::collections::BTreeMap::new();
+    for part in report.parts {
+        let part_id = part.part_id.trim();
+        let digest = part
+            .source_geometry_digest
+            .as_deref()
+            .unwrap_or_default()
+            .trim();
+        if part_id.is_empty() || !digest.starts_with("sha256:") || digest.len() <= "sha256:".len() {
+            return Err(AppError::validation(
+                "Direct OCCT topology report part source geometry identity is missing or invalid.",
+            ));
+        }
+        if digests
+            .insert(part_id.to_string(), digest.to_string())
+            .is_some()
+        {
+            return Err(AppError::validation(format!(
+                "Direct OCCT topology report repeats partId '{part_id}'."
+            )));
+        }
+    }
+    if digests.is_empty() {
+        return Err(AppError::validation(
+            "Direct OCCT topology report has no analytic BRep parts.",
+        ));
+    }
+    Ok(digests)
+}
+
+pub(crate) fn validate_direct_occt_guided_expected_solids(topology_path: &Path) -> AppResult<()> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SolidReport {
+        #[serde(default)]
+        parts: Vec<SolidPart>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SolidPart {
+        part_id: String,
+        solid_count: Option<u64>,
+        brep_valid: Option<bool>,
+    }
+
+    let contents = fs::read_to_string(topology_path).map_err(|error| {
+        AppError::persistence(format!(
+            "Direct OCCT topology report could not be read '{}': {error}",
+            topology_path.display()
+        ))
+    })?;
+    let report: SolidReport = serde_json::from_str(&contents).map_err(|error| {
+        AppError::validation(format!(
+            "Direct OCCT solid-validity report invalid: {error}"
+        ))
+    })?;
+    if report.parts.is_empty() {
+        return Err(AppError::validation(
+            "Guided reconstruction exact preview has no parts.",
+        ));
+    }
+    for part in report.parts {
+        let part_id = part.part_id.trim();
+        if part_id.is_empty() {
+            return Err(AppError::validation(
+                "Guided reconstruction exact preview has empty part identity.",
+            ));
+        }
+        let (Some(solid_count), Some(brep_valid)) = (part.solid_count, part.brep_valid) else {
+            return Err(AppError::validation(format!(
+                "Guided reconstruction part '{part_id}' has no solid-validity proof from exact OCCT runtime."
+            )));
+        };
+        if solid_count == 0 {
+            return Err(AppError::validation(format!(
+                "Guided reconstruction part '{part_id}' contains no exact solid; open/surface-only result cannot be committed."
+            )));
+        }
+        if !brep_valid {
+            return Err(AppError::validation(format!(
+                "Guided reconstruction part '{part_id}' failed exact BRep validity check."
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn direct_occt_exact_target_geometries(
+    topology_path: &Path,
+) -> AppResult<
+    std::collections::BTreeMap<String, crate::capture_brep_validation::ExactBrepTargetGeometry>,
+> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ExactReport {
+        #[serde(default)]
+        parts: Vec<ExactPart>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ExactPart {
+        #[serde(default)]
+        vertices: Vec<ExactTarget>,
+        #[serde(default)]
+        edges: Vec<ExactTarget>,
+        #[serde(default)]
+        faces: Vec<ExactTarget>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ExactTarget {
+        #[serde(default)]
+        target_id: String,
+        #[serde(default)]
+        exact_geometry: Option<RawExactGeometry>,
+    }
+    #[derive(Deserialize)]
+    #[serde(
+        tag = "kind",
+        rename_all = "camelCase",
+        rename_all_fields = "camelCase"
+    )]
+    enum RawExactGeometry {
+        Vertex {
+            point: DirectOcctTopologyPoint,
+        },
+        LineEdge {
+            start: DirectOcctTopologyPoint,
+            end: DirectOcctTopologyPoint,
+        },
+        CircleEdge {
+            center: DirectOcctTopologyPoint,
+            normal: [f64; 3],
+            x_direction: [f64; 3],
+            radius: f64,
+            first_parameter: f64,
+            last_parameter: f64,
+        },
+        PlaneFace {
+            origin: DirectOcctTopologyPoint,
+            normal: [f64; 3],
+            #[serde(default)]
+            boundary_edge_target_ids: Vec<Vec<String>>,
+        },
+        CylinderFace {
+            axis_origin: DirectOcctTopologyPoint,
+            axis_direction: [f64; 3],
+            radius: f64,
+            #[serde(default)]
+            boundary_edge_target_ids: Vec<Vec<String>>,
+        },
+    }
+    fn point(value: DirectOcctTopologyPoint) -> [f64; 3] {
+        [value.x, value.y, value.z]
+    }
+    let contents = fs::read_to_string(topology_path).map_err(|error| {
+        AppError::persistence(format!(
+            "Direct OCCT topology report could not be read '{}': {error}",
+            topology_path.display()
+        ))
+    })?;
+    let report: ExactReport = serde_json::from_str(&contents).map_err(|error| {
+        AppError::validation(format!(
+            "Direct OCCT exact topology report invalid: {error}"
+        ))
+    })?;
+    let mut result = std::collections::BTreeMap::new();
+    for target in report.parts.into_iter().flat_map(|part| {
+        part.vertices
+            .into_iter()
+            .chain(part.edges)
+            .chain(part.faces)
+    }) {
+        let Some(raw) = target.exact_geometry else {
+            continue;
+        };
+        let target_id = target.target_id.trim();
+        if target_id.is_empty() {
+            return Err(AppError::validation(
+                "Direct OCCT exact target geometry has no targetId.",
+            ));
+        }
+        let geometry = match raw {
+            RawExactGeometry::Vertex { point: value } => {
+                crate::capture_brep_validation::ExactBrepTargetGeometry::Vertex {
+                    point: point(value),
+                }
+            }
+            RawExactGeometry::LineEdge { start, end } => {
+                crate::capture_brep_validation::ExactBrepTargetGeometry::LineEdge {
+                    start: point(start),
+                    end: point(end),
+                }
+            }
+            RawExactGeometry::CircleEdge {
+                center,
+                normal,
+                x_direction,
+                radius,
+                first_parameter,
+                last_parameter,
+            } => crate::capture_brep_validation::ExactBrepTargetGeometry::CircleEdge {
+                center: point(center),
+                normal,
+                x_direction,
+                radius,
+                first_parameter,
+                last_parameter,
+            },
+            RawExactGeometry::PlaneFace {
+                origin,
+                normal,
+                boundary_edge_target_ids,
+            } => crate::capture_brep_validation::ExactBrepTargetGeometry::PlaneFace {
+                origin: point(origin),
+                normal,
+                boundary_edge_target_ids,
+            },
+            RawExactGeometry::CylinderFace {
+                axis_origin,
+                axis_direction,
+                radius,
+                boundary_edge_target_ids,
+            } => crate::capture_brep_validation::ExactBrepTargetGeometry::CylinderFace {
+                axis_origin: point(axis_origin),
+                axis_direction,
+                radius,
+                boundary_edge_target_ids,
+            },
+        };
+        if result.insert(target_id.to_string(), geometry).is_some() {
+            return Err(AppError::validation(format!(
+                "Direct OCCT exact topology repeats targetId '{target_id}'."
+            )));
+        }
+    }
+    Ok(result)
+}
+
+pub(crate) fn direct_occt_authored_binding_target_ids(
+    topology_path: &Path,
+) -> AppResult<std::collections::BTreeMap<(String, String), Vec<String>>> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct BindingReport {
+        #[serde(default)]
+        parts: Vec<BindingPart>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct BindingPart {
+        part_id: String,
+        #[serde(default)]
+        vertices: Vec<BindingTarget>,
+        #[serde(default)]
+        edges: Vec<BindingTarget>,
+        #[serde(default)]
+        faces: Vec<BindingTarget>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct BindingTarget {
+        target_id: String,
+        #[serde(default)]
+        authored_bindings: Vec<String>,
+    }
+
+    let contents = fs::read_to_string(topology_path).map_err(|error| {
+        AppError::persistence(format!(
+            "Direct OCCT topology report could not be read '{}': {error}",
+            topology_path.display()
+        ))
+    })?;
+    let report: BindingReport = serde_json::from_str(&contents).map_err(|error| {
+        AppError::validation(format!(
+            "Direct OCCT authored binding topology report invalid: {error}"
+        ))
+    })?;
+    let mut result = std::collections::BTreeMap::<(String, String), Vec<String>>::new();
+    for part in report.parts {
+        let part_id = part.part_id.trim();
+        if part_id.is_empty() {
+            return Err(AppError::validation(
+                "Direct OCCT authored binding topology has empty partId.",
+            ));
+        }
+        for target in part
+            .vertices
+            .into_iter()
+            .chain(part.edges)
+            .chain(part.faces)
+        {
+            let target_id = target.target_id.trim();
+            if target_id.is_empty() && !target.authored_bindings.is_empty() {
+                return Err(AppError::validation(
+                    "Direct OCCT authored binding target has empty targetId.",
+                ));
+            }
+            for binding in target.authored_bindings {
+                let binding = binding.trim();
+                if binding.is_empty() {
+                    return Err(AppError::validation(
+                        "Direct OCCT authored binding name is empty.",
+                    ));
+                }
+                let targets = result
+                    .entry((part_id.to_string(), binding.to_string()))
+                    .or_default();
+                if !targets.iter().any(|existing| existing == target_id) {
+                    targets.push(target_id.to_string());
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+pub(crate) fn direct_occt_authored_binding_ordered_edge_target_ids(
+    topology_path: &Path,
+) -> AppResult<std::collections::BTreeMap<(String, String), Vec<String>>> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct OrderedBindingReport {
+        #[serde(default)]
+        parts: Vec<OrderedBindingPart>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct OrderedBindingPart {
+        part_id: String,
+        #[serde(default)]
+        authored_binding_edge_order: Vec<OrderedBindingEntry>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct OrderedBindingEntry {
+        name: String,
+        target_ids: Vec<String>,
+    }
+
+    let contents = fs::read_to_string(topology_path).map_err(|error| {
+        AppError::persistence(format!(
+            "Direct OCCT topology report could not be read '{}': {error}",
+            topology_path.display()
+        ))
+    })?;
+    let report: OrderedBindingReport = serde_json::from_str(&contents).map_err(|error| {
+        AppError::validation(format!(
+            "Direct OCCT authored binding edge order report invalid: {error}"
+        ))
+    })?;
+    let mut result = std::collections::BTreeMap::new();
+    for part in report.parts {
+        let part_id = part.part_id.trim();
+        if part_id.is_empty() {
+            return Err(AppError::validation(
+                "Direct OCCT authored binding edge order has empty partId.",
+            ));
+        }
+        for entry in part.authored_binding_edge_order {
+            let name = entry.name.trim();
+            if name.is_empty() || entry.target_ids.is_empty() {
+                return Err(AppError::validation(
+                    "Direct OCCT authored binding edge order is empty.",
+                ));
+            }
+            let mut target_ids = Vec::with_capacity(entry.target_ids.len());
+            for target_id in entry.target_ids {
+                let target_id = target_id.trim();
+                if target_id.is_empty() || target_ids.iter().any(|existing| existing == target_id) {
+                    return Err(AppError::validation(format!(
+                        "Direct OCCT authored binding '{name}' edge order contains empty or duplicate target identity."
+                    )));
+                }
+                target_ids.push(target_id.to_string());
+            }
+            if result
+                .insert((part_id.to_string(), name.to_string()), target_ids)
+                .is_some()
+            {
+                return Err(AppError::validation(format!(
+                    "Direct OCCT authored binding edge order repeats '{part_id}/{name}'."
+                )));
+            }
+        }
+    }
+    Ok(result)
+}
+
 fn direct_occt_selection_targets(
     part_bindings: &[PartBinding],
     topology_report: Option<&DirectOcctTopologyReport>,
@@ -1116,6 +1541,71 @@ fn direct_occt_selection_targets(
             .unwrap_or_else(|| part_binding.part_id.clone());
         let topology_parameter_keys =
             direct_occt_topology_target_parameter_keys(&part_binding.parameter_keys);
+
+        for vertex in topology_part
+            .vertices
+            .iter()
+            .filter(|vertex| vertex.point.is_some())
+        {
+            let canonical_target_id = direct_occt_vertex_target_id(part_id, vertex);
+            if !seen_canonical_target_ids.insert(canonical_target_id.clone()) {
+                continue;
+            }
+            let stable_target_id = stable_vertex_target_id(&canonical_target_id);
+            let preferred_public_target_id = if stable_target_id.is_empty() {
+                canonical_target_id.clone()
+            } else {
+                stable_target_id
+            };
+            let mut public_target_id =
+                if seen_public_target_ids.insert(preferred_public_target_id.clone()) {
+                    preferred_public_target_id
+                } else {
+                    canonical_target_id.clone()
+                };
+            if !seen_manifest_ids.insert(public_target_id.clone()) {
+                if public_target_id != canonical_target_id
+                    && seen_manifest_ids.insert(canonical_target_id.clone())
+                {
+                    public_target_id = canonical_target_id.clone();
+                } else {
+                    continue;
+                }
+            }
+            let durable_target_id = direct_occt_durable_vertex_target_id(
+                part_id,
+                part_stable_node_keys.get(part_id).map(String::as_str),
+                part_root_node_ids.get(part_id).copied(),
+                &public_target_id,
+            )
+            .filter(|durable_target_id| seen_manifest_ids.insert(durable_target_id.clone()));
+            let canonical_target_id_value = if canonical_target_id != public_target_id
+                && seen_manifest_ids.insert(canonical_target_id.clone())
+            {
+                Some(canonical_target_id.clone())
+            } else {
+                None
+            };
+            selection_targets.push(SelectionTarget {
+                target_id: Some(public_target_id.clone()),
+                durable_target_id,
+                canonical_target_id: canonical_target_id_value.clone(),
+                alias_ids: canonical_target_id_value
+                    .clone()
+                    .map(|canonical_target_id| {
+                        topology_target_aliases(&public_target_id, canonical_target_id)
+                    })
+                    .unwrap_or_default(),
+                part_id: part_binding.part_id.clone(),
+                viewer_node_id: viewer_node_id.clone(),
+                label: direct_occt_vertex_label(topology_part, vertex),
+                kind: SelectionTargetKind::Vertex,
+                editable: false,
+                parameter_keys: Vec::new(),
+                primitive_ids: Vec::new(),
+                view_ids: Vec::new(),
+            });
+        }
 
         for edge in topology_part
             .edges
@@ -1509,6 +1999,60 @@ fn direct_occt_edge_target_id(part_id: &str, edge: &DirectOcctTopologyEdge) -> S
         Some(signature) => format!("{part_id}:edge:{edge_index}:{signature}"),
         None => format!("{part_id}:edge:{edge_index}"),
     }
+}
+
+fn direct_occt_vertex_target_id(part_id: &str, vertex: &DirectOcctTopologyVertex) -> String {
+    let explicit_target_id = vertex.target_id.as_deref().unwrap_or_default().trim();
+    if !explicit_target_id.is_empty() {
+        return explicit_target_id.to_string();
+    }
+    let vertex_index = vertex
+        .vertex_index
+        .map(|index| index.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    match vertex.point.as_ref() {
+        Some(point) => format!(
+            "{part_id}:vertex:{vertex_index}:{}",
+            direct_occt_point_signature(point)
+        ),
+        None => format!("{part_id}:vertex:{vertex_index}"),
+    }
+}
+
+fn direct_occt_durable_vertex_target_id(
+    part_id: &str,
+    stable_node_key: Option<&str>,
+    root_node_id: Option<u64>,
+    target_id: &str,
+) -> Option<String> {
+    stable_node_key
+        .and_then(|stable_node_key| {
+            durable_vertex_target_id_for_stable_node_key(part_id, stable_node_key, target_id)
+        })
+        .or_else(|| {
+            root_node_id
+                .and_then(|root_node_id| durable_vertex_target_id(part_id, root_node_id, target_id))
+        })
+}
+
+fn direct_occt_vertex_label(
+    topology_part: &DirectOcctTopologyPart,
+    vertex: &DirectOcctTopologyVertex,
+) -> String {
+    let label = vertex.label.trim();
+    if !label.is_empty() {
+        return label.to_string();
+    }
+    let part_label = if topology_part.label.trim().is_empty() {
+        topology_part.part_id.trim()
+    } else {
+        topology_part.label.trim()
+    };
+    let vertex_index = vertex
+        .vertex_index
+        .map(|index| index.saturating_add(1).to_string())
+        .unwrap_or_else(|| "?".to_string());
+    format!("{part_label}.Vertex{vertex_index}")
 }
 
 fn direct_occt_stable_edge_target_id(target_id: &str) -> String {
@@ -3116,6 +3660,7 @@ echo "fake runner plan: $plan"
             parts: vec![DirectOcctTopologyPart {
                 part_id: "body".to_string(),
                 label: "Body".to_string(),
+                vertices: Vec::new(),
                 edges: Vec::new(),
                 faces: vec![DirectOcctTopologyFace {
                     target_id: None,
@@ -3130,6 +3675,7 @@ echo "fake runner plan: $plan"
                     normal: Some([0.0, 0.0, 1.0]),
                     area: Some(200.0),
                 }],
+                source_geometry_digest: None,
             }],
         };
 
@@ -3185,6 +3731,169 @@ echo "fake runner plan: $plan"
         assert_eq!(bundle.face_targets[0].center.x, 5.0);
         assert_eq!(bundle.face_targets[0].normal, Some([0.0, 0.0, 1.0]));
         assert_eq!(bundle.face_targets[0].area, Some(200.0));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn direct_occt_runtime_maps_exact_vertices_to_vertex_selection_targets() {
+        let root = temp_root("direct-occt-vertex-topology");
+        let source_path = root.join(SOURCE_FILE_NAME);
+        fs::create_dir_all(&root).expect("root");
+        fs::write(&source_path, "(model (part body (box 10 20 30)))").expect("source");
+        let topology = DirectOcctTopologyReport {
+            parts: vec![DirectOcctTopologyPart {
+                part_id: "body".to_string(),
+                label: "Body".to_string(),
+                vertices: vec![DirectOcctTopologyVertex {
+                    target_id: Some("body:vertex:0:0-0-0".to_string()),
+                    vertex_index: Some(0),
+                    label: "Body.Vertex1".to_string(),
+                    point: Some(DirectOcctTopologyPoint {
+                        x: 0.0,
+                        y: 0.0,
+                        z: 0.0,
+                    }),
+                }],
+                edges: Vec::new(),
+                faces: Vec::new(),
+                source_geometry_digest: Some("sha256:geometry".to_string()),
+            }],
+        };
+
+        let manifest = build_direct_occt_manifest(
+            "model-1",
+            &source_path,
+            &[("body".to_string(), "Body".to_string())],
+            &[],
+            &[],
+            Some(&topology),
+            &HashMap::new(),
+        )
+        .expect("manifest");
+
+        let vertex = manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == SelectionTargetKind::Vertex)
+            .expect("vertex target");
+        assert_eq!(vertex.part_id, "body");
+        assert_eq!(vertex.target_id.as_deref(), Some("body:vertex:0-0-0"));
+        assert_eq!(
+            vertex.canonical_target_id.as_deref(),
+            Some("body:vertex:0:0-0-0")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn direct_occt_part_geometry_digest_reader_is_exact_and_rejects_missing_identity() {
+        let root = temp_root("direct-occt-part-geometry-digests");
+        fs::create_dir_all(&root).expect("root");
+        let topology_path = root.join(TOPOLOGY_FILE_NAME);
+        fs::write(
+            &topology_path,
+            r#"{"schemaVersion":1,"parts":[{"partId":"body","sourceGeometryDigest":"sha256:body","authoredBindingEdgeOrder":[{"name":"outline","targetIds":["body:edge:0:0-0-0_1-0-0"]}],"vertices":[{"targetId":"body:vertex:0:0-0-0","authoredBindings":["base"],"exactGeometry":{"kind":"vertex","point":{"x":0,"y":0,"z":0}}}],"edges":[{"targetId":"body:edge:0:0-0-0_1-0-0","authoredBindings":["base"],"exactGeometry":{"kind":"lineEdge","start":{"x":0,"y":0,"z":0},"end":{"x":1,"y":0,"z":0}}}],"faces":[{"targetId":"body:face:0:0-0-0:1","authoredBindings":["base","top"],"exactGeometry":{"kind":"planeFace","origin":{"x":0,"y":0,"z":0},"normal":[0,0,1]}}]}]}"#,
+        )
+        .expect("topology");
+        assert_eq!(
+            direct_occt_part_source_geometry_digests(&topology_path).expect("digests"),
+            std::collections::BTreeMap::from([("body".into(), "sha256:body".into())])
+        );
+        let exact = direct_occt_exact_target_geometries(&topology_path).expect("exact geometry");
+        assert_eq!(
+            exact.get("body:vertex:0:0-0-0"),
+            Some(
+                &crate::capture_brep_validation::ExactBrepTargetGeometry::Vertex {
+                    point: [0.0, 0.0, 0.0]
+                }
+            )
+        );
+        assert!(matches!(
+            exact.get("body:edge:0:0-0-0_1-0-0"),
+            Some(crate::capture_brep_validation::ExactBrepTargetGeometry::LineEdge { .. })
+        ));
+        assert!(matches!(
+            exact.get("body:face:0:0-0-0:1"),
+            Some(crate::capture_brep_validation::ExactBrepTargetGeometry::PlaneFace { .. })
+        ));
+        let bindings =
+            direct_occt_authored_binding_target_ids(&topology_path).expect("authored bindings");
+        assert_eq!(
+            bindings.get(&("body".into(), "base".into())),
+            Some(&vec![
+                "body:vertex:0:0-0-0".into(),
+                "body:edge:0:0-0-0_1-0-0".into(),
+                "body:face:0:0-0-0:1".into(),
+            ])
+        );
+        assert_eq!(
+            bindings.get(&("body".into(), "top".into())),
+            Some(&vec!["body:face:0:0-0-0:1".into()])
+        );
+        let ordered = direct_occt_authored_binding_ordered_edge_target_ids(&topology_path)
+            .expect("authored binding edge order");
+        assert_eq!(
+            ordered.get(&("body".into(), "outline".into())),
+            Some(&vec!["body:edge:0:0-0-0_1-0-0".into()])
+        );
+
+        fs::write(
+            &topology_path,
+            r#"{"schemaVersion":1,"parts":[{"partId":"body","vertices":[],"edges":[],"faces":[]}]}"#,
+        )
+        .expect("topology");
+        let error = direct_occt_part_source_geometry_digests(&topology_path)
+            .expect_err("missing digest")
+            .message;
+        assert!(error.contains("identity is missing or invalid"), "{error}");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn guided_expected_solid_gate_rejects_open_invalid_or_unproven_parts() {
+        let root = temp_root("direct-occt-guided-solid-validity");
+        fs::create_dir_all(&root).expect("root");
+        let topology_path = root.join(TOPOLOGY_FILE_NAME);
+
+        fs::write(
+            &topology_path,
+            r#"{"schemaVersion":1,"parts":[{"partId":"body","solidCount":0,"brepValid":true}]}"#,
+        )
+        .expect("open topology");
+        let error = validate_direct_occt_guided_expected_solids(&topology_path)
+            .expect_err("surface-only result")
+            .message;
+        assert!(error.contains("no exact solid"), "{error}");
+
+        fs::write(
+            &topology_path,
+            r#"{"schemaVersion":1,"parts":[{"partId":"body","solidCount":1,"brepValid":false}]}"#,
+        )
+        .expect("invalid topology");
+        let error = validate_direct_occt_guided_expected_solids(&topology_path)
+            .expect_err("invalid solid")
+            .message;
+        assert!(error.contains("failed exact BRep validity"), "{error}");
+
+        fs::write(
+            &topology_path,
+            r#"{"schemaVersion":1,"parts":[{"partId":"body"}]}"#,
+        )
+        .expect("unproven topology");
+        let error = validate_direct_occt_guided_expected_solids(&topology_path)
+            .expect_err("missing proof")
+            .message;
+        assert!(error.contains("no solid-validity proof"), "{error}");
+
+        fs::write(
+            &topology_path,
+            r#"{"schemaVersion":1,"parts":[{"partId":"body","solidCount":2,"brepValid":true}]}"#,
+        )
+        .expect("valid topology");
+        validate_direct_occt_guided_expected_solids(&topology_path).expect("valid solids");
 
         let _ = fs::remove_dir_all(root);
     }
@@ -3272,6 +3981,8 @@ echo "fake runner plan: $plan"
             parts: vec![DirectOcctTopologyPart {
                 part_id: "body".to_string(),
                 label: "Body".to_string(),
+                vertices: Vec::new(),
+                source_geometry_digest: None,
                 edges: Vec::new(),
                 faces: vec![DirectOcctTopologyFace {
                     target_id: None,
@@ -3326,6 +4037,59 @@ echo "fake runner plan: $plan"
     }
 
     #[test]
+    fn direct_occt_manifest_records_exact_vertex_tagged_anchor_ids() {
+        let root = temp_root("direct-occt-tagged-vertex-anchor");
+        let source_path = root.join(SOURCE_FILE_NAME);
+        fs::create_dir_all(&root).expect("root");
+        fs::write(&source_path, "(model (part body (box 10 20 30)))").expect("source");
+        let topology = DirectOcctTopologyReport {
+            parts: vec![DirectOcctTopologyPart {
+                part_id: "body".to_string(),
+                label: "Body".to_string(),
+                vertices: vec![DirectOcctTopologyVertex {
+                    target_id: Some("body:vertex:0:0-0-0".to_string()),
+                    vertex_index: Some(0),
+                    label: "Body.Vertex1".to_string(),
+                    point: Some(DirectOcctTopologyPoint {
+                        x: 0.0,
+                        y: 0.0,
+                        z: 0.0,
+                    }),
+                }],
+                edges: Vec::new(),
+                faces: Vec::new(),
+                source_geometry_digest: Some("sha256:body".to_string()),
+            }],
+        };
+        let manifest = build_direct_occt_manifest(
+            "model-1",
+            &source_path,
+            &[("body".to_string(), "Body".to_string())],
+            &[],
+            &[CoreSelectorTagDecl {
+                name: "datum_origin".to_string(),
+                kind: CoreSelectorTagKind::Vertex,
+                authored_selector: "target-id:body:vertex:0:0-0-0".to_string(),
+                target: "body".to_string(),
+            }],
+            Some(&topology),
+            &HashMap::from([(String::from("body"), 42_u64)]),
+        )
+        .expect("manifest");
+
+        let anchor = manifest
+            .tagged_anchors
+            .get("datum_origin")
+            .expect("vertex anchor");
+        assert_eq!(anchor.kind, TaggedAnchorKind::Vertex);
+        assert_eq!(anchor.target_ids, vec!["body:vertex:0-0-0"]);
+        assert_eq!(anchor.durable_target_ids, vec!["body:node:42:vertex:0-0-0"]);
+        assert_eq!(anchor.canonical_target_ids, vec!["body:vertex:0:0-0-0"]);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn direct_occt_manifest_records_clause_face_tagged_anchor_ids() {
         let root = temp_root("direct-occt-tagged-clause-face-anchor");
         let source_path = root.join(SOURCE_FILE_NAME);
@@ -3335,6 +4099,8 @@ echo "fake runner plan: $plan"
             parts: vec![DirectOcctTopologyPart {
                 part_id: "body".to_string(),
                 label: "Body".to_string(),
+                vertices: Vec::new(),
+                source_geometry_digest: None,
                 edges: Vec::new(),
                 faces: vec![
                     DirectOcctTopologyFace {
@@ -3488,6 +4254,8 @@ echo "fake runner plan: $plan"
             parts: vec![DirectOcctTopologyPart {
                 part_id: "body".to_string(),
                 label: "Body".to_string(),
+                vertices: Vec::new(),
+                source_geometry_digest: None,
                 edges: vec![DirectOcctTopologyEdge {
                     target_id: None,
                     edge_index: Some(0),
@@ -3559,6 +4327,8 @@ echo "fake runner plan: $plan"
             parts: vec![DirectOcctTopologyPart {
                 part_id: "body".to_string(),
                 label: "Body".to_string(),
+                vertices: Vec::new(),
+                source_geometry_digest: None,
                 edges: vec![DirectOcctTopologyEdge {
                     target_id: None,
                     edge_index: Some(0),
@@ -3634,6 +4404,8 @@ echo "fake runner plan: $plan"
             parts: vec![DirectOcctTopologyPart {
                 part_id: "body".to_string(),
                 label: "Body".to_string(),
+                vertices: Vec::new(),
+                source_geometry_digest: None,
                 edges: vec![DirectOcctTopologyEdge {
                     target_id: None,
                     edge_index: Some(0),
@@ -3706,6 +4478,8 @@ echo "fake runner plan: $plan"
             parts: vec![DirectOcctTopologyPart {
                 part_id: "body".to_string(),
                 label: "Body".to_string(),
+                vertices: Vec::new(),
+                source_geometry_digest: None,
                 edges: vec![DirectOcctTopologyEdge {
                     target_id: None,
                     edge_index: Some(0),
@@ -3981,11 +4755,299 @@ echo "fake runner plan: $plan"
         assert!(manifest
             .selection_targets
             .iter()
+            .any(|target| target.kind == SelectionTargetKind::Vertex));
+        assert!(manifest
+            .selection_targets
+            .iter()
             .any(|target| target.kind == SelectionTargetKind::Edge));
         assert!(manifest
             .selection_targets
             .iter()
             .any(|target| target.kind == SelectionTargetKind::Face));
+        let exact_geometries =
+            direct_occt_exact_target_geometries(&bundle_dir.join(TOPOLOGY_FILE_NAME))
+                .expect("exact target geometries");
+        assert!(exact_geometries.values().any(|geometry| matches!(
+            geometry,
+            crate::capture_brep_validation::ExactBrepTargetGeometry::Vertex { .. }
+        )));
+        assert!(exact_geometries.values().any(|geometry| matches!(
+            geometry,
+            crate::capture_brep_validation::ExactBrepTargetGeometry::LineEdge { .. }
+        )));
+        assert!(exact_geometries.values().any(|geometry| matches!(
+            geometry,
+            crate::capture_brep_validation::ExactBrepTargetGeometry::PlaneFace { .. }
+        )));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_quarter_guided_source_uses_two_mirrors_and_diagnostics_leave_artifacts_immutable() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
+            return;
+        }
+
+        let source = r#"(model
+          (params (number insert_depth 2 :label "Insert depth" :min 1 :max 10 :step 0.5))
+          (tag-face support-face :faces "bottom" part-1)
+          (part part-1 (build
+            (shape quarter (translate 5 5 0 (box 10 10 insert_depth)))
+            (shape x-half (union quarter (mirror "x" 0 quarter)))
+            (result (union x-half (mirror "y" 0 x-half))))))"#;
+        assert_eq!(source.matches("(box ").count(), 1, "one authored quarter");
+        assert_eq!(
+            source.matches("(mirror ").count(),
+            2,
+            "explicit X/Y completion"
+        );
+
+        let mut guide = crate::contracts::CaptureReconstructionGuide::test_fixture();
+        guide.symmetry_completion = crate::contracts::CaptureSymmetryCompletion::Quarter {
+            first_plane_id: "plane-x".into(),
+            second_plane_id: "plane-y".into(),
+        };
+        let symmetry_fit = crate::contracts::CaptureFitResidual {
+            rms_mm: 0.0,
+            max_mm: 0.0,
+            tolerance_mm: 0.1,
+        };
+        guide.planes.extend([
+            crate::contracts::CaptureNamedPlane {
+                plane_id: "plane-x".into(),
+                label: "X symmetry".into(),
+                role: crate::contracts::CapturePlaneRole::Symmetry,
+                landmark_ids: vec![
+                    "landmark-1".into(),
+                    "landmark-2".into(),
+                    "landmark-3".into(),
+                ],
+                origin_mm: [0.0, 0.0, 0.0],
+                normal: [1.0, 0.0, 0.0],
+                fit: symmetry_fit.clone(),
+            },
+            crate::contracts::CaptureNamedPlane {
+                plane_id: "plane-y".into(),
+                label: "Y symmetry".into(),
+                role: crate::contracts::CapturePlaneRole::Symmetry,
+                landmark_ids: vec![
+                    "landmark-1".into(),
+                    "landmark-2".into(),
+                    "landmark-3".into(),
+                ],
+                origin_mm: [0.0, 0.0, 0.0],
+                normal: [0.0, 1.0, 0.0],
+                fit: symmetry_fit,
+            },
+        ]);
+        guide.feature_expectations[0].expected_authored_selector =
+            crate::contracts::CaptureAuthoredSelector::Tag {
+                name: "support-face".into(),
+            };
+        guide.feature_expectations[0].guide_item_ids = vec!["profile-1".into(), "plane-1".into()];
+        guide.feature_expectations[0].cardinality =
+            crate::contracts::CaptureSelectorCardinality::OneOrMore;
+        guide
+            .measurements
+            .push(crate::contracts::CaptureNamedMeasurement {
+                measurement_id: "depth".into(),
+                label: "insert depth".into(),
+                landmark_ids: Vec::new(),
+                value: 2.0,
+                unit: "mm".into(),
+                fit_critical: true,
+                authored_parameter_name: Some("insert_depth".into()),
+                constraint_kind: Some(crate::contracts::CaptureConstraintKind::Extent),
+            });
+        guide.reconstructed_profiles = vec![crate::contracts::CaptureReconstructedProfile {
+            candidate_id: "profile-candidate:profile-1:polyline".into(),
+            source_profile_id: "profile-1".into(),
+            support_plane_id: "plane-1".into(),
+            segments: [
+                ("landmark-1", "landmark-2", [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+                ("landmark-2", "landmark-3", [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+                ("landmark-3", "landmark-1", [0.0, 1.0, 0.0], [0.0, 0.0, 0.0]),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (start_id, end_id, start_mm, end_mm))| {
+                crate::contracts::CaptureProfileSegment {
+                    segment_id: format!("profile-1:segment:{index}"),
+                    source_landmark_ids: vec![start_id.into(), end_id.into()],
+                    neighborhood_ids: Vec::new(),
+                    parameter_range: [index as f64, index as f64 + 1.0],
+                    geometry: crate::contracts::CaptureProfileSegmentGeometry::Line {
+                        start_mm,
+                        end_mm,
+                    },
+                    fit: crate::contracts::CaptureFitResidual {
+                        rms_mm: 0.0,
+                        max_mm: 0.0,
+                        tolerance_mm: 0.1,
+                    },
+                }
+            })
+            .collect(),
+            closed: true,
+            continuous: true,
+            closure_error_mm: 0.0,
+            maximum_continuity_gap_mm: 0.0,
+            support_plane_max_mm: 0.0,
+            supporting_evidence_ids: vec!["profile-1".into()],
+            rejected_hypotheses: Vec::new(),
+        }];
+        guide.feature_plan_candidates = vec![crate::contracts::CaptureFeaturePlanCandidate {
+            plan_id: "plan:quarter-insert".into(),
+            label: "Quarter insert extrusion and symmetry".into(),
+            operations: vec![crate::contracts::CaptureFeatureOperation::Extrude {
+                profile_candidate_id: "profile-candidate:profile-1:polyline".into(),
+                distance_dimension_id: "depth".into(),
+            }],
+            supporting_evidence_ids: vec!["profile-1".into(), "depth".into()],
+            rejecting_evidence: Vec::new(),
+            score: 1.0,
+            status: crate::contracts::CaptureFeaturePlanStatus::Supported,
+        }];
+        guide.selected_feature_plan_id = Some("plan:quarter-insert".into());
+        guide.constraint_graph = crate::capture_guidance::build_capture_constraint_graph(&guide)
+            .expect("quarter constraint graph");
+        crate::capture_brep_validation::validate_capture_guided_source_semantics(&guide, source)
+            .expect("quarter source semantics");
+        let copied_source = r#"(model
+          (params (number insert_depth 2 :label "Insert depth" :min 1 :max 10 :step 0.5))
+          (part part-1 (build
+            (shape quarter (translate 5 5 0 (box 10 10 insert_depth)))
+            (shape copied-2 (translate -5 5 0 (box 10 10 insert_depth)))
+            (shape copied-3 (translate 5 -5 0 (box 10 10 insert_depth)))
+            (shape copied-4 (translate -5 -5 0 (box 10 10 insert_depth)))
+            (result (union quarter copied-2 copied-3 copied-4)))))"#;
+        let copied_error =
+            crate::capture_brep_validation::validate_capture_guided_source_semantics(
+                &guide,
+                copied_source,
+            )
+            .expect_err("copied quarters must not satisfy explicit symmetry")
+            .message;
+        assert!(
+            copied_error.contains("requires 2 explicit mirror"),
+            "{copied_error}"
+        );
+
+        let root = temp_root("quarter-guided-artifact-invariance");
+        let resolver = TestResolver { root: root.clone() };
+        let program = compile(source);
+        let hash = content_hash(source, "{}");
+        let model_id = model_id_from_hash(&hash);
+        let (bundle, mut manifest) = render_core_program_runtime_bundle(
+            &program,
+            source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("quarter exact OCCT bundle");
+        manifest.source_digest = Some(crate::services::render_snapshot::canonical_source_digest(
+            source,
+        ));
+        let bundle_dir =
+            crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("bundle dir");
+        validate_direct_occt_guided_expected_solids(&bundle_dir.join(TOPOLOGY_FILE_NAME))
+            .expect("quarter result is valid solid");
+
+        let design = crate::contracts::DesignOutput {
+            title: "Quarter insert".into(),
+            version_name: "V1".into(),
+            response: String::new(),
+            interaction_mode: crate::contracts::InteractionMode::Design,
+            macro_code: source.into(),
+            macro_dialect: crate::contracts::MacroDialect::EckyIrV0,
+            engine_kind: bundle.engine_kind,
+            source_language: bundle.source_language,
+            geometry_backend: bundle.geometry_backend,
+            ui_spec: crate::contracts::UiSpec::default(),
+            initial_params: crate::contracts::DesignParams::new(),
+            post_processing: None,
+        };
+        let snapshot = crate::services::render_snapshot::build_render_snapshot(
+            crate::services::render_snapshot::RenderSnapshotInput {
+                design: &design,
+                effective_params: &crate::contracts::DesignParams::new(),
+                artifact_bundle: &bundle,
+                model_manifest: &manifest,
+            },
+        )
+        .expect("exact quarter snapshot");
+        guide.target_source_digest = snapshot.source_digest.clone();
+        guide.canonical_digest = guide.compute_canonical_digest().expect("guide digest");
+        let exact_provenance =
+            crate::capture_brep_validation::validate_capture_direct_occt_snapshot(
+                &guide,
+                &snapshot,
+                &bundle_dir.join(TOPOLOGY_FILE_NAME),
+            )
+            .expect("selected plan exact runtime trace");
+        assert_eq!(
+            exact_provenance.selected_feature_plan_id.as_deref(),
+            Some("plan:quarter-insert")
+        );
+        assert_eq!(exact_provenance.feature_operation_traces.len(), 1);
+        assert!(!exact_provenance.feature_operation_traces[0]
+            .authored_node_keys
+            .is_empty());
+        assert!(!exact_provenance.feature_operation_traces[0]
+            .brep_target_ids
+            .is_empty());
+
+        let preview_path = Path::new(&bundle.preview_stl_path);
+        let step_path = Path::new(&bundle.export_artifacts[0].path);
+        let preview_before = fs::read(preview_path).expect("preview bytes");
+        let step_before = fs::read(step_path).expect("STEP bytes");
+        let artifact_digest_before =
+            crate::services::render_snapshot::artifact_bundle_digest(&bundle)
+                .expect("artifact digest");
+        guide.source_mesh.content_digest =
+            crate::capture_guidance::source_mesh_content_digest(preview_path)
+                .expect("preview mesh digest");
+        guide.canonical_digest = guide.compute_canonical_digest().expect("guide digest");
+        let boundary =
+            crate::ecky_cad_host::analysis_boundary::load_direct_occt_analysis_boundary_surface(
+                &bundle_dir,
+                "part-1",
+            )
+            .expect("exact analysis boundary");
+        let report = crate::capture_deviation::compute_observed_mesh_to_brep_deviation(
+            preview_path,
+            &guide,
+            &boundary,
+            &artifact_digest_before,
+            128,
+            0.1,
+        )
+        .expect("display-only deviation");
+        assert_eq!(
+            report.generated_geometry_digest,
+            exact_provenance.geometry_digest
+        );
+        assert_eq!(report.evidence_scope, "observedRegionOnly");
+        assert_eq!(
+            fs::read(preview_path).expect("preview after"),
+            preview_before
+        );
+        assert_eq!(fs::read(step_path).expect("STEP after"), step_before);
+        assert_eq!(
+            crate::services::render_snapshot::artifact_bundle_digest(&bundle)
+                .expect("artifact digest after"),
+            artifact_digest_before
+        );
 
         let _ = fs::remove_dir_all(root);
     }

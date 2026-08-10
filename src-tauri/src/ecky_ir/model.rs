@@ -1338,6 +1338,7 @@ fn core_operation_name(op: &CoreOperation) -> String {
         CoreOperation::Frame(CoreFrameOp::PathFrame) => "path-frame".to_string(),
         CoreOperation::Frame(CoreFrameOp::Place) => "place".to_string(),
         CoreOperation::Frame(CoreFrameOp::ClipBox) => "clip-box".to_string(),
+        CoreOperation::Frame(CoreFrameOp::ClipPlane) => "clip-plane".to_string(),
         CoreOperation::Meta(CoreMetaOp::Group) => "compound".to_string(),
         CoreOperation::Meta(CoreMetaOp::Comment) => "meta".to_string(),
         CoreOperation::Meta(CoreMetaOp::Annotate) => "build".to_string(),

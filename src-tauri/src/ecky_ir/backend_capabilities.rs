@@ -147,6 +147,7 @@ const NATIVE_OCCT_OPS: &[BackendOperationCapability] = &[
     supported("path-frame"),
     supported("place"),
     supported("clip-box"),
+    supported("clip-plane"),
     supported("compound"),
     supported("meta"),
     supported("build"),

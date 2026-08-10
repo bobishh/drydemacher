@@ -11,6 +11,11 @@ use crate::contracts::{AppResult, ParamValue};
 use crate::ecky_ir_patterns::{
     apply_wall_pattern, WallPatternMode, WallPatternSpec, WallPatternTarget,
 };
+use crate::surface_trim_cap::SurfaceTrimCapMode;
+use crate::surface_trim_external_shapes::SurfaceTrimPathMode;
+use crate::surface_trim_runtime::{
+    execute_surface_trim, CanonicalSurfaceTrimAnchor, SurfaceTrimRuntimeOutput,
+};
 
 use super::edge_ops::{chamfer_mesh, fillet_mesh, parse_edge_selector};
 use super::eval_scalar::{
@@ -2296,6 +2301,19 @@ pub(super) fn eval_geometry_with_bindings(
             let (mesh, target) = build_wall_pattern_target(target_expr, env, bindings)?;
             Ok(Geometry::Mesh(apply_wall_pattern(&mesh, &target, &spec)?))
         }
+        "surface-trim" => {
+            let (source_path, source_digest, loop_anchors, keep_seed, path_mode, cap_mode) =
+                parse_surface_trim_call(args, env)?;
+            let output = execute_surface_trim(
+                Path::new(&source_path),
+                &source_digest,
+                &loop_anchors,
+                &keep_seed,
+                path_mode,
+                cap_mode,
+            )?;
+            Ok(Geometry::Mesh(surface_trim_output_to_mesh(output)?))
+        }
         "chamfer" => Err(validation(
             "`chamfer` is a CAD BRep surface operation and must run on the Direct OCCT backend. Use `mesh-chamfer` explicitly for mesh-native geometry.",
         )),
@@ -2359,6 +2377,193 @@ pub(super) fn eval_geometry_with_bindings(
             other
         ))),
     }
+}
+
+fn parse_surface_trim_call(
+    args: &[IrExpr],
+    env: &BTreeMap<String, ParamValue>,
+) -> AppResult<(
+    String,
+    String,
+    Vec<CanonicalSurfaceTrimAnchor>,
+    CanonicalSurfaceTrimAnchor,
+    SurfaceTrimPathMode,
+    SurfaceTrimCapMode,
+)> {
+    let (positional, keywords) = split_call_args(
+        "surface-trim",
+        args,
+        &["schema-version", "source-digest", "loop", "keep-seed", "path-mode", "cap"],
+    )?;
+    if positional.len() != 1 {
+        return Err(validation(
+            "`surface-trim` expects exactly one imported mesh shape.",
+        ));
+    }
+    let source_path = parse_surface_trim_import_path(positional[0], env)?;
+    let schema_version = eval_number(
+        required_surface_trim_keyword(&keywords, "schema-version")?,
+        env,
+    )?;
+    if !schema_version.is_finite()
+        || schema_version.fract().abs() > f64::EPSILON
+        || schema_version
+            != crate::surface_trim_external_shapes::SURFACE_TRIM_SCHEMA_VERSION as f64
+    {
+        return Err(validation(format!(
+            "Unsupported `surface-trim` schema version {}; expected {}.",
+            schema_version,
+            crate::surface_trim_external_shapes::SURFACE_TRIM_SCHEMA_VERSION
+        )));
+    }
+    let source_digest = eval_stringish(
+        required_surface_trim_keyword(&keywords, "source-digest")?,
+        env,
+    )?;
+    let loop_items = expr_list_items(
+        required_surface_trim_keyword(&keywords, "loop")?,
+        "surface-trim loop",
+    )?;
+    if loop_items.len() < 3 {
+        return Err(validation(
+            "`surface-trim` loop requires at least three mesh anchors.",
+        ));
+    }
+    let loop_anchors = loop_items
+        .iter()
+        .map(|value| parse_surface_trim_anchor(value, env))
+        .collect::<AppResult<Vec<_>>>()?;
+    let keep_seed = parse_surface_trim_anchor(
+        required_surface_trim_keyword(&keywords, "keep-seed")?,
+        env,
+    )?;
+    let path_mode = match eval_stringish(
+        required_surface_trim_keyword(&keywords, "path-mode")?,
+        env,
+    )?
+    .as_str()
+    {
+        "shortest" => SurfaceTrimPathMode::Shortest,
+        "feature" => SurfaceTrimPathMode::Feature,
+        other => {
+            return Err(validation(format!(
+                "`surface-trim` path mode '{}' is invalid; expected shortest or feature.",
+                other
+            )))
+        }
+    };
+    let cap_mode = match eval_stringish(
+        required_surface_trim_keyword(&keywords, "cap")?,
+        env,
+    )?
+    .as_str()
+    {
+        "open" => SurfaceTrimCapMode::Open,
+        "flat" => SurfaceTrimCapMode::Flat,
+        "surface-fill" => SurfaceTrimCapMode::SurfaceFill,
+        other => {
+            return Err(validation(format!(
+                "`surface-trim` cap mode '{}' is invalid; expected open, flat, or surface-fill.",
+                other
+            )))
+        }
+    };
+    Ok((
+        source_path,
+        source_digest,
+        loop_anchors,
+        keep_seed,
+        path_mode,
+        cap_mode,
+    ))
+}
+
+fn required_surface_trim_keyword<'a>(
+    keywords: &'a BTreeMap<String, &'a IrExpr>,
+    name: &str,
+) -> AppResult<&'a IrExpr> {
+    keywords
+        .get(name)
+        .copied()
+        .ok_or_else(|| validation(format!("`surface-trim` requires `:{}`.", name)))
+}
+
+fn parse_surface_trim_import_path(
+    value: &IrExpr,
+    env: &BTreeMap<String, ParamValue>,
+) -> AppResult<String> {
+    let items = expr_list_items(value, "surface-trim source")?;
+    if expr_head_symbol(items, "surface-trim source")? != "import-stl" || items.len() != 2 {
+        return Err(validation(
+            "`surface-trim` source must be one direct `(import-stl path)` node so mesh-anchor indices resolve against immutable source triangles.",
+        ));
+    }
+    eval_stringish(&items[1], env)
+}
+
+fn parse_surface_trim_anchor(
+    value: &IrExpr,
+    env: &BTreeMap<String, ParamValue>,
+) -> AppResult<CanonicalSurfaceTrimAnchor> {
+    let items = expr_list_items(value, "surface-trim mesh anchor")?;
+    if expr_head_symbol(items, "surface-trim mesh anchor")? != "mesh-anchor" || items.len() != 5
+    {
+        return Err(validation(
+            "A `surface-trim` anchor must be `(mesh-anchor triangle-index b0 b1 b2)`.",
+        ));
+    }
+    let raw_triangle_index = eval_number(&items[1], env)?;
+    if !raw_triangle_index.is_finite()
+        || raw_triangle_index < 0.0
+        || raw_triangle_index.fract().abs() > f64::EPSILON
+        || raw_triangle_index > u64::MAX as f64
+    {
+        return Err(validation(
+            "`mesh-anchor` triangle index must be a non-negative integer.",
+        ));
+    }
+    Ok(CanonicalSurfaceTrimAnchor {
+        triangle_index: raw_triangle_index as u64,
+        barycentric: [
+            eval_number(&items[2], env)?,
+            eval_number(&items[3], env)?,
+            eval_number(&items[4], env)?,
+        ],
+    })
+}
+
+fn surface_trim_output_to_mesh(output: SurfaceTrimRuntimeOutput) -> AppResult<IrMesh> {
+    let mut polygons = Vec::with_capacity(output.triangles.len());
+    for triangle in output.triangles {
+        let indices = triangle.map(|index| index as usize);
+        if indices.iter().any(|index| *index >= output.vertices.len()) {
+            return Err(validation(
+                "`surface-trim` runtime emitted a triangle index outside its vertex buffer.",
+            ));
+        }
+        let points = indices.map(|index| {
+            let point = output.vertices[index];
+            Point3::new(point[0], point[1], point[2])
+        });
+        let cross = (points[1] - points[0]).cross(&(points[2] - points[0]));
+        if !cross.norm().is_finite() || cross.norm() <= 1.0e-12 {
+            return Err(validation(
+                "`surface-trim` runtime emitted a degenerate triangle.",
+            ));
+        }
+        let normal = cross.normalize();
+        polygons.push(IrPolygon::new(
+            points
+                .into_iter()
+                .map(|point| IrVertex::new(point, normal))
+                .collect(),
+            None,
+        ));
+    }
+    if polygons.is_empty() {
+        return Err(validation("`surface-trim` removed every source triangle."));
+    }
+    Ok(IrMesh::from_polygons(&polygons, None))
 }
 
 fn add_mesh_bridge_overlap(mesh: &IrMesh) -> IrMesh {

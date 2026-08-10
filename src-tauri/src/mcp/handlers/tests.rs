@@ -532,6 +532,7 @@ fn sample_manifest(model_id: &str) -> ModelManifest {
         tagged_anchors: std::collections::BTreeMap::new(),
         feature_graph: None,
         correspondence_graph: None,
+        analysis_declarations: Vec::new(),
         warnings: Vec::new(),
         enrichment_state: crate::contracts::ManifestEnrichmentState {
             status: EnrichmentStatus::None,
@@ -4624,6 +4625,7 @@ async fn given_film_coupon_fixture_when_film_gap_patch_preview_then_commit_retur
             message_id: Some(preview.message_id.clone()),
             title: Some("Film Coupon Committed".to_string()),
             version_name: Some("V-film-gap-commit".to_string()),
+            capture_guided_result: None,
         },
         &test_ctx(),
     )
@@ -5055,6 +5057,7 @@ async fn bounded_polyhedron_mcp_inspect_validate_preview_verify_commit_smoke() {
             message_id: Some(preview.message_id.clone()),
             title: Some("Polyhedron".to_string()),
             version_name: Some("V-verified".to_string()),
+            capture_guided_result: None,
         },
         &test_ctx(),
     )
@@ -7480,6 +7483,7 @@ async fn given_preview_render_when_commit_runs_then_history_gets_one_version() {
             message_id: Some(preview.preview_id.clone()),
             title: Some("Committed Pot".to_string()),
             version_name: Some("V-preview".to_string()),
+            capture_guided_result: None,
         },
         &ctx,
     )
@@ -7541,6 +7545,7 @@ async fn given_unverified_preview_when_commit_runs_then_commit_is_rejected_witho
             message_id: Some(preview.preview_id.clone()),
             title: None,
             version_name: None,
+            capture_guided_result: None,
         },
         &ctx,
     )
@@ -7603,6 +7608,7 @@ async fn given_green_verified_preview_after_ram_cache_loss_when_commit_runs_then
             message_id: Some(preview.preview_id.clone()),
             title: None,
             version_name: Some("V-verified-durable".to_string()),
+            capture_guided_result: None,
         },
         &ctx,
     )
@@ -7681,6 +7687,7 @@ async fn given_verified_snapshot_a_when_params_change_to_snapshot_b_then_commit_
             message_id: Some(second.preview_id),
             title: None,
             version_name: None,
+            capture_guided_result: None,
         },
         &ctx,
     )
@@ -7767,6 +7774,7 @@ async fn given_unverified_preview_after_session_memory_clears_when_commit_runs_t
             message_id: Some(preview.preview_id.clone()),
             title: None,
             version_name: Some("V-durable".to_string()),
+            capture_guided_result: None,
         },
         &ctx,
     )
@@ -8812,6 +8820,7 @@ async fn project_folder_apply_refuses_stale_and_conflicted_folders() {
             message_id: Some(preview.message_id.clone()),
             title: None,
             version_name: Some("V-in-app".to_string()),
+            capture_guided_result: None,
         },
         &test_ctx(),
     )
@@ -8943,8 +8952,13 @@ async fn project_folder_watcher_applies_settled_edits_in_place() {
         std::path::Path::new(&export.folder).join(crate::project_mirror::PROJECT_SOURCE_FILE_NAME);
     std::fs::write(&source_path, "(model (part body (box 11 10 5)))").expect("edit");
 
-    // First tick after the edit: settle, no apply yet.
-    assert!(watcher.tick(&state, &resolver, &ctx).await.is_empty());
+    // First tick after the edit: report it immediately, then settle.
+    let detected = watcher.tick(&state, &resolver, &ctx).await;
+    assert!(matches!(
+        &detected[..],
+        [ProjectFolderWatchEvent::Detected { slug, thread_id }]
+            if slug == "live-bracket-watch" && thread_id == "thread-1"
+    ));
 
     // Second tick: digest unchanged -> applied and committed.
     let events = watcher.tick(&state, &resolver, &ctx).await;
@@ -8999,7 +9013,10 @@ async fn project_folder_watcher_reports_broken_edit_once_and_retries_after_chang
     let ctx = test_ctx();
 
     std::fs::write(&source_path, "(model (part body (box 1 1 1))$)").expect("broken edit");
-    assert!(watcher.tick(&state, &resolver, &ctx).await.is_empty());
+    assert!(matches!(
+        &watcher.tick(&state, &resolver, &ctx).await[..],
+        [ProjectFolderWatchEvent::Detected { .. }]
+    ));
     let events = watcher.tick(&state, &resolver, &ctx).await;
     assert_eq!(events.len(), 1, "{events:?}");
     assert!(
@@ -9013,7 +9030,10 @@ async fn project_folder_watcher_reports_broken_edit_once_and_retries_after_chang
 
     // Fixing the file retries and applies.
     std::fs::write(&source_path, "(model (part body (box 2 2 2)))").expect("fixed edit");
-    assert!(watcher.tick(&state, &resolver, &ctx).await.is_empty());
+    assert!(matches!(
+        &watcher.tick(&state, &resolver, &ctx).await[..],
+        [ProjectFolderWatchEvent::Detected { .. }]
+    ));
     let events = watcher.tick(&state, &resolver, &ctx).await;
     assert!(
         matches!(&events[0], ProjectFolderWatchEvent::Applied { .. }),
@@ -9201,6 +9221,7 @@ async fn commit_preview_version_refreshes_clean_bound_source() {
             message_id: Some(preview.preview_id.clone()),
             title: None,
             version_name: Some("V-cog-v2".to_string()),
+            capture_guided_result: None,
         },
         &ctx,
     )
@@ -9328,6 +9349,7 @@ async fn commit_preview_version_refuses_on_pending_external_edit() {
             message_id: Some(preview.preview_id.clone()),
             title: None,
             version_name: Some("V-cog-clobber".to_string()),
+            capture_guided_result: None,
         },
         &ctx,
     )
