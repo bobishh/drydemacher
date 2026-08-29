@@ -20,14 +20,12 @@ function createSessionStore() {
     phase: 'booting' as SessionPhase,
     status: 'System ready.',
     error: null as SessionError | null,
+    globalError: null as SessionError | null,
     stlUrl: null as string | null,
     runtimeRevision: 0,
     artifactBundle: null as ArtifactBundle | null,
     modelManifest: null as ModelManifest | null,
     selectedPartId: null as string | null,
-    isManual: false as boolean,
-    manualThreadId: null as string | null,
-    manualMessageId: null as string | null,
     repairMessage: '' as string,
     cookingPhrase: '' as string,
   });
@@ -39,14 +37,24 @@ function createSessionStore() {
     setPhase: (p: SessionPhase) => update(s => ({ ...s, phase: p })),
     setStatus: (msg: string) => update(s => ({ ...s, status: msg })),
     setError: (err: SessionError | null) => update(s => ({ ...s, error: err })),
+    setGlobalError: (err: SessionError | null) => update(s => ({ ...s, globalError: err })),
     setStlUrl: (url: string | null) =>
+      update(s => {
+        if (s.stlUrl === url) return s;
+        return {
+          ...s,
+          stlUrl: url,
+          runtimeRevision: s.runtimeRevision + 1,
+          artifactBundle: url ? s.artifactBundle : null,
+          modelManifest: url ? s.modelManifest : null,
+          selectedPartId: url ? s.selectedPartId : null,
+        };
+      }),
+    reloadStlUrl: (url: string) =>
       update(s => ({
         ...s,
         stlUrl: url,
         runtimeRevision: s.runtimeRevision + 1,
-        artifactBundle: url ? s.artifactBundle : null,
-        modelManifest: url ? s.modelManifest : null,
-        selectedPartId: url ? s.selectedPartId : null,
       })),
     setModelRuntime: (bundle: ArtifactBundle | null, manifest: ModelManifest | null) =>
       update(s => {
@@ -64,7 +72,6 @@ function createSessionStore() {
     setSelectedPartId: (partId: string | null) => update(s => ({ ...s, selectedPartId: partId })),
     clearModelRuntime: () =>
       update(s => ({ ...s, artifactBundle: null, modelManifest: null, selectedPartId: null })),
-    setIsManual: (m: boolean) => update(s => ({ ...s, isManual: m })),
     setRepairMessage: (msg: string) => update(s => ({ ...s, repairMessage: msg })),
     setCookingPhrase: (msg: string) => update(s => ({ ...s, cookingPhrase: msg })),
   };
@@ -83,30 +90,9 @@ export const selectedPartId = {
   subscribe: (fn: (value: string | null) => void) => session.subscribe(s => fn(s.selectedPartId)),
   set: session.setSelectedPartId,
 };
-export const isManual = { subscribe: (fn: (value: boolean) => void) => session.subscribe(s => fn(s.isManual)) };
-
-let manualRenderActive = false;
-let manualRenderThreadId: string | null = null;
-let manualRenderMessageId: string | null = null;
-
-export function setManualRenderActive(
-  active: boolean,
-  target: { threadId?: string | null; messageId?: string | null } | null = null,
-) {
-  manualRenderActive = active;
-  if (active) {
-    manualRenderThreadId = target?.threadId ?? null;
-    manualRenderMessageId = target?.messageId ?? null;
-  } else {
-    manualRenderThreadId = null;
-    manualRenderMessageId = null;
-  }
-  syncSessionPhaseFromQueue();
-}
-
 /**
  * Derives session.phase from aggregate request queue state.
- * This is a pure projection of the requestQueue + manual state.
+ * This is a pure projection of requestQueue state.
  */
 export function syncSessionPhaseFromQueue() {
   const q = get(requestQueue);
@@ -115,8 +101,7 @@ export function syncSessionPhaseFromQueue() {
   const currentSession = get(session);
 
   let newPhase: SessionPhase = 'idle';
-  const hasActiveLLM = phases.some(p => ['classifying', 'answering', 'generating', 'repairing', 'rendering', 'queued_for_render', 'committing'].includes(p));
-  
+
   if (currentSession.phase === 'booting') {
     newPhase = 'booting';
   } else if (phases.some(p => p === 'rendering' || p === 'queued_for_render' || p === 'committing')) {
@@ -129,18 +114,13 @@ export function syncSessionPhaseFromQueue() {
     newPhase = 'answering';
   } else if (phases.some(p => p === 'classifying')) {
     newPhase = 'classifying';
-  } else if (manualRenderActive) {
-    newPhase = 'rendering';
   } else {
     newPhase = 'idle';
   }
 
   session.update(s => ({ 
     ...s, 
-    phase: newPhase, 
-    isManual: manualRenderActive && !hasActiveLLM,
-    manualThreadId: manualRenderThreadId,
-    manualMessageId: manualRenderMessageId,
+    phase: newPhase,
   }));
 }
 

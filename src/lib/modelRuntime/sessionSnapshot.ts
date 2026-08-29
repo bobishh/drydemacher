@@ -7,7 +7,7 @@ import { workingCopy } from '../stores/workingCopy';
 import { activeRenderSnapshot } from '../stores/activeRenderSnapshot';
 import { buildImportedSyntheticDesign } from './importedRuntime';
 import { saveLastDesign } from '../tauri/client';
-import type { DesignOutput, LastDesignSnapshot } from '../types/domain';
+import type { AuthoringTargetRef, DesignOutput, LastDesignSnapshot } from '../types/domain';
 
 type TauriWindow = Window & {
   __TAURI_INTERNALS__?: {
@@ -46,6 +46,29 @@ function buildWorkingDesign(): DesignOutput | null {
   };
 }
 
+export function resolveRestartTargetRef(
+  explicitTargetRef: AuthoringTargetRef | null | undefined,
+  activeTargetRef: AuthoringTargetRef | null | undefined,
+  threadId: string | null,
+  messageId: string | null,
+): AuthoringTargetRef | null {
+  if (explicitTargetRef !== undefined) return explicitTargetRef;
+  const activeTargetMatches = activeTargetRef && threadId && (
+    activeTargetRef.kind === 'savedVersion'
+      ? activeTargetRef.threadId === threadId && activeTargetRef.messageId === messageId
+      : activeTargetRef.kind === 'draft'
+        ? activeTargetRef.threadId === threadId && activeTargetRef.previewId === messageId
+        : activeTargetRef.threadId === threadId
+  );
+  if (activeTargetMatches) return activeTargetRef;
+  if (!threadId || !messageId) return null;
+  return {
+    kind: 'savedVersion',
+    threadId,
+    messageId,
+  };
+}
+
 export async function persistLastSessionSnapshot(
   overrides: Partial<LastDesignSnapshot> = {},
 ): Promise<void> {
@@ -55,6 +78,8 @@ export async function persistLastSessionSnapshot(
 
   const currentSession = get(session);
   const currentSnapshot = get(activeRenderSnapshot);
+  const threadId = overrides.threadId !== undefined ? overrides.threadId : get(activeThreadId);
+  const messageId = overrides.messageId !== undefined ? overrides.messageId : get(activeVersionId);
   const baseManifest = overrides.modelManifest ?? currentSession.modelManifest;
   const candidateSelectedPartId = overrides.selectedPartId ?? currentSession.selectedPartId;
   const selectedPartId =
@@ -65,27 +90,44 @@ export async function persistLastSessionSnapshot(
 
   const snapshot: LastDesignSnapshot = {
     design: overrides.design !== undefined ? overrides.design : buildWorkingDesign(),
-    threadId: overrides.threadId !== undefined ? overrides.threadId : get(activeThreadId),
-    messageId: overrides.messageId !== undefined ? overrides.messageId : get(activeVersionId),
+    threadId,
+    messageId,
     artifactBundle:
       overrides.artifactBundle !== undefined
         ? overrides.artifactBundle
         : currentSession.artifactBundle,
     modelManifest: baseManifest ?? null,
     selectedPartId,
-    targetRef:
-      overrides.targetRef !== undefined
-        ? overrides.targetRef
-        : currentSnapshot?.targetRef ?? null,
+    targetRef: resolveRestartTargetRef(
+      overrides.targetRef,
+      currentSnapshot?.targetRef,
+      threadId,
+      messageId,
+    ),
   };
 
-  if (!snapshot.design && !snapshot.artifactBundle && !snapshot.modelManifest) {
+  // Saved versions and durable drafts restore by identity. Sending their full
+  // runtime aggregate back through IPC duplicates SQLite/native/WebContent
+  // memory and can kill WebContent on dense models.
+  const persistedSnapshot: LastDesignSnapshot = threadId && messageId
+    ? {
+        design: null,
+        threadId,
+        messageId,
+        artifactBundle: null,
+        modelManifest: null,
+        selectedPartId,
+        targetRef: snapshot.targetRef,
+      }
+    : snapshot;
+
+  if (!snapshot.threadId && !snapshot.messageId && !snapshot.design && !snapshot.artifactBundle && !snapshot.modelManifest) {
     await clearLastSessionSnapshot();
     return;
   }
 
   try {
-    await saveLastDesign(snapshot);
+    await saveLastDesign(persistedSnapshot);
   } catch (error) {
     console.warn('[SessionSnapshot] Failed to persist last snapshot:', error);
   }

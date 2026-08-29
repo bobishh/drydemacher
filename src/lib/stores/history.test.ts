@@ -7,15 +7,19 @@ import {
   activeThreadMessagesLoading,
   activeThreadVersionLoading,
   createNewThread,
+  evictSupersededVersionDetails,
+  resolveCommittedVersionAfterHistoryRefresh,
   threadMessagePageState,
 } from './history';
 import type { Thread } from '../types/domain';
 import { activeThreadIdStore, activeVersionId } from './domainState';
+import { historyStore } from './domainState';
 import { session } from './sessionStore';
 import { get } from 'svelte/store';
 import { activeVersionTimelineIndex, versionTimelineMessages } from '../threadTimeline';
+import { rememberCommittedVersionMessage, rememberLatestThreadVersion } from './history';
 
-function sampleBundle(modelId: string, previewStlPath: string): ArtifactBundle {
+function sampleBundle(modelId: string, modelStlPath: string): ArtifactBundle {
   return {
     schemaVersion: 1,
     modelId,
@@ -28,7 +32,7 @@ function sampleBundle(modelId: string, previewStlPath: string): ArtifactBundle {
     fcstdPath: '',
     manifestPath: `/tmp/${modelId}.json`,
     macroPath: `/tmp/${modelId}.ecky`,
-    previewStlPath,
+    modelStlPath,
     viewerAssets: [],
     edgeTargets: [],
     calloutAnchors: [],
@@ -98,6 +102,80 @@ function sampleThread(id: string, messages: Message[] = []): Thread {
     status: 'active',
   };
 }
+
+test('history refresh replaces a cleared draft target with the newest committed exact version', () => {
+  const older = sampleMessage(
+    'message-old',
+    sampleBundle('model-old', '/tmp/model-old.stl'),
+    sampleManifest('model-old'),
+  );
+  const exactHead = sampleMessage(
+    'message-exact-head',
+    sampleBundle('model-exact-head', '/tmp/model-exact-head.stl'),
+    sampleManifest('model-exact-head'),
+  );
+
+  const resolved = resolveCommittedVersionAfterHistoryRefresh(
+    'cleared-draft-preview-id',
+    [older, exactHead],
+  );
+
+  assert.equal(resolved?.id, 'message-exact-head');
+  assert.equal(resolved?.artifactBundle?.modelStlPath, '/tmp/model-exact-head.stl');
+});
+
+test('history refresh preserves an explicitly selected committed version', () => {
+  const selected = sampleMessage(
+    'message-selected',
+    sampleBundle('model-selected', '/tmp/model-selected.stl'),
+    sampleManifest('model-selected'),
+  );
+  const newer = sampleMessage(
+    'message-newer',
+    sampleBundle('model-newer', '/tmp/model-newer.stl'),
+    sampleManifest('model-newer'),
+  );
+
+  assert.equal(
+    resolveCommittedVersionAfterHistoryRefresh('message-selected', [selected, newer]),
+    null,
+  );
+});
+
+test('history keeps failed artifactless versions and advances head to latest append', () => {
+  historyStore.set([]);
+  activeVersionId.set(null);
+
+  const first: Message = {
+    id: 'failed-version',
+    role: 'assistant',
+    content: 'provider raw error body',
+    status: 'error',
+    output: {
+      title: 'Draft',
+      versionName: 'V-failed',
+      response: 'provider raw error body',
+      interactionMode: 'design',
+      macroCode: 'box()',
+      sourceLanguage: 'ecky',
+      geometryBackend: 'build123d',
+      uiSpec: { fields: [] },
+      initialParams: {},
+    },
+    artifactBundle: null,
+    modelManifest: null,
+    timestamp: 10,
+  };
+  const second = { ...first, id: 'pending-version', status: 'pending' as const, timestamp: 11 };
+
+  rememberCommittedVersionMessage('thread-lossless', 'Draft', first);
+  rememberLatestThreadVersion('thread-lossless', second);
+
+  const thread = get(historyStore).find((candidate) => candidate.id === 'thread-lossless');
+  assert.deepEqual(thread?.messages.map((message) => message.id), ['pending-version', 'failed-version']);
+  assert.equal(thread?.versionCount, 2);
+  assert.equal(get(activeVersionId), 'pending-version');
+});
 
 function mergeThreadMessagesLike(existing: Message[], incoming: Message[]): Message[] {
   const seen = new Set<string>();
@@ -197,129 +275,8 @@ function effectiveActiveVersionIdLike(messages: Message[], currentVersionId: str
   return index >= 0 ? versions[index]?.id ?? null : null;
 }
 
-const versionRuntimePayloadCacheLike = new Map<
-  string,
-  { artifactBundle: Message['artifactBundle'] | null; modelManifest: Message['modelManifest'] | null }
->();
-
-function resetVersionRuntimePayloadCacheLike() {
-  versionRuntimePayloadCacheLike.clear();
-}
-
-function rememberVersionRuntimePayloadLike(
-  messageId: string,
-  artifactBundle: Message['artifactBundle'] | null | undefined,
-  modelManifest: Message['modelManifest'] | null | undefined,
-) {
-  if (!artifactBundle || !modelManifest || artifactBundle.modelId !== modelManifest.modelId) return;
-  versionRuntimePayloadCacheLike.set(messageId, {
-    artifactBundle,
-    modelManifest,
-  });
-}
-
-function resolveVersionRuntimePayloadLike(message: Message) {
-  const cached = versionRuntimePayloadCacheLike.get(message.id);
-  if (cached && cached.artifactBundle && cached.modelManifest && cached.artifactBundle.modelId === cached.modelManifest.modelId) {
-    return cached;
-  }
-  return {
-    artifactBundle: message.artifactBundle ?? null,
-    modelManifest: message.modelManifest ?? null,
-  };
-}
-
-async function persistVersionRuntimePayloadLike(
-  messageId: string,
-  artifactBundle: Message['artifactBundle'] | null | undefined,
-  modelManifest: Message['modelManifest'] | null | undefined,
-  persistRuntime?: (
-    messageId: string,
-    artifactBundle: Message['artifactBundle'],
-    modelManifest: Message['modelManifest'],
-  ) => Promise<void>,
-) {
-  if (!artifactBundle || !modelManifest || artifactBundle.modelId !== modelManifest.modelId) {
-    return false;
-  }
-  if (persistRuntime) {
-    await persistRuntime(messageId, artifactBundle, modelManifest);
-  }
-  return true;
-}
-
-test('resolveVersionRuntimePayload prefers remembered rebuilt runtime for same message', () => {
-  resetVersionRuntimePayloadCacheLike();
-
-  const staleBundle = sampleBundle('model-1', '/tmp/stale-preview.stl');
-  const rebuiltBundle = sampleBundle('model-1', '/tmp/rebuilt-preview.stl');
-  const manifest = sampleManifest('model-1');
-  const message = sampleMessage('msg-1', staleBundle, manifest);
-
-  rememberVersionRuntimePayloadLike(message.id, rebuiltBundle, manifest);
-  const resolved = resolveVersionRuntimePayloadLike(message);
-
-  assert.equal(resolved.artifactBundle?.previewStlPath, rebuiltBundle.previewStlPath);
-  assert.equal(resolved.modelManifest?.modelId, manifest.modelId);
-});
-
-test('resolveVersionRuntimePayload uses target artifact instead of previous current session when switching versions', () => {
-  resetVersionRuntimePayloadCacheLike();
-
-  const currentBundle = sampleBundle('model-current', '/tmp/current-preview.stl');
-  const currentManifest = sampleManifest('model-current');
-  const targetBundle = sampleBundle('model-target', '/tmp/target-preview.stl');
-  const targetManifest = sampleManifest('model-target');
-  const targetMessage = sampleMessage('msg-target', targetBundle, targetManifest);
-
-  activeThreadIdStore.set('thread-1');
-  activeVersionId.set(targetMessage.id);
-  session.setStlUrl('/tmp/current-preview.stl');
-  session.setModelRuntime(currentBundle, currentManifest);
-
-  const resolved = resolveVersionRuntimePayloadLike(targetMessage);
-
-  assert.equal(resolved.artifactBundle?.modelId, 'model-target');
-  assert.equal(resolved.artifactBundle?.previewStlPath, '/tmp/target-preview.stl');
-  assert.equal(resolved.modelManifest?.modelId, 'model-target');
-});
-
-test('persistVersionRuntimePayload skips inconsistent runtime payloads', async () => {
-  const calls: Array<{ messageId: string; modelId: string }> = [];
-  const persisted = await persistVersionRuntimePayloadLike(
-      'msg-1',
-      sampleBundle('model-1', '/tmp/rebuilt-preview.stl'),
-      sampleManifest('model-2'),
-      async (messageId, artifactBundle) => {
-      if (artifactBundle) {
-        calls.push({ messageId, modelId: artifactBundle.modelId });
-      }
-    },
-  );
-
-  assert.equal(persisted, false);
-  assert.deepEqual(calls, []);
-});
-
-test('persistVersionRuntimePayload stores rebuilt runtime for same message', async () => {
-  const calls: Array<{ messageId: string; modelId: string }> = [];
-  const persisted = await persistVersionRuntimePayloadLike(
-      'msg-1',
-      sampleBundle('model-1', '/tmp/rebuilt-preview.stl'),
-      sampleManifest('model-1'),
-      async (messageId, artifactBundle) => {
-      if (artifactBundle) {
-        calls.push({ messageId, modelId: artifactBundle.modelId });
-      }
-    },
-  );
-
-  assert.equal(persisted, true);
-  assert.deepEqual(calls, [{ messageId: 'msg-1', modelId: 'model-1' }]);
-});
-
 test('mergeCommittedVersionMessage inserts committed fork message into new active thread', () => {
-  const bundle = sampleBundle('model-1', '/tmp/preview.stl');
+  const bundle = sampleBundle('model-1', '/tmp/model.stl');
   const manifest = sampleManifest('model-1');
   const message = sampleMessage('msg-fork', bundle, manifest);
 
@@ -358,7 +315,7 @@ test('mergeActiveThreadMessages hydrates skinny page payload from seeded active 
   const merged = mergeActiveThreadMessagesLike([active], [skinny], 'msg-active');
 
   assert.equal(merged[0]?.id, 'msg-active');
-  assert.equal(merged[0]?.artifactBundle?.previewStlPath, '/tmp/active.stl');
+  assert.equal(merged[0]?.artifactBundle?.modelStlPath, '/tmp/active.stl');
   assert.equal(merged[0]?.modelManifest?.modelId, 'model-active');
 });
 
@@ -454,4 +411,31 @@ test('Given stale thread messages are loading When backend opens the reusable em
   assert.equal(get(activeThreadMessagesLoading), false);
   assert.equal(get(activeThreadVersionLoading), false);
   assert.equal(get(threadMessagePageState)[newThreadId!]?.isLoading, false);
+});
+
+test('selected detail hydration evicts superseded heavy version payloads', () => {
+  const older = sampleMessage('older', sampleBundle('older-model', '/tmp/older.stl'), sampleManifest('older-model'));
+  const selected = sampleMessage('selected', sampleBundle('selected-model', '/tmp/selected.stl'), sampleManifest('selected-model'));
+  const threads: Thread[] = [{
+    id: 'thread-1',
+    title: 'Thread',
+    summary: '',
+    messages: [older, selected],
+    updatedAt: 1,
+    genieTraits: null,
+    versionCount: 2,
+    pendingCount: 0,
+    queuedCount: 0,
+    errorCount: 0,
+    isBlank: false,
+    status: 'active',
+    finalizedAt: null,
+    pendingConfirm: null,
+  }];
+
+  const projected = evictSupersededVersionDetails(threads, 'thread-1', selected);
+
+  assert.equal(projected[0].messages[0].artifactBundle, null);
+  assert.equal(projected[0].messages[0].modelManifest, null);
+  assert.equal(projected[0].messages[1].artifactBundle?.modelId, 'selected-model');
 });

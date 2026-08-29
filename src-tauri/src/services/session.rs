@@ -18,6 +18,10 @@ struct LastDesignPointer {
 }
 
 pub fn last_snapshot_path(app: &dyn PathResolver) -> PathBuf {
+    app.app_config_dir().join("last_design.edn")
+}
+
+fn legacy_last_snapshot_path(app: &dyn PathResolver) -> PathBuf {
     app.app_config_dir().join("last_design.json")
 }
 
@@ -26,28 +30,44 @@ pub fn write_last_snapshot(app: &dyn PathResolver, snapshot: Option<&LastDesignS
     match snapshot {
         Some(snapshot) => {
             if let Some(serialized) = serialize_restart_pointer(snapshot) {
-                let _ = fs::write(path, serialized);
+                if fs::write(&path, serialized).is_ok() {
+                    let _ = fs::remove_file(legacy_last_snapshot_path(app));
+                }
             } else {
                 let _ = fs::remove_file(path);
+                let _ = fs::remove_file(legacy_last_snapshot_path(app));
             }
         }
         None => {
             let _ = fs::remove_file(path);
+            let _ = fs::remove_file(legacy_last_snapshot_path(app));
         }
     }
 }
 
 pub fn read_last_snapshot(app: &dyn PathResolver, conn: &Connection) -> Option<LastDesignSnapshot> {
-    let data = fs::read_to_string(last_snapshot_path(app)).ok()?;
-    let pointer = serde_json::from_str::<LastDesignPointer>(&data)
-        .ok()
-        .or_else(|| legacy_pointer(&data))?;
+    let pointer = match fs::read(last_snapshot_path(app)) {
+        Ok(data) => crate::strict_edn::from_slice::<LastDesignPointer>(&data).ok()?,
+        Err(_) => {
+            let legacy_path = legacy_last_snapshot_path(app);
+            let data = fs::read_to_string(&legacy_path).ok()?;
+            let pointer = serde_json::from_str::<LastDesignPointer>(&data)
+                .ok()
+                .or_else(|| legacy_pointer(&data))?;
+            if let Ok(serialized) = crate::strict_edn::to_vec(&pointer) {
+                if fs::write(last_snapshot_path(app), serialized).is_ok() {
+                    let _ = fs::remove_file(legacy_path);
+                }
+            }
+            pointer
+        }
+    };
     resolve_restart_pointer(conn, &pointer)
 }
 
-fn serialize_restart_pointer(snapshot: &LastDesignSnapshot) -> Option<String> {
+fn serialize_restart_pointer(snapshot: &LastDesignSnapshot) -> Option<Vec<u8>> {
     let target = snapshot.target_ref.clone()?;
-    serde_json::to_string_pretty(&LastDesignPointer {
+    crate::strict_edn::to_vec(&LastDesignPointer {
         schema_version: RESTART_POINTER_SCHEMA_VERSION,
         target,
         selected_part_id: snapshot.selected_part_id.clone(),
@@ -99,8 +119,7 @@ fn resolve_restart_pointer(
             message_id,
         } => resolve_saved_pointer(conn, thread_id, message_id, pointer),
         AuthoringTargetRef::LatestSaved { thread_id } => {
-            let message_id =
-                db::get_latest_successful_message_id_in_thread(conn, thread_id).ok()??;
+            let message_id = db::get_thread_latest_version(conn, thread_id).ok()??.id;
             resolve_saved_pointer(conn, thread_id, &message_id, pointer)
         }
     }
@@ -159,6 +178,24 @@ mod tests {
         InteractionMode, MacroDialect, ModelManifest, SourceLanguage, UiSpec,
     };
 
+    struct TestResolver {
+        root: PathBuf,
+    }
+
+    impl PathResolver for TestResolver {
+        fn app_config_dir(&self) -> PathBuf {
+            self.root.clone()
+        }
+
+        fn app_data_dir(&self) -> PathBuf {
+            self.root.clone()
+        }
+
+        fn resource_path(&self, _path: &str) -> Option<PathBuf> {
+            None
+        }
+    }
+
     fn design() -> DesignOutput {
         DesignOutput {
             title: "Recovered".to_string(),
@@ -186,7 +223,7 @@ mod tests {
             "contentHash": "sha256:artifact",
             "fcstdPath": "",
             "manifestPath": "/tmp/model-1.json",
-            "previewStlPath": "/tmp/model-1.stl"
+            "modelStlPath": "/tmp/model-1.stl"
         }))
         .unwrap()
     }
@@ -225,15 +262,50 @@ mod tests {
         };
 
         let serialized = serialize_restart_pointer(&snapshot).expect("tagged pointer");
-        let value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        let text = std::str::from_utf8(&serialized).unwrap();
+        let value: LastDesignPointer = crate::strict_edn::from_slice(&serialized).unwrap();
 
-        assert_eq!(value["schemaVersion"], 1);
-        assert_eq!(value["target"]["kind"], "draft");
-        assert_eq!(value["target"]["previewId"], "preview-1");
-        assert_eq!(value["selectedPartId"], "part-1");
-        assert!(value.get("design").is_none());
-        assert!(value.get("artifactBundle").is_none());
-        assert!(value.get("modelManifest").is_none());
+        assert!(text.contains(":schema-version"));
+        assert!(text.contains(":selected-part-id"));
+        assert_eq!(value.schema_version, 1);
+        assert!(matches!(
+            value.target,
+            AuthoringTargetRef::Draft { ref preview_id, .. } if preview_id == "preview-1"
+        ));
+        assert_eq!(value.selected_part_id.as_deref(), Some("part-1"));
+    }
+
+    #[test]
+    fn restart_pointer_writes_canonical_edn_only() {
+        let root = std::env::temp_dir().join(format!(
+            "ecky-last-design-edn-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("last_design.json"), "{}").unwrap();
+        let resolver = TestResolver { root: root.clone() };
+        let snapshot = LastDesignSnapshot {
+            design: None,
+            thread_id: Some("thread-1".to_string()),
+            message_id: Some("message-1".to_string()),
+            artifact_bundle: None,
+            model_manifest: None,
+            selected_part_id: None,
+            target_ref: Some(AuthoringTargetRef::SavedVersion {
+                thread_id: "thread-1".to_string(),
+                message_id: "message-1".to_string(),
+            }),
+        };
+
+        write_last_snapshot(&resolver, Some(&snapshot));
+
+        assert!(root.join("last_design.edn").is_file());
+        assert!(!root.join("last_design.json").exists());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

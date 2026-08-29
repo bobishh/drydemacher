@@ -38,7 +38,7 @@ const artifactBundle = {
   fcstdPath: '/mock/cache/model.FCStd',
   manifestPath: '/mock/cache/manifest.json',
   macroPath: '/mock/cache/source.FCMacro',
-  previewStlPath: '/mock/cache/preview.stl',
+  modelStlPath: '/mock/cache/model.stl',
   viewerAssets: [],
 };
 
@@ -81,13 +81,22 @@ type BootMockOptions = {
   runtimeDelayMs?: number;
   messagesPageMode?: 'full' | 'skinny-active' | 'omits-active';
   runtimeFilesExist?: boolean;
+  runtimeSizeBytes?: number;
   runtimeStlFailsOnce?: boolean;
   allowBootRebuild?: boolean;
   rebuildSameArtifact?: boolean;
   renderDelayMs?: number;
+  rebuildError?: string;
   lastSnapshotMode?: 'full' | 'missing-manifest' | 'missing-design' | 'none';
   pointedMessageMode?: 'full' | 'missing';
   threadWindowLayout?: Record<string, unknown> | null;
+  recoveryState?: {
+    terminationCount: number;
+    automaticReloadUsed: boolean;
+    blocked: boolean;
+    rawError: string | null;
+    occurredAt: number | null;
+  };
 };
 
 const MOCK_STL = `solid mock
@@ -102,19 +111,19 @@ endsolid mock
 `;
 
 async function installBaseBootMock(page: Page, options: BootMockOptions = {}) {
-  let previewStlRequests = 0;
+  let modelStlRequests = 0;
   await page.route(/\/mock\/.*\.stl(?:\?.*)?$/, async (route) => {
     const url = route.request().url();
     const runtimeFilesExist = options.runtimeFilesExist ?? true;
     const allowBootRebuild = options.allowBootRebuild ?? false;
-    if (options.runtimeStlFailsOnce && url.includes('/mock/cache/preview.stl')) {
-      previewStlRequests += 1;
-      if (previewStlRequests === 1) {
+    if (options.runtimeStlFailsOnce && url.includes('/mock/cache/model.stl')) {
+      modelStlRequests += 1;
+      if (modelStlRequests === 1) {
         await route.fulfill({ status: 404, contentType: 'text/plain', body: 'missing runtime' });
         return;
       }
     }
-    if (url.includes('/mock/cache/rebuilt-preview.stl')) {
+    if (url.includes('/mock/cache/rebuilt-model.stl')) {
       await route.fulfill({ status: allowBootRebuild ? 200 : 404, contentType: 'model/stl', body: MOCK_STL });
       return;
     }
@@ -125,12 +134,20 @@ async function installBaseBootMock(page: Page, options: BootMockOptions = {}) {
     await route.fulfill({ status: 200, contentType: 'model/stl', body: MOCK_STL });
   });
 
-  return page.addInitScript(({ runtimeCapabilities, config, artifactBundle, modelManifest, design, history, runtimeDelayMs, messagesPageMode, runtimeFilesExist, allowBootRebuild, rebuildSameArtifact, renderDelayMs, lastSnapshotMode, pointedMessageMode, threadWindowLayout }) => {
+  return page.addInitScript(({ runtimeCapabilities, config, artifactBundle, modelManifest, design, history, runtimeDelayMs, messagesPageMode, runtimeFilesExist, runtimeSizeBytes, allowBootRebuild, rebuildSameArtifact, renderDelayMs, rebuildError, lastSnapshotMode, pointedMessageMode, threadWindowLayout, recoveryState }) => {
     (window as any).__BOOT_CALLS__ = [];
     (window as any).__BOOT_CAPABILITIES_RESOLVED__ = false;
     window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
+    let nextCallbackId = 1;
+    window.__TAURI_INTERNALS__.transformCallback = (callback: unknown) => {
+      const callbackId = nextCallbackId++;
+      (window as unknown as Record<string, unknown>)[`_${callbackId}`] = callback;
+      return callbackId;
+    };
     window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
       (window as any).__BOOT_CALLS__.push({ cmd, args });
+      if (cmd === 'plugin:event|listen') return Number(args?.handler ?? 0);
+      if (cmd === 'plugin:event|unlisten') return null;
       if (cmd === 'get_config') return config;
       if (cmd === 'save_config') return null;
       if (cmd === 'get_runtime_capabilities') {
@@ -256,14 +273,18 @@ async function installBaseBootMock(page: Page, options: BootMockOptions = {}) {
       }
       if (cmd === 'get_thread_window_layout') return threadWindowLayout;
       if (cmd === 'save_thread_window_layout') return null;
+      if (cmd === 'get_web_content_recovery_state') return recoveryState;
+      if (cmd === 'acknowledge_web_content_recovery') return null;
       if (cmd === 'get_active_agent_sessions') return [];
       if (cmd === 'get_agent_terminal_snapshots') return [];
+      if (cmd === 'get_agent_activity') return { events: [], latestCursor: 0 };
       if (cmd === 'plugin:fs|exists') return runtimeFilesExist;
-      if (cmd === 'plugin:fs|size') return 1024;
+      if (cmd === 'plugin:fs|size') return runtimeSizeBytes;
       if (cmd === 'render_model' && allowBootRebuild) {
         if (renderDelayMs) {
           await new Promise((resolve) => setTimeout(resolve, renderDelayMs));
         }
+        if (rebuildError) throw new Error(rebuildError);
         if (rebuildSameArtifact) {
           return artifactBundle;
         }
@@ -271,7 +292,7 @@ async function installBaseBootMock(page: Page, options: BootMockOptions = {}) {
           ...artifactBundle,
           modelId: 'cached-model-rebuilt',
           contentHash: 'cached-hash-rebuilt',
-          previewStlPath: '/mock/cache/rebuilt-preview.stl',
+          modelStlPath: '/mock/cache/rebuilt-model.stl',
         };
       }
       if (cmd === 'get_model_manifest') return {
@@ -279,7 +300,7 @@ async function installBaseBootMock(page: Page, options: BootMockOptions = {}) {
         modelId: args?.modelId ?? 'cached-model-rebuilt',
       };
       if (cmd === 'save_model_manifest') return null;
-      if (cmd === 'update_version_runtime') return null;
+      if (cmd === 'repair_missing_version_runtime') return null;
       if (cmd === 'render_model') throw new Error('render_model must not run during cached boot restore');
       if (cmd === 'get_thread') throw new Error('full get_thread must not run during cached boot restore');
       return null;
@@ -294,16 +315,55 @@ async function installBaseBootMock(page: Page, options: BootMockOptions = {}) {
     runtimeDelayMs: options.runtimeDelayMs ?? 0,
     messagesPageMode: options.messagesPageMode ?? 'full',
     runtimeFilesExist: options.runtimeFilesExist ?? true,
+    runtimeSizeBytes: options.runtimeSizeBytes ?? 1024,
     allowBootRebuild: options.allowBootRebuild ?? false,
     rebuildSameArtifact: options.rebuildSameArtifact ?? false,
     renderDelayMs: options.renderDelayMs ?? 0,
+    rebuildError: options.rebuildError ?? '',
     lastSnapshotMode: options.lastSnapshotMode ?? 'full',
     pointedMessageMode: options.pointedMessageMode ?? 'full',
     threadWindowLayout: options.threadWindowLayout ?? null,
+    recoveryState: options.recoveryState ?? {
+      terminationCount: 0,
+      automaticReloadUsed: false,
+      blocked: false,
+      rawError: null,
+      occurredAt: null,
+    },
   });
 }
 
 test.describe('Boot restore', () => {
+  test('Given WebContent terminated after memory pressure When recovery reload boots Then durable state restores without duplicate work', async ({ page }) => {
+    await installBaseBootMock(page, {
+      recoveryState: {
+        terminationCount: 1,
+        automaticReloadUsed: true,
+        blocked: false,
+        rawError: 'WKWebView web content process terminated',
+        occurredAt: 123,
+      },
+    });
+
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0, { timeout: 5000 });
+    await expect(page.locator('.viewer-shell canvas')).toBeVisible();
+    await expect(page.getByRole('alert')).toContainText(
+      'WebContent recovered: WKWebView web content process terminated',
+    );
+
+    const calls = await page.evaluate(() =>
+      (window as any).__BOOT_CALLS__.map((entry: { cmd: string }) => entry.cmd),
+    );
+    expect(calls).toContain('get_last_design');
+    expect(calls).toContain('get_thread_message_version');
+    expect(calls).not.toContain('get_thread');
+    expect(calls).not.toContain('render_model');
+    expect(calls).not.toContain('queue_agent_prompt');
+    expect(calls).not.toContain('send_codex_provider_message');
+    expect(calls).not.toContain('send_agy_provider_message');
+  });
+
   test('Given no saved snapshot and a newer reusable blank thread When app boots Then it opens the latest authored thread', async ({ page }) => {
     await installBaseBootMock(page, {
       lastSnapshotMode: 'none',
@@ -388,7 +448,7 @@ test.describe('Boot restore', () => {
       .toBe(false);
   });
 
-  test('Given boot runtime is missing When app starts Then restore rebuilds cached version runtime', async ({ page }) => {
+  test('Given saved preview is missing When app starts Then its saved source rebuilds the runtime', async ({ page }) => {
     await installBaseBootMock(page, {
       runtimeFilesExist: false,
       allowBootRebuild: true,
@@ -397,12 +457,15 @@ test.describe('Boot restore', () => {
 
     await page.goto('/');
     await expect(page.locator('.boot-overlay')).toHaveCount(0, { timeout: 5000 });
-    await expect(page.getByRole('button', { name: /CODE/ })).toBeEnabled();
+    await expect(page.getByRole('button', { name: /Code inspector/i })).toBeEnabled();
     await expect(page.getByRole('button', { name: 'Dismiss error' })).toHaveCount(0);
 
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__BOOT_CALLS__.some((entry: { cmd: string }) => entry.cmd === 'repair_missing_version_runtime'),
+    )).toBe(true);
     const calls = await page.evaluate(() => (window as any).__BOOT_CALLS__.map((entry: { cmd: string }) => entry.cmd));
     expect(calls).toContain('render_model');
-    expect(calls).toContain('update_version_runtime');
+    expect(calls).toContain('repair_missing_version_runtime');
   });
 
   test('Given last snapshot points to a cached artifact When app boots Then it restores the pointed DB version without full thread load or rerender', async ({ page }) => {
@@ -421,25 +484,75 @@ test.describe('Boot restore', () => {
     expect(calls).not.toContain('render_model');
   });
 
-  test('Given restored runtime files are missing When app boots Then source rebuilds cached runtime', async ({ page }) => {
+  test('Given a saved version is restored When boot persists restart state Then it keeps a saved-version target pointer', async ({ page }) => {
+    await installBaseBootMock(page);
+
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0, { timeout: 5000 });
+
+    const persistedSnapshot = await page.evaluate(() => {
+      const calls = (window as any).__BOOT_CALLS__ as Array<{
+        cmd: string;
+        args?: { snapshot?: { targetRef?: unknown } };
+      }>;
+      return calls
+        .filter((entry) => entry.cmd === 'save_last_design' && entry.args?.snapshot)
+        .at(-1)?.args?.snapshot ?? null;
+    });
+
+    expect(persistedSnapshot).toMatchObject({
+      threadId: 'thread-boot',
+      messageId: 'msg-cached',
+      targetRef: {
+        kind: 'savedVersion',
+        threadId: 'thread-boot',
+        messageId: 'msg-cached',
+      },
+    });
+  });
+
+  test('Given a saved preview has a large reported size When app boots Then frontend uses it without a size gate', async ({ page }) => {
+    let previewRequests = 0;
+    page.on('request', (request) => {
+      if (request.url().includes('/mock/cache/model.stl')) previewRequests += 1;
+    });
+    await installBaseBootMock(page, { runtimeSizeBytes: 1024 * 1024 * 1024 });
+
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0, { timeout: 5000 });
+    await expect(page.getByRole('button', { name: /Code inspector/i })).toBeEnabled();
+
+    const calls = await page.evaluate(() => (window as any).__BOOT_CALLS__.map((entry: { cmd: string }) => entry.cmd));
+    expect(calls).not.toContain('plugin:fs|size');
+    expect(calls).not.toContain('render_model');
+    expect(previewRequests).toBeGreaterThan(0);
+  });
+
+  test('Given saved preview is missing When source rebuild fails Then raw render error stays visible', async ({ page }) => {
     await installBaseBootMock(page, {
       runtimeFilesExist: false,
       allowBootRebuild: true,
+      rebuildError: 'FreeCAD exited 1: missing Part workbench',
     });
 
     await page.goto('/');
     await expect(page.locator('.boot-overlay')).toHaveCount(0, { timeout: 5000 });
-    await expect(page.getByRole('button', { name: /CODE/ })).toBeEnabled();
-    await expect(page.getByRole('button', { name: 'Dismiss error' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Code inspector/i })).toBeEnabled();
+    await expect(page.getByRole('alert')).toContainText('Runtime Rebuild Error:');
+    await expect(page.getByRole('alert')).toContainText('FreeCAD exited 1: missing Part workbench');
 
     const calls = await page.evaluate(() => (window as any).__BOOT_CALLS__.map((entry: { cmd: string }) => entry.cmd));
     expect(calls).toContain('get_thread_message_version');
     expect(calls).toContain('render_model');
-    expect(calls).toContain('update_version_runtime');
+    expect(calls).not.toContain('repair_missing_version_runtime');
     expect(calls).not.toContain('get_thread');
   });
 
-  test('Given old FreeCAD artifact fetch fails once When rebuild returns same model path Then viewer reloads rebuilt runtime', async ({ page }) => {
+  test('Given saved preview fetch fails once When app boots Then it rebuilds and reloads the same artifact URL', async ({ page }) => {
+    let previewRequests = 0;
+    page.on('request', (request) => {
+      if (request.url().includes('/mock/cache/model.stl')) previewRequests += 1;
+    });
     await installBaseBootMock(page, {
       runtimeStlFailsOnce: true,
       allowBootRebuild: true,
@@ -448,15 +561,18 @@ test.describe('Boot restore', () => {
 
     await page.goto('/');
     await expect(page.locator('.boot-overlay')).toHaveCount(0, { timeout: 5000 });
-    await expect(page.locator('.viewer-shell canvas')).toBeVisible();
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__BOOT_CALLS__.some((entry: { cmd: string }) => entry.cmd === 'repair_missing_version_runtime'),
+    )).toBe(true);
     await expect(page.getByRole('button', { name: 'Dismiss error' })).toHaveCount(0);
 
     const calls = await page.evaluate(() => (window as any).__BOOT_CALLS__.map((entry: { cmd: string }) => entry.cmd));
     expect(calls).toContain('render_model');
-    expect(calls).toContain('update_version_runtime');
+    expect(calls).toContain('repair_missing_version_runtime');
+    expect(previewRequests).toBeGreaterThan(1);
   });
 
-  test('Given cached snapshot has no source and runtime files are missing When app boots Then pointed DB source rebuilds runtime', async ({ page }) => {
+  test('Given cached snapshot has no source and preview is missing When app boots Then pointed DB source rebuilds it', async ({ page }) => {
     await installBaseBootMock(page, {
       lastSnapshotMode: 'missing-design',
       runtimeFilesExist: false,
@@ -465,14 +581,17 @@ test.describe('Boot restore', () => {
 
     await page.goto('/');
     await expect(page.locator('.boot-overlay')).toHaveCount(0, { timeout: 5000 });
-    await expect(page.getByRole('button', { name: /CODE/ })).toBeEnabled();
+    await expect(page.getByRole('button', { name: /Code inspector/i })).toBeEnabled();
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__BOOT_CALLS__.some((entry: { cmd: string }) => entry.cmd === 'repair_missing_version_runtime'),
+    )).toBe(true);
     await expect(page.getByRole('button', { name: 'Dismiss error' })).toHaveCount(0);
 
     const calls = await page.evaluate(() => (window as any).__BOOT_CALLS__.map((entry: { cmd: string }) => entry.cmd));
     expect(calls).toContain('get_thread_message_version');
     expect(calls).not.toContain('get_thread_latest_version');
     expect(calls).toContain('render_model');
-    expect(calls).toContain('update_version_runtime');
+    expect(calls).toContain('repair_missing_version_runtime');
     expect(calls).not.toContain('get_thread');
   });
 
@@ -509,7 +628,7 @@ test.describe('Boot restore', () => {
 
     await page.goto('/');
     await expect(page.locator('.boot-overlay')).toHaveCount(0, { timeout: 5000 });
-    await expect(page.getByRole('button', { name: /CODE/ })).toBeEnabled();
+    await expect(page.getByRole('button', { name: /Code inspector/i })).toBeEnabled();
 
     const calls = await page.evaluate(() => (window as any).__BOOT_CALLS__.map((entry: { cmd: string }) => entry.cmd));
     expect(calls).not.toContain('get_thread');
@@ -521,7 +640,7 @@ test.describe('Boot restore', () => {
 
     await page.goto('/');
     await expect(page.locator('.boot-overlay')).toHaveCount(0, { timeout: 5000 });
-    await expect(page.getByRole('button', { name: /CODE/ })).toBeEnabled();
+    await expect(page.getByRole('button', { name: /Code inspector/i })).toBeEnabled();
     await page.getByRole('button', { name: 'DIALOGUE' }).click();
     await expect(page.locator('.version-title').filter({ hasText: 'Cached Boot Model' }).first()).toBeVisible();
 
@@ -530,7 +649,7 @@ test.describe('Boot restore', () => {
     expect(calls).not.toContain('render_model');
   });
 
-  test('Given old history thread runtime cache is missing When thread opens Then cached runtime rebuilds', async ({ page }) => {
+  test('Given a thread latest preview is missing When thread opens Then source rebuilds its durable STL', async ({ page }) => {
     await installBaseBootMock(page, {
       lastSnapshotMode: 'none',
       runtimeFilesExist: false,
@@ -544,12 +663,12 @@ test.describe('Boot restore', () => {
     const card = page.locator('.project-card').filter({ hasText: 'Cached Thread' });
     await card.getByRole('button', { name: 'OPEN' }).click();
 
-    await expect(page.getByRole('button', { name: /CODE/ })).toBeEnabled();
+    await expect(page.getByRole('button', { name: /Code inspector/i })).toBeEnabled();
     await expect(page.getByRole('button', { name: 'Dismiss error' })).toHaveCount(0);
 
     const calls = await page.evaluate(() => (window as any).__BOOT_CALLS__.map((entry: { cmd: string }) => entry.cmd));
     expect(calls).toContain('get_thread_latest_version');
     expect(calls).toContain('render_model');
-    expect(calls).toContain('update_version_runtime');
+    expect(calls).toContain('repair_missing_version_runtime');
   });
 });

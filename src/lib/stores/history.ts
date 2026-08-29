@@ -3,17 +3,17 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import { historyStore as history, activeThreadIdStore as activeThreadId, activeVersionId } from './domainState';
 import { workingCopy, isDirty } from './workingCopy';
 import { session } from './sessionStore';
-import { handleParamChange, commitManualVersion } from '../controllers/manualController';
+import { commitManualVersion } from '../controllers/manualController';
 import { paramPanelState } from './paramPanelState';
 import { profileLog } from '../debug/profiler';
 import { clearLastSessionSnapshot, persistLastSessionSnapshot } from '../modelRuntime/sessionSnapshot';
-import { getRenderableRuntimeBundle, inspectRuntimeBundle } from '../modelRuntime/runtimeBundle';
+import { getRenderableRuntimeBundle } from '../modelRuntime/runtimeBundle';
 import { confirmAction } from '../ui/confirmAction';
+import { createRevisionedSingleflight } from './historyProjectionRefresh';
 import type { Message, Thread } from '../types/domain';
 import { isCurrentThreadLoad as isCurrentThreadLoadState, shouldSkipThreadSelect } from '../threadLoading';
 import {
   activeVersionTimelineIndex,
-  isRenderableVersionTimelineMessage,
   versionTimelineMessages,
 } from '../threadTimeline';
 import { sameArtifactVersion } from '../versionPreviewPersistence';
@@ -34,9 +34,7 @@ import {
   getThreadMessageVersion,
   getThreadMessagesPage,
   renameThread as renameThreadCommand,
-  getThread,
   restoreVersion as restoreVersionCommand,
-  updateVersionRuntime,
 } from '../tauri/client';
 
 type NewThreadPayload = {
@@ -48,17 +46,12 @@ type NewThreadPayload = {
 type ThreadMessagePageState = {
   isLoading: boolean;
   hasMore: boolean;
-  nextBefore: number | null;
+  nextBefore: string | null;
   error: string | null;
 };
 
 let latestLoadVersionToken = 0;
 let latestThreadSwitchToken = 0;
-const versionRuntimePayloadCache = new Map<
-  string,
-  { artifactBundle: Message['artifactBundle']; modelManifest: Message['modelManifest'] }
->();
-
 export const activeThreadMessagesLoading = writable(false);
 export const activeThreadVersionLoading = writable(false);
 export const activeThreadLoadingId = writable<string | null>(null);
@@ -68,10 +61,32 @@ const INITIAL_THREAD_MESSAGE_PAGE_LIMIT = 20;
 const OLDER_THREAD_MESSAGE_PAGE_LIMIT = 50;
 const THREAD_MESSAGES_PAGE_TIMEOUT_MS = 8000;
 const THREAD_LATEST_VERSION_TIMEOUT_MS = 8000;
+const RESTORED_OLDER_PAGE_LIMIT = 10;
+const HISTORY_WINDOW_STORAGE_KEY = 'ecky.historyProjectionWindows.v1';
+const historyProjectionRefreshes = createRevisionedSingleflight<{
+  freshHistory: Thread[];
+  page: Awaited<ReturnType<typeof getThreadMessagesPage>>;
+}>();
+let localHistoryProjectionRevision = 0;
 
-export type LoadVersionOptions = {
-  rebuildMissingRuntime?: boolean;
-};
+function storedOlderPageCount(threadId: string): number {
+  try {
+    const raw = JSON.parse(localStorage.getItem(HISTORY_WINDOW_STORAGE_KEY) ?? '{}') as Record<string, number>;
+    return Math.max(0, Math.min(RESTORED_OLDER_PAGE_LIMIT, Math.floor(raw[threadId] ?? 0)));
+  } catch {
+    return 0;
+  }
+}
+
+function persistOlderPageCount(threadId: string, count: number): void {
+  try {
+    const raw = JSON.parse(localStorage.getItem(HISTORY_WINDOW_STORAGE_KEY) ?? '{}') as Record<string, number>;
+    raw[threadId] = Math.max(0, Math.min(RESTORED_OLDER_PAGE_LIMIT, Math.floor(count)));
+    localStorage.setItem(HISTORY_WINDOW_STORAGE_KEY, JSON.stringify(raw));
+  } catch {
+    // Projection-window persistence is best effort; durable history remains canonical.
+  }
+}
 
 async function hydrateVersionCandidate(
   message: Message,
@@ -138,6 +153,33 @@ function mergeThreadMessagePayload(existing: Message | undefined, incoming: Mess
   };
 }
 
+export function evictSupersededVersionDetails(
+  threads: Thread[],
+  selectedThreadId: string,
+  selected: Message,
+): Thread[] {
+  return threads.map((thread) => ({
+    ...thread,
+    messages: (thread.messages ?? []).map((message) => {
+      if (thread.id === selectedThreadId && message.id === selected.id) {
+        return mergeThreadMessagePayload(message, selected);
+      }
+      if (!message.output && !message.artifactBundle && !message.modelManifest && !message.imageData) {
+        return message;
+      }
+      return {
+        ...message,
+        output: null,
+        artifactBundle: null,
+        modelManifest: null,
+        structuralVerification: null,
+        imageData: null,
+        attachmentImages: [],
+      };
+    }),
+  }));
+}
+
 function mergeActiveThreadMessages(
   existingMessages: Message[],
   incomingMessages: Message[],
@@ -158,7 +200,9 @@ function mergeActiveThreadMessages(
 }
 
 function versionCountForMessages(messages: Message[], fallback: number): number {
-  return Math.max(fallback, messages.filter(isRenderableVersionTimelineMessage).length);
+  // Count every authored attempt. Failed, pending, and artifactless versions
+  // remain history rows and must not disappear from the count.
+  return Math.max(fallback, versionTimelineMessages(messages).length);
 }
 
 function mergeCommittedVersionMessage(
@@ -195,6 +239,7 @@ function mergeCommittedVersionMessage(
 
 export function rememberCommittedVersionMessage(threadId: string, title: string, message: Message) {
   history.update((threads) => mergeCommittedVersionMessage(threads, threadId, title, message));
+  activeVersionId.set(message.id);
 }
 
 export function rememberLatestThreadVersion(threadId: string, message: Message) {
@@ -210,6 +255,7 @@ export function rememberLatestThreadVersion(threadId: string, message: Message) 
       };
     }),
   );
+  activeVersionId.set(message.id);
 }
 
 function beginThreadSwitch(targetThreadId: string) {
@@ -247,15 +293,27 @@ function toAssetUrl(path: string | null | undefined): string {
 }
 
 function isVersionCandidate(message: Message | null | undefined): message is Message {
-  return Boolean(message && isRenderableVersionTimelineMessage(message));
+  return Boolean(message && versionTimelineMessages([message]).length > 0);
+}
+
+export function resolveCommittedVersionAfterHistoryRefresh(
+  currentVersionId: string | null,
+  messages: Message[],
+): Message | null {
+  if (!currentVersionId || messages.some((message) => message.id === currentVersionId)) {
+    return null;
+  }
+  return [...messages].reverse().find(isVersionCandidate) ?? null;
 }
 
 function versionLabel(message: Message): string {
   return (
     message.output?.title ||
+    message.versionSummary?.title ||
     message.modelManifest?.document?.documentLabel ||
     message.modelManifest?.document?.documentName ||
     message.artifactBundle?.modelId ||
+    message.versionSummary?.modelId ||
     'Imported Model'
   );
 }
@@ -267,32 +325,10 @@ function hasConsistentRuntimePayload(
   return Boolean(bundle && manifest && bundle.modelId === manifest.modelId);
 }
 
-function isDurableRuntimePath(path: string | null | undefined): boolean {
-  if (!path) return false;
-  return path.includes('/model-runtime/') || path.includes('\\model-runtime\\');
-}
-
-function rememberVersionRuntimePayload(
-  messageId: string,
-  artifactBundle: Message['artifactBundle'] | null | undefined,
-  modelManifest: Message['modelManifest'] | null | undefined,
-) {
-  if (!hasConsistentRuntimePayload(artifactBundle, modelManifest)) return;
-  versionRuntimePayloadCache.set(messageId, {
-    artifactBundle: artifactBundle ?? null,
-    modelManifest: modelManifest ?? null,
-  });
-}
-
 function resolveVersionRuntimePayload(message: Message): {
   artifactBundle: Message['artifactBundle'] | null;
   modelManifest: Message['modelManifest'] | null;
 } {
-  const cached = versionRuntimePayloadCache.get(message.id);
-  if (cached && hasConsistentRuntimePayload(cached.artifactBundle, cached.modelManifest)) {
-    return cached;
-  }
-
   const currentThreadId = get(activeThreadId);
   const currentVersionId = get(activeVersionId);
   const currentSession = get(session);
@@ -300,7 +336,8 @@ function resolveVersionRuntimePayload(message: Message): {
     message.id === currentVersionId &&
     currentThreadId &&
     hasConsistentRuntimePayload(currentSession.artifactBundle, currentSession.modelManifest) &&
-    (!message.artifactBundle || sameArtifactVersion(message.artifactBundle, currentSession.artifactBundle))
+    message.artifactBundle &&
+    sameArtifactVersion(message.artifactBundle, currentSession.artifactBundle)
   ) {
     return {
       artifactBundle: currentSession.artifactBundle,
@@ -312,17 +349,6 @@ function resolveVersionRuntimePayload(message: Message): {
     artifactBundle: message.artifactBundle ?? null,
     modelManifest: message.modelManifest ?? null,
   };
-}
-
-async function persistVersionRuntimePayload(
-  messageId: string,
-  artifactBundle: Message['artifactBundle'] | null | undefined,
-  modelManifest: Message['modelManifest'] | null | undefined,
-  persistRuntime: typeof updateVersionRuntime = updateVersionRuntime,
-): Promise<boolean> {
-  if (!hasConsistentRuntimePayload(artifactBundle, modelManifest)) return false;
-  await persistRuntime(messageId, artifactBundle!, modelManifest!);
-  return true;
 }
 
 async function resolveForkRuntimePayload(message: Message): Promise<{
@@ -338,7 +364,6 @@ async function resolveForkRuntimePayload(message: Message): Promise<{
     try {
       const refreshedManifest = await getModelManifest(message.artifactBundle.modelId);
       if (message.artifactBundle.modelId === refreshedManifest.modelId) {
-        rememberVersionRuntimePayload(message.id, message.artifactBundle, refreshedManifest);
         return {
           artifactBundle: message.artifactBundle,
           modelManifest: refreshedManifest,
@@ -355,18 +380,29 @@ async function resolveForkRuntimePayload(message: Message): Promise<{
 export async function loadVersion(
   msg: Message | null | undefined,
   expectedThreadId: string | null = get(activeThreadId),
-  options: LoadVersionOptions = {},
-) {
-  if (!isVersionCandidate(msg)) return;
-  const rebuildMissingRuntime = options.rebuildMissingRuntime ?? true;
+): Promise<boolean> {
+  if (!isVersionCandidate(msg)) return false;
+  console.warn('[CAD_FLOW][version.load.start]', {
+    expectedThreadId,
+    messageId: msg.id,
+    sourceKind: msg.artifactBundle?.sourceKind ?? msg.modelManifest?.sourceKind ?? null,
+    modelId: msg.artifactBundle?.modelId ?? msg.modelManifest?.modelId ?? null,
+    modelStlPath: msg.artifactBundle?.modelStlPath ?? null,
+    hasCanonicalSource: Boolean(msg.output?.macroCode),
+  });
   const loadToken = ++latestLoadVersionToken;
-  let rebuiltRuntime = false;
+  let runtimeUnavailable = false;
   const isStale = () =>
     loadToken !== latestLoadVersionToken ||
     (expectedThreadId !== null && get(activeThreadId) !== expectedThreadId);
 
   const versionMessage = await hydrateVersionCandidate(msg, expectedThreadId);
-  if (isStale()) return;
+  if (isStale()) return false;
+  if (expectedThreadId) {
+    history.update((threads) =>
+      evictSupersededVersionDetails(threads, expectedThreadId, versionMessage),
+    );
+  }
 
   if (versionMessage.output) {
     workingCopy.loadVersion(versionMessage.output, versionMessage.id);
@@ -376,108 +412,68 @@ export async function loadVersion(
     paramPanelState.reset();
   }
   activeVersionId.set(versionMessage.id);
+  session.setError(
+    versionMessage.status === 'error'
+      ? versionMessage.content || versionMessage.output?.response || 'Version render failed.'
+      : null,
+  );
 
   const runtimePayload = resolveVersionRuntimePayload(versionMessage);
-  const trustedRuntimeBundle = getRenderableRuntimeBundle(
-    runtimePayload.artifactBundle ?? null,
+  const renderableBundle = getRenderableRuntimeBundle(
+    runtimePayload.artifactBundle,
     versionMessage.output?.postProcessing ?? null,
     versionMessage.output?.initialParams ?? {},
   );
-  if (trustedRuntimeBundle?.previewStlPath && isDurableRuntimePath(trustedRuntimeBundle.previewStlPath)) {
-    session.setStlUrl(toAssetUrl(trustedRuntimeBundle.previewStlPath));
-    session.setModelRuntime(trustedRuntimeBundle, runtimePayload.modelManifest ?? versionMessage.modelManifest ?? null);
-    session.setSelectedPartId(null);
-    rememberVersionRuntimePayload(
-      versionMessage.id,
-      trustedRuntimeBundle,
-      runtimePayload.modelManifest ?? versionMessage.modelManifest ?? null,
-    );
-    session.setStatus(`Loaded Version: ${versionLabel(versionMessage)}`);
-    if (isStale()) return;
-    await persistLastSessionSnapshot({
-      design: versionMessage.output ?? null,
-      threadId: expectedThreadId ?? get(activeThreadId),
-      messageId: versionMessage.id,
-      artifactBundle: trustedRuntimeBundle,
-      modelManifest: runtimePayload.modelManifest ?? versionMessage.modelManifest ?? null,
-      selectedPartId: null,
-    });
-    return;
-  }
-
-  const runtime = await inspectRuntimeBundle(
-    runtimePayload.artifactBundle ?? null,
-    undefined,
-    undefined,
-    versionMessage.output?.postProcessing ?? null,
-    versionMessage.output?.initialParams ?? {},
-  );
-  if (isStale()) return;
+  const runtime = {
+    bundle: renderableBundle?.modelStlPath ? renderableBundle : null,
+    degradedToModel: Boolean(
+      renderableBundle &&
+        (runtimePayload.artifactBundle?.viewerAssets?.length ?? 0) > 0 &&
+        (renderableBundle.viewerAssets?.length ?? 0) === 0,
+    ),
+  };
+  console.warn('[CAD_FLOW][version.runtime.result]', {
+    expectedThreadId,
+    messageId: versionMessage.id,
+    modelId: runtimePayload.artifactBundle?.modelId ?? null,
+    modelStlPath: runtimePayload.artifactBundle?.modelStlPath ?? null,
+    hasStoredModel: Boolean(runtime.bundle),
+    degradedToModel: runtime.degradedToModel,
+  });
+  if (isStale()) return false;
   if (runtime.bundle) {
-    session.setStlUrl(toAssetUrl(runtime.bundle.previewStlPath));
+    session.setStlUrl(toAssetUrl(runtime.bundle.modelStlPath));
     session.setModelRuntime(runtime.bundle, runtimePayload.modelManifest ?? versionMessage.modelManifest ?? null);
     session.setSelectedPartId(null);
-    rememberVersionRuntimePayload(
-      versionMessage.id,
-      runtime.bundle,
-      runtimePayload.modelManifest ?? versionMessage.modelManifest ?? null,
-    );
-  } else if (runtime.skippedOversizedPreview) {
-    session.setStlUrl(null);
-    session.clearModelRuntime();
   } else if (versionMessage.output) {
     session.clearModelRuntime();
-    if (!rebuildMissingRuntime) {
-      session.setStlUrl(null);
-      session.setStatus(`Cached runtime missing for ${versionLabel(versionMessage)}.`);
-      return;
-    }
-    session.setStatus('Cached runtime missing on disk. Rebuilding preview...');
-    await handleParamChange(versionMessage.output.initialParams || {}, versionMessage.output.macroCode, false);
-    if (isStale()) return;
-    rebuiltRuntime = true;
-    rememberVersionRuntimePayload(
-      versionMessage.id,
-      get(session).artifactBundle,
-      get(session).modelManifest,
-    );
-    try {
-      await persistVersionRuntimePayload(
-        versionMessage.id,
-        get(session).artifactBundle,
-        get(session).modelManifest,
-      );
-    } catch (error) {
-      console.warn('[History] Failed to persist rebuilt runtime bundle:', error);
-    }
+    session.setStlUrl(null);
+    runtimeUnavailable = true;
   } else {
     session.setStlUrl(null);
     session.clearModelRuntime();
   }
 
-  if (runtime.skippedOversizedPreview) {
-    session.setStatus(
-      runtime.bundle
-        ? `Loaded Version: ${versionLabel(versionMessage)} (lithophane preview skipped; using base part geometry to keep the viewer responsive).`
-        : `Loaded Version: ${versionLabel(versionMessage)} (lithophane preview was too large to load safely).`,
-    );
-  } else if (runtime.degradedToPreview) {
-    session.setStatus(`Loaded Version: ${versionLabel(versionMessage)} (preview only; part geometry was evicted).`);
-  } else if (rebuiltRuntime) {
-    session.setStatus(`Loaded Version: ${versionLabel(versionMessage)} (runtime rebuilt from macro).`);
+  if (runtime.degradedToModel) {
+    session.setStatus(`Loaded Version: ${versionLabel(versionMessage)} (model only; part geometry was evicted).`);
+  } else if (runtimeUnavailable) {
+    session.setStatus(`Loaded Version: ${versionLabel(versionMessage)} (saved model unavailable).`);
   } else if (runtime.bundle || versionMessage.output || !versionMessage.artifactBundle) {
     session.setStatus(`Loaded Version: ${versionLabel(versionMessage)}`);
   }
 
-  if (isStale()) return;
+  if (isStale()) return false;
+  const persistedBundle = runtime.bundle ?? runtimePayload.artifactBundle ?? versionMessage.artifactBundle ?? null;
+  const persistedManifest = runtimePayload.modelManifest ?? versionMessage.modelManifest ?? null;
   await persistLastSessionSnapshot({
     design: versionMessage.output ?? null,
     threadId: expectedThreadId ?? get(activeThreadId),
     messageId: versionMessage.id,
-    artifactBundle: runtime.bundle ?? runtimePayload.artifactBundle ?? versionMessage.artifactBundle ?? null,
-    modelManifest: runtimePayload.modelManifest ?? versionMessage.modelManifest ?? null,
+    artifactBundle: persistedBundle,
+    modelManifest: persistedManifest,
     selectedPartId: null,
   });
+  return Boolean(runtime.bundle);
 }
 
 export async function loadFromHistory(thread: Thread) {
@@ -543,7 +539,7 @@ export async function loadFromHistory(thread: Thread) {
   try {
     if (seededLatestVersion) {
       bootstrappedVersionId = seededLatestVersion.id;
-      await loadVersion(seededLatestVersion, targetThreadId, { rebuildMissingRuntime: true });
+      await loadVersion(seededLatestVersion, targetThreadId);
       if (!isCurrentThreadLoad(switchToken, targetThreadId)) {
         void messagesPromise.catch(() => undefined);
         return;
@@ -569,7 +565,7 @@ export async function loadFromHistory(thread: Thread) {
         }),
       );
       if (latestVersion.id !== bootstrappedVersionId) {
-        await loadVersion(latestVersion, targetThreadId, { rebuildMissingRuntime: true });
+        await loadVersion(latestVersion, targetThreadId);
       }
     } else {
       activeVersionId.set(null);
@@ -604,57 +600,73 @@ export async function loadFromHistory(thread: Thread) {
     }
   }
 
-  try {
-    const page = await messagesPromise;
-    if (!isCurrentThreadLoad(switchToken, targetThreadId)) return;
-    if (!page) {
+  void (async () => {
+    try {
+      const initialPage = await messagesPromise;
+      if (!isCurrentThreadLoad(switchToken, targetThreadId)) return;
+      if (!initialPage) {
+        setThreadPageState(targetThreadId, {
+          isLoading: false,
+          hasMore: false,
+          nextBefore: null,
+          error: null,
+        });
+        return;
+      }
+      let page = initialPage;
+      let restoredMessages = [...page.messages];
+      const restoreCount = storedOlderPageCount(targetThreadId);
+      for (let index = 0; index < restoreCount && page.hasMore && page.nextBefore; index += 1) {
+        page = await getThreadMessagesPage(
+          targetThreadId,
+          page.nextBefore,
+          OLDER_THREAD_MESSAGE_PAGE_LIMIT,
+          false,
+        );
+        if (!isCurrentThreadLoad(switchToken, targetThreadId)) return;
+        restoredMessages = mergeThreadMessages(restoredMessages, page.messages);
+      }
+      history.update((items) =>
+        items.map((candidate) =>
+          candidate.id === targetThreadId
+            ? {
+                ...candidate,
+                messages: mergeActiveThreadMessages(
+                  candidate.messages ?? [],
+                  restoredMessages,
+                  get(activeVersionId),
+                ),
+              }
+            : candidate,
+        ),
+      );
       setThreadPageState(targetThreadId, {
         isLoading: false,
-        hasMore: false,
-        nextBefore: null,
+        hasMore: page.hasMore,
+        nextBefore: page.nextBefore,
         error: null,
       });
-      return;
-    }
-    history.update((items) =>
-      items.map((candidate) =>
-        candidate.id === targetThreadId
-          ? {
-              ...candidate,
-              messages: mergeActiveThreadMessages(
-                candidate.messages ?? [],
-                page.messages,
-                get(activeVersionId),
-              ),
-            }
-          : candidate,
-      ),
-    );
-    setThreadPageState(targetThreadId, {
-      isLoading: false,
-      hasMore: page.hasMore,
-      nextBefore: page.nextBefore,
-      error: null,
-    });
-    profileLog('history.load_thread_page', {
-      threadId: targetThreadId,
-      messages: page.messages.length,
-      hasMore: page.hasMore,
-    });
-  } catch (e) {
-    if (isCurrentThreadLoad(switchToken, targetThreadId)) {
-      console.error('[History] Failed to load thread messages:', e);
-      setThreadPageState(targetThreadId, {
-        isLoading: false,
-        error: formatBackendError(e),
+      profileLog('history.load_thread_page', {
+        threadId: targetThreadId,
+        messages: restoredMessages.length,
+        hasMore: page.hasMore,
+        restoredOlderPages: restoreCount,
       });
+    } catch (e) {
+      if (isCurrentThreadLoad(switchToken, targetThreadId)) {
+        console.error('[History] Failed to load thread messages:', e);
+        setThreadPageState(targetThreadId, {
+          isLoading: false,
+          error: formatBackendError(e),
+        });
+      }
+    } finally {
+      if (isCurrentThreadLoad(switchToken, targetThreadId)) {
+        activeThreadMessagesLoading.set(false);
+        activeThreadLoadingId.set(null);
+      }
     }
-  } finally {
-    if (isCurrentThreadLoad(switchToken, targetThreadId)) {
-      activeThreadMessagesLoading.set(false);
-      activeThreadLoadingId.set(null);
-    }
-  }
+  })();
 }
 
 export async function deleteThread(id: string): Promise<boolean> {
@@ -708,7 +720,6 @@ export async function deleteVersion(messageId: string) {
       get(activeVersionId) === messageId ||
       effectiveActiveVersionId(currentThread?.messages ?? [], get(activeVersionId)) === messageId;
     await deleteVersionCommand(messageId);
-    versionRuntimePayloadCache.delete(messageId);
     if (!currentThreadId) return;
     if (wasActiveVersion) {
       detachActiveVersionRuntime();
@@ -911,23 +922,22 @@ export async function forkDesign() {
       return;
     }
 
-    const forkedThread = await getThread(newThreadId);
+    await refreshHistory();
+    const forkedSummary = get(history).find((thread) => thread.id === newThreadId) ?? null;
+    const forkedMessage = newMessageId
+      ? await getThreadMessageVersion(newThreadId, newMessageId)
+      : await getThreadLatestVersion(newThreadId);
+    if (!forkedSummary || !forkedMessage) {
+      throw new Error('Forked thread projection is unavailable.');
+    }
+    const forkedThread = { ...forkedSummary, messages: [forkedMessage] };
     history.update((items) => {
       const nextItems = items.filter((item) => item.id !== newThreadId);
       return [forkedThread, ...nextItems];
     });
 
     activeThreadId.set(newThreadId);
-    const forkedMessage =
-      forkedThread.messages.find((message) => message.id === newMessageId) ??
-      [...forkedThread.messages].reverse().find(isVersionCandidate) ??
-      null;
-
-    if (forkedMessage) {
-      await loadVersion(forkedMessage);
-    } else {
-      activeVersionId.set(newMessageId || null);
-    }
+    await loadVersion(forkedMessage);
 
     session.setStatus('Design forked into a new thread.');
     paramPanelState.setVersionId(newMessageId || null);
@@ -969,7 +979,8 @@ export async function reopenThread(id: string) {
 
 export async function openInventoryThread(id: string): Promise<boolean> {
   try {
-    const thread = await getThread(id);
+    const thread = (await getInventoryCommand()).find((candidate) => candidate.id === id) ?? null;
+    if (!thread) throw new Error(`Completed project ${id} was not found.`);
     await loadFromHistory(thread);
     session.setStatus('Viewing completed project.');
     return true;
@@ -1004,6 +1015,7 @@ export async function loadOlderThreadMessages(threadId: string) {
       nextBefore: page.nextBefore,
       error: null,
     });
+    persistOlderPageCount(threadId, storedOlderPageCount(threadId) + 1);
   } catch (e) {
     setThreadPageState(threadId, {
       isLoading: false,
@@ -1032,4 +1044,92 @@ export async function refreshHistory() {
   } catch (e) {
     console.error("[History] Failed to refresh history:", e);
   }
+}
+
+/**
+ * Refreshes only bounded history projections for one thread.
+ *
+ * Event bursts coalesce behind one in-flight request. Existing older pages and
+ * hydrated selected-version payload remain resident; the newest compact page
+ * patches matching rows without resetting timeline UI state.
+ */
+export function refreshThreadHistoryProjection(
+  threadId: string,
+  revision?: number | null,
+): Promise<void> {
+  const requestedRevision = Number.isFinite(revision)
+    ? Number(revision)
+    : ++localHistoryProjectionRevision;
+
+  return historyProjectionRefreshes.request(
+    threadId,
+    requestedRevision,
+    async () => {
+      const startedAt = performance.now();
+      const [freshHistory, page] = await Promise.all([
+        getHistory(),
+        getThreadMessagesPage(
+          threadId,
+          null,
+          INITIAL_THREAD_MESSAGE_PAGE_LIMIT,
+          false,
+        ),
+      ]);
+      profileLog('history.refresh_projection', {
+        projection: 'thread_summary+timeline_page',
+        durationMs: Number((performance.now() - startedAt).toFixed(2)),
+        rows: page.messages.length,
+        bytes: page.observedBytes,
+        truncatedFields: page.truncatedFields?.length ?? 0,
+      });
+      return { freshHistory, page };
+    },
+    ({ freshHistory, page }) => {
+      const freshSummary = freshHistory.find((thread) => thread.id === threadId) ?? null;
+      history.update((items) => {
+        const existing = items.find((thread) => thread.id === threadId) ?? null;
+        const existingMessages = existing?.messages ?? [];
+        const patchedMessages = page.messages.map((message) =>
+          mergeThreadMessagePayload(
+            existingMessages.find((candidate) => candidate.id === message.id),
+            message,
+          ),
+        );
+        const messages = mergeThreadMessages(existingMessages, patchedMessages);
+        const summary = freshSummary ?? existing;
+        if (!summary) return items;
+        const nextThread = { ...summary, messages };
+        const nextItems = items.some((thread) => thread.id === threadId)
+          ? items.map((thread) => (thread.id === threadId ? nextThread : thread))
+          : [nextThread, ...items];
+        const otherFresh = new Map(
+          freshHistory
+            .filter((thread) => thread.id !== threadId)
+            .map((thread) => [thread.id, thread]),
+        );
+        return nextItems.map((thread) => {
+          const nextSummary = otherFresh.get(thread.id);
+          return nextSummary
+            ? { ...nextSummary, messages: thread.messages ?? [] }
+            : thread;
+        });
+      });
+
+      const existingPageState = get(threadMessagePageState)[threadId];
+      setThreadPageState(threadId, {
+        isLoading: false,
+        hasMore: existingPageState?.nextBefore !== null && existingPageState?.nextBefore !== undefined
+          ? existingPageState.hasMore
+          : page.hasMore,
+        nextBefore: existingPageState?.nextBefore ?? page.nextBefore,
+        error: null,
+      });
+    },
+  ).catch((error) => {
+      setThreadPageState(threadId, {
+        isLoading: false,
+        error: formatBackendError(error),
+      });
+      throw error;
+    });
 }

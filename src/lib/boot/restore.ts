@@ -34,7 +34,6 @@ import {
 } from '../stores/history';
 import { isRenderableVersionTimelineMessage } from '../threadTimeline';
 import type { LastDesignSnapshot, Message, Thread, ThreadMessagesPage } from '../types/domain';
-import { BOOT_LOAD_VERSION_OPTIONS } from './loadVersionOptions';
 
 const BOOT_RESTORE_TIMEOUT_MS = 6000;
 const BOOT_VERSION_LOOKUP_TIMEOUT_MS = 4000;
@@ -211,7 +210,7 @@ async function loadConfig() {
     loadedConfig.mcp = {
       port: null,
       maxSessions: null,
-      mode: loadedConfig.connectionType === 'mcp' ? 'active' : 'passive',
+      mode: 'passive',
       primaryAgentId: null,
       promptTimeoutSecs: 1800,
       eckyAstAuthoring: false,
@@ -220,22 +219,16 @@ async function loadConfig() {
     needsSave = true;
   } else {
     if (!loadedConfig.mcp.mode) {
-      loadedConfig.mcp.mode = loadedConfig.mcp.autoAgents.length > 0 ? 'active' : 'passive';
+      loadedConfig.mcp.mode = 'passive';
+      needsSave = true;
+    }
+    if (loadedConfig.mcp.mode === 'active') {
+      loadedConfig.mcp.mode = 'passive';
       needsSave = true;
     }
     const nextPrimary =
       loadedConfig.mcp.autoAgents.find((agent) => agent.enabled)?.id ?? null;
-    if (
-      loadedConfig.mcp.mode === 'active' &&
-      (!loadedConfig.mcp.primaryAgentId ||
-        !loadedConfig.mcp.autoAgents.some(
-          (agent) => agent.enabled && agent.id === loadedConfig.mcp.primaryAgentId,
-        ))
-    ) {
-      loadedConfig.mcp.primaryAgentId = nextPrimary;
-      needsSave = true;
-    }
-    if (loadedConfig.mcp.mode === 'passive' && loadedConfig.mcp.primaryAgentId === undefined) {
+    if (loadedConfig.mcp.primaryAgentId === undefined) {
       loadedConfig.mcp.primaryAgentId = nextPrimary;
       needsSave = true;
     }
@@ -265,6 +258,7 @@ async function loadConfig() {
 
 export async function saveConfig() {
   const currentConfig = get(config);
+  session.setGlobalError(null);
   try {
     await persistConfig(currentConfig);
     try {
@@ -274,7 +268,8 @@ export async function saveConfig() {
     }
     session.setStatus('Configuration saved.');
   } catch (e) {
-    session.setError(`Config Save Error: ${formatBackendError(e)}`);
+    session.setGlobalError(`Config Save Error: ${formatBackendError(e)}`);
+    throw e;
   }
 }
 
@@ -366,12 +361,13 @@ async function restoreLastDesign() {
 
     upsertRestoredMessage(last.threadId, targetMessage);
     await withBootTimeout(
-      loadVersion(targetMessage, last.threadId, BOOT_LOAD_VERSION_OPTIONS),
+      loadVersion(targetMessage, last.threadId),
       BOOT_MODEL_LOAD_TIMEOUT_MS,
       'Last design runtime load timed out',
     ).catch((e) => {
       console.warn('[Boot] Last design runtime was not restored:', e);
       session.setStatus('Last design runtime unavailable.');
+      return false;
     });
     void loadRestoredThreadPage(last.threadId);
 

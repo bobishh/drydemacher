@@ -1,7 +1,7 @@
 export type SessionActor =
   | { kind: 'user'; id: string }
   | { kind: 'agent'; id: string; label: string }
-  | { kind: 'system'; id: string };
+  | { kind: 'system'; id: string; label?: string };
 
 export type SessionSeverity = 'info' | 'success' | 'warning' | 'error' | 'question';
 
@@ -49,13 +49,19 @@ export type SessionEventDiff = {
 
 export type SessionEvent = {
   id: string;
+  cursor?: number | null;
   sessionId: string;
   threadId: string | null;
   versionId: string | null;
+  lifecycleKey?: string | null;
   actor: SessionActor;
   kind: SessionEventKind;
   title: string;
   summary: string;
+  detail?: string | null;
+  phase?: string | null;
+  state?: 'active' | 'resolved' | 'failed' | 'canceled' | null;
+  requiresAttention?: boolean | null;
   timestamp: number;
   severity: SessionSeverity;
   artifacts?: SessionEventArtifact[];
@@ -97,6 +103,26 @@ export type SessionCodeDiffView = {
   diff: SessionEventDiff | null;
   diffs: SessionEventDiff[];
   hasDiff: boolean;
+};
+
+export type AgentActivityEventLike = {
+  eventId: string;
+  cursor: number;
+  sessionId: string;
+  threadId?: string | null;
+  messageId?: string | null;
+  versionId?: string | null;
+  actor: { kind: 'agent' | 'system'; id: string; label: string };
+  kind: string;
+  lifecycleKey?: string | null;
+  phase?: string | null;
+  summary: string;
+  detail?: string | null;
+  severity: SessionSeverity;
+  state: 'active' | 'resolved' | 'failed' | 'canceled';
+  requiresAttention: boolean;
+  occurredAt: number;
+  raw?: unknown | null;
 };
 
 const AGENT_ACTION_KINDS = new Set<SessionEventKind>([
@@ -156,6 +182,11 @@ export function appendSessionEvent(
   return [...events, event]
     .map((item, index) => ({ item, index }))
     .sort((left, right) => {
+      const leftCursor = left.item.cursor ?? null;
+      const rightCursor = right.item.cursor ?? null;
+      if (leftCursor !== null && rightCursor !== null && leftCursor !== rightCursor) {
+        return leftCursor - rightCursor;
+      }
       if (left.item.timestamp !== right.item.timestamp) {
         return left.item.timestamp - right.item.timestamp;
       }
@@ -266,6 +297,39 @@ export function composeCodeDiffView(
   };
 }
 
+export function mapAgentActivityEventToSessionEvent(
+  event: AgentActivityEventLike,
+): SessionEvent {
+  return {
+    id: event.eventId,
+    cursor: event.cursor,
+    sessionId: event.sessionId,
+    threadId: event.threadId ?? null,
+    versionId: event.versionId ?? null,
+    lifecycleKey: event.lifecycleKey ?? null,
+    actor: event.actor.kind === 'agent'
+      ? { kind: 'agent', id: event.actor.id, label: event.actor.label }
+      : { kind: 'system', id: event.actor.id, label: event.actor.label },
+    kind:
+      event.state === 'active'
+        ? 'agent_action_started'
+        : event.severity === 'error'
+          ? 'render_failed'
+          : event.requiresAttention
+            ? 'user_decision'
+            : 'agent_action_finished',
+    title: event.phase?.trim() || event.summary,
+    summary: event.summary,
+    detail: event.detail ?? null,
+    phase: event.phase ?? null,
+    state: event.state,
+    requiresAttention: event.requiresAttention,
+    timestamp: event.occurredAt,
+    severity: event.severity,
+    raw: event.raw ?? null,
+  };
+}
+
 function latestEvent(events: SessionEvent[]): SessionEvent | null {
   if (events.length === 0) return null;
   return events[events.length - 1] ?? null;
@@ -275,6 +339,11 @@ function sortSessionEvents(events: SessionEvent[]): SessionEvent[] {
   return events
     .map((item, index) => ({ item, index }))
     .sort((left, right) => {
+      const leftCursor = left.item.cursor ?? null;
+      const rightCursor = right.item.cursor ?? null;
+      if (leftCursor !== null && rightCursor !== null && leftCursor !== rightCursor) {
+        return leftCursor - rightCursor;
+      }
       if (left.item.timestamp !== right.item.timestamp) {
         return left.item.timestamp - right.item.timestamp;
       }

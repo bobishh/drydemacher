@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import type { AgentActivityEvent } from './tauri/contracts';
 import {
   appendSessionEvent,
   composeBubbleEvent,
   composeCodeDiffView,
   composeSessionActivity,
+  mapAgentActivityEventToSessionEvent,
   relatedSessionEvents,
   type SessionEvent,
 } from './sessionActivity';
@@ -13,9 +15,11 @@ import {
 function makeEvent(overrides: Partial<SessionEvent>): SessionEvent {
   return {
     id: overrides.id ?? 'event-1',
+    cursor: overrides.cursor,
     sessionId: overrides.sessionId ?? 'session-1',
     threadId: overrides.threadId !== undefined ? overrides.threadId : 'thread-1',
     versionId: overrides.versionId !== undefined ? overrides.versionId : 'version-1',
+    lifecycleKey: overrides.lifecycleKey,
     actor:
       overrides.actor ?? {
         kind: 'agent',
@@ -25,6 +29,10 @@ function makeEvent(overrides: Partial<SessionEvent>): SessionEvent {
     kind: overrides.kind ?? 'agent_action_finished',
     title: overrides.title ?? 'Agent action',
     summary: overrides.summary ?? 'Agent action finished.',
+    detail: overrides.detail,
+    phase: overrides.phase,
+    state: overrides.state,
+    requiresAttention: overrides.requiresAttention,
     timestamp: overrides.timestamp ?? 1,
     severity: overrides.severity ?? 'info',
     artifacts: overrides.artifacts,
@@ -32,6 +40,64 @@ function makeEvent(overrides: Partial<SessionEvent>): SessionEvent {
     raw: overrides.raw,
   };
 }
+
+function makeAgentActivityEvent(overrides: Partial<AgentActivityEvent> = {}): AgentActivityEvent {
+  return {
+    eventId: overrides.eventId ?? 'agent-event-1',
+    cursor: overrides.cursor ?? 7,
+    sessionId: overrides.sessionId ?? 'session-1',
+    threadId: overrides.threadId ?? 'thread-1',
+    messageId: overrides.messageId ?? 'message-1',
+    versionId: overrides.versionId ?? 'version-1',
+    actor:
+      overrides.actor ?? {
+        kind: 'agent',
+        id: 'agent-1',
+        label: 'Ecky',
+      },
+    kind: overrides.kind ?? 'trace',
+    lifecycleKey: overrides.lifecycleKey ?? 'thread-1:build-1',
+    phase: overrides.phase ?? 'reading',
+    summary: overrides.summary ?? 'Agent trace summary.',
+    detail: overrides.detail ?? 'Raw detail.',
+    severity: overrides.severity ?? 'info',
+    state: overrides.state ?? 'active',
+    requiresAttention: overrides.requiresAttention ?? false,
+    occurredAt: overrides.occurredAt ?? 11,
+    raw: overrides.raw ?? '{"note":"raw body"}',
+  };
+}
+
+test('mapAgentActivityEventToSessionEvent preserves event identity and raw body', () => {
+  const source = makeAgentActivityEvent();
+
+  const mapped = mapAgentActivityEventToSessionEvent(source);
+
+  assert.equal(mapped.id, source.eventId);
+  assert.equal(mapped.sessionId, source.sessionId);
+  assert.equal(mapped.threadId, source.threadId);
+  assert.equal(mapped.versionId, source.versionId);
+  assert.equal(mapped.actor.kind, 'agent');
+  assert.equal(mapped.actor.id, source.actor.id);
+  assert.equal(mapped.actor.label, source.actor.label);
+  assert.equal(mapped.timestamp, source.occurredAt);
+  assert.equal((mapped as { cursor?: number }).cursor, source.cursor);
+  assert.equal((mapped as { lifecycleKey?: string | null }).lifecycleKey, source.lifecycleKey);
+  assert.equal(mapped.summary, source.summary);
+  assert.equal(mapped.raw, source.raw);
+});
+
+test('mapAgentActivityEventToSessionEvent maps every backend kind without losing actor fields', () => {
+  const trace = mapAgentActivityEventToSessionEvent(makeAgentActivityEvent({ kind: 'trace' }));
+  const runtime = mapAgentActivityEventToSessionEvent(makeAgentActivityEvent({
+    eventId: 'runtime-event-1',
+    kind: 'runtime',
+    actor: { kind: 'system', id: 'runtime-1', label: 'Agent runtime' },
+  }));
+
+  assert.deepEqual(trace.actor, { kind: 'agent', id: 'agent-1', label: 'Ecky' });
+  assert.deepEqual(runtime.actor, { kind: 'system', id: 'runtime-1', label: 'Agent runtime' });
+});
 
 test('appendSessionEvent sorts by timestamp and keeps source order on ties', () => {
   const original = [
@@ -48,6 +114,20 @@ test('appendSessionEvent sorts by timestamp and keeps source order on ties', () 
   assert.deepEqual(
     original.map((event) => event.id),
     ['late', 'tie-a'],
+  );
+});
+
+test('appendSessionEvent keeps cursor order ahead of timestamp when both exist', () => {
+  const original = [
+    makeEvent({ id: 'cursor-2', cursor: 2, timestamp: 20 }),
+    makeEvent({ id: 'cursor-1', cursor: 1, timestamp: 99 }),
+  ];
+
+  const appended = appendSessionEvent(original, makeEvent({ id: 'cursor-3', cursor: 3, timestamp: 1 }));
+
+  assert.deepEqual(
+    appended.map((event) => event.id),
+    ['cursor-1', 'cursor-2', 'cursor-3'],
   );
 });
 

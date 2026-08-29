@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { BOOT_LOAD_VERSION_OPTIONS } from './loadVersionOptions';
 import type { ArtifactBundle, Message, ModelManifest } from '../types/domain';
 
 function sampleBundle(modelId: string): ArtifactBundle {
@@ -17,7 +16,7 @@ function sampleBundle(modelId: string): ArtifactBundle {
     fcstdPath: `/tmp/${modelId}.FCStd`,
     manifestPath: `/tmp/${modelId}.json`,
     macroPath: `/tmp/${modelId}.FCMacro`,
-    previewStlPath: `/tmp/${modelId}.stl`,
+    modelStlPath: `/tmp/${modelId}.stl`,
     viewerAssets: [],
   };
 }
@@ -120,7 +119,7 @@ test('mergeRestoredThreadMessages preserves restored active runtime when page re
   assert.equal(merged.length, 1);
   assert.equal(merged[0].content, 'Skinny page copy');
   assert.equal(merged[0].output?.macroCode, '# cached macro');
-  assert.equal(merged[0].artifactBundle?.previewStlPath, '/tmp/cached-model.stl');
+  assert.equal(merged[0].artifactBundle?.modelStlPath, '/tmp/cached-model.stl');
   assert.equal(merged[0].modelManifest?.modelId, 'cached-model');
 });
 
@@ -138,8 +137,4 @@ test('mergeRestoredThreadMessages keeps restored active version when first page 
   assert.equal(merged[0].id, 'msg-cached');
   assert.equal(merged[0].artifactBundle?.modelId, 'cached-model');
   assert.equal(merged[1].id, 'msg-older');
-});
-
-test('given missing cached runtime when boot restores last design then version load does not rebuild preview', () => {
-  assert.equal(BOOT_LOAD_VERSION_OPTIONS.rebuildMissingRuntime, false);
 });

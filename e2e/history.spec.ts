@@ -15,6 +15,7 @@ function installProjectSwitcherMocks(options?: {
   threadPreviews?: Record<string, string | null>;
   threadPreviewDelayMs?: number;
   campaignRuns?: Array<Record<string, unknown>>;
+  runtimeFileDelay?: { includes: string; ms: number };
 }) {
   const history = options?.history ?? [];
   const inventory = options?.inventory ?? [];
@@ -26,6 +27,7 @@ function installProjectSwitcherMocks(options?: {
   const threadPreviews = options?.threadPreviews ?? {};
   const threadPreviewDelayMs = options?.threadPreviewDelayMs ?? 0;
   const campaignRuns = options?.campaignRuns ?? [];
+  const runtimeFileDelay = options?.runtimeFileDelay ?? null;
 
   return async ({ page }: { page: import('@playwright/test').Page }) => {
     await page.addInitScript(
@@ -40,6 +42,7 @@ function installProjectSwitcherMocks(options?: {
         threadPreviews,
         threadPreviewDelayMs,
         campaignRuns,
+        runtimeFileDelay,
       }) => {
         const mockWindow = window as any;
         localStorage.clear();
@@ -165,6 +168,14 @@ function installProjectSwitcherMocks(options?: {
           if (cmd === 'get_mcp_server_status') return [];
           if (cmd === 'get_mess_stl_path') return '/mock/mess.stl';
           if (cmd === 'get_default_macro') return '# mock macro';
+          if (cmd === 'plugin:fs|exists') {
+            const path = String(args?.path ?? '');
+            if (runtimeFileDelay && path.includes(runtimeFileDelay.includes)) {
+              await new Promise((resolve) => setTimeout(resolve, runtimeFileDelay.ms));
+            }
+            return true;
+          }
+          if (cmd === 'plugin:fs|size') return 1024;
           if (cmd === 'get_thread_latest_version') {
             if (latestVersionDelayMs > 0) {
               await new Promise((resolve) => setTimeout(resolve, latestVersionDelayMs));
@@ -200,6 +211,7 @@ function installProjectSwitcherMocks(options?: {
         threadPreviews,
         threadPreviewDelayMs,
         campaignRuns,
+        runtimeFileDelay,
       },
     );
   };
@@ -296,6 +308,184 @@ test.describe('Projects', () => {
     await expect(page.locator('[data-window-id="projects"] .project-card')).toHaveCount(0);
   });
 
+  test('Given history changed after boot When Projects opens Then active projects refresh', async ({ page }) => {
+    await installProjectSwitcherMocks({
+      history: [
+        {
+          id: 'existing-project',
+          title: 'Existing project',
+          summary: '',
+          messages: [],
+          updatedAt: 200,
+          versionCount: 1,
+          pendingCount: 0,
+          queuedCount: 0,
+          errorCount: 0,
+          status: 'active',
+          isBlank: false,
+        },
+      ],
+    })({ page });
+
+    await page.goto('/');
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+
+    const getHistoryCalls = page.evaluate(() =>
+      (window as any).__PROJECTS_CALLS__.filter((call: { cmd: string }) => call.cmd === 'get_history').length,
+    );
+    await expect(getHistoryCalls).resolves.toBeGreaterThanOrEqual(2);
+    await expect(page.locator('[data-window-id="projects"] [data-project-id="existing-project"]')).toBeVisible();
+  });
+
+  test('Given cached projects When switching while cache validation is pending Then loaded viewport never flashes empty', async ({ page }) => {
+    const makeVersion = (threadId: string, modelId: string, path: string) => ({
+      id: `${threadId}-version`,
+      role: 'assistant',
+      content: modelId,
+      status: 'success',
+      timestamp: 100,
+      output: {
+        title: modelId,
+        versionName: 'V1',
+        response: '',
+        interactionMode: 'design',
+        macroCode: `(model (part ${modelId} (box 1 1 1)))`,
+        sourceLanguage: 'ecky',
+        geometryBackend: 'mesh',
+        engineKind: 'ecky',
+        uiSpec: { fields: [] },
+        initialParams: {},
+        postProcessing: null,
+      },
+      artifactBundle: {
+        modelId,
+        sourceKind: 'generated',
+        sourceLanguage: 'ecky',
+        geometryBackend: 'mesh',
+        engineKind: 'ecky',
+        contentHash: `${modelId}-hash`,
+        artifactVersion: 1,
+        modelStlPath: path,
+        viewerAssets: [],
+      },
+      modelManifest: {
+        modelId,
+        sourceKind: 'generated',
+        document: { documentName: modelId, documentLabel: modelId, objectCount: 1, warnings: [] },
+        parts: [],
+        parameterGroups: [],
+        controlPrimitives: [],
+        controlRelations: [],
+        controlViews: [],
+        selectionTargets: [],
+        advisories: [],
+        measurementAnnotations: [],
+        warnings: [],
+        enrichmentState: { status: 'none', proposals: [] },
+      },
+    });
+    const alphaVersion = makeVersion('alpha', 'alpha-model', '/mock/alpha.stl');
+    const betaVersion = makeVersion('beta', 'beta-model', '/mock/beta.stl');
+    const makeThread = (id: string, title: string, version: Record<string, unknown>) => ({
+      id,
+      title,
+      summary: '',
+      messages: [version],
+      updatedAt: id === 'alpha' ? 200 : 100,
+      versionCount: 1,
+      pendingCount: 0,
+      queuedCount: 0,
+      errorCount: 0,
+      status: 'active',
+      isBlank: false,
+    });
+    await installProjectSwitcherMocks({
+      history: [makeThread('alpha', 'Alpha project', alphaVersion), makeThread('beta', 'Beta project', betaVersion)],
+      latestVersions: { alpha: alphaVersion, beta: betaVersion },
+      messagePages: { alpha: [alphaVersion], beta: [betaVersion] },
+      runtimeFileDelay: { includes: 'beta.stl', ms: 700 },
+    })({ page });
+    let betaStlRequests = 0;
+    await page.route(/\/mock\/(alpha|beta)\.stl(?:\?.*)?$/, (route) => {
+      if (route.request().url().includes('/beta.stl')) betaStlRequests += 1;
+      return route.fulfill({
+        status: 200,
+        contentType: 'model/stl',
+        body: 'solid mock\nfacet normal 0 0 0\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid mock',
+      });
+    });
+
+    await page.goto('/');
+    const viewer = page.locator('.viewer-host').first();
+    await expect(viewer).toHaveAttribute('data-model-status', 'loaded');
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    await page.locator('[data-project-id="beta"]').getByRole('button', { name: 'OPEN' }).click();
+    await expect(viewer).toHaveAttribute('data-model-status', 'loaded');
+    await expect(page.locator('.viewer-shell')).toHaveAttribute('data-model-key', /beta-model/);
+    expect(betaStlRequests).toBe(1);
+    await expect(page.evaluate(() =>
+      (window as any).__PROJECTS_CALLS__.filter((call: { cmd: string }) => call.cmd === 'render_model').length,
+    )).resolves.toBe(0);
+  });
+
+  test('Given a project has no saved preview When it opens Then thread navigation never renders it', async ({ page }) => {
+    const version = {
+      id: 'no-preview-version',
+      role: 'assistant',
+      content: 'No preview model',
+      status: 'success',
+      timestamp: 100,
+      output: {
+        title: 'No preview model',
+        versionName: 'V1',
+        response: '',
+        interactionMode: 'design',
+        macroCode: '(model (part body (box 1 1 1)))',
+        sourceLanguage: 'ecky',
+        geometryBackend: 'mesh',
+        engineKind: 'ecky',
+        uiSpec: { fields: [] },
+        initialParams: {},
+        postProcessing: null,
+      },
+      artifactBundle: null,
+      modelManifest: null,
+    };
+    await installProjectSwitcherMocks({
+      history: [{
+        id: 'no-preview-thread',
+        title: 'No preview project',
+        summary: '',
+        messages: [],
+        updatedAt: 100,
+        versionCount: 1,
+        pendingCount: 0,
+        queuedCount: 0,
+        errorCount: 0,
+        status: 'active',
+        isBlank: false,
+      }],
+      latestVersions: { 'no-preview-thread': version },
+      messagePages: { 'no-preview-thread': [version] },
+    })({ page });
+
+    await page.goto('/');
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    await page.locator('[data-project-id="no-preview-thread"]').getByRole('button', { name: 'OPEN' }).click();
+
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__PROJECTS_CALLS__.filter(
+        (call: { cmd: string }) => call.cmd === 'get_thread_latest_version',
+      ).length,
+    )).toBeGreaterThan(0);
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__PROJECTS_CALLS__.filter(
+        (call: { cmd: string }) => call.cmd === 'render_model',
+      ).length,
+    )).toBe(0);
+    await expect(page.locator('.viewport-transmutation')).toHaveCount(0);
+  });
+
   test('Given a reusable blank thread and an authored thread When Projects opens Then only the authored thread is listed', async ({ page }) => {
     await installProjectSwitcherMocks({
       history: [
@@ -382,7 +572,7 @@ test.describe('Projects', () => {
     expect(calls.filter((entry) => entry.cmd === 'get_thread_latest_version')).toHaveLength(0);
   });
 
-  test('Given latest version lacks thumbnail When older page has preview Then project card displays preview image', async ({ page }) => {
+  test('Given latest version lacks thumbnail When older version has preview Then project card reports no current preview', async ({ page }) => {
     const previewImage = `data:image/png;base64,${btoa('older-preview')}`;
     await installProjectSwitcherMocks({
       history: [
@@ -391,7 +581,28 @@ test.describe('Projects', () => {
           title: 'Paged Preview Thread',
           summary: '',
           updatedAt: Date.UTC(2026, 5, 1),
-          messages: [],
+          messages: [
+            {
+              id: 'older-version',
+              role: 'assistant',
+              status: 'success',
+              output: {},
+              artifactBundle: {},
+              imageData: previewImage,
+              timestamp: 100,
+              content: '',
+            },
+            {
+              id: 'current-head',
+              role: 'assistant',
+              status: 'error',
+              output: {},
+              artifactBundle: {},
+              imageData: null,
+              timestamp: 200,
+              content: '',
+            },
+          ],
           genieTraits: null,
           versionCount: 2,
           pendingCount: 0,
@@ -403,7 +614,7 @@ test.describe('Projects', () => {
         },
       ],
       threadPreviews: {
-        'thread-preview': previewImage,
+        'thread-preview': null,
       },
     })({ page });
 
@@ -412,12 +623,9 @@ test.describe('Projects', () => {
 
     const card = page.locator('[data-window-id="projects"] .project-card').filter({ hasText: 'Paged Preview Thread' });
     const preview = card.locator('.preview-frame');
-    await expect(preview).toHaveAttribute('data-preview-state', 'ready');
-    await expect(preview.locator('img')).toHaveAttribute('src', previewImage);
-    await expect
-      .poll(() => preview.locator('img').evaluate((image) => getComputedStyle(image).objectFit))
-      .toBe('contain');
-    await expect(card.getByText('NO PREVIEW')).toHaveCount(0);
+    await expect(preview).toHaveAttribute('data-preview-state', 'empty');
+    await expect(preview.locator('img')).toHaveCount(0);
+    await expect(card.getByText('NO PREVIEW')).toBeVisible();
   });
 
   test('Given a project starts without preview When preview event arrives Then card replaces NO PREVIEW', async ({ page }) => {
@@ -445,7 +653,7 @@ test.describe('Projects', () => {
           id: 'version-1',
           role: 'assistant',
           status: 'success',
-          artifactBundle: { previewStlPath: '/mock/version-1.stl' },
+          artifactBundle: { modelStlPath: '/mock/version-1.stl' },
           imageData: null,
         },
       },

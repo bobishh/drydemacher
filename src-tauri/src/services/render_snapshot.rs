@@ -45,6 +45,88 @@ pub fn canonical_parameter_digest(params: &DesignParams) -> AppResult<String> {
     canonical_digest(params, "effectiveParams")
 }
 
+const VERSION_INPUT_DIGEST_SCHEMA: &str = "version-input-v1";
+const VERSION_RUNTIME_CACHE_SCHEMA: &str = "version-runtime-v1";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VersionInputIdentity<'a> {
+    schema: &'static str,
+    source: &'a str,
+    effective_params: &'a DesignParams,
+    interaction_mode: &'a crate::contracts::InteractionMode,
+    macro_dialect: &'a crate::contracts::MacroDialect,
+    engine_kind: &'a crate::contracts::EngineKind,
+    source_language: &'a crate::contracts::SourceLanguage,
+    geometry_backend: &'a crate::contracts::GeometryBackend,
+    ui_spec: &'a crate::contracts::UiSpec,
+    post_processing: Option<crate::contracts::PostProcessingSpec>,
+}
+
+/// Digest of immutable version-owned render inputs. `effective_params` must be
+/// the complete resolved map, never a caller patch. Result metadata, artifact
+/// paths, status, labels, and timestamps intentionally do not participate.
+pub fn canonical_version_input_digest(
+    design: &DesignOutput,
+    effective_params: &DesignParams,
+) -> AppResult<String> {
+    canonical_digest(
+        &VersionInputIdentity {
+            schema: VERSION_INPUT_DIGEST_SCHEMA,
+            source: &design.macro_code,
+            effective_params,
+            interaction_mode: &design.interaction_mode,
+            macro_dialect: &design.macro_dialect,
+            engine_kind: &design.engine_kind,
+            source_language: &design.source_language,
+            geometry_backend: &design.geometry_backend,
+            ui_spec: &design.ui_spec,
+            post_processing: crate::contracts::normalize_post_processing_spec(
+                design.post_processing.clone(),
+            ),
+        },
+        "versionInput",
+    )
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VersionRuntimeCacheIdentity<'a> {
+    schema: &'static str,
+    durable_version_id: &'a str,
+    version_input_digest: &'a str,
+    model_id: &'a str,
+    artifact_content_hash: &'a str,
+    component_dependency_lock_digest: Option<&'a str>,
+}
+
+/// Version-runtime association key. Artifact stores may deduplicate bytes, but
+/// runtime ownership never aliases two durable message versions.
+pub fn version_runtime_cache_key(
+    durable_version_id: &str,
+    version_input_digest: &str,
+    artifact_bundle: &ArtifactBundle,
+) -> AppResult<String> {
+    if durable_version_id.trim().is_empty() {
+        return Err(AppError::validation(
+            "durableVersionId must not be empty for version runtime cache identity.",
+        ));
+    }
+    canonical_digest(
+        &VersionRuntimeCacheIdentity {
+            schema: VERSION_RUNTIME_CACHE_SCHEMA,
+            durable_version_id,
+            version_input_digest,
+            model_id: &artifact_bundle.model_id,
+            artifact_content_hash: &artifact_bundle.content_hash,
+            component_dependency_lock_digest: artifact_bundle
+                .component_dependency_lock_digest
+                .as_deref(),
+        },
+        "versionRuntimeCacheIdentity",
+    )
+}
+
 pub fn artifact_bundle_digest(bundle: &ArtifactBundle) -> AppResult<String> {
     canonical_digest(bundle, "artifactBundle")
 }
@@ -153,7 +235,7 @@ pub fn validate_render_snapshot(snapshot: &RenderSnapshot) -> AppResult<()> {
     Ok(())
 }
 
-fn validate_render_compatibility(
+pub(crate) fn validate_render_compatibility(
     design: &DesignOutput,
     bundle: &ArtifactBundle,
     manifest: &ModelManifest,
@@ -232,7 +314,7 @@ mod tests {
             fcstd_path: String::new(),
             manifest_path: String::new(),
             macro_path: None,
-            preview_stl_path: String::new(),
+            model_stl_path: String::new(),
             viewer_assets: Vec::new(),
             edge_targets: Vec::new(),
             face_targets: Vec::new(),
@@ -243,6 +325,7 @@ mod tests {
             component_dependency_lock: None,
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
         }
     }
 
@@ -284,6 +367,7 @@ mod tests {
             },
             geometry_provenance: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
         }
     }
 
@@ -302,6 +386,61 @@ mod tests {
             canonical_parameter_digest(&first).expect("first digest"),
             canonical_parameter_digest(&second).expect("second digest")
         );
+    }
+
+    #[test]
+    fn version_input_digest_covers_full_effective_parameter_map_canonically() {
+        let design = design();
+        let first = BTreeMap::from([
+            ("width".to_string(), ParamValue::Number(12.0)),
+            ("enabled".to_string(), ParamValue::Boolean(true)),
+        ]);
+        let reordered = BTreeMap::from([
+            ("enabled".to_string(), ParamValue::Boolean(true)),
+            ("width".to_string(), ParamValue::Number(12.0)),
+        ]);
+        let changed = BTreeMap::from([
+            ("width".to_string(), ParamValue::Number(13.0)),
+            ("enabled".to_string(), ParamValue::Boolean(true)),
+        ]);
+
+        let first_digest = canonical_version_input_digest(&design, &first).expect("first");
+        let reordered_digest =
+            canonical_version_input_digest(&design, &reordered).expect("reordered");
+        let changed_digest = canonical_version_input_digest(&design, &changed).expect("changed");
+
+        assert_eq!(first_digest, reordered_digest);
+        assert_ne!(first_digest, changed_digest);
+    }
+
+    #[test]
+    fn version_runtime_cache_key_is_scoped_to_durable_version() {
+        let input_digest = canonical_version_input_digest(&design(), &BTreeMap::new())
+            .expect("version input digest");
+
+        let artifact = bundle("model-a");
+        let first = version_runtime_cache_key("message-a", &input_digest, &artifact)
+            .expect("first cache key");
+        let second = version_runtime_cache_key("message-b", &input_digest, &artifact)
+            .expect("second cache key");
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn version_runtime_cache_key_rejects_changed_artifact_content() {
+        let input_digest = canonical_version_input_digest(&design(), &BTreeMap::new())
+            .expect("version input digest");
+        let first_artifact = bundle("model-a");
+        let mut changed_artifact = first_artifact.clone();
+        changed_artifact.content_hash = "sha256:changed-artifact".to_string();
+
+        let first = version_runtime_cache_key("message-a", &input_digest, &first_artifact)
+            .expect("first cache key");
+        let changed = version_runtime_cache_key("message-a", &input_digest, &changed_artifact)
+            .expect("changed cache key");
+
+        assert_ne!(first, changed);
     }
 
     #[test]

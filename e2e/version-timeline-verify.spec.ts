@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-function installVersionTimelineMocks() {
+function installVersionTimelineMocks(options?: { includeFailedHead?: boolean }) {
   const thread = {
     id: 'thread-verify',
     title: 'Verify Timeline Thread',
@@ -69,12 +69,12 @@ function installVersionTimelineMocks() {
             totalVolume: 10,
             totalArea: 8,
             bbox: null,
-            previewStlSizeBytes: 128,
-            previewStlTriangleCount: 64,
-            previewStlComponentCount: 1,
-            previewStlNonManifoldEdgeCount: 0,
-            previewStlOverhangTriangleCount: 0,
-            previewStlOverhangRatio: 0,
+            modelStlSizeBytes: 128,
+            modelStlTriangleCount: 64,
+            modelStlComponentCount: 1,
+            modelStlNonManifoldEdgeCount: 0,
+            modelStlOverhangTriangleCount: 0,
+            modelStlOverhangRatio: 0,
           },
           verifierStatus: 'ok',
           verifierSource: 'native',
@@ -87,7 +87,7 @@ function installVersionTimelineMocks() {
           contentHash: 'hash-verify',
           fcstdPath: '/mock/model-runtime/model.FCStd',
           manifestPath: '/mock/model-runtime/manifest.json',
-          previewStlPath: '/mock/model-runtime/model.stl',
+          modelStlPath: '/mock/model-runtime/model.stl',
           viewerAssets: [],
           exportArtifacts: [],
         },
@@ -149,8 +149,45 @@ function installVersionTimelineMocks() {
           enrichmentState: { status: 'none', proposals: [] },
         },
       },
-    ],
+    ] as Array<Record<string, unknown>>,
   };
+
+  if (options?.includeFailedHead) {
+    thread.messages.push({
+      id: 'msg-failed-head',
+      role: 'assistant',
+      content: 'line 17: unexpected closing parenthesis',
+      status: 'error',
+      timestamp: Date.UTC(2026, 5, 13) / 1000 + 1,
+      output: {
+        title: 'Broken bracket draft',
+        versionName: 'V2',
+        response: 'line 17: unexpected closing parenthesis',
+        interactionMode: 'tune',
+        macroCode: '(model (part broken (box 10 4 20))))',
+        sourceLanguage: 'ecky',
+        geometryBackend: 'build123d',
+        uiSpec: { fields: [] },
+        initialParams: {},
+        postProcessing: null,
+      },
+      structuralVerification: null,
+      artifactBundle: null,
+      modelManifest: null,
+      agentOrigin: {
+        hostLabel: 'Codex MCP Client',
+        clientKind: 'mcp-http',
+        agentLabel: 'Ecky',
+        llmModelId: 'mock-model',
+        llmModelLabel: 'Mock Model',
+        sessionId: 'session-failed-draft',
+        createdAt: Date.UTC(2026, 5, 13) / 1000 + 1,
+      },
+    });
+    thread.versionCount = 2;
+    thread.errorCount = 1;
+    thread.updatedAt += 1;
+  }
 
   return async ({ page }: { page: import('@playwright/test').Page }) => {
     await page.route(/\/model-runtime\/model\.stl(?:\?.*)?$/, async (route) => {
@@ -172,6 +209,7 @@ endsolid mock
     await page.addInitScript(({ thread }) => {
       const mockWindow = window as any;
       localStorage.clear();
+      mockWindow.__versionProjectionCalls = [];
 
       const config = {
         engines: [{ id: 'mock', name: 'Mock', provider: 'openai', apiKey: '', model: 'mock', baseUrl: '', enabled: true }],
@@ -198,6 +236,7 @@ endsolid mock
         return id;
       };
       window.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: Record<string, unknown>) => {
+        mockWindow.__versionProjectionCalls.push({ cmd, args: structuredClone(args ?? {}) });
         if (cmd === 'get_config') return structuredClone(config);
         if (cmd === 'save_config') return null;
         if (cmd === 'get_runtime_capabilities') {
@@ -225,14 +264,69 @@ endsolid mock
           return [structuredClone(thread)];
         }
         if (cmd === 'get_thread') return structuredClone(thread);
-        if (cmd === 'get_thread_latest_version' || cmd === 'get_thread_message_version') {
-          return structuredClone(thread.messages[0]);
+        if (cmd === 'get_thread_latest_version') {
+          return structuredClone(thread.messages.at(-1));
+        }
+        if (cmd === 'get_thread_message_version') {
+          return structuredClone(
+            thread.messages.find((message) => message.id === args?.messageId) ?? null,
+          );
+        }
+        if (cmd === 'get_version_detail') {
+          const message = thread.messages.find((candidate) => candidate.id === args?.messageId) ?? null;
+          if (!message) return null;
+          const projected = structuredClone(message) as any;
+          const edgeTargets = projected.artifactBundle?.edgeTargets ?? [];
+          const faceTargets = projected.artifactBundle?.faceTargets ?? [];
+          const selectionTargets = projected.modelManifest?.selectionTargets ?? [];
+          if (projected.artifactBundle) {
+            projected.artifactBundle.edgeTargets = [];
+            projected.artifactBundle.faceTargets = [];
+          }
+          if (projected.modelManifest) projected.modelManifest.selectionTargets = [];
+          return {
+            message: projected,
+            denseTopologyRef: 'version-topology:msg-verify',
+            edgeCount: edgeTargets.length,
+            faceCount: faceTargets.length,
+            selectionTargetCount: selectionTargets.length,
+            observedBytes: 4096,
+            truncatedFields: [],
+            availableSections: ['core', 'denseTopology'],
+          };
+        }
+        if (cmd === 'get_dense_topology_page') {
+          const message = thread.messages.find((candidate) => candidate.id === args?.messageId) as any;
+          const kind = args?.kind;
+          const values = kind === 'edge'
+            ? message?.artifactBundle?.edgeTargets ?? []
+            : kind === 'face'
+              ? message?.artifactBundle?.faceTargets ?? []
+              : message?.modelManifest?.selectionTargets ?? [];
+          return {
+            snapshotRef: 'version-topology:msg-verify',
+            kind,
+            items: values.map((value: unknown) => ({ kind, value })),
+            nextCursor: null,
+            totalCount: values.length,
+            observedBytes: 1024,
+          };
         }
         if (cmd === 'get_thread_messages_page') {
           return {
             messages: structuredClone(thread.messages),
             hasMore: false,
             nextBefore: null,
+          };
+        }
+        if (cmd === 'get_project_source') {
+          const latestOutput = thread.messages.at(-1)?.output as { macroCode?: string } | undefined;
+          return {
+            threadId: thread.id,
+            folder: '/mock/projects/thread-verify',
+            file: '/mock/projects/thread-verify/model.ecky',
+            source: latestOutput?.macroCode ?? '',
+            sourceDigest: 'sha256:verify-source',
           };
         }
         if (cmd === 'macro_ast_source_map') {
@@ -245,6 +339,9 @@ endsolid mock
         if (cmd === 'get_deleted_messages') return [];
         if (cmd === 'get_last_design') return null;
         if (cmd === 'get_active_agent_sessions') return [];
+        if (cmd === 'get_agent_activity') {
+          return { events: [], latestCursor: 0, oldestCursor: 0, droppedCount: 0 };
+        }
         if (cmd === 'get_agent_terminal_snapshots') return [];
         if (cmd === 'get_mcp_server_status') return [];
         if (cmd === 'get_mess_stl_path') return '/mock/mess.stl';
@@ -263,7 +360,7 @@ test('Given persisted authored verify chips When opening version thread Then chi
   await page.locator('[data-window-id="projects"]').getByRole('button', { name: 'COMPLETED' }).click();
   await page.locator('.project-card', { hasText: 'Verify Timeline Thread' }).getByRole('button', { name: 'VIEW' }).click();
   await page.getByRole('button', { name: 'DIALOGUE' }).click();
-  await page.getByRole('button', { name: 'PARAMS' }).click();
+  await page.getByRole('button', { name: 'Parameters' }).click();
 
   const failedChip = page.getByRole(
     'button',
@@ -281,4 +378,50 @@ test('Given persisted authored verify chips When opening version thread Then chi
 
   await expect(page.getByTestId('macro-source-pane')).toBeVisible();
   await expect(page.getByText(/EDIT SOURCE \/ RIB_CLEARANCE/i)).toBeVisible();
+});
+
+test('Given dense version targets When opening a version Then core loads first and topology hydrates by bounded pages', async ({ page }) => {
+  await installVersionTimelineMocks()({ page });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'PROJECTS' }).click();
+  await page.locator('[data-window-id="projects"]').getByRole('button', { name: 'COMPLETED' }).click();
+  await page.locator('.project-card', { hasText: 'Verify Timeline Thread' }).getByRole('button', { name: 'VIEW' }).click();
+
+  await expect.poll(async () => page.evaluate(() => (
+    (window as any).__versionProjectionCalls as Array<{ cmd: string }>
+  ).some((call) => call.cmd === 'get_version_detail'))).toBe(true);
+  const calls = await page.evaluate(() => (window as any).__versionProjectionCalls as Array<{ cmd: string }>);
+  expect(calls.some((call) => call.cmd === 'get_thread')).toBe(false);
+  expect(calls.some((call) => call.cmd === 'get_dense_topology_page')).toBe(true);
+});
+
+test('Given a failed artifact-less draft is newest When opening its thread Then it remains head and visible version history', async ({ page }) => {
+  await installVersionTimelineMocks({ includeFailedHead: true })({ page });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'PROJECTS' }).click();
+  await page.locator('[data-window-id="projects"]').getByRole('button', { name: 'COMPLETED' }).click();
+  await page.locator('.project-card', { hasText: 'Verify Timeline Thread' }).getByRole('button', { name: 'VIEW' }).click();
+  await page.getByRole('button', { name: 'DIALOGUE' }).click();
+
+  await expect(page.locator('.version-counter')).toHaveText(/V 2 OF 2/);
+  await expect(page.locator('.version-title')).toHaveText('Broken bracket draft');
+  await expect(page.locator('.trail-active-version')).toContainText('line 17: unexpected closing parenthesis');
+});
+
+test('Given version authoring controls When editing code or parameters Then Apply is the only version action', async ({ page }) => {
+  await installVersionTimelineMocks()({ page });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'PROJECTS' }).click();
+  await page.locator('[data-window-id="projects"]').getByRole('button', { name: 'COMPLETED' }).click();
+  await page.locator('.project-card', { hasText: 'Verify Timeline Thread' }).getByRole('button', { name: 'VIEW' }).click();
+
+  await page.getByRole('button', { name: 'Code inspector' }).click();
+  await expect(page.getByRole('button', { name: 'APPLY', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: /COMMIT VERSION/i })).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Parameters' }).click();
+  await expect(page.getByRole('button', { name: 'COMMIT', exact: true })).toHaveCount(0);
 });

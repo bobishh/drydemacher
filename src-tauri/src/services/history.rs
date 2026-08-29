@@ -1,19 +1,24 @@
 use crate::contracts::{AppError, AppResult, MessageRole, MessageStatus, Thread, ThreadStatus};
 use crate::db;
 use crate::persist_thread_summary;
+use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn get_history(conn: &rusqlite::Connection) -> AppResult<Vec<Thread>> {
-    let mut threads = db::get_all_threads(conn)
+    let mut threads = db::get_recent_threads_limited(conn, 100)
         .map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))?;
     for thread in &mut threads {
-        thread.is_blank = crate::thread_source_binding::thread_is_blank(
-            conn,
-            &thread.id,
-            !thread.is_blank,
-        )
-        .map_err(|err| AppError::persistence(err.to_string()))?;
+        thread.title = crate::transport_budget::bounded_text(&thread.title, 512);
+        thread.summary = crate::transport_budget::bounded_text(&thread.summary, 1_024);
+        thread.is_blank = crate::thread_source_binding::thread_is_blank(conn, &thread.id)
+            .map_err(|err| AppError::persistence(err.to_string()))?;
     }
+    crate::transport_budget::require_serialized_budget(
+        "threadList",
+        &threads,
+        crate::transport_budget::THREAD_LIST_MAX_BYTES,
+        "thread summary pagination",
+    )?;
     Ok(threads)
 }
 
@@ -33,7 +38,7 @@ pub fn get_thread(conn: &rusqlite::Connection, id: &str) -> AppResult<Thread> {
     let updated_at = messages.last().map(|m| m.timestamp).unwrap_or(0);
     let version_count = messages
         .iter()
-        .filter(|m| is_renderable_version_message(m))
+        .filter(|m| m.status != MessageStatus::Discarded && db::is_version_message(m))
         .count();
     let pending_count = messages
         .iter()
@@ -47,7 +52,7 @@ pub fn get_thread(conn: &rusqlite::Connection, id: &str) -> AppResult<Thread> {
         .iter()
         .filter(|m| m.role == MessageRole::Assistant && m.status == MessageStatus::Error)
         .count();
-    let is_blank = crate::thread_source_binding::thread_is_blank(conn, id, !messages.is_empty())
+    let is_blank = crate::thread_source_binding::thread_is_blank(conn, id)
         .map_err(|err| AppError::persistence(err.to_string()))?;
 
     let lifecycle = db::get_thread_lifecycle(conn, id)
@@ -76,6 +81,12 @@ pub fn get_thread(conn: &rusqlite::Connection, id: &str) -> AppResult<Thread> {
     })
 }
 
+pub fn get_thread_summary(conn: &rusqlite::Connection, id: &str) -> AppResult<Thread> {
+    db::get_thread_summary_by_id(conn, id)
+        .map_err(|err| AppError::persistence(err.to_string()))?
+        .ok_or_else(|| AppError::not_found("Thread not found."))
+}
+
 pub fn get_thread_latest_version(
     conn: &rusqlite::Connection,
     id: &str,
@@ -83,7 +94,9 @@ pub fn get_thread_latest_version(
     db::get_visible_thread_title(conn, id)
         .map_err(|err| AppError::persistence(err.to_string()))?
         .ok_or_else(|| AppError::not_found("Thread not found."))?;
-    db::get_thread_latest_version(conn, id).map_err(|err| AppError::persistence(err.to_string()))
+    db::get_thread_version_detail(conn, id, None)
+        .map(|detail| detail.map(|detail| detail.message))
+        .map_err(|err| AppError::persistence(err.to_string()))
 }
 
 pub fn get_thread_message_version(
@@ -94,28 +107,192 @@ pub fn get_thread_message_version(
     db::get_visible_thread_title(conn, thread_id)
         .map_err(|err| AppError::persistence(err.to_string()))?
         .ok_or_else(|| AppError::not_found("Thread not found."))?;
-    db::get_thread_message_version(conn, thread_id, message_id)
+    db::get_thread_version_detail(conn, thread_id, Some(message_id))
+        .map(|detail| detail.map(|detail| detail.message))
         .map_err(|err| AppError::persistence(err.to_string()))
+}
+
+pub fn get_version_detail(
+    conn: &rusqlite::Connection,
+    thread_id: &str,
+    message_id: &str,
+) -> AppResult<crate::contracts::VersionDetail> {
+    db::get_thread_version_detail(conn, thread_id, Some(message_id))
+        .map_err(|err| AppError::persistence(err.to_string()))?
+        .ok_or_else(|| AppError::not_found("Version not found."))
+}
+
+pub fn get_version_source_window(
+    conn: &rusqlite::Connection,
+    thread_id: &str,
+    message_id: &str,
+    start_byte: usize,
+    max_bytes: usize,
+) -> AppResult<crate::contracts::SourceWindow> {
+    const SOURCE_WINDOW_MAX_BYTES: usize = 256 * 1024;
+    let (source, stored_digest) = db::get_version_source(conn, thread_id, message_id)
+        .map_err(|err| AppError::persistence(err.to_string()))?
+        .ok_or_else(|| AppError::not_found("Version source not found."))?;
+    let total_bytes = source.len();
+    let mut start = start_byte.min(total_bytes);
+    while start < total_bytes && !source.is_char_boundary(start) {
+        start += 1;
+    }
+    let mut end = start
+        .saturating_add(max_bytes.clamp(1, SOURCE_WINDOW_MAX_BYTES))
+        .min(total_bytes);
+    while end > start && !source.is_char_boundary(end) {
+        end -= 1;
+    }
+    let digest =
+        stored_digest.unwrap_or_else(|| format!("sha256:{:x}", Sha256::digest(source.as_bytes())));
+    Ok(crate::contracts::SourceWindow {
+        thread_id: thread_id.to_string(),
+        message_id: message_id.to_string(),
+        digest,
+        content: source[start..end].to_string(),
+        start_byte: start,
+        end_byte: end,
+        total_bytes,
+        next_start_byte: (end < total_bytes).then_some(end),
+        truncated: end < total_bytes || start > 0,
+    })
+}
+
+fn topology_cursor_identity(thread_id: &str, message_id: &str, kind: &str) -> u64 {
+    format!("{thread_id}\0{message_id}\0{kind}")
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+}
+
+pub fn get_dense_topology_page(
+    conn: &rusqlite::Connection,
+    thread_id: &str,
+    message_id: &str,
+    kind: crate::contracts::DenseTopologyKind,
+    cursor: Option<String>,
+    limit: Option<usize>,
+) -> AppResult<crate::contracts::DenseTopologyPage> {
+    use crate::contracts::{DenseTopologyItem, DenseTopologyKind, DenseTopologyPage};
+    let kind_name = match kind {
+        DenseTopologyKind::Edge => "edge",
+        DenseTopologyKind::Face => "face",
+        DenseTopologyKind::Selection => "selection",
+    };
+    let identity = topology_cursor_identity(thread_id, message_id, kind_name);
+    let offset = if let Some(cursor) = cursor {
+        let mut parts = cursor.split(':');
+        let valid = parts.next() == Some("v1")
+            && parts
+                .next()
+                .is_some_and(|part| part == format!("{identity:016x}"));
+        let offset = parts.next().and_then(|part| part.parse::<usize>().ok());
+        if !valid || parts.next().is_some() || offset.is_none() {
+            return Err(AppError::validation("Invalid dense topology cursor."));
+        }
+        offset.unwrap_or(0)
+    } else {
+        0
+    };
+    let safe_limit = limit.unwrap_or(500).clamp(1, 500);
+    let (column, path) = match kind {
+        DenseTopologyKind::Edge => ("artifact_bundle", "$.edgeTargets"),
+        DenseTopologyKind::Face => ("artifact_bundle", "$.faceTargets"),
+        DenseTopologyKind::Selection => ("model_manifest", "$.selectionTargets"),
+    };
+    let (raw_items, total_count) = db::get_dense_topology_json_page(
+        conn,
+        thread_id,
+        message_id,
+        column,
+        path,
+        offset,
+        safe_limit + 1,
+    )
+    .map_err(|err| AppError::persistence(err.to_string()))?;
+    let mut items = Vec::new();
+    let mut observed_bytes = 2usize;
+    for raw in raw_items.into_iter().take(safe_limit) {
+        let item = match kind {
+            DenseTopologyKind::Edge => DenseTopologyItem::Edge(
+                serde_json::from_str(&raw).map_err(|err| AppError::persistence(err.to_string()))?,
+            ),
+            DenseTopologyKind::Face => DenseTopologyItem::Face(
+                serde_json::from_str(&raw).map_err(|err| AppError::persistence(err.to_string()))?,
+            ),
+            DenseTopologyKind::Selection => DenseTopologyItem::Selection(
+                serde_json::from_str(&raw).map_err(|err| AppError::persistence(err.to_string()))?,
+            ),
+        };
+        let item_bytes = serde_json::to_vec(&item)
+            .map(|value| value.len())
+            .unwrap_or(0);
+        if observed_bytes.saturating_add(item_bytes)
+            > crate::transport_budget::TOPOLOGY_PAGE_MAX_BYTES
+        {
+            if items.is_empty() {
+                return Err(AppError::validation(format!(
+                    "Dense topology item is {} bytes; allowed page is {} bytes. Reduce target metadata.",
+                    item_bytes,
+                    crate::transport_budget::TOPOLOGY_PAGE_MAX_BYTES
+                )));
+            }
+            break;
+        }
+        observed_bytes = observed_bytes.saturating_add(item_bytes);
+        items.push(item);
+    }
+    let next_offset = offset + items.len();
+    Ok(DenseTopologyPage {
+        snapshot_ref: format!("topology:{thread_id}:{message_id}"),
+        kind,
+        next_cursor: (next_offset < total_count)
+            .then(|| format!("v1:{identity:016x}:{next_offset}")),
+        total_count,
+        observed_bytes,
+        items,
+    })
 }
 
 pub fn get_thread_messages_page(
     conn: &rusqlite::Connection,
     id: &str,
-    before: Option<u64>,
+    before: Option<String>,
     limit: Option<usize>,
     include_visual_payloads: bool,
 ) -> AppResult<crate::contracts::ThreadMessagesPage> {
+    if include_visual_payloads {
+        return Err(AppError::validation(
+            "Timeline pages never include visual/runtime payloads. Hydrate one selected version instead.",
+        ));
+    }
     db::get_visible_thread_title(conn, id)
         .map_err(|err| AppError::persistence(err.to_string()))?
         .ok_or_else(|| AppError::not_found("Thread not found."))?;
     db::get_thread_messages_page(
         conn,
         id,
-        before,
+        before.as_deref(),
         limit.unwrap_or(50),
         include_visual_payloads,
     )
     .map_err(|err| AppError::persistence(err.to_string()))
+}
+
+pub fn get_thread_messages_page_filtered(
+    conn: &rusqlite::Connection,
+    id: &str,
+    before: Option<String>,
+    limit: Option<usize>,
+    roles: Option<&[MessageRole]>,
+) -> AppResult<crate::contracts::ThreadMessagesPage> {
+    db::get_visible_thread_title(conn, id)
+        .map_err(|err| AppError::persistence(err.to_string()))?
+        .ok_or_else(|| AppError::not_found("Thread not found."))?;
+    db::get_thread_messages_page_filtered(conn, id, before.as_deref(), limit.unwrap_or(50), roles)
+        .map_err(|err| AppError::persistence(err.to_string()))
 }
 
 pub fn finalize_thread(
@@ -131,24 +308,14 @@ pub fn finalize_thread(
     db::get_visible_thread_title(conn, thread_id)
         .map_err(|err| AppError::persistence(err.to_string()))?
         .ok_or_else(|| AppError::not_found("Thread not found."))?;
-    let messages = db::get_thread_messages(conn, thread_id)
+    let has_version = db::has_renderable_thread_version(conn, thread_id, selected_message_id)
         .map_err(|err| AppError::persistence(err.to_string()))?;
-
-    if let Some(message_id) = selected_message_id {
-        messages
-            .iter()
-            .find(|message| message.id == message_id && is_renderable_version_message(message))
-            .ok_or_else(|| {
-                AppError::validation("Selected final model is not a valid version in this thread.")
-            })?;
-    } else {
-        messages
-            .iter()
-            .rev()
-            .find(|message| is_renderable_version_message(message))
-            .ok_or_else(|| {
-                AppError::validation("Thread has no successful versions to finalize.")
-            })?;
+    if !has_version {
+        return Err(AppError::validation(if selected_message_id.is_some() {
+            "Selected final model is not a valid version in this thread."
+        } else {
+            "Thread has no successful versions to finalize."
+        }));
     }
 
     let changed = db::finalize_thread(conn, thread_id, now as i64)
@@ -158,12 +325,6 @@ pub fn finalize_thread(
     }
 
     Ok(())
-}
-
-fn is_renderable_version_message(message: &crate::contracts::Message) -> bool {
-    message.role == MessageRole::Assistant
-        && message.status == MessageStatus::Success
-        && message.artifact_bundle.is_some()
 }
 
 pub fn reopen_thread(conn: &rusqlite::Connection, thread_id: &str) -> AppResult<()> {
@@ -177,15 +338,11 @@ pub fn reopen_thread(conn: &rusqlite::Connection, thread_id: &str) -> AppResult<
 }
 
 pub fn get_inventory(conn: &rusqlite::Connection) -> AppResult<Vec<Thread>> {
-    let mut threads = db::get_inventory_threads(conn)
-        .map_err(|err| AppError::persistence(err.to_string()))?;
+    let mut threads =
+        db::get_inventory_threads(conn).map_err(|err| AppError::persistence(err.to_string()))?;
     for thread in &mut threads {
-        thread.is_blank = crate::thread_source_binding::thread_is_blank(
-            conn,
-            &thread.id,
-            !thread.is_blank,
-        )
-        .map_err(|err| AppError::persistence(err.to_string()))?;
+        thread.is_blank = crate::thread_source_binding::thread_is_blank(conn, &thread.id)
+            .map_err(|err| AppError::persistence(err.to_string()))?;
     }
     Ok(threads)
 }
@@ -268,6 +425,7 @@ mod tests {
             component_dependency_lock: None,
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: 1,
             model_id: model_id.to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -279,7 +437,7 @@ mod tests {
             fcstd_path: format!("/tmp/{model_id}.FCStd"),
             manifest_path: format!("/tmp/{model_id}.json"),
             macro_path: None,
-            preview_stl_path: format!("/tmp/{model_id}.stl"),
+            model_stl_path: format!("/tmp/{model_id}.stl"),
             viewer_assets: Vec::new(),
             edge_targets: Vec::new(),
             face_targets: Vec::new(),
@@ -449,14 +607,15 @@ mod tests {
     }
 
     #[test]
-    fn history_marks_only_message_free_blank_bound_source_as_reusable_blank() {
+    fn history_marks_only_never_modified_thread_as_reusable_blank() {
         let db_path = std::env::temp_dir().join(format!(
             "ecky-thread-blank-classification-{}.sqlite",
             uuid::Uuid::new_v4()
         ));
         let conn = db::init_db(&db_path).unwrap();
         db::create_or_update_thread(&conn, "blank", "Untitled design", 200, None).unwrap();
-        db::create_or_update_thread(&conn, "authored", "Authored source", 100, None).unwrap();
+        db::create_or_update_thread(&conn, "renamed-blank", "Untitled design", 150, None).unwrap();
+        db::update_thread_title(&conn, "renamed-blank", "Hydrant cap").unwrap();
 
         let root = std::env::temp_dir().join(format!(
             "ecky-thread-blank-bindings-{}",
@@ -472,22 +631,28 @@ mod tests {
         .unwrap();
         crate::thread_source_binding::upsert_binding_row(
             &conn,
-            "authored",
-            &root.join("authored"),
-            &crate::thread_source_binding::source_digest(
-                "(model (part head (sphere 20)))",
-            ),
+            "renamed-blank",
+            &root.join("renamed-blank"),
+            &crate::thread_source_binding::source_digest(""),
             None,
         )
         .unwrap();
 
         let threads = get_history(&conn).unwrap();
-        assert!(threads.iter().find(|thread| thread.id == "blank").unwrap().is_blank);
-        assert!(!threads
-            .iter()
-            .find(|thread| thread.id == "authored")
-            .unwrap()
-            .is_blank);
+        assert!(
+            threads
+                .iter()
+                .find(|thread| thread.id == "blank")
+                .unwrap()
+                .is_blank
+        );
+        assert!(
+            !threads
+                .iter()
+                .find(|thread| thread.id == "renamed-blank")
+                .unwrap()
+                .is_blank
+        );
 
         let _ = std::fs::remove_file(db_path);
     }
@@ -528,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn get_thread_ignores_output_only_messages_in_version_count() {
+    fn get_thread_counts_output_only_messages_as_authored_versions() {
         let db_path = std::env::temp_dir().join(format!(
             "ecky-thread-output-only-version-{}.sqlite",
             uuid::Uuid::new_v4()
@@ -545,7 +710,7 @@ mod tests {
 
         let thread = get_thread(&conn, "thread-output-only").unwrap();
         assert_eq!(thread.messages.len(), 2);
-        assert_eq!(thread.version_count, 1);
+        assert_eq!(thread.version_count, 2);
 
         let latest = get_thread_latest_version(&conn, "thread-output-only")
             .unwrap()
@@ -556,7 +721,7 @@ mod tests {
     }
 
     #[test]
-    fn get_thread_latest_version_returns_newest_renderable_success() {
+    fn get_thread_latest_version_returns_newest_authored_version() {
         let db_path = std::env::temp_dir().join(format!(
             "ecky-thread-latest-version-{}.sqlite",
             uuid::Uuid::new_v4()
@@ -576,15 +741,66 @@ mod tests {
             .unwrap()
             .expect("latest");
 
-        assert_eq!(latest.id, "msg-newer");
+        assert_eq!(latest.id, "msg-failed");
         assert_eq!(
             latest
                 .output
                 .as_ref()
                 .map(|output| output.version_name.as_str()),
-            Some("V-new")
+            Some("V-failed")
         );
 
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn get_thread_latest_version_returns_newest_authored_version_even_when_failed() {
+        let db_path = std::env::temp_dir().join(format!(
+            "ecky-thread-latest-failed-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let conn = db::init_db(&db_path).expect("schema");
+        db::create_or_update_thread(&conn, "thread-latest-failed", "Latest", 100, None)
+            .expect("thread");
+
+        let older = sample_message("msg-old-success", 100, "V-old");
+        let mut failed = sample_message("msg-new-failed", 200, "V-failed");
+        failed.status = MessageStatus::Error;
+        failed.artifact_bundle = None;
+        db::add_message(&conn, "thread-latest-failed", &older).expect("old");
+        db::add_message(&conn, "thread-latest-failed", &failed).expect("failed");
+
+        let latest = get_thread_latest_version(&conn, "thread-latest-failed")
+            .expect("latest query")
+            .expect("latest version");
+        assert_eq!(latest.id, "msg-new-failed");
+        assert_eq!(latest.status, MessageStatus::Error);
+        let pointed = get_thread_message_version(&conn, "thread-latest-failed", "msg-new-failed")
+            .expect("pointed query")
+            .expect("pointed version");
+        assert_eq!(pointed.id, "msg-new-failed");
+        drop(conn);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn get_thread_counts_failed_artifactless_authored_versions() {
+        let db_path = std::env::temp_dir().join(format!(
+            "ecky-thread-count-failed-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let conn = db::init_db(&db_path).expect("schema");
+        db::create_or_update_thread(&conn, "thread-count-failed", "Count", 100, None)
+            .expect("thread");
+
+        let mut failed = sample_message("msg-count-failed", 100, "V-failed");
+        failed.status = MessageStatus::Error;
+        failed.artifact_bundle = None;
+        db::add_message(&conn, "thread-count-failed", &failed).expect("failed");
+
+        let thread = get_thread(&conn, "thread-count-failed").expect("thread query");
+        assert_eq!(thread.version_count, 1);
+        drop(conn);
         let _ = std::fs::remove_file(db_path);
     }
 
@@ -691,32 +907,28 @@ mod tests {
             vec!["msg-2", "msg-3"]
         );
         assert!(first_page.has_more);
-        assert_eq!(first_page.next_before, Some(102));
+        assert!(first_page
+            .next_before
+            .as_deref()
+            .is_some_and(|cursor| cursor.starts_with("v2:")));
+        assert!(first_page.messages.iter().all(|message| message.has_image));
         assert!(first_page
             .messages
             .iter()
-            .all(|message| message.image_data.is_none()));
-        assert!(first_page
-            .messages
-            .iter()
-            .all(|message| message.attachment_images.is_empty()));
-        assert!(first_page.messages.iter().all(|message| {
-            message.artifact_bundle.as_ref().is_some_and(|bundle| {
-                bundle.edge_targets.is_empty() && bundle.face_targets.is_empty()
-            })
-        }));
-        assert!(first_page
-            .messages
-            .iter()
-            .all(|message| message.model_manifest.is_none()));
+            .all(|message| message.attachment_count == 1));
+        assert!(first_page.messages.iter().all(|message| message
+            .version_summary
+            .as_ref()
+            .is_some_and(|version| {
+                version.has_output && version.has_runtime && !version.has_manifest
+            })));
+        assert!(first_page.observed_bytes < 1_048_576);
 
-        let full_page =
-            get_thread_messages_page(&conn, "thread-page", None, Some(2), true).unwrap();
-        assert!(full_page.messages.iter().all(|message| {
-            message.artifact_bundle.as_ref().is_some_and(|bundle| {
-                bundle.edge_targets.len() == 1 && bundle.face_targets.len() == 1
-            })
-        }));
+        let full_page_error =
+            get_thread_messages_page(&conn, "thread-page", None, Some(2), true).unwrap_err();
+        assert!(full_page_error
+            .to_string()
+            .contains("Hydrate one selected version"));
 
         let second_page =
             get_thread_messages_page(&conn, "thread-page", first_page.next_before, Some(2), false)
@@ -731,6 +943,183 @@ mod tests {
         );
         assert!(!second_page.has_more);
 
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn get_thread_messages_page_cursor_preserves_equal_timestamp_order() {
+        let db_path = std::env::temp_dir().join(format!(
+            "ecky-thread-message-cursor-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let conn = db::init_db(&db_path).unwrap();
+        db::create_or_update_thread(&conn, "thread-cursor", "Cursor", 100, None).unwrap();
+        for index in 1..=4 {
+            db::add_message(
+                &conn,
+                "thread-cursor",
+                &sample_message(&format!("same-{index}"), 100, &format!("V{index}")),
+            )
+            .unwrap();
+        }
+
+        let first = get_thread_messages_page(&conn, "thread-cursor", None, Some(2), false).unwrap();
+        let second = get_thread_messages_page(
+            &conn,
+            "thread-cursor",
+            first.next_before.clone(),
+            Some(2),
+            false,
+        )
+        .unwrap();
+        let ids = first
+            .messages
+            .iter()
+            .chain(second.messages.iter())
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids.len(), 4);
+        assert_eq!(
+            ids.iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            4
+        );
+        assert!(!second.has_more);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn filtered_timeline_applies_role_before_limit_and_rejects_cross_thread_cursor() {
+        let db_path = std::env::temp_dir().join(format!(
+            "ecky-thread-filtered-page-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let conn = db::init_db(&db_path).unwrap();
+        for thread_id in ["thread-a", "thread-b"] {
+            db::create_or_update_thread(&conn, thread_id, thread_id, 100, None).unwrap();
+        }
+        db::add_message(
+            &conn,
+            "thread-a",
+            &Message {
+                id: "user-old".into(),
+                role: MessageRole::User,
+                content: "user".into(),
+                status: MessageStatus::Success,
+                output: None,
+                usage: None,
+                artifact_bundle: None,
+                model_manifest: None,
+                structural_verification: None,
+                agent_origin: None,
+                image_data: None,
+                visual_kind: None,
+                attachment_images: Vec::new(),
+                timestamp: 100,
+            },
+        )
+        .unwrap();
+        db::add_message(
+            &conn,
+            "thread-a",
+            &sample_message("assistant-new", 200, "V2"),
+        )
+        .unwrap();
+        let page = get_thread_messages_page_filtered(
+            &conn,
+            "thread-a",
+            None,
+            Some(1),
+            Some(&[MessageRole::User]),
+        )
+        .unwrap();
+        assert_eq!(page.messages[0].id, "user-old");
+
+        db::add_message(&conn, "thread-b", &sample_message("other", 200, "V1")).unwrap();
+        let cursor = get_thread_messages_page(&conn, "thread-a", None, Some(1), false)
+            .unwrap()
+            .next_before;
+        let error = get_thread_messages_page(&conn, "thread-b", cursor, Some(1), false)
+            .expect_err("cursor is bound to thread");
+        assert!(error.to_string().contains("Invalid thread timeline cursor"));
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn selected_version_core_excludes_dense_targets_and_pages_them_by_reference() {
+        let db_path = std::env::temp_dir().join(format!(
+            "ecky-version-detail-topology-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let conn = db::init_db(&db_path).unwrap();
+        db::create_or_update_thread(&conn, "thread-detail", "Detail", 100, None).unwrap();
+        let mut message = sample_message("version-detail", 100, "V1");
+        for index in 0..3 {
+            message.artifact_bundle.as_mut().unwrap().edge_targets.push(
+                crate::contracts::ViewerEdgeTarget {
+                    target_id: format!("edge-{index}"),
+                    durable_target_id: None,
+                    canonical_target_id: None,
+                    alias_ids: Vec::new(),
+                    part_id: "body".into(),
+                    viewer_node_id: "body".into(),
+                    label: "Edge".into(),
+                    editable: false,
+                    start: crate::contracts::ViewerEdgePoint {
+                        x: 0.0,
+                        y: 0.0,
+                        z: 0.0,
+                    },
+                    end: crate::contracts::ViewerEdgePoint {
+                        x: 1.0,
+                        y: 0.0,
+                        z: 0.0,
+                    },
+                },
+            );
+        }
+        db::add_message(&conn, "thread-detail", &message).unwrap();
+
+        let detail = get_version_detail(&conn, "thread-detail", "version-detail").unwrap();
+        assert_eq!(detail.edge_count, 3);
+        assert_eq!(
+            detail.message.artifact_bundle.unwrap().edge_targets.len(),
+            0
+        );
+        assert!(detail.dense_topology_ref.is_some());
+        assert!(detail.observed_bytes < crate::transport_budget::VERSION_CORE_MAX_BYTES);
+
+        let first = get_dense_topology_page(
+            &conn,
+            "thread-detail",
+            "version-detail",
+            crate::contracts::DenseTopologyKind::Edge,
+            None,
+            Some(2),
+        )
+        .unwrap();
+        assert_eq!(first.items.len(), 2);
+        assert_eq!(first.total_count, 3);
+        assert!(first.next_cursor.is_some());
+        let second = get_dense_topology_page(
+            &conn,
+            "thread-detail",
+            "version-detail",
+            crate::contracts::DenseTopologyKind::Edge,
+            first.next_cursor,
+            Some(2),
+        )
+        .unwrap();
+        assert_eq!(second.items.len(), 1);
+        assert!(second.next_cursor.is_none());
+
+        let source =
+            get_version_source_window(&conn, "thread-detail", "version-detail", 0, 8).unwrap();
+        assert!(source.content.len() <= 8);
+        assert_eq!(source.total_bytes, message.output.unwrap().macro_code.len());
         let _ = std::fs::remove_file(db_path);
     }
 }

@@ -1,22 +1,36 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import { afterEach, test } from 'node:test';
 import { get } from 'svelte/store';
+import { session } from './sessionStore';
 
-import { requestQueue } from './requestQueue';
-import { session, setManualRenderActive } from './sessionStore';
+afterEach(() => {
+  session.setError(null);
+  session.setGlobalError(null);
+});
 
-test('manual render cannot move startup session out of booting phase', () => {
-  requestQueue.clear();
-  setManualRenderActive(false);
-  session.setPhase('booting');
+test('global app errors stay separate from thread session errors', () => {
+  session.setError('thread failure');
+  session.setGlobalError('config save failure');
 
-  setManualRenderActive(true, { threadId: 'thread-1', messageId: 'msg-1' });
+  assert.equal(get(session).error, 'thread failure');
+  assert.equal(get(session).globalError, 'config save failure');
+});
 
-  const current = get(session);
-  assert.equal(current.phase, 'booting');
-  assert.equal(current.isManual, true);
+test('setting the same model URL does not reload geometry', () => {
+  session.setStlUrl('/tmp/model.stl');
+  const loaded = get(session);
 
-  setManualRenderActive(false);
-  session.setPhase('idle');
-  requestQueue.clear();
+  session.setStlUrl('/tmp/model.stl');
+
+  assert.equal(get(session).runtimeRevision, loaded.runtimeRevision);
+});
+
+test('explicit runtime reload retries the same model URL', () => {
+  session.setStlUrl('/tmp/model.stl');
+  const loaded = get(session);
+
+  session.reloadStlUrl('/tmp/model.stl');
+
+  assert.equal(get(session).stlUrl, '/tmp/model.stl');
+  assert.equal(get(session).runtimeRevision, loaded.runtimeRevision + 1);
 });
