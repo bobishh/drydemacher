@@ -417,7 +417,16 @@ Current shipped metric keys:
 - `stl connected-component-count`
 - `stl non-manifold-edge-count`
 - `stl overhang-face-count`
+- `stl bed-contact-area-ratio [part-id]`
+- `stl bed-contact-x-span-ratio [part-id]`
+- `stl bed-contact-y-span-ratio [part-id]`
 - `clearance min-distance`
+
+Bed-contact ratios compare downward planar faces touching the lowest Z plane
+against all downward planar faces. Area ratio catches models whose nominal
+bottom is mostly suspended. X/Y span ratios catch models resting only on one
+small island, edge, or corner. Pass an optional part id to analyze that part's
+STL instead of the combined model STL.
 
 `clearance min-distance` compares the minimum distance between two named
 selectors.

@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     fs,
+    path::{Path, PathBuf},
 };
 
 use crate::contracts::{
@@ -823,12 +824,7 @@ fn resolve_metric_value(
             }
             resolve_manifest_metric_value(key, bundle, metrics)
         }
-        "stl" => {
-            if !args.is_empty() {
-                return Err("STL verify metrics do not accept selector arguments.".to_string());
-            }
-            resolve_stl_metric_value(key, metrics)
-        }
+        "stl" => resolve_stl_metric_value(key, args, bundle, manifest, metrics),
         "clearance" => resolve_clearance_metric_value(key, args, bundle, manifest),
         "selector" => resolve_selector_metric_value(key, args, bundle, manifest),
         "relation" => resolve_relation_metric_value(key, args, bundle, manifest),
@@ -1745,8 +1741,31 @@ fn resolve_manifest_metric_value(
 
 fn resolve_stl_metric_value(
     key: &str,
+    args: &[CoreVerifyValue],
+    bundle: &ArtifactBundle,
+    manifest: &ModelManifest,
     metrics: &AuthorVerificationMetrics,
 ) -> Result<AuthorVerifyResolvedValue, String> {
+    if matches!(
+        key,
+        "bed-contact-area-ratio" | "bed-contact-x-span-ratio" | "bed-contact-y-span-ratio"
+    ) {
+        let path = resolve_stl_metric_path(args, bundle, manifest)?;
+        let contact = super::structural_verification::model_stl_bed_contact_summary(&path)
+            .map_err(|error| error.to_string())?;
+        let value = match key {
+            "bed-contact-area-ratio" => contact.area_ratio,
+            "bed-contact-x-span-ratio" => contact.x_span_ratio,
+            "bed-contact-y-span-ratio" => contact.y_span_ratio,
+            _ => unreachable!(),
+        };
+        return Ok(AuthorVerifyResolvedValue::Number(value));
+    }
+    if !args.is_empty() {
+        return Err(format!(
+            "STL verify metric `{key}` does not accept selector arguments."
+        ));
+    }
     let structural = metrics
         .structural
         .as_ref()
@@ -1771,6 +1790,39 @@ fn resolve_stl_metric_value(
             .map(|value| AuthorVerifyResolvedValue::Number(value as f64))
             .ok_or_else(|| "Overhang face count missing from structural evidence.".to_string()),
         other => Err(format!("Unsupported stl verify metric `{other}`.")),
+    }
+}
+
+fn resolve_stl_metric_path(
+    args: &[CoreVerifyValue],
+    bundle: &ArtifactBundle,
+    manifest: &ModelManifest,
+) -> Result<PathBuf, String> {
+    match args {
+        [] => Ok(PathBuf::from(&bundle.model_stl_path)),
+        [selector] => {
+            let part_id = verify_symbol_like(selector)
+                .ok_or_else(|| "STL part selector must be symbol or text.".to_string())?;
+            let part = manifest
+                .parts
+                .iter()
+                .find(|part| part.part_id == part_id)
+                .ok_or_else(|| format!("STL part selector `{part_id}` did not resolve."))?;
+            let asset_path = part
+                .viewer_asset_path
+                .as_deref()
+                .ok_or_else(|| format!("Part `{part_id}` has no viewer asset for STL analysis."))?;
+            let asset_path = Path::new(asset_path);
+            Ok(if asset_path.is_absolute() {
+                asset_path.to_path_buf()
+            } else {
+                Path::new(&bundle.manifest_path)
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(asset_path)
+            })
+        }
+        _ => Err("STL bed-contact metrics accept at most one part selector.".to_string()),
     }
 }
 
@@ -2207,6 +2259,72 @@ mod tests {
             bytes.extend_from_slice(&0_u16.to_le_bytes());
         }
         fs::write(path, bytes).expect("write multipart STL");
+    }
+
+    fn write_bed_contact_fixture(path: &std::path::Path) {
+        let triangles = [
+            [[0.0_f32, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]],
+            [[0.0_f32, 0.0, 1.0], [0.0, 10.0, 1.0], [10.0, 0.0, 1.0]],
+        ];
+        let mut bytes = vec![0_u8; 80];
+        bytes.extend_from_slice(&(triangles.len() as u32).to_le_bytes());
+        for triangle in triangles {
+            for value in [0.0_f32; 3] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            for vertex in triangle {
+                for value in vertex {
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            bytes.extend_from_slice(&0_u16.to_le_bytes());
+        }
+        fs::write(path, bytes).expect("write bed-contact STL");
+    }
+
+    #[test]
+    fn authored_verify_supports_part_scoped_bed_contact_metrics() {
+        let dir =
+            std::env::temp_dir().join(format!("ecky-authored-bed-contact-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("create test dir");
+        write_bed_contact_fixture(&dir.join("case.stl"));
+
+        let mut bundle = sample_bundle();
+        bundle.manifest_path = dir.join("manifest.json").display().to_string();
+        let mut manifest = sample_manifest();
+        manifest.parts.truncate(1);
+        manifest.parts[0].viewer_asset_path = Some("case.stl".to_string());
+
+        let metric = |key: &str| {
+            CoreVerifyValue::List(vec![
+                CoreVerifyValue::Symbol("stl".to_string()),
+                CoreVerifyValue::Symbol(key.to_string()),
+                CoreVerifyValue::Symbol("base".to_string()),
+            ])
+        };
+        let less_than = |value: f64| {
+            CoreVerifyValue::List(vec![
+                CoreVerifyValue::Symbol("<".to_string()),
+                CoreVerifyValue::Number(value),
+            ])
+        };
+        let result = evaluate_author_verify_clauses(
+            &[
+                verify_clause(metric("bed-contact-area-ratio"), less_than(0.02)),
+                verify_clause(metric("bed-contact-x-span-ratio"), less_than(0.2)),
+                verify_clause(metric("bed-contact-y-span-ratio"), less_than(0.2)),
+            ],
+            &bundle,
+            &manifest,
+            Some(&sample_structural_result(true)),
+        );
+
+        assert!(result.passed, "Expected pass, got: {:?}", result.checks);
+        assert!(result
+            .checks
+            .iter()
+            .all(|check| check.status == AuthorVerifyCheckStatus::Passed));
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]

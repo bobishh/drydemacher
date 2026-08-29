@@ -9,6 +9,7 @@ use crate::contracts::{
 
 const OVERHANG_NORMAL_Z_THRESHOLD: f32 = -0.70710677;
 const BUILD_PLANE_EPSILON_MM: f32 = 0.001;
+const BED_CONTACT_NORMAL_Z_THRESHOLD: f32 = -0.999;
 
 pub fn verify_structure(
     bundle: &ArtifactBundle,
@@ -397,6 +398,15 @@ struct StlTopologySummary {
     overhang_ratio: f64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct StlBedContactSummary {
+    pub contact_area_mm2: f64,
+    pub downward_planar_area_mm2: f64,
+    pub area_ratio: f64,
+    pub x_span_ratio: f64,
+    pub y_span_ratio: f64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct StlEdge {
     a: StlVertex,
@@ -628,6 +638,106 @@ pub(crate) fn model_stl_non_manifold_edge_count(path: &Path) -> AppResult<usize>
             path.display()
         ))),
     }
+}
+
+pub(crate) fn model_stl_bed_contact_summary(path: &Path) -> AppResult<StlBedContactSummary> {
+    match model_stl_triangles(path).map_err(|err| {
+        AppError::render(format!("Failed to read STL '{}': {err}", path.display()))
+    })? {
+        StlPreview::Parsed(triangles) if !triangles.is_empty() => {
+            stl_bed_contact_summary(&triangles).ok_or_else(|| {
+                AppError::render(format!(
+                    "STL '{}' has no downward planar faces for bed-contact analysis.",
+                    path.display()
+                ))
+            })
+        }
+        StlPreview::Parsed(_) => Err(AppError::render(format!(
+            "STL '{}' contains no triangles.",
+            path.display()
+        ))),
+        StlPreview::Unreadable => Err(AppError::render(format!(
+            "STL '{}' is neither valid binary nor ASCII STL.",
+            path.display()
+        ))),
+    }
+}
+
+fn stl_bed_contact_summary(triangles: &[StlTriangle]) -> Option<StlBedContactSummary> {
+    let min_z = stl_min_z(triangles)?;
+    let mut downward_planar_area_mm2 = 0.0_f64;
+    let mut contact_area_mm2 = 0.0_f64;
+    let mut downward_points = Vec::new();
+    let mut contact_points = Vec::new();
+
+    for triangle in triangles {
+        let Some(normal_z) = triangle_unit_normal_z(triangle) else {
+            continue;
+        };
+        if normal_z > BED_CONTACT_NORMAL_Z_THRESHOLD {
+            continue;
+        }
+        let area = triangle_projected_xy_area(triangle);
+        if area <= f64::EPSILON {
+            continue;
+        }
+        downward_planar_area_mm2 += area;
+        downward_points.extend(triangle.coords);
+        if triangle
+            .coords
+            .iter()
+            .all(|point| point[2] <= min_z + BUILD_PLANE_EPSILON_MM)
+        {
+            contact_area_mm2 += area;
+            contact_points.extend(triangle.coords);
+        }
+    }
+
+    if downward_planar_area_mm2 <= f64::EPSILON {
+        return None;
+    }
+
+    let area_ratio = (contact_area_mm2 / downward_planar_area_mm2).clamp(0.0, 1.0);
+    let x_span_ratio = point_span_ratio(&contact_points, &downward_points, 0);
+    let y_span_ratio = point_span_ratio(&contact_points, &downward_points, 1);
+    Some(StlBedContactSummary {
+        contact_area_mm2,
+        downward_planar_area_mm2,
+        area_ratio,
+        x_span_ratio,
+        y_span_ratio,
+    })
+}
+
+fn triangle_projected_xy_area(triangle: &StlTriangle) -> f64 {
+    let [a, b, c] = triangle.coords;
+    let ux = b[0] - a[0];
+    let uy = b[1] - a[1];
+    let vx = c[0] - a[0];
+    let vy = c[1] - a[1];
+    f64::from((ux * vy - uy * vx).abs()) * 0.5
+}
+
+fn point_span_ratio(contact: &[[f32; 3]], all: &[[f32; 3]], axis: usize) -> f64 {
+    let span = |points: &[[f32; 3]]| {
+        let min = points
+            .iter()
+            .map(|point| point[axis])
+            .fold(f32::INFINITY, f32::min);
+        let max = points
+            .iter()
+            .map(|point| point[axis])
+            .fold(f32::NEG_INFINITY, f32::max);
+        f64::from(max - min)
+    };
+    if contact.is_empty() || all.is_empty() {
+        return 0.0;
+    }
+    let all_span = span(all);
+    if all_span <= f64::EPSILON {
+        return 0.0;
+    }
+    (span(contact) / all_span).clamp(0.0, 1.0)
 }
 
 fn add_model_stl_topology_issues(
@@ -1133,6 +1243,26 @@ mod tests {
         let topology = model_stl_topology_summary(&triangles);
         assert_eq!(topology.non_manifold_edge_count, 0);
         assert_eq!(topology.component_count, 2);
+    }
+
+    #[test]
+    fn bed_contact_summary_detects_most_downward_area_above_bed() {
+        let downward_triangle = |size: f32, z: f32| {
+            let coords = [[0.0, 0.0, z], [0.0, size, z], [size, 0.0, z]];
+            StlTriangle {
+                vertices: coords.map(StlVertex::new),
+                coords,
+            }
+        };
+        let triangles = [downward_triangle(1.0, 0.0), downward_triangle(10.0, 1.0)];
+
+        let contact = stl_bed_contact_summary(&triangles).expect("bed-contact metrics");
+
+        assert!((contact.contact_area_mm2 - 0.5).abs() < 1.0e-9);
+        assert!((contact.downward_planar_area_mm2 - 50.5).abs() < 1.0e-9);
+        assert!((contact.area_ratio - (0.5 / 50.5)).abs() < 1.0e-9);
+        assert!((contact.x_span_ratio - 0.1).abs() < 1.0e-9);
+        assert!((contact.y_span_ratio - 0.1).abs() < 1.0e-9);
     }
 
     #[test]

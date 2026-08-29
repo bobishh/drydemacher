@@ -182,7 +182,7 @@ VERIFY CLAUSES\n\
 - `metric` first item is a local alias; second item is a metric expression. `expect` alias must match the metric alias exactly.\n\
 - Metric namespaces: `manifest`, `stl`, `clearance`, `selector`, `relation`.\n\
 - Manifest metrics: `(manifest has-step)`, `(manifest has-model-stl)`, `(manifest edge-target-count)`, `(manifest face-target-count)`, `(manifest export-format-count)`, `(manifest part-count)`.\n\
-- STL metrics: `(stl triangle-count)`, `(stl connected-component-count)`, `(stl non-manifold-edge-count)`, `(stl overhang-face-count)`.\n\
+- STL metrics: `(stl triangle-count)`, `(stl connected-component-count)`, `(stl non-manifold-edge-count)`, `(stl overhang-face-count)`, `(stl bed-contact-area-ratio [part-id])`, `(stl bed-contact-x-span-ratio [part-id])`, `(stl bed-contact-y-span-ratio [part-id])`. Bed-contact metrics compare downward planar faces touching the lowest Z plane against all downward planar faces; use them when print-bed grounding matters.\n\
 - Clearance metric: `(clearance min-distance selector-a selector-b)`. Selectors may be part names such as `body` and `lid`, or stable target ids when known.\n\
 - Selector metrics: `(selector axis selector)`, `(selector extent-x selector)`, `(selector extent-y selector)`, `(selector extent-z selector)`, `(selector center-x selector)`, `(selector center-y selector)`, `(selector center-z selector)`. Axis returns text: `x`, `y`, or `z`; extents and centers are millimeters.\n\
 - Relation metrics: `(relation axis-angle selector-a selector-b)`, `(relation center-delta-x selector-a selector-b)`, `(relation center-delta-y selector-a selector-b)`, `(relation center-delta-z selector-a selector-b)`. Axis angle is unsigned degrees; center deltas are signed millimeters: selector-a center minus selector-b center.\n\
@@ -1481,6 +1481,9 @@ mod tests {
         assert!(build123d.contains("(manifest part-count)"));
         assert!(build123d.contains("(stl non-manifold-edge-count)"));
         assert!(build123d.contains("(stl triangle-count)"));
+        assert!(build123d.contains("(stl bed-contact-area-ratio [part-id])"));
+        assert!(build123d.contains("(stl bed-contact-x-span-ratio [part-id])"));
+        assert!(build123d.contains("(stl bed-contact-y-span-ratio [part-id])"));
         assert!(build123d.contains("(clearance min-distance selector-a selector-b)"));
         assert!(build123d.contains("(selector axis selector)"));
         assert!(build123d.contains("(selector extent-x selector)"));
