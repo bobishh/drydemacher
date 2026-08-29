@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/ecky-render", "crates/ecky-fem"]
+members = [".", "crates/ecky-render", "crates/ecky-fem", "crates/ecky-accelerate-sparse"]
 resolver = "2"
 
 [package]
@@ -9,6 +9,12 @@ description = "Prompt-driven 3D CAD designer"
 authors = ["Bogdan"]
 edition = "2021"
 default-run = "ecky_cad"
+autobins = false
+
+[features]
+default = []
+cli = []
+tooling = []
 
 [build-dependencies]
 tauri-build = { version = "2.0", features = [] }
@@ -26,18 +32,20 @@ ecky-fem = { path = "crates/ecky-fem" }
 specta = { version = "2.0.0-rc.22", features = ["derive"] }
 specta-typescript = "0.0.9"
 tauri-specta = { version = "2.0.0-rc.21", features = ["derive", "typescript"] }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.13", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
+notify = "8.2.0"
 axum = "0.8"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 uuid = { version = "1.0", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
-rusqlite = { version = "0.38.0", features = ["bundled"] }
+rusqlite = { version = "0.38.0", features = ["blob", "bundled"] }
 sha2 = "0.10.9"
 base64 = "0.22.1"
+rmp-serde = "1.3.0"
 rand = "0.8"
 qrcode = "0.14"
-rcgen = { version = "0.12", features = ["x509-parser"] }
+rcgen = { version = "0.13.2", features = ["x509-parser"] }
 regex = "1.12.3"
 rustpython-parser = "0.4.0"
 rustpython-ast = { version = "0.4.0", features = ["visitor"] }
@@ -55,6 +63,7 @@ csgrs = { version = "0.20.1", default-features = false, features = ["f64", "stl-
 geo = "0.29.3"
 fs2 = "0.4"
 im-rc = "15.1.0"
+meshopt = "0.6.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.25"
@@ -81,3 +90,63 @@ path = "src/main.rs"
 [[bin]]
 name = "ecky"
 path = "src/bin/ecky.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "migrate_history_payloads"
+path = "src/bin/migrate_history_payloads.rs"
+required-features = ["tooling"]
+
+[[bin]]
+name = "cad_to_ecky"
+path = "src/bin/cad_to_ecky.rs"
+required-features = ["tooling"]
+
+[[bin]]
+name = "export_agent_prompt"
+path = "src/bin/export_agent_prompt.rs"
+required-features = ["tooling"]
+
+[[bin]]
+name = "export_contracts"
+path = "src/bin/export_contracts.rs"
+required-features = ["tooling"]
+
+[[bin]]
+name = "export_mcp_skill"
+path = "src/bin/export_mcp_skill.rs"
+required-features = ["tooling"]
+
+[[bin]]
+name = "lower_ecky_ir_to_freecad"
+path = "src/bin/lower_ecky_ir_to_freecad.rs"
+required-features = ["tooling"]
+
+[[bin]]
+name = "pack_campaign_previews"
+path = "src/bin/pack_campaign_previews.rs"
+required-features = ["tooling"]
+
+[[bin]]
+name = "profile_history_projection"
+path = "src/bin/profile_history_projection.rs"
+required-features = ["tooling"]
+
+[[bin]]
+name = "render_ecky_ir_native_occt"
+path = "src/bin/render_ecky_ir_native_occt.rs"
+required-features = ["tooling"]
+
+[[bin]]
+name = "translate_legacy_python_to_ecky_ir"
+path = "src/bin/translate_legacy_python_to_ecky_ir.rs"
+required-features = ["tooling"]
+
+[profile.dev.package.meshopt]
+opt-level = 3
+
+[profile.dev.package.ecky-fem]
+opt-level = 3
+
+[profile.dev.package.ecky-accelerate-sparse]
+opt-level = 3

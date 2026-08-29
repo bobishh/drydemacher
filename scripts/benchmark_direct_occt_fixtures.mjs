@@ -190,7 +190,7 @@ export function snapshotFromCli({ cliResult, sampleDir, fixture, params, outputD
   const manifest = cli?.manifestPath && existsSync(cli.manifestPath)
     ? readJson(cli.manifestPath)
     : { parts: (topology?.parts || []).map(part => ({ partId: part.partId, viewerAssetPath: `parts/${part.partId}.stl` })) };
-  const stlPath = cli?.previewStlPath || join(bundleDir, 'preview.stl');
+  const stlPath = cli?.modelStlPath || join(bundleDir, 'model.stl');
   const stepPath = cli?.stepPath || join(bundleDir, 'model.step');
   for (const source of [cli?.manifestPath, topologyPath, stagePath, join(bundleDir, 'plan.json')].filter(Boolean)) {
     if (!existsSync(source)) continue;
@@ -467,7 +467,7 @@ export function buildReport({ runDir, cli, driver, runtimeRoot, workers, samples
 
 export function main() {
   const cli = releaseCli();
-  if (!existsSync(cli)) throw new Error(`release Ecky CLI missing: ${cli}\nBuild first: cd src-tauri && cargo build --release --bin ecky`);
+  if (!existsSync(cli)) throw new Error(`release Ecky CLI missing: ${cli}\nBuild first: cd src-tauri && cargo build --release --features cli --bin ecky`);
   const samples = sampleCount();
   const workers = productionWorkers();
   const driver = fixtureDriver();

@@ -18,7 +18,7 @@ test.describe('Ecky language reference — paged docs reader', () => {
 
     const toc = page.locator('nav[aria-label="Reference contents"]');
     const links = toc.locator('.docs-toc__link');
-    await expect(links).toHaveCount(14);
+    await expect(links).toHaveCount(16);
     await expect(toc.getByRole('link', { name: 'Operation Index' })).toHaveAttribute('href', '/docs/');
     await expect(toc.getByRole('link', { name: 'Verify Clauses' })).toHaveAttribute(
       'href',
@@ -47,7 +47,7 @@ test.describe('Ecky language reference — paged docs reader', () => {
       page.getByRole('heading', { name: 'Live package references', level: 3 }),
     ).toBeVisible();
     await expect(page.locator('.docs-main')).toContainText('No semver ranges');
-    await expect(page.locator('.docs-main')).toContainText('ecky.lock.json');
+    await expect(page.locator('.docs-main')).toContainText('ecky.lock.edn');
     await expect(page.locator('.docs-main')).toContainText('never calls FreeCAD');
     await expect(page.locator('.docs-main')).toContainText('solidify');
   });

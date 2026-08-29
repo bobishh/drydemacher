@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -8,6 +8,8 @@ use ecky_cad_lib::ecky_language_surface::supported_surface_reference;
 
 const OP_INDEX_START: &str = "<!-- ECKY_GENERATED_OP_INDEX_START -->";
 const OP_INDEX_END: &str = "<!-- ECKY_GENERATED_OP_INDEX_END -->";
+const SURFACE_REFERENCE_START: &str = "<!-- ECKY_GENERATED_SURFACE_REFERENCE_START -->";
+const SURFACE_REFERENCE_END: &str = "<!-- ECKY_GENERATED_SURFACE_REFERENCE_END -->";
 
 fn main() {
     let output_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../docs/generated");
@@ -54,6 +56,7 @@ fn write_book_operation_index() {
     }
 
     let table = render_operation_index(&source, &surface_names);
+    let surface_table = render_surface_reference();
 
     let (prefix, after_start) = source
         .split_once(OP_INDEX_START)
@@ -62,9 +65,58 @@ fn write_book_operation_index() {
         .split_once(OP_INDEX_END)
         .expect("canonical corpus operation-index end marker");
     let updated = format!("{prefix}{OP_INDEX_START}\n{table}{OP_INDEX_END}{suffix}");
+    let (prefix, after_start) = updated
+        .split_once(SURFACE_REFERENCE_START)
+        .expect("canonical corpus surface-reference start marker");
+    let (_, suffix) = after_start
+        .split_once(SURFACE_REFERENCE_END)
+        .expect("canonical corpus surface-reference end marker");
+    let updated = format!(
+        "{prefix}{SURFACE_REFERENCE_START}\n{surface_table}{SURFACE_REFERENCE_END}{suffix}"
+    );
 
     fs::write(&book_path, updated).expect("write canonical book operation index");
     eprintln!("Updated {}", book_path.display());
+}
+
+fn render_surface_reference() -> String {
+    let mut entries = BTreeMap::new();
+    for (backend, label) in [
+        (GeometryBackend::Freecad, "freecad"),
+        (GeometryBackend::Build123d, "legacy-build123d"),
+        (GeometryBackend::EckyRust, "mesh/native"),
+    ] {
+        for entry in supported_surface_reference(backend).entries {
+            let (_, backends): &mut (_, BTreeSet<&str>) = entries
+                .entry(entry.name.clone())
+                .or_insert_with(|| (entry.clone(), BTreeSet::new()));
+            backends.insert(label);
+        }
+    }
+
+    let mut table = String::from(
+        "| Form | Kind | Signature | Backends | Description | Example |\n\
+         | --- | --- | --- | --- | --- | --- |\n",
+    );
+    for (name, (entry, backends)) in entries {
+        table.push_str(&format!(
+            "| `{}` | {} | `{}` | {} | {} | `{}` |\n",
+            markdown_cell(&name),
+            markdown_cell(&entry.kind),
+            markdown_cell(&entry.signature),
+            backends.into_iter().collect::<Vec<_>>().join(", "),
+            markdown_cell(&entry.description),
+            markdown_cell(&entry.example),
+        ));
+    }
+    table
+}
+
+fn markdown_cell(value: &str) -> String {
+    value
+        .replace('\n', " ")
+        .replace('|', "\\|")
+        .replace('`', "\\`")
 }
 
 fn render_operation_index(source: &str, surface_names: &BTreeSet<String>) -> String {
@@ -141,5 +193,16 @@ mod tests {
     fn markdown_anchor_matches_docs_heading_slug() {
         assert_eq!(markdown_anchor("deg->rad"), "deg-rad");
         assert_eq!(markdown_anchor("repeat-union"), "repeat-union");
+    }
+
+    #[test]
+    fn generated_surface_reference_contains_registry_only_forms() {
+        let table = render_surface_reference();
+
+        assert!(table.contains("| `verify` | modelClause |"));
+        assert!(table.contains("| `feature` | modelClause |"));
+        assert!(table.contains("| `import-step` | cadOp |"));
+        assert!(table.contains("mesh/native"));
+        assert!(!table.contains("| `assembly` |"));
     }
 }

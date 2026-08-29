@@ -40,7 +40,6 @@
       "../docs": "campaign-content",
       "../sites/landing/src/models": "campaign-content/sites/landing/src/models",
       "../.dist/runtime/occt": "runtime/occt",
-      "../.dist/runtime/ftetwild": "runtime/ftetwild",
       "../.dist/speech-runtime": "runtime/speech"
     },
     "icon": [

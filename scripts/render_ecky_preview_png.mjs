@@ -218,7 +218,7 @@ async function main() {
   const sourceSha256 = createHash('sha256').update(sourceBytes).digest('hex');
 
   const workDir = await mkdtemp(join(tmpdir(), 'ecky-png-'));
-  const stlPath = join(workDir, 'preview.stl');
+  const stlPath = join(workDir, 'model.stl');
   const { contentHash } = await nativeRender(eckyAbs, stlPath);
   const stlBytes = (await readFile(stlPath)).length;
 

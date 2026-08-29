@@ -44,6 +44,8 @@ server/test_fc.py
 server/test_main.py
 server/test_env.py
 tmp/
+/artifacts/
+/outputs/
 public/docs/assets/
 docs/books/ecky-ir/assets/
 # Generated book artifacts published by `npm run build:book` (source is

@@ -280,7 +280,7 @@
 
   (verify
     (tag preview_exists)
-    (metric check (manifest has-preview-stl))
+    (metric check (manifest has-model-stl))
     (expect check (= true)))
 
   (verify

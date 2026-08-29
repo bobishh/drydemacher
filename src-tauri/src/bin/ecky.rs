@@ -339,7 +339,7 @@ fn copy_artifact(source: &Path, destination: &Path) -> Result<(), CliError> {
 fn copy_bundle(bundle: &ArtifactBundle, destination: &Path) -> Result<(), CliError> {
     fs::create_dir_all(destination).map_err(|error| CliError::Write(error.to_string()))?;
     let mut artifacts = vec![
-        PathBuf::from(&bundle.preview_stl_path),
+        PathBuf::from(&bundle.model_stl_path),
         PathBuf::from(&bundle.manifest_path),
     ];
     if let Some(path) = &bundle.macro_path {
@@ -383,7 +383,7 @@ fn render_with(
     let bundle = render_backend(&source, &args.parameters, args.backend, &resolver)
         .map_err(|error| CliError::Render(error.to_string()))?;
     if let Some(path) = &args.stl {
-        copy_artifact(Path::new(&bundle.preview_stl_path), path)?;
+        copy_artifact(Path::new(&bundle.model_stl_path), path)?;
     }
     if let Some(path) = &args.step {
         let source = bundle
@@ -402,7 +402,7 @@ fn render_with(
     if args.json {
         println!(
             "{}",
-            serde_json::json!({ "backend": args.backend_name, "previewStlPath": bundle.preview_stl_path, "stepPath": bundle.export_artifacts.iter().find(|artifact| artifact.format.eq_ignore_ascii_case("step")).map(|artifact| artifact.path.clone()), "manifestPath": bundle.manifest_path, "contentHash": bundle.content_hash })
+            serde_json::json!({ "backend": args.backend_name, "modelStlPath": bundle.model_stl_path, "stepPath": bundle.export_artifacts.iter().find(|artifact| artifact.format.eq_ignore_ascii_case("step")).map(|artifact| artifact.path.clone()), "manifestPath": bundle.manifest_path, "contentHash": bundle.content_hash })
         );
     } else {
         println!("render: ok");
@@ -496,7 +496,7 @@ mod tests {
             "artifactVersion": 1,
             "fcstdPath": "",
             "manifestPath": manifest,
-            "previewStlPath": preview,
+            "modelStlPath": preview,
             "exportArtifacts": exports
         }))
         .expect("build artifact bundle")
@@ -516,7 +516,7 @@ mod tests {
     fn render_routes_freecad_to_freecad_backend_without_runner() {
         let root = TempDir::new("freecad-route");
         let input = root.0.join("input.ecky");
-        let preview = root.0.join("preview.stl");
+        let preview = root.0.join("model.stl");
         let output = root.0.join("out.stl");
         fs::write(&input, "(model (part body (box 1 2 3)))").expect("write input");
         fs::write(&preview, "stl").expect("write preview");
@@ -540,7 +540,7 @@ mod tests {
     fn render_routes_direct_occt_to_native_backend_without_runner() {
         let root = TempDir::new("direct-route");
         let input = root.0.join("input.ecky");
-        let preview = root.0.join("preview.stl");
+        let preview = root.0.join("model.stl");
         let output = root.0.join("out.stl");
         fs::write(&input, "(model (part body (box 1 2 3)))").expect("write input");
         fs::write(&preview, "stl").expect("write preview");
@@ -563,7 +563,7 @@ mod tests {
     fn render_copies_step_and_fails_when_requested_artifact_is_missing() {
         let root = TempDir::new("step-copy");
         let input = root.0.join("input.ecky");
-        let preview = root.0.join("preview.stl");
+        let preview = root.0.join("model.stl");
         let step = root.0.join("model.step");
         let output = root.0.join("out.stl");
         let copied_step = root.0.join("nested/out.step");

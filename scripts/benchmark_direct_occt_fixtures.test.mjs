@@ -151,8 +151,8 @@ writeFileSync(join(out, 'topology.json'), JSON.stringify({ parts: [{ partId: 'sa
 writeFileSync(join(out, 'plan.json'), JSON.stringify({ schemaVersion: 1, parts: [] }));
 writeFileSync(join(out, 'stage-report.json'), JSON.stringify({ schemaVersion: 1, stages: [] }));
 const stl = 'solid tiny\\nfacet normal 0 0 1\\n outer loop\\n  vertex 0 0 0\\n  vertex 1 0 0\\n  vertex 0 1 0\\n endloop\\nendfacet\\nendsolid tiny\\n';
-writeFileSync(join(out, 'preview.stl'), stl); writeFileSync(join(out, 'parts/sample.stl'), stl); writeFileSync(join(out, 'model.step'), 'ISO-10303-21;');
-process.stdout.write(JSON.stringify({ manifestPath: join(out, 'manifest.json'), previewStlPath: join(out, 'preview.stl'), stepPath: join(out, 'model.step') }) + '\\n');
+writeFileSync(join(out, 'model.stl'), stl); writeFileSync(join(out, 'parts/sample.stl'), stl); writeFileSync(join(out, 'model.step'), 'ISO-10303-21;');
+process.stdout.write(JSON.stringify({ manifestPath: join(out, 'manifest.json'), modelStlPath: join(out, 'model.stl'), stepPath: join(out, 'model.step') }) + '\\n');
 `);
   chmodSync(fakeCli, 0o755);
   const requestPath = join(sampleDir, 'request.json');
@@ -166,5 +166,5 @@ process.stdout.write(JSON.stringify({ manifestPath: join(out, 'manifest.json'), 
   const result = JSON.parse(readFileSync(join(sampleDir, 'result.json'), 'utf8'));
   assert.equal(result.validity, true);
   for (const name of ['runtime-manifest.json', 'topology.json', 'stage-report.json', 'plan.json', 'result.json']) assert.equal(existsSync(join(sampleDir, name)), true, name);
-  for (const name of ['model.step', 'preview.stl', 'parts/sample.stl']) assert.equal(existsSync(join(sampleDir, 'bundle', name)), false, name);
+  for (const name of ['model.step', 'model.stl', 'parts/sample.stl']) assert.equal(existsSync(join(sampleDir, 'bundle', name)), false, name);
 });

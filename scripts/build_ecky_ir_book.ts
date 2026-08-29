@@ -12,7 +12,8 @@ const outputDir = path.join(bookTargetDir, 'dist', 'books');
 const htmlPath = path.join(outputDir, 'ecky-ir-field-guide.html');
 const epubPath = path.join(outputDir, 'ecky-ir-field-guide.epub');
 const epubWorkDir = path.join(outputDir, 'ecky-ir-field-guide-epub');
-const docsSourcePath = path.join(root, 'public', 'tutorials', 'ecky-campaign.md');
+const campaignSourcePath = path.join(root, 'public', 'tutorials', 'ecky-campaign.md');
+const referenceSourcePath = path.join(root, 'public', 'docs', 'ecky-ir.md');
 // The app serves the reader markdown, the EPUB download, and chapter images
 // from `public/docs` (Vite static root). Publish the freshly built artifacts
 // there so a single `build:book` keeps both the in-app reader and the EPUB
@@ -21,7 +22,10 @@ const publicDocsDir = path.join(root, 'public', 'docs');
 
 syncEckyIrContent(root);
 syncSplitBook(root);
-const docsMarkdown = fs.readFileSync(docsSourcePath, 'utf8');
+const docsMarkdown = [
+  fs.readFileSync(campaignSourcePath, 'utf8').trimEnd(),
+  fs.readFileSync(referenceSourcePath, 'utf8').trimEnd(),
+].join('\n\n');
 
 const book = buildEckyIrBook({
   docsMarkdown,

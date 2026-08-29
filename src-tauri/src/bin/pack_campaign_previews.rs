@@ -72,7 +72,7 @@ fn usage(error: &str) -> ExitCode {
     if !error.is_empty() {
         eprintln!("{error}");
     }
-    eprintln!("Usage: cargo run --bin pack_campaign_previews -- [--render-one-missing] [--campaign-root <path>] [--runtime-root <path>]");
+    eprintln!("Usage: cargo run --features tooling --bin pack_campaign_previews -- [--render-one-missing] [--campaign-root <path>] [--runtime-root <path>]");
     if error.is_empty() {
         ExitCode::SUCCESS
     } else {

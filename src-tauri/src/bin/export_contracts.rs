@@ -33,6 +33,10 @@ fn main() {
         .replace(
             "componentImportOrigins: ComponentImportOrigin[]",
             "componentImportOrigins?: ComponentImportOrigin[]",
+        )
+        .replace(
+            "componentPlacementEvidence: ComponentPlacementEvidence[]",
+            "componentPlacementEvidence?: ComponentPlacementEvidence[]",
         );
     if patched != generated {
         fs::write(&output_path, patched).expect("Failed to patch generated contracts");
