@@ -1,5 +1,5 @@
 import type { AgentTerminalSnapshot } from '../types/domain';
-import type { ThreadAgentState } from '../tauri/client';
+import type { ThreadAgentPresentationState } from './presentation';
 
 export type GenieBubbleSource =
   | 'none'
@@ -91,7 +91,7 @@ export function resolveGenieBubblePresentation(input: {
   pendingAgentPrompt?: { message?: string | null; agentLabel: string } | null;
   draftFeedbackSummary?: string | null;
   hasQueuedAgentMessageWithoutPrompt?: boolean;
-  threadAgentState?: ThreadAgentState | null | undefined;
+  threadAgentState?: ThreadAgentPresentationState | null | undefined;
   activeMcpBubbleSummary?: string | null;
   threadAgentMascotBubble?: string | null;
   threadError?: string | null;
@@ -184,7 +184,7 @@ export function resolveGenieBubblePresentation(input: {
 }
 
 export function isThreadAgentBusy(
-  state: ThreadAgentState | null | undefined,
+  state: ThreadAgentPresentationState | null | undefined,
 ): boolean {
   return Boolean(
     state &&
@@ -221,7 +221,7 @@ function withElapsed(
 }
 
 export function resolveActiveMcpBubble(input: {
-  threadAgentState: ThreadAgentState | null | undefined;
+  threadAgentState: ThreadAgentPresentationState | null | undefined;
   visibleAgentTerminal: AgentTerminalSnapshot | null | undefined;
   cookingPhrase: string | null | undefined;
   nowSecs: number;
@@ -247,7 +247,7 @@ export function resolveActiveMcpBubble(input: {
 }
 
 export function resolveTerminalActivityMeta(input: {
-  threadAgentState: ThreadAgentState | null | undefined;
+  threadAgentState: ThreadAgentPresentationState | null | undefined;
   visibleAgentTerminal: AgentTerminalSnapshot | null | undefined;
   nowSecs: number;
 }): string {

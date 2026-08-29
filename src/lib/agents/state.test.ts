@@ -13,18 +13,23 @@ import {
   resolveActivePendingPrompt,
   shouldAutoFocusAgentWorkingVersion,
   usesMcpConnection,
-  usesActiveMcpMode,
   usesAgentDialogueMode,
 } from './state';
 
-test('normalizeMcpMode falls back to active when legacy auto-agents exist', () => {
+test('normalizeMcpMode keeps passive when mode is missing', () => {
   assert.equal(
     normalizeMcpMode(undefined, [
       { id: 'a1', label: 'Primary', cmd: 'codex', args: [], enabled: true },
     ]),
-    'active',
+    'passive',
   );
   assert.equal(normalizeMcpMode(undefined, []), 'passive');
+  assert.equal(
+    normalizeMcpMode('active', [
+      { id: 'a1', label: 'Primary', cmd: 'codex', args: [], enabled: true },
+    ]),
+    'passive',
+  );
 });
 
 test('derivePrimaryAgentId keeps a valid enabled primary and otherwise picks the first enabled agent', () => {
@@ -87,7 +92,7 @@ test('resolveActivePendingPrompt only activates a prompt bound to the current th
   );
 });
 
-test('resolveActivePendingPrompt ignores stale prompts from non-primary agents in active mode', () => {
+test('resolveActivePendingPrompt stays deterministic in passive mode', () => {
   assert.equal(
     resolveActivePendingPrompt({
       prompts: [
@@ -96,14 +101,14 @@ test('resolveActivePendingPrompt ignores stale prompts from non-primary agents i
       ],
       currentThreadId: 'thread-1',
       connectionType: 'mcp',
-      mode: 'active',
+      mode: 'passive',
       autoAgents: [
         { id: 'a1', label: 'Alpha', cmd: 'codex', args: [], enabled: true },
         { id: 'a2', label: 'Beta', cmd: 'codex', args: [], enabled: true },
       ],
       primaryAgentId: 'a2',
     })?.requestId,
-    'beta',
+    'alpha',
   );
 });
 
@@ -123,12 +128,6 @@ test('deriveThreadAttentionIds marks only foreign-thread prompt and screenshot r
     }).sort(),
     ['thread-foreign', 'thread-other'],
   );
-});
-
-test('usesActiveMcpMode only enables in-app MCP routing for active mode', () => {
-  assert.equal(usesActiveMcpMode('mcp', 'active'), true);
-  assert.equal(usesActiveMcpMode('mcp', 'passive'), false);
-  assert.equal(usesActiveMcpMode('api_key', 'active'), false);
 });
 
 test('usesMcpConnection enables queued dialogue for both active and passive MCP', () => {

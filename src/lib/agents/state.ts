@@ -1,6 +1,6 @@
 import type { GenieMode } from '../genie/traits';
 import type { AgentSession, AutoAgent, McpMode } from '../types/domain';
-import type { ThreadAgentState } from '../tauri/client';
+import type { ThreadAgentPresentationState } from './presentation';
 
 export type PendingThreadPrompt = {
   requestId: string;
@@ -14,15 +14,15 @@ export type PendingThreadScreenshot = {
 };
 
 export function normalizeMcpMode(mode: McpMode | null | undefined, autoAgents: AutoAgent[]): McpMode {
-  if (mode === 'active' || mode === 'passive') return mode;
-  return autoAgents.length > 0 ? 'active' : 'passive';
+  if (mode === 'passive') return 'passive';
+  return 'passive';
 }
 
 export function usesActiveMcpMode(
   connectionType: string | null | undefined,
   mode: McpMode | null | undefined,
 ): boolean {
-  return connectionType === 'mcp' && mode === 'active';
+  return false;
 }
 
 export function usesMcpConnection(
@@ -95,7 +95,7 @@ export function promptBelongsToPrimaryAgent(
   return (agentLabel ?? '').trim() === primaryAgentLabel.trim();
 }
 
-export function phaseLabelForThreadAgentState(state: ThreadAgentState): string {
+export function phaseLabelForThreadAgentState(state: ThreadAgentPresentationState): string {
   if (state.activityLabel?.trim()) return state.activityLabel;
   if (state.statusText?.trim()) return state.statusText;
   switch (state.phase) {
@@ -130,16 +130,7 @@ export function resolveActivePendingPrompt(input: {
   autoAgents: AutoAgent[];
   primaryAgentId: string | null | undefined;
 }): PendingThreadPrompt | null {
-  const filtered = input.prompts.filter((prompt) => {
-    if (input.connectionType !== 'mcp' || input.mode !== 'active') {
-      return true;
-    }
-    return promptBelongsToPrimaryAgent(
-      input.autoAgents,
-      input.primaryAgentId,
-      prompt.agentLabel,
-    );
-  });
+  const filtered = input.prompts;
   if (!filtered.length) return null;
 
   const currentThreadId = input.currentThreadId?.trim() || null;
@@ -182,7 +173,7 @@ export function deriveThreadAttentionIds(input: {
 }
 
 export function deriveMascotStateForThreadAgent(
-  state: ThreadAgentState | null | undefined,
+  state: ThreadAgentPresentationState | null | undefined,
 ): { connected: boolean; mode: GenieMode; bubble: string } {
   if (!state || state.connectionState === 'none') {
     return { connected: false, mode: 'idle', bubble: '' };
