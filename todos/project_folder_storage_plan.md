@@ -19,7 +19,7 @@ Use one sqlite database per project:
         <version-id>/
           manifest.json
           model.FCStd
-          preview.stl
+          model.stl
           viewer-assets/
   exports/
 ```
@@ -246,7 +246,7 @@ Project export:
 - [ ] Exclude dependency caches and temp files.
 
 Thread export:
-- [ ] Export one thread with source, manifest, FCStd, preview STL, and metadata.
+- [ ] Export one thread with source, manifest, FCStd, model STL, and metadata.
 - [ ] Preserve relative paths inside package.
 
 Acceptance:

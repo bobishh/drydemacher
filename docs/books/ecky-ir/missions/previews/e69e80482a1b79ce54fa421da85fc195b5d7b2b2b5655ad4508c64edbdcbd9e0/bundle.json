@@ -10,14 +10,14 @@
   "fcstdPath": "",
   "manifestPath": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-987f9a02b0d0/manifest.json",
   "macroPath": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-987f9a02b0d0/source.ecky",
-  "previewStlPath": "preview.stl",
+  "modelStlPath": "model.stl",
   "viewerAssets": [
     {
       "partId": "supportless_rail",
       "nodeId": "supportless_rail",
       "objectName": "supportless_rail",
       "label": "Supportless Rail",
-      "path": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-987f9a02b0d0/preview.stl",
+      "path": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-987f9a02b0d0/model.stl",
       "format": "stl"
     }
   ],

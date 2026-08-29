@@ -31,6 +31,18 @@ and verification authoring while keeping source-backed AST as the authority.
   decoration.
 - The shared layout model must expose `nodeId -> x/y/w/h/path/ports/controlAnchor`
   so SVG and HTML layers stay aligned.
+- The shipped `New Params` projection is the frontend shell to extend. A second
+  visual document model SHALL NOT be introduced.
+- Typed geometry projection consumes existing `EckyAstNode`, authoring graph,
+  shape graph, and Core operation signature data. It does not add a parallel
+  Rust IR hierarchy.
+- Operation port roles come from the canonical backend operation/signature
+  registry. Frontend code SHALL NOT maintain a second operation arity/type map.
+- Automatic layout is derived. MVP stores only selection and expansion state as
+  session UI state keyed by stable node key. Manual node positioning and durable
+  layout persistence are deferred.
+- Core nodes with `sourceAddressable=false` remain visible as collapsed
+  read-only nodes with the backend-provided reason.
 - Search result selection focuses and frames the matching source-backed map
   region instead of acting as text-only filtering.
 - Visual direction is Vertex/futuristic blobs with luminous contours and ports,
@@ -116,9 +128,14 @@ MapNode
   id
   kind
   label
+  valueKind
+  operation?
   sourceRange?
+  sourceAddressable
+  editableOps
+  nonEditableReason?
   children
-  ports
+  ports: role + valueKind + cardinality + connection
   controls
   verification
   layoutHints
@@ -129,6 +146,107 @@ Vertex/futuristic regions: dark irregular plates, neon edge glow, bronze
 accents, ports, traces, and focused regions. SVG owns these shapes. HTML owns
 the live control surface. Canvas may only draw underlay glow or background
 noise. Contract stays same.
+
+## Typed Geometry Projection
+
+`New Params` currently projects parameter ownership from `ModelManifest`,
+`UiSpec`, current values, and a shallow source byte map. That shipped projection
+remains the fallback and supplies proven scene, search, focus, density, and
+inline-control behavior. Typed geometry mode enriches it with existing backend
+AST/authoring packets instead of inferring operations from source text in
+TypeScript.
+
+### Current implementation gap
+
+Current frontend projection is not a partial Core graph. Its node kinds are
+limited to `model`, `part`, `port`, `param`, and `verify`; construction uses
+`ModelManifest`, `UiSpec`, parameter values, and `macro_ast_source_map`. The
+source-map command provides only top-level ids, labels, and byte ranges.
+
+The stronger backend path exists but is disconnected:
+
+- `get_authoring_graph` compiles current source and returns AST, feature,
+  dependency, constraint, target, and handle projections;
+- frontend `AuthoringGraph` decodes targets but leaves AST nodes, features,
+  dependencies, constraints, and handles as `unknown[]`;
+- no workbench consumer calls `getAuthoringGraph`;
+- Core verifier already stores argument names in `ArgSpec`, but this metadata is
+  private validator implementation and is not a public visual descriptor;
+- current map connectors represent root/part layout, not typed value flow;
+- current CAD tone logic infers dimensions from labels such as `width`, `x`,
+  `height`, and `y` instead of backend type/unit metadata.
+
+MVP closes this bridge. It extends existing `AuthoringGraphAstNode` projection
+and TypeScript decoder with addressability, child/input edges, and typed port
+roles. It does not create a new persisted graph, new Core node hierarchy, or a
+frontend Lisp parser.
+
+Projection inputs:
+
+```text
+EckyAstNode[]
+AuthoringGraph
+ShapeGraphPacket
+canonical operation descriptors
+current values
+VisualLayoutState
+```
+
+Projection output remains a frontend view model. It is regenerated after every
+accepted patch and never becomes geometry or source truth.
+
+Collapse policy follows `CoreValueKind` and source addressability:
+
+- `Number`, `Boolean`, and `Text` bindings render as inline expressions or
+  controls under the nearest structural owner.
+- `Point2`, `Point3`, and scalar `List` values render inline by default and may
+  expand through a math/details lens.
+- `Sketch`, `Path`, `Frame`, `Mesh`, `Compound`, and `Solid` bindings render as
+  structural nodes.
+- named `part`, `shape`, geometry-valued `let`, and geometry-valued `let*`
+  bindings preserve authored names as labels and identity anchors.
+- anonymous nested operations may render inside the nearest named structural
+  node instead of occupying the top-level scene.
+- nodes without authored source mapping render as collapsed read-only nodes;
+  UI exposes `nonEditableReason` and never synthesizes an edit path.
+
+This policy is projection-only. It does not constant-fold or rewrite authored
+Lisp. Expanding inline math changes view state only.
+
+Operation nodes use typed role-labelled ports. Examples:
+
+```text
+difference: base: Solid, tools: Solid+
+union: solids: Solid+
+extrude: profile: Sketch, height: Number
+translate: x/y/z: Number, shape: geometry
+place: frame: Frame, shape: geometry
+repeat-union: count/index inputs, body: Solid
+```
+
+Exact roles, kinds, ordering, and cardinality come from canonical backend
+operation descriptors. Frontend may display `Subtract` while retaining exact
+source operation `difference`.
+
+For MVP, backend may attach resolved port descriptors directly to each projected
+call node. A standalone operation-catalog command is unnecessary. Existing
+`ArgSpec` names and expected kinds become reusable descriptor data instead of
+remaining private validation-only constants.
+
+Visual gestures produce the same digest-guarded AST patches used by agents. The
+scoped raw-source pane may remain a legacy escape hatch, but typed node editing
+SHALL NOT use byte splicing or write Core IR directly.
+
+Stable identity policy:
+
+- named params, parts, shapes, and let bindings retain layout/selection across
+  formatting changes and unrelated sibling insertion or reorder;
+- anonymous nested operation identity is best-effort and may reset when its
+  structural path changes;
+- when identity cannot be preserved, stale layout is discarded instead of
+  attaching it to another operation;
+- backend remains authority for `stableNodeKey`, `sourceAddressable`, and
+  editable operations.
 
 ## New Params View
 
@@ -216,7 +334,15 @@ Verification authoring uses existing verify syntax and future named constraints:
 - Source edits persist through existing version/history flows.
 - Configuration changes persist through `save_config` to
   `app_config_dir/config.edn`.
-- Map layout preferences are config, not source.
+- Deterministic automatic layout is not persisted.
+- MVP visual state contains selection and expansion only. It is keyed by
+  `stableNodeKey`, remains session-local, and is excluded from `.ecky`, render
+  inputs, version digests, artifacts, and exports.
+- Manual node positioning, grouping overrides, and restart persistence are out
+  of MVP scope. If added later, they remain non-authoring UI metadata keyed by
+  thread/workspace plus stable node key.
+- Stale visual-state keys are ignored. They never retarget by array index or
+  nearest visual position.
 - Authored params, parts, relations, repeats, instances, and verify clauses are
   source.
 - No SQLite file is written directly.
@@ -274,21 +400,31 @@ Rust changes require `cd src-tauri && cargo check` before success report.
 - focus selected region
 - no-match state
 
-### Phase 4: Map Insertion
+### Phase 4: Typed Geometry Projection
+
+- reuse shipped `New Params` SVG/HTML scene and interaction shell
+- consume backend AST, authoring graph, and shape graph packets
+- project scalar bindings inline and geometry bindings as structural nodes
+- derive operation-specific typed ports from canonical signatures
+- show non-source-addressable nodes as collapsed read-only structure
+- retain layout and selection for stable named nodes across unrelated reorder
+- keep automatic layout; persist no manual coordinates in MVP
+
+### Phase 5: Map Insertion
 
 - click/type insertion anchor
 - insert part/input/relation/repeat/instance
 - parser diagnostics at pending node
 - source roundtrip
 
-### Phase 5: Verification Authoring
+### Phase 6: Verification Authoring
 
 - create named constraints/bindings from selections
 - render verify nodes/overlays
 - pass/fail/error state
 - production export excludes diagnostics
 
-### Phase 6: Panel Retirement Decision
+### Phase 7: Panel Retirement Decision
 
 - evaluate whether to replace old params panel
 - remove detached params dependency only for proven migrated flows
@@ -299,7 +435,6 @@ Rust changes require `cd src-tauri && cargo check` before success report.
 
 - Final art metaphor: exact Vertex/futuristic blob language, glow intensity,
   density, and motion level.
-- Whether map layout positions are ephemeral, config-backed, or source-backed.
 - Whether keyboard-first command palette is required for all insertion kinds.
 - Whether source text editor stays side-by-side, modal, or secondary drawer after
   map editor reaches parity.

@@ -17,7 +17,7 @@ Ecky:
   -> stress/displacement checks -> parameter edit -> repeat
 ```
 
-That loop must not depend on the FreeCAD UI, Python, or a hidden cloud solver,
+That loop must not depend on the FreeCAD UI, arbitrary Python, or a hidden cloud solver,
 and it must not present an unconverged linear-elastic result as engineering
 certification.
 
@@ -35,8 +35,9 @@ certification.
 - Add a provenance-preserving boundary mesh from Direct OCCT and a separate
   validated tetrahedral volume-mesh artifact. The FEM mesh never replaces
   manufacturing BRep/STL/STEP geometry.
-- Add a pinned native fTetWild runtime adapter, isolated in a cancellable worker
-  process, for tagged tetrahedralization without FreeCAD or Python.
+- Add an external Gmsh HXT Tet4 meshing adapter, with an optional Netgen exact-
+  BRep fallback, isolated behind bounded cancellable worker processes without
+  FreeCAD or an STL round-trip.
 - Add a Rust FEM crate for Tet4 small-strain isotropic elasticity, sparse
   assembly, Dirichlet elimination, sparse solution, reactions, strain, stress,
   von Mises stress, displacement, mass, and safety-factor results.
@@ -82,9 +83,10 @@ The first supported study is intentionally narrow:
   replacement for physical testing and qualified review.
 - Silent geometry defeaturing, support stiffening, load redistribution,
   material lookup, load-case invention, or uncertainty suppression by an agent.
-- Runtime dependence on FreeCAD FEM, CalculiX, GPL Gmsh, TetGen, Python, or a
-  remote service. Gmsh/CalculiX may be used only as offline reference or through
-  separately approved commercial licensing.
+- Runtime dependence on FreeCAD FEM, CalculiX, TetGen, arbitrary Python, or a
+  remote service. Gmsh is invoked only as a separately installed external
+  executable; an explicitly probed Netgen adapter may use its own interpreter.
+  Gmsh is never linked or bundled without approved GPL/commercial licensing.
 - Treating a surface STL as a tetrahedral FEM mesh.
 
 ## Capabilities
@@ -112,7 +114,8 @@ change the manufacturing semantics of `direct-occt-runtime`,
 - New isolated `src-tauri/crates/ecky-fem` domain crate.
 - Direct OCCT boundary tessellation output with per-triangle face-target
   provenance.
-- Bundled native-runtime manifest/probe and dedicated fTetWild worker adapter.
+- External-runtime probes and a dedicated Gmsh HXT adapter with optional Netgen
+  exact-BRep fallback.
 - Artifact bundle/model manifest additive FEM summaries and derived-asset
   routing.
 - Render/verification services, MCP capability group, and Tauri commands using
@@ -120,14 +123,14 @@ change the manufacturing semantics of `direct-occt-runtime`,
   boundary structs.
 - Workbench control dock and viewport result-material path; no separate agent
   status bar and no solver stdout/stderr copied into general app logs.
-- MPL-2.0 source/notice packaging for fTetWild and audited transitive
-  dependencies. GPL Gmsh and TetGen's AGPL path are excluded from default
-  product.
+- Runtime/license evidence for separately installed Gmsh and Netgen; neither is
+  linked or bundled by the default product. Gmsh's GPL and TetGen's AGPL paths
+  are excluded from the default bundle.
 
 ## Proof Gates
 
 - A parameterized bracket authored in `.ecky` runs end to end without FreeCAD,
-  Python, CalculiX, network access, or hidden fallback.
+  arbitrary Python, CalculiX, network access, or hidden fallback.
 - Constant-strain patch, uniaxial bar, load/reaction equilibrium, rigid-body
   rejection, and offline CalculiX differential fixtures pass recorded
   tolerances.

@@ -2,10 +2,11 @@
 
 ## Guardrails
 
-- Outer Playwright BDD red first. Prove happy and external-edit/conflict state.
+- Outer Playwright BDD red first. Prove happy, invalid-save, unchanged-save,
+  and concurrent-append states.
 - Preserve global `history.sqlite` and `model-runtime`; no workspace migration.
 - Tauri payload camelCase; Rust snake_case + `#[serde(rename_all = "camelCase")]`.
-- Atomic source writes. Never clobber a digest mismatch.
+- Atomic source writes. Digest mismatch is not a conflict or refusal condition.
 - No direct SQLite writes outside backend commands. No stage or commit.
 - Run `cd src-tauri && cargo check` before success report.
 
@@ -23,10 +24,12 @@
 ## 2. Automatic Sync
 
 - [x] 2.1 Failing integration: Ecky/agent version refreshes bound source.
-- [x] 2.2 Guard every Ecky source write with binding digest.
-- [x] 2.3 Settled watcher edit -> validate -> preview -> commit -> digest update;
-  no duplicate version per save.
-- [x] 2.4 External-edit conflict test proves no file clobber/raw error.
+- [x] 2.2 Historical digest guard implementation (superseded by lossless
+  append semantics; retain implementation history for audit).
+- [x] 2.3 Historical settled watcher pipeline and unchanged-save dedupe proof
+  (superseded where it drops invalid versions).
+- [x] 2.4 Historical external-edit conflict proof (superseded; no longer the
+  target contract).
 - [x] 2.5 Make `project_folder_*` compatibility wrappers; retain internal
   preview/commit primitives.
 
@@ -49,3 +52,18 @@
 - [ ] 5.2 Full `npm run test:unit`, `npm run test:e2e`, `cd src-tauri && cargo check`, `cargo test`.
 - [x] 5.3 `openspec validate thread-source-binding --strict`.
 - [ ] 5.4 Archive through `openspec archive` after all work is green.
+
+## 6. Lossless Version Append Migration (follow-up)
+
+- [ ] 6.1 Add immutable version/append-order and explicit head persistence (or
+  equivalent transactionally ordered query) without deleting existing rows.
+- [ ] 6.2 Change Ecky, agent, and external saves to append every changed save,
+  including invalid validation/render results; attach status and raw errors.
+- [ ] 6.3 Remove conflict refusal, raw conflict UI, and force-overwrite paths;
+  serialize writers and make last append head.
+- [ ] 6.4 Preserve unchanged-observation dedupe while proving two changed saves
+  never collapse or lose a version.
+- [ ] 6.5 Add migration tests covering invalid saves, concurrent/ordered
+  appends, head selection, successful-status filtering, and legacy history.
+- [ ] 6.6 Run focused BDD, full unit/e2e, `cargo check`, `cargo test`, and
+  `openspec validate thread-source-binding --strict` after migration.

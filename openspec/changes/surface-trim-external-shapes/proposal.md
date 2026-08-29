@@ -37,6 +37,10 @@ a second geometry authority.
 - Split intersected triangles and emit the selected mesh region.
 - Support explicit cap modes: Open, Flat, and Surface Fill.
 - Expose applied trims with Edit and Remove through exact AST node identity.
+- Persist every changed trim file/draft, path or region candidate, cap preview,
+  and Apply source snapshot as an immutable version before validation. Latest
+  append is always head, including invalid or stale attempts; successful trim
+  renders remain a separate filter.
 - Preserve later `solidify`, boolean, thread, pocket, and other BRep operations.
 - Keep Guides/Reconstruct/Validate subordinate to Capture; Surface Trim belongs
   to the general Crop step.
@@ -65,4 +69,5 @@ a second geometry authority.
 - Reload reconstructs applied trim controls from canonical source.
 - Edit replaces the exact selected node; Remove unwraps only that node.
 - Happy, pending, stale-source, invalid-loop, and cap-failure UI states pass.
-
+- Invalid, pending, and stale attempts retain raw status/evidence without a
+  version conflict or force/refusal path.

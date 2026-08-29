@@ -44,8 +44,9 @@
   and crop gizmo interaction must not create points accidentally.
 - [x] 3.4 Render persistent numbered point overlays and selected-item focus
   without treating mesh vertices/faces as source-backed CAD entities.
-- [x] 3.5 Add edit/delete/undo-within-draft behavior without creating model
-  history versions.
+- [x] 3.5 Add edit/delete/undo-within-draft behavior without creating accepted
+  model history versions; each distinct draft state still appends a candidate
+  version before validation.
 
 ## 4. Metric Calibration And Local Frame
 
@@ -98,8 +99,15 @@
   bounds, or mesh digest changes.
 - [x] 6.5 Add explicit remap proposal contract with old/new anchors and residual;
   require confirmation before remapped landmark becomes authoritative.
-- [x] 6.6 Preserve last valid guide and model on failed save, stale revision,
-  missing mesh, or remap rejection.
+- [x] 6.6 Preserve last successful guide/model as the render projection on failed
+  save, stale revision, missing mesh, or remap rejection; retain any appended
+  candidate and its raw reason when persistence is available.
+- [ ] 6.7 Migrate guide/source/draft persistence to append every distinct
+  candidate before validation; retain failed/stale candidates, exact source, and
+  raw evidence, serialize appends, and advance `head` to the latest candidate.
+- [ ] 6.8 Add migration tests proving stale expected revisions and changed mesh
+  digests append without conflict/refusal; successful-version filtering remains
+  a projection only.
 
 ## 7. Canonical Agent Handoff
 
@@ -125,13 +133,13 @@
   authored quarter and explicit X/Y symmetry operations, not four copied shape
   blocks or mirrored STL.
 - [x] 8.2 Validate generated source through normal compiler, exact OCCT preview,
-  structural verification, and source/version digest guards.
+  structural verification, and source/version digest provenance checks.
 - [x] 8.3 Reject open/invalid expected-solid result, compile failure, unresolved
-  assumptions, or missing fit-critical bindings without committing.
+  assumptions, or missing fit-critical bindings without accepting the candidate.
 - [x] 8.4 Preserve ordinary `.ecky` source and artifact lifecycle; reconstruction
   result is not a new geometry kind.
-- [x] 8.5 Keep source/history unchanged until explicit Apply/Commit and surface raw
-  compiler/runtime errors beside responsible guide/build state.
+- [x] 8.5 Keep production source projection unchanged until explicit Apply/Commit
+  and surface raw compiler/runtime errors beside responsible guide/build state.
 - [x] 8.6 Add failing exact-runtime tests resolving each feature expectation from
   authored binding/tag to expected BRep target kind and cardinality. Reject
   missing, ambiguous, wrong-kind, stale, or coordinate-only matches.
@@ -170,6 +178,9 @@
   `openspec validate capture-guided-brep-reconstruction --strict`.
 - [x] 10.7 Verify Tactical Midnight, square borders, `overflow: hidden`, raw error
   reporting, and absence of a new status bar or terminal-output dump.
+- [ ] 10.8 Add migration BDD coverage: invalid compile, validation, stale-source,
+  and source-divergence candidates append first, become `head`, retain exact
+  source/raw evidence, and never produce a version conflict or loss.
 
 ## 11. Deterministic Reconstruction Stack
 

@@ -54,7 +54,8 @@ canonical anchor coordinates.
 - **WHEN** mesh digest differs, triangle is missing/degenerate, barycentric values
   are invalid, or recomputed position exceeds tolerance
 - **THEN** backend rejects anchor with exact reason
-- **AND** last valid guide and model remain unchanged
+- **AND** failed candidate source and raw reason are appended as the new `head`
+- **AND** last valid guide/model remain the successful projection
 
 #### Scenario: User orbits camera
 
@@ -86,6 +87,8 @@ manufacturing scale.
 - **THEN** guide remains unready
 - **AND** each residual and accepted tolerance are visible
 - **AND** system does not silently average contradictory evidence into success
+- **AND** the candidate containing contradictory evidence remains an appended
+  version at `head`
 
 #### Scenario: Native capture supplies metric provenance
 
@@ -115,7 +118,8 @@ constraint.
 - **WHEN** frame evidence is coincident, collinear, ill-conditioned, non-finite,
   or cannot form right-handed frame
 - **THEN** backend rejects frame with exact geometric reason
-- **AND** previous valid frame remains unchanged
+- **AND** invalid candidate version becomes `head` with raw geometric reason
+- **AND** previous valid frame remains the successful projection
 
 #### Scenario: User fits symmetry plane
 
@@ -219,12 +223,16 @@ MUST NOT substitute for identity.
   FEM node where BRep target is required, or omits owner artifact digest
 - **THEN** typed decoding/validation rejects reference before geometry matching
 
-### Requirement: Versioned And Persistent Reconstruction Guide
+### Requirement: Append-Only Versioned And Persistent Reconstruction Guide
 
-The system SHALL persist a versioned deterministic reconstruction guide through
-Ecky-owned capture-run services. Saves SHALL be guarded by expected guide
-revision and source mesh digest. Frontend and agents SHALL NOT write SQLite
-directly.
+The system SHALL persist an append-only deterministic reconstruction guide and
+every distinct source/draft/candidate change through Ecky-owned capture-run
+services before validation. Valid, invalid, failed, and stale candidates SHALL
+remain addressable versions. Appends SHALL be serialized; stale expected
+revision or changed source digest SHALL never reject an append or create a
+conflict. `head` SHALL always identify the latest appended version. Successful
+versions MAY be filtered for rendering/application as a projection only.
+Frontend and agents SHALL NOT write SQLite directly.
 
 #### Scenario: Historical capture reopens
 
@@ -236,18 +244,28 @@ directly.
 
 #### Scenario: Concurrent guide edit occurs
 
-- **WHEN** save carries stale expected revision
-- **THEN** backend rejects update and returns current revision identity
-- **AND** neither guide nor current model is overwritten
+- **WHEN** append carries stale expected revision
+- **THEN** backend serializes and appends the candidate as a new version
+- **AND** `head` advances to that version
+- **AND** no version conflict or refusal is returned
+
+#### Scenario: Failed candidate is retained
+
+- **WHEN** a changed guide/source/draft fails validation, compile, or exact BRep
+  verification
+- **THEN** backend appends it before validation and advances `head`
+- **AND** exact candidate source plus raw backend/agent evidence are retained
+- **AND** successful-version filtering may keep the last successful render as a
+  projection without deleting or rewinding the failed version
 
 #### Scenario: Source mesh changes
 
 - **GIVEN** guide anchors reference mesh digest A
 - **WHEN** reconstruction, crop, or selected mesh changes to digest B
-- **THEN** guide is marked stale
-- **AND** CAD generation is blocked
-- **AND** optional remap reports old/new anchors and residual and requires
-  explicit confirmation
+- **THEN** the new candidate appends and becomes `head`
+- **AND** old/new source identities and stale/remap evidence are retained
+- **AND** no conflict or version loss occurs; optional remap still requires
+  explicit confirmation before treating anchors as remapped
 
 ### Requirement: Deterministic Reconstruction Evidence Stack
 
@@ -328,8 +346,9 @@ solidification.
 #### Scenario: Target source advances during generation
 
 - **WHEN** target source/version differs from guarded request identity
-- **THEN** generated preview is not applied automatically
-- **AND** exact conflict remains visible with old/new identities
+- **THEN** generated candidate appends and becomes `head`
+- **AND** old/new identities are visible as source-divergence metadata
+- **AND** no conflict/refusal is emitted and no candidate is discarded
 
 ### Requirement: Parametric BRep Preserves Design Intent
 
@@ -356,7 +375,9 @@ represented explicitly rather than baked into copied geometry or tessellation.
 - **WHEN** source fails compilation, exact runtime yields open/invalid expected
   solid, or fit-critical bindings are unresolved
 - **THEN** preview remains failed/red
-- **AND** system does not mark reconstruction complete or commit it
+- **AND** system does not mark reconstruction complete or accept it as the
+  successful projection
+- **AND** failed candidate version remains at `head` with exact source/raw reason
 - **AND** raw compiler/runtime reason is visible
 
 ### Requirement: Honest Reference Overlay And Deviation
@@ -399,13 +420,15 @@ history authority, status bar, or provider fallback.
 
 - **WHEN** validated `.ecky` BRep preview is produced
 - **THEN** owning thread receives ordinary preview draft
-- **AND** source and history remain uncommitted until explicit Apply/Commit
+- **AND** production source projection remains uncommitted until explicit
+  Apply/Commit while the candidate version is already in history
 - **AND** guide digest and assumptions remain in result provenance
 
 #### Scenario: Guided generation fails
 
 - **WHEN** mesh is missing/stale, calibration/frame invalid, agent fails, or BRep
   verification fails
-- **THEN** last good capture mesh, guide, model, and history remain unchanged
+- **THEN** last good capture mesh/model may remain the successful projection
+- **AND** failed candidate is appended and becomes `head`
 - **AND** raw responsible error appears in Capture/agent workflow surface
 - **AND** user can edit guide or retry without recapturing valid source evidence

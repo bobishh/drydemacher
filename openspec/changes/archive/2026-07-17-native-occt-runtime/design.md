@@ -93,7 +93,7 @@ Input:
 Output:
 
 - `model.step`
-- `preview.stl`
+- `model.stl`
 - `topology.json`
 - process exit code
 - stdout/stderr raw diagnostics

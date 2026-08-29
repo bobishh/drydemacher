@@ -69,7 +69,7 @@ Live OCCT proof:
 - Source contains one authored quarter primitive and two explicit mirror operations.
 - Exact runtime returns a valid solid.
 - Deviation samples report `observedRegionOnly`.
-- Preview STL bytes, STEP bytes, and artifact-bundle digest remain unchanged after diagnostics.
+- Model STL bytes, STEP bytes, and artifact-bundle digest remain unchanged after diagnostics.
 
 ## Change integrity
 

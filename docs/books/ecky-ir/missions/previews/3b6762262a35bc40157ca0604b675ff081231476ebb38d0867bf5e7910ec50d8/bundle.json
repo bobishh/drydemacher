@@ -10,14 +10,14 @@
   "fcstdPath": "",
   "manifestPath": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-04de910b158f/manifest.json",
   "macroPath": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-04de910b158f/source.ecky",
-  "previewStlPath": "preview.stl",
+  "modelStlPath": "model.stl",
   "viewerAssets": [
     {
       "partId": "frame_clamp",
       "nodeId": "frame_clamp",
       "objectName": "frame_clamp",
       "label": "Frame Clamp",
-      "path": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-04de910b158f/preview.stl",
+      "path": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-04de910b158f/model.stl",
       "format": "stl"
     }
   ],

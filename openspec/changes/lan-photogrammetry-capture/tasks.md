@@ -72,7 +72,8 @@
 - [x] 6.1 Add failing Playwright flow: start capture, show QR/progress, receive
   reconstructed preview, inspect, Apply/Commit.
 - [x] 6.2 Add failure/pending flow preserving active model and source frames.
-- [x] 6.3 Ensure reconstruction never auto-commits or claims analytic BRep.
+- [x] 6.3 Historical pre-lossless behavior: reconstruction never auto-committed
+  or claimed analytic BRep (version retention superseded by task 6.16).
 - [x] 6.4 Keep capture state in Ecky workflow surfaces; no separate agent status
   bar and no scan-specific editor mode.
 - [x] 6.5 Bind capture session to target thread/version at creation.
@@ -94,6 +95,12 @@
   pairing credentials, restored frame manifest, crop, and scale.
 - [x] 6.15 Resume historical runs through `ADD PHOTOS` without duplicating run
   identity, and adopt newest pre-durability capture through explicit action.
+- [ ] 6.16 Route every changed generated model source, persisted model preview
+  draft, and Apply source through one append-before-validation version path;
+  retain raw status/evidence and make latest append head even when failed or
+  stale. Keep capture assets/run metadata outside model version history.
+- [ ] 6.17 Remove capture version-conflict/thread-advanced/force gates while
+  preserving geometric validation failures such as bad source digest or crop.
 
 ## 7. Native Client Extension Boundary
 
@@ -113,3 +120,8 @@
 - [ ] 8.4b Validate physical iPhone Safari rotation, screen wake, and reconnect
   after the latest mobile-client changes.
 - [x] 8.5 Run `openspec validate lan-photogrammetry-capture --strict`.
+- [ ] 8.6 Add BDD proof that failed reconstruction, pending upload, and stale
+  Apply each append one version, become head, and leave earlier successful
+  renders available through an explicit successful-only filter.
+- [ ] 8.7 Add migration proof for existing capture history: derive deterministic
+  append order, preserve all records, and resolve head from latest append.

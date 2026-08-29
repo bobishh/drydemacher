@@ -1,6 +1,6 @@
 # Ecky MCP Tools
 
-_Generated from the live MCP tool catalog by `cargo run --bin export_mcp_skill` (`npm run generate:skill`). Do not edit by hand._
+_Generated from the live MCP tool catalog by `cargo run --features tooling --bin export_mcp_skill` (`npm run generate:skill`). Do not edit by hand._
 
 ## health_check
 
@@ -34,7 +34,7 @@ Arguments: `includeArchitecture`, `limit`, `query` (required), `roots`
 
 ## project_folder_export
 
-Compatibility/recovery export. Bound targets already expose sourcePath/sourceFolder; edit sourcePath and call project_folder_apply instead. Use export only to seed/reseed a missing unbound folder. Existing bindings retain their exact stored folder.
+Compatibility/recovery export. Bound targets already expose sourcePath/sourceFolder; edit sourcePath directly and let the watcher sync settled edits. Use export only to seed/reseed a missing unbound folder. Existing bindings retain their exact stored folder.
 
 Arguments: `messageId`, `slug`, `threadId`
 
@@ -44,21 +44,15 @@ Read-only sync classification of a project folder: clean | fileChanged | threadA
 
 Arguments: `slug` (required)
 
-## project_folder_apply
-
-Apply an externally edited model.ecky back onto its bound thread: compile check, preview render, commit as a new version, rebase the folder manifest. Refuses stale (threadAdvanced) folders; conflict needs force=true.
-
-Arguments: `force`, `slug` (required), `title`, `versionName`
-
 ## component_extract
 
-Lift an existing part subtree into a closed, copy-inline `define-component` snippet. Referenced model params become the signature (metadata preserved); scalar outer let bindings become plain defaults; other free references are reported as blockers. Optionally saves the component into the component library.
+Lift an existing part subtree into a closed, copy-inline `define-component` snippet. Local port ids/types/frames/fit metadata are preserved; ports that depend on unresolved parent/world bindings block extraction. Referenced model params become the signature. Optionally saves the component into the component library.
 
 Arguments: `description`, `messageId`, `name`, `partKey` (required), `save`, `source` (required), `tags`, `threadId`
 
 ## component_search
 
-Search the component library by compact header (name, one-liner, param keys, tags). Header-only: never returns component bodies; use component_get for source.
+Search the component library by compact header (name, one-liner, param keys, tags, port ids and compatibility types). Header-only: never returns component bodies; use component_get for source.
 
 Arguments: `limit`, `query`
 
@@ -112,7 +106,7 @@ Arguments: `agentLabel`, `llmModelId`, `llmModelLabel`, `title`
 
 ## thread_borrow
 
-Borrow an existing thread as this MCP session's current target without logging out/in. Use this after thread_list/thread_get when choosing or switching existing work. Pass messageId to target a specific version; otherwise pass threadId for the latest/default target.
+Borrow an existing thread as this MCP session's current target without logging out/in. Use this after thread_list/thread_get only when choosing or intentionally switching existing work. Provider connections created by Ecky are already pre-bound and MUST NOT call thread_borrow for their assigned thread. Pass messageId to target a specific version; otherwise pass threadId for the latest/default target.
 
 Arguments: `agentLabel`, `llmModelId`, `llmModelLabel`, `messageId`, `modelId`, `stealThread`, `threadId`
 
@@ -200,6 +194,60 @@ Read-only constraint validation for sourceLanguage=ecky targets. Compiles source
 
 Arguments: `agentLabel`, `llmModelId`, `llmModelLabel`, `messageId`, `parameters`, `threadId`
 
+## fem_validate
+
+Validate one authored native linear-static study against the current exact rendered model. Resolves durable BRep face tags, units, material, loads, supports, closed OCCT boundary, evidence, budgets, and stale source identity. Does not mesh, solve, edit source, or create history.
+
+Arguments: `agentLabel`, `analysisName` (required), `budgets`, `control`, `jobId`, `llmModelId`, `llmModelLabel`, `messageId`, `threadId`
+
+## fem_run
+
+Run the validated authored study through automatic external Gmsh HXT exact-BRep meshing, Tet4 assembly, Faer sparse solve, postprocess, engineering gates, and atomic immutable publication. Returns compact summaries and artifact paths only; bulk arrays stay outside message EDN. Never edits source or commits history.
+
+Arguments: `agentLabel`, `analysisName` (required), `budgets`, `control`, `jobId`, `llmModelId`, `llmModelLabel`, `messageId`, `threadId`
+
+## fem_mesh_preview
+
+Generate and validate the pinned native Tet4 volume mesh without assembling or solving. Publishes immutable node/cell/boundary arrays plus quality and exact BRep face-group coverage. Never edits source or commits history.
+
+Arguments: `agentLabel`, `analysisName` (required), `budgets`, `control`, `jobId`, `llmModelId`, `llmModelLabel`, `messageId`, `threadId`
+
+## fem_cancel
+
+Request cancellation of one running FEM job at its next declared safe boundary. Returns whether the job was found.
+
+Arguments: `agentLabel`, `jobId` (required), `llmModelId`, `llmModelLabel`
+
+## fem_result_get
+
+Read and revalidate one immutable FEM result manifest by exact analysis and solution digests. Returns compact metadata and binary artifact paths, never bulk arrays.
+
+Arguments: `agentLabel`, `analysisIdentityDigest` (required), `llmModelId`, `llmModelLabel`, `maximumResultBytes`, `solutionDigest` (required)
+
+## fem_convergence
+
+Run at least three explicit coarse-to-fine native Tet4 levels sequentially. Returns per-level immutable identities, quality, counts, residual, extrema, relative deltas, and separate displacement/stress status. Rising unconverged stress is marked suspectedSingularity.
+
+Arguments: `agentLabel`, `analysisName` (required), `budgets`, `control`, `displacementRelativeTolerance` (required), `jobId`, `llmModelId`, `llmModelLabel`, `meshSizesMm` (required), `messageId`, `stressRelativeTolerance` (required), `threadId`
+
+## fem_topology_run
+
+Resolve the watcher-synchronized authored FEM study, build or reuse its immutable Tet4 mesh internally, then run or resume bounded native SIMP topology optimization. fem_mesh_preview is optional diagnostics, never a prerequisite. Publishes a binary checkpoint, binary density arrays, and a VTU density preview; no topology JSON artifact manifest. Output is analysis evidence: no exact BRep, production STEP, stress acceptance, fatigue, nonlinear contact, or print certification.
+
+Arguments: `agentLabel`, `analysisName` (required), `budgets`, `control`, `jobId`, `llmModelId`, `llmModelLabel`, `messageId`, `resumeStateDigest`, `threadId`
+
+## fem_topology_reconstruct
+
+Consume one converged generic Tet4 topology density artifact, retain the component connecting every authored support/load anchor, reject islands, and emit one closed manifold polyhedron expression admitted for the faceted BRep bridge. Never infers product semantics or mutates model state. The candidate still requires preview plus independent FEM before publication.
+
+Arguments: `agentLabel`, `analysisIdentityDigest` (required), `analysisName` (required), `densityThreshold`, `inputDigest` (required), `llmModelId`, `llmModelLabel`, `meshContentDigest` (required), `messageId`, `stateDigest` (required), `threadId`
+
+## fem_publish_verified_result
+
+Publish FEM evidence for an already-created structurally green preview only when an immutable native FEM result remains decision-ready and exactly matches the preview source and OCCT analysis boundary. Reloads and verifies the result server-side; stale, red, corrupt, or caller-mismatched evidence cannot publish.
+
+Arguments: `agentLabel`, `analysisIdentityDigest` (required), `analysisName` (required), `captureGuidedResult`, `llmModelId`, `llmModelLabel`, `messageId`, `resultDigest` (required), `solutionDigest` (required), `threadId`
+
 ## get_model_screenshot
 
 Capture the current model viewport as Ecky can see it. Defaults to the visible workbench view; if the requested target is not open, Ecky asks the user how to proceed.
@@ -220,7 +268,7 @@ Arguments: `agentLabel`, `geometryBackend`, `llmModelId`, `llmModelLabel`, `mess
 
 ## macro_preview_render
 
-Compatibility-only when sourcePath is absent. Bound targets edit sourcePath then call project_folder_apply. Replace macro code and rerender a draft. Returns artifactDigest; check hasStepExport before promising STEP. IMPORTANT: check workspace_overview.agentBrief.summary and rules — if sourceLanguage is `ecky`, macroCode MUST be current `.ecky` source (starting with `(model ...)`). geometryBackend chooses FreeCAD interop or native Ecky lowering; source extension does not. Authoring uses pure lispy Ecky source compiled to internal Core IR or the selected backend. `define`, `lambda`, `let`, `let*`, `if`, and generic helpers like `range`, `map`, `filter`, `reduce`, `zip`, `enumerate`, `linspace`, and `flat-map` are allowed; `set!`, assignment, rebinding, and mutation are not. Current `let` bindings are parallel, so same-frame bindings cannot depend on earlier siblings; use `let*` or nested `let` for sequential dependencies. `(define ...)` is NOT valid inside `(model ...)`; use `let*` inside `(part ...)` for computed values from params, and reserve top-level `(define (fn args) ...)` for reusable helper functions outside `(model ...)`. When workspace_overview.agentBrief.summary reports sourceLanguage `ecky`, uiSpec and parameters are auto-derived from the params block. For existing targets, omit parameters: macro_preview_render preserves current target params. Use params_preview_render for numeric changes. parameters only seeds first versions. uiSpec.fields is an array of control descriptors — each field MUST have: key (string), label (string), type (one of: range|number|select|checkbox|image). For numeric parameters, prefer number; range only when explicitly needed. range/number: min, max, step (numbers). select: options array of {label, value} objects — MUST have at least one option. checkbox: no extra fields. image: use for file-picker inputs (e.g. a reference photo) — no extra fields, value is an absolute file path string once chosen by the user. parameters is a flat key→value map matching uiSpec field keys. For image fields, the parameter may be omitted or set to an empty string until the user picks a file in the UI. If macroCode came from a target_macro_get/macro_buffer_get window read (windowStartLine/windowEndLine/truncated), include sourceWindow with those raw observed/window/full-size details; a truncated window submitted as a full replacement is rejected unless sourceWindow.acknowledgesTruncation is true.
+Compatibility-only when sourcePath is absent. Bound targets edit sourcePath directly and let the watcher sync settled edits. Replace macro code and rerender a draft. Returns artifactDigest; check hasStepExport before promising STEP. IMPORTANT: check workspace_overview.agentBrief.summary and rules — if sourceLanguage is `ecky`, macroCode MUST be current `.ecky` source (starting with `(model ...)`). geometryBackend chooses FreeCAD interop or native Ecky lowering; source extension does not. Authoring uses pure lispy Ecky source compiled to internal Core IR or the selected backend. `define`, `lambda`, `let`, `let*`, `if`, and generic helpers like `range`, `map`, `filter`, `reduce`, `zip`, `enumerate`, `linspace`, and `flat-map` are allowed; `set!`, assignment, rebinding, and mutation are not. Current `let` bindings are parallel, so same-frame bindings cannot depend on earlier siblings; use `let*` or nested `let` for sequential dependencies. `(define ...)` is NOT valid inside `(model ...)`; use `let*` inside `(part ...)` for computed values from params, and reserve top-level `(define (fn args) ...)` for reusable helper functions outside `(model ...)`. When workspace_overview.agentBrief.summary reports sourceLanguage `ecky`, uiSpec and parameters are auto-derived from the params block. For existing targets, omit parameters: macro_preview_render preserves current target params. Use params_preview_render for numeric changes. parameters only seeds first versions. uiSpec.fields is an array of control descriptors — each field MUST have: key (string), label (string), type (one of: range|number|select|checkbox|image). For numeric parameters, prefer number; range only when explicitly needed. range/number: min, max, step (numbers). select: options array of {label, value} objects — MUST have at least one option. checkbox: no extra fields. image: use for file-picker inputs (e.g. a reference photo) — no extra fields, value is an absolute file path string once chosen by the user. parameters is a flat key→value map matching uiSpec field keys. For image fields, the parameter may be omitted or set to an empty string until the user picks a file in the UI. If macroCode came from a target_macro_get/macro_buffer_get window read (windowStartLine/windowEndLine/truncated), include sourceWindow with those raw observed/window/full-size details; a truncated window submitted as a full replacement is rejected unless sourceWindow.acknowledgesTruncation is true.
 
 Arguments: `agentLabel`, `geometryBackend`, `llmModelId`, `llmModelLabel`, `macroCode` (required), `messageId`, `parameters`, `sourceWindow`, `threadId`, `uiSpec`
 
@@ -272,12 +320,6 @@ Delete one measurement semantic annotation and save a new version.
 
 Arguments: `agentLabel`, `annotationId` (required), `llmModelId`, `llmModelLabel`, `messageId`, `threadId`, `title`, `versionName`
 
-## commit_preview_version
-
-Persist the latest green verified preview draft as a new saved version. Call verify_generated_model first; if verification is red, repair and preview again. Do not commit capped red results.
-
-Arguments: `agentLabel`, `llmModelId`, `llmModelLabel`, `messageId`, `threadId`, `title`, `versionName`
-
 ## thread_fork_from_target
 
 Save the latest draft or saved target into a new thread.
@@ -289,6 +331,12 @@ Arguments: `agentLabel`, `llmModelId`, `llmModelLabel`, `messageId`, `threadId`,
 Compare two STL models using volume and bounding-box metrics.
 
 Arguments: `genPath` (required), `refPath` (required)
+
+## version_delete
+
+Move one saved version to trash by exact message id. Uses the same recoverable history deletion path as the Ecky UI.
+
+Arguments: `agentLabel`, `llmModelId`, `llmModelLabel`, `messageId` (required)
 
 ## version_restore
 
@@ -352,7 +400,7 @@ Arguments: `threadId` (required)
 
 ## verify_generated_model
 
-Run deterministic structural verification plus authored `(verify ...)` clauses on the generated model for the currently bound target/thread. Call after preview/render and before commit_preview_version. Returns artifactDigest plus the full structured result including pass/fail, issue codes, metrics, and verifier source. If red, repair source/params and preview again; commit only green verification, or report capped red honestly without commit. Screenshot/VLM verification is secondary.
+Run deterministic structural verification plus authored `(verify ...)` clauses on the generated model for the currently bound target/thread. Call after preview/render. Verification automatically attaches pass/fail evidence to the already-appended version; there is no commit or finalize step. Returns artifactDigest plus the full structured result including issue codes, metrics, and verifier source. If red, repair source/params and preview again, or report capped red honestly. Screenshot/VLM verification is secondary.
 
 Arguments: `agentLabel`, `llmModelId`, `llmModelLabel`, `messageId`, `modelId`, `originalPrompt`, `threadId`
 
@@ -364,19 +412,19 @@ Arguments: `agentLabel`, `llmModelId`, `llmModelLabel`, `messageId`, `modelId`, 
 
 ## printability_analyze
 
-Read-only printability analysis for the active target/model preview STL. Resolves the current editable target, reads the artifact bundle preview STL path, and returns artifactDigest plus compact mesh/overhang/topology facts. Does not edit source or render.
+Read-only printability analysis for the active target/model model STL. Resolves the current editable target, reads the artifact bundle model STL path, and returns artifactDigest plus compact mesh/overhang/topology facts. Does not edit source or render.
 
 Arguments: `agentLabel`, `llmModelId`, `llmModelLabel`, `messageId`, `modelId`, `threadId`
 
 ## printability_transform_recipes_get
 
-Read-only supportless-FDM transform recipe slice for the active target/model preview STL. Returns artifactDigest-guarded candidate recipes with action kind, rationale, estimated effect, target/sourceAnchor when known, and preview/apply support status. Does not edit source or render.
+Read-only supportless-FDM transform recipe slice for the active target/model model STL. Returns artifactDigest-guarded candidate recipes with action kind, rationale, estimated effect, target/sourceAnchor when known, and preview/apply support status. Does not edit source or render.
 
 Arguments: `agentLabel`, `llmModelId`, `llmModelLabel`, `messageId`, `modelId`, `threadId`
 
 ## semantic_transform_preview
 
-Create a source-consistent preview draft for supportless-FDM semantic recipes. Narrow v1 supports actionKind=reorient for sourceLanguage=ecky .ecky sources only, validates expectedArtifact {modelId, previewStlPath, contentHash}, and rejects chamfer/split as unsupported.
+Create a source-consistent preview draft for supportless-FDM semantic recipes. Narrow v1 supports actionKind=reorient for sourceLanguage=ecky .ecky sources only, validates expectedArtifact {modelId, modelStlPath, contentHash}, and rejects chamfer/split as unsupported.
 
 Arguments: `actionKind` (required), `agentLabel`, `expectedArtifact` (required), `llmModelId`, `llmModelLabel`, `messageId`, `modelId`, `recipeId` (required), `threadId`
 
@@ -412,15 +460,9 @@ Arguments: `agentLabel`, `expectedNodeDigest` (required), `geometryBackend`, `ll
 
 ## ecky_ast_patch_preview
 
-Alias for ecky_ast_replace_and_render. Apply one guarded AST patch and render preview artifact without committing history.
+Alias for ecky_ast_replace_and_render. Apply one guarded AST patch, append its changed source version, and render preview artifacts.
 
 Arguments: `agentLabel`, `expectedNodeDigest` (required), `geometryBackend`, `llmModelId`, `llmModelLabel`, `messageId`, `newName`, `operation`, `parameters`, `path`, `postProcessing`, `replacementSource`, `sourceDigest` (required), `stableNodeKey`, `threadId`
-
-## ecky_ast_patch_commit
-
-Alias for commit_preview_version. Commit the latest successful preview draft into thread history.
-
-Arguments: `agentLabel`, `llmModelId`, `llmModelLabel`, `messageId`, `threadId`, `title`, `versionName`
 
 ## ecky_ast_set_number
 

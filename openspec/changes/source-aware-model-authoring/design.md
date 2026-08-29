@@ -11,7 +11,7 @@ creating a second geometry source of truth.
 - Backend owns parse, stable AST identity, dependency analysis, handle binding,
   patch validation, compilation, render, and serialization.
 - Frontend owns raycasting, synchronized selection, overlays, gizmo interaction,
-  draft presentation, and explicit Apply/Commit controls.
+  draft presentation, and version intent controls.
 - Three.js scene is rendered output and interaction surface, never canonical
   geometry.
 - LLM may propose guarded AST patches. LLM does not build authoritative
@@ -114,15 +114,19 @@ pointer drag
   -> raycast stable target
   -> resolve HandleBinding
   -> convert world delta in emitted frame
-  -> guarded AST patch validate using source + node digests
-  -> compile preview
+  -> append exact AST patch draft as immutable version
+  -> advance head to appended version
+  -> validate and compile that version
+  -> attach success or raw failure evidence
   -> highlight affected targets
-  -> explicit Apply/Commit
 ```
 
 Frontend may show a clearly marked local ghost during drag. Backend-rendered
-preview is authoritative. Preview requests are throttled and superseded drafts
-are discarded. Drag never commits history automatically.
+preview is authoritative for rendered geometry. Content-identical drag samples
+may be coalesced before persistence, but every distinct persisted draft is an
+immutable version. Superseded, invalid, and failed versions remain in history.
+Head always identifies the latest appended version; latest successful render is
+a separate projection/filter and never rewrites head.
 
 ## Synchronized Lenses
 
@@ -162,8 +166,8 @@ Manipulation slice:
 ```gherkin
 Given an existing source-backed cylinder
 When author drags its radius handle from 8 to 12
-Then stable AST value is patched, preview rerenders, affected targets highlight,
-and source remains uncommitted until Apply
+Then exact draft source is appended as a version, head advances to it, preview
+rerenders, and affected targets highlight
 ```
 
 ```gherkin

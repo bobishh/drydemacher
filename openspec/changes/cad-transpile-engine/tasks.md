@@ -63,8 +63,11 @@ only), and an optional dev CLI. Author tests first (BDD red→green) per task.
 
 ## 5. Verify gate + repair loop
 
+Checked items below record prior transpile behavior. Lossless-version-history
+migration remains explicit in §5.5–§5.7.
+
 ### V1 (UI / consumer) — model + dialogue verify
-- [x] 5.1 After transpile, compile + render + `verify_generated_model` (structural
+- [x] 5.1 (prior behavior) After transpile, compile + render + `verify_generated_model` (structural
   + model-authored `(verify …)`) as normal; never auto-commit a red result.
   Evidence: `cad_transpile::tests::gate_compiles_renders_then_runs_existing_generated_model_verification`
   pins stage order and commit readiness; capped-red coverage pins false readiness.
@@ -74,7 +77,7 @@ only), and an optional dev CLI. Author tests first (BDD red→green) per task.
   structural checks are caught by the human in the loop, not by source parity.
   Evidence: `cad_transpile::tests::dialogue_requirements_accumulate_and_demand_matching_verify_clauses`
   and `dialogue_requirement_without_executed_authored_check_stays_red`.
-- [x] 5.3 Repair loop: feed the compiler/verify diagnostic back to the model (per
+- [x] 5.3 (prior behavior) Repair loop: feed the compiler/verify diagnostic back to the model (per
   the API operating contract) and re-request, capped; report capped red honestly
   without commit. Evidence:
   `cad_transpile::tests::compiler_diagnostic_drives_bounded_repair_then_green_verification`
@@ -88,6 +91,16 @@ only), and an optional dev CLI. Author tests first (BDD red→green) per task.
   CLI; used to vet components before release. Do NOT wire into the UI. Evidence:
   `cad_transpile::tests::measurable_source_bbox_and_volume_mismatch_fail_internal_parity_gate`
   and `ui_tier_without_source_measurement_skips_parity`.
+
+- [ ] 5.5 (BDD red) Append each distinct emitted/draft source before compile,
+  render, or verify; prove invalid/pending output becomes head and unchanged
+  observations do not duplicate versions.
+- [ ] 5.6 (BDD red) Replace conflict/thread-advanced/force refusal with serialized
+  append semantics; prove stale/concurrent emissions persist, last append is
+  head, and late diagnostics attach to their originating version.
+- [ ] 5.7 (BDD red) Store raw diagnostics on appended versions; add explicit
+  successful/shippable filter/count separate from head/history. Repair outputs
+  append new versions.
 
 ## 6. Surfaces
 

@@ -11,18 +11,17 @@ failing mathematical or boundary test.
   aluminum material, Tet4 controls, fixed support, and total surface force.
 - [x] 1.2 Assert the outer result contract: native-only execution, non-empty
   volume mesh, finite displacement/stress, reaction equilibrium, mass, exact
-  source/geometry/result digests, and no FreeCAD/Python/CalculiX/network
-  invocation.
+  source/geometry/result digests, and no FreeCAD, arbitrary Python, CalculiX, or
+  network invocation.
 - [x] 1.3 Add failing outer cases for unresolved face tag, open domain,
   underconstrained rigid body, cancelled job, and stale result after a parameter
   change; confirm each failure occurs at the intended stage.
 - [x] 1.4 Audit exact versions, APIs, transitive licenses, platform support, and
-  maintenance status for fTetWild, libigl, geogram, GMP, oneTBB, Fenris, Faer,
+  maintenance status for Gmsh HXT, Netgen, Fenris, Faer,
   `mshio`, and `vtkio`. Record decision and lock versions before dependencies.
-- [x] 1.5 Add packaging/legal gate proving pinned fTetWild binary/source digests,
-  MPL source/notices, covered adapter modifications, and transitive inventory.
-  Reject TetGen/AGPL and bundled/linked GPL Gmsh without approved commercial or
-  whole-product license evidence.
+- [x] 1.5 Add runtime/license gate proving probed Gmsh executable and optional
+  Netgen interpreter/module digests, protocol, and license evidence. Reject
+  TetGen/AGPL and bundled/linked GPL Gmsh without approved licensing evidence.
 
 ## 2. Typed `.ecky` Analysis Surface
 
@@ -57,7 +56,7 @@ failing mathematical or boundary test.
   control, analysis identity, runtime identity, and camelCase DTO mirrors at
   the app boundary.
 - [x] 3.3 Implement finite, bounded, versioned domain contracts and deterministic
-  canonical hashing. Keep Fenris/Faer/fTetWild types private to adapters.
+  canonical hashing. Keep Fenris/Faer/Gmsh/Netgen types private to adapters.
 - [x] 3.4 Red budget tests for boundary triangles, Tet4 cells, nodes, DOFs,
   sparse nonzeros, result bytes, and convergence levels with observed/allowed
   diagnostics.
@@ -84,20 +83,20 @@ failing mathematical or boundary test.
 - [x] 4.7 Prove normal render artifacts and manufacturing export digests are
   byte/digest-identical with and without requesting an analysis boundary mesh.
 
-## 5. Native fTetWild Worker
+## 5. External Gmsh HXT / Netgen Mesher
 
 - [x] 5.1 Red capability-probe tests for valid runtime, missing executable/source,
   wrong platform/arch/ABI, bad digest, unsupported version, and missing license
   metadata.
-- [x] 5.2 Add manifested pinned fTetWild runtime probing patterned after
-  standalone OCCT runtime without consulting ambient user installations unless
-  explicit development override is configured.
+- [x] 5.2 Add explicit Gmsh HXT and optional Netgen runtime probing, recording
+  executable/interpreter/module paths and digests; support configured external
+  development/runtime paths only.
 - [x] 5.3 Red worker-protocol tests for valid tagged closed surface, malformed
   array lengths, out-of-range indices, open/non-manifold surface, budget excess,
   unsupported element order, native crash, stderr propagation, and cancellation.
-- [x] 5.4 Implement dedicated Rust fTetWild worker and narrow audited adapter.
-  Accept structured arrays only; never use STL as internal handoff. Widen or
-  remap upstream `surface_tags` without truncation and publish MPL modifications.
+- [x] 5.4 Implement dedicated Rust Gmsh HXT worker and narrow adapter using
+  exact-BRep STEP input and bounded ASCII MSH2 output; preserve OCC face-group
+  identity and keep Netgen fallback behind the same request contract.
 - [x] 5.5 Red mesh-generation test proving one closed domain becomes Tet4 cells
   and source boundary groups survive global and local refinement.
 - [x] 5.6 Implement tagged input boundary facets, one volume region,
@@ -108,8 +107,8 @@ failing mathematical or boundary test.
   connectedness, minimum quality, and worst-element location.
 - [x] 5.8 Implement orientation normalization, canonical numbering/digest,
   boundary reconciliation, quality metrics, and success-only atomic output.
-- [x] 5.9 Add no-fallback tests proving fTetWild failure never invokes TetGen,
-  Gmsh, FreeCAD, Python, untagged STL remeshing, or remote service.
+- [x] 5.9 Add no-fallback tests proving Gmsh HXT/Netgen failure never invokes
+  TetGen, FreeCAD, untagged STL remeshing, or remote service.
 - [x] 5.10 Refactor worker lifecycle and ensure cancellation/restart leaves no
   orphan process, global native state, or partial mesh cache entry.
 
@@ -189,7 +188,7 @@ failing mathematical or boundary test.
   publish stages with counts and elapsed time.
 - [x] 9.4 Implement typed activity/progress without a new status bar and without
   dumping native interactive output into general app logs.
-- [x] 9.5 Red cancellation tests at fTetWild, assembly, factorization, postprocess,
+- [x] 9.5 Red cancellation tests at Gmsh HXT/Netgen, assembly, factorization, postprocess,
   and convergence levels; require no worker/orphan/partial artifact.
 - [x] 9.6 Add cooperative chunk cancellation and move uninterruptible native or
   direct-solve stages behind a killable worker before claiming cancellation.
@@ -237,7 +236,7 @@ failing mathematical or boundary test.
 - [x] 12.2 Add an Analysis section to the existing workbench control dock using
   Tactical Midnight, square borders, bronze `--primary`/`--secondary`, and
   `overflow: hidden` on major layout containers.
-- [x] 12.3 Red UI failure/pending cases for unavailable fTetWild runtime, invalid
+- [x] 12.3 Red UI failure/pending cases for unavailable Gmsh HXT runtime, invalid
   mesh, singular solve, running/cancelled study, and stale result; assert raw
   backend detail remains visible.
 - [x] 12.4 Add result legend, undeformed outline, deformed boundary scale,
@@ -309,12 +308,13 @@ failing mathematical or boundary test.
 - [x] 15.2 Run the relevant Playwright happy path plus unavailable-runtime,
   singular/stale, and cancellation cases on the isolated test app.
 - [x] 15.3 Run `cd src-tauri && cargo check` and `cargo test`; record any
-  platform-gated fTetWild tests and their CI matrix evidence.
+  platform-gated external Gmsh HXT/Netgen tests and their CI matrix evidence.
 - [x] 15.4 Run the full bracket convergence and offline reference gates and
   preserve measured counts, quality, residuals, equilibrium, and deltas.
 - [x] 15.5 Run MCP inspect -> validate -> mesh -> solve -> verify -> commit on
   the bracket demonstrator; do not commit a red/unconverged required check.
 - [x] 15.6 Run `openspec validate native-fem-structural-analysis --strict`.
-- [x] 15.7 Confirm no FreeCAD/Python/CalculiX/network/TetGen/Gmsh runtime invocation,
-  no SQLite direct writes, no partial artifacts, no manufacturing digest drift,
-  and no engineering-certification language.
+- [x] 15.7 Confirm no FreeCAD/Python/CalculiX/network/TetGen runtime invocation
+  outside the explicit Gmsh HXT/Netgen adapters, no SQLite direct writes, no
+  partial artifacts, no manufacturing digest drift, and no engineering-
+  certification language.

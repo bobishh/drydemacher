@@ -5,9 +5,9 @@
 The system SHALL export one thread's active macro to a plain filesystem folder
 under a configurable projects root (`config.projectsRoot`, default
 `<app_data>/projects`), writing `model.ecky` (the active macro source) and a
-camelCase `ecky-project.json` manifest that binds the folder to its
-`threadId`/`messageId`/`modelId` with a `sourceDigest` of the exported text.
-Re-exporting the same project SHALL preserve the existing `projectId` so
+kebab-case `ecky-project.edn` manifest that binds the folder to its
+`thread-id`/`message-id`/`model-id` with a `source-digest` of the exported text.
+Re-exporting the same project SHALL preserve the existing `project-id` so
 external references stay valid.
 
 #### Scenario: Export writes source and manifest
@@ -15,21 +15,21 @@ external references stay valid.
 - GIVEN a thread with an active version
 - WHEN the project is exported to a folder
 - THEN the folder contains `model.ecky` with the active macro source
-- AND the folder contains `ecky-project.json` binding threadId, messageId, and a
-  sourceDigest of the written source
+- AND the folder contains `ecky-project.edn` binding thread-id, message-id, and
+  source-digest of the written source
 
 #### Scenario: Re-export keeps the project identity
 
 - GIVEN a previously exported project folder
 - WHEN the project is exported again
-- THEN the manifest retains the original `projectId`
+- THEN the manifest retains the original `project-id`
 
 ### Requirement: Digest-Based Sync Status
 
-The system SHALL classify a project folder as `clean`, `fileChanged`,
-`threadAdvanced`, `conflict`, or `missing` by comparing the file digest against
-the manifest `sourceDigest` and the thread head against the bound `messageId`,
-and SHALL do so without mutating the folder, the thread, or any history.
+The system SHALL classify a project folder as `clean`, `fileChanged`, or
+`missing`, and MAY report head movement as an informational flag. Classification
+SHALL compare file digest against manifest `source-digest` and SHALL not create
+a conflict gate or mutate history.
 
 #### Scenario: Unedited folder on the bound head is clean
 
@@ -47,37 +47,57 @@ and SHALL do so without mutating the folder, the thread, or any history.
 - WHEN status is requested
 - THEN the folder is classified `fileChanged`
 
-#### Scenario: Both sides moved is reported as conflict
+#### Scenario: Both sides moved remains applicable
 
 - GIVEN an exported folder edited externally
 - AND the thread advanced past the bound message
 - WHEN status is requested
-- THEN the folder is classified `conflict`
+- THEN status reports `fileChanged` with head movement
+- AND apply remains allowed
 
 ### Requirement: Project Folder Apply
 
-The system SHALL apply an externally edited `model.ecky` by compile-checking the
-file, rendering a preview, and committing it as a new version on the bound
-thread through the existing preview/commit pipeline, then refreshing the
-manifest. Apply SHALL refuse when the thread advanced past the manifest binding
-unless the caller passes an explicit force flag, and SHALL never silently
-clobber either side; on refusal the previous head remains available as a
-version.
+The system SHALL append every externally changed `model.ecky` as a new version
+before compile-checking or rendering it. That appended version SHALL become
+head regardless of validation/render outcome, retain exact source bytes, and be
+persisted through the existing preview/commit pipeline. Successful versions
+SHALL be separately filterable. Unchanged content SHALL be idempotent.
 
 #### Scenario: Apply commits a new version
 
 - GIVEN a folder classified `fileChanged`
 - WHEN apply runs
-- THEN the edited source is compiled and a preview is rendered
-- AND a new version is committed on the bound thread
+- THEN a new version containing exact edited source is appended on the bound
+  thread and becomes head
+- AND that version is compiled and previewed
 - AND the manifest is rebased onto the new head
 
-#### Scenario: Stale folder refuses without force
+#### Scenario: Invalid source still becomes head
 
-- GIVEN a folder classified `conflict` or `threadAdvanced`
-- WHEN apply runs without a force flag
-- THEN apply refuses and reports why
-- AND the existing thread head is left unchanged
+- GIVEN a changed folder containing invalid source
+- WHEN apply runs
+- THEN a new version is appended before compilation
+- AND that failed version is the thread head
+- AND the raw validation error is retained on the version
+
+#### Scenario: Both sides changed serialize without conflict
+
+- GIVEN the thread advanced and the folder file changed
+- WHEN apply runs
+- THEN the file is appended as the newest version
+- AND the prior head remains available in history
+
+#### Scenario: Unchanged content is idempotent
+
+- GIVEN the folder source matches the current head source exactly
+- WHEN apply runs
+- THEN no duplicate version is created
+
+#### Scenario: Successful versions filter independently
+
+- GIVEN history contains successful and failed appended versions
+- WHEN successful versions are requested
+- THEN failed versions are excluded
 
 ### Requirement: Mirror Stays Out of the Database
 

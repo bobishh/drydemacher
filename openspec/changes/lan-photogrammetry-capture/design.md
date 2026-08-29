@@ -54,6 +54,25 @@ uniform scale, errors, and timestamps. Photo/STL bytes remain filesystem assets.
 Pairing tokens, active HTTP clients, cancellation handles, and provider process
 handles remain memory-only runtime state.
 
+### Lossless Capture Versioning
+
+Every settled change to generated model source, a persisted model preview draft,
+or an Apply source snapshot first appends one immutable model version containing
+its exact payload/digest. Validation, reconstruction, and rendering attach
+status, artifacts, and raw evidence after the append. Failed, pending, and stale
+results remain complete model-history records and become head. Capture photos,
+frame manifests, and transient crop controls retain their existing capture-run
+lifecycle; they do not create model versions unless serialized into a persisted
+model draft.
+
+Head is the last serialized append, independent of success or artifact
+availability. `last successful render` is an explicit filter/projection and
+never substitutes for head. Concurrent or stale writers serialize; both changed
+snapshots append, with the later append as head. Version writes do not emit
+`conflict`, `threadAdvanced`, or require `force`. Geometric invalidity (such as
+bad crop bounds or source digest drift) remains validation evidence on the
+appended version, not a version conflict.
+
 Task history lists durable capture runs independently from committed model
 versions. Opening a run creates a fresh short-lived pairing token, rehydrates its
 frame manifest from `captures/<runId>/manifest.json`, and restores raw or cropped
@@ -183,8 +202,10 @@ visible when preview arrives, existing Ecky bubble-choice UX offers switch or
 stay; no implicit switch occurs. An empty workspace that created the capture
 target remains that target despite its deferred thread id and does not receive a
 false switch prompt. Apply inserts a captured part through the
-parser-reported model AST boundary using `solidify(import-stl(...))`. Source
-divergence is a conflict, never a patch against current unrelated screen. Commit
+parser-reported model AST boundary using `solidify(import-stl(...))`. Apply first
+appends its exact source/draft snapshot; source divergence is raw validation
+evidence, never a version conflict or refusal against current unrelated screen.
+Commit
 creates a normal version in bound thread. Cancellation removes active
 credentials and transient jobs; source asset retention follows an explicit
 session action, not hidden cleanup.
@@ -210,7 +231,8 @@ Camera permission denial, insecure-context failure, upload rejection, decode
 failure, insufficient source frames, provider absence, provider stderr, and mesh
 validation failure remain distinguishable. UI shows raw actionable body from the
 responsible browser/backend/provider boundary. Last accepted frame manifest and
-last good model remain unchanged.
+last good model projection remain unchanged on failure, while the attempted
+version and its evidence remain retained and head.
 
 ## BDD Strategy
 

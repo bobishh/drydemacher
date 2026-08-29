@@ -61,7 +61,7 @@ Goal: stop tool misuse and make every CAD change reproducible.
 
 ### Tasks
 
-- Add contributor doc section: model updates must use MCP `macro_preview_render` + `commit_preview_version`.
+- Add contributor doc section: `macro_preview_render` appends model updates and `verify_generated_model` attaches evidence automatically.
 - Add debug warning if assistant/import path tries to write app DB directly in dev scripts.
 - Add MCP smoke script that renders current `.ecky` source into existing thread without touching DB.
 - Add checklist to PR template or docs:
@@ -180,14 +180,13 @@ Goal: agent can inspect and patch without reading full macro.
 - `ecky_ast_patch_preview`
   - render preview through runtime
   - returns artifact digest
-- `ecky_ast_patch_commit`
   - commit existing preview
   - no raw DB access
 
 ### Acceptance
 
 - Given user says `increase film_gap to 0.45`
-- Agent calls inspect/get/validate/preview/commit
+- Agent calls inspect/get/append/validate/preview/verify
 - No full macro rewrite
 - Final response includes changed stable key and new MCP model id.
 
@@ -523,7 +522,7 @@ Harvey physical tests. Sagan agent UX. Helmholtz geometry.
 
 - Trench 1 stable identity.
 - Trench 2 lossless `set_number`.
-- Trench 3 MCP inspect/validate/preview/commit.
+- Trench 3 MCP inspect/append/validate/preview/verify.
 - Trench 4 param dependency for direct params.
 
 ### Phase 3: Agent Understands Features

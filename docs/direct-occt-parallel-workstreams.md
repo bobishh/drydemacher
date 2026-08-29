@@ -107,7 +107,7 @@ This is one target pipeline, not separate mesh/lithophane and BREP products.
      path while dependencies remain.
    - mesh-only/non-exact Rust path writes `generated-ir-*` mesh output.
 4. Post-processing runs after geometry export:
-   - lithophane attachments and displacement operate on the final preview STL.
+   - lithophane attachments and displacement operate on the final model STL.
    - target part selection uses the bundle manifest from whichever geometry path
      succeeded.
 5. Removal gate:

@@ -170,7 +170,7 @@ Committed version ownership SHALL be
 #### Scenario: Filesystem project mirrors same lock
 
 - **WHEN** a live-reference version exports to a filesystem project
-- **THEN** identical canonical lock bytes are written to `ecky.lock.json`
+- **THEN** identical canonical lock bytes are written to `ecky.lock.edn`
 - **AND** project apply supplies those bytes as expected lock
 
 #### Scenario: Portable project contains locked payloads

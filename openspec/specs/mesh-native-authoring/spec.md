@@ -94,7 +94,7 @@ path when that path validates successfully.
 - **GIVEN** a `.ecky` model containing one valid mesh literal and mesh-safe
   transforms
 - **WHEN** preview renders
-- **THEN** the Rust mesh runtime produces a viewer artifact and preview STL
+- **THEN** the Rust mesh runtime produces a viewer artifact and model STL
 - **AND** no arbitrary Python or Blender process executes.
 
 #### Scenario: Closed polyhedron enters hybrid boolean

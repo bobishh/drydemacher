@@ -63,6 +63,21 @@ derived mesh. Separate imported sources may each own one trim. Edit replaces the
 selected node by AST path. Remove replaces the selected wrapper with its shape
 child. Neither action rewrites unrelated source.
 
+### Lossless Trim Versioning
+
+Every settled change to a persisted trim file, path/loop candidate, keep-region
+selection, cap preview, or Apply draft first appends an immutable version with
+the exact payload/digest. Anchor, topology, cap, source-digest, and render
+validation attach raw status/evidence to that version after append. Failed,
+pending, and stale attempts remain history and become head.
+
+Head is the last serialized append. A successful-render query is a separate
+projection and never substitutes for head. Stale or concurrent writers append
+both changed snapshots in serialization order; version writes do not emit
+`conflict`, `threadAdvanced`, or require `force`. Geometric failures such as a
+stale source digest, invalid loop, or non-manifold result remain explicit
+validation failures attached to the attempted version.
+
 ## Geometry Pipeline
 
 ### 1. Source validation
@@ -239,7 +254,9 @@ UI displays backend body without generic replacement for:
 - resulting mesh not closed/oriented/manifold;
 - `solidify` or later BRep failure.
 
-Canonical source and current successful preview stay unchanged on failure.
+Canonical source and current successful preview projection stay unchanged on
+failure; the attempted version and raw failure evidence remain retained and
+head.
 
 ## Later Refinement
 

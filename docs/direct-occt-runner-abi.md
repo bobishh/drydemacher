@@ -8,7 +8,7 @@ without generating or compiling per-render C++ source.
 The contract applies only to
 `src-tauri/src/ecky_cad_host/direct_occt.rs`-derived plans and current runtime
 artifacts:
-`model.step`, `preview.stl`, `topology.json`.
+`model.step`, `model.stl`, `topology.json`.
 
 ## 1) Plan input (`plan.json`)
 
@@ -153,7 +153,7 @@ Paths:
 On successful execution:
 
 - creates `model.step`
-- creates `preview.stl`
+- creates `model.stl`
 - creates `topology.json`
 - exits `0`
 - returns stdout + stderr as plain process text (normal logs optional)
@@ -289,7 +289,7 @@ Phase 2: shadow mode
 
 - emit `plan.json`, run both C++ and runner for a fixed fixture set.
 - compare:
-  - file existence (`model.step`, `preview.stl`, `topology.json`)
+  - file existence (`model.step`, `model.stl`, `topology.json`)
   - deterministic topological counts
   - checksum deltas within allowed bounds
 - block mode switch until parity is stable.

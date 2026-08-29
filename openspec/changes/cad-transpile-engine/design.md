@@ -17,8 +17,9 @@ client, no new prompt. The only invariants:
 foreign source (OpenSCAD / FreeCAD-JSON / STEP-summary / text)
    └─[adapter: text only if binary]→ source text
         └─[request: system=agent_language_reference, user=translate+source]→ LLM
-             └─ .ecky → compile → verify_generated_model → (parity to source)
-                  └─ green → buffer / new thread version ; red → diagnostic → repair
+             └─ distinct .ecky/draft → append immutable version (head advances)
+                  └─ compile → verify_generated_model → (parity to source)
+                       └─ attach status/diagnostic → successful filter or repair append
 ```
 
 Everything after "→ LLM" is the existing path.
@@ -38,7 +39,7 @@ parity in the UI** — that arsenal stays in the CLI (§3.3, §6).
 No new tool required: a user sends a thread message containing the foreign code
 and asks to transpile. The in-app agent (whose system prompt is already
 `agent_language_reference`) reads the message and authors a **new thread version**
-via `macro_preview_render` / `commit_preview_version` — identical to any other
+via `macro_preview_render` / automatic verification attachment — identical to any other
 authoring turn. Optionally a thin `cad_transpile` MCP verb can canonicalise the
 translate instruction, but it is sugar over the same message flow.
 
@@ -58,7 +59,7 @@ consumer gets only its vetted output.
 | Ecky system prompt | `agent_prompt::agent_language_reference(backend)` |
 | Provider/model/key/base_url | `Config { provider, api_key, base_url, model }` (NIM = OpenAI-compatible `base_url`) |
 | Chat request + parse | `llm.rs` (`send_openai_request`, `extract_openai_message_content`) |
-| Thread version authoring | `macro_preview_render`, `commit_preview_version` |
+| Thread version authoring | `macro_preview_render`, `verify_generated_model` |
 | Gate | `verify_generated_model` + authored `(verify …)` |
 | Geometry parity measurement | source → STEP → build123d `import_step` bbox/volume |
 | CLI shape precedent | `src/bin/translate_legacy_python_to_ecky_ir.rs` |
@@ -80,9 +81,11 @@ could not do. The geometry rules and op catalogue come from the system prompt.
 **V1 (UI / consumer):**
 1. Compile + render + `verify_generated_model` (structural + model/dialogue
    authored `(verify …)` clauses) — already the standard gate.
-2. On red: return the diagnostic to the model (the API operating contract already
-   says "treat the compiler diagnostic as authoritative; fix the named cause and
-   re-emit") and re-request, capped. Never auto-commit red.
+2. On red: attach the raw diagnostic to the already-appended version, return it
+   to the model (the API operating contract already says "treat the compiler
+   diagnostic as authoritative; fix the named cause and re-emit"), and append
+   each repair emission as a new version. Red versions are not successful or
+   shippable, but remain head until a later append.
 3. Size/intent errors that pass structural checks (e.g. a 2× hex head — manifold,
    single solid, but wrong size) are caught by the **human in the loop**: the user
    says "head's too big", the model fixes it and adds a clause pinning the
@@ -122,3 +125,11 @@ evidence. The FreeCAD adapter is built fresh as extraction-only when needed.
   intent over them, not a subsystem.
 - **Trusting LLM output without parity**: rejected — silent coordinate
   hallucination. The gate is mandatory.
+
+## 10. Lossless version history
+
+Transpile follows lossless-version-history: changed source/draft appends before
+processing; identical observations do not append. Head resolves by serialized
+append order, independent of status or artifacts. Late results attach to their
+originating version. Stale input appends normally; no conflict/thread-advanced
+refusal. Successful versions are an explicit projection.

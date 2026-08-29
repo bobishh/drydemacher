@@ -229,7 +229,7 @@ adds `componentDependencyLockDigest` explicitly. `ArtifactBundle.contentHash`
 and render cache keys also include that digest. A lock mismatch blocks
 preview/render/commit and never rewrites an existing committed lock.
 
-Filesystem project export mirrors the lock as `ecky.lock.json`; project apply
+Filesystem project export mirrors the lock as `ecky.lock.edn`; project apply
 passes it as `expected_lock`. Unlocked first resolution returns a candidate
 lock; successful version commit owns persistence.
 
@@ -270,7 +270,7 @@ payloads after a grace period. It acquires the component-store mutation lock
 and rechecks roots immediately before deletion. `LastDesignSnapshot` needs no
 separate root because it points to an already persisted message bundle.
 
-Normal filesystem project export writes source plus `ecky.lock.json`; it may
+Normal filesystem project export writes source plus `ecky.lock.edn`; it may
 require the shared store or later package retrieval on another machine.
 Explicit portable export additionally writes immutable package payloads under
 `dependencies/sha256/<hex>.eckypkg`. Import verifies each payload against the

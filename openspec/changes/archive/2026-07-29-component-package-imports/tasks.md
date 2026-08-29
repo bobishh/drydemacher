@@ -41,7 +41,7 @@
   ArtifactBundle, ModelManifest, message-version JSON, and restore without a new
   SQLite column.
 - [x] 4.3 Add expected-lock mismatch enforcement and filesystem
-  `ecky.lock.json` mirror/apply tests, including explicit portable
+  `ecky.lock.edn` mirror/apply tests, including explicit portable
   export/import with digest verification.
 - [x] 4.4 Add explicit-upgrade tests proving preview/render/export never mutate
   a committed lock and successful upgrade commits a new version.

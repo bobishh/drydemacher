@@ -5,7 +5,7 @@
 1. Direct OCCT builds an analytic `TopoDS_Shape`.
 2. `BRepMesh_IncrementalMesh` tessellates the shape.
 3. The native writer serializes the triangulation to binary STL.
-4. The runtime bundle exposes that STL as `preview_stl_path`.
+4. The runtime bundle exposes that STL as `model_stl_path`.
 5. Viewer loading and multipart STL export consume the resulting triangles.
 
 The relevant implementations are the generated source emitter in

@@ -56,9 +56,18 @@ Everything the transpile needs already exists in the app:
   client — and a free tier means retries (the verify-repair loop) cost nothing,
   so a weaker model is acceptable.
 - **Version writing**: the agent already authors thread versions
-  (`macro_preview_render` / `commit_preview_version`).
+  (`macro_preview_render` / automatic verification outcome attachment).
 - **Gate**: `verify_generated_model` + authored `(verify …)` already run on every
   version.
+
+### Version-history contract
+
+Every distinct emitted or draft Ecky source is appended as an immutable version
+before compile, render, or verify. The append advances `head` immediately,
+regardless of pending, invalid, or failed status. Raw diagnostics attach to that
+version; repair emissions append new versions. Successful/shippable is a
+separate filter and never changes head. Serialized append order wins; version
+writes do not produce conflict or `threadAdvanced` refusals.
 
 The only genuinely new pieces are the two thin affordances (a code-window toggle;
 an MCP transpile convention) and an optional dev CLI for comparing models.

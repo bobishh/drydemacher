@@ -62,7 +62,7 @@ Add these eventual commands:
 Compatibility notes:
 
 - `render_stl` may remain during migration as a thin compatibility wrapper
-- preview STL may remain a derived field on `ArtifactBundle`
+- model STL may remain a derived field on `ArtifactBundle`
 - existing UI can consume preview assets before full picker support lands
 
 ## Milestone 0: Contracts and Extraction Boundary
@@ -110,7 +110,7 @@ Make app-generated designs persist richer artifacts without breaking the current
 - export one viewer mesh per FreeCAD object or selected part
 - emit `manifest.json`
 - keep current knob model as the source of editable parameters for generated designs
-- keep preview STL for the existing viewer and export flow
+- keep model STL for the existing viewer and export flow
 
 ### Success Criteria
 
@@ -243,7 +243,7 @@ Upgrade the viewer/runtime layer from delivery-track mesh parts to a richer scen
 Ship these first:
 
 - `FCStd + manifest.json` as truth
-- preview STL for compatibility
+- model STL for compatibility
 - per-object mesh exports for viewer picking
 - object/part-level selection
 - LLM enrichment as assistive proposal generation only

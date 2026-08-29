@@ -53,7 +53,11 @@ surface, and mirroring a scan is not presented as a final BRep.
 - Record typed correspondences from guide evidence through authored bindings/
   tags to exact BRep targets, then report target-kind residuals and sampled
   deviation only on observed scan regions.
-- Preserve explicit preview, Apply, Commit, stale-source, and raw-error behavior.
+- Preserve explicit preview, Apply, Commit, source-divergence metadata, and raw-error behavior.
+- Append every distinct source/draft/candidate change as a durable version before
+  validation, including failed and stale candidates. Head always points to the
+  latest appended version; successful versions are a filter/projection, never a
+  replacement for history.
 
 ## Out Of Scope
 

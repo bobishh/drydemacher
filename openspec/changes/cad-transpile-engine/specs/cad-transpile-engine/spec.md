@@ -28,6 +28,28 @@ adapters that never emit Ecky.
 - THEN its system prompt equals `agent_language_reference(backend)`
 - AND the user message contains the translate instruction and the source verbatim.
 
+### Requirement: Every distinct transpile emission is losslessly versioned before processing
+
+The system SHALL append each distinct emitted or draft Ecky source as an immutable
+version before compile, render, or verify. The append SHALL advance head regardless
+of status. Raw diagnostics attach to that version; repairs append new versions.
+Successful/shippable filtering is separate from head. Stale or concurrent writes
+append in serialized order and SHALL NOT be rejected as conflicts or `threadAdvanced`.
+
+#### Scenario: Red emission remains head and successful history remains filterable
+
+- GIVEN successful transpile version A is head
+- WHEN changed emission B fails compile or verification
+- THEN B is persisted and becomes head with its raw diagnostic
+- AND successful filtering returns A without relabeling A as head.
+
+#### Scenario: Late results attach to their originating version
+
+- GIVEN version B and later version C are appended in that order
+- WHEN verification for B completes after C
+- THEN the result attaches to B
+- AND C remains head.
+
 ### Requirement: Transpiled output is gated, tiered by surface
 
 The system SHALL treat LLM output as untrusted until it compiles and passes
@@ -36,7 +58,8 @@ the model- and dialogue-authored `(verify …)` clauses, with the human in the l
 catching size/intent errors; the UI SHALL NOT depend on FreeCAD or on source
 measurement. Automated source-parity (bounding box + volume against a measurable
 source) is internal CLI tooling for pre-release vetting and SHALL NOT be wired
-into the UI. Red results SHALL NOT be auto-committed or shipped in either tier;
+into the UI. Red results SHALL NOT be marked successful or shippable; they remain
+persisted history and head;
 the diagnostic SHALL be returned for a capped repair loop.
 
 #### Scenario: V1 catches a requirement via a dialogue-authored clause
@@ -61,7 +84,8 @@ the diagnostic SHALL be returned for a capped repair loop.
 - GIVEN transpiled output that fails to compile
 - WHEN the gate runs
 - THEN the compiler diagnostic is returned to the model for re-emission
-- AND no version is committed while the result is red.
+- AND the red emission is already an appended version with its raw diagnostic;
+  no successful/shippable version is created until a later green emission.
 
 ### Requirement: Model and provider are configurable, defaulting to the app config
 

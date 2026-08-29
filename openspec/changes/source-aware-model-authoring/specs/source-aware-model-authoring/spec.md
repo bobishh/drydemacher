@@ -48,17 +48,28 @@ source binding, manipulation frame, editable operation, and digest guards.
 - **GIVEN** selected feature has exact editable handle binding
 - **WHEN** author drags handle
 - **THEN** world-space delta converts through emitted frame
-- **AND** guarded AST patch validates source and node digests
-- **AND** accepted draft rerenders affected geometry
-- **AND** history remains unchanged until explicit Apply/Commit
+- **AND** exact draft content is appended as an immutable version
+- **AND** thread head advances to that version before validation completes
+- **AND** validation and render success or raw failure attach to that version
+- **AND** successful versions remain separately filterable
 
-#### Scenario: Stale handle patch fails safely
+#### Scenario: Stale handle patch remains lossless
 
 - **GIVEN** source or node digest changed after handle projection
 - **WHEN** author drags stale handle
-- **THEN** backend rejects patch
-- **AND** source and accepted model stay unchanged
-- **AND** raw backend error remains attached to handle context
+- **THEN** backend appends the exact attempted draft as a failed version
+- **AND** thread head advances to the failed version
+- **AND** last successful rendered model may remain the visible fallback
+- **AND** raw backend error remains attached to the failed version and handle
+  context
+
+#### Scenario: Later draft removes need for conflict resolution
+
+- **GIVEN** two source-backed draft edits originate from stale views
+- **WHEN** both distinct drafts reach the owning authoring actor
+- **THEN** each draft is appended in actor order as an immutable version
+- **AND** head identifies the second append
+- **AND** neither edit is refused as a version conflict or deleted
 
 ### Requirement: Derived Vertices Are Not Generic Edit Handles
 
@@ -80,8 +91,8 @@ authoritative projection or direct renderer mutation.
 #### Scenario: Language intent resolves exact candidate
 
 - **WHEN** LLM maps author request to exact source-backed operation
-- **THEN** candidate uses same inspect, validate, preview, and commit guards as
-  direct manipulation
+- **THEN** candidate uses same inspect, append-version, validate, preview, and
+  status-recording path as direct manipulation
 
 #### Scenario: Language intent is ambiguous
 

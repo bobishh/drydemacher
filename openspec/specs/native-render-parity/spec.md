@@ -6,7 +6,7 @@ TBD - created by archiving change native-build123d-differential-parity. Update P
 ### Requirement: Differential geometry parity against build123d
 
 The system SHALL verify Direct OCCT (native) renders by comparing their
-preview STL against a build123d render of the identical source and parameters,
+model STL against a build123d render of the identical source and parameters,
 within fixed tolerances (volume ±2 %, surface area ±5 %, per-axis bbox
 ±0.5 mm, identical connected-component count, zero non-manifold edges in the
 native mesh).
@@ -49,4 +49,3 @@ The system SHALL bound native render wall time by
 - GIVEN a corpus fixture whose native render takes longer than the envelope
 - WHEN the differential corpus runs
 - THEN the timing check fails reporting both durations.
-

@@ -18,18 +18,18 @@ duplicating its contracts.
 
 - One directory per project under a configurable projects root
   (`config.projectsRoot`, default `<app_data>/projects`).
-- Folder contents: `model.ecky` (active macro source) plus `ecky-project.json`
-  (camelCase manifest binding the folder to threadId/messageId/modelId with a
-  sourceDigest of the exported text).
+- Folder contents: `model.ecky` (active macro source) plus `ecky-project.edn`
+  (kebab-case EDN manifest binding the folder to thread/message/model ids with
+  a source digest of the exported text).
 - Explicit, digest-based sync semantics:
   - export: write/refresh the folder from a thread's active version.
-  - status: classify the folder as clean / fileChanged / threadAdvanced /
-    conflict / missing without mutating anything.
-  - apply: compile-check the edited file, render a preview, commit it as a new
-    version on the bound thread, and refresh the manifest.
-- Conflict policy: `apply` refuses when the thread advanced past the manifest
-  binding unless the caller passes an explicit force flag; conflicts never
-  silently clobber either side.
+  - status: report clean / fileChanged / missing plus informational head movement.
+  - apply: every changed file is appended as a new version before compile or
+    render outcome is known; that version becomes head even when invalid.
+    Successful versions remain separately filterable.
+- Lossless policy: no conflict or stale refusal, no force apply, and no dropped
+  source. Both-side changes serialize the file append as newest head; exact
+  unchanged content creates no duplicate version.
 - MCP tools `project_folder_export`, `project_folder_status`,
   `project_folder_apply` so agents and external editors share one flow; all
   version writes go through existing preview/commit handlers (no direct DB
@@ -54,10 +54,10 @@ duplicating its contracts.
 ## Approach
 
 - T1: `project_mirror` core in Rust: manifest contract, export, digest status,
-  deterministic conflict classification. Pure fs + digest logic, no DB.
+  and informational head movement. Pure fs + digest logic, no DB.
 - T2: MCP handlers composing existing `macro_preview_render` +
-  `commit_preview_version` flows for `apply`; thread binding checks against
-  history.
+  preview/verification flows for `apply`; serialized append and manifest
+  rebase through backend history services.
 - T3: MCP tool registration + dispatch.
 - T4: docs: authoring-card note + ecky-ir book section describing the folder
   contract for external editors and LLM skills.
@@ -70,8 +70,8 @@ duplicating its contracts.
 - A user can export a thread to a folder, edit `model.ecky` in any editor,
   run `project_folder_apply` (directly or via an agent), and see a new
   committed version with a rendered preview in the app.
-- A stale folder (thread advanced) refuses to apply without force and reports
-  exactly why.
+- Invalid edits remain visible as versions with failure status, while successful
+  versions can be filtered independently.
 - All sync states are observable through `project_folder_status` without side
   effects.
 - Existing storage, params panel, and editor behavior unchanged.

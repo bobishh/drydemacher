@@ -12,7 +12,7 @@ Mesh generation and solve SHALL be explicit workbench or MCP actions.
 
 - **WHEN** normal geometry preview runs
 - **THEN** CAD preview and topology artifacts are produced normally
-- **AND** no fTetWild worker or FEM solver starts
+- **AND** no Gmsh HXT/Netgen worker or FEM solver starts
 - **AND** the study is shown as not run or stale as applicable.
 
 #### Scenario: User runs the study

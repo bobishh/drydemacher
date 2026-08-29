@@ -27,7 +27,7 @@ agent handoff. Frontend never becomes geometry authority.
 
 - Capture mesh remains immutable reference geometry.
 - `.ecky` remains the only canonical source for generated parametric geometry.
-- A `CaptureReconstructionGuide` is a separate versioned artifact, not a hidden
+- A `CaptureReconstructionGuide` is a separate append-only versioned artifact, not a hidden
   prompt string and not a mesh mutation.
 - Frontend raycasts and presents handles; backend validates anchors and derives
   calibrated coordinates.
@@ -416,8 +416,14 @@ digest change.
     explicitly applies/commits an accepted BRep preview.
 
 Camera orbit never changes guide coordinates. Landmark edits, reorder, delete,
-and guide reset are explicit actions. Guide edits do not create model versions;
-accepted generated source follows normal history.
+and guide reset are explicit actions. Every distinct guide/source/draft change
+appends a version before validation, including invalid and failed candidates.
+The append operation is serialized; a stale expected revision never rejects or
+overwrites an append. `head` always advances to the newest appended version.
+Successful versions can be filtered or projected for rendering, but failed
+versions retain exact source and raw backend/agent evidence and remain in
+history. Accepted generated source can additionally follow normal Apply/Commit
+projection.
 
 ## Agent Handoff
 
@@ -511,14 +517,18 @@ Guide metadata is stored through an Ecky-owned capture-run service. No frontend
 or agent writes SQLite directly. Mesh/photos remain filesystem artifacts.
 Boundary structs use camelCase serialization.
 
-Each save includes expected guide revision, capture run ID, and source mesh
-digest. Stale revision or changed mesh rejects update and returns current
-identity. Reopening capture restores guide and overlays. Pairing token rotation
-does not change guide identity.
+Each append includes capture run ID, source mesh digest, candidate source/draft,
+and raw validation evidence. Appends are serialized and never rejected because
+expected revision is stale or source changed; the new version is still written
+and becomes `head`. Reopening capture restores the full append-only history and
+head. Pairing token rotation does not change guide identity. A source change is
+recorded as divergence metadata on the new version, not as a conflict or loss.
 
-`BUILD CAD FROM GUIDE` also guards target source digest and target version. If
-source advances while generation runs, preview is retained as a conflict and is
-not applied to the newer source automatically.
+`BUILD CAD FROM GUIDE` records target source digest/version on the candidate. If
+source advances while generation runs, the candidate still appends and becomes
+head with explicit old/new source identities and raw evidence. Rendering may
+show the latest successful result as a projection, but no candidate is dropped,
+refused, or relabeled as a version conflict.
 
 ## Failure Surface
 
@@ -534,13 +544,15 @@ Distinct errors include:
 - missing, ambiguous, wrong-kind, or over-tolerance BRep correspondence;
 - empty or self-inconsistent profile;
 - insufficient evidence for requested reconstruction;
-- target source/version divergence;
+- target source/version divergence metadata;
 - generated source compile failure;
 - invalid/open BRep result;
 - overlay/deviation artifact mismatch.
 
 Raw actionable backend/agent errors remain visible beside responsible guide
-item. Last good guide, model, capture mesh, and history remain unchanged.
+item and are stored on the failed version. The last good render/model may remain
+the successful projection, while history and `head` still advance to the latest
+failed or stale version.
 
 ## BDD Strategy
 
@@ -552,7 +564,8 @@ When user calibrates a known distance, defines local frame and two symmetry
 planes, labels ordered profile points, and chooses BUILD CAD FROM GUIDE
 Then exact digest-bound guide is sent to the owning thread
 And agent-produced parametric BRep preview overlays the unchanged reference mesh
-And source/history remain uncommitted until explicit Apply/Commit
+And exact generated draft is already an appended version and current `head`
+And Apply/Commit only changes its result/projection state
 ```
 
 ### Degenerate evidence
@@ -561,7 +574,8 @@ And source/history remain uncommitted until explicit Apply/Commit
 Given selected frame points are coincident or collinear
 When user attempts to mark guide ready
 Then backend rejects the frame with exact geometric reason
-And previous valid guide and model remain unchanged
+And an invalid candidate version is appended as `head` with raw geometric reason
+And previous valid guide/model remain the successful projection
 ```
 
 ### Stale mesh

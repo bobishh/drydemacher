@@ -53,7 +53,7 @@ mcp/handlers/
   macro_buffer.rs   // buffer get/replace/preview
   target.rs         // target_macro/detail/meta get
   session.rs        // login/logout/resume/borrow
-  render.rs         // macro_preview_render, commit_preview_version
+  render.rs         // macro_preview_render, automatic verification outcome attachment
   thread.rs         // thread create/list/fork/messages
   ...               // one file per cohesive tool group
 ```

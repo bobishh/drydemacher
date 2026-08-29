@@ -229,25 +229,63 @@ Tasks:
   unsupported flows only") — `e2e/params.spec.ts:733`.
 - [ ] 6.7 Ensure no separate agent status bar or live terminal dump appears.
 
-## 7. Verification
+## 7. Typed Geometry Projection Extension
+
+Write scope:
+
+- existing `New Params` projection and scene types
+- canonical operation/signature role metadata only where not exposed
+- visual layout UI state
+- Playwright source/visual/viewport roundtrip
 
 Tasks:
 
-- [x] 7.1 Run `openspec validate macro-ast-map-editor`.
-- [ ] 7.2 Run targeted backend unit tests for AST identity and patch operations.
+- [ ] 7.1 Add failing Playwright happy path with scalar `let`, solid binding,
+  `extrude`, and `difference`; prove inline scalar, structural geometry nodes,
+  labelled ports, and source-backed selection.
+- [ ] 7.2 Add failing Playwright read-only path for macro-expanded/Core-only
+  node; prove collapsed display, raw reason, and disabled mutation.
+- [ ] 7.3 Type existing `AuthoringGraph` AST nodes, features, dependencies,
+  constraints, and handles instead of keeping `unknown[]`; wire `New Params` to
+  `getAuthoringGraph`. Keep `macro_ast_source_map` only as legacy fallback.
+- [ ] 7.4 Implement collapse policy from backend `valueKind`: scalar inline,
+  geometry structural, unknown/read-only collapsed.
+- [ ] 7.5 Refactor existing private `ArgSpec` name/kind metadata into reusable
+  backend descriptors and attach resolved ports to projected call nodes. Do not
+  add a frontend signature switch table or standalone catalog command for MVP.
+- [ ] 7.6 Project references as edges and keep named binding labels/identity.
+- [ ] 7.7 Keep automatic layout. Store selection and expansion only in
+  session-local state keyed by stable key; add no manual coordinates or durable
+  layout persistence in MVP.
+- [ ] 7.8 Add Rust tests proving named params, parts, shapes, and let bindings
+  survive unrelated sibling insertion/reorder.
+- [ ] 7.9 Add frontend tests proving anonymous stale layout keys drop instead
+  of retargeting by index or position.
+- [ ] 7.10 Route typed changes through digest-guarded AST patches. Keep scoped
+  source byte splicing isolated as legacy raw-source editing only.
+
+## 8. Verification
+
+Tasks:
+
+- [x] 8.1 Run `openspec validate macro-ast-map-editor` for prior scope.
+- [ ] 8.2 Re-run OpenSpec validation after typed projection requirements.
+- [ ] 8.3 Run targeted backend unit tests for AST identity and patch operations.
   Not individually isolated from the full suite (see [[project_component_unification]]
   gates instead).
-- [x] 7.3 Run targeted frontend unit tests for map projections/controls/search.
+- [x] 8.4 Run targeted frontend unit tests for prior map projections/controls/search.
   Covered by full `npm run test:unit` run (7.5) — `macroAstMap.test.ts` /
   `macroAstSceneLayout.test.ts` pass within it.
-- [x] 7.4 Run targeted Playwright specs for map render, param edit, search
+- [x] 8.5 Run targeted Playwright specs for prior map render, param edit, search
   focus, insertion, and verification layer. Ran `e2e/params.spec.ts` in full
   2026-07-06: 20/20 green. (Search focus and verification layer have no specs
   to run — see sections 3/5 gaps.)
-- [x] 7.5 Run `npm run test:unit`. 2026-07-06: 285/286 (1 pre-existing
+- [x] 8.6 Run `npm run test:unit`. 2026-07-06: 285/286 (1 pre-existing
   unrelated failure, `buildEckyIrBook ... docs corpus drift`, also flagged in
   `workbench-ui-declutter`).
-- [x] 7.6 Run `cd src-tauri && cargo check`. Green throughout this session.
+- [x] 8.7 Run `cd src-tauri && cargo check`. Green for prior scope.
+- [ ] 8.8 Run typed projection Playwright happy and read-only scenarios,
+  targeted unit tests, and `cd src-tauri && cargo check` for new Rust changes.
 
 ## Parallel Plan
 
@@ -266,6 +304,7 @@ Dependency order:
 AST identity -> params map projection -> readonly New Params renderer
 AST identity -> param patch -> inline controls
 AST identity -> search index -> search focus
+AST identity + Core kinds + operation signatures -> typed geometry projection
 AST identity -> insertion patch -> insertion UI
 AST identity -> verify patch -> verification overlay
 inline controls + search + insertion + verification -> panel retirement decision

@@ -8,6 +8,7 @@
 - **NEVER COMMIT OR STAGE ANYTHING UNLESS ASKED FOR.** This includes `jj describe`, `jj commit`, `git add`, `git commit`, or any other source control operations that create a checkpoint or update a description.
 - **Conventional Commits (when a commit IS requested).** Every commit message MUST follow the Conventional Commits spec (conventionalcommits.org): `<type>[optional scope]: <description>`. Types: `feat`, `fix`, `refactor`, `perf`, `docs`, `test`, `build`, `ci`, `chore`. Scope is the OpenSpec change or module when it helps (`feat(component-unification): ...`). A breaking change uses `!` after the type/scope (`refactor!: ...`) and a `BREAKING CHANGE:` footer explaining the migration. One commit = one logical change, mapped to the ticket being worked. Description is imperative, lower-case, no trailing period. Commit messages are always in English (subject and body), regardless of the chat language. Never add `Co-Authored-By: Claude` or any AI co-author line. Release Please consumes these messages to compute versions and the changelog, so they are a machine contract, not just prose.
 - **Always verify Rust code** by running `cd src-tauri && cargo check` before reporting a successful implementation or restart.
+- **No Redundant Browser Runs:** A passing Playwright flow is browser proof. Do not also open or control a separate browser when Playwright already proves the requested UI behavior. Launch a separate browser only when an unresolved visual/interactive risk cannot be proven by existing automated coverage, or when the user explicitly requests live browser inspection.
 - **Strictly adhere to the established UI theme** (Tactical Midnight, square borders, `--primary` / `--secondary` bronze accents).
 - **Enforce layout boundaries**: All major layout containers must have `overflow: hidden` to prevent UI jitter and content bleeding.
 - **Real Error Reporting**: Never use generic "Check API Key" messages. Always capture and display the raw error body from the backend/provider.
@@ -18,7 +19,6 @@
 - **Physical Fit Relations**: Any new physical fit relation must be represented by a named constraint or named binding. No anonymous geometry offsets for fit-critical dimensions.
 - **Debug Overlay Boundary**: Debug overlays are preview-only diagnostics. Never emit debug overlay primitives into production export geometry (STL/STEP).
 - **MCP-First Authoring Order**: Follow `inspect -> validate -> preview -> commit` through MCP tools before claiming completion.
-- **No SQLite Writes**: Never write SQLite files directly (`history.sqlite` or any app DB). All updates must flow through MCP commands.
 - **AST Patch Preference**: Prefer AST patch operations over full macro rewrites when an `ecky_ast_*` patch can express the change.
 - **No Junk Threads**: Do not create speculative `TMP`/throwaway threads or versions for debugging when an existing target thread can be inspected or forked. If the agent creates temporary history noise during a failed attempt, it must clean that noise up before stopping.
 

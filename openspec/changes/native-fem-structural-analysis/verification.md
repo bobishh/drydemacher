@@ -5,16 +5,17 @@
 - Exact OCCT boundary: welded finite triangles, duplicate/degenerate rejection,
   closed/manifold/single-component/positive-volume gates, BRep vertex-edge-face-loop
   incidence, mesh face adjacency, durable face groups, selected-face area coverage.
-- Native meshing: packaged pinned fTetWild probe, typed-array protocol, crash/raw
-  stderr propagation, malformed/OOB/open input rejection, kill-on-cancel, no
-  FreeCAD/Python/CalculiX/TetGen/Gmsh/network fallback path.
+- Native meshing: external Gmsh HXT probe, exact-BRep/typed-array protocol,
+  crash/raw stderr propagation, malformed/OOB/open input rejection,
+  kill-on-cancel, and explicit Netgen exact-BRep fallback; no FreeCAD,
+  CalculiX, TetGen, network, or untagged STL fallback.
 - Mechanics: Tet4 basis/constitutive/patch tests, exact surface load integration,
   Dirichlet elimination, Faer sparse solve, residual/equilibrium/energy gates,
   unaveraged verification stress, display-only nodal averaging, reactions.
 - Artifacts: immutable mesh/result manifests, bounded digest-checked sidecars,
   exact singleflight cache, atomic VTU export with Tet4/displacement/nodal and
   element stress arrays.
-- Cancellation: fTetWild and Faer run behind killable workers; assembly and
+- Cancellation: Gmsh HXT/Netgen and Faer run behind killable workers; assembly and
   postprocess poll chunk observers; convergence stops between levels. Shared
   jobs count independent subscribers and raise the worker kill token only when
   the final subscriber cancels. Cancelled work publishes no partial protocol or
@@ -50,7 +51,7 @@ cargo test compiler_and_runtime_resolve_typed_fem_max_min_metrics_from_current_s
 support reaction, safety-factor, typed-unit rejection, location, stale-study rejection
 
 cargo test commands::fem::tests::exact_warm_run_uses_singleflight_cache_without_meshing_or_solving_again --lib
-1 passed; real OCCT + packaged fTetWild; cold/warm/singleflight
+1 passed; real OCCT + external Gmsh HXT; cold/warm/singleflight
 
 cargo test services::fem_artifacts::tests::vtu_export_contains_tet4_displacement_and_separate_nodal_and_element_stress --lib
 1 passed
@@ -73,7 +74,7 @@ cargo test render_core_program_manifest_includes_ast_identity --lib
 
 npx playwright test e2e/native-fem-analysis.spec.ts
 14 passed; happy path plus ordinary-preview zero-worker proof, unavailable
-fTetWild, invalid mesh, singular solve, cancelled solve, stale source, failed
+Gmsh HXT, invalid mesh, singular solve, cancelled solve, stale source, failed
 convergence level, corrupt result array, and preview-only export invariants
 
 npm run typecheck
@@ -104,9 +105,9 @@ cargo test parameter_sweep_preserves_current_selectors_and_rejects_removed_topol
 1 passed; live OCCT min/nominal/max plus hole transition, full boundary-group
 coverage, current selector survival, removed topology explicit failure
 
-ECKY_FTETWILD_RUNTIME_ROOT=../.dist/runtime/ftetwild cargo test --test fem_pipeline -- --test-threads=1
-2 passed; real packaged worker, immutable result artifact, and outer failure
-boundaries with no partial publication
+ECKY_GMSH_EXECUTABLE="$(command -v gmsh)" cargo test --test fem_pipeline -- --test-threads=1
+2 passed; external Gmsh HXT worker, immutable result artifact, and outer failure
+boundaries with no partial publication (platform-gated when Gmsh is unavailable)
 
 cargo test --test fem_pipeline outer_failures_stop_at_resolve_boundary_or_rigid_mode_gate_before_publication
 1 passed; unresolved tag/cancel stop at resolve, open solid stops at boundary,
@@ -167,8 +168,8 @@ cargo test --test architecture_fitness
 frontend invoke boundary violation
 
 static FEM runtime audit
-clean for FreeCAD/Python/CalculiX/network/TetGen/Gmsh/rusqlite/history.sqlite;
-only pinned fTetWild worker and Ecky-owned killable solver worker spawn
+clean for FreeCAD/Python/CalculiX/network/TetGen/rusqlite/history.sqlite;
+only external Gmsh HXT/Netgen workers and Ecky-owned killable solver worker spawn
 
 openspec validate native-fem-structural-analysis --strict
 valid

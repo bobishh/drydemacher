@@ -23,6 +23,11 @@ or an unbounded live stream.
 - Queue accepted frames through temporary network loss and resume transfer.
 - Keep source photos, frame metrics, reconstruction state, and resulting mesh in
   an Ecky-owned capture artifact.
+- Persist every changed generated model source, persisted preview draft, and
+  Apply source as an immutable model version before validation or reconstruction.
+  Capture photos and frame manifests remain capture-run assets, not model
+  versions. Latest model append is always head, including failed or stale
+  attempts; successful results remain a separate filter.
 - Run reconstruction behind a Mac-owned provider interface, with Apple Object
   Capture as the first macOS provider.
 - Import the reconstructed triangle mesh through the existing `MeshAsset`
@@ -58,5 +63,7 @@ editing and future unified direct manipulation apply without scan-only UI.
   every preview frame.
 - Network loss preserves queued frames and reconnect resumes idempotently.
 - Reconstruction failure preserves source frames and exposes raw provider error.
+- Failed, pending, or stale capture mutations remain queryable as head with raw
+  status/evidence; no version conflict or force decision discards them.
 - Successful reconstruction enters Ecky through `MeshAsset`, then follows normal
   preview and explicit Apply/Commit semantics.

@@ -10,14 +10,14 @@
   "fcstdPath": "",
   "manifestPath": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-d7e35f47728e/manifest.json",
   "macroPath": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-d7e35f47728e/source.ecky",
-  "previewStlPath": "preview.stl",
+  "modelStlPath": "model.stl",
   "viewerAssets": [
     {
       "partId": "bracket",
       "nodeId": "bracket",
       "objectName": "bracket",
       "label": "Bracket",
-      "path": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-d7e35f47728e/preview.stl",
+      "path": "/Users/bogdan/Library/Application Support/com.alcoholics-audacious.ecky-cad/model-runtime/generated/generated-direct-occt-d7e35f47728e/model.stl",
       "format": "stl"
     }
   ],

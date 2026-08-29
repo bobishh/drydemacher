@@ -35,12 +35,16 @@
 
 - [ ] 4.1 Define and test `HandleBinding` contract.
 - [ ] 4.2 Add failing Playwright radius-handle drag scenario.
-- [ ] 4.3 Add stale source/node digest failure scenario preserving draft and raw
-  backend error.
+- [ ] 4.3 Add stale source/node digest scenario proving attempted draft becomes a
+  failed version with raw backend error and current head.
 - [ ] 4.4 Implement guarded preview patch lifecycle.
 - [ ] 4.5 Implement box, cylinder, extrusion, transform, hole, fillet, and
   chamfer adapters incrementally under separate red-green cycles.
-- [ ] 4.6 Keep history unchanged until explicit Apply/Commit.
+- [ ] 4.6 Append every distinct persisted draft as an immutable version before
+  validation; move head on every append.
+- [ ] 4.7 Expose latest-successful filtering without changing head semantics.
+- [ ] 4.8 Serialize stale/concurrent draft appends without conflict refusal,
+  force mode, overwrite, or history deletion.
 
 ## 5. Source-Authored Point Handles
 
@@ -52,9 +56,11 @@
 ## 6. LLM Manipulation Integration
 
 - [ ] 6.1 Route annotation and language intent into candidate AST patches.
-- [ ] 6.2 Require same inspect -> validate -> preview -> commit lifecycle.
+- [ ] 6.2 Require same inspect -> append version -> validate -> preview -> record
+  status lifecycle.
 - [ ] 6.3 Add ambiguity confirmation scenario.
-- [ ] 6.4 Prove LLM path cannot bypass source digest or node digest guards.
+- [ ] 6.4 Prove LLM path records stale source or node digests as version failure
+  evidence without losing attempted content.
 
 ## 7. Verification
 

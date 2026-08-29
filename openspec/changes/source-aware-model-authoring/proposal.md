@@ -54,6 +54,8 @@ compiler remains projection authority.
 - Geometry selection resolves through stable target and source identities.
 - Supported handle drag validates source and node digests before preview.
 - Unsupported derived geometry never claims editability.
-- Accepted preview updates source and affected targets without committing until
-  explicit Apply/Commit.
+- Every content-changing source draft event appends an immutable version and
+  advances thread head before validation or rendering decides its status.
+- Failed, invalid, and superseded drafts remain addressable history; consumers
+  may filter successful versions without redefining head or deleting evidence.
 - Raw backend errors stay attached to responsible handle or source node.

@@ -30,6 +30,45 @@ history authority.
 - **THEN** session records target thread and source-version identity
 - **AND** later preview cannot patch whichever thread happens to be visible
 
+### Requirement: Lossless Capture Mutation Versions
+
+The system SHALL append one immutable model version for every distinct generated
+model source, persisted model preview draft, or Apply source snapshot before
+validation or reconstruction. Capture photos, frame manifests, and transient
+crop/scale controls SHALL remain capture-run state unless serialized into such a
+persisted model draft. The version SHALL retain exact content identity and later
+raw status/evidence.
+Head SHALL resolve to the latest serialized append regardless of success,
+pending state, stale evidence, or artifact availability. Successful renders SHALL
+be exposed through a separate filter/projection and SHALL NOT replace head.
+
+#### Scenario: Failed capture mutation becomes head
+
+- **GIVEN** a successful capture preview is head
+- **WHEN** a changed candidate or draft is persisted and validation or
+  reconstruction fails
+- **THEN** changed snapshot is retained as one immutable version
+- **AND** raw failure evidence is attached to that version
+- **AND** that version is head while the earlier successful render remains
+  available through successful filtering
+
+#### Scenario: Stale Apply appends without version conflict
+
+- **GIVEN** an Apply source snapshot was prepared against an older capture/model
+  state
+- **WHEN** geometric/source validation detects digest or snapshot drift
+- **THEN** attempted source snapshot is appended before validation
+- **AND** raw stale evidence is attached to it and it becomes head
+- **AND** no `conflict`, `threadAdvanced`, or force refusal is emitted
+- **AND** prior successful renders remain queryable
+
+#### Scenario: Concurrent capture writers preserve both changes
+
+- **WHEN** two changed capture snapshots are serialized for the same run
+- **THEN** each snapshot is appended exactly once
+- **AND** later append is head
+- **AND** neither append is discarded as a version conflict
+
 ### Requirement: Durable Capture History
 
 The system SHALL persist capture-run metadata in SQLite while retaining source
@@ -199,7 +238,8 @@ provider implementation.
 - **WHEN** provider is unavailable or returns failure
 - **THEN** raw provider error is visible
 - **AND** source frames remain available for retry
-- **AND** last good model and history remain unchanged
+- **AND** last good model remains the successful-render projection
+- **AND** failed reconstruction version and raw provider evidence remain history
 
 ### Requirement: Reconstructed Output Is Ordinary Mesh Geometry
 

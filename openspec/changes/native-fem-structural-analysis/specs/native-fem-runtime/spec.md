@@ -109,7 +109,7 @@ with positive enclosed volume and valid face-group cardinality.
 - **GIVEN** the boundary has a missing face, non-manifold edge, degenerate
   triangle, winding mismatch, invalid group index, or non-positive volume
 - **WHEN** admission runs
-- **THEN** meshing fails before fTetWild starts
+- **THEN** meshing fails before the Gmsh HXT/Netgen mesher starts
 - **AND** the diagnostic includes observed topology counts and offending ids.
 
 #### Scenario: Tessellation changes semantic topology
@@ -120,41 +120,42 @@ with positive enclosed volume and valid face-group cardinality.
 - **THEN** boundary is rejected with source/output incidence evidence
 - **AND** coordinate proximity cannot satisfy topology equivalence
 
-### Requirement: fTetWild tetrahedralization is native and isolated
+### Requirement: Gmsh HXT tetrahedralization is external and isolated
 
-The product SHALL run pinned fTetWild through a dedicated native worker to
-produce first-order tetrahedra from structured tagged boundary arrays. The
-default path MUST NOT invoke FreeCAD, Python, CalculiX, TetGen, Gmsh, remote
-service, or untagged STL fallback.
+The product SHALL run an explicitly probed external Gmsh HXT executable through
+a dedicated bounded worker to produce first-order tetrahedra from an exact BRep.
+If HXT fails, an explicitly probed Netgen OCC exact-BRep worker MAY run within
+the remaining budget. The default path MUST NOT invoke FreeCAD, CalculiX,
+TetGen, arbitrary Python, network, cloud service, or untagged STL fallback;
+Python is allowed only through the explicitly probed Netgen adapter.
 
-#### Scenario: Available fTetWild runtime meshes a bracket
+#### Scenario: Available Gmsh HXT runtime meshes a bracket
 
-- **GIVEN** runtime manifest matches platform, architecture, pinned source and
-  binary digests, adapter protocol, supported Tet4/tag capability, MPL source/
-  notices, and transitive license inventory
+- **GIVEN** Gmsh executable identity matches its probed path, version, digest,
+  platform, architecture, adapter protocol, and supported Tet4 capability
 - **WHEN** a valid tagged boundary and mesh controls are submitted
 - **THEN** the worker returns typed nodes, Tet4 cells, tagged boundary facets,
   runtime identity, insertion/approximation evidence, and meshing diagnostics
-- **AND** no compatibility process is invoked.
+- **AND** no compatibility process is invoked unless HXT fails and the explicit
+  Netgen fallback is available.
 
-#### Scenario: fTetWild runtime is unavailable or crashes
+#### Scenario: Gmsh HXT runtime is unavailable or crashes
 
-- **GIVEN** pinned native executable/source manifest is missing/mismatched or
-  worker exits
-  unsuccessfully
+- **GIVEN** the configured Gmsh executable is missing/mismatched or the worker
+  exits unsuccessfully
 - **WHEN** capability probing or meshing runs
 - **THEN** the operation fails with raw probe/stdout/stderr/exit detail
-- **AND** no alternate mesher starts
+- **AND** Netgen starts only when its interpreter/module identity was explicitly
+  probed and HXT failed before the remaining budget was exhausted
 - **AND** no partial volume mesh enters cache.
 
-#### Scenario: Surface group tag exceeds upstream byte range
+#### Scenario: Exact BRep face identity is not preserved
 
-- **GIVEN** boundary contains more face groups than upstream `char` tag storage
-  can represent safely
-- **WHEN** worker maps face groups into fTetWild
-- **THEN** adapter uses validated wide IDs or bounded bijective remap
-- **AND** every output group round-trips without truncation, collision, or modulo
-  behavior.
+- **GIVEN** Gmsh or Netgen output omits, reorders, or ambiguously maps an exact
+  OCC face group
+- **WHEN** boundary reconciliation runs
+- **THEN** the adapter rejects the mesh with source/output face evidence
+- **AND** no numeric proximity or lossy tag remap can satisfy the mapping.
 
 ### Requirement: Volume meshes retain boundary groups and pass quality gates
 
@@ -166,7 +167,7 @@ to exactly one tetrahedron and one valid boundary group.
 #### Scenario: Locally refined mesh preserves groups
 
 - **GIVEN** a smaller size is requested on a tagged load face
-- **WHEN** Tet4 meshing and validation complete
+- **WHEN** Gmsh HXT or its explicit Netgen fallback completes and validation runs
 - **THEN** refined exterior facets remain assigned to that source face group
 - **AND** complete boundary area coverage is within configured tolerance.
 
@@ -190,7 +191,7 @@ to exactly one tetrahedron and one valid boundary group.
 
 ### Requirement: Meshing is reproducible and identity complete
 
-The runtime SHALL set explicit fTetWild envelope/options/thread policy, SHALL
+The runtime SHALL set explicit Gmsh HXT/Netgen options/thread policy, SHALL
 canonicalize checked connectivity before digesting, and SHALL include every
 geometry, boundary, control, adapter, native runtime, and tolerance input in
 mesh identity.
@@ -200,11 +201,11 @@ mesh identity.
 - **GIVEN** structured boundary, controls, runtime, and tolerances are identical
 - **WHEN** the request is served from cache or recomputed
 - **THEN** canonical mesh identity is identical
-- **AND** a valid cache hit performs no fTetWild execution.
+- **AND** a valid cache hit performs no Gmsh HXT or Netgen execution.
 
 #### Scenario: Native runtime or local size changes
 
-- **WHEN** the fTetWild runtime identity or one local mesh control changes
+- **WHEN** the Gmsh HXT/Netgen runtime identity or one local mesh control changes
 - **THEN** the prior mesh is not reused under the new request
 - **AND** both identities remain distinguishable in diagnostics.
 
@@ -314,7 +315,7 @@ arrays SHALL use validated bounded sidecars rather than thread-message payloads.
 
 - **GIVEN** a complete validated result exists for the exact current identity
 - **WHEN** the same analysis is requested
-- **THEN** no boundary meshing, fTetWild, assembly, factorization, or post-processing
+- **THEN** no boundary meshing, Gmsh HXT/Netgen, assembly, factorization, or post-processing
   executes
 - **AND** the immutable result is returned.
 
@@ -344,7 +345,7 @@ budgets and cancel without orphan workers or partial artifacts.
 
 #### Scenario: User cancels during volume meshing
 
-- **GIVEN** an fTetWild worker is generating a mesh
+- **GIVEN** a Gmsh HXT or Netgen worker is generating a mesh
 - **WHEN** the final subscriber cancels
 - **THEN** the worker is terminated or cooperatively stopped
 - **AND** the job reports cancelled

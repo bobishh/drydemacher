@@ -15,13 +15,12 @@
 Write scope: new `src-tauri/src/project_mirror.rs`, `src-tauri/src/lib.rs`
 (module registration), `src-tauri/src/contracts.rs` (Config field), tests.
 
-- [x] 1.1 Manifest read/write round-trip (`ecky-project.json`, camelCase,
-  schemaVersion 1).
+- [x] 1.1 Manifest read/write round-trip (`ecky-project.edn`, kebab-case EDN,
+  schema-version 1).
 - [x] 1.2 Export: write `model.ecky` + manifest into
   `<projectsRoot>/<slug>/`; deterministic slug; re-export refreshes.
-- [x] 1.3 Status classification: missing / clean / fileChanged /
-  threadAdvanced / conflict, pure function over (file digest, manifest,
-  thread head id).
+- [ ] 1.3 Lossless status/appending semantics: clean / fileChanged / missing
+  plus informational head movement; no conflict classification gate.
 - [x] 1.4 `projectsRoot` config field with `<app_data>/projects` default.
   (Added `Config.projects_root: Option<String>` (camelCase `projectsRoot`,
   serde default None); `projects_root()` honors a non-blank override and
@@ -38,11 +37,10 @@ Write scope: `src-tauri/src/mcp/handlers.rs`, tests.
   explicit message), write mirror, return folder path + manifest.
 - [x] 2.2 `handle_project_folder_status`: read-only classification incl.
   thread head lookup.
-- [x] 2.3 `handle_project_folder_apply`: digest gate -> compile/preview via
-  `handle_macro_preview_render` -> `handle_commit_preview_version` -> manifest
-  rebase; conflict/threadAdvanced refusal; `force` override.
-- [x] 2.4 Failure paths: invalid source surfaces raw compiler error, folder
-  and thread untouched.
+- [ ] 2.3 `handle_project_folder_apply`: changed bytes append a version/head
+  before compile/preview; preserve success/failure outcome and manifest.
+- [ ] 2.4 Failure paths: invalid source surfaces raw error while failed version
+  and exact source remain queryable; unchanged source is idempotent.
 
 ## 3. T3 - MCP Tool Surface
 
@@ -65,7 +63,8 @@ Write scope: `src-tauri/src/mcp/server.rs`, tests.
 - [x] 5.1 File watcher (debounced) emitting status changes to the UI.
   (1s polling loop, two-tick digest settle, per-digest failure memo;
   emits `history-updated` + `project-folder-sync` events.)
-- [x] 5.2 Status chip + export/apply affordances in the app shell.
+- [ ] 5.2 Status chip + export/apply affordances in the app shell: remove
+  conflict/force refusal UI; show failed head and success-only filter.
   (Tauri commands `project_folder_export` / `project_folder_status` /
   `project_folder_apply` in `src-tauri/src/commands/project_mirror.rs`, thin
   wrappers over the existing mirror core + MCP `project_folder_*` handlers
@@ -78,12 +77,9 @@ Write scope: `src-tauri/src/mcp/server.rs`, tests.
   (clean/fileChanged/threadAdvanced/conflict/missing) plus
   EXPORT / APPLY / RE-EXPORT / FORCE APPLY affordances and the raw backend
   error verbatim. BDD: `e2e/project-folder-sync.spec.ts`.)
-- [x] 5.3 Playwright BDD: happy path + conflict path on a real route.
-  (`e2e/project-folder-sync.spec.ts`: happy path export -> fileChanged ->
-  Apply commits a new version -> chip goes clean; conflict path
-  threadAdvanced -> Apply refuses without force and surfaces the exact
-  reason, with RE-EXPORT remediation available. Mocks the Tauri boundary
-  and replays `project-folder-sync` via `__emitTauriEvent`.)
+- [ ] 5.3 Playwright BDD: export -> edit -> apply appends head; invalid edit
+  still appends failed head; both-sides changed serializes file as newest;
+  unchanged apply creates no duplicate; success-only filter excludes failures.
 
 ## 6. T6 - Literate Document Renderer (rides macro-ast-map-editor)
 
@@ -108,6 +104,6 @@ Write scope: `src-tauri/src/mcp/server.rs`, tests.
 
 - [x] G-MIRROR Export -> external edit -> apply yields a new committed version
   with rendered preview; manifest rebased.
-- [x] G-STALE threadAdvanced and conflict refuse without force, with exact
-  reasons.
+- [ ] G-LOSSLESS changed or invalid source is never lost; newest appended
+  version is always head and success filtering is separate.
 - [x] G-GREEN Full `cargo test` stays green.

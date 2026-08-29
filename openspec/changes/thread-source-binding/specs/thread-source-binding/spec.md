@@ -17,30 +17,46 @@ thread creation. It SHALL retain exact bound path after title/root changes.
 
 ### Requirement: Ecky and External Editors Synchronize One Bound File
 
-The system SHALL atomically refresh a clean bound source file after a successful
-Ecky-originated version commit. After settled external edit, it SHALL validate,
-preview, and commit the source through existing version pipeline, then update
-binding digest. It SHALL not create version from unchanged file observation.
+The system SHALL append one immutable version for every settled changed save
+from Ecky, an agent, or an external editor, regardless of validation/render
+outcome. Each version SHALL retain source bytes (or a durable source
+reference/digest) plus validation and render status, including raw failure
+details when available. Append order SHALL advance head to the last appended
+version. It SHALL not create a version from an unchanged observation.
 
 #### Scenario: External save becomes version
 
 - GIVEN bound thread with saved version
 - WHEN external editor saves valid changed bound source
-- THEN watcher commits exactly one new version
+- THEN watcher appends exactly one immutable version
+- AND the version is marked valid by validation/render status
 - AND Ecky leaves external source bytes unchanged
 
-### Requirement: Pending External Source Is Never Clobbered
+### Requirement: Source Saves Are Lossless And Conflict-Free
 
-The system SHALL compare bound source digest before Ecky-originated source
-write. On mismatch it SHALL refuse before writing, keep source/history
-unchanged, and surface raw conflict reason.
+The system SHALL serialize Ecky/agent writes and external saves through one
+append boundary. A digest mismatch SHALL NOT be treated as a conflict and
+SHALL NOT cause refusal, rollback, history loss, or a force-overwrite branch.
+The last append SHALL become head. External source bytes SHALL remain intact
+for the external append. Version validation/render status SHALL be filterable
+without removing failed versions from history.
 
-#### Scenario: Ecky commit meets unsynced edit
+#### Scenario: Invalid external save remains history
 
-- GIVEN bound thread whose file differs from stored digest
-- WHEN Ecky attempts to commit different source
-- THEN it refuses before overwriting file
-- AND no version commits
+- GIVEN bound thread whose source has changed since the previous head
+- WHEN the external save settles with invalid source
+- THEN one immutable version appends
+- AND its validation/render status records failure
+- AND head points to that version
+- AND no conflict or force decision is required
+
+#### Scenario: Concurrent saves append serially
+
+- GIVEN Ecky and an external editor save changed source near the same time
+- WHEN both append operations complete
+- THEN both immutable versions remain in history in append order
+- AND head points to the last appended version
+- AND neither operation is rejected as a conflict
 
 ### Requirement: Source Actions Are Discoverable
 

@@ -23,6 +23,42 @@ that follows the source surface.
 - **AND** raw source mesh remains visible
 - **AND** no OCCT render occurs for pointer-hover path previews
 
+### Requirement: Lossless Trim Mutation Versions
+
+The system SHALL append one immutable version for every distinct persisted trim
+file, path/loop candidate, keep-region selection, cap preview, or Apply source
+snapshot before anchor, topology, cap, or render validation. Raw status and
+evidence SHALL attach to that version. Head SHALL be the latest serialized
+append regardless of success, pending state, stale evidence, or artifact
+availability. Successful previews SHALL be a separate filter/projection.
+
+#### Scenario: Invalid trim candidate becomes head
+
+- **GIVEN** a successful trim preview is head
+- **WHEN** a changed loop, seed, or cap candidate is persisted and validation
+  fails
+- **THEN** candidate remains one immutable history version with raw failure
+  evidence
+- **AND** candidate becomes head
+- **AND** earlier successful preview remains available through successful
+  filtering
+
+#### Scenario: Stale source Apply appends without version conflict
+
+- **GIVEN** Apply draft references an older source digest or target snapshot
+- **WHEN** source validation detects drift
+- **THEN** exact Apply draft is appended before validation
+- **AND** raw stale evidence is attached and it becomes head
+- **AND** no `conflict`, `threadAdvanced`, or force refusal is emitted
+- **AND** prior successful preview remains queryable
+
+#### Scenario: Concurrent trim writers preserve both changes
+
+- **WHEN** two changed trim snapshots are serialized for one source
+- **THEN** both snapshots append exactly once
+- **AND** later append is head
+- **AND** neither is discarded as a version conflict
+
 ### Requirement: Deterministic Intelligent Path
 
 The system SHALL compute deterministic shortest or feature-aware surface paths
@@ -195,11 +231,14 @@ snapshot drift.
 - **WHEN** current imported bytes no longer match anchor digest
 - **THEN** preview and Apply reject stale evidence
 - **AND** raw expected and actual digest are available in failure detail
-- **AND** file, successful preview, and history remain unchanged
+- **AND** file and successful preview projection remain unchanged
+- **AND** attempted version and raw stale evidence remain in history as head
 
 #### Scenario: Apply backend fails
 
 - **WHEN** cutting, capping, rendering, or source persistence fails
 - **THEN** UI displays backend error body
-- **AND** canonical source, current successful render, and history version remain
+- **AND** canonical source and current successful render projection remain
   unchanged
+- **AND** failed attempt remains as an appended history version with raw
+  evidence and becomes head

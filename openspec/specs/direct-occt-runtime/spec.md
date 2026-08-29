@@ -108,7 +108,7 @@ silent fallback.
 - GIVEN an analytic BRep shape and a supported `chamfer` operation
 - WHEN the Direct OCCT runtime executes the plan
 - THEN `BRepFilletAPI_MakeChamfer` is used
-- AND the generated preview STL is only a tessellation of the analytic result
+- AND the generated model STL is only a tessellation of the analytic result
 - AND the STEP export remains analytic BRep
 
 #### Scenario: Solidified mesh-origin chamfer

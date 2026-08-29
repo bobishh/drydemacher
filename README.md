@@ -41,7 +41,7 @@ A minimal model:
 
   (verify
     (tag preview_exists)
-    (metric check (manifest has-preview-stl))
+    (metric check (manifest has-model-stl))
     (expect check (= true)))
 
   (part body
@@ -71,7 +71,7 @@ Canonical settings live in the platform app-config directory as `config.edn`. `c
 
 ### CLI tutorial flow
 
-The [`ecky` binary](src-tauri/src/bin/ecky.rs) runs the same source flow as the [Ecky IR Field Guide](docs/books/ecky-ir/index.md): validate a model, inspect lowered backend source, then render an artifact. Build it from the repository with `cargo build --bin ecky` in `src-tauri/`.
+The [`ecky` binary](src-tauri/src/bin/ecky.rs) runs the same source flow as the [Ecky IR Field Guide](docs/books/ecky-ir/index.md): validate a model, inspect lowered backend source, then render an artifact. Build it from the repository with `cargo build --features cli --bin ecky` in `src-tauri/`.
 
 ```bash
 # Validate the minimal model shown above.
@@ -101,9 +101,9 @@ External agents use Ecky-owned tools and state transitions. Normal sequence:
 2. Validate constraints or an AST patch when applicable.
 3. Render a draft with `macro_preview_render`.
 4. Check it with `verify_generated_model`; use a screenshot for visual claims.
-5. Persist only a green draft with `commit_preview_version`.
+5. Run `verify_generated_model`; it attaches pass/fail evidence to the already-appended version automatically.
 
-Never write `history.sqlite` directly. Smoke-test preview-to-commit behavior with:
+Never write `history.sqlite` directly. Smoke-test preview plus automatic version verification with:
 
 ```bash
 npm run mcp:smoke -- <thread-id> <path-to-model.ecky> [mcp-url]
@@ -133,5 +133,16 @@ npm run test:e2e
 npm run typecheck
 cd src-tauri && cargo check && cargo test
 ```
+
+For a full Rust run without retaining test/link artifacts in the live Tauri target:
+
+```bash
+npm run test:rust:clean
+```
+
+This uses a unique temporary Cargo target and removes it on success, failure, or
+interrupt. To reclaim accumulated live dev artifacts explicitly, run
+`npm run clean:rust-artifacts` while the Tauri dev process is stopped; the next dev
+build is cold.
 
 Development uses outer BDD plus inner unit red-green-refactor cycles. Frontend Tauri payloads use `camelCase`; Rust uses `snake_case`; Rust boundary structs translate through `#[serde(rename_all = "camelCase")]`.

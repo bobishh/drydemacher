@@ -120,7 +120,7 @@ type ArtifactBundle = {
   contentHash: string;
   fcstdPath: string;
   manifestPath: string;
-  previewStlPath: string | null;
+  modelStlPath: string | null;
   stepPath: string | null;
   viewerAssets: {
     format: 'stl-parts' | 'glb';
@@ -137,7 +137,7 @@ Required semantics:
 
 - `fcstdPath` is always present once the bundle exists
 - viewer assets are derived and may evolve in format without changing truth
-- preview STL may remain nullable during import-only or migration states
+- model STL may remain nullable during import-only or migration states
 
 ### `ModelManifest`
 

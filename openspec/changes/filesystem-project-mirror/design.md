@@ -8,16 +8,17 @@ thread/version (sqlite history, canonical record)
         v
 <projectsRoot>/<slug>/
   model.ecky          <- editable by anything: editors, LLM file skills, sed
-  ecky-project.json   <- binding manifest, written only by Ecky
+  ecky-project.edn   <- binding manifest, written only by Ecky
         |  external edit
         v
 project_folder_status  (digest classification, read-only)
         |  project_folder_apply
         v
-compile check -> macro_preview_render -> commit_preview_version
+append exact file bytes as version/head -> compile check -> macro_preview_render
         |
         v
-new version message on the bound thread; manifest rebased to it
+new version message on the bound thread (success or failure); manifest rebased
+to it when apply completes
 ```
 
 The folder is a mirror, never an alternate database. Every write into history
@@ -25,22 +26,20 @@ flows through the same preview/commit handlers agents already use, so leases,
 artifact truth, and version provenance behave identically regardless of who
 edited the file.
 
-## Manifest contract (`ecky-project.json`)
+## Manifest contract (`ecky-project.edn`)
 
-```json
-{
-  "schemaVersion": 1,
-  "projectId": "proj-<uuid>",
-  "threadId": "thread-...",
-  "messageId": "msg-...",
-  "modelId": "generated-...",
-  "sourceDigest": "sha256:<hex of exported model.ecky bytes>",
-  "exportedAt": 1781200000
-}
+```clojure
+{:exported-at 1781200000
+ :message-id "msg-..."
+ :model-id "generated-..."
+ :project-id "proj-<uuid>"
+ :schema-version 1
+ :source-digest "sha256:<hex of exported model.ecky bytes>"
+ :thread-id "thread-..."}
 ```
 
-- camelCase (Tauri boundary convention for JSON contracts).
-- `sourceDigest` is the digest of the bytes Ecky last wrote or applied; it is
+- Kebab-case EDN on disk; camelCase remains only at the Tauri boundary.
+- `source-digest` is the digest of the bytes Ecky last wrote or applied; it is
   the only thing distinguishing "user edited the file" from "clean".
 - Ecky owns the manifest; external editors must not need to touch it.
 
@@ -48,25 +47,24 @@ edited the file.
 
 ```text
 missing        no model.ecky or no manifest
-clean          file digest == manifest.sourceDigest, thread head == manifest.messageId
-file_changed   file digest != manifest.sourceDigest, thread head == manifest.messageId
-thread_advanced file digest == manifest.sourceDigest, thread head != manifest.messageId
-conflict       both differ
+clean           file digest == manifest.source-digest
+file_changed   file digest != manifest.source-digest
+missing         no model.ecky or no manifest
+thread_moved    informational flag: head != manifest.message-id
 ```
 
-Thread head = latest committed assistant version message on the bound thread.
+Thread head = latest appended version record on the bound thread, independent
+of validation/render status.
 Status is read-only and cheap (one digest + one history lookup).
 
 ## Apply semantics
 
-- `file_changed` -> compile check, preview render, commit, manifest rebased.
+- `file_changed` -> append exact source as a new version/head, then compile and
+  render it; persist success or failure on that version.
 - `clean` -> no-op success (idempotent).
-- `thread_advanced` -> error telling the caller to re-export (folder is stale).
-- `conflict` -> error unless `force: true`; force applies the file as a new
-  version on top of the current head (file wins, history preserved as
-  versions; nothing is lost because the previous head remains a version).
-- Compile or render failures surface the raw error and leave both the folder
-  and the thread untouched.
+- `thread_moved` plus changed file -> append file as newest head; no conflict.
+- Compile/render failures surface raw error but retain failed version/source.
+  Exact unchanged content is deduplicated.
 
 ## Ownership
 

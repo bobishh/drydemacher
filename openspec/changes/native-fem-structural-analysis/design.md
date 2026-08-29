@@ -59,7 +59,7 @@ embed or automate the FreeCAD workbench.
        oriented triangles
        triangle -> durable CAD face group
        closed/manifold/provenance evidence
-  -> fTetWild worker
+  -> external Gmsh HXT worker (optional Netgen exact-BRep fallback)
   -> FemVolumeMesh
        nodes
        Tet4 connectivity
@@ -94,7 +94,7 @@ and responsibility boundaries, not necessarily 15 software services.
 | 7. Load cases and combinations | explicit authoring | magnitude, distribution, frame, duration, combination, provenance, uncertainty | surface force/traction/pressure and provenance implemented; combinations/duration not implemented |
 | 8. Supports and boundary realism | explicit authoring + deterministic audit | constrained DOFs, physical rationale, over/underconstraint evidence | durable selectors, component constraints, rigid-mode and support-area audit implemented |
 | 9. Analysis boundary representation | direct OCCT runtime | closed grouped surface with CAD-face provenance | implemented with BRep incidence and selected-face area checks |
-| 10. Volume discretization | native mesher | Tet4 mesh, quality, group coverage, mesh identity | implemented through pinned packaged fTetWild worker |
+| 10. Volume discretization | external exact-BRep mesher | Tet4 mesh, quality, group coverage, mesh identity | implemented through Gmsh HXT with optional Netgen fallback |
 | 11. Equation assembly and solve | deterministic FEM core | K/f/constraints, displacement, stress, reactions | implemented for linear-static isotropic Tet4 |
 | 12. Numerical verification | deterministic FEM core | patch/oracle proof, residual, equilibrium, energy, finite-value gates | implemented; independent offline solver golden remains open |
 | 13. Discretization error and singularity analysis | convergence service | per-metric convergence, hotspot movement, suspected singularities | displacement/stress status and partial-failure evidence implemented; hotspot movement evidence remains open |
@@ -252,41 +252,29 @@ tolerance controls geometric approximation only, not semantic topology.
 
 ## Volume Mesher Decision
 
-### Selected MVP Backend: fTetWild
+### Selected MVP Backend: Gmsh HXT
 
-Bundle a pinned, audited fTetWild build under MPL-2.0 and call it from a
-dedicated native worker. The app sends structured `AnalysisBoundarySurface`
-arrays and mesh controls. It never performs an STL round-trip. Each input
-triangle carries compact face-group tag; worker returns nodes, Tet4 cells,
-exterior facets, propagated group tags, insertion/approximation evidence, and
-raw diagnostics.
+Invoke a separately installed Gmsh executable through a dedicated bounded worker.
+The adapter exports the exact Direct OCCT BRep to a temporary STEP input, asks
+Gmsh's OCC/HXT path for Tet4 output, and parses bounded ASCII MSH2 output. Face
+signatures, durable face groups, source/STEP digest, mesh controls, and runtime
+identity are checked before publication. No STL round-trip or untagged remesh is
+allowed.
 
-fTetWild tracks input face tags as `surface_tags`, but upstream storage currently
-narrows them to `char`. Ecky adapter/fork SHALL use validated wide group IDs or a
-bounded remap table, publish MPL-covered modifications, and prove round-trip for
-more groups than signed-byte range. No truncation or modulo mapping is allowed.
+Gmsh HXT is the primary mesher. If it fails after producing no accepted mesh,
+the service may use an explicitly probed Netgen OCC exact-BRep fallback within
+the remaining runtime budget. Netgen receives the same STEP, face count,
+durable-group mapping, size controls, and digest-bound request. A missing or
+changed executable/module, malformed output, timeout, cancellation, or failed
+face mapping remains a raw stage error; no TetGen, FreeCAD, Python fallback,
+network, or cloud service is attempted beyond the explicit Netgen adapter.
 
-fTetWild may retriangulate or move output boundary within configured envelope.
-Therefore propagated tag alone is insufficient. Worker admission reconciles
-every exterior facet against source group, proves group coverage and adjacency,
-records Hausdorff/envelope error, and rejects missing, ambiguous, cross-group,
-or over-tolerance output. Hole filling and smooth-open-boundary modes are off;
-input must already be valid closed analysis boundary.
-
-Worker process isolates native crashes and peak memory, gives hard cancellation
-boundary, and keeps native stdout/stderr in dedicated terminal/error payload.
-Runtime manifest records platform, architecture, pinned commit/version, binary
-and source digests, MPL/source/notice paths, transitive license inventory,
-supported capabilities, and adapter protocol. There is no fallback to TetGen,
-Gmsh, untagged STL, Python, network, or cloud service.
-
-### Conditional Reference Backend: Gmsh
-
-Gmsh physical groups and discrete entities fit this boundary model technically,
-but official Gmsh is GPL-2-or-later, not LGPL. It SHALL NOT be linked or bundled
-in default distributed Ecky unless whole-product licensing permits GPL or a
-commercial Gmsh license is recorded. Separately installed Gmsh may serve offline
-development/reference fixtures without becoming product fallback.
+Gmsh is GPL-2-or-later and is never linked or bundled by default. The runtime
+probe resolves `ECKY_GMSH_EXECUTABLE` or `gmsh` on PATH and records executable
+path, version, SHA-256, platform, architecture, and HXT adapter protocol. Netgen
+is similarly probed through `ECKY_NETGEN_PYTHON` or the `netgen` launcher; its
+Python/module paths and digests enter runtime identity. Product distribution
+must provide the required external-runtime license evidence.
 
 ### Rejected Default: TetGen Through `tritet`
 
@@ -327,8 +315,8 @@ violations. It records at least node/cell counts, min/max volume, minimum scaled
 Jacobian or equivalent documented tetra quality, radius ratio, boundary area
 by group, connected components, and worst element location.
 
-MVP uses reproducible meshing settings: fixed fTetWild options, envelope, fixed
-thread policy, no ambient user config, and every option in cache identity.
+MVP uses reproducible Gmsh HXT/Netgen options, fixed thread policy, no ambient
+mesher config, and every option plus external-runtime identity in cache identity.
 Connectivity is canonicalized before digesting. If the mesher still produces a
 different topology for identical identity, the differing digest is reported;
 it is never reused under the old key.
@@ -463,18 +451,17 @@ nonzeros, worker memory estimate, solve time, result bytes, and convergence-run
 count. Admission reports observed/estimated and allowed values before expensive
 allocation where possible.
 
-Cancellation terminates the fTetWild worker and cooperatively interrupts Rust
+Cancellation terminates the Gmsh HXT/Netgen worker and cooperatively interrupts Rust
 assembly/solve between bounded chunks. If the sparse backend cannot interrupt a
 direct factorization, it runs behind a killable worker boundary before product
 exposure claims cancellation.
 
 ## Dependency And License Decisions
 
-- fTetWild: selected pinned volume mesher under MPL-2.0. Bundle binary, exact
-  corresponding source, MPL notices, adapter/fork modifications, and audited
-  transitive licenses. Disable optional TetGen support.
-- Gmsh: GPL-2-or-later reference/commercial-license option only. Never bundle or
-  link default distributed product under false LGPL assumption.
+- Gmsh HXT: external GPL-2-or-later executable, never linked or bundled by the
+  default product. Record executable/version/hash/license evidence.
+- Netgen: external OCC fallback through a separately probed Python/module
+  runtime. Record interpreter/module/version/hash/license evidence.
 - Fenris: MIT/Apache, selected only behind a pinned experimental assembly
   adapter; its README explicitly says it has no solver and unstable API.
 - Faer: selected Rust sparse linear algebra backend behind an internal adapter.
@@ -487,8 +474,8 @@ exposure claims cancellation.
 
 Primary upstream references:
 
-- <https://github.com/wildmeshing/fTetWild>
-- <https://arxiv.org/abs/1908.03581>
+- <https://gmsh.info/doc/texinfo/gmsh.html#Mesh-module>
+- <https://ngsolve.org/downloads>
 - <https://gmsh.info/#License>
 - <https://github.com/elrnv/fenris>
 - <https://github.com/sarah-ek/faer-rs>
@@ -514,7 +501,8 @@ Primary upstream references:
 - Axial bar displacement/stress against closed-form solution.
 - Cantilever displacement trend with recorded linear-Tet tolerance.
 - Bracket fixture against versioned CalculiX reference output.
-- fTetWild surface-tag preservation, topology reconciliation, and local sizing.
+- Gmsh HXT surface-group preservation, exact-BRep reconciliation, Netgen fallback,
+  and local sizing.
 - Singular underconstrained model rejection.
 - Stale-result invalidation after one parameter edit.
 - Cancel during mesh and solve with no partial result.
@@ -533,14 +521,14 @@ case, and manufacturing-export digest equality with result overlays enabled.
   general high-fidelity behavior. Tet10 is a later explicit capability.
 - **Stable CAD face mapping can be lost during remeshing.** Boundary groups are
   first-class and complete coverage is a hard gate; no coordinate fallback.
-- **fTetWild retriangulates within an envelope.** Propagated tags plus explicit
-  boundary reconciliation are hard gates; proximity alone never transfers a
-  load/support group.
-- **fTetWild packaging carries MPL and transitive obligations.** Pin source,
-  publish covered modifications, ship exact corresponding source/notices, and
-  keep TetGen disabled.
-- **Gmsh is GPL, not LGPL.** Default integration is forbidden without compatible
-  whole-product or commercial license evidence.
+- **External meshers can reorder or retriangulate.** Face signatures, durable
+  groups, exact source digests, and complete boundary reconciliation are hard
+  gates; proximity alone never transfers a load/support group.
+- **Gmsh/Netgen are external license/runtime obligations.** Probe immutable
+  paths and hashes, preserve raw diagnostics, and block distribution without
+  required license evidence.
+- **Gmsh is GPL, not LGPL.** External invocation requires compatible whole-product
+  or commercial license evidence; default distribution does not bundle it.
 - **Fenris API is unstable.** Pin and hide it behind `ElementAssembler`; the
   independent oracle suite is authoritative.
 - **Sparse direct factorization may exceed memory.** Estimate/budget nonzeros

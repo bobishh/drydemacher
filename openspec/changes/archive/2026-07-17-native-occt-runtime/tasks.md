@@ -40,7 +40,7 @@ Tasks:
 - [x] 2.1 Specify `plan.json` schema version and top-level fields.
 - [x] 2.2 Specify runner CLI shape:
   `direct-occt-runner --plan plan.json --out <bundle-dir>`.
-- [x] 2.3 Specify outputs: `model.step`, `preview.stl`, `topology.json`,
+- [x] 2.3 Specify outputs: `model.step`, `model.stl`, `topology.json`,
   stdout, stderr, exit code.
 - [x] 2.4 Specify native runner error classes.
 - [x] 2.5 Specify compatibility between Rust `OcctPlan` and runner schema.

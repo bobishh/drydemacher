@@ -48,7 +48,7 @@ Status meanings: `Done`, `Doing`, `Next`, `Blocked`, `Parked`.
 | Done | Euclid subagent | Compact AST edit response | Response has `newSourceDigest`, `editedPath`, `operation`, `lineCount`; no heavy source/runtime payloads. |
 | Done | Nietzsche subagent | Audit CST path/rename expansion | File:line implementation map for build/let/params/rename. |
 | Done | Main | Correct MCP AST support matrix | Document unsupported structural operations instead of implying CST parity exists. |
-| Done | Main | Split preview render from commit | `*_preview_render` stores a session draft and updates viewport; `commit_preview_version` writes one history card. |
+| Done | Main | Persist before preview | `*_preview_render` appends one history version, stores preview state, and updates viewport; verification attaches its outcome automatically. |
 | Done | Main + subagents | Expand source-addressable AST edits | `cargo test given_ -- --nocapture`: params replace/insert/rename, part insert/delete/rename, build shape insert/delete/rename, let binding insert/delete/rename, call arg/keyword sibling edits. |
 | Next | Main | Rename wording from macro-first to source-first where safe | Tool descriptions say editable source, not full macro. |
 | Next | Main | Expose source-only Lisp paths in AST get | Some source-addressable paths can now edit by explicit path, but `ecky_ast_get` still primarily emits Core-visible nodes. |

@@ -27,7 +27,7 @@
 
 - [ ] Define versioned campaign preview manifest keyed by canonical source and
   runtime digests.
-- [ ] Generate required preview STL/bundle assets sequentially with a bounded
+- [ ] Generate required model STL/bundle assets sequentially with a bounded
   worker; do not run corpus renders in parallel.
 - [ ] Fail build/packaging when a source-bearing step lacks a fresh preview.
 - [ ] Resolve bundled canonical preview in backend step payload without kernel execution.

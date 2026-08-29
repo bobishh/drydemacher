@@ -89,9 +89,15 @@
 - [x] 8.4 Add failing nested-operation test removing exact wrapper and preserving
   its shape child and unrelated operations.
 - [x] 8.5 Extract applied trims from canonical source for UI reload.
-- [x] 8.6 Keep failed Apply/Edit/Remove atomic: file, preview, and history unchanged.
+- [x] 8.6 Historical atomic-failure behavior: file, preview, and history stayed
+  unchanged (superseded by lossless append tasks 8.8-8.9).
 - [x] 8.7 Reject a second schema-v1 trim on the same exact import; require Edit or
   Remove while allowing one trim on each separate imported source.
+- [ ] 8.8 Append every changed trim candidate/draft and Apply source snapshot
+  before anchor, topology, cap, or render validation; attach raw evidence and
+  make latest append head even when the operation is invalid or stale.
+- [ ] 8.9 Remove version-conflict/thread-advanced/force refusal from trim writes;
+  retain geometric source-digest and topology failures as validation outcomes.
 
 ## 9. Viewer and Crop UX
 
@@ -119,3 +125,8 @@
 - [x] 10.6 Run strict OpenSpec validation.
 - [x] 10.7 Browser-proof real imported STL interaction, reload, Edit, Remove, and
   later BRep boolean; capture screenshots and exact source diff.
+- [ ] 10.8 Add BDD proof for failed/pending/stale trim mutations: each appends a
+  head version, preserves prior successful preview through successful filtering,
+  and retains raw evidence.
+- [ ] 10.9 Add migration proof for existing trim history and drafts, preserving
+  every record and deriving deterministic append order/head.

@@ -8,7 +8,7 @@ This is product/engineering doctrine for importing external CAD models, adding p
 
 Current implementation:
 
-- FreeCAD `.FCStd` import exists. It persists the source `.FCStd`, produces preview STL, STEP, model manifest, and part artifacts.
+- FreeCAD `.FCStd` import exists. It persists the source `.FCStd`, produces model STL, STEP, model manifest, and part artifacts.
 - `.ecky` source can import STL via `(import-stl "...")` and SVG profile/path data via `(svg "...")` where the chosen backend supports it.
 - Legacy persisted Build123d identifiers are migration input only; they resolve to native Ecky authoring/runtime settings.
 - Exact topology handles exist for FreeCAD edge/face targets and Direct OCCT edge/face targets. Accepted component ports can preserve validated `targetIds` against accepted bundle edge/face targets.
@@ -111,7 +111,7 @@ For future OpenSCAD, import must store:
 
 Importer renders or inspects enough to know what exists:
 
-- preview STL or mesh
+- model STL or mesh
 - STEP/FCStd when exact BRep exists
 - `modelManifest`
 - part list
@@ -448,7 +448,7 @@ Phase 1:
 
 - accept `.py`
 - run in bundled/runtime-selected build123d environment
-- capture primary solid(s), preview STL, STEP, manifest, raw errors
+- capture primary solid(s), model STL, STEP, manifest, raw errors
 - preserve script as `sourceRef`
 - expose discovered parameters only when explicit or safely declared
 

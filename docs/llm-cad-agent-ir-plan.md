@@ -168,7 +168,7 @@ Non-goal v1: global optimal manufacturing solver.
 | Partial | Add suggestion anchors | `printability_analyze` fills source anchors when feature graph has one clear feature. |
 | Done | Add read-only transform recipes | `printability_transform_recipes_get` returns digest-guarded supportless-FDM recipe candidates with pending preview and unsupported apply status. |
 | Done | Add preview-only reorient transform | `semantic_transform_preview` wraps simple `.ecky` part roots, renders a draft, and leaves chamfer/split unsupported. |
-| Done | Harden transform guards | artifact digest and `semantic_transform_preview.expectedArtifact` require `contentHash` in addition to model and preview STL path. |
+| Done | Harden transform guards | artifact digest and `semantic_transform_preview.expectedArtifact` require `contentHash` in addition to model and model STL path. |
 | Next | Broaden transform source support | reorient preview supports richer `.ecky` part forms; chamfer/split remain unsupported until source/feature anchors improve. |
 | Pending | Constraint-aware optimization | optimizer respects locked dimensions, clearances, ports, and assembly mates. |
 
@@ -195,7 +195,7 @@ Add tools in order:
 | Partial | `ecky_dependency_get` | Return dependency paths for `.ecky` params. |
 | Done | `ecky_constraints_validate` | Validate `.ecky` param constraints against provided/current/default values. |
 | Done | `artifact_feature_graph_get` | Return model manifest feature/correspondence graphs plus artifact digest. |
-| Done | `printability_analyze` | Return preview STL printability analysis and artifact digest. |
+| Done | `printability_analyze` | Return model STL printability analysis and artifact digest. |
 | Done | `printability_transform_recipes_get` | Return digest-guarded supportless-FDM recipe candidates without editing source or rendering. |
 | Partial | `semantic_transform_preview` | Preview reorient supportless-FDM recipes for simple `.ecky` parts with required content-hash artifact guard; chamfer/split unsupported. |
 

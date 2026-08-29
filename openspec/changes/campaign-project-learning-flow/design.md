@@ -73,7 +73,7 @@ Every source-bearing step has a build-time preview record:
 - runtime/backend identity;
 - model id;
 - verified artifact bundle;
-- preview STL;
+- model STL;
 - optional camera framing metadata.
 
 Rust build tooling renders these assets one at a time with a bounded worker and
