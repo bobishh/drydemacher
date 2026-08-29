@@ -1,8 +1,11 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use csgrs::float_types::parry3d::na::{Matrix3, Vector3};
+use ecky_render::component_placement::{
+    solve_placement_graph, validate_clearance, validate_port_compatibility, PlacementFrame,
+    PlacementGraphMate,
+};
 use tauri::{AppHandle, State};
 
 use crate::component_package_runtime;
@@ -20,14 +23,6 @@ use crate::contracts::{
 };
 use crate::models::{AppState, PathResolver};
 use crate::topology_target_ids::{is_stable_topology_target_id, portable_topology_target_id};
-
-const FRAME_EPSILON: f64 = 1.0e-6;
-
-#[derive(Clone, Debug)]
-struct RigidFrame {
-    origin: Vector3<f64>,
-    basis: Matrix3<f64>,
-}
 
 #[derive(Clone, Debug)]
 struct AssemblySolveResult {
@@ -61,79 +56,24 @@ enum CutGroupRole {
     Tool,
 }
 
-impl RigidFrame {
-    fn identity() -> Self {
-        Self {
-            origin: Vector3::new(0.0, 0.0, 0.0),
-            basis: Matrix3::identity(),
-        }
-    }
-
-    fn from_port_frame(frame: &PortFrame, label: &str) -> Result<Self, String> {
-        let x_axis = normalize_frame_axis(frame.x_axis, label, "xAxis")?;
-        let y_axis = normalize_frame_axis(frame.y_axis, label, "yAxis")?;
-        let z_axis = normalize_frame_axis(frame.z_axis, label, "zAxis")?;
-        if x_axis.dot(&y_axis).abs() > FRAME_EPSILON
-            || x_axis.dot(&z_axis).abs() > FRAME_EPSILON
-            || y_axis.dot(&z_axis).abs() > FRAME_EPSILON
-        {
-            return Err(format!("{label} frame axes must be orthogonal."));
-        }
-        if x_axis.cross(&y_axis).dot(&z_axis) <= FRAME_EPSILON {
-            return Err(format!(
-                "{label} frame axes must form a right-handed basis."
-            ));
-        }
-        Ok(Self {
-            origin: Vector3::new(frame.origin[0], frame.origin[1], frame.origin[2]),
-            basis: Matrix3::from_columns(&[x_axis, y_axis, z_axis]),
-        })
-    }
-
-    fn compose(&self, other: &Self) -> Self {
-        Self {
-            origin: self.origin + self.basis * other.origin,
-            basis: self.basis * other.basis,
-        }
-    }
-
-    fn inverse(&self) -> Self {
-        let basis = self.basis.transpose();
-        Self {
-            origin: -(basis * self.origin),
-            basis,
-        }
-    }
-
-    fn approx_eq(&self, other: &Self) -> bool {
-        (self.origin - other.origin).norm() <= FRAME_EPSILON
-            && (self.basis - other.basis).norm() <= FRAME_EPSILON
-    }
-
-    fn into_port_frame(self) -> PortFrame {
-        let x_axis = self.basis.column(0);
-        let y_axis = self.basis.column(1);
-        let z_axis = self.basis.column(2);
-        PortFrame {
-            origin: [self.origin.x, self.origin.y, self.origin.z],
-            x_axis: [x_axis[0], x_axis[1], x_axis[2]],
-            y_axis: [y_axis[0], y_axis[1], y_axis[2]],
-            z_axis: [z_axis[0], z_axis[1], z_axis[2]],
-        }
-    }
+fn placement_frame_from_contract(frame: &PortFrame, label: &str) -> Result<PlacementFrame, String> {
+    PlacementFrame::from_axes(
+        frame.origin,
+        frame.x_axis,
+        frame.y_axis,
+        frame.z_axis,
+        label,
+    )
+    .map_err(|error| error.message)
 }
 
-fn normalize_frame_axis(
-    axis: [f64; 3],
-    label: &str,
-    axis_name: &str,
-) -> Result<Vector3<f64>, String> {
-    let axis = Vector3::new(axis[0], axis[1], axis[2]);
-    let norm = axis.norm();
-    if norm <= FRAME_EPSILON {
-        return Err(format!("{label} frame {axis_name} must be non-zero."));
+fn port_frame_from_placement(frame: PlacementFrame) -> PortFrame {
+    PortFrame {
+        origin: frame.origin,
+        x_axis: frame.x_axis,
+        y_axis: frame.y_axis,
+        z_axis: frame.z_axis,
     }
-    Ok(axis / norm)
 }
 
 #[tauri::command]
@@ -1239,10 +1179,10 @@ fn build_installed_assembly_export_parts(
             }
         });
         if component.runtime.artifact_bundle.viewer_assets.is_empty() {
-            let preview_path = component.runtime.artifact_bundle.preview_stl_path.trim();
+            let preview_path = component.runtime.artifact_bundle.model_stl_path.trim();
             if preview_path.is_empty() {
                 return Err(crate::contracts::AppError::validation(format!(
-                    "Installed assembly '{}@{}:{}' component instance '{}' has no exportable viewer assets or preview STL.",
+                    "Installed assembly '{}@{}:{}' component instance '{}' has no exportable viewer assets or model STL.",
                     assembly_runtime.package_id,
                     assembly_runtime.version,
                     assembly_runtime.assembly.assembly_id,
@@ -1838,211 +1778,226 @@ fn solve_installed_assembly(assembly_source: &InstalledAssemblySource) -> Assemb
         .iter()
         .map(|component| (component.instance_id.as_str(), component))
         .collect::<HashMap<_, _>>();
-    let mut adjacency = HashMap::<&str, Vec<(usize, bool)>>::new();
-    for (mate_index, mate) in assembly_source.assembly.mates.iter().enumerate() {
-        adjacency
-            .entry(mate.a.instance_id.as_str())
-            .or_default()
-            .push((mate_index, true));
-        adjacency
-            .entry(mate.b.instance_id.as_str())
-            .or_default()
-            .push((mate_index, false));
-    }
+    let instance_ids = assembly_source
+        .components
+        .iter()
+        .map(|component| component.instance_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut graph_mates = Vec::new();
+    let mut graph_result_indices = Vec::new();
+    let mut mate_results = Vec::with_capacity(assembly_source.assembly.mates.len());
 
-    let mut placements = HashMap::<String, RigidFrame>::new();
-    let mut checked_mates = HashSet::<usize>::new();
-    let mut mate_results = Vec::new();
-
-    for component in &assembly_source.components {
-        if placements.contains_key(&component.instance_id) {
+    for mate in &assembly_source.assembly.mates {
+        let mut mate_result = InstalledAssemblyMateResult {
+            mate_id: mate.mate_id.clone(),
+            solved: false,
+            required_clearance: None,
+            available_clearance: None,
+            warning: None,
+        };
+        let Some(a_component) = components_by_instance.get(mate.a.instance_id.as_str()) else {
+            mate_result.warning = Some(format!(
+                "Assembly '{}' mate '{}' cannot be solved: instance '{}' is missing from resolved components.",
+                assembly_source.assembly.assembly_id, mate.mate_id, mate.a.instance_id
+            ));
+            mate_results.push(mate_result);
+            continue;
+        };
+        let Some(b_component) = components_by_instance.get(mate.b.instance_id.as_str()) else {
+            mate_result.warning = Some(format!(
+                "Assembly '{}' mate '{}' cannot be solved: instance '{}' is missing from resolved components.",
+                assembly_source.assembly.assembly_id, mate.mate_id, mate.b.instance_id
+            ));
+            mate_results.push(mate_result);
+            continue;
+        };
+        let Some(a_port) = find_component_port(a_component, mate.a.port_id.as_str()) else {
+            mate_result.warning = Some(format!(
+                "Assembly '{}' mate '{}' cannot be solved: port '{}.{}' is missing from resolved component metadata.",
+                assembly_source.assembly.assembly_id,
+                mate.mate_id,
+                mate.a.instance_id,
+                mate.a.port_id
+            ));
+            mate_results.push(mate_result);
+            continue;
+        };
+        let Some(b_port) = find_component_port(b_component, mate.b.port_id.as_str()) else {
+            mate_result.warning = Some(format!(
+                "Assembly '{}' mate '{}' cannot be solved: port '{}.{}' is missing from resolved component metadata.",
+                assembly_source.assembly.assembly_id,
+                mate.mate_id,
+                mate.b.instance_id,
+                mate.b.port_id
+            ));
+            mate_results.push(mate_result);
+            continue;
+        };
+        if let Err(error) = validate_port_compatibility(
+            &a_port.type_id,
+            &a_port.compatible_with,
+            &b_port.type_id,
+            &b_port.compatible_with,
+            &format!(
+                "assembly '{}' mate '{}'",
+                assembly_source.assembly.assembly_id, mate.mate_id
+            ),
+        ) {
+            mate_result.warning = Some(error.message);
+            mate_results.push(mate_result);
             continue;
         }
-        if !adjacency.contains_key(component.instance_id.as_str()) {
-            placements.insert(component.instance_id.clone(), RigidFrame::identity());
-            continue;
-        }
-        placements.insert(component.instance_id.clone(), RigidFrame::identity());
-        let mut queue = VecDeque::from([component.instance_id.clone()]);
-        while let Some(instance_id) = queue.pop_front() {
-            let Some(current_placement) = placements.get(&instance_id).cloned() else {
+        match validate_mate_clearance(
+            &assembly_source.assembly.assembly_id,
+            mate,
+            &mate.a,
+            &mate.b,
+            a_port,
+            b_port,
+        ) {
+            Ok((required_clearance, available_clearance)) => {
+                mate_result.required_clearance = required_clearance;
+                mate_result.available_clearance = available_clearance;
+            }
+            Err((required_clearance, available_clearance, warning)) => {
+                mate_result.required_clearance = required_clearance;
+                mate_result.available_clearance = available_clearance;
+                mate_result.warning = Some(warning);
+                mate_results.push(mate_result);
                 continue;
-            };
-            let mates = adjacency
-                .get(instance_id.as_str())
-                .cloned()
-                .unwrap_or_default();
-            for (mate_index, current_is_a) in mates {
-                if !checked_mates.insert(mate_index) {
-                    continue;
-                }
-                let mate = &assembly_source.assembly.mates[mate_index];
-                let mut mate_result = InstalledAssemblyMateResult {
-                    mate_id: mate.mate_id.clone(),
-                    solved: false,
-                    required_clearance: None,
-                    available_clearance: None,
-                    warning: None,
-                };
-                let (current_ref, other_ref) = if current_is_a {
-                    (&mate.a, &mate.b)
-                } else {
-                    (&mate.b, &mate.a)
-                };
-                let Some(current_component) =
-                    components_by_instance.get(current_ref.instance_id.as_str())
-                else {
-                    mate_result.warning = Some(format!(
-                        "Assembly '{}' mate '{}' cannot be solved: instance '{}' is missing from resolved components.",
-                        assembly_source.assembly.assembly_id, mate.mate_id, current_ref.instance_id
-                    ));
-                    mate_results.push(mate_result);
-                    continue;
-                };
-                let Some(other_component) =
-                    components_by_instance.get(other_ref.instance_id.as_str())
-                else {
-                    mate_result.warning = Some(format!(
-                        "Assembly '{}' mate '{}' cannot be solved: instance '{}' is missing from resolved components.",
-                        assembly_source.assembly.assembly_id, mate.mate_id, other_ref.instance_id
-                    ));
-                    mate_results.push(mate_result);
-                    continue;
-                };
-                let Some(current_port) =
-                    find_component_port(*current_component, current_ref.port_id.as_str())
-                else {
-                    mate_result.warning = Some(format!(
-                        "Assembly '{}' mate '{}' cannot be solved: port '{}.{}' is missing from resolved component metadata.",
-                        assembly_source.assembly.assembly_id,
-                        mate.mate_id,
-                        current_ref.instance_id,
-                        current_ref.port_id
-                    ));
-                    mate_results.push(mate_result);
-                    continue;
-                };
-                let Some(other_port) =
-                    find_component_port(*other_component, other_ref.port_id.as_str())
-                else {
-                    mate_result.warning = Some(format!(
-                        "Assembly '{}' mate '{}' cannot be solved: port '{}.{}' is missing from resolved component metadata.",
-                        assembly_source.assembly.assembly_id,
-                        mate.mate_id,
-                        other_ref.instance_id,
-                        other_ref.port_id
-                    ));
-                    mate_results.push(mate_result);
-                    continue;
-                };
-                let (source_ref, target_ref, source_port, target_port) = if current_is_a {
-                    (&mate.a, &mate.b, current_port, other_port)
-                } else {
-                    (&mate.a, &mate.b, other_port, current_port)
-                };
-                match validate_mate_clearance(
+            }
+        }
+        let Some(a_frame) = a_port.frame.as_ref() else {
+            mate_result.warning = Some(format!(
+                "Assembly '{}' mate '{}' cannot be solved: port '{}.{}' is missing frame.",
+                assembly_source.assembly.assembly_id,
+                mate.mate_id,
+                mate.a.instance_id,
+                mate.a.port_id
+            ));
+            mate_results.push(mate_result);
+            continue;
+        };
+        let Some(b_frame) = b_port.frame.as_ref() else {
+            mate_result.warning = Some(format!(
+                "Assembly '{}' mate '{}' cannot be solved: port '{}.{}' is missing frame.",
+                assembly_source.assembly.assembly_id,
+                mate.mate_id,
+                mate.b.instance_id,
+                mate.b.port_id
+            ));
+            mate_results.push(mate_result);
+            continue;
+        };
+        let a_frame = match placement_frame_from_contract(
+            a_frame,
+            &format!("port '{}.{}'", mate.a.instance_id, mate.a.port_id),
+        ) {
+            Ok(frame) => frame,
+            Err(message) => {
+                mate_result.warning = Some(with_mate_context(
                     &assembly_source.assembly.assembly_id,
                     mate,
-                    source_ref,
-                    target_ref,
-                    source_port,
-                    target_port,
-                ) {
-                    Ok((required_clearance, available_clearance)) => {
-                        mate_result.required_clearance = required_clearance;
-                        mate_result.available_clearance = available_clearance;
-                    }
-                    Err((required_clearance, available_clearance, warning)) => {
-                        mate_result.required_clearance = required_clearance;
-                        mate_result.available_clearance = available_clearance;
-                        mate_result.warning = Some(warning);
-                        mate_results.push(mate_result);
-                        continue;
-                    }
-                }
-                let Some(current_frame) = current_port.frame.as_ref() else {
-                    mate_result.warning = Some(format!(
-                        "Assembly '{}' mate '{}' cannot be solved: port '{}.{}' is missing frame.",
-                        assembly_source.assembly.assembly_id,
-                        mate.mate_id,
-                        current_ref.instance_id,
-                        current_ref.port_id
-                    ));
-                    mate_results.push(mate_result);
-                    continue;
-                };
-                let Some(other_frame) = other_port.frame.as_ref() else {
-                    mate_result.warning = Some(format!(
-                        "Assembly '{}' mate '{}' cannot be solved: port '{}.{}' is missing frame.",
-                        assembly_source.assembly.assembly_id,
-                        mate.mate_id,
-                        other_ref.instance_id,
-                        other_ref.port_id
-                    ));
-                    mate_results.push(mate_result);
-                    continue;
-                };
-                let current_frame = match RigidFrame::from_port_frame(
-                    current_frame,
-                    &format!("port '{}.{}'", current_ref.instance_id, current_ref.port_id),
-                ) {
-                    Ok(frame) => frame,
-                    Err(message) => {
-                        mate_result.warning = Some(format!(
-                            "Assembly '{}' mate '{}' cannot be solved: {}",
-                            assembly_source.assembly.assembly_id, mate.mate_id, message
-                        ));
-                        mate_results.push(mate_result);
-                        continue;
-                    }
-                };
-                let other_frame = match RigidFrame::from_port_frame(
-                    other_frame,
-                    &format!("port '{}.{}'", other_ref.instance_id, other_ref.port_id),
-                ) {
-                    Ok(frame) => frame,
-                    Err(message) => {
-                        mate_result.warning = Some(format!(
-                            "Assembly '{}' mate '{}' cannot be solved: {}",
-                            assembly_source.assembly.assembly_id, mate.mate_id, message
-                        ));
-                        mate_results.push(mate_result);
-                        continue;
-                    }
-                };
-                let derived_other = current_placement
-                    .compose(&current_frame)
-                    .compose(&other_frame.inverse());
-                if let Some(existing_other) = placements.get(&other_ref.instance_id) {
-                    if !existing_other.approx_eq(&derived_other) {
-                        mate_result.warning = Some(format!(
-                            "Assembly '{}' mate '{}' cannot be solved: port frames conflict with existing placement for instance '{}'.",
-                            assembly_source.assembly.assembly_id,
-                            mate.mate_id,
-                            other_ref.instance_id
-                        ));
-                    } else {
-                        mate_result.solved = true;
-                    }
-                    mate_results.push(mate_result);
-                    continue;
-                }
-                placements.insert(other_ref.instance_id.clone(), derived_other);
-                queue.push_back(other_ref.instance_id.clone());
-                mate_result.solved = true;
+                    message,
+                ));
                 mate_results.push(mate_result);
+                continue;
+            }
+        };
+        let b_frame = match placement_frame_from_contract(
+            b_frame,
+            &format!("port '{}.{}'", mate.b.instance_id, mate.b.port_id),
+        ) {
+            Ok(frame) => frame,
+            Err(message) => {
+                mate_result.warning = Some(with_mate_context(
+                    &assembly_source.assembly.assembly_id,
+                    mate,
+                    message,
+                ));
+                mate_results.push(mate_result);
+                continue;
+            }
+        };
+
+        let result_index = mate_results.len();
+        mate_results.push(mate_result);
+        graph_result_indices.push(result_index);
+        graph_mates.push(PlacementGraphMate {
+            mate_id: mate.mate_id.clone(),
+            a_instance_id: mate.a.instance_id.clone(),
+            a_port_id: mate.a.port_id.clone(),
+            a_port_frame: a_frame,
+            b_instance_id: mate.b.instance_id.clone(),
+            b_port_id: mate.b.port_id.clone(),
+            b_port_frame: b_frame,
+        });
+    }
+
+    let mut adjacency = BTreeMap::<String, BTreeSet<String>>::new();
+    for instance_id in &instance_ids {
+        adjacency.entry(instance_id.clone()).or_default();
+    }
+    for mate in &graph_mates {
+        adjacency
+            .entry(mate.a_instance_id.clone())
+            .or_default()
+            .insert(mate.b_instance_id.clone());
+        adjacency
+            .entry(mate.b_instance_id.clone())
+            .or_default()
+            .insert(mate.a_instance_id.clone());
+    }
+    let mut roots = BTreeMap::new();
+    let mut visited = BTreeSet::new();
+    for component in &assembly_source.components {
+        let instance_id = &component.instance_id;
+        if !visited.insert(instance_id.clone()) {
+            continue;
+        }
+        roots.insert(instance_id.clone(), PlacementFrame::identity());
+        let mut queue = VecDeque::from([instance_id.clone()]);
+        while let Some(current) = queue.pop_front() {
+            for neighbour in adjacency.get(&current).into_iter().flatten() {
+                if visited.insert(neighbour.clone()) {
+                    queue.push_back(neighbour.clone());
+                }
             }
         }
     }
 
-    let placement_frames = assembly_source
-        .components
-        .iter()
-        .filter_map(|component| {
-            placements
-                .remove(&component.instance_id)
-                .map(|placement| (component.instance_id.clone(), placement.into_port_frame()))
-        })
+    let graph_label = format!("assembly '{}'", assembly_source.assembly.assembly_id);
+    let placements = match solve_placement_graph(
+        instance_ids.iter().cloned(),
+        roots,
+        &graph_mates,
+        &graph_label,
+    ) {
+        Ok(solution) => {
+            let solved = solution
+                .solved_mate_ids
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            for (mate, result_index) in graph_mates.iter().zip(graph_result_indices.iter()) {
+                mate_results[*result_index].solved = solved.contains(&mate.mate_id);
+            }
+            solution.placements
+        }
+        Err(error) => {
+            for result_index in graph_result_indices {
+                mate_results[result_index].warning = Some(error.message.clone());
+            }
+            instance_ids
+                .iter()
+                .cloned()
+                .map(|instance_id| (instance_id, PlacementFrame::identity()))
+                .collect()
+        }
+    };
+
+    let placement_frames = placements
+        .into_iter()
+        .map(|(instance_id, placement)| (instance_id, port_frame_from_placement(placement)))
         .collect::<BTreeMap<_, _>>();
 
     AssemblySolveResult {
@@ -2107,41 +2062,22 @@ fn validate_mate_clearance(
             ));
         }
     };
-    if let Some(required_clearance) = required_clearance {
-        let Some(available_clearance) = target_clearance else {
-            return Err((
-                Some(required_clearance),
-                None,
-                format!(
-                    "Assembly '{}' mate '{}' cannot be solved: target port '{}.{}' is missing numeric clearance for required clearance {}.",
-                    assembly_id,
-                    mate.mate_id,
-                    target_ref.instance_id,
-                    target_ref.port_id,
-                    required_clearance
-                ),
-            ));
-        };
-        if available_clearance + FRAME_EPSILON < required_clearance {
-            return Err((
-                Some(required_clearance),
-                Some(available_clearance),
-                format!(
-                    "Assembly '{}' mate '{}' cannot be solved: target port '{}.{}' clearance {} is below required clearance {} from source port '{}.{}'.",
-                    assembly_id,
-                    mate.mate_id,
-                    target_ref.instance_id,
-                    target_ref.port_id,
-                    available_clearance,
-                    required_clearance,
-                    source_ref.instance_id,
-                    source_ref.port_id
-                ),
-            ));
-        }
-        return Ok((Some(required_clearance), Some(available_clearance)));
+    if let Err(error) = validate_clearance(
+        required_clearance,
+        target_clearance,
+        &format!(
+            "Assembly '{}' mate '{}' target port '{}.{}' from source port '{}.{}'",
+            assembly_id,
+            mate.mate_id,
+            target_ref.instance_id,
+            target_ref.port_id,
+            source_ref.instance_id,
+            source_ref.port_id
+        ),
+    ) {
+        return Err((required_clearance, target_clearance, error.message));
     }
-    Ok((None, None))
+    Ok((required_clearance, target_clearance))
 }
 
 fn numeric_component_interface_param(
@@ -2625,6 +2561,7 @@ mod tests {
             component_dependency_lock: None,
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: "generated-abc123".to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -2636,7 +2573,7 @@ mod tests {
             fcstd_path: "/tmp/model.FCStd".to_string(),
             manifest_path: manifest_path.to_string(),
             macro_path: Some("/tmp/model.py".to_string()),
-            preview_stl_path: "/tmp/model.stl".to_string(),
+            model_stl_path: "/tmp/model.stl".to_string(),
             viewer_assets: Vec::new(),
             edge_targets: vec![ViewerEdgeTarget {
                 target_id: "alias-edge".to_string(),
@@ -3024,6 +2961,128 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("clearance"));
+    }
+
+    #[test]
+    fn solve_installed_assembly_reports_redundant_mate_conflict_from_shared_graph() {
+        let mut source = test_assembly_source(Some(PortFrame {
+            origin: [-10.0, 0.0, 5.0],
+            x_axis: [-1.0, 0.0, 0.0],
+            y_axis: [0.0, 1.0, 0.0],
+            z_axis: [0.0, 0.0, -1.0],
+        }));
+        source.components[1]
+            .installed_source
+            .component
+            .ports
+            .push(test_port(
+                "shifted_slot",
+                Some(PortFrame {
+                    origin: [-8.0, 0.0, 5.0],
+                    x_axis: [-1.0, 0.0, 0.0],
+                    y_axis: [0.0, 1.0, 0.0],
+                    z_axis: [0.0, 0.0, -1.0],
+                }),
+            ));
+        source.assembly.mates.push(AssemblyMate {
+            mate_id: "rail-into-shifted-cage".to_string(),
+            type_id: "linear_insert".to_string(),
+            a: PortReference {
+                instance_id: "rail".to_string(),
+                port_id: "dovetail_rail".to_string(),
+            },
+            b: PortReference {
+                instance_id: "cage".to_string(),
+                port_id: "shifted_slot".to_string(),
+            },
+            params: Default::default(),
+        });
+
+        let solve = solve_installed_assembly(&source);
+
+        assert!(solve.mate_results.iter().all(|result| !result.solved));
+        let warning = solve.mate_results[0]
+            .warning
+            .as_deref()
+            .expect("conflict warning");
+        assert!(
+            warning.contains("conflicts for instance `cage`"),
+            "{warning}"
+        );
+        assert!(warning.contains("rail-into-cage"), "{warning}");
+        assert!(warning.contains("rail-into-shifted-cage"), "{warning}");
+        assert!(warning.contains("produced frame"), "{warning}");
+    }
+
+    #[test]
+    fn installed_and_inline_component_forms_solve_identical_placement_frames() {
+        let source = test_assembly_source(Some(PortFrame {
+            origin: [-10.0, 0.0, 5.0],
+            x_axis: [-1.0, 0.0, 0.0],
+            y_axis: [0.0, 1.0, 0.0],
+            z_axis: [0.0, 0.0, -1.0],
+        }));
+        let installed = solve_installed_assembly(&source);
+        let installed_frame = installed
+            .placement_frames
+            .get("cage")
+            .expect("installed cage frame");
+        let extracted = crate::component_extract::extract_component(
+            &crate::component_extract::ComponentExtractRequest {
+                source: r#"
+                    (model
+                      (part cage-template
+                        (ports (port dovetail_slot
+                          :type "mechanical.dovetail.rail.v1"
+                          :frame (frame :origin '(-10 0 5)
+                            :x-axis '(-1 0 0) :z-axis '(0 0 -1))))
+                        (box 1 1 1)))
+                "#
+                .to_string(),
+                part_key: "cage-template".to_string(),
+                component_name: Some("cage".to_string()),
+                description: None,
+                tags: Vec::new(),
+                thread_id: None,
+                message_id: None,
+            },
+        )
+        .expect("extract inline cage");
+        let inline_source = format!(
+            r#"{}
+            (model
+              (part rail
+                (ports (port dovetail_rail :type "mechanical.dovetail.rail.v1"
+                  :frame (frame :origin '(10 0 5)
+                    :x-axis '(1 0 0) :z-axis '(0 0 1))))
+                (box 1 1 1))
+              (part cage
+                (place-component (cage) :from dovetail_slot
+                  :to (port-ref rail dovetail_rail) :normal aligned)))
+        "#,
+            extracted.component_source
+        );
+        let inline = crate::ecky_scheme::compiler::inspect_component_placement_evidence(
+            &inline_source,
+            &BTreeMap::new(),
+        )
+        .expect("inline evidence");
+        let inline_frame = &inline[0].placement_frame;
+
+        assert_eq!(installed_frame.origin, inline_frame.origin);
+        assert_eq!(installed_frame.x_axis, inline_frame.x_axis);
+        assert_eq!(installed_frame.y_axis, inline_frame.y_axis);
+        assert_eq!(installed_frame.z_axis, inline_frame.z_axis);
+        assert_eq!(
+            serde_json::to_vec(installed_frame).expect("installed frame json"),
+            serde_json::to_vec(&PortFrame {
+                origin: inline_frame.origin,
+                x_axis: inline_frame.x_axis,
+                y_axis: inline_frame.y_axis,
+                z_axis: inline_frame.z_axis,
+            })
+            .expect("inline frame json")
+        );
     }
 
     #[test]

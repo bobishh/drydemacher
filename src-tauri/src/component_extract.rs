@@ -44,6 +44,16 @@ pub struct ComponentHeaderParam {
     pub label: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentHeaderPort {
+    pub port_id: String,
+    pub type_id: String,
+    /// Complete authored `(port ...)` clause. Keeps frame and named fit
+    /// metadata without freezing it to evaluated world coordinates.
+    pub port_source: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComponentProvenance {
@@ -68,6 +78,8 @@ pub struct ComponentHeader {
     /// Signature keys that participate in a `:relations` constraint of the
     /// source model — the fit-critical knobs of this component.
     pub interfaces: Vec<String>,
+    #[serde(default)]
+    pub ports: Vec<ComponentHeaderPort>,
 }
 
 #[derive(Clone, Debug)]
@@ -111,7 +123,23 @@ pub fn extract_component(request: &ComponentExtractRequest) -> AppResult<Extract
         ))
     })?;
 
-    let free = collect_free_variables(&body, &BTreeSet::new());
+    let port_clauses = scan
+        .part_items
+        .iter()
+        .skip(2)
+        .filter(|item| {
+            expr_list_items(item, "part clause")
+                .ok()
+                .and_then(|items| items.first().and_then(expr_head_name))
+                .as_deref()
+                == Some("ports")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut free = collect_free_variables(&body, &BTreeSet::new());
+    for clause in &port_clauses {
+        free.extend(port_clause_free_variables(clause)?);
+    }
     let params_by_key: BTreeMap<&String, &String> =
         scan.param_entries.iter().map(|(k, v)| (k, v)).collect();
 
@@ -158,10 +186,15 @@ pub fn extract_component(request: &ComponentExtractRequest) -> AppResult<Extract
         )));
     }
 
+    let port_source = port_clauses
+        .iter()
+        .map(|clause| format!("  {clause}\n"))
+        .collect::<String>();
     let component_source = format!(
-        "(define-component {}\n  ({})\n  {})",
+        "(define-component {}\n  ({})\n{}  {})",
         name,
         signature_entries.join("\n   "),
+        port_source,
         body
     );
 
@@ -182,6 +215,7 @@ pub fn extract_component(request: &ComponentExtractRequest) -> AppResult<Extract
             source_digest: format!("sha256:{:x}", Sha256::digest(request.source.as_bytes())),
         },
         interfaces,
+        ports: component_header_ports(&port_clauses)?,
     };
 
     Ok(ExtractedComponent {
@@ -189,6 +223,129 @@ pub fn extract_component(request: &ComponentExtractRequest) -> AppResult<Extract
         component_source,
         header,
     })
+}
+
+fn port_clause_free_variables(clause: &ExprKind) -> AppResult<BTreeSet<String>> {
+    let mut free = BTreeSet::new();
+    let items = expr_list_items(clause, "ports clause")
+        .map_err(|error| AppError::parse(error.to_string()))?;
+    for port_expr in items.iter().skip(1) {
+        let port_items = expr_list_items(port_expr, "port clause")
+            .map_err(|error| AppError::parse(error.to_string()))?;
+        let mut index = 2usize;
+        while index < port_items.len() {
+            let Some(keyword) = extract_keyword_name(&port_items[index]) else {
+                index += 1;
+                continue;
+            };
+            let Some(value) = port_items.get(index + 1) else {
+                break;
+            };
+            match keyword.as_str() {
+                "frame" => {
+                    let frame_items = expr_list_items(value, "port frame")
+                        .map_err(|error| AppError::parse(error.to_string()))?;
+                    for coordinate_value in frame_items.iter().skip(2).step_by(2) {
+                        free.extend(collect_free_variables(coordinate_value, &BTreeSet::new()));
+                    }
+                }
+                "params" => {
+                    let params = expr_list_items(value, "port params")
+                        .map_err(|error| AppError::parse(error.to_string()))?;
+                    for param in params {
+                        let pair = expr_list_items(&param, "port param")
+                            .map_err(|error| AppError::parse(error.to_string()))?;
+                        if let Some(param_value) = pair.get(1) {
+                            free.extend(collect_free_variables(param_value, &BTreeSet::new()));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            index += 2;
+        }
+    }
+    Ok(free)
+}
+
+fn component_header_ports(clauses: &[ExprKind]) -> AppResult<Vec<ComponentHeaderPort>> {
+    let mut ports = Vec::new();
+    let mut seen = BTreeSet::new();
+    for clause in clauses {
+        let items = expr_list_items(clause, "ports clause")
+            .map_err(|error| AppError::parse(error.to_string()))?;
+        for port_expr in items.iter().skip(1) {
+            let port_items = expr_list_items(port_expr, "port clause")
+                .map_err(|error| AppError::parse(error.to_string()))?;
+            if port_items.first().and_then(expr_head_name).as_deref() != Some("port")
+                || port_items.len() < 2
+            {
+                return Err(AppError::parse(
+                    "Extracted ports must use `(port id :type ... :frame ...)`.",
+                ));
+            }
+            let port_id = expr_identifier(&port_items[1])
+                .ok_or_else(|| AppError::parse("Extracted port id must be a literal symbol."))?;
+            if !seen.insert(port_id.clone()) {
+                return Err(AppError::validation(format!(
+                    "Extracted part defines port `{port_id}` more than once."
+                )));
+            }
+            let mut type_id = None;
+            let mut index = 2usize;
+            while index < port_items.len() {
+                let keyword = extract_keyword_name(&port_items[index]).ok_or_else(|| {
+                    AppError::parse(format!(
+                        "Extracted port `{port_id}` expects keyword options."
+                    ))
+                })?;
+                let value = port_items.get(index + 1).ok_or_else(|| {
+                    AppError::parse(format!(
+                        "Extracted port `{port_id}` option `:{keyword}` needs a value."
+                    ))
+                })?;
+                if keyword == "type" {
+                    type_id = Some(extract_symbol_or_text(value).ok_or_else(|| {
+                        AppError::parse(format!(
+                            "Extracted port `{port_id}` type must be literal text or symbol."
+                        ))
+                    })?);
+                }
+                index += 2;
+            }
+            ports.push(ComponentHeaderPort {
+                port_id: port_id.clone(),
+                type_id: type_id.ok_or_else(|| {
+                    AppError::parse(format!("Extracted port `{port_id}` requires `:type`."))
+                })?,
+                port_source: port_expr.to_string(),
+            });
+        }
+    }
+    Ok(ports)
+}
+
+fn extract_keyword_name(expr: &ExprKind) -> Option<String> {
+    let ExprKind::Atom(atom) = expr else {
+        return None;
+    };
+    match &atom.syn.ty {
+        TokenType::Keyword(name) | TokenType::Identifier(name) => {
+            name.to_string().strip_prefix(':').map(str::to_string)
+        }
+        _ => None,
+    }
+}
+
+fn extract_symbol_or_text(expr: &ExprKind) -> Option<String> {
+    let ExprKind::Atom(atom) = expr else {
+        return None;
+    };
+    match &atom.syn.ty {
+        TokenType::Identifier(value) => Some(value.to_string()),
+        TokenType::StringLiteral(value) => Some(value.to_string()),
+        _ => None,
+    }
 }
 
 fn validate_component_name(name: &str) -> AppResult<()> {
@@ -602,5 +759,60 @@ mod tests {
         let json = serde_json::to_value(&extracted.header).expect("serialize");
         assert!(json["provenance"]["sourceDigest"].is_string());
         assert_eq!(json["name"], "pin");
+    }
+
+    #[test]
+    fn extraction_preserves_local_port_source_and_compact_header() {
+        let source = r#"
+            (model
+              (params (number clearance 0.3))
+              (part bracket
+                (ports
+                  (port mount
+                    :type "mechanical.mount.v1"
+                    :params ((clearance clearance))
+                    :frame (frame
+                      :origin '(0 0 0)
+                      :x-axis '(1 0 0)
+                      :z-axis '(0 0 1))))
+                (box 10 clearance 4)))
+        "#;
+        let extracted = extract_component(&request(source, "bracket")).expect("extract port");
+
+        assert!(extracted.component_source.contains("(ports"));
+        assert!(extracted
+            .component_source
+            .contains(":params ((clearance clearance))"));
+        assert_eq!(extracted.header.ports.len(), 1);
+        assert_eq!(extracted.header.ports[0].port_id, "mount");
+        assert_eq!(extracted.header.ports[0].type_id, "mechanical.mount.v1");
+        assert!(extracted.header.ports[0].port_source.contains(":frame"));
+
+        let wrapped = format!(
+            "{}\n(model (part demo ({})))",
+            extracted.component_source, extracted.name
+        );
+        compile_to_core_program(&wrapped)
+            .unwrap_or_else(|error| panic!("extracted port source failed: {error}\n{wrapped}"));
+    }
+
+    #[test]
+    fn extraction_rejects_port_frame_bound_to_parent_world_value() {
+        let source = r#"
+            (model
+              (let ((world-origin (list 10 20 30)))
+                (part bracket
+                  (ports
+                    (port mount :type "mechanical.mount.v1"
+                      :frame (frame
+                        :origin world-origin
+                        :x-axis '(1 0 0)
+                        :z-axis '(0 0 1))))
+                  (box 10 4 2))))
+        "#;
+        let error = extract_component(&request(source, "bracket"))
+            .expect_err("parent/world port binding blocks extraction");
+        assert!(error.message.contains("world-origin"), "{}", error.message);
+        assert!(error.message.contains("blocked"), "{}", error.message);
     }
 }

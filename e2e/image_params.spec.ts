@@ -94,7 +94,7 @@ endsolid mock
             contentHash: 'mock-hash',
             fcstdPath: '/mock.FCStd',
             manifestPath: '/mock/manifest.json',
-            previewStlPath: '/mock.stl',
+            modelStlPath: '/mock.stl',
             viewerAssets: [],
             calloutAnchors: [],
             measurementGuides: [],
@@ -130,7 +130,7 @@ endsolid mock
             issues: [],
             metrics: {
               partCount: 1,
-              previewStlSizeBytes: 1024,
+              modelStlSizeBytes: 1024,
               totalVolume: 1000,
               totalArea: 500,
               bbox: { xMin: 0, yMin: 0, zMin: 0, xMax: 10, yMax: 10, zMax: 10 },

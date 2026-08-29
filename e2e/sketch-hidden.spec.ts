@@ -49,7 +49,7 @@ endsolid mock
         fcstdPath: null,
         manifestPath: '/mock/manifest.json',
         macroPath: '/mock/model.ecky',
-        previewStlPath: '/mock/preview.stl',
+        modelStlPath: '/mock/model.stl',
         viewerAssets: [],
       };
       const modelManifest = {
@@ -179,7 +179,7 @@ endsolid mock
               ...artifactBundle,
               modelId: 'stale-sketch-preview',
               contentHash: 'stale-sketch-preview-hash',
-              previewStlPath: '/mock/saved-sketch-preview.stl',
+              modelStlPath: '/mock/saved-sketch-model.stl',
             },
             sketchDocument: null,
           };

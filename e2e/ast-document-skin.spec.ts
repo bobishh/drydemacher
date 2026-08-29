@@ -138,7 +138,7 @@ function astDocumentSkinMockScript() {
         fcstdPath: '/mock.FCStd',
         manifestPath: '/mock/manifest.json',
         macroPath: '/mock.py',
-        previewStlPath: '/mock.stl',
+        modelStlPath: '/mock.stl',
         viewerAssets: [],
         calloutAnchors: [],
         measurementGuides: [],
@@ -177,7 +177,7 @@ function astDocumentSkinMockScript() {
         issues: [],
         metrics: {
           partCount: 1,
-          previewStlSizeBytes: 1024,
+          modelStlSizeBytes: 1024,
           totalVolume: 1000,
           totalArea: 500,
           bbox: { xMin: 0, yMin: 0, zMin: 0, xMax: 10, yMax: 10, zMax: 10 },

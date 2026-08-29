@@ -1,3 +1,7 @@
+fixture: daughter-flower-airtag-bracelet
+  part: daughter-flower-body key: sha256:eecf6c24c1bfef179f44fb305be11c502a4208502b09ef274206a8f288c8ba78
+  part: daughter-flower-center-lid key: sha256:e25d49bc932446068563adb4726ef9e5ef8f6cb6869afe2a3a251963b98c46e3
+  part: daughter-tpu-breakaway-strap key: sha256:6f955871f5c6931b6a66fb6238a6712cb48beb662c6e334ae3dbb7bdb1285bda
 fixture: dovetail-box
   part: dovetail_box_body key: sha256:598e32158e8ced00e15471ac305eb2a5b8364f8bdd2aa30d251fc62467f53653
   part: dovetail_box_lid key: sha256:399349c6a5921ed087818c9360c41107b750bbf84befd0e1c5558f5096d32795

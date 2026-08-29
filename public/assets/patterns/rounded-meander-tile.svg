@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="256" height="256" viewBox="0 0 256 256">
+  <rect width="256" height="256" fill="#f5f0df"/>
+  <defs>
+    <g id="meander" fill="none" stroke="#091a33" stroke-width="28" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M 0,-44 H 104 V -104 H 44 V -76"/>
+      <path d="M 44,0 V 104 H 104 V 44 H 76"/>
+      <path d="M 0,44 H -104 V 104 H -44 V 76"/>
+      <path d="M -44,0 V -104 H -104 V -44 H -76"/>
+    </g>
+    <g id="checker" fill="#091a33">
+      <rect x="-15" y="-15" width="11" height="11" rx="3"/>
+      <rect x="4" y="-15" width="11" height="11" rx="3"/>
+      <rect x="-15" y="4" width="11" height="11" rx="3"/>
+      <rect x="4" y="4" width="11" height="11" rx="3"/>
+    </g>
+  </defs>
+  <g>
+    <g transform="translate(128 128)"><use xlink:href="#meander"/><use xlink:href="#checker"/></g>
+  </g>
+</svg>

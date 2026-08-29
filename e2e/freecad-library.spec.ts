@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 
-type FreecadLibraryMockMode = 'ok' | 'mesh' | 'searchError' | 'importError' | 'pending';
+type FreecadLibraryMockMode = 'ok' | 'paged' | 'unconfigured' | 'mesh' | 'searchError' | 'importError' | 'pending' | 'sourcePending' | 'pickerError';
 
 const importedBundle = {
   modelId: 'imported-step-freecad-library-608',
@@ -9,7 +9,7 @@ const importedBundle = {
   artifactVersion: 1,
   fcstdPath: '/mock/runtime/model.FCStd',
   manifestPath: '/mock/runtime/manifest.json',
-  previewStlPath: '/mock/runtime/preview.stl',
+  modelStlPath: '/mock/runtime/model.stl',
   exportArtifacts: [{ label: 'STEP', format: 'step', path: '/mock/runtime/model.step', role: 'primary' }],
 };
 
@@ -46,7 +46,7 @@ const importedMeshBundle = {
   artifactVersion: 1,
   fcstdPath: '',
   manifestPath: '/mock/runtime/mesh-manifest.json',
-  previewStlPath: '/mock/freecad-library/Printable/Fan Guard.stl',
+  modelStlPath: '/mock/freecad-library/Printable/Fan Guard.stl',
   viewerAssets: [
     {
       partId: 'mesh-body',
@@ -109,12 +109,14 @@ async function installFreecadLibraryMocks(page: Page, mode: FreecadLibraryMockMo
     mockWindow.__SAVED_CONFIG__ = null;
     mockWindow.__IMPORT_CALLS__ = [];
     mockWindow.__ADDED_IMPORTED__ = null;
+    mockWindow.__RENDER_CALLS__ = [];
+    mockWindow.__IMPORTED_APPLY_CALLS__ = [];
     mockWindow.__PACKAGE_HEADERS__ = [];
     mockWindow.__CONFIG__ = {
       engines: [],
       selectedEngineId: '',
       freecadCmd: '',
-      freecadLibraryRoots: mockMode === 'ok' || mockMode === 'mesh' || mockMode === 'pending'
+      freecadLibraryRoots: mockMode === 'ok' || mockMode === 'paged' || mockMode === 'mesh' || mockMode === 'pending' || mockMode === 'sourcePending'
         ? ['/mock/freecad-library']
         : [],
       assets: [],
@@ -185,6 +187,16 @@ async function installFreecadLibraryMocks(page: Page, mode: FreecadLibraryMockMo
         };
       }
       if (cmd === 'get_history') return [];
+      if (cmd === 'get_project_source') {
+        if (mockMode === 'sourcePending') await delay(600);
+        return {
+          threadId: args?.threadId,
+          folder: `/mock/projects/${args?.threadId}`,
+          sourcePath: `/mock/projects/${args?.threadId}/model.ecky`,
+          source: '',
+          sourceDigest: 'empty',
+        };
+      }
       if (cmd === 'get_last_design') return null;
       if (cmd === 'get_default_macro') return '';
       if (cmd === 'check_freecad') return true;
@@ -206,7 +218,10 @@ async function installFreecadLibraryMocks(page: Page, mode: FreecadLibraryMockMo
         };
       }
       if (cmd === 'list_installed_component_package_headers') return mockWindow.__PACKAGE_HEADERS__;
-      if (cmd === 'plugin:dialog|open') return '/mock/freecad-library';
+      if (cmd === 'plugin:dialog|open') {
+        if (mockMode === 'pickerError') throw new Error('raw folder picker failure');
+        return '/mock/freecad-library';
+      }
       if (cmd === 'search_freecad_library') {
         if (mockMode === 'searchError') {
           throw {
@@ -214,6 +229,20 @@ async function installFreecadLibraryMocks(page: Page, mode: FreecadLibraryMockMo
             message: 'FreeCAD library scan failed',
             details: 'raw root missing: /mock/freecad-library',
           };
+        }
+        if (mockMode === 'paged') {
+          const offset = args?.request?.offset ?? 0;
+          const count = offset === 0 ? 101 : 1;
+          return Array.from({ length: count }, (_, index) => {
+            const number = offset + index + 1;
+            return {
+              ...item,
+              id: `Mechanical Parts/Part-${number}`,
+              name: `Nested Part ${number}`,
+              relativePath: `Mechanical Parts/Deep/Part-${number}.step`,
+              importPath: `/mock/freecad-library/Mechanical Parts/Deep/Part-${number}.step`,
+            };
+          });
         }
         return mockMode === 'mesh' ? [meshItem] : [item];
       }
@@ -236,6 +265,30 @@ async function installFreecadLibraryMocks(page: Page, mode: FreecadLibraryMockMo
       }
       if (cmd === 'save_model_manifest') return null;
       if (cmd === 'save_last_design') return null;
+      if (cmd === 'render_model') {
+        mockWindow.__RENDER_CALLS__.push(args);
+        return bundle;
+      }
+      if (cmd === 'apply_imported_model') {
+        mockWindow.__IMPORTED_APPLY_CALLS__.push(args);
+        return bundle;
+      }
+      if (cmd === 'open_project_in_editor') {
+        mockWindow.__OPENED_SOURCE__ = args;
+        return {
+          slug: '608-bearing',
+          folder: '/mock/projects/608-bearing',
+          file: '/mock/projects/608-bearing/model.ecky',
+        };
+      }
+      if (cmd === 'open_imported_cad_source') {
+        mockWindow.__OPENED_CAD__ = args;
+        return {
+          slug: '608-bearing',
+          folder: '/mock/projects/608-bearing',
+          file: '/mock/projects/608-bearing/608.step',
+        };
+      }
       return null;
     };
   }, {
@@ -257,6 +310,7 @@ test.describe('FreeCAD library catalog', () => {
     await page.getByRole('button', { name: 'FREECAD PARTS' }).click();
 
     await expect(page.getByText('LOCAL SOURCE')).toBeVisible();
+    await expect(page.getByText('608 Bearing')).toBeVisible();
     await page.getByPlaceholder('Search library...').fill('608 bearing');
     await page.getByRole('button', { name: 'SEARCH', exact: true }).click();
 
@@ -270,10 +324,67 @@ test.describe('FreeCAD library catalog', () => {
     await expect
       .poll(() => page.evaluate(() => (window as any).__ADDED_IMPORTED__?.title))
       .toBe('608 Bearing');
+
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'CODE' }).click();
+    const codeModal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR:' });
+    await expect(codeModal.getByRole('tab', { name: 'SUMMARY', exact: true })).toHaveAttribute('aria-selected', 'true');
+    await expect(codeModal.getByRole('tab', { name: 'COMPONENT', exact: true })).toBeVisible();
+    await expect(codeModal).toContainText('IMPORTED CAD EVIDENCE — READ ONLY');
+    await expect(codeModal).toContainText('IMPORTED STEP — READ ONLY');
+    await expect(codeModal).toContainText('/mock/freecad-library/Mechanical Parts/Bearings/608.step');
+    await expect(codeModal.getByRole('button', { name: 'APPLY', exact: true })).toHaveCount(0);
+    await expect(codeModal.getByRole('button', { name: 'COMMIT VERSION' })).toHaveCount(0);
+    await expect(codeModal.getByRole('button', { name: 'TRANSLATE TO ECKY' })).toHaveCount(0);
+    await expect(codeModal.getByRole('button', { name: 'OPEN FILE' })).toHaveCount(0);
+    await codeModal.getByRole('button', { name: 'OPEN CAD' }).click();
+    await expect(codeModal.getByText('/mock/projects/608-bearing/608.step')).toBeVisible();
+    await expect(page.evaluate(() => (window as any).__OPENED_CAD__?.messageId)).resolves.toBe('msg-imported-608');
+    await codeModal.getByRole('tab', { name: 'COMPONENT', exact: true }).click();
+    await expect(codeModal).toContainText('FREECAD-COMPONENT — SOURCE IDENTITY AND BINDINGS');
+    await expect(codeModal.locator('.code-container')).toContainText('(freecad-component');
+    await expect(codeModal.locator('.code-container')).toContainText(':source-kind :step');
+    await codeModal.getByRole('button', { name: 'APPLY', exact: true }).click();
+    await expect.poll(() => page.evaluate(() => (window as any).__IMPORTED_APPLY_CALLS__.length)).toBe(1);
+    await expect(page.evaluate(() => (window as any).__RENDER_CALLS__.length)).resolves.toBe(0);
+    await expect(codeModal).not.toContainText('IMPORTED STEP — READ ONLY');
+    await codeModal.getByRole('tab', { name: 'SUMMARY', exact: true }).click();
+    await expect(codeModal).toContainText('IMPORTED STEP — READ ONLY');
+  });
+
+  test('Given more than one catalog page When library opens Then next page reaches later nested models', async ({ page }) => {
+    await installFreecadLibraryMocks(page, 'paged');
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'LIBRARY' }).click();
+    await page.getByRole('button', { name: 'FREECAD PARTS' }).click();
+    await expect(page.getByText('Nested Part 100')).toBeVisible();
+    await page.getByRole('button', { name: 'NEXT' }).click();
+    await expect(page.getByText('Nested Part 101')).toBeVisible();
+    await expect(page.getByText('PAGE 2')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'NEXT' })).toBeDisabled();
+    await page.getByRole('button', { name: 'PREVIOUS' }).click();
+    await expect(page.getByText('Nested Part 1', { exact: true })).toBeVisible();
+  });
+
+  test('Given imported STEP source read is pending When CODE opens Then imported summary appears immediately', async ({ page }) => {
+    await installFreecadLibraryMocks(page, 'sourcePending');
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'LIBRARY' }).click();
+    await page.getByRole('button', { name: 'FREECAD PARTS' }).click();
+    await page.getByRole('button', { name: 'IMPORT 608 Bearing' }).click();
+    await expect.poll(() => page.evaluate(() => (window as any).__ADDED_IMPORTED__?.title)).toBe('608 Bearing');
+
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'CODE' }).click();
+    const codeModal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR:' });
+    await expect(codeModal).toBeVisible({ timeout: 250 });
+    await expect(codeModal).toContainText('IMPORTED CAD EVIDENCE — READ ONLY');
   });
 
   test('Given no configured library When user picks folder Then config persists root and search works', async ({ page }) => {
-    await installFreecadLibraryMocks(page, 'searchError');
+    await installFreecadLibraryMocks(page, 'unconfigured');
     await page.goto('/');
     await expect(page.locator('.boot-overlay')).toHaveCount(0);
 
@@ -284,6 +395,21 @@ test.describe('FreeCAD library catalog', () => {
     await expect(page.evaluate(() => (window as any).__SAVED_CONFIG__?.freecadLibraryRoots)).resolves.toEqual([
       '/mock/freecad-library',
     ]);
+    await expect(page.getByText('/mock/freecad-library')).toBeVisible();
+    await expect(page.getByText('608 Bearing')).toBeVisible();
+  });
+
+  test('Given folder picker fails When user sets local source Then raw error stays visible', async ({ page }) => {
+    await installFreecadLibraryMocks(page, 'pickerError');
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'LIBRARY' }).click();
+    await page.getByRole('button', { name: 'FREECAD PARTS' }).click();
+    await page.getByRole('button', { name: 'SET FOLDER' }).click();
+
+    await expect(page.getByText('LIBRARY ERROR')).toBeVisible();
+    await expect(page.getByText('raw folder picker failure')).toBeVisible();
   });
 
   test('Given backend scan fails When search runs Then raw error body stays visible', async ({ page }) => {

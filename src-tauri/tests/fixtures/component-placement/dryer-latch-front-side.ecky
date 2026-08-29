@@ -1,0 +1,44 @@
+(define-component dryer-latch
+  ((number latch-width 20)
+   (number clearance 0.3))
+  (ports
+    (port mount
+      :type "dryer.latch.mount.v1"
+      :params ((clearance clearance))
+      :frame (frame
+        :origin '(0 0 0)
+        :x-axis '(1 0 0)
+        :z-axis '(0 0 1))))
+  (box latch-width 4 2))
+
+(model
+  (part enclosure
+    (ports
+      (port front
+        :type "dryer.latch.mount.v1"
+        :frame (frame
+          :origin '(0 -25 15)
+          :x-axis '(1 0 0)
+          :z-axis '(0 -1 0)))
+      (port side-left
+        :type "dryer.latch.mount.v1"
+        :frame (frame
+          :origin '(50 0 15)
+          :x-axis '(0 1 0)
+          :z-axis '(1 0 0)))
+      (port side-right
+        :type "dryer.latch.mount.v1"
+        :frame (frame
+          :origin '(-50 0 15)
+          :x-axis '(0 -1 0)
+          :z-axis '(-1 0 0))))
+    (box 100 50 30))
+  (part front-latch
+    (place-component (dryer-latch) :from mount
+      :to (port-ref enclosure front) :normal opposed))
+  (part side-latch
+    (place-component (dryer-latch) :from mount
+      :to (port-ref enclosure side-left) :normal opposed))
+  (part mirrored-side-latch
+    (place-component (dryer-latch) :from mount
+      :to (port-ref enclosure side-right) :normal opposed :mirror x)))

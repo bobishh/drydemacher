@@ -900,6 +900,53 @@ pub struct PortReference {
     pub port_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ComponentMateNormalMode {
+    Aligned,
+    Opposed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ComponentMirrorAxis {
+    X,
+    Y,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ComponentMateStatus {
+    Solved,
+    Failed,
+}
+
+/// Durable explanation of one source-authored component placement. Geometry
+/// backends consume the solved frame; inspection surfaces retain mate intent.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentPlacementEvidence {
+    pub instance_id: String,
+    pub component_id: String,
+    pub source_port_ref: PortReference,
+    pub target_port_ref: PortReference,
+    pub placement_frame: PortFrame,
+    pub normal_mode: ComponentMateNormalMode,
+    pub roll_degrees: f64,
+    pub offset: [f64; 3],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror_axis: Option<ComponentMirrorAxis>,
+    pub mate_status: ComponentMateStatus,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resolved_fit_values: BTreeMap<String, ComponentInterfaceValue>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_start: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_end: Option<u32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AssemblyMate {

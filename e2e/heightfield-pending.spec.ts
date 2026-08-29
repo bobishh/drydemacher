@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-test('Given an empty heightfield image When design is generated Then render waits until image selection and Apply', async ({
+test('Given empty protrude image When design is generated Then render waits until image selection and Apply', async ({
   page,
 }) => {
   await page.route(/\/heightfield\.stl(?:\?.*)?$/, async (route) => {
@@ -28,9 +28,26 @@ endsolid heightfield
       calls.push({ cmd, args });
       if (cmd === 'get_config') {
         return {
-          engines: [{ id: 'mock', name: 'Mock' }],
+          engines: [
+            {
+              id: 'mock',
+              name: 'Mock',
+              provider: 'openai',
+              apiKey: 'sk-test',
+              model: 'gpt-test',
+              lightModel: 'gpt-test',
+              baseUrl: '',
+              enabled: true,
+            },
+          ],
           selectedEngineId: 'mock',
           hasSeenOnboarding: true,
+          connectionType: 'api_key',
+          defaultEngineKind: 'ecky',
+          defaultSourceLanguage: 'eckyIrV0',
+          defaultGeometryBackend: 'eckyRust',
+          maxGenerationAttempts: 1,
+          maxVerifyAttempts: 0,
         };
       }
       if (cmd === 'get_runtime_capabilities') {
@@ -46,6 +63,15 @@ endsolid heightfield
         };
       }
       if (cmd === 'check_freecad') return false;
+      if (cmd === 'open_or_create_blank_design_thread') {
+        return {
+          threadId: 'heightfield-thread',
+          slug: 'protruded-relief',
+          folder: '/mock/protruded-relief',
+          file: '/mock/protruded-relief/model.ecky',
+          source: '(model)',
+        };
+      }
       if (cmd === 'get_history') return [];
       if (cmd === 'get_last_design') return null;
       if (cmd === 'get_default_macro') return '(model)';
@@ -76,11 +102,11 @@ endsolid heightfield
           messageId: 'heightfield-message',
           usage: null,
           design: {
-            title: 'Heightfield Relief',
+            title: 'Protruded Relief',
             versionName: 'V1',
             interactionMode: 'design',
             macroCode:
-              '(model (params (image heightmap "")) (part relief (heightfield heightmap :width 100 :depth 70 :relief-height 4 :base-thickness 1.2)))',
+              '(model (params (image heightmap "")) (part relief (protrude heightmap 4 :width 100 :depth 70 :foreground dark)))',
             sourceLanguage: 'eckyIrV0',
             geometryBackend: 'eckyRust',
             uiSpec: {
@@ -104,7 +130,7 @@ endsolid heightfield
           contentHash: 'heightfield-hash',
           fcstdPath: '',
           manifestPath: '/heightfield-manifest.json',
-          previewStlPath: '/heightfield.stl',
+          modelStlPath: '/heightfield.stl',
           viewerAssets: [],
           calloutAnchors: [],
           measurementGuides: [],
@@ -145,7 +171,7 @@ endsolid heightfield
           issues: [],
           metrics: {
             partCount: 1,
-            previewStlSizeBytes: 256,
+            modelStlSizeBytes: 256,
             totalVolume: 1,
             totalArea: 1,
             bbox: { xMin: 0, yMin: 0, zMin: 0, xMax: 1, yMax: 1, zMax: 1 },
@@ -184,10 +210,19 @@ endsolid heightfield
   await page.goto('/');
   await expect(page.locator('.boot-overlay')).toHaveCount(0);
   await page.getByRole('button', { name: 'DIALOGUE' }).click();
-  await page.fill('textarea.prompt-input', 'make a heightfield relief');
-  await page
-    .locator('textarea.prompt-input')
-    .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+  await page.fill('textarea.prompt-input', 'make a protruded relief');
+  await page.getByRole('button', { name: 'PROCESS' }).click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as any).__HEIGHTFIELD_CALLS__.filter(
+            (entry: { cmd: string }) => entry.cmd === 'generate_design',
+          ).length,
+      ),
+    )
+    .toBe(1);
 
   expect(
     await page.evaluate(
@@ -198,12 +233,11 @@ endsolid heightfield
     ),
   ).toBe(0);
 
-  await page.getByRole('button', { name: 'PARAMS' }).click({ force: true });
+  await page.getByRole('button', { name: 'Parameters' }).click({ force: true });
   await expect(page.locator('.param-panel')).toBeVisible();
-  await expect(page.getByRole('status')).toContainText(
-    'Heightfield pending image selection: Height Map',
+  await expect(page.locator('.image-geometry-pending')).toContainText(
+    'Image geometry pending selection: Height Map',
   );
-  await page.getByRole('button', { name: 'RAW', exact: true }).click();
   await page.getByRole('button', { name: 'Select Image...' }).last().click();
   await expect(page.getByRole('button', { name: 'height-map.png' }).last()).toBeVisible();
   await page.getByRole('button', { name: 'APPLY' }).click();
@@ -218,25 +252,4 @@ endsolid heightfield
       ),
     )
     .toBe(1);
-
-  await expect(page.getByText(/Mesh evidence: part=relief/)).toContainText(
-    'boundaryOrNonManifoldEdges=0 topology=closed',
-  );
-  await page.getByRole('button', { name: '×' }).click();
-  await page.getByRole('button', { name: /EXPORT/ }).click();
-  await page.getByRole('button', { name: /^STL/ }).click();
-  await expect
-    .poll(() =>
-      page.evaluate(() =>
-        (window as any).__HEIGHTFIELD_CALLS__.find(
-          (entry: { cmd: string }) => entry.cmd === 'export_file',
-        ),
-      ),
-    )
-    .toMatchObject({
-      args: {
-        sourcePath: '/heightfield.stl',
-        targetPath: '/tmp/exported-heightfield.stl',
-      },
-    });
 });

@@ -7,6 +7,8 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::Cursor;
 
+use crate::image_sampling::{raster_coverage_image, RasterForeground};
+
 pub const RASTER_TRACE_EXTRACTOR_VERSION: &str = "raster-trace-v1";
 pub const MAX_RASTER_TRACE_PIXELS: u64 = 40_000_000;
 const MAX_RASTER_TRACE_FILE_BYTES: u64 = 64 * 1024 * 1024;
@@ -66,10 +68,17 @@ pub fn extract_raster_contours(request: RasterTraceRequest) -> AppResult<RasterT
         .map_err(|error| raster_error(&request, format!("image dimensions failed: {error}")))?;
     ensure_pixel_budget(width, height).map_err(|detail| raster_error(&request, detail))?;
 
-    let image = image::load_from_memory(&bytes)
-        .map_err(|error| raster_error(&request, format!("image decode failed: {error}")))?
-        .to_luma8();
-    let foreground = threshold_pixels(&image, request.threshold, request.invert);
+    let decoded = image::load_from_memory(&bytes)
+        .map_err(|error| raster_error(&request, format!("image decode failed: {error}")))?;
+    let image = raster_coverage_image(
+        decoded,
+        if request.invert {
+            RasterForeground::Light
+        } else {
+            RasterForeground::Dark
+        },
+    );
+    let foreground = threshold_pixels(&image, request.threshold);
     let components = connected_components(&foreground, width, height);
     let connected_component_count = components.len();
     let mut loops = components
@@ -197,16 +206,10 @@ fn ensure_pixel_budget(width: u32, height: u32) -> Result<(), String> {
     Ok(())
 }
 
-fn threshold_pixels(image: &image::GrayImage, threshold: u8, invert: bool) -> Vec<bool> {
+fn threshold_pixels(image: &image::GrayImage, threshold: u8) -> Vec<bool> {
     image
         .pixels()
-        .map(|pixel| {
-            if invert {
-                pixel[0] >= threshold
-            } else {
-                pixel[0] <= threshold
-            }
-        })
+        .map(|pixel| pixel[0] > 0 && pixel[0] >= threshold)
         .collect()
 }
 

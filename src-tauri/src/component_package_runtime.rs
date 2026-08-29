@@ -1912,6 +1912,14 @@ pub struct ExtractedComponentSearchResult {
     pub one_liner: String,
     pub param_keys: Vec<String>,
     pub tags: Vec<String>,
+    pub ports: Vec<ExtractedComponentPortSummary>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractedComponentPortSummary {
+    pub port_id: String,
+    pub type_id: String,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -1992,6 +2000,7 @@ pub fn search_extracted_components(
                 .iter()
                 .map(|tag| (*tag).to_string())
                 .collect(),
+            ports: Vec::new(),
         });
         if results.len() >= limit {
             return Ok(results);
@@ -2050,6 +2059,14 @@ pub fn search_extracted_components(
             one_liner,
             param_keys,
             tags: header.tags,
+            ports: header
+                .ports
+                .into_iter()
+                .map(|port| ExtractedComponentPortSummary {
+                    port_id: port.port_id,
+                    type_id: port.type_id,
+                })
+                .collect(),
         });
         if results.len() >= limit {
             break;
@@ -2169,6 +2186,7 @@ fn builtin_stdlib_record(component: &BuiltinStdlibComponent) -> ExtractedCompone
                 source_digest: format!("builtin:{}@{}", component.name, component.version),
             },
             interfaces: Vec::new(),
+            ports: Vec::new(),
         },
     }
 }
@@ -2248,6 +2266,25 @@ mod extracted_component_library_tests {
         .expect("extract")
     }
 
+    fn sample_extracted_with_port(name: &str) -> crate::component_extract::ExtractedComponent {
+        let source = r#"
+            (model
+              (part bracket
+                (ports
+                  (port mount :type "mechanical.mount.v1"
+                    :frame (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1))))
+                (box 12 4 2)))
+        "#;
+        extract_component(&ComponentExtractRequest {
+            source: source.to_string(),
+            part_key: "bracket".to_string(),
+            component_name: Some(name.to_string()),
+            description: Some("Ported bracket".to_string()),
+            ..Default::default()
+        })
+        .expect("extract ported component")
+    }
+
     #[test]
     fn save_search_get_round_trip() {
         let resolver = temp_resolver("roundtrip");
@@ -2302,6 +2339,26 @@ mod extracted_component_library_tests {
 
         let limited = search_extracted_components(&resolver, "", 1).expect("limited");
         assert_eq!(limited.len(), 1);
+    }
+
+    #[test]
+    fn compact_search_exposes_port_ids_and_types_without_body_source() {
+        let resolver = temp_resolver("ported-search");
+        save_extracted_component(&resolver, &sample_extracted_with_port("ported-bracket"))
+            .expect("save");
+
+        let hits = search_extracted_components(&resolver, "Ported", 10).expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0].ports,
+            vec![ExtractedComponentPortSummary {
+                port_id: "mount".to_string(),
+                type_id: "mechanical.mount.v1".to_string(),
+            }]
+        );
+        let json = serde_json::to_value(&hits[0]).expect("serialize compact result");
+        assert!(json.get("source").is_none(), "body source leaked: {json}");
+        assert_eq!(json["ports"][0]["portId"], "mount");
     }
 
     #[test]

@@ -361,12 +361,14 @@ fn test_config() -> Config {
         mcp: McpConfig::default(),
         has_seen_onboarding: true,
         connection_type: None,
+        provider_models: ecky_cad_lib::contracts::ProviderModels::default(),
         default_engine_kind: EngineKind::Freecad,
         default_source_language: SourceLanguage::LegacyPython,
         default_geometry_backend: GeometryBackend::Freecad,
         max_generation_attempts: 3,
         max_verify_attempts: 0,
         projects_root: None,
+        fem_compute: Default::default(),
     }
 }
 
@@ -2037,6 +2039,7 @@ async fn runtime_bundle_component_package_project_preserves_explicit_ui_contract
         serde_json::to_string_pretty(&ecky_cad_lib::contracts::ModelManifest {
             geometry_provenance: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: ecky_cad_lib::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: "step-model".to_string(),
             source_kind: ModelSourceKind::ImportedStep,
@@ -2075,7 +2078,7 @@ async fn runtime_bundle_component_package_project_preserves_explicit_ui_contract
         .expect("serialize manifest"),
     )
     .expect("write manifest");
-    let preview_path = temp_root.join("preview.stl");
+    let preview_path = temp_root.join("model.stl");
     fs::write(&preview_path, "solid fake\nendsolid fake\n").expect("write preview");
 
     let ui_spec = ecky_cad_lib::contracts::UiSpec {
@@ -2137,6 +2140,7 @@ async fn runtime_bundle_component_package_project_preserves_explicit_ui_contract
                 component_dependency_lock: None,
                 component_dependency_lock_digest: None,
                 component_import_origins: Vec::new(),
+                component_placement_evidence: Vec::new(),
                 schema_version: ecky_cad_lib::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
                 model_id: "step-model".to_string(),
                 source_kind: ModelSourceKind::ImportedStep,
@@ -2148,7 +2152,7 @@ async fn runtime_bundle_component_package_project_preserves_explicit_ui_contract
                 fcstd_path: String::new(),
                 manifest_path: manifest_path.to_string_lossy().to_string(),
                 macro_path: None,
-                preview_stl_path: preview_path.to_string_lossy().to_string(),
+                model_stl_path: preview_path.to_string_lossy().to_string(),
                 viewer_assets: Vec::new(),
                 edge_targets: Vec::new(),
                 face_targets: Vec::new(),
@@ -2319,6 +2323,7 @@ async fn runtime_bundle_component_package_project_rejects_unknown_runtime_target
         serde_json::to_string_pretty(&ecky_cad_lib::contracts::ModelManifest {
             geometry_provenance: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: ecky_cad_lib::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: "fake-model".to_string(),
             source_kind: ModelSourceKind::Generated,
@@ -2357,7 +2362,7 @@ async fn runtime_bundle_component_package_project_rejects_unknown_runtime_target
         .expect("serialize manifest"),
     )
     .expect("write manifest");
-    let preview_path = temp_root.join("preview.stl");
+    let preview_path = temp_root.join("model.stl");
     fs::write(&preview_path, "solid fake\nendsolid fake\n").expect("write preview");
 
     let err = component_package_commands::write_artifact_bundle_component_package_project(
@@ -2376,6 +2381,7 @@ async fn runtime_bundle_component_package_project_rejects_unknown_runtime_target
                 component_dependency_lock: None,
                 component_dependency_lock_digest: None,
                 component_import_origins: Vec::new(),
+                component_placement_evidence: Vec::new(),
                 schema_version: ecky_cad_lib::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
                 model_id: "fake-model".to_string(),
                 source_kind: ModelSourceKind::Generated,
@@ -2387,7 +2393,7 @@ async fn runtime_bundle_component_package_project_rejects_unknown_runtime_target
                 fcstd_path: String::new(),
                 manifest_path: manifest_path.to_string_lossy().to_string(),
                 macro_path: Some(source_path.to_string_lossy().to_string()),
-                preview_stl_path: preview_path.to_string_lossy().to_string(),
+                model_stl_path: preview_path.to_string_lossy().to_string(),
                 viewer_assets: Vec::new(),
                 edge_targets: Vec::new(),
                 face_targets: Vec::new(),
@@ -3204,7 +3210,7 @@ async fn render_installed_assembly_builds_joined_output_runtime_when_output_mode
         output_runtime.artifact_bundle.source_kind,
         ModelSourceKind::ImportedStep
     );
-    assert!(std::path::Path::new(&output_runtime.artifact_bundle.preview_stl_path).is_file());
+    assert!(std::path::Path::new(&output_runtime.artifact_bundle.model_stl_path).is_file());
     assert!(std::path::Path::new(&output_runtime.artifact_bundle.fcstd_path).is_file());
     assert_eq!(output_runtime.artifact_bundle.export_artifacts.len(), 1);
     assert_eq!(
@@ -3492,7 +3498,7 @@ async fn render_installed_assembly_builds_joined_output_runtime_with_cut_group()
         .expect("joined cut output runtime");
     assert_eq!(output_runtime.model_manifest.parts.len(), 1);
     assert!(
-        !std::path::Path::new(&output_runtime.artifact_bundle.preview_stl_path)
+        !std::path::Path::new(&output_runtime.artifact_bundle.model_stl_path)
             .as_os_str()
             .is_empty()
     );
@@ -3658,7 +3664,7 @@ async fn render_installed_assembly_builds_fused_output_runtime_for_pure_fuse_mod
         output_runtime.artifact_bundle.source_kind,
         ModelSourceKind::ImportedStep
     );
-    assert!(std::path::Path::new(&output_runtime.artifact_bundle.preview_stl_path).is_file());
+    assert!(std::path::Path::new(&output_runtime.artifact_bundle.model_stl_path).is_file());
     assert!(std::path::Path::new(&output_runtime.artifact_bundle.fcstd_path).is_file());
     assert_eq!(output_runtime.artifact_bundle.export_artifacts.len(), 1);
     assert_eq!(

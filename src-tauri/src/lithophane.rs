@@ -11,7 +11,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-const MAX_SAFE_PREVIEW_STL_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SAFE_MODEL_STL_BYTES: u64 = 64 * 1024 * 1024;
 const PLANAR_SEGMENT_CEILING: f32 = 768.0;
 const CYLINDRICAL_SEGMENT_CEILING: f32 = 192.0;
 const SPHERICAL_SEGMENT_CEILING: f32 = 160.0;
@@ -1163,11 +1163,11 @@ fn ensure_preview_file_size_within_limit(path: &Path) -> AppResult<()> {
             ))
         })?
         .len();
-    if size_bytes > MAX_SAFE_PREVIEW_STL_BYTES {
+    if size_bytes > MAX_SAFE_MODEL_STL_BYTES {
         return Err(AppError::validation(format!(
             "Lithophane preview is too large for the viewer ({} MB > {} MB). Reduce image coverage or resolution, or apply the image to a smaller flatter patch.",
             size_bytes / (1024 * 1024),
-            MAX_SAFE_PREVIEW_STL_BYTES / (1024 * 1024)
+            MAX_SAFE_MODEL_STL_BYTES / (1024 * 1024)
         )));
     }
     Ok(())
@@ -1177,7 +1177,7 @@ fn write_safe_preview_mesh(output_stl: &Path, mesh: &Mesh) -> AppResult<()> {
     let file_name = output_stl
         .file_name()
         .and_then(|value| value.to_str())
-        .unwrap_or("preview.stl");
+        .unwrap_or("model.stl");
     let temp_output = output_stl.with_file_name(format!("{}.tmp", file_name));
     write_mesh(&temp_output, mesh)?;
     let size_check = ensure_preview_file_size_within_limit(&temp_output);
@@ -1284,12 +1284,12 @@ pub fn resolve_image_path(
     }
 }
 
-pub fn export_dir_for_preview(preview_stl_path: &Path) -> PathBuf {
-    let stem = preview_stl_path
+pub fn export_dir_for_preview(model_stl_path: &Path) -> PathBuf {
+    let stem = model_stl_path
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or("preview");
-    preview_stl_path
+    model_stl_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(format!("{}-exports", stem))
@@ -1300,7 +1300,7 @@ mod tests {
     use super::{
         bilinear_gray, compute_fit_uv, ensure_preview_file_size_within_limit,
         export_dir_for_preview, sample_target_segments, write_3mf_package, Bounds, PatchFrame,
-        ThreeMfObject, Vec3, CYLINDRICAL_SEGMENT_CEILING, MAX_SAFE_PREVIEW_STL_BYTES,
+        ThreeMfObject, Vec3, CYLINDRICAL_SEGMENT_CEILING, MAX_SAFE_MODEL_STL_BYTES,
     };
     use crate::contracts::{
         LithophanePlacement, LithophanePlacementMode, LithophaneSide, OverflowMode, ProjectionType,
@@ -1500,7 +1500,7 @@ mod tests {
 
     #[test]
     fn export_dir_uses_local_preview_stem() {
-        let path = export_dir_for_preview(Path::new("/tmp/example-preview.stl"));
+        let path = export_dir_for_preview(Path::new("/tmp/example-model.stl"));
         assert_eq!(path, Path::new("/tmp/example-preview-exports"));
     }
 
@@ -1508,9 +1508,9 @@ mod tests {
     fn oversized_preview_file_is_rejected() {
         let root = std::env::temp_dir().join(format!("ecky-litho-size-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let preview = root.join("preview.stl");
+        let preview = root.join("model.stl");
         let file = std::fs::File::create(&preview).unwrap();
-        file.set_len(MAX_SAFE_PREVIEW_STL_BYTES + 1).unwrap();
+        file.set_len(MAX_SAFE_MODEL_STL_BYTES + 1).unwrap();
         let error = ensure_preview_file_size_within_limit(&preview).unwrap_err();
         assert!(error.to_string().contains("too large for the viewer"));
     }
