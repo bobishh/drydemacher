@@ -790,6 +790,65 @@ void given_partial_union_side_outputs_when_render_fails_then_none_publish_and_co
     fs::remove_all(corrupt_root);
 }
 
+void given_boolean_cutter_when_face_is_generated_then_authored_support_surface_survives() {
+    const TopoDS_Shape blank =
+        BRepPrimAPI_MakeBox(gp_Pnt(-8, -8, -5), 16, 16, 10).Shape();
+    const TopoDS_Shape cutter = BRepPrimAPI_MakeCylinder(
+        gp_Ax2(gp_Pnt(0, 0, -10), gp_Dir(0, 0, 1)), 3, 20).Shape();
+    const TopoDS_Shape result = BRepAlgoAPI_Cut(blank, cutter).Shape();
+    BRepBuilderAPI_Copy copied_result(result, Standard_False, Standard_False);
+    const TopoDS_Shape topology_copy = copied_result.Shape();
+
+    bool matched_generated_cylindrical_face = false;
+    for (TopExp_Explorer result_faces(topology_copy, TopAbs_FACE); result_faces.More(); result_faces.Next()) {
+        const TopoDS_Face result_face = TopoDS::Face(result_faces.Current());
+        if (BRepAdaptor_Surface(result_face).GetType() != GeomAbs_Cylinder) continue;
+        for (TopExp_Explorer cutter_faces(cutter, TopAbs_FACE); cutter_faces.More(); cutter_faces.Next()) {
+            const TopoDS_Face cutter_face = TopoDS::Face(cutter_faces.Current());
+            if (faces_share_support_surface(result_face, cutter_face)) {
+                matched_generated_cylindrical_face = true;
+                break;
+            }
+        }
+    }
+    assert(matched_generated_cylindrical_face);
+}
+
+void given_fused_capsule_cutter_when_cut_repeats_then_authored_faces_survive() {
+    const TopoDS_Shape blank =
+        BRepPrimAPI_MakeBox(gp_Pnt(-20, 0, -40), 40, 32, 80).Shape();
+    const TopoDS_Shape lower_end = BRepPrimAPI_MakeCylinder(
+        gp_Ax2(gp_Pnt(0, -10, -2.25), gp_Dir(0, 1, 0)), 2.75, 50).Shape();
+    const TopoDS_Shape upper_end = BRepPrimAPI_MakeCylinder(
+        gp_Ax2(gp_Pnt(0, -10, 2.25), gp_Dir(0, 1, 0)), 2.75, 50).Shape();
+    const TopoDS_Shape bridge =
+        BRepPrimAPI_MakeBox(gp_Pnt(-2.75, -10, -2.25), 5.5, 50, 4.5).Shape();
+    const TopoDS_Shape ends = BRepAlgoAPI_Fuse(lower_end, upper_end).Shape();
+    const TopoDS_Shape capsule = BRepAlgoAPI_Fuse(ends, bridge).Shape();
+    const TopoDS_Shape first_cut = BRepAlgoAPI_Cut(blank, capsule).Shape();
+    const TopoDS_Shape attached = BRepAlgoAPI_Fuse(
+        first_cut,
+        BRepPrimAPI_MakeBox(gp_Pnt(-4, 27, -30), 8, 8, 60).Shape()).Shape();
+    const TopoDS_Shape repeated_cut = BRepAlgoAPI_Cut(attached, capsule).Shape();
+    BRepBuilderAPI_Copy copied_result(repeated_cut, Standard_False, Standard_False);
+    const TopoDS_Shape topology_copy = copied_result.Shape();
+
+    std::size_t matched_faces = 0;
+    for (TopExp_Explorer result_faces(topology_copy, TopAbs_FACE); result_faces.More(); result_faces.Next()) {
+        const TopoDS_Face result_face = TopoDS::Face(result_faces.Current());
+        bool matched = false;
+        for (TopExp_Explorer cutter_faces(capsule, TopAbs_FACE); cutter_faces.More(); cutter_faces.Next()) {
+            if (faces_share_support_surface(
+                    result_face, TopoDS::Face(cutter_faces.Current()))) {
+                matched = true;
+                break;
+            }
+        }
+        if (matched) ++matched_faces;
+    }
+    assert(matched_faces >= 3);
+}
+
 }  // namespace
 
 int main() {
@@ -808,4 +867,6 @@ int main() {
     given_mesh_domain_part_when_brep_operands_reach_boolean_then_closure_stays_mesh();
     given_outer_only_policy_when_grouped_union_executes_then_authored_nary_path_stays_baseline();
     given_partial_union_side_outputs_when_render_fails_then_none_publish_and_corruption_recomputes();
+    given_boolean_cutter_when_face_is_generated_then_authored_support_surface_survives();
+    given_fused_capsule_cutter_when_cut_repeats_then_authored_faces_survive();
 }

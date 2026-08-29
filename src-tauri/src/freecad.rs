@@ -37,7 +37,7 @@ const MANIFEST_FILE_NAME: &str = "manifest.json";
 const RUNNER_REPORT_FILE_NAME: &str = "runner-report.json";
 const HIDDEN_LINE_REPORT_FILE_NAME: &str = "hidden-line-projections.json";
 const FCSTD_FILE_NAME: &str = "model.FCStd";
-const PREVIEW_STL_FILE_NAME: &str = "preview.stl";
+const MODEL_STL_FILE_NAME: &str = "model.stl";
 const STEP_FILE_NAME: &str = "model.step";
 const IMPORT_STEP_SOURCE_FILE_NAME: &str = "source.step";
 const PARTS_DIR_NAME: &str = "parts";
@@ -175,7 +175,7 @@ pub fn render(
     app: &dyn PathResolver,
 ) -> AppResult<String> {
     render_model(macro_code, parameters, configured_freecad_cmd, app)
-        .map(|bundle| bundle.preview_stl_path)
+        .map(|bundle| bundle.model_stl_path)
 }
 
 pub fn render_model(
@@ -255,7 +255,7 @@ pub fn render_model_with_sources_and_font_path(
         macro_path.clone()
     };
     let fcstd_path = bundle_dir.join(FCSTD_FILE_NAME);
-    let preview_stl_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+    let model_stl_path = bundle_dir.join(MODEL_STL_FILE_NAME);
     let step_path = bundle_dir.join(STEP_FILE_NAME);
     let runner_report_path = bundle_dir.join(RUNNER_REPORT_FILE_NAME);
     let parts_dir = bundle_dir.join(PARTS_DIR_NAME);
@@ -272,7 +272,7 @@ pub fn render_model_with_sources_and_font_path(
         app,
         configured_freecad_cmd,
         &runner_macro_path,
-        &preview_stl_path,
+        &model_stl_path,
         &fcstd_path,
         &step_path,
         &parts_dir,
@@ -307,7 +307,7 @@ pub fn render_model_with_sources_and_font_path(
         &fcstd_path,
         &manifest_path,
         Some(&macro_path),
-        &preview_stl_path,
+        &model_stl_path,
         &step_path,
         &manifest,
         &report,
@@ -343,7 +343,7 @@ pub fn import_fcstd(
     fs::create_dir_all(&bundle_dir).map_err(|err| AppError::persistence(err.to_string()))?;
 
     let fcstd_path = bundle_dir.join(FCSTD_FILE_NAME);
-    let preview_stl_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+    let model_stl_path = bundle_dir.join(MODEL_STL_FILE_NAME);
     let step_path = bundle_dir.join(STEP_FILE_NAME);
     let runner_report_path = bundle_dir.join(RUNNER_REPORT_FILE_NAME);
     let parts_dir = bundle_dir.join(PARTS_DIR_NAME);
@@ -360,7 +360,7 @@ pub fn import_fcstd(
         app,
         configured_freecad_cmd,
         &fcstd_path,
-        &preview_stl_path,
+        &model_stl_path,
         &step_path,
         &parts_dir,
         &runner_report_path,
@@ -393,7 +393,7 @@ pub fn import_fcstd(
         &fcstd_path,
         &manifest_path,
         None,
-        &preview_stl_path,
+        &model_stl_path,
         &step_path,
         &manifest,
         &report,
@@ -430,7 +430,7 @@ pub fn import_step(
 
     let import_step_path = bundle_dir.join(IMPORT_STEP_SOURCE_FILE_NAME);
     let fcstd_path = bundle_dir.join(FCSTD_FILE_NAME);
-    let preview_stl_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+    let model_stl_path = bundle_dir.join(MODEL_STL_FILE_NAME);
     let step_path = bundle_dir.join(STEP_FILE_NAME);
     let runner_report_path = bundle_dir.join(RUNNER_REPORT_FILE_NAME);
     let parts_dir = bundle_dir.join(PARTS_DIR_NAME);
@@ -448,7 +448,7 @@ pub fn import_step(
         configured_freecad_cmd,
         &import_step_path,
         &fcstd_path,
-        &preview_stl_path,
+        &model_stl_path,
         &step_path,
         &parts_dir,
         &runner_report_path,
@@ -481,7 +481,7 @@ pub fn import_step(
         &fcstd_path,
         &manifest_path,
         None,
-        &preview_stl_path,
+        &model_stl_path,
         &step_path,
         &manifest,
         &report,
@@ -536,7 +536,7 @@ pub fn assemble_step_parts(
 
     let assembly_input_path = bundle_dir.join("assembly-input.json");
     let fcstd_path = bundle_dir.join(FCSTD_FILE_NAME);
-    let preview_stl_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+    let model_stl_path = bundle_dir.join(MODEL_STL_FILE_NAME);
     let step_path = bundle_dir.join(STEP_FILE_NAME);
     let runner_report_path = bundle_dir.join(RUNNER_REPORT_FILE_NAME);
     let parts_dir = bundle_dir.join(PARTS_DIR_NAME);
@@ -554,7 +554,7 @@ pub fn assemble_step_parts(
         configured_freecad_cmd,
         &assembly_input_path,
         &fcstd_path,
-        &preview_stl_path,
+        &model_stl_path,
         &step_path,
         &parts_dir,
         &runner_report_path,
@@ -582,7 +582,7 @@ pub fn assemble_step_parts(
         &fcstd_path,
         &manifest_path,
         None,
-        &preview_stl_path,
+        &model_stl_path,
         &step_path,
         &manifest,
         &report,
@@ -619,7 +619,7 @@ pub fn apply_imported_model(
     fs::create_dir_all(&bundle_dir).map_err(|err| AppError::persistence(err.to_string()))?;
 
     let fcstd_path = PathBuf::from(&bundle.fcstd_path);
-    let preview_stl_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+    let model_stl_path = bundle_dir.join(MODEL_STL_FILE_NAME);
     let step_path = bundle_dir.join(STEP_FILE_NAME);
     let runner_report_path = bundle_dir.join(RUNNER_REPORT_FILE_NAME);
     let manifest_path = bundle_dir.join(MANIFEST_FILE_NAME);
@@ -635,7 +635,7 @@ pub fn apply_imported_model(
         app,
         configured_freecad_cmd,
         &fcstd_path,
-        &preview_stl_path,
+        &model_stl_path,
         &step_path,
         &parts_dir,
         &runner_report_path,
@@ -657,7 +657,7 @@ pub fn apply_imported_model(
         &fcstd_path,
         &manifest_path,
         None,
-        &preview_stl_path,
+        &model_stl_path,
         &step_path,
         &next_manifest,
         &report,
@@ -786,41 +786,13 @@ pub fn runtime_cache_dir(app: &dyn PathResolver) -> AppResult<PathBuf> {
     Ok(runtime_root)
 }
 
-const MAX_CACHE_BYTES: u64 = 500 * 1024 * 1024;
+pub fn evict_cache_if_needed(_cache_dir: &Path) {
+    // Runtime bundles are history authority, not an expendable byte cache.
+    // Old-version STL cleanup is explicit and scoped to a history-preview lease.
+}
 
-pub fn evict_cache_if_needed(cache_dir: &Path) {
-    let mut bundle_dirs = Vec::new();
-    collect_bundle_dirs(cache_dir, &mut bundle_dirs);
-
-    let mut total: u64 = 0;
-    let mut entries: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
-
-    for bundle_dir in bundle_dirs {
-        let size = dir_size(&bundle_dir);
-        if size == 0 {
-            continue;
-        }
-        let modified = fs::metadata(&bundle_dir)
-            .and_then(|meta| meta.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        total += size;
-        entries.push((bundle_dir, size, modified));
-    }
-
-    if total <= MAX_CACHE_BYTES {
-        return;
-    }
-
-    entries.sort_by_key(|(_, _, modified)| *modified);
-
-    for (path, size, _) in entries {
-        if total <= MAX_CACHE_BYTES {
-            break;
-        }
-        if fs::remove_dir_all(&path).is_ok() {
-            total = total.saturating_sub(size);
-        }
-    }
+pub fn evict_cache_if_needed_except(_cache_dir: &Path, _protected_bundle_dir: &Path) {
+    // Kept as a compatibility hook for render callers. Deliberately no-op.
 }
 
 pub fn resolve_resource_path(
@@ -881,7 +853,7 @@ fn build_bundle(
     fcstd_path: &Path,
     manifest_path: &Path,
     macro_path: Option<&Path>,
-    preview_stl_path: &Path,
+    model_stl_path: &Path,
     step_path: &Path,
     manifest: &ModelManifest,
     report: &RunnerReport,
@@ -895,6 +867,7 @@ fn build_bundle(
         component_dependency_lock: None,
         component_dependency_lock_digest: None,
         component_import_origins: Vec::new(),
+        component_placement_evidence: Vec::new(),
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind,
@@ -906,7 +879,7 @@ fn build_bundle(
         fcstd_path: path_to_string(fcstd_path)?,
         manifest_path: path_to_string(manifest_path)?,
         macro_path: macro_path.map(path_to_string).transpose()?,
-        preview_stl_path: path_to_string(preview_stl_path)?,
+        model_stl_path: path_to_string(model_stl_path)?,
         viewer_assets: viewer_assets_from_manifest(bundle_dir, manifest)?,
         edge_targets: edge_targets_from_report(report, manifest),
         face_targets: face_targets_from_report(report, manifest),
@@ -1657,6 +1630,7 @@ fn build_manifest_with_stable_node_keys(
     let manifest = ModelManifest {
         geometry_provenance: None,
         component_import_origins: Vec::new(),
+        component_placement_evidence: Vec::new(),
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind,
@@ -2023,7 +1997,7 @@ fn normalize_cached_bundle(
     let bundle = bundle_from_manifest(bundle_dir, bundle, &manifest)?;
     if !Path::new(&bundle.fcstd_path).exists()
         || !Path::new(&bundle.manifest_path).exists()
-        || !Path::new(&bundle.preview_stl_path).exists()
+        || !Path::new(&bundle.model_stl_path).exists()
         || !bundle_step_path(bundle_dir).exists()
         || bundle
             .viewer_assets
@@ -2078,7 +2052,7 @@ fn bundle_from_manifest(
     bundle.geometry_backend = manifest.geometry_backend;
     bundle.fcstd_path = path_to_string(&canonical_fcstd_path(bundle_dir, &bundle))?;
     bundle.manifest_path = path_to_string(&canonical_manifest_path(bundle_dir, &bundle))?;
-    bundle.preview_stl_path = path_to_string(&canonical_preview_path(bundle_dir, &bundle))?;
+    bundle.model_stl_path = path_to_string(&canonical_model_path(bundle_dir, &bundle))?;
     bundle.export_artifacts = step_export_artifacts(&canonical_step_path(bundle_dir, &bundle))?;
     bundle.viewer_assets = viewer_assets_from_manifest(bundle_dir, manifest)?;
     bundle.edge_targets = reconcile_edge_targets_with_manifest(bundle.edge_targets, manifest);
@@ -2167,12 +2141,12 @@ fn canonical_manifest_path(bundle_dir: &Path, bundle: &ArtifactBundle) -> PathBu
     }
 }
 
-fn canonical_preview_path(bundle_dir: &Path, bundle: &ArtifactBundle) -> PathBuf {
-    let canonical = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+fn canonical_model_path(bundle_dir: &Path, bundle: &ArtifactBundle) -> PathBuf {
+    let canonical = bundle_dir.join(MODEL_STL_FILE_NAME);
     if canonical.exists() {
         canonical
     } else {
-        normalize_bundle_relative_path(bundle_dir, Path::new(&bundle.preview_stl_path))
+        normalize_bundle_relative_path(bundle_dir, Path::new(&bundle.model_stl_path))
     }
 }
 
@@ -2305,7 +2279,7 @@ fn run_generate_runner(
     app: &dyn PathResolver,
     configured_freecad_cmd: Option<&str>,
     macro_path: &Path,
-    preview_stl_path: &Path,
+    model_stl_path: &Path,
     fcstd_path: &Path,
     step_path: &Path,
     parts_dir: &Path,
@@ -2317,7 +2291,7 @@ fn run_generate_runner(
     command
         .env("ECKYCAD_MODE", "generate")
         .env("ECKYCAD_MACRO", path_to_string(macro_path)?)
-        .env("ECKYCAD_STL", path_to_string(preview_stl_path)?)
+        .env("ECKYCAD_STL", path_to_string(model_stl_path)?)
         .env("ECKYCAD_FCSTD", path_to_string(fcstd_path)?)
         .env("ECKYCAD_STEP", path_to_string(step_path)?)
         .env("ECKYCAD_PARTS_DIR", path_to_string(parts_dir)?)
@@ -2344,7 +2318,7 @@ fn run_import_runner(
     app: &dyn PathResolver,
     configured_freecad_cmd: Option<&str>,
     fcstd_path: &Path,
-    preview_stl_path: &Path,
+    model_stl_path: &Path,
     step_path: &Path,
     parts_dir: &Path,
     runner_report_path: &Path,
@@ -2353,7 +2327,7 @@ fn run_import_runner(
     command
         .env("ECKYCAD_MODE", "import_fcstd")
         .env("ECKYCAD_IMPORT_FCSTD", path_to_string(fcstd_path)?)
-        .env("ECKYCAD_STL", path_to_string(preview_stl_path)?)
+        .env("ECKYCAD_STL", path_to_string(model_stl_path)?)
         .env("ECKYCAD_STEP", path_to_string(step_path)?)
         .env("ECKYCAD_PARTS_DIR", path_to_string(parts_dir)?)
         .env("ECKYCAD_REPORT", path_to_string(runner_report_path)?)
@@ -2366,7 +2340,7 @@ fn run_import_step_runner(
     configured_freecad_cmd: Option<&str>,
     import_step_path: &Path,
     fcstd_path: &Path,
-    preview_stl_path: &Path,
+    model_stl_path: &Path,
     step_path: &Path,
     parts_dir: &Path,
     runner_report_path: &Path,
@@ -2376,7 +2350,7 @@ fn run_import_step_runner(
         .env("ECKYCAD_MODE", "import_step")
         .env("ECKYCAD_IMPORT_STEP", path_to_string(import_step_path)?)
         .env("ECKYCAD_FCSTD", path_to_string(fcstd_path)?)
-        .env("ECKYCAD_STL", path_to_string(preview_stl_path)?)
+        .env("ECKYCAD_STL", path_to_string(model_stl_path)?)
         .env("ECKYCAD_STEP", path_to_string(step_path)?)
         .env("ECKYCAD_PARTS_DIR", path_to_string(parts_dir)?)
         .env("ECKYCAD_REPORT", path_to_string(runner_report_path)?)
@@ -2389,7 +2363,7 @@ fn run_assemble_step_runner(
     configured_freecad_cmd: Option<&str>,
     assembly_input_path: &Path,
     fcstd_path: &Path,
-    preview_stl_path: &Path,
+    model_stl_path: &Path,
     step_path: &Path,
     parts_dir: &Path,
     runner_report_path: &Path,
@@ -2402,7 +2376,7 @@ fn run_assemble_step_runner(
             path_to_string(assembly_input_path)?,
         )
         .env("ECKYCAD_FCSTD", path_to_string(fcstd_path)?)
-        .env("ECKYCAD_STL", path_to_string(preview_stl_path)?)
+        .env("ECKYCAD_STL", path_to_string(model_stl_path)?)
         .env("ECKYCAD_STEP", path_to_string(step_path)?)
         .env("ECKYCAD_PARTS_DIR", path_to_string(parts_dir)?)
         .env("ECKYCAD_REPORT", path_to_string(runner_report_path)?)
@@ -2441,7 +2415,7 @@ fn run_apply_import_runner(
     app: &dyn PathResolver,
     configured_freecad_cmd: Option<&str>,
     fcstd_path: &Path,
-    preview_stl_path: &Path,
+    model_stl_path: &Path,
     step_path: &Path,
     parts_dir: &Path,
     runner_report_path: &Path,
@@ -2453,7 +2427,7 @@ fn run_apply_import_runner(
         .env("ECKYCAD_MODE", "apply_imported_fcstd")
         .env("ECKYCAD_IMPORT_FCSTD", path_to_string(fcstd_path)?)
         .env("ECKYCAD_FCSTD", path_to_string(fcstd_path)?)
-        .env("ECKYCAD_STL", path_to_string(preview_stl_path)?)
+        .env("ECKYCAD_STL", path_to_string(model_stl_path)?)
         .env("ECKYCAD_STEP", path_to_string(step_path)?)
         .env("ECKYCAD_PARTS_DIR", path_to_string(parts_dir)?)
         .env("ECKYCAD_REPORT", path_to_string(runner_report_path)?)
@@ -2696,7 +2670,7 @@ fn import_enrichment_proposal(
         },
         part_ids: vec![part_id.to_string()],
         parameter_keys,
-        confidence: 0.42,
+        confidence: None,
         status: EnrichmentStatus::Pending,
         provenance: "heuristic.import.bounds".to_string(),
     }
@@ -2851,41 +2825,6 @@ fn path_to_string(path: &Path) -> AppResult<String> {
         .ok_or_else(|| AppError::internal("Invalid UTF-8 path."))
 }
 
-fn collect_bundle_dirs(root: &Path, output: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        if path.join(BUNDLE_FILE_NAME).exists() {
-            output.push(path);
-            continue;
-        }
-        collect_bundle_dirs(&path, output);
-    }
-}
-
-fn dir_size(path: &Path) -> u64 {
-    let Ok(entries) = fs::read_dir(path) else {
-        return 0;
-    };
-
-    let mut total = 0;
-    for entry in entries.flatten() {
-        let entry_path = entry.path();
-        if entry_path.is_dir() {
-            total += dir_size(&entry_path);
-        } else if let Ok(meta) = fs::metadata(&entry_path) {
-            total += meta.len();
-        }
-    }
-    total
-}
-
 impl From<RunnerBounds> for ManifestBounds {
     fn from(value: RunnerBounds) -> Self {
         Self {
@@ -2948,6 +2887,72 @@ mod tests {
             .expect("join FreeCAD integration lowering thread")
     }
 
+    #[test]
+    fn cache_budget_never_deletes_history_runtime_bundles() {
+        let resolver = TestResolver::new("cache-active-bundle");
+        let cache_dir = resolver.root.join("model-runtime");
+        let old_bundle = cache_dir.join("generated").join("generated-old");
+        let active_bundle = cache_dir.join("generated").join("generated-active");
+        fs::create_dir_all(&old_bundle).expect("old bundle dir");
+        fs::create_dir_all(&active_bundle).expect("active bundle dir");
+        fs::write(old_bundle.join(BUNDLE_FILE_NAME), b"{}").expect("old bundle marker");
+        fs::write(active_bundle.join(BUNDLE_FILE_NAME), b"{}").expect("active bundle marker");
+        fs::File::create(old_bundle.join("payload.bin"))
+            .and_then(|file| file.set_len(300 * 1024 * 1024))
+            .expect("old sparse payload");
+        fs::File::create(active_bundle.join("payload.bin"))
+            .and_then(|file| file.set_len(300 * 1024 * 1024))
+            .expect("active sparse payload");
+        fs::File::open(&old_bundle)
+            .and_then(|directory| {
+                directory
+                    .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
+            })
+            .expect("age old bundle");
+
+        evict_cache_if_needed_except(&cache_dir, &active_bundle);
+
+        assert!(old_bundle.exists(), "history bundle must survive");
+        assert!(
+            active_bundle.exists(),
+            "active bundle must survive eviction"
+        );
+        fs::remove_dir_all(&resolver.root).expect("cleanup");
+    }
+
+    #[test]
+    fn cache_budget_never_deletes_oversized_runtime_bundles() {
+        let resolver = TestResolver::new("cache-fresh-large-bundle");
+        let cache_dir = resolver.root.join("model-runtime");
+        let old_bundle = cache_dir.join("generated").join("generated-old");
+        let fresh_bundle = cache_dir.join("generated").join("generated-fresh");
+        fs::create_dir_all(&old_bundle).expect("old bundle dir");
+        fs::create_dir_all(&fresh_bundle).expect("fresh bundle dir");
+        fs::write(old_bundle.join(BUNDLE_FILE_NAME), b"{}").expect("old bundle marker");
+        fs::write(fresh_bundle.join(BUNDLE_FILE_NAME), b"{}").expect("fresh bundle marker");
+        fs::File::create(old_bundle.join("payload.bin"))
+            .and_then(|file| file.set_len(100 * 1024 * 1024))
+            .expect("old sparse payload");
+        fs::File::create(fresh_bundle.join("payload.bin"))
+            .and_then(|file| file.set_len(600 * 1024 * 1024))
+            .expect("fresh sparse payload");
+        fs::File::open(&old_bundle)
+            .and_then(|directory| {
+                directory
+                    .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
+            })
+            .expect("age old bundle");
+
+        evict_cache_if_needed(&cache_dir);
+
+        assert!(old_bundle.exists(), "history bundle must survive");
+        assert!(
+            fresh_bundle.exists(),
+            "fresh oversized bundle must survive eviction"
+        );
+        fs::remove_dir_all(&resolver.root).expect("cleanup");
+    }
+
     fn fixture_generated_report() -> RunnerReport {
         serde_json::from_str(include_str!(
             "../tests/fixtures/generated_runner_report.json"
@@ -2997,6 +3002,7 @@ mod tests {
         ModelManifest {
             geometry_provenance: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind,
@@ -3053,6 +3059,7 @@ mod tests {
             component_dependency_lock: None,
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind,
@@ -3064,7 +3071,7 @@ mod tests {
             fcstd_path: "/tmp/stale.FCStd".to_string(),
             manifest_path: "/tmp/stale-manifest.json".to_string(),
             macro_path: None,
-            preview_stl_path: "/tmp/stale-preview.stl".to_string(),
+            model_stl_path: "/tmp/stale-model.stl".to_string(),
             viewer_assets: vec![ViewerAsset {
                 part_id: "stale".to_string(),
                 node_id: "stale".to_string(),
@@ -3087,7 +3094,7 @@ mod tests {
         fs::create_dir_all(root.join(PARTS_DIR_NAME)).expect("bundle dirs");
         let fcstd_path = root.join(FCSTD_FILE_NAME);
         let manifest_path = root.join(MANIFEST_FILE_NAME);
-        let preview_stl_path = root.join(PREVIEW_STL_FILE_NAME);
+        let model_stl_path = root.join(MODEL_STL_FILE_NAME);
         let step_path = root.join(STEP_FILE_NAME);
         let asset_path = root.join(PARTS_DIR_NAME).join("000-outershell.stl");
         let manifest = sample_manifest("generated-step", ModelSourceKind::Generated, &asset_path);
@@ -3101,7 +3108,7 @@ mod tests {
             &fcstd_path,
             &manifest_path,
             None,
-            &preview_stl_path,
+            &model_stl_path,
             &step_path,
             &manifest,
             &report,
@@ -3122,7 +3129,7 @@ mod tests {
         fs::create_dir_all(root.join(PARTS_DIR_NAME)).expect("bundle dirs");
         let fcstd_path = root.join(FCSTD_FILE_NAME);
         let manifest_path = root.join(MANIFEST_FILE_NAME);
-        let preview_stl_path = root.join(PREVIEW_STL_FILE_NAME);
+        let model_stl_path = root.join(MODEL_STL_FILE_NAME);
         let step_path = root.join(STEP_FILE_NAME);
         let report = sample_report(vec![RunnerObject {
             part_id: String::new(),
@@ -3173,7 +3180,7 @@ mod tests {
             &fcstd_path,
             &manifest_path,
             None,
-            &preview_stl_path,
+            &model_stl_path,
             &step_path,
             &manifest,
             &report,
@@ -3210,7 +3217,7 @@ mod tests {
         fs::create_dir_all(root.join(PARTS_DIR_NAME)).expect("bundle dirs");
         let fcstd_path = root.join(FCSTD_FILE_NAME);
         let manifest_path = root.join(MANIFEST_FILE_NAME);
-        let preview_stl_path = root.join(PREVIEW_STL_FILE_NAME);
+        let model_stl_path = root.join(MODEL_STL_FILE_NAME);
         let step_path = root.join(STEP_FILE_NAME);
         let report = sample_report(vec![RunnerObject {
             part_id: String::new(),
@@ -3262,7 +3269,7 @@ mod tests {
             &fcstd_path,
             &manifest_path,
             None,
-            &preview_stl_path,
+            &model_stl_path,
             &step_path,
             &manifest,
             &report,
@@ -4462,7 +4469,7 @@ mod tests {
         fs::create_dir_all(bundle_dir.join(PARTS_DIR_NAME)).expect("parts dir");
 
         let fcstd_path = bundle_dir.join(FCSTD_FILE_NAME);
-        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let preview_path = bundle_dir.join(MODEL_STL_FILE_NAME);
         let step_path = bundle_dir.join(STEP_FILE_NAME);
         let asset_path = bundle_dir.join(PARTS_DIR_NAME).join("000-outershell.stl");
         fs::write(&fcstd_path, b"fcstd").expect("fcstd");
@@ -4485,7 +4492,7 @@ mod tests {
             cached.manifest_path,
             bundle_dir.join(MANIFEST_FILE_NAME).to_string_lossy()
         );
-        assert_eq!(cached.preview_stl_path, preview_path.to_string_lossy());
+        assert_eq!(cached.model_stl_path, preview_path.to_string_lossy());
         assert_eq!(cached.export_artifacts[0].path, step_path.to_string_lossy());
         assert_eq!(cached.viewer_assets.len(), 1);
         assert_eq!(cached.viewer_assets[0].part_id, "part-shell");
@@ -4500,7 +4507,7 @@ mod tests {
             saved.manifest_path,
             bundle_dir.join(MANIFEST_FILE_NAME).to_string_lossy()
         );
-        assert_eq!(saved.preview_stl_path, preview_path.to_string_lossy());
+        assert_eq!(saved.model_stl_path, preview_path.to_string_lossy());
         assert_eq!(saved.viewer_assets[0].path, asset_path.to_string_lossy());
     }
 
@@ -4513,7 +4520,7 @@ mod tests {
         fs::create_dir_all(bundle_dir.join(PARTS_DIR_NAME)).expect("parts dir");
 
         fs::write(bundle_dir.join(FCSTD_FILE_NAME), b"fcstd").expect("fcstd");
-        fs::write(bundle_dir.join(PREVIEW_STL_FILE_NAME), b"preview").expect("preview");
+        fs::write(bundle_dir.join(MODEL_STL_FILE_NAME), b"preview").expect("preview");
         fs::write(bundle_dir.join(STEP_FILE_NAME), b"step").expect("step");
         fs::write(
             bundle_dir.join(PARTS_DIR_NAME).join("000-outershell.stl"),
@@ -4532,7 +4539,7 @@ mod tests {
         let mut bundle = sample_bundle(model_id, ModelSourceKind::Generated);
         bundle.fcstd_path = FCSTD_FILE_NAME.to_string();
         bundle.manifest_path = MANIFEST_FILE_NAME.to_string();
-        bundle.preview_stl_path = PREVIEW_STL_FILE_NAME.to_string();
+        bundle.model_stl_path = MODEL_STL_FILE_NAME.to_string();
         bundle.viewer_assets[0].path = "parts/stale.stl".to_string();
         write_bundle(&bundle_dir, &bundle).expect("bundle");
 
@@ -4549,8 +4556,8 @@ mod tests {
             bundle_dir.join(MANIFEST_FILE_NAME).to_string_lossy()
         );
         assert_eq!(
-            cached.preview_stl_path,
-            bundle_dir.join(PREVIEW_STL_FILE_NAME).to_string_lossy()
+            cached.model_stl_path,
+            bundle_dir.join(MODEL_STL_FILE_NAME).to_string_lossy()
         );
         assert_eq!(
             cached.export_artifacts[0].path,
@@ -4599,7 +4606,7 @@ mod tests {
         fs::create_dir_all(bundle_dir.join(PARTS_DIR_NAME)).expect("parts dir");
 
         let fcstd_path = bundle_dir.join(FCSTD_FILE_NAME);
-        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let preview_path = bundle_dir.join(MODEL_STL_FILE_NAME);
         let step_path = bundle_dir.join(STEP_FILE_NAME);
         let asset_path = bundle_dir.join(PARTS_DIR_NAME).join("000-outershell.stl");
         fs::write(&fcstd_path, b"fcstd").expect("fcstd");
@@ -4638,7 +4645,7 @@ mod tests {
             saved.viewer_assets[0].path,
             updated_asset_path.to_string_lossy()
         );
-        assert_eq!(saved.preview_stl_path, preview_path.to_string_lossy());
+        assert_eq!(saved.model_stl_path, preview_path.to_string_lossy());
     }
 
     #[test]
@@ -4653,7 +4660,7 @@ mod tests {
         fs::create_dir_all(bundle_dir.join(PARTS_DIR_NAME)).expect("parts dir");
 
         let fcstd_path = bundle_dir.join(FCSTD_FILE_NAME);
-        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let preview_path = bundle_dir.join(MODEL_STL_FILE_NAME);
         let step_path = bundle_dir.join(STEP_FILE_NAME);
         let asset_path = bundle_dir.join(PARTS_DIR_NAME).join("000-outershell.stl");
         fs::write(&fcstd_path, b"fcstd").expect("fcstd");
@@ -4728,7 +4735,7 @@ mod tests {
         fs::create_dir_all(bundle_dir.join(PARTS_DIR_NAME)).expect("parts dir");
 
         fs::write(bundle_dir.join(FCSTD_FILE_NAME), b"fcstd").expect("fcstd");
-        fs::write(bundle_dir.join(PREVIEW_STL_FILE_NAME), b"preview").expect("preview");
+        fs::write(bundle_dir.join(MODEL_STL_FILE_NAME), b"preview").expect("preview");
         fs::write(bundle_dir.join(PARTS_DIR_NAME).join("001-lid.stl"), b"part").expect("part");
 
         let mut manifest = sample_manifest(
@@ -4775,7 +4782,7 @@ mod tests {
         fs::create_dir_all(bundle_dir.join(PARTS_DIR_NAME)).expect("parts dir");
 
         let fcstd_path = bundle_dir.join(FCSTD_FILE_NAME);
-        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let preview_path = bundle_dir.join(MODEL_STL_FILE_NAME);
         let step_path = bundle_dir.join(STEP_FILE_NAME);
         let asset_path = bundle_dir.join(PARTS_DIR_NAME).join("000-outershell.stl");
         fs::write(&fcstd_path, b"fcstd").expect("fcstd");
@@ -4879,13 +4886,13 @@ mod tests {
             crate::contracts::GeometryBackend::Freecad
         );
         assert!(bundle.fcstd_path.ends_with("model.FCStd"));
-        assert!(bundle.preview_stl_path.ends_with("preview.stl"));
+        assert!(bundle.model_stl_path.ends_with("model.stl"));
         assert!(bundle
             .macro_path
             .as_deref()
             .is_some_and(|path| path.ends_with("source.ecky")));
         assert!(Path::new(&bundle.fcstd_path).exists());
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
     }
 
     #[test]
@@ -4919,7 +4926,7 @@ mod tests {
             .macro_path
             .as_deref()
             .is_some_and(|path| path.ends_with("source.ecky")));
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
         let manifest: ModelManifest = serde_json::from_str(
             &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
         )
@@ -4958,7 +4965,7 @@ mod tests {
             .macro_path
             .as_deref()
             .is_some_and(|path| path.ends_with("source.ecky")));
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
         let manifest: ModelManifest = serde_json::from_str(
             &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
         )
@@ -4995,7 +5002,7 @@ mod tests {
             .macro_path
             .as_deref()
             .is_some_and(|path| path.ends_with("source.ecky")));
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
         let manifest: ModelManifest = serde_json::from_str(
             &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
         )
@@ -5032,7 +5039,7 @@ mod tests {
             .macro_path
             .as_deref()
             .is_some_and(|path| path.ends_with("source.ecky")));
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
         let manifest: ModelManifest = serde_json::from_str(
             &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
         )
@@ -5105,7 +5112,7 @@ mod tests {
             .macro_path
             .as_deref()
             .is_some_and(|path| path.ends_with("source.ecky")));
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
         let manifest: ModelManifest = serde_json::from_str(
             &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
         )
@@ -5156,7 +5163,7 @@ mod tests {
             .macro_path
             .as_deref()
             .is_some_and(|path| path.ends_with("source.ecky")));
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
         let manifest: ModelManifest = serde_json::from_str(
             &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
         )
@@ -5197,7 +5204,7 @@ mod tests {
             .macro_path
             .as_deref()
             .is_some_and(|path| path.ends_with("source.ecky")));
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
         let manifest: ModelManifest = serde_json::from_str(
             &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
         )
@@ -5238,7 +5245,7 @@ mod tests {
             .macro_path
             .as_deref()
             .is_some_and(|path| path.ends_with("source.ecky")));
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
         let manifest: ModelManifest = serde_json::from_str(
             &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
         )
@@ -5285,7 +5292,7 @@ mod tests {
             .macro_path
             .as_deref()
             .is_some_and(|path| path.ends_with("source.ecky")));
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
         let manifest: ModelManifest = serde_json::from_str(
             &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
         )
@@ -5394,7 +5401,7 @@ mod tests {
             .macro_path
             .as_deref()
             .is_some_and(|path| path.ends_with("source.ecky")));
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
         let manifest: ModelManifest = serde_json::from_str(
             &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
         )
@@ -5457,7 +5464,7 @@ mod tests {
         )
         .expect("render exact edge selector");
 
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
         let manifest: ModelManifest = serde_json::from_str(
             &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
         )
@@ -5525,7 +5532,7 @@ mod tests {
         )
         .expect("render exact face selector");
 
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
         let manifest: ModelManifest = serde_json::from_str(
             &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
         )
@@ -5570,7 +5577,7 @@ mod tests {
         )
         .expect("render coarse face selector");
 
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
         let manifest: ModelManifest = serde_json::from_str(
             &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
         )
@@ -5615,7 +5622,7 @@ mod tests {
         )
         .expect("render richer face selector");
 
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
         let manifest: ModelManifest = serde_json::from_str(
             &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
         )
@@ -5659,7 +5666,7 @@ mod tests {
             .macro_path
             .as_deref()
             .is_some_and(|path| path.ends_with("source.ecky")));
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
         let manifest: ModelManifest = serde_json::from_str(
             &fs::read_to_string(&bundle.manifest_path).expect("read manifest"),
         )

@@ -338,7 +338,7 @@ fn load_font_selector(selector: &str) -> Option<ResolvedFont> {
     let mut db = fontdb::Database::new();
     db.load_system_fonts();
     let id = db.query(&Query {
-        families: &[Family::Name(selector), Family::SansSerif],
+        families: &[Family::Name(selector)],
         weight: Weight::NORMAL,
         stretch: Stretch::Normal,
         style: Style::Normal,

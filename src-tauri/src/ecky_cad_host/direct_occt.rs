@@ -11,8 +11,8 @@ use crate::ecky_cad_host::text_profile::parse_text_profile;
 use crate::ecky_core_ir::{
     CoreArrayOp, CoreBinding, CoreBooleanOp, CoreFrameOp, CoreKeywordArg, CoreLiteral, CoreMetaOp,
     CoreNode, CoreNodeKind, CoreOperation, CoreParameterKind, CorePart, CorePathOp, CorePrimitive,
-    CoreProgram, CoreReference, CoreSelectorPayload, CoreShapeBinding, CoreSurfaceOp, CoreSymbol,
-    CoreTransformOp, CoreValueKind, NodeId,
+    CoreProgram, CoreReference, CoreSelectorPayload, CoreSelectorTagKind, CoreShapeBinding,
+    CoreSurfaceOp, CoreSymbol, CoreTransformOp, CoreValueKind, NodeId,
 };
 
 // --- Authoring-error constructors (backend layer) -------------------------
@@ -194,6 +194,7 @@ pub enum OcctOp {
     PathFrame,
     Place,
     ClipBox,
+    ClipThreadEnvelope,
     ClipPlane,
     LinearArray,
     RadialArray,
@@ -380,12 +381,36 @@ fn plan_expanded_core_program_with_bindings(
         .parts
         .iter()
         .map(|part| {
-            let mut planner =
-                PartPlanner::new(&param_names, &scalar_env, max_node_id(&part.root) + 1);
+            let requested_let_bindings = program
+                .selector_tags
+                .iter()
+                .filter(|tag| tag.kind == CoreSelectorTagKind::Face && tag.target == part.key)
+                .filter_map(|tag| {
+                    let raw = tag.authored_selector.trim();
+                    raw.to_ascii_lowercase()
+                        .starts_with("created-by:")
+                        .then(|| &raw["created-by:".len()..])
+                })
+                .flat_map(|bindings| bindings.split('|'))
+                .map(str::trim)
+                .filter(|binding| !binding.is_empty())
+                .map(str::to_string)
+                .collect::<BTreeSet<_>>();
+            let mut planner = PartPlanner::new(
+                &param_names,
+                &scalar_env,
+                max_node_id(&part.root) + 1,
+                requested_let_bindings.clone(),
+            );
             let root = planner.plan_node(&part.root)?;
             let authored_shape_bindings = planner.authored_shape_bindings.clone();
+            let protected_slots = authored_shape_bindings
+                .iter()
+                .filter(|(name, _)| requested_let_bindings.contains(name))
+                .map(|(_, slot)| *slot)
+                .collect::<BTreeSet<_>>();
             let commands = if optimize_graph {
-                optimize_part_commands(root, planner.commands).map_err(|err| {
+                optimize_part_commands(root, planner.commands, &protected_slots).map_err(|err| {
                     backend_error(
                         AuthoringReason::Type,
                         format!("Direct OCCT adapter produced an invalid command graph: {err}"),
@@ -459,6 +484,7 @@ pub(crate) fn plan_core_program_unoptimized(program: &CoreProgram) -> AuthoringR
 fn optimize_part_commands(
     root: OcctSlot,
     mut commands: Vec<OcctCommand>,
+    protected_slots: &BTreeSet<OcctSlot>,
 ) -> AuthoringResult<Vec<OcctCommand>> {
     let producers = command_producers(&commands)?;
     validate_command_graph(root, &commands, &producers)?;
@@ -473,6 +499,7 @@ fn optimize_part_commands(
         .max()
         .unwrap_or(0)
         + 1;
+    let mut bypassed_protected_slots = BTreeSet::new();
     let mut result: Vec<OcctCommand> = Vec::with_capacity(commands.len());
     for mut command in commands.into_iter() {
         if command.op == OcctOp::Difference && command.args.len() >= 2 {
@@ -485,6 +512,11 @@ fn optimize_part_commands(
             // which already precede the difference, so topological order holds.
             let mut synthesized: Vec<OcctCommand> = Vec::new();
             for tool in &command.args[1..] {
+                if let OcctArg::Ref(slot) = tool {
+                    if protected_slots.contains(slot) {
+                        bypassed_protected_slots.insert(*slot);
+                    }
+                }
                 flatten_difference_tool(
                     tool,
                     &original,
@@ -518,6 +550,12 @@ fn optimize_part_commands(
     let optimized_producers = command_producers(&commands)?;
     let mut reachable = BTreeSet::new();
     collect_reachable_slots(root, &commands, &optimized_producers, &mut reachable)?;
+    // Keep authored topology bindings even when the boolean consumes their
+    // flattened children. The bound union remains inspectable, while the final
+    // geometry avoids using its potentially disconnected fused result.
+    for slot in bypassed_protected_slots {
+        collect_reachable_slots(slot, &commands, &optimized_producers, &mut reachable)?;
+    }
     commands.retain(|command| reachable.contains(&command.output));
     Ok(commands)
 }
@@ -858,11 +896,10 @@ fn expand_core_program_for_direct_occt(
             })
         })
         .collect::<AuthoringResult<Vec<_>>>()?;
-    Ok(CoreProgram::new(
-        program.id,
-        program.parameters.clone(),
-        parts,
-    ))
+    Ok(
+        CoreProgram::new(program.id, program.parameters.clone(), parts)
+            .with_selector_tags(program.selector_tags.clone()),
+    )
 }
 
 fn expand_node_for_direct_occt(
@@ -1112,6 +1149,17 @@ fn expand_node_for_direct_occt(
         }
         CoreNodeKind::Call { op, args, keywords } if matches!(op, CoreOperation::Custom(name) if name == "regular-polygon") => {
             expand_regular_polygon_node(
+                node,
+                args,
+                keywords,
+                param_names,
+                env,
+                node_env,
+                next_node_id,
+            )
+        }
+        CoreNodeKind::Call { op, args, keywords } if matches!(op, CoreOperation::Custom(name) if name == "voronoi-cell") => {
+            expand_voronoi_cell_node(
                 node,
                 args,
                 keywords,
@@ -1458,18 +1506,23 @@ fn expand_svg_node(
 fn expand_text_node(
     node: &CoreNode,
     args: &[CoreNode],
-    _keywords: &[CoreKeywordArg],
+    keywords: &[CoreKeywordArg],
     param_names: &BTreeMap<u64, String>,
     env: &BTreeMap<String, ParamValue>,
     next_node_id: &mut u64,
 ) -> AuthoringResult<CoreNode> {
-    if args.len() < 2 {
+    if args.len() != 2 {
         return Err(bk_arity("text", "text value and size"));
     }
 
     let value = eval_core_stringish(&args[0], param_names, env)?;
     let size = eval_core_number(&args[1], param_names, env)?;
-    let components = parse_text_profile(&value, size, None).map_err(|err| {
+    let font = keywords
+        .iter()
+        .find(|keyword| keyword.name == "font")
+        .map(|keyword| eval_core_stringish(keyword.source_node(), param_names, env))
+        .transpose()?;
+    let components = parse_text_profile(&value, size, font.as_deref()).map_err(|err| {
         backend_op_error(
             AuthoringReason::Type,
             "text",
@@ -1671,10 +1724,9 @@ fn expand_helical_ridge_node(
     let base_half = (base_width + 2.0 * envelope_clearance) * 0.5;
     let crest_half = (crest_width + 2.0 * envelope_clearance) * 0.5;
     let ridge_depth = depth + envelope_clearance;
-    // Profile trapezoid: wide base (`base_width`) at `radius`, narrow crest
-    // (`crest_width`) at `radius + ridge_depth`. Must match the build123d
-    // lowering profile exactly for backend parity (note the final point uses
-    // `base_half`, not `crest_half`).
+    // Local section. The Direct OCCT helical loft places each sampled section
+    // on the spine; keeping the absolute radius in both the section and helix
+    // path displaces the ridge away from the thread core.
     let (base_lower, base_upper) = if has_lower_flank {
         (
             -crest_half - ridge_depth * lower_flank.tan(),
@@ -1685,11 +1737,12 @@ fn expand_helical_ridge_node(
     };
     let profile_wire = path3_node(
         &[
-            [radius, 0.0, base_lower],
-            [radius + ridge_depth, 0.0, -crest_half],
-            [radius + ridge_depth, 0.0, crest_half],
-            [radius, 0.0, base_upper],
-            [radius, 0.0, base_lower],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, base_lower],
+            [ridge_depth, 0.0, -crest_half],
+            [ridge_depth, 0.0, crest_half],
+            [0.0, 0.0, base_upper],
+            [0.0, 0.0, 0.0],
         ],
         next_node_id,
     );
@@ -1816,6 +1869,15 @@ pub(crate) fn thread_printability_warnings(
     program: &CoreProgram,
     parameters: &DesignParams,
 ) -> AuthoringResult<Vec<String>> {
+    // Component expansion introduces hygienic local aliases (`##name2`) whose
+    // values are resolved by the Direct OCCT normalization pass. Inspect the
+    // same normalized Core consumed by the planner; walking authored Core here
+    // makes a successfully rendered component fail later while building its
+    // advisory manifest.
+    let normalized =
+        super::direct_occt_normalize::normalize_core_program_for_direct_occt(program, parameters)
+            .map_err(|err| planner_dependency_error("printability normalization failed", err))?;
+    let program = &normalized;
     let param_names = program
         .parameters
         .iter()
@@ -1914,28 +1976,74 @@ fn collect_thread_printability_warnings(
             }
         }
         CoreNodeKind::Build { bindings, result } => {
+            let mut nested_env = env.clone();
+            let mut nested_node_env = node_env.clone();
             for binding in bindings {
                 collect_thread_printability_warnings(
                     &binding.value,
                     param_names,
-                    env,
-                    node_env,
+                    &nested_env,
+                    &nested_node_env,
                     warnings,
                 )?;
+                if let Some(param_value) = eval_scalar_binding_for_direct_occt(
+                    &binding.value,
+                    param_names,
+                    &nested_env,
+                    &nested_node_env,
+                )? {
+                    nested_env.insert(binding.name.clone(), param_value.clone());
+                    nested_node_env.insert(binding.value.id.raw(), param_value);
+                    record_scalar_node_values_for_direct_occt(
+                        &binding.value,
+                        param_names,
+                        &nested_env,
+                        &mut nested_node_env,
+                    );
+                }
             }
-            collect_thread_printability_warnings(result, param_names, env, node_env, warnings)?;
+            collect_thread_printability_warnings(
+                result,
+                param_names,
+                &nested_env,
+                &nested_node_env,
+                warnings,
+            )?;
         }
         CoreNodeKind::Let { bindings, body } => {
+            let mut nested_env = env.clone();
+            let mut nested_node_env = node_env.clone();
             for binding in bindings {
                 collect_thread_printability_warnings(
                     &binding.value,
                     param_names,
-                    env,
-                    node_env,
+                    &nested_env,
+                    &nested_node_env,
                     warnings,
                 )?;
+                if let Some(param_value) = eval_scalar_binding_for_direct_occt(
+                    &binding.value,
+                    param_names,
+                    &nested_env,
+                    &nested_node_env,
+                )? {
+                    nested_env.insert(binding.name.clone(), param_value.clone());
+                    nested_node_env.insert(binding.value.id.raw(), param_value);
+                    record_scalar_node_values_for_direct_occt(
+                        &binding.value,
+                        param_names,
+                        &nested_env,
+                        &mut nested_node_env,
+                    );
+                }
             }
-            collect_thread_printability_warnings(body, param_names, env, node_env, warnings)?;
+            collect_thread_printability_warnings(
+                body,
+                param_names,
+                &nested_env,
+                &nested_node_env,
+                warnings,
+            )?;
         }
         CoreNodeKind::If {
             condition,
@@ -2229,6 +2337,14 @@ fn expand_thread_node(
     // against a redefined variable (the runner path never exercised this).
     ridge.id = next_id(next_node_id);
 
+    // The swept profile is centered on both helix endpoints, so its raw solid
+    // extends below z=0 and above `length`. Intersect the fused male solid with
+    // the named major envelope. Clipping after fusion keeps the buried root
+    // overlap intact during union, then trims both end spill and any sweep
+    // tolerance outside the intended radial boundary. Female threads return
+    // above as subtraction cutters and remain naturally bounded by their host.
+    let major_radius = radius + depth;
+    let major_top_radius = top_radius + depth;
     let core = CoreNode::new(
         next_id(next_node_id),
         CoreNodeKind::Call {
@@ -2254,11 +2370,26 @@ fn expand_thread_node(
         CoreValueKind::Solid,
     );
 
-    Ok(rebuild_node(
-        node,
+    let unbounded_thread = CoreNode::new(
+        next_id(next_node_id),
         CoreNodeKind::Call {
             op: CoreOperation::Boolean(CoreBooleanOp::Union),
             args: vec![core, ridge],
+            keywords: Vec::new(),
+        },
+        CoreValueKind::Solid,
+    );
+
+    Ok(rebuild_node(
+        node,
+        CoreNodeKind::Call {
+            op: CoreOperation::Custom("clip-thread-envelope".to_string()),
+            args: vec![
+                number_node(next_node_id, major_radius),
+                number_node(next_node_id, major_top_radius),
+                number_node(next_node_id, length),
+                unbounded_thread,
+            ],
             keywords: Vec::new(),
         },
     ))
@@ -2372,7 +2503,10 @@ fn expand_tapped_hole_node(
     // coincident cylinder face. The ridge root moves in by `overlap` and its
     // depth grows by `overlap`, so the crest (major = minor + depth) and the
     // bore surface (minor) are unchanged — only the buried part differs.
-    let overlap = 0.3_f64.min(minor * 0.5).min(depth);
+    // The sampled helical loft needs substantial radial burial before OCCT's
+    // fuse recognizes a shared volume. Crest radius stays unchanged because
+    // ridge depth grows by the same named overlap.
+    let overlap = 0.8_f64.min(minor * 0.5).min(depth);
     let ridge_radius = minor - overlap;
     let ridge_depth = depth + overlap;
 
@@ -2433,10 +2567,7 @@ fn expand_tapped_hole_node(
         node,
         CoreNodeKind::Call {
             op: CoreOperation::Boolean(CoreBooleanOp::Union),
-            // Difference flattening preserves Union source order. Cut the
-            // relief first, then the bore: OCCT treats bore-first followed by
-            // the overlapping helical ridge as a near-contact no-op.
-            args: vec![ridge, bore],
+            args: vec![bore, ridge],
             keywords: Vec::new(),
         },
     ))
@@ -2545,6 +2676,101 @@ fn expand_regular_polygon_node(
         CoreValueKind::List,
     );
 
+    Ok(rebuild_node(
+        node,
+        CoreNodeKind::Call {
+            op: CoreOperation::Primitive(CorePrimitive::Polygon),
+            args: vec![list],
+            keywords: Vec::new(),
+        },
+    ))
+}
+
+fn expand_voronoi_cell_node(
+    node: &CoreNode,
+    args: &[CoreNode],
+    keywords: &[CoreKeywordArg],
+    param_names: &BTreeMap<u64, String>,
+    env: &BTreeMap<String, ParamValue>,
+    node_env: &BTreeMap<u64, ParamValue>,
+    next_node_id: &mut u64,
+) -> AuthoringResult<CoreNode> {
+    if args.len() != 5 {
+        return Err(bk_arity(
+            "voronoi-cell",
+            "sites, index, width, height, and inset",
+        ));
+    }
+    reject_unknown_keywords(keywords, &[], "voronoi-cell")?;
+
+    let sites_node =
+        expand_node_for_direct_occt(&args[0], param_names, env, node_env, next_node_id)?;
+    let CoreNodeKind::List(site_nodes) = &sites_node.kind else {
+        return Err(bk_op(
+            AuthoringReason::Type,
+            "voronoi-cell",
+            "`voronoi-cell` sites must evaluate to a point2 list.",
+        ));
+    };
+    let sites = site_nodes
+        .iter()
+        .enumerate()
+        .map(|(site_index, site)| {
+            let CoreNodeKind::List(coordinates) = &site.kind else {
+                return Err(bk_op(
+                    AuthoringReason::Type,
+                    "voronoi-cell",
+                    format!("`voronoi-cell` site {site_index} must be point2."),
+                ));
+            };
+            if coordinates.len() != 2 {
+                return Err(bk_op(
+                    AuthoringReason::Type,
+                    "voronoi-cell",
+                    format!("`voronoi-cell` site {site_index} must have two coordinates."),
+                ));
+            }
+            Ok([
+                eval_number_for_direct_occt(&coordinates[0], param_names, env, node_env)?,
+                eval_number_for_direct_occt(&coordinates[1], param_names, env, node_env)?,
+            ])
+        })
+        .collect::<AuthoringResult<Vec<_>>>()?;
+
+    let index = eval_number_for_direct_occt(&args[1], param_names, env, node_env)?;
+    if !index.is_finite() || index < 0.0 || index.fract().abs() > 1.0e-9 {
+        return Err(bk_op(
+            AuthoringReason::Type,
+            "voronoi-cell",
+            "`voronoi-cell` index must be a non-negative integer.",
+        ));
+    }
+    let width = eval_number_for_direct_occt(&args[2], param_names, env, node_env)?;
+    let height = eval_number_for_direct_occt(&args[3], param_names, env, node_env)?;
+    let inset = eval_number_for_direct_occt(&args[4], param_names, env, node_env)?;
+    let points = crate::ecky_deterministic::voronoi_cell_polygon(
+        &sites,
+        index as usize,
+        width,
+        height,
+        inset,
+    )
+    .map_err(|message| bk_op(AuthoringReason::Type, "voronoi-cell", message))?;
+    let point_nodes = points
+        .into_iter()
+        .map(|point| {
+            CoreNode::new(
+                next_id(next_node_id),
+                CoreNodeKind::Literal(CoreLiteral::Point2(point)),
+                CoreValueKind::Point2,
+            )
+        })
+        .collect();
+    let list = CoreNode::new(
+        next_id(next_node_id),
+        CoreNodeKind::List(point_nodes),
+        CoreValueKind::List,
+    );
     Ok(rebuild_node(
         node,
         CoreNodeKind::Call {
@@ -3883,6 +4109,7 @@ struct PartPlanner<'a> {
     next_node_id: u64,
     commands: Vec<OcctCommand>,
     authored_shape_bindings: Vec<(String, OcctSlot)>,
+    requested_let_bindings: BTreeSet<String>,
 }
 
 impl<'a> PartPlanner<'a> {
@@ -3890,6 +4117,7 @@ impl<'a> PartPlanner<'a> {
         param_names: &'a BTreeMap<u64, String>,
         scalar_env: &'a BTreeMap<String, ParamValue>,
         next_node_id: u64,
+        requested_let_bindings: BTreeSet<String>,
     ) -> Self {
         Self {
             param_names,
@@ -3900,6 +4128,7 @@ impl<'a> PartPlanner<'a> {
             next_node_id,
             commands: Vec::new(),
             authored_shape_bindings: Vec::new(),
+            requested_let_bindings,
         }
     }
 
@@ -4032,6 +4261,21 @@ impl<'a> PartPlanner<'a> {
                 self.scalar_env.insert(binding.name.clone(), scalar);
                 self.scalar_node_values
                     .insert(binding.value.id.raw(), value.clone());
+            }
+            if let OcctArg::Ref(slot) = &value {
+                if let Some(authored_name) = self.requested_let_bindings.iter().find(|requested| {
+                    binding.name == requested.as_str()
+                        || binding
+                            .name
+                            .strip_prefix(&format!("##{requested}"))
+                            .is_some_and(|suffix| {
+                                !suffix.is_empty()
+                                    && suffix.chars().all(|character| character.is_ascii_digit())
+                            })
+                }) {
+                    self.authored_shape_bindings
+                        .push((authored_name.clone(), *slot));
+                }
             }
             self.locals.insert(binding.name.clone(), value);
         }
@@ -4612,6 +4856,9 @@ fn occt_op(op: &CoreOperation) -> AuthoringResult<OcctOp> {
         CoreOperation::Frame(CoreFrameOp::PathFrame) => Ok(OcctOp::PathFrame),
         CoreOperation::Frame(CoreFrameOp::Place) => Ok(OcctOp::Place),
         CoreOperation::Frame(CoreFrameOp::ClipBox) => Ok(OcctOp::ClipBox),
+        CoreOperation::Custom(name) if name == "clip-thread-envelope" => {
+            Ok(OcctOp::ClipThreadEnvelope)
+        }
         CoreOperation::Frame(CoreFrameOp::ClipPlane) => Ok(OcctOp::ClipPlane),
         CoreOperation::Array(CoreArrayOp::LinearArray) => Ok(OcctOp::LinearArray),
         CoreOperation::Array(CoreArrayOp::RadialArray) => Ok(OcctOp::RadialArray),
@@ -5164,6 +5411,7 @@ mod tests {
                 ],
                 keywords: Vec::new(),
             }],
+            &BTreeSet::new(),
         )
         .expect_err("missing dependency");
 
@@ -5198,6 +5446,7 @@ mod tests {
                     keywords: Vec::new(),
                 },
             ],
+            &BTreeSet::new(),
         )
         .expect_err("cycle");
 
@@ -5713,6 +5962,29 @@ mod tests {
     }
 
     #[test]
+    fn plans_male_thread_with_named_radial_axial_envelope_clip() {
+        let plan = expand_to_plan(
+            "(model (part papa (thread :radius 8 :pitch 4 :length 12 :depth 1 :base-width 2 :crest-width 1)))",
+        );
+        let commands = &plan.parts[0].commands;
+        let envelope_clip = commands
+            .iter()
+            .find(|command| command.op == OcctOp::ClipThreadEnvelope)
+            .expect("male thread must be clipped to its radial/axial envelope");
+
+        assert_eq!(
+            envelope_clip.args[..3],
+            [
+                OcctArg::Number(9.0),
+                OcctArg::Number(9.0),
+                OcctArg::Number(12.0),
+            ],
+            "named envelope must use bottom/top major radii and authored length"
+        );
+        assert!(matches!(envelope_clip.args[3], OcctArg::Ref(_)));
+    }
+
+    #[test]
     fn plans_conical_thread_as_cone_and_conical_helix_for_direct_occt() {
         let plan = expand_to_plan(
             "(model (part pipe (thread :radius 6 :top-radius 5 :pitch 2 :length 20 :depth 0.8)))",
@@ -5729,6 +6001,18 @@ mod tests {
             "top radius travels with helix: {helix:?}"
         );
         assert_eq!(helix.args[4], OcctArg::Number(4.7));
+        let envelope_clip = commands
+            .iter()
+            .find(|command| command.op == OcctOp::ClipThreadEnvelope)
+            .expect("conical thread envelope clip");
+        assert_eq!(
+            envelope_clip.args[..3],
+            [
+                OcctArg::Number(6.8),
+                OcctArg::Number(5.8),
+                OcctArg::Number(20.0),
+            ]
+        );
     }
 
     #[test]
@@ -5884,8 +6168,10 @@ mod tests {
             .map(|command| command.op)
             .collect();
         assert!(
-            !ops.contains(&OcctOp::Union) && !ops.contains(&OcctOp::Cylinder),
-            "female thread should be a bare ridge cutter (no core cylinder/union), got {ops:?}"
+            !ops.contains(&OcctOp::Union)
+                && !ops.contains(&OcctOp::Cylinder)
+                && !ops.contains(&OcctOp::ClipThreadEnvelope),
+            "female thread should be a bare ridge cutter (no core/envelope clip), got {ops:?}"
         );
     }
 
@@ -5953,8 +6239,8 @@ mod tests {
             .expect("tapped-hole union first producer");
         assert_eq!(
             first_producer.op,
-            OcctOp::Sweep,
-            "tapped-hole must order relief before bore so a binary cut removes the relief first",
+            OcctOp::Cylinder,
+            "tapped-hole must cut the bore before the relief to avoid coincident internal seams",
         );
 
         assert!(plan.parts[0]
@@ -6242,6 +6528,246 @@ mod tests {
             boxes >= 4,
             "expected wall + 3 expanded rib instances, got {boxes} boxes"
         );
+    }
+
+    #[test]
+    fn plans_local_component_ports_on_front_and_side_without_euler_rotations() {
+        let program = compile(include_str!(
+            "../../tests/fixtures/component-placement/dryer-latch-front-side.ecky"
+        ));
+        let plan = plan_core_program(&program).expect("native placement plan");
+        let portable = {
+            use ecky_render::KernelPlanner;
+            ecky_render::PortableKernelPlanner
+                .plan(&program, &BTreeMap::new())
+                .expect("portable placement plan")
+        };
+        assert_eq!(
+            plan.parts
+                .iter()
+                .map(|part| part.key.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "enclosure",
+                "front-latch",
+                "side-latch",
+                "mirrored-side-latch"
+            ]
+        );
+
+        let plane_origin = |part_index: usize| -> [f64; 3] {
+            let plane = plan.parts[part_index]
+                .commands
+                .iter()
+                .find(|command| command.op == OcctOp::Plane)
+                .expect("placed part plane");
+            let origin = plane
+                .keywords
+                .iter()
+                .find(|keyword| keyword.name == "origin")
+                .expect("plane origin")
+                .source_arg();
+            match origin {
+                OcctArg::Point3(point) => *point,
+                OcctArg::List(values) if values.len() == 3 => {
+                    let mut point = [0.0; 3];
+                    for (index, value) in values.iter().enumerate() {
+                        let OcctArg::Number(value) = value else {
+                            panic!("plane origin coordinate must be numeric");
+                        };
+                        point[index] = *value;
+                    }
+                    point
+                }
+                other => panic!("plane origin must be a point, got {other:?}"),
+            }
+        };
+        assert_eq!(plane_origin(1), [0.0, -25.0, 15.0]);
+        assert_eq!(plane_origin(2), [50.0, 0.0, 15.0]);
+        assert_eq!(plane_origin(3), [-50.0, 0.0, 15.0]);
+        fn portable_scalar(part: &ecky_render::KernelPart, arg: &ecky_render::KernelArg) -> f64 {
+            if arg.kind == "number" {
+                return arg.value.as_f64().expect("portable number");
+            }
+            assert_eq!(arg.kind, "ref", "unexpected portable scalar: {arg:?}");
+            let output = arg.value.as_u64().expect("portable ref output");
+            let command = part
+                .commands
+                .iter()
+                .find(|command| command.output == output)
+                .expect("portable scalar command");
+            let values = command
+                .args
+                .iter()
+                .map(|value| portable_scalar(part, value))
+                .collect::<Vec<_>>();
+            match command.op.as_str() {
+                "+" => values.iter().sum(),
+                "-" if values.len() == 1 => -values[0],
+                "-" => values[1..].iter().fold(values[0], |acc, value| acc - value),
+                "*" => values.iter().product(),
+                "/" => values[1..].iter().fold(values[0], |acc, value| acc / value),
+                other => panic!("unsupported portable scalar op `{other}`"),
+            }
+        }
+        let portable_plane_axis = |part_index: usize, name: &str| -> [f64; 3] {
+            let part = &portable.parts[part_index];
+            let plane = part
+                .commands
+                .iter()
+                .find(|command| command.op == "plane")
+                .expect("portable placed part plane");
+            let value = plane
+                .keywords
+                .iter()
+                .find(|keyword| keyword.name == name)
+                .and_then(|keyword| keyword.value.as_ref())
+                .expect("portable plane axis")
+                .value
+                .as_array()
+                .expect("portable plane axis array");
+            std::array::from_fn(|index| {
+                value[index]
+                    .as_f64()
+                    .or_else(|| {
+                        serde_json::from_value::<ecky_render::KernelArg>(value[index].clone())
+                            .ok()
+                            .map(|arg| portable_scalar(part, &arg))
+                    })
+                    .expect("numeric axis")
+            })
+        };
+        for part_index in 1..=3 {
+            assert_eq!(
+                portable_plane_axis(part_index, "origin"),
+                plane_origin(part_index)
+            );
+        }
+        let local_box = |part_index: usize| {
+            plan.parts[part_index]
+                .commands
+                .iter()
+                .find(|command| command.op == OcctOp::Box)
+                .expect("local latch box")
+        };
+        let local_body_digest = |part_index: usize| {
+            let box_command = local_box(part_index);
+            format!(
+                "sha256:{:x}",
+                Sha256::digest(
+                    format!(
+                        "{:?}\0{:?}\0{:?}",
+                        box_command.op, box_command.args, box_command.keywords
+                    )
+                    .as_bytes()
+                )
+            )
+        };
+        assert_eq!(local_box(1).args, local_box(2).args);
+        assert_eq!(local_box(1).keywords, local_box(2).keywords);
+        assert_eq!(local_box(1).args, local_box(3).args);
+        assert_eq!(local_box(1).keywords, local_box(3).keywords);
+        assert_eq!(local_body_digest(1), local_body_digest(2));
+        assert_eq!(local_body_digest(1), local_body_digest(3));
+        let plane_axis = |part_index: usize, name: &str| -> [f64; 3] {
+            let plane = plan.parts[part_index]
+                .commands
+                .iter()
+                .find(|command| command.op == OcctOp::Plane)
+                .expect("placed part plane");
+            let axis = plane
+                .keywords
+                .iter()
+                .find(|keyword| keyword.name == name)
+                .expect("plane axis")
+                .source_arg();
+            let OcctArg::Point3(axis) = axis else {
+                panic!("plane {name} must be a point, got {axis:?}");
+            };
+            *axis
+        };
+        let front_normal = plane_axis(1, "normal");
+        let side_normal = plane_axis(2, "normal");
+        assert_eq!(portable_plane_axis(1, "normal"), front_normal);
+        assert_eq!(portable_plane_axis(2, "normal"), side_normal);
+        assert_eq!(portable_plane_axis(3, "normal"), plane_axis(3, "normal"));
+        assert_eq!(front_normal, [0.0, 1.0, 0.0]);
+        assert_eq!(side_normal, [-1.0, 0.0, 0.0]);
+        assert_eq!(
+            front_normal
+                .iter()
+                .zip(side_normal)
+                .map(|(left, right)| left * right)
+                .sum::<f64>(),
+            0.0
+        );
+        for part in &plan.parts[1..] {
+            let ops = part
+                .commands
+                .iter()
+                .map(|command| command.op)
+                .collect::<Vec<_>>();
+            assert!(ops.contains(&OcctOp::Plane), "{ops:?}");
+            assert!(ops.contains(&OcctOp::Box), "{ops:?}");
+            assert!(ops.contains(&OcctOp::Place), "{ops:?}");
+            assert!(
+                !ops.contains(&OcctOp::Rotate),
+                "manual Euler leaked: {ops:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plans_parameterized_thread_inside_component_for_direct_occt() {
+        let program = compile(
+            r#"
+            (define-component threaded-ring
+              ((number radius 18)
+               (number pitch 4)
+               (number length 12)
+               (number depth 1.4))
+              (build
+                (shape positive
+                  (thread
+                    :radius radius
+                    :pitch pitch
+                    :length length
+                    :depth depth
+                    :base-width 2.75
+                    :crest-width 1))
+                (result positive)))
+            (model
+              (params
+                (number ring-radius 20)
+                (number ring-pitch 4)
+                (number ring-length 12)
+                (number ring-depth 1.4))
+              (part ring
+                (threaded-ring
+                  :radius ring-radius
+                  :pitch ring-pitch
+                  :length ring-length
+                  :depth ring-depth)))
+            "#,
+        );
+
+        let parameters = DesignParams::from([
+            ("ring-radius".to_string(), ParamValue::Number(20.0)),
+            ("ring-pitch".to_string(), ParamValue::Number(4.0)),
+            ("ring-length".to_string(), ParamValue::Number(12.0)),
+            ("ring-depth".to_string(), ParamValue::Number(1.4)),
+        ]);
+        let plan =
+            plan_core_program_with_params(&program, &parameters).expect("component thread planned");
+        let warnings = thread_printability_warnings(&program, &parameters)
+            .expect("component thread printability inspected");
+
+        assert!(!plan.parts.is_empty());
+        assert!(plan.parts.iter().any(|part| part
+            .commands
+            .iter()
+            .any(|command| command.op == OcctOp::Sweep)));
+        assert!(warnings.iter().all(|warning| !warning.is_empty()));
     }
 
     #[test]
@@ -6666,6 +7192,58 @@ mod tests {
     }
 
     #[test]
+    fn preserves_only_created_by_let_bindings_for_topology_provenance() {
+        let program = compile(
+            r#"(model
+              (tag-face mounting :faces "created-by:lower_slot|upper_slot" body)
+              (part body
+                (let* ((base (box 20 10 72))
+                       (lower_slot (translate 10 5 16 (cylinder 2 20)))
+                       (upper_slot (translate 10 5 56 (cylinder 2 20)))
+                       (unrelated (box 1 1 1))
+                       (slotted (difference base lower_slot upper_slot)))
+                  slotted)))"#,
+        );
+
+        assert_eq!(program.selector_tags[0].target, "body");
+        assert_eq!(
+            program.selector_tags[0].authored_selector,
+            "created-by:lower_slot|upper_slot"
+        );
+
+        let normalized =
+            crate::ecky_cad_host::direct_occt_normalize::normalize_core_program_for_direct_occt(
+                &program,
+                &DesignParams::new(),
+            )
+            .expect("normalize");
+        let expanded =
+            expand_core_program_for_direct_occt(&normalized, &DesignParams::new()).expect("expand");
+        assert_eq!(expanded.selector_tags.len(), 1);
+        let unoptimized =
+            plan_expanded_core_program_with_bindings(&expanded, &DesignParams::new(), false)
+                .expect("unoptimized plan");
+        assert_eq!(
+            unoptimized
+                .authored_shape_bindings
+                .iter()
+                .map(|binding| binding.name.as_str())
+                .collect::<Vec<_>>(),
+            ["lower_slot", "upper_slot"]
+        );
+
+        let planned = plan_core_program_with_params_and_bindings(&program, &DesignParams::new())
+            .expect("plan with requested let bindings");
+        let names = planned
+            .authored_shape_bindings
+            .iter()
+            .map(|binding| binding.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, ["lower_slot", "upper_slot"]);
+    }
+
+    #[test]
     fn plans_svg_wire_soup_for_artwork_rejected_by_clean_path() {
         // Two disjoint filled squares = multiple outer loops, which the clean
         // profile path rejects. The tolerant wire-soup fallback must instead
@@ -6760,6 +7338,32 @@ mod tests {
             ops[..ops.len() - 2].iter().all(|op| *op == OcctOp::Polygon),
             "{ops:?}"
         );
+    }
+
+    #[test]
+    fn text_font_keyword_overrides_global_font_for_direct_occt() {
+        let program = compile(
+            r#"
+            (model
+              (params
+                (select font "ecky-missing-font"
+                  :label "Font"
+                  :options (("Missing" "ecky-missing-font") ("Arial" "Arial"))))
+              (part body (extrude (text "II" 12 :font font) 4)))
+        "#,
+        );
+        let controls = crate::ecky_ir::derive_controls_from_core_program(&program)
+            .expect("derive font control");
+
+        assert!(matches!(
+            controls.fields.as_slice(),
+            [crate::contracts::UiField::Select { key, label, options, .. }]
+                if key == "font" && label == "Font" && options.len() == 2
+        ));
+
+        let err = plan_core_program(&program).expect_err("local missing font must fail");
+
+        assert!(err.to_string().contains("ecky-missing-font"), "{err}");
     }
 
     #[test]
@@ -7329,6 +7933,31 @@ mod tests {
         assert!(
             ops.contains(&OcctOp::Polygon) && ops.contains(&OcctOp::Extrude),
             "expected regular-polygon to expand into a polygon + extrude plan, got {ops:?}"
+        );
+    }
+
+    #[test]
+    fn plans_voronoi_cell_as_polygon_for_direct_occt() {
+        let program = compile(
+            r#"
+            (model
+              (part cell
+                (extrude
+                  (voronoi-cell
+                    (voronoi-cells 3 3 12 12 1.5 23)
+                    4 40 40 1.2)
+                  5)))
+            "#,
+        );
+        let plan = plan_core_program(&program).expect("voronoi-cell planned");
+        let ops = plan.parts[0]
+            .commands
+            .iter()
+            .map(|command| command.op)
+            .collect::<Vec<_>>();
+        assert!(
+            ops.contains(&OcctOp::Polygon) && ops.contains(&OcctOp::Extrude),
+            "expected voronoi-cell to expand into a polygon + extrude plan, got {ops:?}"
         );
     }
 

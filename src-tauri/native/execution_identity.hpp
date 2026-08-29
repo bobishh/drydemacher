@@ -174,7 +174,9 @@ public:
     const std::filesystem::path& staging_root() const { return staging_; }
 
     void commit() {
-        for (const std::string& kind : {"commands", "parts", "part-meshes", "partial-booleans"}) {
+        for (const std::string& kind : {
+                 "commands", "parts", "authored-parts", "part-meshes",
+                 "partial-booleans", "topology-parts"}) {
             const std::filesystem::path staged = staging_ / kind;
             if (!std::filesystem::is_directory(staged)) continue;
             const std::filesystem::path destination = root_ / kind;
@@ -189,8 +191,9 @@ public:
 
 private:
     static bool supported_kind(const std::string& kind) {
-        return kind == "commands" || kind == "parts" || kind == "part-meshes" ||
-            kind == "partial-booleans";
+        return kind == "commands" || kind == "parts" || kind == "authored-parts" ||
+            kind == "part-meshes" || kind == "partial-booleans" ||
+            kind == "topology-parts";
     }
 
     std::filesystem::path root_;

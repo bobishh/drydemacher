@@ -1,0 +1,23 @@
+(model
+  (part papa
+    (thread
+      :radius 8
+      :pitch 4
+      :length 12
+      :depth 1
+      :base-width 2
+      :crest-width 1))
+  (part mama
+    (translate 24 0 0
+      (difference
+        (cylinder 11 12)
+        (cylinder 8 12)
+        (thread
+          :radius 8
+          :pitch 4
+          :length 12
+          :depth 1
+          :base-width 2
+          :crest-width 1
+          :female #t
+          :clearance 0.2)))))

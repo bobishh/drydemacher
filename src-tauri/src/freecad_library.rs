@@ -35,6 +35,7 @@ pub fn search_freecad_library(
     let roots = resolve_roots(&request.roots, configured_roots)?;
     let query_tokens = tokenize(&request.query);
     let limit = request.limit.unwrap_or(80).clamp(1, 500) as usize;
+    let offset = request.offset as usize;
     let mut items = Vec::new();
 
     for root in roots {
@@ -72,8 +73,7 @@ pub fn search_freecad_library(
             .then_with(|| a.category_path.cmp(&b.category_path))
             .then_with(|| a.name.cmp(&b.name))
     });
-    items.truncate(limit);
-    Ok(items)
+    Ok(items.into_iter().skip(offset).take(limit).collect())
 }
 
 pub fn import_path_from_request(request: &FreecadLibraryImportRequest) -> AppResult<PathBuf> {
@@ -189,6 +189,7 @@ fn persist_mesh_runtime(
     let manifest = ModelManifest {
         geometry_provenance: provenance.clone(),
         component_import_origins: Vec::new(),
+        component_placement_evidence: Vec::new(),
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.clone(),
         source_kind: source_kind.clone(),
@@ -250,6 +251,7 @@ fn persist_mesh_runtime(
         component_dependency_lock: None,
         component_dependency_lock_digest: None,
         component_import_origins: Vec::new(),
+        component_placement_evidence: Vec::new(),
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id,
         source_kind,
@@ -261,7 +263,7 @@ fn persist_mesh_runtime(
         fcstd_path: String::new(),
         manifest_path: path_to_string(&manifest_path)?,
         macro_path: None,
-        preview_stl_path: if ext == "stl" {
+        model_stl_path: if ext == "stl" {
             mesh_path_string.clone()
         } else {
             String::new()
@@ -677,6 +679,7 @@ mod tests {
             query: "608 bearing".to_string(),
             roots: vec![root.to_string_lossy().to_string()],
             limit: Some(10),
+            offset: 0,
             include_architecture: false,
         };
         let items = search_freecad_library(&request, &[]).unwrap();
@@ -684,6 +687,38 @@ mod tests {
         assert_eq!(items[0].preferred_format, "step");
         assert!(items[0].formats.contains(&"fcstd".to_string()));
         assert!(items[0].tags.contains(&"hardware".to_string()));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn search_pages_all_nested_models_without_a_fixed_catalog_cap() {
+        let root = temp_root("pagination");
+        let dir = root.join("Mechanical Parts").join("Fasteners");
+        fs::create_dir_all(&dir).unwrap();
+        for index in 0..125 {
+            fs::write(dir.join(format!("Part-{index:03}.step")), b"step").unwrap();
+        }
+
+        let request = |offset| FreecadLibrarySearchRequest {
+            query: String::new(),
+            roots: vec![root.to_string_lossy().to_string()],
+            limit: Some(50),
+            offset,
+            include_architecture: false,
+        };
+        let first = search_freecad_library(&request(0), &[]).unwrap();
+        let second = search_freecad_library(&request(50), &[]).unwrap();
+        let third = search_freecad_library(&request(100), &[]).unwrap();
+
+        assert_eq!((first.len(), second.len(), third.len()), (50, 50, 25));
+        let ids = first
+            .iter()
+            .chain(&second)
+            .chain(&third)
+            .map(|item| item.id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(ids.len(), 125);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -699,6 +734,7 @@ mod tests {
             query: "door".to_string(),
             roots: vec![root.to_string_lossy().to_string()],
             limit: Some(10),
+            offset: 0,
             include_architecture: false,
         };
         assert!(search_freecad_library(&request, &[]).unwrap().is_empty());
@@ -725,6 +761,7 @@ mod tests {
             query: "printable".to_string(),
             roots: vec![root.to_string_lossy().to_string()],
             limit: Some(10),
+            offset: 0,
             include_architecture: false,
         };
         let items = search_freecad_library(&request, &[]).unwrap();
@@ -754,6 +791,7 @@ mod tests {
             query: "fan".to_string(),
             roots: vec![root.to_string_lossy().to_string()],
             limit: Some(10),
+            offset: 0,
             include_architecture: false,
         };
         let item = search_freecad_library(&request, &[]).unwrap().remove(0);
@@ -784,7 +822,7 @@ mod tests {
         let root = temp_root("capture-generated");
         let app_root = temp_root("capture-generated-app");
         fs::create_dir_all(&root).unwrap();
-        let mesh_path = root.join("preview.stl");
+        let mesh_path = root.join("model.stl");
         fs::write(&mesh_path, b"solid capture\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid capture\n").unwrap();
 
         let prepared = import_generated_capture_mesh(

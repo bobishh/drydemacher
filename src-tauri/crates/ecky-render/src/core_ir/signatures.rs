@@ -5,8 +5,9 @@ use std::collections::HashMap;
 use super::{
     CompilerError, CompilerErrorKind, CoreArrayOp, CoreBinding, CoreBooleanOp, CoreFrameOp,
     CoreKeywordArg, CoreLiteral, CoreMetaOp, CoreNode, CoreNodeKind, CoreOperation, CorePathOp,
-    CorePrimitive, CoreProgram, CoreReference, CoreResult, CoreSelectorPayload, CoreSurfaceOp,
-    CoreTransformOp, CoreValueKind, NodeId, ParamId, SourceSpan,
+    CorePrimitive, CoreProgram, CoreReference, CoreResult, CoreSelectorPayload,
+    CoreStlPreparationPolicy, CoreSurfaceOp, CoreTransformOp, CoreValueKind, NodeId, ParamId,
+    SourceSpan,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -455,7 +456,7 @@ fn verify_call(
     let name = operation_name(op);
     match op {
         CoreOperation::Primitive(primitive) => {
-            verify_primitive(primitive.clone(), &name, args, node, env)
+            verify_primitive(primitive.clone(), &name, args, keywords, node, env)
         }
         CoreOperation::Boolean(boolean) => verify_boolean(boolean.clone(), &name, args, node, env),
         CoreOperation::Transform(transform) => {
@@ -477,14 +478,20 @@ fn verify_call(
         CoreOperation::Custom(custom) if custom == "heightfield" => {
             verify_heightfield(&name, args, keywords, node, env)
         }
-        CoreOperation::Custom(custom) if custom == "mesh-anchor" => {
-            verify_exact(
-                &name,
-                args,
-                &[num("triangle-index"), num("barycentric-0"), num("barycentric-1"), num("barycentric-2")],
-                env,
-            )
+        CoreOperation::Custom(custom) if custom == "protrude" => {
+            verify_protrude(&name, args, keywords, node, env)
         }
+        CoreOperation::Custom(custom) if custom == "mesh-anchor" => verify_exact(
+            &name,
+            args,
+            &[
+                num("triangle-index"),
+                num("barycentric-0"),
+                num("barycentric-1"),
+                num("barycentric-2"),
+            ],
+            env,
+        ),
         CoreOperation::Custom(custom) if custom == "surface-trim" => {
             verify_surface_trim(&name, args, keywords, node, env)
         }
@@ -492,6 +499,7 @@ fn verify_call(
             if matches!(
                 custom.as_str(),
                 "regular-polygon"
+                    | "voronoi-cell"
                     | "trapezoid"
                     | "slot-center-to-center"
                     | "slot-center-point"
@@ -520,12 +528,36 @@ fn verify_surface_trim(
         name,
         keywords,
         &[
-            KeywordSpec { name: "schema-version", expected: ExpectedKind::Number, required: true },
-            KeywordSpec { name: "source-digest", expected: ExpectedKind::Text, required: true },
-            KeywordSpec { name: "loop", expected: ExpectedKind::List, required: true },
-            KeywordSpec { name: "keep-seed", expected: ExpectedKind::Any, required: true },
-            KeywordSpec { name: "path-mode", expected: ExpectedKind::Text, required: true },
-            KeywordSpec { name: "cap", expected: ExpectedKind::Text, required: true },
+            KeywordSpec {
+                name: "schema-version",
+                expected: ExpectedKind::Number,
+                required: true,
+            },
+            KeywordSpec {
+                name: "source-digest",
+                expected: ExpectedKind::Text,
+                required: true,
+            },
+            KeywordSpec {
+                name: "loop",
+                expected: ExpectedKind::List,
+                required: true,
+            },
+            KeywordSpec {
+                name: "keep-seed",
+                expected: ExpectedKind::Any,
+                required: true,
+            },
+            KeywordSpec {
+                name: "path-mode",
+                expected: ExpectedKind::Text,
+                required: true,
+            },
+            KeywordSpec {
+                name: "cap",
+                expected: ExpectedKind::Text,
+                required: true,
+            },
         ],
         env,
     )?;
@@ -547,6 +579,25 @@ fn verify_convenience_custom(
     env: &KindEnv,
 ) -> CoreResult<()> {
     let result = match name {
+        "voronoi-cell" => {
+            verify_exact(
+                name,
+                args,
+                &[
+                    ArgSpec {
+                        name: "sites",
+                        expected: ExpectedKind::List,
+                    },
+                    num("index"),
+                    num("width"),
+                    num("height"),
+                    num("inset"),
+                ],
+                env,
+            )?;
+            verify_keyword_contract(name, keywords, &[], env)?;
+            ExpectedKind::Sketch
+        }
         "regular-polygon" => {
             verify_exact(name, args, &[num("sides"), num("circumradius")], env)?;
             verify_keyword_contract(
@@ -765,6 +816,50 @@ fn node_span(keywords: &[CoreKeywordArg]) -> Option<SourceSpan> {
     keywords
         .first()
         .and_then(|keyword| keyword.source_node().span)
+}
+
+fn verify_protrude(
+    name: &str,
+    args: &[CoreNode],
+    keywords: &[CoreKeywordArg],
+    node: &CoreNode,
+    env: &KindEnv,
+) -> CoreResult<()> {
+    verify_exact(
+        name,
+        args,
+        &[
+            ArgSpec {
+                name: "image",
+                expected: ExpectedKind::Text,
+            },
+            num("height"),
+        ],
+        env,
+    )?;
+    verify_keyword_contract(
+        name,
+        keywords,
+        &[
+            KeywordSpec {
+                name: "width",
+                expected: ExpectedKind::Number,
+                required: true,
+            },
+            KeywordSpec {
+                name: "depth",
+                expected: ExpectedKind::Number,
+                required: true,
+            },
+            KeywordSpec {
+                name: "foreground",
+                expected: ExpectedKind::Text,
+                required: false,
+            },
+        ],
+        env,
+    )?;
+    verify_result(name, ExpectedKind::Solid, node, env)
 }
 
 fn verify_heightfield(
@@ -1054,6 +1149,7 @@ fn verify_primitive(
     primitive: CorePrimitive,
     name: &str,
     args: &[CoreNode],
+    keywords: &[CoreKeywordArg],
     node: &CoreNode,
     env: &KindEnv,
 ) -> CoreResult<()> {
@@ -1178,7 +1274,143 @@ fn verify_primitive(
             }
             verify_result(name, ExpectedKind::Sketch, node, env)
         }
-        CorePrimitive::Text | CorePrimitive::Svg | CorePrimitive::Stl => Ok(()),
+        CorePrimitive::Text => {
+            verify_exact(name, args, &[any("value"), num("size")], env)?;
+            verify_keyword_contract(
+                name,
+                keywords,
+                &[KeywordSpec {
+                    name: "font",
+                    expected: ExpectedKind::Text,
+                    required: false,
+                }],
+                env,
+            )?;
+            verify_result(name, ExpectedKind::Sketch, node, env)
+        }
+        CorePrimitive::Svg => Ok(()),
+        CorePrimitive::Stl => verify_stl_preparation(name, keywords, node, env),
+    }
+}
+
+pub(crate) fn normalize_stl_preparation_policy(
+    keywords: &[CoreKeywordArg],
+) -> CoreResult<Option<CoreStlPreparationPolicy>> {
+    let target = keywords
+        .iter()
+        .find(|keyword| keyword.name == "target-triangles");
+    let max_error = keywords.iter().find(|keyword| keyword.name == "max-error");
+    let preserve_boundaries = keywords
+        .iter()
+        .find(|keyword| keyword.name == "preserve-boundaries");
+
+    if target.is_none() && max_error.is_none() && preserve_boundaries.is_none() {
+        return Ok(None);
+    }
+    if target.is_none() {
+        return Err(type_error(
+            "import-stl",
+            "expected `:target-triangles` with `:max-error`",
+            "got no `:target-triangles`",
+            node_span(keywords),
+        ));
+    }
+    if max_error.is_none() {
+        return Err(type_error(
+            "import-stl",
+            "expected `:target-triangles` with `:max-error`",
+            "got no `:max-error`",
+            node_span(keywords),
+        ));
+    }
+
+    let preserve_boundaries = preserve_boundaries
+        .map(|keyword| keyword.source_node().clone())
+        .unwrap_or_else(|| {
+            CoreNode::new(
+                NodeId::new(0),
+                CoreNodeKind::Literal(CoreLiteral::Boolean(true)),
+                CoreValueKind::Boolean,
+            )
+        });
+
+    Ok(Some(CoreStlPreparationPolicy {
+        target_triangles: target
+            .expect("target-triangles present")
+            .source_node()
+            .clone(),
+        max_error: max_error.expect("max-error present").source_node().clone(),
+        preserve_boundaries,
+    }))
+}
+
+fn verify_stl_preparation(
+    name: &str,
+    keywords: &[CoreKeywordArg],
+    _node: &CoreNode,
+    env: &KindEnv,
+) -> CoreResult<()> {
+    verify_keyword_contract(
+        name,
+        keywords,
+        &[
+            KeywordSpec {
+                name: "target-triangles",
+                expected: ExpectedKind::Number,
+                required: false,
+            },
+            KeywordSpec {
+                name: "max-error",
+                expected: ExpectedKind::Number,
+                required: false,
+            },
+            KeywordSpec {
+                name: "preserve-boundaries",
+                expected: ExpectedKind::Boolean,
+                required: false,
+            },
+        ],
+        env,
+    )?;
+
+    let Some(policy) = normalize_stl_preparation_policy(keywords)? else {
+        return Ok(());
+    };
+
+    let mut literal_bound_error = None;
+    if let Some(target) = literal_number(&policy.target_triangles) {
+        if !target.is_finite() || target < 4.0 || target.fract() != 0.0 {
+            literal_bound_error = Some(format!("target-triangles={target}"));
+        }
+    }
+    if let Some(max_error) = literal_number(&policy.max_error) {
+        if !max_error.is_finite() || max_error <= 0.0 {
+            let detail = format!("max-error={max_error}");
+            literal_bound_error = Some(match literal_bound_error {
+                Some(existing) => format!("{existing}, {detail}"),
+                None => detail,
+            });
+        }
+    }
+    if let Some(actual) = literal_bound_error {
+        return Err(type_error(
+            name,
+            "`:target-triangles` must be a finite integer >= 4 and `:max-error` must be > 0",
+            &actual,
+            policy
+                .target_triangles
+                .span
+                .or(policy.max_error.span)
+                .or(policy.preserve_boundaries.span),
+        ));
+    }
+    Ok(())
+}
+
+fn literal_number(node: &CoreNode) -> Option<f64> {
+    match &node.kind {
+        CoreNodeKind::Literal(CoreLiteral::Number(value)) => Some(*value),
+        _ => None,
     }
 }
 
@@ -1247,7 +1479,94 @@ fn verify_surface(
     env: &KindEnv,
 ) -> CoreResult<()> {
     match surface {
-        CoreSurfaceOp::Extrude | CoreSurfaceOp::Revolve => {
+        CoreSurfaceOp::Extrude => {
+            verify_exact(name, args, &[any("profile-or-image"), num("distance")], env)?;
+            match effective_kind(&args[0], env) {
+                CoreValueKind::Text => verify_keyword_contract(
+                    name,
+                    keywords,
+                    &[
+                        KeywordSpec {
+                            name: "width",
+                            expected: ExpectedKind::Number,
+                            required: true,
+                        },
+                        KeywordSpec {
+                            name: "depth",
+                            expected: ExpectedKind::Number,
+                            required: true,
+                        },
+                        KeywordSpec {
+                            name: "threshold",
+                            expected: ExpectedKind::Number,
+                            required: false,
+                        },
+                        KeywordSpec {
+                            name: "foreground",
+                            expected: ExpectedKind::Text,
+                            required: false,
+                        },
+                        KeywordSpec {
+                            name: "symmetric",
+                            expected: ExpectedKind::Boolean,
+                            required: false,
+                        },
+                    ],
+                    env,
+                )?,
+                CoreValueKind::Sketch => verify_keyword_contract(
+                    name,
+                    keywords,
+                    &[KeywordSpec {
+                        name: "symmetric",
+                        expected: ExpectedKind::Boolean,
+                        required: false,
+                    }],
+                    env,
+                )?,
+                CoreValueKind::Any => verify_keyword_contract(
+                    name,
+                    keywords,
+                    &[
+                        KeywordSpec {
+                            name: "width",
+                            expected: ExpectedKind::Number,
+                            required: false,
+                        },
+                        KeywordSpec {
+                            name: "depth",
+                            expected: ExpectedKind::Number,
+                            required: false,
+                        },
+                        KeywordSpec {
+                            name: "threshold",
+                            expected: ExpectedKind::Number,
+                            required: false,
+                        },
+                        KeywordSpec {
+                            name: "foreground",
+                            expected: ExpectedKind::Text,
+                            required: false,
+                        },
+                        KeywordSpec {
+                            name: "symmetric",
+                            expected: ExpectedKind::Boolean,
+                            required: false,
+                        },
+                    ],
+                    env,
+                )?,
+                actual => {
+                    return Err(type_error(
+                        name,
+                        "arg 0 `profile-or-image` expected sketch or text",
+                        &format!("got {}", kind_label(actual)),
+                        args[0].span,
+                    ));
+                }
+            }
+        }
+        CoreSurfaceOp::Revolve => {
             verify_exact(name, args, &[sketch("profile"), num("distance")], env)?;
         }
         CoreSurfaceOp::Loft => {
@@ -3558,5 +3877,49 @@ mod tests {
                 16,
             ))
         );
+    }
+
+    #[test]
+    fn import_stl_preparation_rejects_invalid_literal_bounds() {
+        let root = call_with_keywords(
+            10,
+            CoreOperation::Primitive(CorePrimitive::Stl),
+            vec![text_lit(11, "/tmp/part.stl")],
+            vec![
+                ("target-triangles", num(12, 3.0)),
+                ("max-error", num(13, 0.0)),
+            ],
+            CoreValueKind::Mesh,
+        );
+        let err = verify_core_program(&part(root)).expect_err("invalid import prep must fail");
+
+        let message = err.to_string();
+        assert!(message.contains("import-stl"), "{message}");
+        assert!(message.contains("target"), "{message}");
+        assert!(message.contains("max-error"), "{message}");
+    }
+
+    #[test]
+    fn text_accepts_optional_text_font_and_rejects_numeric_font() {
+        let valid = call_with_keywords(
+            10,
+            CoreOperation::Primitive(CorePrimitive::Text),
+            vec![text_lit(11, "HELLO"), num(12, 12.0)],
+            vec![("font", text_lit(13, "Arial"))],
+            CoreValueKind::Sketch,
+        );
+        verify_core_program(&part(valid)).expect("text font should verify");
+
+        let invalid = call_with_keywords(
+            20,
+            CoreOperation::Primitive(CorePrimitive::Text),
+            vec![text_lit(21, "HELLO"), num(22, 12.0)],
+            vec![("font", num(23, 42.0))],
+            CoreValueKind::Sketch,
+        );
+        let message = verify_err(part(invalid));
+
+        assert!(message.contains("font"), "{message}");
+        assert!(message.contains("text"), "{message}");
     }
 }

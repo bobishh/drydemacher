@@ -9,6 +9,7 @@ use crate::contracts::{AppError, AppResult, SelectionTarget};
 
 pub const ANALYSIS_BOUNDARY_WELD_TOLERANCE_MM: f64 = 1.0e-6;
 const ANALYSIS_BOUNDARY_SCHEMA_VERSION: u32 = 1;
+const ANALYSIS_BOUNDARY_FACE_AREA_RELATIVE_TOLERANCE: f64 = 0.025;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -16,7 +17,25 @@ struct AnalysisBoundaryTopologyReport {
     #[serde(default)]
     schema_version: u32,
     #[serde(default)]
+    tessellation_policy: AnalysisBoundaryTessellationPolicy,
+    #[serde(default)]
     parts: Vec<AnalysisBoundaryTopologyPart>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalysisBoundaryTessellationPolicy {
+    pub linear_deflection_mm: f64,
+    pub angular_deflection_rad: f64,
+}
+
+impl Default for AnalysisBoundaryTessellationPolicy {
+    fn default() -> Self {
+        Self {
+            linear_deflection_mm: 0.04,
+            angular_deflection_rad: 0.1,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -154,6 +173,7 @@ pub struct AnalysisBoundarySurface {
     pub part_id: String,
     pub label: String,
     pub source_geometry_digest: String,
+    pub tessellation_policy: AnalysisBoundaryTessellationPolicy,
     pub vertices: Vec<[f64; 3]>,
     pub triangles: Vec<[u32; 3]>,
     pub triangle_face_group_indices: Vec<u32>,
@@ -190,7 +210,12 @@ fn load_manifest(bundle_dir: &Path) -> AppResult<AnalysisBoundaryManifestView> {
 }
 
 fn load_topology_report(bundle_dir: &Path) -> AppResult<AnalysisBoundaryTopologyReport> {
-    let topology_path = bundle_dir.join("topology.json");
+    let dedicated_boundary_path = bundle_dir.join("analysis-boundary.json");
+    let topology_path = if dedicated_boundary_path.is_file() {
+        dedicated_boundary_path
+    } else {
+        bundle_dir.join("topology.json")
+    };
     let topology_text = fs::read_to_string(&topology_path).map_err(|err| {
         AppError::persistence(format!(
             "Analysis boundary topology '{}' could not be read: {}",
@@ -215,6 +240,19 @@ fn build_analysis_boundary_surface(
         return Err(AppError::validation(format!(
             "Analysis boundary topology report schemaVersion {} is unsupported.",
             report.schema_version
+        )));
+    }
+    let tessellation_policy = report.tessellation_policy;
+    if !tessellation_policy.linear_deflection_mm.is_finite()
+        || tessellation_policy.linear_deflection_mm <= 0.0
+        || !tessellation_policy.angular_deflection_rad.is_finite()
+        || tessellation_policy.angular_deflection_rad <= 0.0
+        || tessellation_policy.angular_deflection_rad > std::f64::consts::PI
+    {
+        return Err(AppError::validation(format!(
+            "Analysis boundary tessellation policy is invalid: linearDeflectionMm={}, angularDeflectionRad={}.",
+            tessellation_policy.linear_deflection_mm,
+            tessellation_policy.angular_deflection_rad
         )));
     }
     let part = report
@@ -313,11 +351,13 @@ fn build_analysis_boundary_surface(
         &triangles,
         &triangle_group_indices,
         &face_groups,
+        tessellation_policy,
     )?;
     let content_digest = content_digest(
         &part.part_id,
         part.label.as_str(),
         part.source_geometry_digest.as_deref().unwrap_or_default(),
+        tessellation_policy,
         &vertices,
         &triangles,
         &triangle_group_indices,
@@ -329,6 +369,7 @@ fn build_analysis_boundary_surface(
         part_id: part.part_id.clone(),
         label: part.label.clone(),
         source_geometry_digest: part.source_geometry_digest.clone().unwrap_or_default(),
+        tessellation_policy,
         vertices,
         triangles,
         triangle_face_group_indices: triangle_group_indices,
@@ -617,6 +658,7 @@ fn validate_face_group_coverage(
     triangles: &[[u32; 3]],
     triangle_group_indices: &[u32],
     face_groups: &[AnalysisBoundaryFaceGroup],
+    tessellation_policy: AnalysisBoundaryTessellationPolicy,
 ) -> AppResult<()> {
     let mut observed_area = vec![0.0; face_groups.len()];
     for (triangle, group_index) in triangles.iter().zip(triangle_group_indices) {
@@ -628,7 +670,11 @@ fn validate_face_group_coverage(
     for (index, group) in face_groups.iter().enumerate() {
         let expected = group.area;
         let observed = observed_area[index];
-        let tolerance = (expected.abs() * 0.02).max(1.0e-6);
+        let chord_error = tessellation_policy.linear_deflection_mm;
+        let chord_area_tolerance = chord_error.mul_add(expected.abs().sqrt(), chord_error.powi(2));
+        let tolerance = (expected.abs() * ANALYSIS_BOUNDARY_FACE_AREA_RELATIVE_TOLERANCE)
+            .max(chord_area_tolerance)
+            .max(1.0e-6);
         if !expected.is_finite()
             || expected <= 0.0
             || !observed.is_finite()
@@ -939,6 +985,7 @@ fn content_digest(
     part_id: &str,
     label: &str,
     source_geometry_digest: &str,
+    tessellation_policy: AnalysisBoundaryTessellationPolicy,
     vertices: &[[f64; 3]],
     triangles: &[[u32; 3]],
     triangle_group_indices: &[u32],
@@ -946,12 +993,16 @@ fn content_digest(
     evidence: &AnalysisBoundaryEvidence,
 ) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"ecky-analysis-boundary-v1\0");
+    hasher.update(b"ecky-analysis-boundary-v2\0");
     hasher.update(part_id.as_bytes());
     hasher.update(b"\0");
     hasher.update(label.as_bytes());
     hasher.update(b"\0");
     hasher.update(source_geometry_digest.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(canonical_f64(tessellation_policy.linear_deflection_mm).as_bytes());
+    hasher.update(b"\0");
+    hasher.update(canonical_f64(tessellation_policy.angular_deflection_rad).as_bytes());
     hasher.update(b"\0");
     hasher.update((vertices.len() as u64).to_le_bytes());
     for vertex in vertices {
@@ -1132,6 +1183,7 @@ mod tests {
         };
         AnalysisBoundaryTopologyReport {
             schema_version: ANALYSIS_BOUNDARY_SCHEMA_VERSION,
+            tessellation_policy: AnalysisBoundaryTessellationPolicy::default(),
             parts: vec![AnalysisBoundaryTopologyPart {
                 part_id: "body".to_string(),
                 label: "Body".to_string(),
@@ -1195,6 +1247,39 @@ mod tests {
     }
 
     #[test]
+    fn loader_prefers_dedicated_analysis_boundary_over_viewer_topology() {
+        let root = temp_root("dedicated-boundary");
+        fs::create_dir_all(&root).expect("bundle directory");
+        fs::write(
+            root.join("manifest.json"),
+            serde_json::to_vec(&manifest_view_with_targets()).expect("manifest json"),
+        )
+        .expect("write manifest");
+
+        let analysis_boundary = valid_tetrahedron_report();
+        let mut viewer_topology = analysis_boundary.clone();
+        viewer_topology.parts[0].triangles.clear();
+        viewer_topology.parts[0].triangle_face_group_indices.clear();
+        fs::write(
+            root.join("topology.json"),
+            serde_json::to_vec(&viewer_topology).expect("viewer topology json"),
+        )
+        .expect("write viewer topology");
+        fs::write(
+            root.join("analysis-boundary.json"),
+            serde_json::to_vec(&analysis_boundary).expect("analysis boundary json"),
+        )
+        .expect("write analysis boundary");
+
+        let surface = load_direct_occt_analysis_boundary_surface(&root, "body")
+            .expect("dedicated analysis boundary");
+        assert_eq!(surface.triangles.len(), 4);
+        assert!(surface.evidence.closed);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn exact_face_area_must_match_grouped_boundary_facets() {
         let mut report = valid_tetrahedron_report();
         report.parts[0].faces[0].area = Some(0.75);
@@ -1205,6 +1290,42 @@ mod tests {
         assert!(detail.contains("selector='body:face:0'"));
         assert!(detail.contains("expectedAreaMm2=0.75"));
         assert!(detail.contains("observedAreaMm2=0.5"));
+    }
+
+    #[test]
+    fn face_coverage_tolerance_accounts_for_declared_chord_error() {
+        let mut report = valid_tetrahedron_report();
+        report.tessellation_policy = AnalysisBoundaryTessellationPolicy {
+            linear_deflection_mm: 0.25,
+            angular_deflection_rad: 0.30,
+        };
+        report.parts[0].faces[0].area = Some(0.609);
+
+        let surface =
+            build_analysis_boundary_surface(&report, &manifest_view_with_targets(), "body")
+                .expect("area deviation inside declared tessellation policy");
+        assert_eq!(surface.face_groups[0].triangle_count, 1);
+    }
+
+    #[test]
+    fn face_coverage_accepts_small_faceting_error_on_a_small_exact_face() {
+        validate_face_group_coverage(
+            "body",
+            &[[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            &[[0, 1, 2]],
+            &[0],
+            &[AnalysisBoundaryFaceGroup {
+                part_id: "body".into(),
+                target_id: "body:face:small".into(),
+                canonical_target_id: "body:face:small".into(),
+                durable_target_id: None,
+                label: "small exact face".into(),
+                area: 5.127,
+                triangle_count: 1,
+            }],
+            AnalysisBoundaryTessellationPolicy::default(),
+        )
+        .expect("2.5 percent small-face faceting error");
     }
 
     #[test]
@@ -1231,7 +1352,7 @@ mod tests {
                 .expect("direct occt render");
         let bundle_dir = crate::model_runtime::runtime_bundle_dir(&resolver, &bundle.model_id)
             .expect("bundle dir");
-        let preview_digest_before = digest_file(&bundle_dir.join("preview.stl"));
+        let preview_digest_before = digest_file(&bundle_dir.join("model.stl"));
         let step_digest_before = digest_file(&bundle_dir.join("model.step"));
 
         let surface = load_direct_occt_analysis_boundary_surface(&bundle_dir, "body")
@@ -1265,7 +1386,7 @@ mod tests {
                 .content_digest
         );
 
-        let preview_digest_after = digest_file(&bundle_dir.join("preview.stl"));
+        let preview_digest_after = digest_file(&bundle_dir.join("model.stl"));
         let step_digest_after = digest_file(&bundle_dir.join("model.step"));
         assert_eq!(preview_digest_before, preview_digest_after);
         assert_eq!(step_digest_before, step_digest_after);
@@ -1274,9 +1395,64 @@ mod tests {
     }
 
     #[test]
+    fn integration_emits_coarser_dedicated_boundary_without_mutating_exports() {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .to_path_buf();
+        let runtime_root = bundled_occt_runtime_root_from_repo(&repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
+            return;
+        }
+        let root = temp_root("integration-dedicated-boundary");
+        let resolver = TestResolver { root: root.clone() };
+        let source = "(model (part body (cylinder 20 80)))";
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("compile");
+        let params = DesignParams::new();
+        let (bundle, _manifest) =
+            render_core_program_runtime_bundle(&program, source, &params, &layout, &resolver)
+                .expect("direct occt render");
+        let bundle_dir = crate::model_runtime::runtime_bundle_dir(&resolver, &bundle.model_id)
+            .expect("bundle dir");
+
+        let viewer: AnalysisBoundaryTopologyReport = serde_json::from_slice(
+            &fs::read(bundle_dir.join("topology.json")).expect("viewer topology"),
+        )
+        .expect("viewer topology json");
+        let analysis: AnalysisBoundaryTopologyReport = serde_json::from_slice(
+            &fs::read(bundle_dir.join("analysis-boundary.json"))
+                .expect("dedicated analysis boundary"),
+        )
+        .expect("analysis boundary json");
+        assert_eq!(viewer.parts.len(), 1);
+        assert_eq!(analysis.parts.len(), 1);
+        assert_eq!(
+            viewer.parts[0].source_geometry_digest, analysis.parts[0].source_geometry_digest,
+            "analysis tessellation must not redefine source BRep identity"
+        );
+        assert!(
+            analysis.parts[0].triangles.len() < viewer.parts[0].triangles.len(),
+            "FEM boundary must be coarser than viewer/export tessellation"
+        );
+
+        let surface = load_direct_occt_analysis_boundary_surface(&bundle_dir, "body")
+            .expect("load dedicated boundary");
+        assert_eq!(surface.triangles.len(), analysis.parts[0].triangles.len());
+        assert!(surface.evidence.closed);
+        assert!(surface.evidence.manifold);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn rejects_group_cardinality_mismatch() {
         let report = AnalysisBoundaryTopologyReport {
             schema_version: ANALYSIS_BOUNDARY_SCHEMA_VERSION,
+            tessellation_policy: AnalysisBoundaryTessellationPolicy::default(),
             parts: vec![AnalysisBoundaryTopologyPart {
                 part_id: "body".to_string(),
                 label: "Body".to_string(),
@@ -1314,6 +1490,7 @@ mod tests {
     fn rejects_open_boundary() {
         let report = AnalysisBoundaryTopologyReport {
             schema_version: ANALYSIS_BOUNDARY_SCHEMA_VERSION,
+            tessellation_policy: AnalysisBoundaryTessellationPolicy::default(),
             parts: vec![AnalysisBoundaryTopologyPart {
                 part_id: "body".to_string(),
                 label: "Body".to_string(),
@@ -1346,6 +1523,7 @@ mod tests {
     fn rejects_non_manifold_boundary() {
         let report = AnalysisBoundaryTopologyReport {
             schema_version: ANALYSIS_BOUNDARY_SCHEMA_VERSION,
+            tessellation_policy: AnalysisBoundaryTessellationPolicy::default(),
             parts: vec![AnalysisBoundaryTopologyPart {
                 part_id: "body".to_string(),
                 label: "Body".to_string(),
@@ -1386,6 +1564,7 @@ mod tests {
     fn rejects_degenerate_boundary() {
         let report = AnalysisBoundaryTopologyReport {
             schema_version: ANALYSIS_BOUNDARY_SCHEMA_VERSION,
+            tessellation_policy: AnalysisBoundaryTessellationPolicy::default(),
             parts: vec![AnalysisBoundaryTopologyPart {
                 part_id: "body".to_string(),
                 label: "Body".to_string(),

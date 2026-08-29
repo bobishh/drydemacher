@@ -8,6 +8,10 @@ use steel_core::parser::span::Span;
 use steel_core::parser::tokens::TokenType;
 use steel_core::rvals::SteelVal;
 
+use crate::component_placement::{
+    solve_mate, validate_port_compatibility, AuthoredPlacementEvidence, MateModifiers,
+    MateNormalMode, MirrorAxis, PlacementFrame,
+};
 use crate::core_ir::{
     parse_core_edge_selector_payload, parse_core_face_selector_payload, AnalysisClauseId,
     AnalysisId, CompilerError, CompilerErrorKind, CoreAnalysisClause, CoreAnalysisClauseKind,
@@ -146,6 +150,24 @@ pub fn compile_to_core_program(source: &str) -> CoreResult<CoreProgram> {
     compile_to_core_program_on_guarded_stack(source)
 }
 
+/// Parser/emitter roundtrip for source-authoring tools. Unlike
+/// `compile_to_legacy_source`, this preserves interface and mate forms instead
+/// of returning executable lowered transforms.
+pub fn emit_component_interface_source(source: &str) -> CoreResult<String> {
+    if !source.contains("(ports") && !source.contains("(place-component") {
+        return Ok(source.to_string());
+    }
+    Parser::parse_without_lowering(source)
+        .map_err(|error| compiler_error(CompilerErrorKind::Parse, error))
+        .map(|forms| {
+            forms
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn compile_to_core_program_on_guarded_stack(source: &str) -> CoreResult<CoreProgram> {
     let source = source.to_owned();
@@ -180,6 +202,7 @@ fn compile_to_core_program_inner(source: &str) -> CoreResult<CoreProgram> {
     if !source_contains_suffixed_unit_literals(source) {
         let legacy_source = rewrite_sequence_destructuring_source(source)?;
         reject_model_level_sequence_forms(&legacy_source)?;
+        let legacy_source = lower_component_placement_source(&legacy_source)?;
         let legacy_source = lower_component_definitions_source(&legacy_source)?;
 
         if can_use_expanded_ast(&legacy_source) {
@@ -196,9 +219,11 @@ fn compile_to_core_program_inner(source: &str) -> CoreResult<CoreProgram> {
             .and_then(|program| verify_compiled_core_program(program, source, strict_units));
     }
 
-    let expanded_source = source.to_string();
+    let expanded_source = lower_component_placement_source(source)?;
+    let expanded_source = lower_component_definitions_source(&expanded_source)?;
     let runtime_source = rewrite_sequence_destructuring_source(source)?;
     reject_model_level_sequence_forms(&runtime_source)?;
+    let runtime_source = lower_component_placement_source(&runtime_source)?;
     let runtime_source = lower_component_definitions_source(&runtime_source)?;
 
     if can_use_expanded_ast(&expanded_source) {
@@ -1185,8 +1210,1393 @@ struct ComponentSignatureEntry {
 struct ComponentDefinition {
     name: String,
     entries: Vec<ComponentSignatureEntry>,
+    ports: Vec<ComponentPortTemplate>,
     body: ExprKind,
     verify_clauses: Vec<ExprKind>,
+}
+
+#[derive(Clone, Debug)]
+struct ComponentPortTemplate {
+    port_id: String,
+    type_id: String,
+    compatible_with: Vec<String>,
+    params: BTreeMap<String, ExprKind>,
+    frame: ComponentFrameTemplate,
+}
+
+#[derive(Clone, Debug)]
+struct ComponentFrameTemplate {
+    origin: [ExprKind; 3],
+    x_axis: [ExprKind; 3],
+    z_axis: [ExprKind; 3],
+}
+
+/// Lowers source-native component ports and mates to existing `plane`/`place`
+/// geometry before ordinary component expansion. Sources without placement
+/// forms pass through byte-identical.
+fn lower_component_placement_source(source: &str) -> CoreResult<String> {
+    if !source.contains("(ports") && !source.contains("(place-component") {
+        return Ok(source.to_string());
+    }
+    let forms = Parser::parse_without_lowering(source)
+        .map_err(|err| compiler_error(CompilerErrorKind::Parse, err))?;
+    let mut definitions = Vec::new();
+    for form in &forms {
+        collect_component_definitions(form, &mut definitions)?;
+    }
+    let registry = definitions
+        .into_iter()
+        .map(|definition| (definition.name.clone(), definition))
+        .collect::<BTreeMap<_, _>>();
+    let top_level_bindings = collect_top_level_define_names(&forms);
+    for definition in registry.values() {
+        check_component_closedness(definition, &registry, &top_level_bindings)?;
+    }
+    let part_ports = collect_output_part_ports(&forms)?;
+    let rendered = forms
+        .iter()
+        .map(|form| rewrite_component_placement_form(form, &registry, &part_ports))
+        .collect::<CoreResult<Vec<_>>>()?;
+    Ok(rendered.join("\n"))
+}
+
+/// Resolves authored mate intent beside Core geometry. Runtime manifests use
+/// this sidecar; backends still receive only ordinary mirror/place nodes.
+pub fn inspect_component_placement_evidence(
+    source: &str,
+    numeric_parameters: &BTreeMap<String, f64>,
+) -> CoreResult<Vec<AuthoredPlacementEvidence>> {
+    if !source.contains("(place-component") {
+        return Ok(Vec::new());
+    }
+    let forms = Parser::parse_without_lowering(source)
+        .map_err(|error| compiler_error(CompilerErrorKind::Parse, error))?;
+    let mut definitions = Vec::new();
+    for form in &forms {
+        collect_component_definitions(form, &mut definitions)?;
+    }
+    let registry = definitions
+        .into_iter()
+        .map(|definition| (definition.name.clone(), definition))
+        .collect::<BTreeMap<_, _>>();
+    let part_ports = collect_output_part_ports(&forms)?;
+    let mut evidence = Vec::new();
+    for form in &forms {
+        collect_authored_placement_evidence(
+            form,
+            None,
+            &registry,
+            &part_ports,
+            numeric_parameters,
+            &mut evidence,
+        )?;
+    }
+    Ok(evidence)
+}
+
+fn collect_authored_placement_evidence(
+    expr: &ExprKind,
+    current_instance: Option<&str>,
+    registry: &BTreeMap<String, ComponentDefinition>,
+    part_ports: &BTreeMap<String, BTreeMap<String, ComponentPortTemplate>>,
+    numeric_parameters: &BTreeMap<String, f64>,
+    evidence: &mut Vec<AuthoredPlacementEvidence>,
+) -> CoreResult<()> {
+    let Ok(items) = expr_list_items(expr, "placement evidence") else {
+        return Ok(());
+    };
+    let head = items.first().and_then(expr_identifier);
+    if matches!(head.as_deref(), Some("part") | Some("feature")) {
+        let instance_id = items.get(1).and_then(expr_identifier).ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Resolve,
+                "Placed output part requires a literal stable id.",
+            )
+        })?;
+        for item in items.iter().skip(2).filter(|item| !is_ports_clause(item)) {
+            collect_authored_placement_evidence(
+                item,
+                Some(&instance_id),
+                registry,
+                part_ports,
+                numeric_parameters,
+                evidence,
+            )?;
+        }
+        return Ok(());
+    }
+    if head.as_deref() == Some("place-component") {
+        let instance_id = current_instance.ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Resolve,
+                "`place-component` must belong to a named output part for durable evidence.",
+            )
+        })?;
+        evidence.push(resolve_authored_placement_evidence(
+            expr,
+            &items,
+            instance_id,
+            registry,
+            part_ports,
+            numeric_parameters,
+        )?);
+        return Ok(());
+    }
+    if head.as_deref() == Some("quote") {
+        return Ok(());
+    }
+    for item in items.iter().skip(1) {
+        collect_authored_placement_evidence(
+            item,
+            current_instance,
+            registry,
+            part_ports,
+            numeric_parameters,
+            evidence,
+        )?;
+    }
+    Ok(())
+}
+
+fn resolve_authored_placement_evidence(
+    authored_expr: &ExprKind,
+    items: &[ExprKind],
+    instance_id: &str,
+    registry: &BTreeMap<String, ComponentDefinition>,
+    part_ports: &BTreeMap<String, BTreeMap<String, ComponentPortTemplate>>,
+    numeric_parameters: &BTreeMap<String, f64>,
+) -> CoreResult<AuthoredPlacementEvidence> {
+    let geometry = items.get(1).ok_or_else(|| {
+        CompilerError::new(
+            CompilerErrorKind::Parse,
+            "`place-component` requires a component invocation.",
+        )
+    })?;
+    let geometry_items = expr_list_items(geometry, "placed component invocation")?;
+    let component_id = geometry_items
+        .first()
+        .and_then(expr_identifier)
+        .ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                "`place-component` first argument must invoke a named component.",
+            )
+        })?;
+    let component = registry.get(&component_id).ok_or_else(|| {
+        CompilerError::new(
+            CompilerErrorKind::Resolve,
+            format!("`place-component` references unknown component `{component_id}`."),
+        )
+    })?;
+    let mut from = None;
+    let mut to = None;
+    let mut normal_mode = None;
+    let mut roll_degrees = 0.0;
+    let mut offset_expr = None;
+    let mut mirror_axis = None;
+    let mut index = 2usize;
+    while index < items.len() {
+        let keyword = instantiation_keyword_name(&items[index]).ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                "`place-component` options must be keywords.",
+            )
+        })?;
+        let value = items.get(index + 1).ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                format!("`place-component` option `:{keyword}` needs a value."),
+            )
+        })?;
+        match keyword.as_str() {
+            "from" => from = expr_identifier(value),
+            "to" => to = Some(parse_port_reference(value)?),
+            "normal" => {
+                normal_mode = Some(match expr_identifier(value).as_deref() {
+                    Some("aligned") => MateNormalMode::Aligned,
+                    Some("opposed") => MateNormalMode::Opposed,
+                    _ => {
+                        return Err(CompilerError::new(
+                            CompilerErrorKind::Resolve,
+                            "`place-component :normal` must be `aligned` or `opposed`.",
+                        ))
+                    }
+                })
+            }
+            "roll" => {
+                roll_degrees = evaluate_component_number_with_parameters(
+                    value,
+                    &BTreeMap::new(),
+                    numeric_parameters,
+                    &mut BTreeSet::new(),
+                    "place-component roll",
+                )?
+            }
+            "offset" => offset_expr = Some(parse_vec3_expressions(value, "mate offset")?),
+            "mirror" => {
+                mirror_axis = match expr_identifier(value).as_deref() {
+                    Some("none") => None,
+                    Some("x") => Some(MirrorAxis::X),
+                    Some("y") => Some(MirrorAxis::Y),
+                    _ => {
+                        return Err(CompilerError::new(
+                            CompilerErrorKind::Resolve,
+                            "`place-component :mirror` must be `none`, `x`, or `y`.",
+                        ))
+                    }
+                }
+            }
+            other => {
+                return Err(CompilerError::new(
+                    CompilerErrorKind::UnsupportedFeature,
+                    format!("`place-component` does not support `:{other}`."),
+                ))
+            }
+        }
+        index += 2;
+    }
+    let source_port_id = from.ok_or_else(|| {
+        CompilerError::new(
+            CompilerErrorKind::Parse,
+            "`place-component` requires `:from port`.",
+        )
+    })?;
+    let source_port = component
+        .ports
+        .iter()
+        .find(|port| port.port_id == source_port_id)
+        .ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Resolve,
+                format!("Component `{component_id}` has no port `{source_port_id}`."),
+            )
+        })?;
+    let (target_instance_id, target_port_id) = to.ok_or_else(|| {
+        CompilerError::new(
+            CompilerErrorKind::Parse,
+            "`place-component` requires `:to (port-ref part port)`.",
+        )
+    })?;
+    let target_port = part_ports
+        .get(&target_instance_id)
+        .and_then(|ports| ports.get(&target_port_id))
+        .ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Resolve,
+                format!("Target port `{target_instance_id}.{target_port_id}` does not exist."),
+            )
+        })?;
+    let normal_mode = normal_mode.ok_or_else(|| {
+        CompilerError::new(
+            CompilerErrorKind::Parse,
+            "`place-component` requires explicit `:normal aligned|opposed`.",
+        )
+    })?;
+    let component_args =
+        resolve_component_argument_sources(component, &geometry_items[1..], registry)?;
+    let eval_vec = |values: &[ExprKind; 3], bindings: &BTreeMap<String, String>, label: &str| {
+        Ok::<[f64; 3], CompilerError>([
+            evaluate_component_number_with_parameters(
+                &values[0],
+                bindings,
+                numeric_parameters,
+                &mut BTreeSet::new(),
+                label,
+            )?,
+            evaluate_component_number_with_parameters(
+                &values[1],
+                bindings,
+                numeric_parameters,
+                &mut BTreeSet::new(),
+                label,
+            )?,
+            evaluate_component_number_with_parameters(
+                &values[2],
+                bindings,
+                numeric_parameters,
+                &mut BTreeSet::new(),
+                label,
+            )?,
+        ])
+    };
+    let source_origin = eval_vec(&source_port.frame.origin, &component_args, "source origin")?;
+    let source_x = eval_vec(&source_port.frame.x_axis, &component_args, "source xAxis")?;
+    let source_z = eval_vec(&source_port.frame.z_axis, &component_args, "source zAxis")?;
+    let target_origin = eval_vec(&target_port.frame.origin, &BTreeMap::new(), "target origin")?;
+    let target_x = eval_vec(&target_port.frame.x_axis, &BTreeMap::new(), "target xAxis")?;
+    let target_z = eval_vec(&target_port.frame.z_axis, &BTreeMap::new(), "target zAxis")?;
+    let offset = match offset_expr {
+        Some(values) => eval_vec(&values, &BTreeMap::new(), "mate offset")?,
+        None => [0.0; 3],
+    };
+    let source_frame = PlacementFrame::from_origin_x_z(
+        source_origin,
+        source_x,
+        source_z,
+        &format!("component `{component_id}` port `{source_port_id}`"),
+    )
+    .map_err(|error| CompilerError::new(CompilerErrorKind::Resolve, error.message))?;
+    let target_frame = PlacementFrame::from_origin_x_z(
+        target_origin,
+        target_x,
+        target_z,
+        &format!("part `{target_instance_id}` port `{target_port_id}`"),
+    )
+    .map_err(|error| CompilerError::new(CompilerErrorKind::Resolve, error.message))?;
+    let solved = solve_mate(
+        &source_frame,
+        &target_frame,
+        MateModifiers {
+            normal_mode,
+            roll_degrees,
+            offset,
+            mirror_axis,
+        },
+        &format!("mate `{instance_id}`"),
+    )
+    .map_err(|error| CompilerError::new(CompilerErrorKind::Resolve, error.message))?;
+    let mut resolved_fit_values = BTreeMap::new();
+    for (key, value) in &source_port.params {
+        if let Ok(value) = evaluate_component_number_with_parameters(
+            value,
+            &component_args,
+            numeric_parameters,
+            &mut BTreeSet::new(),
+            &format!("port fit `{key}`"),
+        ) {
+            resolved_fit_values.insert(key.clone(), value);
+        }
+    }
+    for (key, value) in &target_port.params {
+        if let Ok(value) = evaluate_component_number_with_parameters(
+            value,
+            &BTreeMap::new(),
+            numeric_parameters,
+            &mut BTreeSet::new(),
+            &format!("target port fit `{key}`"),
+        ) {
+            let evidence_key = if resolved_fit_values.contains_key(key) {
+                format!("target.{key}")
+            } else {
+                key.clone()
+            };
+            resolved_fit_values.insert(evidence_key, value);
+        }
+    }
+    let span = expr_source_span(authored_expr);
+    Ok(AuthoredPlacementEvidence {
+        instance_id: instance_id.to_string(),
+        component_id,
+        source_instance_id: instance_id.to_string(),
+        source_port_id,
+        target_instance_id,
+        target_port_id,
+        placement_frame: solved.placement_frame,
+        normal_mode,
+        roll_degrees,
+        offset,
+        mirror_axis,
+        resolved_fit_values,
+        source_start: span.map(|value| value.start),
+        source_end: span.map(|value| value.end),
+    })
+}
+
+fn collect_output_part_ports(
+    forms: &[ExprKind],
+) -> CoreResult<BTreeMap<String, BTreeMap<String, ComponentPortTemplate>>> {
+    let mut result = BTreeMap::new();
+    for form in forms {
+        let Ok(items) = expr_list_items(form, "top-level form") else {
+            continue;
+        };
+        if items.first().and_then(expr_head_name).as_deref() != Some("model") {
+            continue;
+        }
+        for clause in items.iter().skip(1) {
+            let Ok(part_items) = expr_list_items(clause, "model clause") else {
+                continue;
+            };
+            let head = part_items.first().and_then(expr_head_name);
+            if !matches!(head.as_deref(), Some("part") | Some("feature")) {
+                continue;
+            }
+            let Some(part_id) = part_items.get(1).and_then(expr_identifier) else {
+                continue;
+            };
+            let mut ports = BTreeMap::new();
+            for item in part_items.iter().skip(2) {
+                if !is_ports_clause(item) {
+                    continue;
+                }
+                for port in parse_ports_clause(&part_id, item)? {
+                    if ports.insert(port.port_id.clone(), port).is_some() {
+                        return Err(CompilerError::new(
+                            CompilerErrorKind::Resolve,
+                            format!("Part `{part_id}` defines the same port more than once."),
+                        ));
+                    }
+                }
+            }
+            if !ports.is_empty() && result.insert(part_id.clone(), ports).is_some() {
+                return Err(CompilerError::new(
+                    CompilerErrorKind::Resolve,
+                    format!("Output part `{part_id}` is defined more than once."),
+                ));
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn is_ports_clause(expr: &ExprKind) -> bool {
+    expr_list_items(expr, "ports clause")
+        .ok()
+        .and_then(|items| items.first().and_then(expr_identifier))
+        .as_deref()
+        == Some("ports")
+}
+
+fn parse_ports_clause(owner: &str, expr: &ExprKind) -> CoreResult<Vec<ComponentPortTemplate>> {
+    let items = expr_list_items(expr, "ports clause")?;
+    let mut ports = Vec::new();
+    let mut seen = BTreeSet::new();
+    for port_expr in items.iter().skip(1) {
+        let port = parse_component_port(owner, port_expr)?;
+        if !seen.insert(port.port_id.clone()) {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Resolve,
+                format!(
+                    "Component `{owner}` defines port `{}` more than once.",
+                    port.port_id
+                ),
+            ));
+        }
+        ports.push(port);
+    }
+    Ok(ports)
+}
+
+fn parse_component_port(owner: &str, expr: &ExprKind) -> CoreResult<ComponentPortTemplate> {
+    let items = expr_list_items(expr, "port declaration")?;
+    if items.first().and_then(expr_identifier).as_deref() != Some("port") || items.len() < 2 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            format!("Component `{owner}` ports must be `(port id :type ... :frame ...)`."),
+        ));
+    }
+    let port_id = expr_identifier(&items[1]).ok_or_else(|| {
+        CompilerError::new(
+            CompilerErrorKind::Parse,
+            format!("Component `{owner}` port id must be a literal symbol."),
+        )
+    })?;
+    let mut type_id = None;
+    let mut compatible_with = Vec::new();
+    let mut params = BTreeMap::new();
+    let mut frame = None;
+    let mut index = 2usize;
+    while index < items.len() {
+        let keyword = instantiation_keyword_name(&items[index]).ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                format!("Component `{owner}` port `{port_id}` expects keyword options."),
+            )
+        })?;
+        let value = items.get(index + 1).ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                format!("Component `{owner}` port `{port_id}` option `:{keyword}` needs a value."),
+            )
+        })?;
+        match keyword.as_str() {
+            "type" => type_id = Some(expr_value_symbol_or_text(value, "port type")?),
+            "compatible-with" => {
+                compatible_with = parse_literal_text_list(value, "port compatible-with")?
+            }
+            "params" => params = parse_port_params(owner, &port_id, value)?,
+            "frame" => {
+                frame = Some(
+                    parse_literal_placement_frame(owner, &port_id, value).map_err(
+                        |mut error| {
+                            if let Some(span) = expr_source_span(value) {
+                                error = error.with_span(span);
+                            }
+                            error
+                        },
+                    )?,
+                )
+            }
+            other => {
+                return Err(CompilerError::new(
+                    CompilerErrorKind::UnsupportedFeature,
+                    format!(
+                        "Component `{owner}` port `{port_id}` does not support `:{other}` yet."
+                    ),
+                ))
+            }
+        }
+        index += 2;
+    }
+    Ok(ComponentPortTemplate {
+        port_id,
+        type_id: type_id.ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                format!("Component `{owner}` port requires `:type`."),
+            )
+        })?,
+        compatible_with,
+        params,
+        frame: frame.ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                format!("Component `{owner}` port requires `:frame`."),
+            )
+        })?,
+    })
+}
+
+fn parse_literal_text_list(expr: &ExprKind, context: &str) -> CoreResult<Vec<String>> {
+    if let ExprKind::Quote(quote) = expr {
+        return parse_literal_text_list(&quote.expr, context);
+    }
+    let items = expr_list_items(expr, context)?;
+    if items.first().and_then(expr_head_name).as_deref() == Some("quote") && items.len() == 2 {
+        return parse_literal_text_list(&items[1], context);
+    }
+    items
+        .iter()
+        .map(|item| expr_value_symbol_or_text(item, context))
+        .collect()
+}
+
+fn parse_port_params(
+    owner: &str,
+    port_id: &str,
+    expr: &ExprKind,
+) -> CoreResult<BTreeMap<String, ExprKind>> {
+    let items = expr_list_items(expr, "port params")?;
+    let mut params = BTreeMap::new();
+    for item in items {
+        let pair = expr_list_items(&item, "port param")?;
+        if pair.len() != 2 {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Parse,
+                format!(
+                    "Component `{owner}` port `{port_id}` params must be `(name value)` pairs."
+                ),
+            ));
+        }
+        let key = expr_identifier(&pair[0]).ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                format!("Component `{owner}` port `{port_id}` param name must be a symbol."),
+            )
+        })?;
+        if params.insert(key.clone(), pair[1].clone()).is_some() {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Resolve,
+                format!("Component `{owner}` port `{port_id}` repeats param `{key}`."),
+            ));
+        }
+    }
+    Ok(params)
+}
+
+fn parse_literal_placement_frame(
+    owner: &str,
+    port_id: &str,
+    expr: &ExprKind,
+) -> CoreResult<ComponentFrameTemplate> {
+    let items = expr_list_items(expr, "port frame")?;
+    if items.first().and_then(expr_identifier).as_deref() != Some("frame") {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            format!("Component `{owner}` port `{port_id}` `:frame` must use `(frame ...)`."),
+        ));
+    }
+    let mut origin = None;
+    let mut x_axis = None;
+    let mut z_axis = None;
+    let mut index = 1usize;
+    while index < items.len() {
+        let keyword = instantiation_keyword_name(&items[index]).ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                format!("Component `{owner}` port `{port_id}` frame expects keyword options."),
+            )
+        })?;
+        let value = items.get(index + 1).ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                format!(
+                    "Component `{owner}` port `{port_id}` frame option `:{keyword}` needs a value."
+                ),
+            )
+        })?;
+        match keyword.as_str() {
+            "origin" => origin = Some(parse_vec3_expressions(value, "frame origin")?),
+            "x-axis" => x_axis = Some(parse_vec3_expressions(value, "frame xAxis")?),
+            "z-axis" => z_axis = Some(parse_vec3_expressions(value, "frame zAxis")?),
+            other => {
+                return Err(CompilerError::new(
+                    CompilerErrorKind::UnsupportedFeature,
+                    format!(
+                        "Component `{owner}` port `{port_id}` frame does not support `:{other}`."
+                    ),
+                ))
+            }
+        }
+        index += 2;
+    }
+    let origin = origin.ok_or_else(|| {
+        CompilerError::new(CompilerErrorKind::Parse, "Port frame requires `:origin`.")
+    })?;
+    let x_axis = x_axis.ok_or_else(|| {
+        CompilerError::new(CompilerErrorKind::Parse, "Port frame requires `:x-axis`.")
+    })?;
+    let z_axis = z_axis.ok_or_else(|| {
+        CompilerError::new(CompilerErrorKind::Parse, "Port frame requires `:z-axis`.")
+    })?;
+    if let (Some(x_axis), Some(z_axis)) = (
+        literal_vec3_from_expressions(&x_axis),
+        literal_vec3_from_expressions(&z_axis),
+    ) {
+        PlacementFrame::from_origin_x_z(
+            [0.0; 3],
+            x_axis,
+            z_axis,
+            &format!("component `{owner}` port `{port_id}`"),
+        )
+        .map_err(|error| CompilerError::new(CompilerErrorKind::Resolve, error.message))?;
+    }
+    Ok(ComponentFrameTemplate {
+        origin,
+        x_axis,
+        z_axis,
+    })
+}
+
+fn literal_vec3_from_expressions(values: &[ExprKind; 3]) -> Option<[f64; 3]> {
+    Some([
+        expr_numeric_literal(&values[0])?.0,
+        expr_numeric_literal(&values[1])?.0,
+        expr_numeric_literal(&values[2])?.0,
+    ])
+}
+
+fn parse_vec3_expressions(expr: &ExprKind, context: &str) -> CoreResult<[ExprKind; 3]> {
+    if let ExprKind::Quote(quote) = expr {
+        return parse_vec3_expressions(&quote.expr, context);
+    }
+    let mut items = expr_list_items(expr, context)?;
+    if items.first().and_then(expr_head_name).as_deref() == Some("quote") && items.len() == 2 {
+        return parse_vec3_expressions(&items[1], context);
+    }
+    if items.first().and_then(expr_identifier).as_deref() == Some("list") {
+        items.remove(0);
+    }
+    if items.len() != 3 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::TypeMismatch,
+            format!(
+                "{context} requires exactly three coordinate expressions; received {} item(s) from `{expr}`.",
+                items.len()
+            ),
+        ));
+    }
+    items.try_into().map_err(|_| {
+        CompilerError::new(
+            CompilerErrorKind::Internal,
+            format!("Failed to retain {context} coordinate expressions."),
+        )
+    })
+}
+
+fn rewrite_component_placement_form(
+    expr: &ExprKind,
+    registry: &BTreeMap<String, ComponentDefinition>,
+    part_ports: &BTreeMap<String, BTreeMap<String, ComponentPortTemplate>>,
+) -> CoreResult<String> {
+    match expr {
+        ExprKind::Atom(_) | ExprKind::Quote(_) => Ok(expr.to_string()),
+        ExprKind::Define(definition) => Ok(format!(
+            "(define {} {})",
+            definition.name,
+            rewrite_component_placement_form(&definition.body, registry, part_ports)?
+        )),
+        ExprKind::Begin(begin) => Ok(format!(
+            "(begin {})",
+            begin
+                .exprs
+                .iter()
+                .map(|item| rewrite_component_placement_form(item, registry, part_ports))
+                .collect::<CoreResult<Vec<_>>>()?
+                .join(" ")
+        )),
+        ExprKind::If(if_expr) => Ok(format!(
+            "(if {} {} {})",
+            rewrite_component_placement_form(&if_expr.test_expr, registry, part_ports)?,
+            rewrite_component_placement_form(&if_expr.then_expr, registry, part_ports)?,
+            rewrite_component_placement_form(&if_expr.else_expr, registry, part_ports)?
+        )),
+        ExprKind::Let(let_expr) => {
+            let bindings = let_expr
+                .bindings
+                .iter()
+                .map(|(name, value)| {
+                    Ok(format!(
+                        "({} {})",
+                        name,
+                        rewrite_component_placement_form(value, registry, part_ports)?
+                    ))
+                })
+                .collect::<CoreResult<Vec<_>>>()?;
+            Ok(format!(
+                "(let ({}) {})",
+                bindings.join(" "),
+                rewrite_component_placement_form(&let_expr.body_expr, registry, part_ports)?
+            ))
+        }
+        ExprKind::LambdaFunction(lambda) => Ok(format!(
+            "(lambda ({}) {})",
+            lambda
+                .args
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" "),
+            rewrite_component_placement_form(&lambda.body, registry, part_ports)?
+        )),
+        ExprKind::List(_) | ExprKind::Vector(_) => {
+            let items = expr_list_items(expr, "component placement form")?;
+            let head = items.first().and_then(expr_identifier);
+            if head.as_deref() == Some("quote") {
+                return Ok(expr.to_string());
+            }
+            if head.as_deref() == Some("place-component") {
+                return rewrite_place_component(&items, registry, part_ports).map_err(
+                    |mut error| {
+                        if error.primary_span.is_none() {
+                            if let Some(span) = expr_source_span(expr) {
+                                error = error.with_span(span);
+                            }
+                        }
+                        error
+                    },
+                );
+            }
+            let output_instance = if matches!(head.as_deref(), Some("part") | Some("feature")) {
+                items.get(1).and_then(expr_identifier)
+            } else {
+                None
+            };
+            let rendered = items
+                .iter()
+                .enumerate()
+                .filter_map(|(index, item)| {
+                    if index > 0
+                        && matches!(
+                            head.as_deref(),
+                            Some("define-component") | Some("part") | Some("feature")
+                        )
+                        && is_ports_clause(item)
+                    {
+                        None
+                    } else {
+                        Some(
+                            rewrite_component_placement_form(item, registry, part_ports).map_err(
+                                |mut error| {
+                                    if let Some(instance_id) = output_instance.as_deref() {
+                                        if !error.message.starts_with("Output instance `") {
+                                            error.message = format!(
+                                                "Output instance `{instance_id}` placement failed: {}",
+                                                error.message
+                                            )
+                                            .into();
+                                        }
+                                    }
+                                    error
+                                },
+                            ),
+                        )
+                    }
+                })
+                .collect::<CoreResult<Vec<_>>>()?;
+            Ok(format!("({})", rendered.join(" ")))
+        }
+        other => Ok(other.to_string()),
+    }
+}
+
+fn rewrite_place_component(
+    items: &[ExprKind],
+    registry: &BTreeMap<String, ComponentDefinition>,
+    part_ports: &BTreeMap<String, BTreeMap<String, ComponentPortTemplate>>,
+) -> CoreResult<String> {
+    let geometry = items.get(1).ok_or_else(|| {
+        CompilerError::new(
+            CompilerErrorKind::Parse,
+            "`place-component` requires a component invocation.",
+        )
+    })?;
+    let geometry_items = expr_list_items(geometry, "placed component invocation")?;
+    let component_id = geometry_items
+        .first()
+        .and_then(expr_identifier)
+        .ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                "`place-component` first argument must invoke a named component.",
+            )
+        })?;
+    let component = registry.get(&component_id).ok_or_else(|| {
+        CompilerError::new(
+            CompilerErrorKind::Resolve,
+            format!("`place-component` references unknown component `{component_id}`."),
+        )
+    })?;
+
+    let mut from = None;
+    let mut to = None;
+    let mut normal_mode = None;
+    let mut roll_degrees = 0.0;
+    let mut offset = ["0".to_string(), "0".to_string(), "0".to_string()];
+    let mut anonymous_nonzero_offset = false;
+    let mut mirror_axis = None;
+    let mut index = 2usize;
+    while index < items.len() {
+        let keyword = instantiation_keyword_name(&items[index]).ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                "`place-component` options must be keywords.",
+            )
+        })?;
+        let value = items.get(index + 1).ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                format!("`place-component` option `:{keyword}` needs a value."),
+            )
+        })?;
+        match keyword.as_str() {
+            "from" => from = expr_identifier(value),
+            "to" => to = Some(parse_port_reference(value)?),
+            "normal" => {
+                normal_mode = Some(match expr_identifier(value).as_deref() {
+                    Some("aligned") => MateNormalMode::Aligned,
+                    Some("opposed") => MateNormalMode::Opposed,
+                    _ => {
+                        return Err(CompilerError::new(
+                            CompilerErrorKind::Resolve,
+                            "`place-component :normal` must be `aligned` or `opposed`.",
+                        ))
+                    }
+                })
+            }
+            "roll" => roll_degrees = expr_number_value(value, "place-component roll")?,
+            "offset" => {
+                let coordinates = parse_vec3_expressions(value, "place-component offset")?;
+                anonymous_nonzero_offset = coordinates.iter().any(|coordinate| {
+                    expr_numeric_literal(coordinate)
+                        .is_some_and(|(number, _)| number.abs() > f64::EPSILON)
+                });
+                offset = coordinates.map(|coordinate| coordinate.to_string())
+            }
+            "mirror" => {
+                mirror_axis = match expr_identifier(value).as_deref() {
+                    Some("none") => None,
+                    Some("x") => Some(MirrorAxis::X),
+                    Some("y") => Some(MirrorAxis::Y),
+                    _ => {
+                        return Err(CompilerError::new(
+                            CompilerErrorKind::Resolve,
+                            "`place-component :mirror` must be `none`, `x`, or `y`.",
+                        ))
+                    }
+                }
+            }
+            other => {
+                return Err(CompilerError::new(
+                    CompilerErrorKind::UnsupportedFeature,
+                    format!("`place-component` does not support `:{other}`."),
+                ))
+            }
+        }
+        index += 2;
+    }
+
+    let from = from.ok_or_else(|| {
+        CompilerError::new(
+            CompilerErrorKind::Parse,
+            "`place-component` requires `:from port`.",
+        )
+    })?;
+    let source_port = component
+        .ports
+        .iter()
+        .find(|port| port.port_id == from)
+        .ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Resolve,
+                format!("Component `{component_id}` has no port `{from}`."),
+            )
+        })?;
+    let (target_part, target_port_id) = to.ok_or_else(|| {
+        CompilerError::new(
+            CompilerErrorKind::Parse,
+            "`place-component` requires `:to (port-ref part port)`.",
+        )
+    })?;
+    let target_port = part_ports
+        .get(&target_part)
+        .and_then(|ports| ports.get(&target_port_id))
+        .ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Resolve,
+                format!(
+                    "Target port `{target_part}.{target_port_id}` does not exist for source `{component_id}.{from}`; sourceFrame={}, sourceFit={}.",
+                    render_component_frame_template(&source_port.frame),
+                    render_port_fit_template(&source_port.params)
+                ),
+            )
+        })?;
+    if anonymous_nonzero_offset
+        && (!source_port.params.is_empty() || !target_port.params.is_empty())
+    {
+        let names = source_port
+            .params
+            .keys()
+            .chain(target_port.params.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(CompilerError::new(
+            CompilerErrorKind::Resolve,
+            format!(
+                "Mate `{component_id}.{from}` -> `{target_part}.{target_port_id}` uses an anonymous non-zero offset while fit metadata is declared ({names}); reference a named fit parameter instead."
+            ),
+        ));
+    }
+    let normal_mode = normal_mode.ok_or_else(|| {
+        CompilerError::new(
+            CompilerErrorKind::Parse,
+            "`place-component` requires explicit `:normal aligned|opposed`.",
+        )
+    })?;
+    let component_args =
+        resolve_component_argument_sources(component, &geometry_items[1..], registry)?;
+    let source_axes = resolve_component_frame_axes(
+        &source_port.frame,
+        &component_args,
+        &format!("component `{component_id}` port `{from}`"),
+    )?;
+    let target_axes = resolve_component_frame_axes(
+        &target_port.frame,
+        &BTreeMap::new(),
+        &format!("part `{target_part}` port `{target_port_id}`"),
+    )?;
+    let placement_context = format!(
+        "mate `{component_id}.{from}` -> `{target_part}.{target_port_id}`; sourceFrame={source_axes:?}; targetFrame={target_axes:?}; sourceFit={}; targetFit={}",
+        render_port_fit_template(&source_port.params),
+        render_port_fit_template(&target_port.params)
+    );
+    validate_port_compatibility(
+        &source_port.type_id,
+        &source_port.compatible_with,
+        &target_port.type_id,
+        &target_port.compatible_with,
+        &placement_context,
+    )
+    .map_err(|error| CompilerError::new(CompilerErrorKind::Resolve, error.message))?;
+    let solved = solve_mate(
+        &source_axes,
+        &target_axes,
+        MateModifiers {
+            normal_mode,
+            roll_degrees,
+            offset: [0.0; 3],
+            mirror_axis,
+        },
+        &placement_context,
+    )
+    .map_err(|error| CompilerError::new(CompilerErrorKind::Resolve, error.message))?;
+
+    let mut geometry = rewrite_component_placement_form(geometry, registry, part_ports)?;
+    if let Some(axis) = solved.mirror_axis {
+        let axis = match axis {
+            MirrorAxis::X => "x",
+            MirrorAxis::Y => "y",
+        };
+        geometry = format!("(mirror \"{axis}\" 0 {geometry})");
+    }
+    let frame = solved.placement_frame;
+    let mut source_origin = source_port
+        .frame
+        .origin
+        .each_ref()
+        .map(|coordinate| substitute_component_expression(coordinate, &component_args));
+    if let Some(axis) = solved.mirror_axis {
+        match axis {
+            MirrorAxis::X => source_origin[0] = negate_expression(&source_origin[0]),
+            MirrorAxis::Y => source_origin[1] = negate_expression(&source_origin[1]),
+        }
+    }
+    let target_origin = target_port.frame.origin.each_ref().map(ToString::to_string);
+    let solved_origin =
+        solve_symbolic_origin(target_origin, &target_axes, offset, source_origin, &frame);
+    Ok(format!(
+        "(place (plane :origin {} :x {} :normal {}) {})",
+        render_expression_vec3(solved_origin),
+        render_vec3(frame.x_axis),
+        render_vec3(frame.z_axis),
+        geometry
+    ))
+}
+
+fn resolve_component_argument_sources(
+    definition: &ComponentDefinition,
+    args: &[ExprKind],
+    registry: &BTreeMap<String, ComponentDefinition>,
+) -> CoreResult<BTreeMap<String, String>> {
+    let signature_keys = definition
+        .entries
+        .iter()
+        .map(|entry| entry.key.clone())
+        .collect::<Vec<_>>();
+    let mut overrides = BTreeMap::new();
+    let mut index = 0usize;
+    while index < args.len() {
+        let keyword = instantiation_keyword_name(&args[index]).ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Resolve,
+                format!(
+                    "Component `{}` placement invocation requires keyword arguments.",
+                    definition.name
+                ),
+            )
+        })?;
+        if !signature_keys.iter().any(|key| key == &keyword) {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Resolve,
+                format!(
+                    "Component `{}` has no parameter `:{keyword}`. Signature: ({}).",
+                    definition.name,
+                    signature_keys.join(" ")
+                ),
+            ));
+        }
+        let value = args.get(index + 1).ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Resolve,
+                format!(
+                    "Component `{}` keyword `:{keyword}` is missing a value.",
+                    definition.name
+                ),
+            )
+        })?;
+        if overrides
+            .insert(keyword.clone(), rewrite_component_calls(value, registry)?)
+            .is_some()
+        {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Resolve,
+                format!(
+                    "Component `{}` keyword `:{keyword}` is given more than once.",
+                    definition.name
+                ),
+            ));
+        }
+        index += 2;
+    }
+    for entry in &definition.entries {
+        if !overrides.contains_key(&entry.key) {
+            let default = entry.default_source.clone().ok_or_else(|| {
+                CompilerError::new(
+                    CompilerErrorKind::Resolve,
+                    format!(
+                        "Component `{}` requires `:{}` for port-frame evaluation.",
+                        definition.name, entry.key
+                    ),
+                )
+            })?;
+            overrides.insert(entry.key.clone(), default);
+        }
+    }
+    Ok(overrides)
+}
+
+fn resolve_component_frame_axes(
+    frame: &ComponentFrameTemplate,
+    bindings: &BTreeMap<String, String>,
+    label: &str,
+) -> CoreResult<PlacementFrame> {
+    let x_axis = evaluate_component_vec3(&frame.x_axis, bindings, &format!("{label} xAxis"))?;
+    let z_axis = evaluate_component_vec3(&frame.z_axis, bindings, &format!("{label} zAxis"))?;
+    PlacementFrame::from_origin_x_z([0.0; 3], x_axis, z_axis, label)
+        .map_err(|error| CompilerError::new(CompilerErrorKind::Resolve, error.message))
+}
+
+fn evaluate_component_vec3(
+    values: &[ExprKind; 3],
+    bindings: &BTreeMap<String, String>,
+    label: &str,
+) -> CoreResult<[f64; 3]> {
+    Ok([
+        evaluate_component_number(&values[0], bindings, &mut BTreeSet::new(), label)?,
+        evaluate_component_number(&values[1], bindings, &mut BTreeSet::new(), label)?,
+        evaluate_component_number(&values[2], bindings, &mut BTreeSet::new(), label)?,
+    ])
+}
+
+fn evaluate_component_number(
+    expr: &ExprKind,
+    bindings: &BTreeMap<String, String>,
+    resolving: &mut BTreeSet<String>,
+    label: &str,
+) -> CoreResult<f64> {
+    evaluate_component_number_with_parameters(expr, bindings, &BTreeMap::new(), resolving, label)
+}
+
+fn evaluate_component_number_with_parameters(
+    expr: &ExprKind,
+    bindings: &BTreeMap<String, String>,
+    parameters: &BTreeMap<String, f64>,
+    resolving: &mut BTreeSet<String>,
+    label: &str,
+) -> CoreResult<f64> {
+    if let Some((value, _)) = expr_numeric_literal(expr) {
+        if value.is_finite() {
+            return Ok(value);
+        }
+    }
+    if let Some(name) = expr_identifier(expr) {
+        if let Some(value) = parameters.get(&name) {
+            return Ok(*value);
+        }
+        if let Some(source) = bindings.get(&name) {
+            if !resolving.insert(name.clone()) {
+                return Err(CompilerError::new(
+                    CompilerErrorKind::Resolve,
+                    format!("{label} contains cyclic parameter `{name}`."),
+                ));
+            }
+            let forms = Parser::parse_without_lowering(source)
+                .map_err(|error| compiler_error(CompilerErrorKind::Parse, error))?;
+            let value = forms.first().ok_or_else(|| {
+                CompilerError::new(
+                    CompilerErrorKind::Resolve,
+                    format!("{label} parameter `{name}` has no numeric expression."),
+                )
+            })?;
+            let result = evaluate_component_number_with_parameters(
+                value, bindings, parameters, resolving, label,
+            );
+            resolving.remove(&name);
+            return result;
+        }
+    }
+    let items = expr_list_items(expr, label)?;
+    let operation = items.first().and_then(expr_identifier).ok_or_else(|| {
+        CompilerError::new(
+            CompilerErrorKind::TypeMismatch,
+            format!("{label} expected a numeric expression, received `{expr}`."),
+        )
+    })?;
+    let values = items
+        .iter()
+        .skip(1)
+        .map(|value| {
+            evaluate_component_number_with_parameters(value, bindings, parameters, resolving, label)
+        })
+        .collect::<CoreResult<Vec<_>>>()?;
+    let value = match operation.as_str() {
+        "+" => values.iter().sum(),
+        "*" => values.iter().product(),
+        "-" if values.len() == 1 => -values[0],
+        "-" if !values.is_empty() => values[1..].iter().fold(values[0], |acc, value| acc - value),
+        "/" if values.len() >= 2 => values[1..].iter().fold(values[0], |acc, value| acc / value),
+        "min" if !values.is_empty() => values.iter().copied().fold(f64::INFINITY, f64::min),
+        "max" if !values.is_empty() => values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        _ => {
+            return Err(CompilerError::new(
+                CompilerErrorKind::TypeMismatch,
+                format!(
+                    "{label} expression `{expr}` is not statically numeric; supported axis operators are +, -, *, /, min, and max."
+                ),
+            ))
+        }
+    };
+    if !value.is_finite() {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Resolve,
+            format!("{label} resolved to non-finite value from `{expr}`."),
+        ));
+    }
+    Ok(value)
+}
+
+fn substitute_component_expression(expr: &ExprKind, bindings: &BTreeMap<String, String>) -> String {
+    if let Some(name) = expr_identifier(expr) {
+        if let Some(value) = bindings.get(&name) {
+            return value.clone();
+        }
+    }
+    match expr {
+        ExprKind::List(_) | ExprKind::Vector(_) => expr_list_items(expr, "frame expression")
+            .map(|items| {
+                format!(
+                    "({})",
+                    items
+                        .iter()
+                        .map(|item| substitute_component_expression(item, bindings))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+            })
+            .unwrap_or_else(|_| expr.to_string()),
+        ExprKind::If(value) => format!(
+            "(if {} {} {})",
+            substitute_component_expression(&value.test_expr, bindings),
+            substitute_component_expression(&value.then_expr, bindings),
+            substitute_component_expression(&value.else_expr, bindings)
+        ),
+        ExprKind::Quote(_) => expr.to_string(),
+        _ => expr.to_string(),
+    }
+}
+
+fn solve_symbolic_origin(
+    target_origin: [String; 3],
+    target_axes: &PlacementFrame,
+    offset: [String; 3],
+    source_origin: [String; 3],
+    placement: &PlacementFrame,
+) -> [String; 3] {
+    let target_basis = [target_axes.x_axis, target_axes.y_axis, target_axes.z_axis];
+    let placement_basis = [placement.x_axis, placement.y_axis, placement.z_axis];
+    std::array::from_fn(|row| {
+        let mut terms = vec![target_origin[row].clone()];
+        for column in 0..3 {
+            terms.push(scale_expression(target_basis[column][row], &offset[column]));
+        }
+        for column in 0..3 {
+            terms.push(scale_expression(
+                -placement_basis[column][row],
+                &source_origin[column],
+            ));
+        }
+        sum_expressions(terms)
+    })
+}
+
+fn scale_expression(coefficient: f64, expression: &str) -> String {
+    if coefficient.abs() < 1.0e-12 {
+        "0".to_string()
+    } else if (coefficient - 1.0).abs() < 1.0e-12 {
+        expression.to_string()
+    } else if (coefficient + 1.0).abs() < 1.0e-12 {
+        negate_expression(expression)
+    } else {
+        format!(
+            "(* {} {})",
+            render_placement_number(coefficient),
+            expression
+        )
+    }
+}
+
+fn negate_expression(expression: &str) -> String {
+    format!("(- {expression})")
+}
+
+fn sum_expressions(terms: Vec<String>) -> String {
+    let terms = terms
+        .into_iter()
+        .filter(|term| term != "0")
+        .collect::<Vec<_>>();
+    match terms.as_slice() {
+        [] => "0".to_string(),
+        [only] => only.clone(),
+        _ => format!("(+ {})", terms.join(" ")),
+    }
+}
+
+fn render_expression_vec3(value: [String; 3]) -> String {
+    format!("(list {} {} {})", value[0], value[1], value[2])
+}
+
+fn parse_port_reference(expr: &ExprKind) -> CoreResult<(String, String)> {
+    let items = expr_list_items(expr, "port reference")?;
+    if items.first().and_then(expr_identifier).as_deref() != Some("port-ref") || items.len() != 3 {
+        return Err(CompilerError::new(
+            CompilerErrorKind::Parse,
+            "Port reference must be `(port-ref part-id port-id)`.",
+        ));
+    }
+    let part = expr_identifier(&items[1]).ok_or_else(|| {
+        CompilerError::new(
+            CompilerErrorKind::Parse,
+            "Port reference part id must be a literal symbol.",
+        )
+    })?;
+    let port = expr_identifier(&items[2]).ok_or_else(|| {
+        CompilerError::new(
+            CompilerErrorKind::Parse,
+            "Port reference port id must be a literal symbol.",
+        )
+    })?;
+    Ok((part, port))
+}
+
+fn render_vec3(value: [f64; 3]) -> String {
+    format!(
+        "'({} {} {})",
+        render_placement_number(value[0]),
+        render_placement_number(value[1]),
+        render_placement_number(value[2])
+    )
+}
+
+fn render_component_frame_template(frame: &ComponentFrameTemplate) -> String {
+    format!(
+        "origin={}, xAxis={}, zAxis={}",
+        render_expression_vec3(frame.origin.each_ref().map(ToString::to_string)),
+        render_expression_vec3(frame.x_axis.each_ref().map(ToString::to_string)),
+        render_expression_vec3(frame.z_axis.each_ref().map(ToString::to_string))
+    )
+}
+
+fn render_port_fit_template(params: &BTreeMap<String, ExprKind>) -> String {
+    if params.is_empty() {
+        return "{}".to_string();
+    }
+    format!(
+        "{{{}}}",
+        params
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn render_placement_number(value: f64) -> String {
+    let value = if value.abs() < 1.0e-12 { 0.0 } else { value };
+    let mut rendered = format!("{value:.12}");
+    while rendered.contains('.') && rendered.ends_with('0') {
+        rendered.pop();
+    }
+    if rendered.ends_with('.') {
+        rendered.pop();
+    }
+    if rendered.is_empty() || rendered == "-0" {
+        "0".to_string()
+    } else {
+        rendered
+    }
 }
 
 /// Lowers `define-component` definitions and keyword instantiations into plain
@@ -1218,8 +2628,9 @@ fn lower_component_definitions_source(source: &str) -> CoreResult<String> {
         }
     }
 
+    let top_level_bindings = collect_top_level_define_names(&forms);
     for definition in &definitions {
-        check_component_closedness(definition, &registry)?;
+        check_component_closedness(definition, &registry, &top_level_bindings)?;
     }
     check_component_graph(&definitions, &registry)?;
 
@@ -1256,6 +2667,39 @@ fn component_definition_items(form: &ExprKind) -> Option<Vec<ExprKind>> {
     } else {
         None
     }
+}
+
+fn collect_top_level_define_names(forms: &[ExprKind]) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for form in forms {
+        if let ExprKind::Define(definition) = form {
+            if let Some(name) = expr_identifier(&definition.name).or_else(|| {
+                expr_list_items(&definition.name, "define signature")
+                    .ok()
+                    .and_then(|signature| signature.first().and_then(expr_identifier))
+            }) {
+                names.insert(name);
+            }
+            continue;
+        }
+        let Ok(items) = expr_list_items(form, "top-level form") else {
+            continue;
+        };
+        if items.first().and_then(expr_head_name).as_deref() != Some("define") {
+            continue;
+        }
+        let Some(name_expr) = items.get(1) else {
+            continue;
+        };
+        if let Some(name) = expr_identifier(name_expr).or_else(|| {
+            expr_list_items(name_expr, "define signature")
+                .ok()
+                .and_then(|signature| signature.first().and_then(expr_identifier))
+        }) {
+            names.insert(name);
+        }
+    }
+    names
 }
 
 fn collect_component_definitions(
@@ -1297,16 +2741,31 @@ fn parse_component_definition(items: &[ExprKind]) -> CoreResult<ComponentDefinit
     for entry in &signature_items {
         entries.push(parse_component_signature_entry(&name, entry)?);
     }
+    let mut ports = Vec::new();
+    let mut seen_ports = BTreeSet::new();
     let mut verify_clauses = Vec::new();
     let mut geometry = Vec::new();
     for form in items.iter().skip(3) {
         let head = expr_list_items(form, "component body form")
             .ok()
             .and_then(|body_items| body_items.first().and_then(expr_identifier));
-        if head.as_deref() == Some("verify") {
-            verify_clauses.push(form.clone());
-        } else {
-            geometry.push(form.clone());
+        match head.as_deref() {
+            Some("ports") => {
+                for port in parse_ports_clause(&name, form)? {
+                    if !seen_ports.insert(port.port_id.clone()) {
+                        return Err(CompilerError::new(
+                            CompilerErrorKind::Resolve,
+                            format!(
+                                "Component `{name}` defines port `{}` more than once.",
+                                port.port_id
+                            ),
+                        ));
+                    }
+                    ports.push(port);
+                }
+            }
+            Some("verify") => verify_clauses.push(form.clone()),
+            _ => geometry.push(form.clone()),
         }
     }
     if geometry.len() != 1 {
@@ -1322,6 +2781,7 @@ fn parse_component_definition(items: &[ExprKind]) -> CoreResult<ComponentDefinit
     Ok(ComponentDefinition {
         name,
         entries,
+        ports,
         body: geometry.remove(0),
         verify_clauses,
     })
@@ -1502,19 +2962,32 @@ fn component_builtin_names() -> &'static BTreeSet<String> {
 fn check_component_closedness(
     definition: &ComponentDefinition,
     registry: &BTreeMap<String, ComponentDefinition>,
+    top_level_bindings: &BTreeSet<String>,
 ) -> CoreResult<()> {
     let mut bound: BTreeSet<String> = definition
         .entries
         .iter()
         .map(|entry| entry.key.clone())
         .collect();
+    bound.extend(top_level_bindings.iter().cloned());
     let mut free = BTreeSet::new();
     collect_component_free_vars(&definition.body, &mut bound, registry, &mut free);
+    for port in &definition.ports {
+        for coordinate in &port.frame.origin {
+            collect_component_free_vars(coordinate, &mut bound, registry, &mut free);
+        }
+        for coordinate in port.frame.x_axis.iter().chain(port.frame.z_axis.iter()) {
+            collect_component_free_vars(coordinate, &mut bound, registry, &mut free);
+        }
+        for value in port.params.values() {
+            collect_component_free_vars(value, &mut bound, registry, &mut free);
+        }
+    }
     if let Some(variable) = free.iter().next() {
         return Err(CompilerError::new(
             CompilerErrorKind::Resolve,
             format!(
-                "Component `{}` references free variable `{}`. Components are closed: add `{}` to the signature or bind it inside the body.",
+                "Component `{}` references free variable `{}`. Components are closed: add `{}` to the signature, bind it inside the body, or declare an immutable top-level helper.",
                 definition.name, variable, variable
             ),
         ));
@@ -1546,6 +3019,9 @@ fn collect_component_free_vars(
                 return;
             }
             if let Some(name) = expr_identifier(expr) {
+                if parse_suffixed_unit_literal(&name).is_some() {
+                    return;
+                }
                 if !bound.contains(&name)
                     && !component_builtin_names().contains(&name)
                     && !registry.contains_key(&name)
@@ -3680,6 +5156,42 @@ fn parse_expanded_analysis_clause(
                 size: refinement.size,
             }
         }
+        "topology-controls" => CoreAnalysisClauseKind::TopologyControls {
+            volume_fraction: parse_expanded_fem_scalar_keyword(
+                &items,
+                ":volume-fraction",
+                "topology volume fraction",
+            )?,
+            penalty: parse_expanded_fem_scalar_keyword(&items, ":penalty", "topology penalty")?,
+            minimum_density: parse_expanded_fem_scalar_keyword(
+                &items,
+                ":minimum-density",
+                "topology minimum density",
+            )?,
+            filter_radius: parse_expanded_fem_scalar_keyword(
+                &items,
+                ":filter-radius",
+                "topology filter radius",
+            )?,
+            move_limit: parse_expanded_fem_scalar_keyword(
+                &items,
+                ":move-limit",
+                "topology move limit",
+            )?,
+            convergence_tolerance: parse_expanded_fem_scalar_keyword(
+                &items,
+                ":convergence-tolerance",
+                "topology convergence tolerance",
+            )?,
+        },
+        "passive-solid" => CoreAnalysisClauseKind::PassiveSolid {
+            face_tag: parse_expanded_face_tag_keyword(&items)?,
+            depth: parse_expanded_fem_scalar_keyword(&items, ":depth", "passive-solid depth")?,
+        },
+        "passive-void" => CoreAnalysisClauseKind::PassiveVoid {
+            face_tag: parse_expanded_face_tag_keyword(&items)?,
+            depth: parse_expanded_fem_scalar_keyword(&items, ":depth", "passive-void depth")?,
+        },
         "fixed" => CoreAnalysisClauseKind::Fixed {
             face_tag: parse_expanded_face_tag_keyword(&items)?,
         },
@@ -4587,13 +6099,14 @@ fn parse_expanded_node(
                         if op_name == "ring" {
                             parse_ring_alias_call(args, keywords, next_node)?
                         } else {
+                            let value_kind = infer_call_value_kind(&op_name, &args);
                             (
                                 CoreNodeKind::Call {
                                     op: map_operation(&op_name),
                                     args,
                                     keywords,
                                 },
-                                infer_value_kind(&op_name),
+                                value_kind,
                             )
                         }
                     }
@@ -6063,58 +7576,28 @@ fn parse_expanded_fancy_list_node(
                 ));
             }
             let count = parse_positive_count(&args[0], "`henon-points` count")?;
-            let mut x = number_literal_node(0.1, next_node, span);
-            let mut y = number_literal_node(0.0, next_node, span);
+            let scale = parse(&args[1], next_node)?;
+            let mut x = 0.1;
+            let mut y = 0.0;
             for _ in 0..count {
-                let nx = add_number_node(
-                    sub_number_node(
-                        number_literal_node(1.0, next_node, span),
-                        mul_number_node(
-                            number_literal_node(1.4, next_node, span),
-                            mul_number_node(x.clone(), x.clone(), next_node, span),
-                            next_node,
-                            span,
-                        ),
-                        next_node,
-                        span,
-                    ),
-                    y,
-                    next_node,
-                    span,
-                );
-                let ny = mul_number_node(
-                    number_literal_node(0.3, next_node, span),
-                    x,
-                    next_node,
-                    span,
-                );
+                let nx = 1.0 - 1.4 * x * x + y;
+                let ny = 0.3 * x;
                 x = nx;
                 y = ny;
-                let scale = parse(&args[1], next_node)?;
                 points.push(bounded_point2_node(
                     mul_number_node(
                         scale.clone(),
-                        div_number_node(
-                            x.clone(),
-                            number_literal_node(2.0, next_node, span),
-                            next_node,
-                            span,
-                        ),
+                        number_literal_node(x / 2.0, next_node, span),
                         next_node,
                         span,
                     ),
                     mul_number_node(
                         scale.clone(),
-                        div_number_node(
-                            y.clone(),
-                            number_literal_node(2.0, next_node, span),
-                            next_node,
-                            span,
-                        ),
+                        number_literal_node(y / 2.0, next_node, span),
                         next_node,
                         span,
                     ),
-                    scale,
+                    scale.clone(),
                     next_node,
                     span,
                 ));
@@ -6636,6 +8119,7 @@ fn compile_named_sequence_application(
             span,
         ));
     }
+    let value_kind = infer_call_value_kind(name, &args);
     Ok(core_node_with_span(
         alloc_node_id(next_node),
         CoreNodeKind::Call {
@@ -6643,7 +8127,7 @@ fn compile_named_sequence_application(
             args,
             keywords: Vec::new(),
         },
-        infer_value_kind(name),
+        value_kind,
         span,
     ))
 }
@@ -8892,6 +10376,38 @@ fn parse_analysis_clause(
                 size: refinement.size,
             }
         }
+        "topology-controls" => CoreAnalysisClauseKind::TopologyControls {
+            volume_fraction: parse_fem_scalar_keyword(
+                &items,
+                ":volume-fraction",
+                "topology volume fraction",
+            )?,
+            penalty: parse_fem_scalar_keyword(&items, ":penalty", "topology penalty")?,
+            minimum_density: parse_fem_scalar_keyword(
+                &items,
+                ":minimum-density",
+                "topology minimum density",
+            )?,
+            filter_radius: parse_fem_scalar_keyword(
+                &items,
+                ":filter-radius",
+                "topology filter radius",
+            )?,
+            move_limit: parse_fem_scalar_keyword(&items, ":move-limit", "topology move limit")?,
+            convergence_tolerance: parse_fem_scalar_keyword(
+                &items,
+                ":convergence-tolerance",
+                "topology convergence tolerance",
+            )?,
+        },
+        "passive-solid" => CoreAnalysisClauseKind::PassiveSolid {
+            face_tag: parse_face_tag_keyword(&items)?,
+            depth: parse_fem_scalar_keyword(&items, ":depth", "passive-solid depth")?,
+        },
+        "passive-void" => CoreAnalysisClauseKind::PassiveVoid {
+            face_tag: parse_face_tag_keyword(&items)?,
+            depth: parse_fem_scalar_keyword(&items, ":depth", "passive-void depth")?,
+        },
         "fixed" => CoreAnalysisClauseKind::Fixed {
             face_tag: parse_face_tag_keyword(&items)?,
         },
@@ -8947,6 +10463,9 @@ const ANALYSIS_CLAUSE_NAMES: &[&str] = &[
     "material",
     "volume-mesh",
     "refine",
+    "topology-controls",
+    "passive-solid",
+    "passive-void",
     "fixed",
     "prescribed-displacement",
     "surface-force",
@@ -9466,13 +10985,14 @@ fn parse_node(
                         if op_name == "ring" {
                             parse_ring_alias_call(args, keywords, next_node)?
                         } else {
+                            let value_kind = infer_call_value_kind(&op_name, &args);
                             (
                                 CoreNodeKind::Call {
                                     op: map_operation(&op_name),
                                     args,
                                     keywords,
                                 },
-                                infer_value_kind(&op_name),
+                                value_kind,
                             )
                         }
                     }
@@ -9869,8 +11389,8 @@ fn map_operation(name: &str) -> CoreOperation {
 fn infer_value_kind(name: &str) -> CoreValueKind {
     match name {
         "+" | "-" | "*" | "/" | "min" | "max" | "clamp" | "lerp" | "smoothstep" | "sin" | "cos"
-        | "tan" | "atan" | "atan2" | "deg" | "rad" | "deg->rad" | "rad->deg" | "abs" | "floor"
-        | "signed-pow" | "hash01" | "hash-signed" | "noise2" | "fbm2" | "voronoi2"
+        | "tan" | "atan" | "atan2" | "deg" | "rad" | "deg->rad" | "rad->deg" | "abs" | "sqrt"
+        | "floor" | "signed-pow" | "hash01" | "hash-signed" | "noise2" | "fbm2" | "voronoi2"
         | "cell-distance2" => CoreValueKind::Number,
         "not" | "and" | "or" | "=" | ">" | ">=" | "<" | "<=" | "even?" | "odd?" | "zero?"
         | "null?" | "empty?" | "list?" => CoreValueKind::Boolean,
@@ -9908,6 +11428,8 @@ fn infer_value_kind(name: &str) -> CoreValueKind {
         | "rounded_polygon"
         | "regular-polygon"
         | "regular_polygon"
+        | "voronoi-cell"
+        | "voronoi_cell"
         | "trapezoid"
         | "slot-overall"
         | "slot_overall"
@@ -9929,6 +11451,16 @@ fn infer_value_kind(name: &str) -> CoreValueKind {
         "plane" | "location" | "path-frame" => CoreValueKind::Frame,
         "compound" | "repeat-compound" => CoreValueKind::Compound,
         _ => CoreValueKind::Solid,
+    }
+}
+
+fn infer_call_value_kind(name: &str, args: &[CoreNode]) -> CoreValueKind {
+    match name {
+        "place" => args
+            .get(1)
+            .map(|shape| shape.value_kind)
+            .unwrap_or(CoreValueKind::Any),
+        _ => infer_value_kind(name),
     }
 }
 
@@ -10463,8 +11995,8 @@ fn normalize_keyword(name: &str) -> String {
 mod tests {
     use super::*;
     use crate::ecky_core_ir::{
-        CoreArrayOp, CoreFrameOp, CoreNodeKind, CoreOperation, CorePathOp, CorePrimitive,
-        CoreReference, CoreSurfaceOp, CoreSymbol,
+        CoreArrayOp, CoreFrameOp, CoreKeywordValue, CoreNodeKind, CoreOperation, CorePathOp,
+        CorePrimitive, CoreReference, CoreSurfaceOp, CoreSymbol,
     };
 
     #[cfg(feature = "workspace-fixtures")]
@@ -12086,6 +13618,46 @@ mod tests {
     }
 
     #[test]
+    fn compiles_native_voronoi_cell_as_sketch_for_extrude() {
+        let program = compile_to_core_program(
+            r#"(model
+              (part body
+                (extrude
+                  (voronoi-cell
+                    (voronoi-cells 3 3 12 12 1.5 23)
+                    4 40 40 1.2)
+                  5)))"#,
+        )
+        .expect("native Voronoi cell profile must compile as a sketch");
+
+        let root = &program.parts[0].root;
+        let CoreNodeKind::Call { args, .. } = &root.kind else {
+            panic!("expected extrude call");
+        };
+        assert_eq!(args[0].value_kind, CoreValueKind::Sketch);
+        assert!(matches!(
+            &args[0].kind,
+            CoreNodeKind::Call { op: CoreOperation::Custom(name), args, .. }
+                if name == "voronoi-cell" && args.len() == 5
+        ));
+    }
+
+    #[test]
+    fn compiles_native_voronoi_cell_inside_repeat_with_param_derived_bindings() {
+        compile_to_core_program(
+            r#"(model
+              (params (number diameter 90mm))
+              (verify (tag preview-exists) (metric preview (manifest has-model-stl)) (expect preview (= true)))
+              (part body
+                (let* ((radius (/ diameter 2))
+                       (sites (voronoi-cells 2 2 10 10 1 7)))
+                  (repeat-union cell 4
+                    (extrude (voronoi-cell sites cell 30 30 1) radius)))))"#,
+        )
+        .expect("voronoi-cell in repeat must retain parameter and let bindings");
+    }
+
+    #[test]
     fn compiles_chaotic_point_helpers_with_literal_counts_on_expanded_ast_path() {
         let program = compile_to_core_program_from_expanded_ast(
             r#"
@@ -12129,6 +13701,24 @@ mod tests {
         };
         assert_eq!(henon.len(), 7);
         assert_eq!(henon[0].value_kind, CoreValueKind::Point2);
+    }
+
+    #[test]
+    fn henon_points_compilation_stays_linear_in_point_count() {
+        let program = compile_to_core_program_from_expanded_ast(
+            r#"
+            (model
+              (part body
+                (path (henon-points 12 9))))
+            "#,
+        )
+        .expect("compile");
+
+        let debug_size = format!("{program:?}").len();
+        assert!(
+            debug_size < 100_000,
+            "henon-points duplicated recurrence AST: {debug_size} debug bytes"
+        );
     }
 
     #[test]
@@ -13087,6 +14677,556 @@ mod tests {
     }
 
     #[test]
+    fn local_component_port_moves_between_front_and_side_by_target_reference_only() {
+        let source = r#"
+            (define-component c-latch
+              ((number length 20))
+              (ports
+                (port mount
+                  :type "mechanical.latch.mount.v1"
+                  :frame (frame
+                    :origin '(0 0 0)
+                    :x-axis '(1 0 0)
+                    :z-axis '(0 0 1))))
+              (box length 4 2))
+            (model
+              (part enclosure
+                (ports
+                  (port front-left-latch
+                    :type "mechanical.latch.mount.v1"
+                    :frame (frame
+                      :origin '(0 -25 15)
+                      :x-axis '(1 0 0)
+                      :z-axis '(0 -1 0)))
+                  (port side-left-latch
+                    :type "mechanical.latch.mount.v1"
+                    :frame (frame
+                      :origin '(50 0 15)
+                      :x-axis '(0 1 0)
+                      :z-axis '(1 0 0))))
+                (box 100 50 30 :align '(center center min)))
+              (part front-latch
+                (place-component
+                  (c-latch)
+                  :from mount
+                  :to (port-ref enclosure front-left-latch)
+                  :normal opposed))
+              (part side-latch
+                (place-component
+                  (c-latch)
+                  :from mount
+                  :to (port-ref enclosure side-left-latch)
+                  :normal opposed)))
+        "#;
+
+        let program = compile_to_core_program(source).expect("local ports and mates compile");
+        assert_eq!(program.parts.len(), 3);
+        assert_eq!(program.parts[1].key, "front-latch");
+        assert_eq!(program.parts[2].key, "side-latch");
+
+        fn contains_place(node: &CoreNode) -> bool {
+            matches!(
+                &node.kind,
+                CoreNodeKind::Call {
+                    op: CoreOperation::Frame(CoreFrameOp::Place),
+                    ..
+                }
+            ) || node_children(node).into_iter().any(contains_place)
+        }
+
+        assert!(contains_place(&program.parts[1].root));
+        assert!(contains_place(&program.parts[2].root));
+    }
+
+    #[test]
+    fn component_placement_evidence_explains_orthogonal_target_without_mesh_math() {
+        let source = r#"
+            (define-component latch ((number clearance 0.3))
+              (ports (port mount :type "mount.v1" :params ((clearance clearance))
+                :frame (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1))))
+              (box 20 4 2))
+            (model
+              (part enclosure
+                (ports (port side :type "mount.v1"
+                  :frame (frame :origin '(50 0 15) :x-axis '(0 1 0) :z-axis '(1 0 0))))
+                (box 100 50 30))
+              (part side-latch
+                (place-component (latch :clearance 0.4) :from mount
+                  :to (port-ref enclosure side) :normal opposed :mirror x)))
+        "#;
+
+        let evidence = inspect_component_placement_evidence(source, &BTreeMap::new())
+            .expect("placement evidence");
+        assert_eq!(evidence.len(), 1);
+        let placement = &evidence[0];
+        assert_eq!(placement.instance_id, "side-latch");
+        assert_eq!(placement.component_id, "latch");
+        assert_eq!(placement.source_port_id, "mount");
+        assert_eq!(placement.target_instance_id, "enclosure");
+        assert_eq!(placement.target_port_id, "side");
+        assert_eq!(placement.mirror_axis, Some(MirrorAxis::X));
+        assert_eq!(placement.resolved_fit_values.get("clearance"), Some(&0.4));
+        assert_eq!(placement.placement_frame.z_axis, [-1.0, 0.0, 0.0]);
+        assert!(placement.source_start.is_some());
+        assert!(placement.source_end.is_some());
+    }
+
+    #[test]
+    fn component_interface_emitter_preserves_mate_intent_and_order() {
+        let source = r#"
+            (define-component latch ()
+              (ports (port mount :type "mount.v1"
+                :frame (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1))))
+              (box 1 1 1))
+            (model
+              (part body
+                (ports (port target :type "mount.v1"
+                  :frame (frame :origin '(10 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1))))
+                (box 2 2 2))
+              (part latch-instance
+                (place-component (latch) :from mount :to (port-ref body target)
+                  :normal opposed :roll 10 :offset '(0 0 0.2) :mirror y)))
+        "#;
+
+        let emitted = emit_component_interface_source(source).expect("authoring emit");
+        assert!(emitted.contains("place-component"), "{emitted}");
+        assert!(emitted.contains("port-ref body target"), "{emitted}");
+        assert!(emitted.contains(":normal opposed"), "{emitted}");
+        assert!(emitted.contains(":roll 10"), "{emitted}");
+        assert!(emitted.contains(":mirror y"), "{emitted}");
+        assert!(!emitted.contains("(place (plane"), "{emitted}");
+
+        let mut before = inspect_component_placement_evidence(source, &BTreeMap::new())
+            .expect("before evidence");
+        let mut after = inspect_component_placement_evidence(&emitted, &BTreeMap::new())
+            .expect("after evidence");
+        for placement in before.iter_mut().chain(after.iter_mut()) {
+            placement.source_start = None;
+            placement.source_end = None;
+        }
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn component_placement_lowering_is_byte_identical_for_legacy_source() {
+        let source = "(model\n  (part body (translate 1 2 3 (box 10 20 30))))\n";
+        assert_eq!(
+            lower_component_placement_source(source).expect("legacy pass-through"),
+            source
+        );
+
+        let before = compile_to_core_program(source).expect("legacy compile");
+        let after_source = lower_component_placement_source(source).expect("lowering");
+        let after = compile_to_core_program(&after_source).expect("lowered compile");
+        assert_eq!(
+            before
+                .parts
+                .iter()
+                .map(|part| &part.key)
+                .collect::<Vec<_>>(),
+            after.parts.iter().map(|part| &part.key).collect::<Vec<_>>()
+        );
+        assert_eq!(emit_program(&before), emit_program(&after));
+    }
+
+    #[test]
+    fn component_port_rejects_invalid_axes_with_owner_port_and_span() {
+        let error = compile_to_core_program(
+            r#"
+            (define-component latch ()
+              (ports
+                (port mount :type "mount.v1"
+                  :frame (frame :origin '(0 0 0) :x-axis '(0 0 2) :z-axis '(0 0 1))))
+              (box 1 1 1))
+            (model (part body (latch)))
+            "#,
+        )
+        .expect_err("parallel axes fail");
+        assert!(error.message.contains("latch"), "{error}");
+        assert!(error.message.contains("mount"), "{error}");
+        assert!(error.message.contains("xAxis"), "{error}");
+        assert!(error.message.contains("zAxis"), "{error}");
+        assert!(
+            error.primary_span.is_some(),
+            "missing source span: {error:?}"
+        );
+    }
+
+    #[test]
+    fn component_mate_rejects_missing_target_port_and_incompatible_type() {
+        let source = |target_port: &str, target_type: &str| {
+            format!(
+                r#"
+                (define-component latch ()
+                  (ports (port mount :type "mount.v1"
+                    :frame (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1))))
+                  (box 1 1 1))
+                (model
+                  (part body
+                    (ports (port target :type "{target_type}"
+                      :frame (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1))))
+                    (box 2 2 2))
+                  (part latch-instance
+                    (place-component (latch)
+                      :from mount :to (port-ref body {target_port}) :normal aligned)))
+                "#
+            )
+        };
+
+        let missing = compile_to_core_program(&source("absent", "mount.v1"))
+            .expect_err("missing target fails");
+        assert!(missing.message.contains("body.absent"), "{missing}");
+        assert!(missing.message.contains("latch-instance"), "{missing}");
+        assert!(missing.message.contains("sourceFrame="), "{missing}");
+        assert!(missing.message.contains("sourceFit="), "{missing}");
+        assert!(missing.primary_span.is_some(), "{missing:?}");
+
+        let incompatible = compile_to_core_program(&source("target", "other.v1"))
+            .expect_err("incompatible type fails");
+        assert!(incompatible.message.contains("mount.v1"), "{incompatible}");
+        assert!(incompatible.message.contains("other.v1"), "{incompatible}");
+        assert!(
+            incompatible.message.contains("latch-instance"),
+            "{incompatible}"
+        );
+        assert!(
+            incompatible.message.contains("sourceFrame="),
+            "{incompatible}"
+        );
+        assert!(
+            incompatible.message.contains("targetFrame="),
+            "{incompatible}"
+        );
+        assert!(
+            incompatible.message.contains("sourceFit="),
+            "{incompatible}"
+        );
+        assert!(
+            incompatible.message.contains("targetFit="),
+            "{incompatible}"
+        );
+        assert!(incompatible.primary_span.is_some(), "{incompatible:?}");
+    }
+
+    #[test]
+    fn component_mate_requires_explicit_normal_mode() {
+        let error = compile_to_core_program(
+            r#"
+            (define-component latch ()
+              (ports (port mount :type "mount.v1"
+                :frame (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1))))
+              (box 1 1 1))
+            (model
+              (part body
+                (ports (port target :type "mount.v1"
+                  :frame (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1))))
+                (box 2 2 2))
+              (part latch-instance
+                (place-component (latch) :from mount :to (port-ref body target))))
+            "#,
+        )
+        .expect_err("normal mode required");
+        assert!(error.message.contains("explicit `:normal"), "{error}");
+    }
+
+    #[test]
+    fn component_interface_rejects_duplicate_dynamic_nonfinite_and_anonymous_fit_inputs() {
+        let duplicate = compile_to_core_program(
+            r#"
+            (define-component latch () (box 1 1 1))
+            (define-component latch () (box 2 2 2))
+            (model (part body (latch)))
+            "#,
+        )
+        .expect_err("duplicate component id rejected");
+        assert!(
+            duplicate.message.contains("defined more than once"),
+            "{duplicate}"
+        );
+
+        let dynamic_port = compile_to_core_program(
+            r#"
+            (define-component latch ()
+              (ports (port (if true mount other) :type "mount.v1"
+                :frame (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1))))
+              (box 1 1 1))
+            (model (part body (latch)))
+            "#,
+        )
+        .expect_err("dynamic port id rejected");
+        assert!(
+            dynamic_port.message.contains("literal symbol"),
+            "{dynamic_port}"
+        );
+
+        let dynamic_type = compile_to_core_program(
+            r#"
+            (define-component latch ()
+              (ports (port mount :type (if true "mount.v1" "other.v1")
+                :frame (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1))))
+              (box 1 1 1))
+            (model (part body (latch)))
+            "#,
+        )
+        .expect_err("dynamic type rejected");
+        assert!(
+            dynamic_type.message.contains("symbol or text"),
+            "{dynamic_type}"
+        );
+
+        let nonfinite = compile_to_core_program(
+            r#"
+            (define-component latch ()
+              (ports (port mount :type "mount.v1"
+                :frame (frame :origin '(0 0 0)
+                  :x-axis (list (/ 1 0) 0 0) :z-axis '(0 0 1))))
+              (box 1 1 1))
+            (model
+              (part body
+                (ports (port target :type "mount.v1" :frame
+                  (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1))))
+                (box 2 2 2))
+              (part latch-instance (place-component (latch) :from mount
+                :to (port-ref body target) :normal aligned)))
+            "#,
+        )
+        .expect_err("non-finite axis rejected");
+        assert!(nonfinite.message.contains("non-finite"), "{nonfinite}");
+
+        let anonymous = compile_to_core_program(
+            r#"
+            (define-component latch ((number clearance 0.3))
+              (ports (port mount :type "mount.v1" :params ((clearance clearance))
+                :frame (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1))))
+              (box 1 1 1))
+            (model
+              (part body
+                (ports (port target :type "mount.v1" :frame
+                  (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1))))
+                (box 2 2 2))
+              (part latch-instance (place-component (latch) :from mount
+                :to (port-ref body target) :normal aligned :offset '(0 0 0.3))))
+            "#,
+        )
+        .expect_err("anonymous fit offset rejected");
+        assert!(
+            anonymous.message.contains("anonymous non-zero offset"),
+            "{anonymous}"
+        );
+
+        compile_to_core_program(
+            r#"
+            (define-component latch ((number clearance 0.3))
+              (ports (port mount :type "mount.v1" :params ((clearance clearance))
+                :frame (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1))))
+              (box 1 1 1))
+            (model
+              (params (number clearance 0.3))
+              (part body
+                (ports (port target :type "mount.v1" :frame
+                  (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1))))
+                (box 2 2 2))
+              (part latch-instance (place-component (latch :clearance clearance) :from mount
+                :to (port-ref body target) :normal aligned
+                :offset (list 0 0 clearance))))
+            "#,
+        )
+        .expect("named fit offset compiles");
+    }
+
+    #[test]
+    fn component_port_accepts_named_metadata_and_declared_compatibility() {
+        let program = compile_to_core_program(
+            r#"
+            (define-component latch ((number clearance 0.3))
+              (ports
+                (port mount
+                  :type "latch.mount.v1"
+                  :compatible-with '(wall.mount.v1)
+                  :params ((clearance clearance))
+                  :frame (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1))))
+              (box 1 1 1))
+            (model
+              (part body
+                (ports (port target :type "wall.mount.v1"
+                  :frame (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1))))
+                (box 2 2 2))
+              (part latch-instance
+                (place-component (latch :clearance 0.4)
+                  :from mount :to (port-ref body target) :normal aligned)))
+            "#,
+        )
+        .expect("named metadata and compatibility compile");
+        assert_eq!(program.parts.len(), 2);
+    }
+
+    #[test]
+    fn component_mate_accepts_roll_offset_and_local_mirror() {
+        let program = compile_to_core_program(
+            r#"
+            (define-component latch ()
+              (ports (port mount :type "mount.v1"
+                :frame (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1))))
+              (box 1 1 1))
+            (model
+              (part body
+                (ports (port target :type "mount.v1"
+                  :frame (frame :origin '(10 20 30) :x-axis '(0 1 0) :z-axis '(1 0 0))))
+                (box 2 2 2))
+              (part latch-instance
+                (place-component (latch)
+                  :from mount :to (port-ref body target) :normal opposed
+                  :roll 15 :offset '(0 0 0.25) :mirror x)))
+            "#,
+        )
+        .expect("all mate modifiers compile");
+
+        fn contains_op(node: &CoreNode, expected: &CoreOperation) -> bool {
+            matches!(&node.kind, CoreNodeKind::Call { op, .. } if op == expected)
+                || node_children(node)
+                    .into_iter()
+                    .any(|child| contains_op(child, expected))
+        }
+        let root = &program.parts[1].root;
+        assert!(contains_op(root, &CoreOperation::Frame(CoreFrameOp::Place)));
+        assert!(contains_op(
+            root,
+            &CoreOperation::Transform(CoreTransformOp::Mirror)
+        ));
+    }
+
+    #[test]
+    fn component_parameter_updates_local_geometry_and_port_origin_before_placement() {
+        let source = |pivot: f64| {
+            format!(
+                r#"
+                (define-component latch ((number pivot 4))
+                  (ports (port mount :type "mount.v1"
+                    :frame (frame :origin (list pivot 0 0)
+                      :x-axis '(1 0 0) :z-axis '(0 0 1))))
+                  (box pivot 2 2))
+                (model
+                  (part body
+                    (ports (port target :type "mount.v1"
+                      :frame (frame :origin '(20 0 0)
+                        :x-axis '(1 0 0) :z-axis '(0 0 1))))
+                    (box 2 2 2))
+                  (part latch-instance
+                    (place-component (latch :pivot {pivot})
+                      :from mount :to (port-ref body target) :normal aligned)))
+                "#
+            )
+        };
+
+        let first = compile_to_legacy_source(&source(5.0)).expect("pivot 5 compiles");
+        let second = compile_to_legacy_source(&source(7.0)).expect("pivot 7 compiles");
+        assert_ne!(
+            first, second,
+            "port/geometry override must enter Core identity"
+        );
+        assert!(first.contains("5"), "{first}");
+        assert!(second.contains("7"), "{second}");
+        let first_evidence = inspect_component_placement_evidence(&source(5.0), &BTreeMap::new())
+            .expect("pivot 5 evidence");
+        let second_evidence = inspect_component_placement_evidence(&source(7.0), &BTreeMap::new())
+            .expect("pivot 7 evidence");
+        assert_eq!(first_evidence[0].placement_frame.origin, [15.0, 0.0, 0.0]);
+        assert_eq!(second_evidence[0].placement_frame.origin, [13.0, 0.0, 0.0]);
+        assert_ne!(first_evidence, second_evidence);
+    }
+
+    #[test]
+    fn component_port_axis_expressions_share_signature_overrides() {
+        let source = |axis_x: f64, axis_y: f64| {
+            format!(
+                r#"
+                (define-component latch ((number axis-x 1) (number axis-y 0))
+                  (ports (port mount :type "mount.v1"
+                    :frame (frame :origin '(0 0 0)
+                      :x-axis (list axis-x axis-y 0) :z-axis '(0 0 1))))
+                  (box 4 2 1))
+                (model
+                  (part body
+                    (ports (port target :type "mount.v1"
+                      :frame (frame :origin '(10 0 0)
+                        :x-axis '(1 0 0) :z-axis '(0 0 1))))
+                    (box 1 1 1))
+                  (part latch-instance
+                    (place-component (latch :axis-x {axis_x} :axis-y {axis_y})
+                      :from mount :to (port-ref body target) :normal aligned)))
+                "#
+            )
+        };
+
+        let x_aligned = compile_to_legacy_source(&source(1.0, 0.0)).expect("x axis compiles");
+        let y_aligned = compile_to_legacy_source(&source(0.0, 1.0)).expect("y axis compiles");
+        assert_ne!(x_aligned, y_aligned, "axis overrides must change placement");
+
+        let error = compile_to_core_program(&source(0.0, 0.0)).expect_err("zero axis rejected");
+        assert!(
+            error.message.contains("component `latch` port `mount`"),
+            "{error}"
+        );
+        assert!(error.message.contains("xAxis"), "{error}");
+    }
+
+    #[test]
+    fn component_port_parameter_scope_matches_expanded_and_runtime_compile_paths() {
+        let source = r#"
+            (define-component latch ((number pivot 4))
+              (ports (port mount :type "mount.v1"
+                :params ((pivot pivot))
+                :frame (frame :origin (list pivot 0 0)
+                  :x-axis '(1 0 0) :z-axis '(0 0 1))))
+              (box pivot 2 2))
+            (model
+              (part body
+                (ports (port target :type "mount.v1"
+                  :frame (frame :origin '(20 0 0)
+                    :x-axis '(1 0 0) :z-axis '(0 0 1))))
+                (box 2 2 2))
+              (part latch-instance
+                (place-component (latch :pivot 6)
+                  :from mount :to (port-ref body target) :normal aligned)))
+        "#;
+        let lowered = lower_component_placement_source(source).expect("placement lower");
+        let lowered = lower_component_definitions_source(&lowered).expect("component lower");
+        let expanded = compile_to_core_program_from_expanded_ast_legacy(&lowered)
+            .expect("expanded compile path");
+        let runtime = compile_to_core_program_via_runtime(&lowered).expect("runtime compile path");
+        assert_eq!(expanded.parts.len(), runtime.parts.len());
+        for (left, right) in expanded.parts.iter().zip(runtime.parts.iter()) {
+            assert_eq!(left.key, right.key);
+            let env = BTreeMap::new();
+            let folded_left = parity_fold_node(&left.root, &env);
+            let folded_right = parity_fold_node(&right.root, &env);
+            assert_eq!(
+                emit_node(&folded_left, &BTreeMap::new(), &BTreeMap::new()),
+                emit_node(&folded_right, &BTreeMap::new(), &BTreeMap::new()),
+                "part `{}` must fold to the same structure on both paths",
+                left.key
+            );
+        }
+    }
+
+    #[test]
+    fn component_port_metadata_obeys_component_closedness() {
+        let error = compile_to_core_program(
+            r#"
+            (define-component latch ()
+              (ports
+                (port mount :type "mount.v1" :params ((clearance parent_clearance))
+                  :frame (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1))))
+              (box 1 1 1))
+            (model (part latch-instance (latch)))
+            "#,
+        )
+        .expect_err("free port metadata binding rejected");
+        assert!(error.message.contains("parent_clearance"), "{error}");
+        assert!(error.message.contains("latch"), "{error}");
+    }
+
+    #[test]
     fn define_component_signature_accepts_param_metadata() {
         let program = compile_to_core_program(
             r#"
@@ -13176,6 +15316,40 @@ mod tests {
         )
         .expect("locals and builtins are not free variables");
         assert_eq!(program.parts.len(), 1);
+    }
+
+    #[test]
+    fn component_body_allows_suffixed_unit_literals() {
+        let program = compile_to_core_program(
+            r#"
+            (define-component metric-bracket ((number width 20mm))
+              (rotate 90deg 0deg 0deg
+                (translate 0mm 2mm 0mm
+                  (box width 10mm 5mm))))
+            (model (part body (metric-bracket)))
+            "#,
+        )
+        .expect("unit literals are values, not free variables");
+
+        assert_eq!(program.parts.len(), 1);
+        let bindings = component_let_bindings(&program.parts[0].root);
+        assert_eq!(binding_number(bindings, "width"), 20.0);
+    }
+
+    #[test]
+    fn component_body_captures_declared_top_level_helper() {
+        let program = compile_to_core_program(
+            r#"
+            (define (metric-box width) (box width 10mm 5mm))
+            (define-component bracket ((number width 20mm))
+              (translate 0mm 2mm 0mm (metric-box width)))
+            (model (part body (bracket)))
+            "#,
+        )
+        .expect("declared helper is a static component dependency");
+
+        let bindings = component_let_bindings(&program.parts[0].root);
+        assert_eq!(binding_number(bindings, "width"), 20.0);
     }
 
     #[test]
@@ -13299,7 +15473,23 @@ mod tests {
             CoreNodeKind::Call { op, args, keywords } => CoreNodeKind::Call {
                 op: op.clone(),
                 args: args.iter().map(|arg| parity_fold_node(arg, env)).collect(),
-                keywords: keywords.clone(),
+                keywords: keywords
+                    .iter()
+                    .map(|keyword| CoreKeywordArg {
+                        name: keyword.name.clone(),
+                        value: match &keyword.value {
+                            CoreKeywordValue::Expr(value) => {
+                                CoreKeywordValue::Expr(parity_fold_node(value, env))
+                            }
+                            CoreKeywordValue::Selector { source, payload } => {
+                                CoreKeywordValue::Selector {
+                                    source: parity_fold_node(source, env),
+                                    payload: payload.clone(),
+                                }
+                            }
+                        },
+                    })
+                    .collect(),
             },
             CoreNodeKind::List(items) => CoreNodeKind::List(
                 items
@@ -14011,6 +16201,60 @@ mod tests {
             vec!["vertices", "triangles"]
         );
         assert!(program.parts[0].root.span.is_some(), "root span required");
+    }
+
+    #[test]
+    fn import_stl_requires_preparation_keywords_as_a_pair() {
+        let err = compile_to_core_program(
+            r#"(model (part body (import-stl "/tmp/part.stl" :target-triangles 8)))"#,
+        )
+        .expect_err("target-triangles without max-error must fail");
+
+        let message = err.to_string();
+        assert!(message.contains("import-stl"), "{message}");
+        assert!(message.contains(":max-error"), "{message}");
+    }
+
+    #[test]
+    fn import_stl_normalizes_preparation_policy_from_keywords() {
+        let program = compile_to_core_program(
+            r#"(model (part body (import-stl "/tmp/part.stl" :target-triangles 4000 :max-error 0.05)))"#,
+        )
+        .expect("prepared import must compile");
+        let policy = program.parts[0]
+            .root
+            .stl_preparation_policy()
+            .expect("policy normalization")
+            .expect("prepared import should normalize");
+
+        assert!(matches!(
+            policy.target_triangles.kind,
+            CoreNodeKind::Literal(CoreLiteral::Number(4000.0))
+        ));
+        assert!(matches!(
+            policy.max_error.kind,
+            CoreNodeKind::Literal(CoreLiteral::Number(value)) if (value - 0.05).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            policy.preserve_boundaries.kind,
+            CoreNodeKind::Literal(CoreLiteral::Boolean(true))
+        ));
+    }
+
+    #[test]
+    fn import_stl_without_preparation_keywords_stays_legacy() {
+        let program =
+            compile_to_core_program(r#"(model (part body (import-stl "/tmp/part.stl")))"#)
+                .expect("legacy import must compile");
+
+        assert!(
+            program.parts[0]
+                .root
+                .stl_preparation_policy()
+                .expect("policy normalization")
+                .is_none(),
+            "legacy import should not synthesize preparation policy"
+        );
     }
 
     #[test]

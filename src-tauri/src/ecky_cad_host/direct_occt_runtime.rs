@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,26 +13,29 @@ use super::direct_occt::{OcctArg, OcctOp};
 use super::direct_occt_sdk::{DirectOcctSdkLayout, NativeExportOutcome};
 use crate::contracts::{
     AnalysisDeclarationBinding, AppError, AppResult, ArtifactBundle, DesignParams,
-    DocumentMetadata, EngineKind, EnrichmentStatus, ExportArtifact, GeometryBackend,
-    GeometryProvenance, GeometryRepresentation, ManifestBounds, ManifestEnrichmentState,
-    ModelManifest, ModelSourceKind, ParameterGroup, PartBinding, SelectionTarget,
-    SelectionTargetKind, SourceLanguage, ViewerEdgePoint, ViewerEdgeTarget, ViewerFaceTarget,
-    MODEL_RUNTIME_SCHEMA_VERSION,
+    DocumentMetadata, EngineKind, EnrichmentStatus, ExportArtifact, FeatureGraph, FeatureNode,
+    GeometryBackend, GeometryProvenance, GeometryRepresentation, ManifestBounds,
+    ManifestEnrichmentState, ModelManifest, ModelSourceKind, ParameterGroup, PartBinding,
+    PreviewView, PreviewViewOffset, SelectionTarget, SelectionTargetKind, SourceLanguage,
+    SourceRef, ViewerEdgePoint, ViewerEdgeTarget, ViewerFaceTarget, MODEL_RUNTIME_SCHEMA_VERSION,
 };
-use crate::ecky_core_ir::{CorePart, CoreProgram, CoreSelectorTagDecl};
+use crate::ecky_core_ir::{
+    CoreNode, CoreNodeKind, CoreOperation, CorePart, CorePrimitive, CoreProgram, CoreReference,
+    CoreSelectorTagDecl,
+};
 use crate::ecky_ir::mesh_asset::{IndexedMeshAsset, MeshAssetSource};
 use crate::models::PathResolver;
 use crate::topology_target_ids::{
     durable_edge_target_id, durable_edge_target_id_for_stable_node_key, durable_face_target_id,
     durable_face_target_id_for_stable_node_key, durable_vertex_target_id,
     durable_vertex_target_id_for_stable_node_key, preferred_public_topology_target_id,
-    resolve_tagged_anchors, stable_edge_target_id, stable_face_target_id, stable_vertex_target_id,
-    topology_target_aliases, viewer_target_alias_ids,
+    resolve_tagged_anchors_with_authored_bindings, stable_edge_target_id, stable_face_target_id,
+    stable_vertex_target_id, topology_target_aliases, viewer_target_alias_ids,
 };
 
 const SOURCE_FILE_NAME: &str = "source.ecky";
 const MANIFEST_FILE_NAME: &str = "manifest.json";
-const PREVIEW_STL_FILE_NAME: &str = "preview.stl";
+const MODEL_STL_FILE_NAME: &str = "model.stl";
 const STEP_FILE_NAME: &str = "model.step";
 const TOPOLOGY_FILE_NAME: &str = "topology.json";
 const DIRECT_OCCT_TEXT_FONT_ENV: &str = "ECKYCAD_FONT_PATH";
@@ -42,9 +45,30 @@ const DIRECT_OCCT_HOT_CACHE_CAPACITY: usize = 2;
 /// on top of [`DIRECT_OCCT_HOT_CACHE_CAPACITY`]; it guards a couple of
 /// pathological oversized renders from pinning the hot cache.
 const DIRECT_OCCT_HOT_CACHE_BYTE_BUDGET: u64 = 128 * 1024 * 1024;
-const DIRECT_OCCT_CACHE_SCHEMA: &str = "direct-occt-v6-explicit-hybrid-cache-contract";
+const DIRECT_OCCT_CACHE_SCHEMA: &str = "direct-occt-v9-lexical-shape-provenance";
+const DIRECT_OCCT_GEOMETRY_CACHE_SCHEMA: &str = "direct-occt-geometry-v1";
+const DIRECT_OCCT_GEOMETRY_CACHE_DIR: &str = "direct-occt-geometry";
+const DIRECT_OCCT_GEOMETRY_CACHE_FILE: &str = "geometry-cache.json";
 const DIGESTS_FILE_NAME: &str = "digests.json";
 const CACHED_ARTIFACT_DIGEST_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DirectOcctGeometryCacheManifest {
+    schema: String,
+    has_step: bool,
+    tessellated_step: bool,
+    source_mesh_digests: Vec<String>,
+    part_assets: Vec<DirectOcctGeometryCachePartAsset>,
+    digests: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DirectOcctGeometryCachePartAsset {
+    part_key: String,
+    file_name: String,
+}
 
 fn direct_occt_analytic_brep_provenance() -> GeometryProvenance {
     GeometryProvenance {
@@ -102,6 +126,13 @@ struct DirectOcctTopologyPart {
     source_geometry_digest: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectOcctSolidDiagnostics {
+    pub part_count: usize,
+    pub solid_count: u64,
+    pub all_breps_valid: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DirectOcctTopologyVertex {
@@ -113,6 +144,8 @@ struct DirectOcctTopologyVertex {
     label: String,
     #[serde(default)]
     point: Option<DirectOcctTopologyPoint>,
+    #[serde(default)]
+    authored_bindings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -130,6 +163,8 @@ struct DirectOcctTopologyEdge {
     start: Option<DirectOcctTopologyPoint>,
     #[serde(default)]
     end: Option<DirectOcctTopologyPoint>,
+    #[serde(default)]
+    authored_bindings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -149,6 +184,8 @@ struct DirectOcctTopologyFace {
     normal: Option<[f64; 3]>,
     #[serde(default)]
     area: Option<f64>,
+    #[serde(default)]
+    authored_bindings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -157,6 +194,354 @@ struct DirectOcctTopologyPoint {
     x: f64,
     y: f64,
     z: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct DirectOcctPartProvenance {
+    parameter_keys: Vec<String>,
+    named_shapes: Vec<(String, Vec<String>)>,
+    faceted_mesh_root: bool,
+}
+
+fn direct_occt_program_provenance(
+    program: &CoreProgram,
+) -> BTreeMap<String, DirectOcctPartProvenance> {
+    let param_names = program
+        .parameters
+        .iter()
+        .map(|parameter| (parameter.id.raw(), parameter.key.clone()))
+        .collect::<BTreeMap<_, _>>();
+    program
+        .parts
+        .iter()
+        .map(|part| {
+            (
+                part.key.clone(),
+                direct_occt_part_provenance(part, &param_names),
+            )
+        })
+        .collect()
+}
+
+fn direct_occt_part_provenance(
+    part: &CorePart,
+    param_names: &BTreeMap<u64, String>,
+) -> DirectOcctPartProvenance {
+    let mut node_index = BTreeMap::new();
+    let mut shapes = Vec::new();
+    direct_occt_index_nodes(&part.root, &BTreeMap::new(), &mut node_index, &mut shapes);
+    let mut reachable = BTreeSet::new();
+    let parameter_keys = direct_occt_node_dependencies(
+        &part.root,
+        param_names,
+        &node_index,
+        &BTreeMap::new(),
+        &mut reachable,
+    );
+    let mut counts = BTreeMap::<String, usize>::new();
+    for (name, _, _) in &shapes {
+        *counts.entry(name.clone()).or_default() += 1;
+    }
+    let named_shapes = shapes
+        .into_iter()
+        .filter(|(name, node, _)| {
+            counts.get(name) == Some(&1) && reachable.contains(&node.id.raw())
+        })
+        .map(|(name, node, locals)| {
+            let mut shape_reachable = BTreeSet::new();
+            let keys = direct_occt_node_dependencies(
+                node,
+                param_names,
+                &node_index,
+                &locals,
+                &mut shape_reachable,
+            );
+            (name, keys)
+        })
+        .collect();
+    DirectOcctPartProvenance {
+        parameter_keys,
+        named_shapes,
+        faceted_mesh_root: direct_occt_part_is_faceted_mesh_root(&part.root),
+    }
+}
+
+fn direct_occt_part_is_faceted_mesh_root(root: &CoreNode) -> bool {
+    let CoreNodeKind::Call { op, args, .. } = &root.kind else {
+        return false;
+    };
+    if !matches!(op, CoreOperation::Custom(name) if name == "solidify") {
+        return false;
+    }
+    matches!(
+        args.as_slice(),
+        [CoreNode {
+            kind: CoreNodeKind::Call {
+                op: CoreOperation::Primitive(CorePrimitive::Stl),
+                ..
+            },
+            ..
+        }]
+    )
+}
+
+fn direct_occt_index_nodes<'a>(
+    node: &'a CoreNode,
+    locals: &BTreeMap<String, u64>,
+    node_index: &mut BTreeMap<u64, &'a CoreNode>,
+    shapes: &mut Vec<(String, &'a CoreNode, BTreeMap<String, u64>)>,
+) {
+    node_index.insert(node.id.raw(), node);
+    match &node.kind {
+        CoreNodeKind::Literal(_) | CoreNodeKind::Reference(_) => {}
+        CoreNodeKind::Build { bindings, result } => {
+            let mut nested = locals.clone();
+            for binding in bindings {
+                shapes.push((binding.name.clone(), &binding.value, nested.clone()));
+                direct_occt_index_nodes(&binding.value, &nested, node_index, shapes);
+                nested.insert(binding.name.clone(), binding.value.id.raw());
+            }
+            direct_occt_index_nodes(result, &nested, node_index, shapes);
+        }
+        CoreNodeKind::Let { bindings, body } => {
+            let mut nested = locals.clone();
+            for binding in bindings {
+                direct_occt_index_nodes(&binding.value, &nested, node_index, shapes);
+                nested.insert(binding.name.clone(), binding.value.id.raw());
+            }
+            direct_occt_index_nodes(body, &nested, node_index, shapes);
+        }
+        CoreNodeKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            direct_occt_index_nodes(condition, locals, node_index, shapes);
+            direct_occt_index_nodes(then_branch, locals, node_index, shapes);
+            direct_occt_index_nodes(else_branch, locals, node_index, shapes);
+        }
+        CoreNodeKind::Call { args, keywords, .. } => {
+            for arg in args {
+                direct_occt_index_nodes(arg, locals, node_index, shapes);
+            }
+            for keyword in keywords {
+                direct_occt_index_nodes(keyword.source_node(), locals, node_index, shapes);
+            }
+        }
+        CoreNodeKind::Range { start, end } => {
+            direct_occt_index_nodes(start, locals, node_index, shapes);
+            direct_occt_index_nodes(end, locals, node_index, shapes);
+        }
+        CoreNodeKind::Map { sources, body, .. } => {
+            for source in sources {
+                direct_occt_index_nodes(source, locals, node_index, shapes);
+            }
+            direct_occt_index_nodes(body, locals, node_index, shapes);
+        }
+        CoreNodeKind::Apply { args, list, .. } => {
+            for arg in args {
+                direct_occt_index_nodes(arg, locals, node_index, shapes);
+            }
+            direct_occt_index_nodes(list, locals, node_index, shapes);
+        }
+        CoreNodeKind::List(items) | CoreNodeKind::Group(items) => {
+            for item in items {
+                direct_occt_index_nodes(item, locals, node_index, shapes);
+            }
+        }
+    }
+}
+
+fn direct_occt_node_dependencies(
+    node: &CoreNode,
+    param_names: &BTreeMap<u64, String>,
+    node_index: &BTreeMap<u64, &CoreNode>,
+    locals: &BTreeMap<String, u64>,
+    reachable: &mut BTreeSet<u64>,
+) -> Vec<String> {
+    let mut keys = BTreeSet::new();
+    let mut visiting = BTreeSet::new();
+    direct_occt_collect_node_dependencies(
+        node,
+        param_names,
+        node_index,
+        locals,
+        reachable,
+        &mut visiting,
+        &mut keys,
+    );
+    keys.into_iter().collect()
+}
+
+fn direct_occt_collect_node_dependencies(
+    node: &CoreNode,
+    param_names: &BTreeMap<u64, String>,
+    node_index: &BTreeMap<u64, &CoreNode>,
+    locals: &BTreeMap<String, u64>,
+    reachable: &mut BTreeSet<u64>,
+    visiting: &mut BTreeSet<u64>,
+    keys: &mut BTreeSet<String>,
+) {
+    let node_id = node.id.raw();
+    reachable.insert(node_id);
+    if !visiting.insert(node_id) {
+        return;
+    }
+    match &node.kind {
+        CoreNodeKind::Literal(_) => {}
+        CoreNodeKind::Reference(CoreReference::Parameter(param_id)) => {
+            if let Some(key) = param_names.get(&param_id.raw()) {
+                keys.insert(key.clone());
+            }
+        }
+        CoreNodeKind::Reference(CoreReference::Node(id)) => {
+            if let Some(target) = node_index.get(&id.raw()) {
+                direct_occt_collect_node_dependencies(
+                    target,
+                    param_names,
+                    node_index,
+                    locals,
+                    reachable,
+                    visiting,
+                    keys,
+                );
+            }
+        }
+        CoreNodeKind::Reference(CoreReference::Local(name)) => {
+            if let Some(target) = locals.get(name).and_then(|id| node_index.get(id)) {
+                direct_occt_collect_node_dependencies(
+                    target,
+                    param_names,
+                    node_index,
+                    locals,
+                    reachable,
+                    visiting,
+                    keys,
+                );
+            }
+        }
+        CoreNodeKind::Reference(CoreReference::Part(_)) => {}
+        CoreNodeKind::Build { bindings, result } => {
+            let mut nested = locals.clone();
+            for binding in bindings {
+                nested.insert(binding.name.clone(), binding.value.id.raw());
+            }
+            direct_occt_collect_node_dependencies(
+                result,
+                param_names,
+                node_index,
+                &nested,
+                reachable,
+                visiting,
+                keys,
+            );
+        }
+        CoreNodeKind::Let { bindings, body } => {
+            let mut nested = locals.clone();
+            for binding in bindings {
+                nested.insert(binding.name.clone(), binding.value.id.raw());
+            }
+            direct_occt_collect_node_dependencies(
+                body,
+                param_names,
+                node_index,
+                &nested,
+                reachable,
+                visiting,
+                keys,
+            );
+        }
+        CoreNodeKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            for child in [
+                condition.as_ref(),
+                then_branch.as_ref(),
+                else_branch.as_ref(),
+            ] {
+                direct_occt_collect_node_dependencies(
+                    child,
+                    param_names,
+                    node_index,
+                    locals,
+                    reachable,
+                    visiting,
+                    keys,
+                );
+            }
+        }
+        CoreNodeKind::Call { args, keywords, .. } => {
+            for child in args
+                .iter()
+                .chain(keywords.iter().map(|keyword| keyword.source_node()))
+            {
+                direct_occt_collect_node_dependencies(
+                    child,
+                    param_names,
+                    node_index,
+                    locals,
+                    reachable,
+                    visiting,
+                    keys,
+                );
+            }
+        }
+        CoreNodeKind::Range { start, end } => {
+            for child in [start.as_ref(), end.as_ref()] {
+                direct_occt_collect_node_dependencies(
+                    child,
+                    param_names,
+                    node_index,
+                    locals,
+                    reachable,
+                    visiting,
+                    keys,
+                );
+            }
+        }
+        CoreNodeKind::Map { sources, body, .. } => {
+            for child in sources.iter().chain(std::iter::once(body.as_ref())) {
+                direct_occt_collect_node_dependencies(
+                    child,
+                    param_names,
+                    node_index,
+                    locals,
+                    reachable,
+                    visiting,
+                    keys,
+                );
+            }
+        }
+        CoreNodeKind::Apply { args, list, .. } => {
+            for child in args.iter().chain(std::iter::once(list.as_ref())) {
+                direct_occt_collect_node_dependencies(
+                    child,
+                    param_names,
+                    node_index,
+                    locals,
+                    reachable,
+                    visiting,
+                    keys,
+                );
+            }
+        }
+        CoreNodeKind::List(items) | CoreNodeKind::Group(items) => {
+            for child in items {
+                direct_occt_collect_node_dependencies(
+                    child,
+                    param_names,
+                    node_index,
+                    locals,
+                    reachable,
+                    visiting,
+                    keys,
+                );
+            }
+        }
+    }
+    visiting.remove(&node_id);
 }
 
 pub(crate) fn render_core_program_runtime_bundle(
@@ -204,20 +589,28 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
     fs::write(&source_path, source_identity)
         .map_err(|err| AppError::persistence(err.to_string()))?;
 
-    let export_outcome = match with_direct_occt_text_font_path(cad_text_font_path, || {
-        super::direct_occt_executor::export_core_program_step_stl_with_params_runner_first(
-            program,
-            parameters,
-            layout,
-            &bundle_dir,
-            app,
-        )
-    }) {
-        Ok(outcome) => outcome,
-        Err(err) => {
-            let _ = fs::remove_dir_all(&bundle_dir);
-            return Err(err);
-        }
+    let geometry_hash =
+        direct_occt_geometry_hash(program, &params_json, parameters, cad_text_font_path, app)?;
+    let export_outcome = match read_cached_direct_occt_geometry(app, &geometry_hash, &bundle_dir)? {
+        Some(outcome) => outcome,
+        None => match with_direct_occt_text_font_path(cad_text_font_path, || {
+            super::direct_occt_executor::export_core_program_step_stl_with_params_runner_first(
+                program,
+                parameters,
+                layout,
+                &bundle_dir,
+                app,
+            )
+        }) {
+            Ok(outcome) => {
+                write_cached_direct_occt_geometry(app, &geometry_hash, &bundle_dir, &outcome)?;
+                outcome
+            }
+            Err(err) => {
+                let _ = fs::remove_dir_all(&bundle_dir);
+                return Err(err);
+            }
+        },
     };
 
     let (step_path, stl_path, part_stl_paths, geometry_provenance) = match export_outcome {
@@ -306,7 +699,23 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
         .collect::<HashMap<_, _>>();
     let part_bounds =
         direct_occt_part_bounds(&part_specs, &part_asset_paths, &bundle_dir, &stl_path);
-    let mut manifest = build_direct_occt_manifest_with_stable_node_keys(
+    let mut program_provenance = direct_occt_program_provenance(program);
+    for part in &program.parts {
+        let Some(feature) = program.feature_decls.get(&part.key) else {
+            continue;
+        };
+        let Some(provenance) = program_provenance.get_mut(&part.key) else {
+            continue;
+        };
+        let mut keys = provenance
+            .parameter_keys
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        keys.extend(feature.param_keys.iter().cloned());
+        provenance.parameter_keys = keys.into_iter().collect();
+    }
+    let mut manifest = build_direct_occt_manifest_with_program_provenance(
         &model_id,
         &source_path,
         &part_specs,
@@ -317,7 +726,9 @@ pub(crate) fn render_core_program_runtime_bundle_with_font_path(
         &part_root_node_ids,
         &part_asset_paths,
         &part_bounds,
+        &program_provenance,
     )?;
+    apply_direct_occt_program_provenance(&mut manifest, program, &program_provenance);
     manifest.analysis_declarations = program
         .analyses
         .iter()
@@ -423,7 +834,7 @@ fn runtime_bundle_artifacts_ready(bundle: &ArtifactBundle) -> bool {
                 .map(|metadata| metadata.is_file() && metadata.len() > 0)
                 .unwrap_or(false)
     };
-    path_ready(&bundle.preview_stl_path)
+    path_ready(&bundle.model_stl_path)
         && bundle
             .viewer_assets
             .iter()
@@ -447,7 +858,7 @@ fn cached_artifact_paths(bundle: &ArtifactBundle) -> Vec<String> {
             paths.push(trimmed.to_string());
         }
     };
-    push_trimmed(&mut paths, &bundle.preview_stl_path);
+    push_trimmed(&mut paths, &bundle.model_stl_path);
     for asset in &bundle.viewer_assets {
         push_trimmed(&mut paths, &asset.path);
     }
@@ -685,8 +1096,54 @@ pub(crate) fn build_direct_occt_manifest_with_stable_node_keys(
     part_asset_paths: &HashMap<String, String>,
     part_bounds: &HashMap<String, ManifestBounds>,
 ) -> AppResult<ModelManifest> {
-    let part_bindings =
-        direct_occt_part_bindings(parts, parameter_keys, part_asset_paths, part_bounds);
+    let fallback_provenance = parts
+        .iter()
+        .map(|(part_id, _)| {
+            (
+                part_id.clone(),
+                DirectOcctPartProvenance {
+                    parameter_keys: parameter_keys.to_vec(),
+                    named_shapes: Vec::new(),
+                    faceted_mesh_root: false,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    build_direct_occt_manifest_with_program_provenance(
+        model_id,
+        source_path,
+        parts,
+        parameter_keys,
+        selector_tags,
+        topology_report,
+        part_stable_node_keys,
+        part_root_node_ids,
+        part_asset_paths,
+        part_bounds,
+        &fallback_provenance,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_direct_occt_manifest_with_program_provenance(
+    model_id: &str,
+    source_path: &Path,
+    parts: &[(String, String)],
+    parameter_keys: &[String],
+    selector_tags: &[CoreSelectorTagDecl],
+    topology_report: Option<&DirectOcctTopologyReport>,
+    part_stable_node_keys: &HashMap<String, String>,
+    part_root_node_ids: &HashMap<String, u64>,
+    part_asset_paths: &HashMap<String, String>,
+    part_bounds: &HashMap<String, ManifestBounds>,
+    program_provenance: &BTreeMap<String, DirectOcctPartProvenance>,
+) -> AppResult<ModelManifest> {
+    let part_bindings = direct_occt_part_bindings_with_provenance(
+        parts,
+        program_provenance,
+        part_asset_paths,
+        part_bounds,
+    );
     let part_ids = part_bindings
         .iter()
         .map(|part| part.part_id.clone())
@@ -696,21 +1153,28 @@ pub(crate) fn build_direct_occt_manifest_with_stable_node_keys(
         topology_report,
         part_stable_node_keys,
         part_root_node_ids,
+        program_provenance,
     )?;
     let tagged_anchor_edge_targets =
         direct_occt_tagged_anchor_edge_targets(topology_report, &selection_targets);
     let tagged_anchor_face_targets =
         direct_occt_tagged_anchor_face_targets(topology_report, &selection_targets);
-    let tagged_anchors = resolve_tagged_anchors(
+    let authored_binding_target_ids = topology_report
+        .map(direct_occt_authored_face_binding_target_ids_from_report)
+        .transpose()?
+        .unwrap_or_default();
+    let tagged_anchors = resolve_tagged_anchors_with_authored_bindings(
         selector_tags,
         &selection_targets,
         &tagged_anchor_edge_targets,
         &tagged_anchor_face_targets,
+        &authored_binding_target_ids,
     )?;
 
     Ok(ModelManifest {
         geometry_provenance: Some(direct_occt_analytic_brep_provenance()),
         component_import_origins: Vec::new(),
+        component_placement_evidence: Vec::new(),
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind: ModelSourceKind::Generated,
@@ -756,9 +1220,187 @@ pub(crate) fn build_direct_occt_manifest_with_stable_node_keys(
     })
 }
 
+fn apply_direct_occt_program_provenance(
+    manifest: &mut ModelManifest,
+    program: &CoreProgram,
+    provenance: &BTreeMap<String, DirectOcctPartProvenance>,
+) {
+    for part in &mut manifest.parts {
+        part.parameter_keys = provenance
+            .get(&part.part_id)
+            .map(|projection| projection.parameter_keys.clone())
+            .unwrap_or_default();
+    }
+    let mut claim_counts = BTreeMap::<String, usize>::new();
+    for projection in provenance.values() {
+        for key in &projection.parameter_keys {
+            *claim_counts.entry(key.clone()).or_default() += 1;
+        }
+    }
+    let all_parameter_keys = program
+        .parameters
+        .iter()
+        .map(|parameter| parameter.key.clone())
+        .collect::<Vec<_>>();
+    let mut groups = Vec::new();
+    let model_keys = all_parameter_keys
+        .iter()
+        .filter(|key| claim_counts.get(*key).copied().unwrap_or_default() != 1)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !model_keys.is_empty() {
+        groups.push(ParameterGroup {
+            group_id: "model:parameters".to_string(),
+            label: "Model Parameters".to_string(),
+            parameter_keys: model_keys,
+            part_ids: manifest
+                .parts
+                .iter()
+                .map(|part| part.part_id.clone())
+                .collect(),
+            editable: true,
+            presentation: Some("primary".to_string()),
+            order: Some(groups.len() as u32),
+        });
+    }
+    let mut nodes = Vec::new();
+    for part in &program.parts {
+        let Some(projection) = provenance.get(&part.key) else {
+            continue;
+        };
+        let feature = program.feature_decls.get(&part.key);
+        let primary_keys = feature
+            .filter(|feature| !feature.param_keys.is_empty())
+            .map(|feature| feature.param_keys.clone())
+            .unwrap_or_else(|| {
+                projection
+                    .parameter_keys
+                    .iter()
+                    .filter(|key| claim_counts.get(*key) == Some(&1))
+                    .cloned()
+                    .collect()
+            });
+        if !primary_keys.is_empty() {
+            groups.push(ParameterGroup {
+                group_id: feature
+                    .map(|feature| feature.feature_id.clone())
+                    .unwrap_or_else(|| format!("part:{}", part.key)),
+                label: part.label.clone(),
+                parameter_keys: primary_keys,
+                part_ids: vec![part.key.clone()],
+                editable: true,
+                presentation: Some("primary".to_string()),
+                order: Some(groups.len() as u32),
+            });
+        }
+        nodes.push(FeatureNode {
+            feature_id: feature
+                .map(|feature| feature.feature_id.clone())
+                .unwrap_or_else(|| format!("part:{}", part.key)),
+            kind: feature
+                .map(|feature| feature.role.clone())
+                .unwrap_or_else(|| "part".to_string()),
+            label: part.label.clone(),
+            source_ref: Some(SourceRef {
+                source_id: None,
+                path: Some(format!("/parts/{}/root", part.key)),
+                start_byte: part.root.span.map(|span| span.start),
+                end_byte: part.root.span.map(|span| span.end),
+            }),
+            dependency_ids: projection.parameter_keys.clone(),
+            output_refs: Vec::new(),
+            ports: Vec::new(),
+        });
+        for (shape_name, parameter_keys) in &projection.named_shapes {
+            if !parameter_keys.is_empty() {
+                groups.push(ParameterGroup {
+                    group_id: format!("shape:{}:{}", part.key, shape_name),
+                    label: humanize_direct_occt_name(shape_name),
+                    parameter_keys: parameter_keys.clone(),
+                    part_ids: vec![part.key.clone()],
+                    editable: true,
+                    presentation: Some("advanced".to_string()),
+                    order: Some(groups.len() as u32),
+                });
+            }
+            nodes.push(FeatureNode {
+                feature_id: format!("shape:{}:{}", part.key, shape_name),
+                kind: "shape".to_string(),
+                label: humanize_direct_occt_name(shape_name),
+                source_ref: Some(SourceRef {
+                    source_id: None,
+                    path: Some(format!("/parts/{}/build/{}", part.key, shape_name)),
+                    start_byte: None,
+                    end_byte: None,
+                }),
+                dependency_ids: parameter_keys.clone(),
+                output_refs: Vec::new(),
+                ports: Vec::new(),
+            });
+        }
+    }
+    manifest.parameter_groups = groups;
+    manifest.feature_graph = Some(FeatureGraph { nodes });
+    manifest.control_views.clear();
+    manifest.preview_views = program
+        .preview_views
+        .iter()
+        .map(|view| PreviewView {
+            view_id: view.name.clone(),
+            label: view.name.clone(),
+            offsets: view
+                .part_offsets
+                .iter()
+                .map(|offset| PreviewViewOffset {
+                    part_id: offset.part_key.clone(),
+                    dx: offset.dx,
+                    dy: offset.dy,
+                    dz: offset.dz,
+                })
+                .collect(),
+        })
+        .collect();
+}
+
+fn humanize_direct_occt_name(name: &str) -> String {
+    name.split(['_', '-'])
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn direct_occt_part_bindings(
     parts: &[(String, String)],
     parameter_keys: &[String],
+    part_asset_paths: &HashMap<String, String>,
+    part_bounds: &HashMap<String, ManifestBounds>,
+) -> Vec<PartBinding> {
+    let provenance = parts
+        .iter()
+        .map(|(part_id, _)| {
+            (
+                part_id.clone(),
+                DirectOcctPartProvenance {
+                    parameter_keys: parameter_keys.to_vec(),
+                    named_shapes: Vec::new(),
+                    faceted_mesh_root: false,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    direct_occt_part_bindings_with_provenance(parts, &provenance, part_asset_paths, part_bounds)
+}
+
+fn direct_occt_part_bindings_with_provenance(
+    parts: &[(String, String)],
+    provenance: &BTreeMap<String, DirectOcctPartProvenance>,
     part_asset_paths: &HashMap<String, String>,
     part_bounds: &HashMap<String, ManifestBounds>,
 ) -> Vec<PartBinding> {
@@ -792,7 +1434,7 @@ fn direct_occt_part_bindings(
             let viewer_asset_path = part_asset_paths
                 .get(&part_id)
                 .cloned()
-                .unwrap_or_else(|| PREVIEW_STL_FILE_NAME.to_string());
+                .unwrap_or_else(|| MODEL_STL_FILE_NAME.to_string());
             PartBinding {
                 part_id: part_id.clone(),
                 freecad_object_name: part_id.clone(),
@@ -801,7 +1443,10 @@ fn direct_occt_part_bindings(
                 semantic_role: Some("generated".to_string()),
                 viewer_asset_path: Some(viewer_asset_path),
                 viewer_node_ids: vec![part_id.clone()],
-                parameter_keys: parameter_keys.to_vec(),
+                parameter_keys: provenance
+                    .get(&part_id)
+                    .map(|projection| projection.parameter_keys.clone())
+                    .unwrap_or_default(),
                 editable: true,
                 bounds: part_bounds.get(&part_id).cloned(),
                 volume: None,
@@ -815,10 +1460,10 @@ fn direct_occt_part_bounds(
     parts: &[(String, String)],
     part_asset_paths: &HashMap<String, String>,
     bundle_dir: &Path,
-    preview_stl_path: &Path,
+    model_stl_path: &Path,
 ) -> HashMap<String, ManifestBounds> {
     let mut bounds_by_part = HashMap::new();
-    let fallback_bounds = manifest_bounds_from_stl(preview_stl_path);
+    let fallback_bounds = manifest_bounds_from_stl(model_stl_path);
 
     for (index, (key, _label)) in parts.iter().enumerate() {
         let fallback_id = if index == 0 {
@@ -881,7 +1526,7 @@ pub(crate) fn build_direct_occt_bundle(
     model_id: &str,
     content_hash: &str,
     source_path: &Path,
-    preview_stl_path: &Path,
+    model_stl_path: &Path,
     step_path: &Path,
     topology_report: Option<&DirectOcctTopologyReport>,
     manifest: &ModelManifest,
@@ -891,6 +1536,7 @@ pub(crate) fn build_direct_occt_bundle(
         component_dependency_lock: None,
         component_dependency_lock_digest: None,
         component_import_origins: Vec::new(),
+        component_placement_evidence: Vec::new(),
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind: ModelSourceKind::Generated,
@@ -902,7 +1548,7 @@ pub(crate) fn build_direct_occt_bundle(
         fcstd_path: String::new(),
         manifest_path: MANIFEST_FILE_NAME.to_string(),
         macro_path: Some(path_to_string(source_path)?),
-        preview_stl_path: path_to_string(preview_stl_path)?,
+        model_stl_path: path_to_string(model_stl_path)?,
         viewer_assets: Vec::new(),
         edge_targets: direct_occt_edge_targets(topology_report, manifest),
         face_targets: direct_occt_face_targets(topology_report, manifest),
@@ -1033,6 +1679,315 @@ fn content_hash_with_runtime_inputs(
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+fn direct_occt_geometry_hash(
+    program: &CoreProgram,
+    params_json: &str,
+    parameters: &DesignParams,
+    cad_text_font_path: Option<&str>,
+    app: &dyn PathResolver,
+) -> AppResult<String> {
+    let plan = super::direct_occt::plan_core_program_with_params(program, parameters)?;
+    let runner_path = super::direct_occt_runner::discover_direct_occt_runner_with_mode(app, true)
+        .ok_or_else(|| {
+        AppError::render("Direct OCCT runner unavailable for geometry cache identity.")
+    })?;
+    let runner_bytes = fs::read(&runner_path).map_err(|err| {
+        AppError::persistence(format!(
+            "Cannot read Direct OCCT runner '{}' for geometry cache identity: {}",
+            runner_path.display(),
+            err
+        ))
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(DIRECT_OCCT_GEOMETRY_CACHE_SCHEMA.as_bytes());
+    hasher.update(b"|plan|");
+    hasher.update(format!("{plan:#?}").as_bytes());
+    hasher.update(b"|params|");
+    hasher.update(params_json.as_bytes());
+    hasher.update(b"|runner|");
+    hasher.update(runner_bytes);
+    if let Some(cad_text_font_path) = normalized_cad_text_font_path(cad_text_font_path) {
+        hasher.update(b"|font|");
+        hasher.update(cad_text_font_path.as_bytes());
+    }
+    hash_direct_occt_import_payloads(&mut hasher, &plan)?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn hash_direct_occt_import_payloads(
+    hasher: &mut Sha256,
+    plan: &super::direct_occt::OcctPlan,
+) -> AppResult<()> {
+    for (part_index, part) in plan.parts.iter().enumerate() {
+        for (command_index, command) in part.commands.iter().enumerate() {
+            if command.op != OcctOp::ImportStl {
+                continue;
+            }
+            let Some(OcctArg::Text(path) | OcctArg::Symbol(path)) = command.args.first() else {
+                continue;
+            };
+            let bytes = fs::read(path).map_err(|err| {
+                AppError::validation(format!(
+                    "Direct OCCT geometry cache key could not read imported STL '{}': {}",
+                    path, err
+                ))
+            })?;
+            hasher.update(b"|import-stl|");
+            hasher.update(part_index.to_le_bytes());
+            hasher.update(command_index.to_le_bytes());
+            hasher.update(path.as_bytes());
+            hasher.update(b"|");
+            hasher.update(bytes);
+            let indexed_sidecar = Path::new(path).with_extension("indexed-mesh.json");
+            if indexed_sidecar.is_file() {
+                let indexed_bytes = fs::read(&indexed_sidecar).map_err(|err| {
+                    AppError::validation(format!(
+                        "Direct OCCT geometry cache key could not read indexed mesh '{}': {}",
+                        indexed_sidecar.display(),
+                        err
+                    ))
+                })?;
+                hasher.update(b"|indexed-mesh|");
+                hasher.update(indexed_sidecar.to_string_lossy().as_bytes());
+                hasher.update(b"|");
+                hasher.update(indexed_bytes);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn direct_occt_geometry_cache_dir(
+    app: &dyn PathResolver,
+    geometry_hash: &str,
+) -> AppResult<PathBuf> {
+    Ok(crate::model_runtime::runtime_root(app)?
+        .join(DIRECT_OCCT_GEOMETRY_CACHE_DIR)
+        .join(geometry_hash))
+}
+
+fn direct_occt_geometry_cache_digest(path: &Path) -> AppResult<String> {
+    let bytes = fs::read(path).map_err(|err| {
+        AppError::persistence(format!(
+            "Cannot read Direct OCCT geometry cache artifact '{}': {}",
+            path.display(),
+            err
+        ))
+    })?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn copy_direct_occt_geometry_cache_artifact(
+    source: &Path,
+    target: &Path,
+    relative_name: &str,
+    digests: &mut BTreeMap<String, String>,
+) -> AppResult<()> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|err| AppError::persistence(err.to_string()))?;
+    }
+    fs::copy(source, target).map_err(|err| {
+        AppError::persistence(format!(
+            "Cannot cache Direct OCCT geometry artifact '{}' as '{}': {}",
+            source.display(),
+            target.display(),
+            err
+        ))
+    })?;
+    digests.insert(
+        relative_name.to_string(),
+        direct_occt_geometry_cache_digest(target)?,
+    );
+    Ok(())
+}
+
+fn validated_direct_occt_geometry_cache_manifest(
+    cache_dir: &Path,
+) -> Option<DirectOcctGeometryCacheManifest> {
+    let raw = fs::read_to_string(cache_dir.join(DIRECT_OCCT_GEOMETRY_CACHE_FILE)).ok()?;
+    let manifest = serde_json::from_str::<DirectOcctGeometryCacheManifest>(&raw).ok()?;
+    if manifest.schema != DIRECT_OCCT_GEOMETRY_CACHE_SCHEMA
+        || !manifest.digests.contains_key(MODEL_STL_FILE_NAME)
+        || !manifest.digests.contains_key(TOPOLOGY_FILE_NAME)
+        || (manifest.has_step && !manifest.digests.contains_key(STEP_FILE_NAME))
+    {
+        return None;
+    }
+    for (relative_name, expected_digest) in &manifest.digests {
+        let actual_digest =
+            direct_occt_geometry_cache_digest(&cache_dir.join(relative_name)).ok()?;
+        if &actual_digest != expected_digest {
+            return None;
+        }
+    }
+    read_direct_occt_topology_report(&cache_dir.join(TOPOLOGY_FILE_NAME)).ok()?;
+    Some(manifest)
+}
+
+fn write_cached_direct_occt_geometry(
+    app: &dyn PathResolver,
+    geometry_hash: &str,
+    bundle_dir: &Path,
+    outcome: &NativeExportOutcome,
+) -> AppResult<()> {
+    let (step_path, stl_path, part_stl_paths, tessellated_step, source_mesh_digests) = match outcome
+    {
+        NativeExportOutcome::Exported {
+            step_path,
+            stl_path,
+            part_stl_paths,
+            tessellated_step,
+            source_mesh_digests,
+        } => (
+            Some(step_path),
+            stl_path,
+            part_stl_paths,
+            *tessellated_step,
+            source_mesh_digests,
+        ),
+        NativeExportOutcome::MeshExported {
+            stl_path,
+            part_stl_paths,
+            source_mesh_digests,
+        } => (None, stl_path, part_stl_paths, false, source_mesh_digests),
+        NativeExportOutcome::Blocked { .. } => return Ok(()),
+    };
+    let topology_path = bundle_dir.join(TOPOLOGY_FILE_NAME);
+    read_direct_occt_topology_report(&topology_path)?;
+    let cache_dir = direct_occt_geometry_cache_dir(app, geometry_hash)?;
+    if validated_direct_occt_geometry_cache_manifest(&cache_dir).is_some() {
+        return Ok(());
+    }
+    let parent = cache_dir
+        .parent()
+        .ok_or_else(|| AppError::persistence("Direct OCCT geometry cache has no parent."))?;
+    fs::create_dir_all(parent).map_err(|err| AppError::persistence(err.to_string()))?;
+    let staging = parent.join(format!("{geometry_hash}.tmp-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&staging).map_err(|err| AppError::persistence(err.to_string()))?;
+    let write_result = (|| {
+        let mut digests = BTreeMap::new();
+        copy_direct_occt_geometry_cache_artifact(
+            stl_path,
+            &staging.join(MODEL_STL_FILE_NAME),
+            MODEL_STL_FILE_NAME,
+            &mut digests,
+        )?;
+        copy_direct_occt_geometry_cache_artifact(
+            &topology_path,
+            &staging.join(TOPOLOGY_FILE_NAME),
+            TOPOLOGY_FILE_NAME,
+            &mut digests,
+        )?;
+        if let Some(step_path) = step_path {
+            copy_direct_occt_geometry_cache_artifact(
+                step_path,
+                &staging.join(STEP_FILE_NAME),
+                STEP_FILE_NAME,
+                &mut digests,
+            )?;
+        }
+        let mut part_assets = Vec::new();
+        for (index, (part_key, path)) in part_stl_paths.iter().enumerate() {
+            let file_name = format!("{index}.stl");
+            let relative_name = format!("parts/{file_name}");
+            copy_direct_occt_geometry_cache_artifact(
+                path,
+                &staging.join(&relative_name),
+                &relative_name,
+                &mut digests,
+            )?;
+            part_assets.push(DirectOcctGeometryCachePartAsset {
+                part_key: part_key.clone(),
+                file_name,
+            });
+        }
+        let manifest = DirectOcctGeometryCacheManifest {
+            schema: DIRECT_OCCT_GEOMETRY_CACHE_SCHEMA.to_string(),
+            has_step: step_path.is_some(),
+            tessellated_step,
+            source_mesh_digests: source_mesh_digests.clone(),
+            part_assets,
+            digests,
+        };
+        let data = serde_json::to_string_pretty(&manifest)
+            .map_err(|err| AppError::persistence(err.to_string()))?;
+        fs::write(staging.join(DIRECT_OCCT_GEOMETRY_CACHE_FILE), data)
+            .map_err(|err| AppError::persistence(err.to_string()))?;
+        if cache_dir.exists() && validated_direct_occt_geometry_cache_manifest(&cache_dir).is_none()
+        {
+            fs::remove_dir_all(&cache_dir).map_err(|err| {
+                AppError::persistence(format!(
+                    "Cannot replace corrupt Direct OCCT geometry cache '{}': {}",
+                    cache_dir.display(),
+                    err
+                ))
+            })?;
+        }
+        match fs::rename(&staging, &cache_dir) {
+            Ok(()) => Ok(()),
+            Err(_) if validated_direct_occt_geometry_cache_manifest(&cache_dir).is_some() => Ok(()),
+            Err(err) => Err(AppError::persistence(format!(
+                "Cannot publish Direct OCCT geometry cache '{}': {}",
+                cache_dir.display(),
+                err
+            ))),
+        }
+    })();
+    if staging.exists() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    write_result
+}
+
+fn read_cached_direct_occt_geometry(
+    app: &dyn PathResolver,
+    geometry_hash: &str,
+    bundle_dir: &Path,
+) -> AppResult<Option<NativeExportOutcome>> {
+    let cache_dir = direct_occt_geometry_cache_dir(app, geometry_hash)?;
+    let Some(manifest) = validated_direct_occt_geometry_cache_manifest(&cache_dir) else {
+        return Ok(None);
+    };
+    fs::copy(
+        cache_dir.join(MODEL_STL_FILE_NAME),
+        bundle_dir.join(MODEL_STL_FILE_NAME),
+    )
+    .map_err(|err| AppError::persistence(err.to_string()))?;
+    fs::copy(
+        cache_dir.join(TOPOLOGY_FILE_NAME),
+        bundle_dir.join(TOPOLOGY_FILE_NAME),
+    )
+    .map_err(|err| AppError::persistence(err.to_string()))?;
+    let mut part_stl_paths = Vec::new();
+    for (index, part) in manifest.part_assets.iter().enumerate() {
+        let destination = bundle_dir.join("parts").join(format!("{index}.stl"));
+        fs::create_dir_all(destination.parent().expect("part cache parent"))
+            .map_err(|err| AppError::persistence(err.to_string()))?;
+        fs::copy(cache_dir.join("parts").join(&part.file_name), &destination)
+            .map_err(|err| AppError::persistence(err.to_string()))?;
+        part_stl_paths.push((part.part_key.clone(), destination));
+    }
+    let stl_path = bundle_dir.join(MODEL_STL_FILE_NAME);
+    if manifest.has_step {
+        let step_path = bundle_dir.join(STEP_FILE_NAME);
+        fs::copy(cache_dir.join(STEP_FILE_NAME), &step_path)
+            .map_err(|err| AppError::persistence(err.to_string()))?;
+        Ok(Some(NativeExportOutcome::Exported {
+            step_path,
+            stl_path,
+            part_stl_paths,
+            tessellated_step: manifest.tessellated_step,
+            source_mesh_digests: manifest.source_mesh_digests,
+        }))
+    } else {
+        Ok(Some(NativeExportOutcome::MeshExported {
+            stl_path,
+            part_stl_paths,
+            source_mesh_digests: manifest.source_mesh_digests,
+        }))
+    }
+}
+
 fn normalized_cad_text_font_path(cad_text_font_path: Option<&str>) -> Option<&str> {
     cad_text_font_path
         .map(str::trim)
@@ -1117,6 +2072,69 @@ fn read_direct_occt_topology_report(path: &Path) -> AppResult<DirectOcctTopology
     })?;
     serde_json::from_str(&contents)
         .map_err(|err| AppError::validation(format!("Direct OCCT topology report invalid: {err}")))
+}
+
+pub fn direct_occt_solid_diagnostics(
+    bundle: &ArtifactBundle,
+) -> AppResult<DirectOcctSolidDiagnostics> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SolidReport {
+        #[serde(default)]
+        parts: Vec<SolidPart>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SolidPart {
+        part_id: String,
+        solid_count: Option<u64>,
+        brep_valid: Option<bool>,
+    }
+
+    let bundle_dir = Path::new(&bundle.manifest_path).parent().ok_or_else(|| {
+        AppError::validation("Direct OCCT artifact manifest has no containing directory.")
+    })?;
+    let topology_path = bundle_dir.join(TOPOLOGY_FILE_NAME);
+    let contents = fs::read_to_string(&topology_path).map_err(|error| {
+        AppError::persistence(format!(
+            "Direct OCCT topology report could not be read '{}': {error}",
+            topology_path.display()
+        ))
+    })?;
+    let report: SolidReport = serde_json::from_str(&contents).map_err(|error| {
+        AppError::validation(format!(
+            "Direct OCCT solid-validity report invalid: {error}"
+        ))
+    })?;
+    if report.parts.is_empty() {
+        return Err(AppError::validation(
+            "Direct OCCT topology report has no exact BRep parts.",
+        ));
+    }
+    let mut solid_count = 0u64;
+    let mut all_breps_valid = true;
+    for part in &report.parts {
+        let part_id = part.part_id.trim();
+        let (Some(part_solid_count), Some(brep_valid)) = (part.solid_count, part.brep_valid) else {
+            return Err(AppError::validation(format!(
+                "Direct OCCT part '{part_id}' has no exact solid-validity diagnostics."
+            )));
+        };
+        if part_id.is_empty() {
+            return Err(AppError::validation(
+                "Direct OCCT topology report has an empty part identity.",
+            ));
+        }
+        solid_count = solid_count.checked_add(part_solid_count).ok_or_else(|| {
+            AppError::validation("Direct OCCT solid count exceeds the admitted numeric bound.")
+        })?;
+        all_breps_valid &= brep_valid;
+    }
+    Ok(DirectOcctSolidDiagnostics {
+        part_count: report.parts.len(),
+        solid_count,
+        all_breps_valid,
+    })
 }
 
 pub(crate) fn direct_occt_part_source_geometry_digests(
@@ -1440,6 +2458,42 @@ pub(crate) fn direct_occt_authored_binding_target_ids(
     Ok(result)
 }
 
+fn direct_occt_authored_face_binding_target_ids_from_report(
+    topology_report: &DirectOcctTopologyReport,
+) -> AppResult<BTreeMap<(String, String), Vec<String>>> {
+    let mut result = BTreeMap::<(String, String), Vec<String>>::new();
+    for part in &topology_report.parts {
+        let part_id = part.part_id.trim();
+        if part_id.is_empty() {
+            return Err(AppError::validation(
+                "Direct OCCT authored binding topology has empty partId.",
+            ));
+        }
+        for target in part.faces.iter().map(|target| {
+            (
+                direct_occt_face_target_id(part_id, target),
+                target.authored_bindings.as_slice(),
+            )
+        }) {
+            for binding in target.1 {
+                let binding = binding.trim();
+                if binding.is_empty() {
+                    return Err(AppError::validation(
+                        "Direct OCCT authored binding name is empty.",
+                    ));
+                }
+                let targets = result
+                    .entry((part_id.to_string(), binding.to_string()))
+                    .or_default();
+                if !targets.iter().any(|existing| existing == &target.0) {
+                    targets.push(target.0.clone());
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
 pub(crate) fn direct_occt_authored_binding_ordered_edge_target_ids(
     topology_path: &Path,
 ) -> AppResult<std::collections::BTreeMap<(String, String), Vec<String>>> {
@@ -1517,6 +2571,7 @@ fn direct_occt_selection_targets(
     topology_report: Option<&DirectOcctTopologyReport>,
     part_stable_node_keys: &HashMap<String, String>,
     part_root_node_ids: &HashMap<String, u64>,
+    program_provenance: &BTreeMap<String, DirectOcctPartProvenance>,
 ) -> AppResult<Vec<SelectionTarget>> {
     let Some(topology_report) = topology_report else {
         return Ok(Vec::new());
@@ -1528,6 +2583,12 @@ fn direct_occt_selection_targets(
 
     for topology_part in &topology_report.parts {
         let part_id = topology_part.part_id.trim();
+        if program_provenance
+            .get(part_id)
+            .is_some_and(|provenance| provenance.faceted_mesh_root)
+        {
+            continue;
+        }
         let Some(part_binding) = part_bindings.iter().find(|part| part.part_id == part_id) else {
             return Err(AppError::validation(format!(
                 "Direct OCCT topology report references unknown partId '{}'.",
@@ -1539,14 +2600,16 @@ fn direct_occt_selection_targets(
             .first()
             .cloned()
             .unwrap_or_else(|| part_binding.part_id.clone());
-        let topology_parameter_keys =
-            direct_occt_topology_target_parameter_keys(&part_binding.parameter_keys);
-
         for vertex in topology_part
             .vertices
             .iter()
             .filter(|vertex| vertex.point.is_some())
         {
+            let topology_parameter_keys = direct_occt_topology_target_parameter_keys(
+                part_id,
+                &vertex.authored_bindings,
+                program_provenance,
+            );
             let canonical_target_id = direct_occt_vertex_target_id(part_id, vertex);
             if !seen_canonical_target_ids.insert(canonical_target_id.clone()) {
                 continue;
@@ -1600,8 +2663,8 @@ fn direct_occt_selection_targets(
                 viewer_node_id: viewer_node_id.clone(),
                 label: direct_occt_vertex_label(topology_part, vertex),
                 kind: SelectionTargetKind::Vertex,
-                editable: false,
-                parameter_keys: Vec::new(),
+                editable: !topology_parameter_keys.is_empty(),
+                parameter_keys: topology_parameter_keys,
                 primitive_ids: Vec::new(),
                 view_ids: Vec::new(),
             });
@@ -1612,6 +2675,11 @@ fn direct_occt_selection_targets(
             .iter()
             .filter(|edge| edge.start.is_some() && edge.end.is_some())
         {
+            let topology_parameter_keys = direct_occt_topology_target_parameter_keys(
+                part_id,
+                &edge.authored_bindings,
+                program_provenance,
+            );
             let canonical_target_id = direct_occt_edge_target_id(part_id, edge);
             if !seen_canonical_target_ids.insert(canonical_target_id.clone()) {
                 continue;
@@ -1677,6 +2745,11 @@ fn direct_occt_selection_targets(
             .iter()
             .filter(|face| face.center.is_some())
         {
+            let topology_parameter_keys = direct_occt_topology_target_parameter_keys(
+                part_id,
+                &face.authored_bindings,
+                program_provenance,
+            );
             let canonical_target_id = direct_occt_face_target_id(part_id, face);
             if !seen_canonical_target_ids.insert(canonical_target_id.clone()) {
                 continue;
@@ -1741,9 +2814,26 @@ fn direct_occt_selection_targets(
     Ok(selection_targets)
 }
 
-fn direct_occt_topology_target_parameter_keys(parameter_keys: &[String]) -> Vec<String> {
-    let _ = parameter_keys;
-    Vec::new()
+fn direct_occt_topology_target_parameter_keys(
+    part_id: &str,
+    authored_bindings: &[String],
+    program_provenance: &BTreeMap<String, DirectOcctPartProvenance>,
+) -> Vec<String> {
+    let Some(part) = program_provenance.get(part_id) else {
+        return Vec::new();
+    };
+    let bindings = authored_bindings
+        .iter()
+        .map(|binding| binding.trim())
+        .filter(|binding| !binding.is_empty())
+        .collect::<BTreeSet<_>>();
+    let mut keys = BTreeSet::new();
+    for (shape_name, shape_keys) in &part.named_shapes {
+        if bindings.contains(shape_name.as_str()) {
+            keys.extend(shape_keys.iter().cloned());
+        }
+    }
+    keys.into_iter().collect()
 }
 
 fn direct_occt_tagged_anchor_edge_targets(
@@ -2396,7 +3486,7 @@ mod tests {
         fs::copy(&direct_step_path, runner_source_dir.join(STEP_FILE_NAME)).expect("runner step");
         fs::copy(
             &direct_stl_path,
-            runner_source_dir.join(PREVIEW_STL_FILE_NAME),
+            runner_source_dir.join(MODEL_STL_FILE_NAME),
         )
         .expect("runner stl");
         fs::copy(
@@ -2435,7 +3525,7 @@ while [ "$#" -gt 0 ]; do
 done
 mkdir -p "$out"
 cp "$source_dir/model.step" "$out/model.step"
-cp "$source_dir/preview.stl" "$out/preview.stl"
+cp "$source_dir/model.stl" "$out/model.stl"
 cp "$source_dir/topology.json" "$out/topology.json"
 cat > "$out/stage-report.json" <<'EOF'
 {{"schemaVersion":1,"totalElapsedMs":0,"stages":[{{"name":"import","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"validate","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"solidify","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"boolean","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"cleanup","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"mesh","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"verify","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"export","status":"skipped","executionCount":0,"elapsedMs":0}}]}}
@@ -2460,7 +3550,7 @@ echo "fake runner plan: $plan"
             "expected fake runner invocation marker"
         );
         assert_eq!(
-            fs::read(&runner_bundle.preview_stl_path).expect("runner preview"),
+            fs::read(&runner_bundle.model_stl_path).expect("runner preview"),
             fs::read(&direct_stl_path).expect("direct preview")
         );
         assert_eq!(
@@ -2607,7 +3697,7 @@ echo "fake runner plan: $plan"
         fs::copy(&direct_step_path, runner_source_dir.join(STEP_FILE_NAME)).expect("runner step");
         fs::copy(
             &direct_stl_path,
-            runner_source_dir.join(PREVIEW_STL_FILE_NAME),
+            runner_source_dir.join(MODEL_STL_FILE_NAME),
         )
         .expect("runner stl");
         fs::copy(
@@ -2646,7 +3736,7 @@ while [ "$#" -gt 0 ]; do
 done
 mkdir -p "$out"
 cp "$source_dir/model.step" "$out/model.step"
-cp "$source_dir/preview.stl" "$out/preview.stl"
+cp "$source_dir/model.stl" "$out/model.stl"
 cp "$source_dir/topology.json" "$out/topology.json"
 cat > "$out/stage-report.json" <<'EOF'
 {{"schemaVersion":1,"totalElapsedMs":0,"stages":[{{"name":"import","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"validate","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"solidify","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"boolean","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"cleanup","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"mesh","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"verify","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"export","status":"skipped","executionCount":0,"elapsedMs":0}}]}}
@@ -2671,7 +3761,7 @@ echo "fake runner plan: $plan"
             "expected fake runner invocation marker"
         );
         assert_eq!(
-            fs::read(&runner_bundle.preview_stl_path).expect("runner preview"),
+            fs::read(&runner_bundle.model_stl_path).expect("runner preview"),
             fs::read(&direct_stl_path).expect("direct preview")
         );
         assert_eq!(
@@ -2722,6 +3812,199 @@ echo "fake runner plan: $plan"
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn semantic_only_tag_face_edit_reuses_geometry_without_invoking_native_runner() {
+        let root = temp_root("direct-occt-semantic-geometry-cache");
+        let resolver = ResourceResolver { root: root.clone() };
+        let runner = root
+            .join("resources")
+            .join("bin")
+            .join("direct-occt-runner");
+        let invoked_marker = root.join("runner-invocations.txt");
+        fs::create_dir_all(runner.parent().expect("runner parent")).expect("runner parent dir");
+        write_executable(
+            &runner,
+            &format!(
+                r#"#!/bin/sh
+set -eu
+invoked_marker='{}'
+out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --plan) shift 2 ;;
+    --out) out=$2; shift 2 ;;
+    *) exit 1 ;;
+  esac
+done
+mkdir -p "$out"
+printf 'step-geometry\n' > "$out/model.step"
+printf 'solid cached\nendsolid cached\n' > "$out/model.stl"
+cat > "$out/topology.json" <<'EOF'
+{{"schemaVersion":1,"parts":[{{"partId":"body","label":"Body","sourceGeometryDigest":"sha256:unchanged","vertices":[],"edges":[],"faces":[{{"targetId":"body:face:0:0-0-0:100","faceIndex":0,"label":"Body.Face1","center":{{"x":0,"y":0,"z":0}},"normal":[0,0,1],"area":100,"authoredBindings":["base"]}},{{"targetId":"body:face:1:0-0-10:100","faceIndex":1,"label":"Body.Face2","center":{{"x":0,"y":0,"z":10}},"normal":[0,0,1],"area":100,"authoredBindings":["bore"]}}]}}]}}
+EOF
+cat > "$out/stage-report.json" <<'EOF'
+{{"schemaVersion":1,"totalElapsedMs":0,"stages":[{{"name":"import","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"validate","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"solidify","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"boolean","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"cleanup","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"mesh","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"verify","status":"skipped","executionCount":0,"elapsedMs":0}},{{"name":"export","status":"skipped","executionCount":0,"elapsedMs":0}}]}}
+EOF
+printf 'run\n' >> "$invoked_marker"
+"#,
+                invoked_marker.display()
+            ),
+        );
+        let layout = blocked_layout(root.join("unused-sdk"));
+        let source = |tag_name: &str, binding: &str| {
+            format!(
+                r#"(model
+                  (tag-face {tag_name} :faces "created-by:{binding}" body)
+                  (part body (build
+                    (shape base (box 10 10 10))
+                    (shape bore (cylinder 2 10))
+                    (result (difference base bore)))))"#
+            )
+        };
+        let cold_source = source("load_base", "base");
+        let cold_program = compile(&cold_source);
+        let warm_source = source("load_bore", "bore");
+        let warm_program = compile(&warm_source);
+        let params_json = serde_json::to_string(&DesignParams::new()).expect("params JSON");
+        assert_eq!(
+            direct_occt_geometry_hash(
+                &cold_program,
+                &params_json,
+                &DesignParams::new(),
+                None,
+                &resolver,
+            )
+            .expect("cold geometry hash"),
+            direct_occt_geometry_hash(
+                &warm_program,
+                &params_json,
+                &DesignParams::new(),
+                None,
+                &resolver,
+            )
+            .expect("warm geometry hash"),
+            "tag declarations must not participate in evaluated geometry identity"
+        );
+        let (cold_bundle, cold_manifest) = render_core_program_runtime_bundle(
+            &cold_program,
+            &cold_source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("cold render");
+        let cold_dir = crate::model_runtime::runtime_bundle_dir(&resolver, &cold_bundle.model_id)
+            .expect("cold dir");
+        let cold_topology = fs::read(cold_dir.join(TOPOLOGY_FILE_NAME)).expect("cold topology");
+
+        let (warm_bundle, warm_manifest) = render_core_program_runtime_bundle(
+            &warm_program,
+            &warm_source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("semantic-only render");
+        let warm_dir = crate::model_runtime::runtime_bundle_dir(&resolver, &warm_bundle.model_id)
+            .expect("warm dir");
+
+        assert_ne!(cold_bundle.model_id, warm_bundle.model_id);
+        assert_eq!(
+            fs::read_to_string(&invoked_marker)
+                .expect("invocation marker")
+                .lines()
+                .count(),
+            1,
+            "semantic-only render must not invoke native geometry execution"
+        );
+        assert_eq!(
+            cold_topology,
+            fs::read(warm_dir.join(TOPOLOGY_FILE_NAME)).expect("warm topology")
+        );
+        assert_eq!(
+            fs::read(&cold_bundle.model_stl_path).expect("cold preview"),
+            fs::read(&warm_bundle.model_stl_path).expect("warm preview")
+        );
+        assert!(cold_manifest.tagged_anchors.contains_key("load_base"));
+        assert!(!warm_manifest.tagged_anchors.contains_key("load_base"));
+        assert!(warm_manifest.tagged_anchors.contains_key("load_bore"));
+        assert_ne!(
+            cold_manifest.tagged_anchors["load_base"].canonical_target_ids,
+            warm_manifest.tagged_anchors["load_bore"].canonical_target_ids,
+            "cached topology must be re-resolved against the new authored selector"
+        );
+
+        let mut changed_runner = fs::read_to_string(&runner).expect("runner source");
+        changed_runner.push_str("\n# runner-v2\n");
+        fs::write(&runner, changed_runner).expect("replace runner binary fixture");
+        let after_runner_change_source = source("load_base_v2", "base");
+        render_core_program_runtime_bundle(
+            &compile(&after_runner_change_source),
+            &after_runner_change_source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("first render after runner change");
+        let after_runner_change_warm_source = source("load_bore_v2", "bore");
+        render_core_program_runtime_bundle(
+            &compile(&after_runner_change_warm_source),
+            &after_runner_change_warm_source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("warm render after runner change");
+        assert_eq!(
+            fs::read_to_string(&invoked_marker)
+                .expect("runner-change invocation marker")
+                .lines()
+                .count(),
+            2,
+            "runner binary change must force exactly one new cold geometry render"
+        );
+
+        let params = DesignParams::new();
+        let params_json = serde_json::to_string(&params).expect("params JSON");
+        let geometry_hash = direct_occt_geometry_hash(
+            &compile(&after_runner_change_source),
+            &params_json,
+            &params,
+            None,
+            &resolver,
+        )
+        .expect("geometry hash");
+        let geometry_cache_dir =
+            direct_occt_geometry_cache_dir(&resolver, &geometry_hash).expect("geometry cache dir");
+        fs::write(
+            geometry_cache_dir.join(MODEL_STL_FILE_NAME),
+            "corrupt-cache-entry",
+        )
+        .expect("corrupt cached preview");
+        for tag_name in ["load_after_corruption", "load_after_repair"] {
+            let source_after_corruption = source(tag_name, "base");
+            render_core_program_runtime_bundle(
+                &compile(&source_after_corruption),
+                &source_after_corruption,
+                &DesignParams::new(),
+                &layout,
+                &resolver,
+            )
+            .expect("render after cache corruption");
+        }
+        assert_eq!(
+            fs::read_to_string(&invoked_marker)
+                .expect("corruption invocation marker")
+                .lines()
+                .count(),
+            3,
+            "corrupt geometry cache must cause one cold repair, then become warm again"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn builds_valid_direct_occt_bundle_manifest_for_exported_box() {
         let root = temp_root("direct-occt-bundle");
@@ -2733,7 +4016,7 @@ echo "fake runner plan: $plan"
             crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
         fs::create_dir_all(&bundle_dir).expect("bundle dir");
         let source_path = bundle_dir.join(SOURCE_FILE_NAME);
-        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let preview_path = bundle_dir.join(MODEL_STL_FILE_NAME);
         let step_path = bundle_dir.join(STEP_FILE_NAME);
         fs::write(&source_path, source).expect("source");
         fs::write(&preview_path, b"solid preview").expect("preview");
@@ -2810,7 +4093,7 @@ echo "fake runner plan: $plan"
             crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
         fs::create_dir_all(&bundle_dir).expect("bundle dir");
         let source_path = bundle_dir.join(SOURCE_FILE_NAME);
-        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let preview_path = bundle_dir.join(MODEL_STL_FILE_NAME);
         let step_path = bundle_dir.join(STEP_FILE_NAME);
         fs::write(&source_path, source).expect("source");
         fs::write(&preview_path, b"solid legacy preview").expect("preview");
@@ -2876,7 +4159,7 @@ echo "fake runner plan: $plan"
             crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
         fs::create_dir_all(&bundle_dir).expect("bundle dir");
         let source_path = bundle_dir.join(SOURCE_FILE_NAME);
-        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let preview_path = bundle_dir.join(MODEL_STL_FILE_NAME);
         let step_path = bundle_dir.join(STEP_FILE_NAME);
         fs::write(&source_path, source).expect("source");
         fs::write(&preview_path, b"solid hybrid preview").expect("preview");
@@ -2934,7 +4217,7 @@ echo "fake runner plan: $plan"
             crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
         fs::create_dir_all(&bundle_dir).expect("bundle dir");
         let source_path = bundle_dir.join(SOURCE_FILE_NAME);
-        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let preview_path = bundle_dir.join(MODEL_STL_FILE_NAME);
         let step_path = bundle_dir.join(STEP_FILE_NAME);
         fs::write(&source_path, source).expect("source");
         fs::write(&preview_path, b"solid hybrid preview").expect("preview");
@@ -2991,7 +4274,7 @@ echo "fake runner plan: $plan"
             crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
         fs::create_dir_all(&bundle_dir).expect("bundle dir");
         let source_path = bundle_dir.join(SOURCE_FILE_NAME);
-        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let preview_path = bundle_dir.join(MODEL_STL_FILE_NAME);
         let step_path = bundle_dir.join(STEP_FILE_NAME);
         fs::write(&source_path, source).expect("source");
         fs::write(&preview_path, b"solid cached preview").expect("preview");
@@ -3080,7 +4363,7 @@ echo "fake runner plan: $plan"
             crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
         fs::create_dir_all(&bundle_dir).expect("bundle dir");
         let source_path = bundle_dir.join(SOURCE_FILE_NAME);
-        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let preview_path = bundle_dir.join(MODEL_STL_FILE_NAME);
         let step_path = bundle_dir.join(STEP_FILE_NAME);
         fs::write(&source_path, source).expect("source");
         // Same-length payload so a size-only readiness check cannot detect it.
@@ -3130,7 +4413,7 @@ echo "fake runner plan: $plan"
         // reuse (e.g. after a process restart) by evicting the hot entry.
         forget_hot_cached_bundle(&bundle_dir);
 
-        // Mutate preview.stl in place, preserving the exact byte length so only
+        // Mutate model.stl in place, preserving the exact byte length so only
         // a content digest can detect it.
         fs::write(&preview_path, mutated).expect("mutate preview in place");
 
@@ -3164,7 +4447,7 @@ echo "fake runner plan: $plan"
             crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
         fs::create_dir_all(&bundle_dir).expect("bundle dir");
         let source_path = bundle_dir.join(SOURCE_FILE_NAME);
-        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let preview_path = bundle_dir.join(MODEL_STL_FILE_NAME);
         let step_path = bundle_dir.join(STEP_FILE_NAME);
         fs::write(&source_path, source).expect("source");
         fs::write(&preview_path, b"solid cached preview").expect("preview");
@@ -3232,7 +4515,7 @@ echo "fake runner plan: $plan"
             crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
         fs::create_dir_all(&bundle_dir).expect("bundle dir");
         let source_path = bundle_dir.join(SOURCE_FILE_NAME);
-        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let preview_path = bundle_dir.join(MODEL_STL_FILE_NAME);
         let step_path = bundle_dir.join(STEP_FILE_NAME);
         fs::write(&source_path, source).expect("source");
         fs::write(&preview_path, b"solid cached preview payload").expect("preview");
@@ -3277,7 +4560,7 @@ echo "fake runner plan: $plan"
             digest_match_fixture("direct-occt-digest-match-different-size");
         write_complete_cached_bundle_digests(&bundle_dir, &bundle).expect("write digests");
         fs::write(
-            bundle_dir.join(PREVIEW_STL_FILE_NAME),
+            bundle_dir.join(MODEL_STL_FILE_NAME),
             b"solid a completely different and longer preview payload",
         )
         .expect("mutate preview");
@@ -3364,7 +4647,7 @@ echo "fake runner plan: $plan"
         let mut sidecar: CachedArtifactDigestSidecar =
             serde_json::from_str(&fs::read_to_string(&sidecar_path).expect("sidecar"))
                 .expect("parse sidecar");
-        sidecar.digests.remove(&bundle.preview_stl_path);
+        sidecar.digests.remove(&bundle.model_stl_path);
         fs::write(
             &sidecar_path,
             serde_json::to_string_pretty(&sidecar).expect("reserialize"),
@@ -3641,7 +4924,7 @@ echo "fake runner plan: $plan"
         assert!(manifest
             .parts
             .iter()
-            .all(|part| part.viewer_asset_path.as_deref() == Some(PREVIEW_STL_FILE_NAME)));
+            .all(|part| part.viewer_asset_path.as_deref() == Some(MODEL_STL_FILE_NAME)));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -3650,7 +4933,7 @@ echo "fake runner plan: $plan"
     fn direct_occt_runtime_maps_topology_report_to_face_targets() {
         let root = temp_root("direct-occt-face-topology");
         let source_path = root.join(SOURCE_FILE_NAME);
-        let preview_path = root.join(PREVIEW_STL_FILE_NAME);
+        let preview_path = root.join(MODEL_STL_FILE_NAME);
         let step_path = root.join(STEP_FILE_NAME);
         fs::create_dir_all(&root).expect("root");
         fs::write(&source_path, "(model (part body (box 10 20 30)))").expect("source");
@@ -3674,6 +4957,7 @@ echo "fake runner plan: $plan"
                     }),
                     normal: Some([0.0, 0.0, 1.0]),
                     area: Some(200.0),
+                    authored_bindings: Vec::new(),
                 }],
                 source_geometry_digest: None,
             }],
@@ -3754,6 +5038,7 @@ echo "fake runner plan: $plan"
                         y: 0.0,
                         z: 0.0,
                     }),
+                    authored_bindings: Vec::new(),
                 }],
                 edges: Vec::new(),
                 faces: Vec::new(),
@@ -3902,7 +5187,7 @@ echo "fake runner plan: $plan"
     fn direct_occt_runtime_maps_topology_report_to_edge_targets() {
         let root = temp_root("direct-occt-edge-topology");
         let source_path = root.join(SOURCE_FILE_NAME);
-        let preview_path = root.join(PREVIEW_STL_FILE_NAME);
+        let preview_path = root.join(MODEL_STL_FILE_NAME);
         let step_path = root.join(STEP_FILE_NAME);
         let topology_path = root.join(TOPOLOGY_FILE_NAME);
         fs::create_dir_all(&root).expect("root");
@@ -3996,6 +5281,7 @@ echo "fake runner plan: $plan"
                     }),
                     normal: Some([0.0, 0.0, 1.0]),
                     area: Some(200.0),
+                    authored_bindings: Vec::new(),
                 }],
             }],
         };
@@ -4037,6 +5323,122 @@ echo "fake runner plan: $plan"
     }
 
     #[test]
+    fn direct_occt_manifest_rebinds_created_by_face_tag_after_topology_change() {
+        let root = temp_root("direct-occt-created-by-face-anchor");
+        let source_path = root.join(SOURCE_FILE_NAME);
+        fs::create_dir_all(&root).expect("root");
+        fs::write(
+            &source_path,
+            "(model (part body (build (shape load_pad (box 10 20 30)) (result load_pad))))",
+        )
+        .expect("source");
+        let selector_tags = [CoreSelectorTagDecl {
+            name: "bottle_load".to_string(),
+            kind: CoreSelectorTagKind::Face,
+            authored_selector: "created-by:load_pad".to_string(),
+            target: "body".to_string(),
+        }];
+
+        let render_manifest = |face_index, x, area| {
+            let topology = DirectOcctTopologyReport {
+                parts: vec![DirectOcctTopologyPart {
+                    part_id: "body".to_string(),
+                    label: "Body".to_string(),
+                    vertices: Vec::new(),
+                    source_geometry_digest: None,
+                    edges: Vec::new(),
+                    faces: vec![DirectOcctTopologyFace {
+                        target_id: None,
+                        face_index: Some(face_index),
+                        originating_slot_index: None,
+                        label: String::new(),
+                        center: Some(DirectOcctTopologyPoint {
+                            x,
+                            y: 10.0,
+                            z: 15.0,
+                        }),
+                        normal: Some([1.0, 0.0, 0.0]),
+                        area: Some(area),
+                        authored_bindings: vec![
+                            "load_pad".to_string(),
+                            "contact_surface".to_string(),
+                        ],
+                    }],
+                }],
+            };
+            build_direct_occt_manifest(
+                "model-1",
+                &source_path,
+                &[("body".to_string(), "Body".to_string())],
+                &[],
+                &selector_tags,
+                Some(&topology),
+                &HashMap::from([(String::from("body"), 42_u64)]),
+            )
+            .expect("manifest")
+        };
+
+        let before = render_manifest(5, 5.0, 200.0);
+        let after = render_manifest(19, 7.0, 260.0);
+        let before_anchor = before.tagged_anchors.get("bottle_load").expect("before");
+        let after_anchor = after.tagged_anchors.get("bottle_load").expect("after");
+
+        assert_eq!(before_anchor.authored_selector, "created-by:load_pad");
+        assert_eq!(
+            before_anchor.canonical_target_ids,
+            ["body:face:5:5-10-15:200"]
+        );
+        assert_eq!(
+            after_anchor.canonical_target_ids,
+            ["body:face:19:7-10-15:260"]
+        );
+        assert_ne!(before_anchor.target_ids, after_anchor.target_ids);
+
+        let combined_selector_tags = [CoreSelectorTagDecl {
+            name: "combined_load".to_string(),
+            kind: CoreSelectorTagKind::Face,
+            authored_selector: "created-by:load_pad|contact_surface".to_string(),
+            target: "body".to_string(),
+        }];
+        let combined_topology = DirectOcctTopologyReport {
+            parts: vec![DirectOcctTopologyPart {
+                part_id: "body".to_string(),
+                label: "Body".to_string(),
+                vertices: Vec::new(),
+                source_geometry_digest: None,
+                edges: Vec::new(),
+                faces: vec![DirectOcctTopologyFace {
+                    target_id: None,
+                    face_index: Some(23),
+                    originating_slot_index: None,
+                    label: String::new(),
+                    center: Some(DirectOcctTopologyPoint {
+                        x: 8.0,
+                        y: 10.0,
+                        z: 15.0,
+                    }),
+                    normal: Some([1.0, 0.0, 0.0]),
+                    area: Some(280.0),
+                    authored_bindings: vec!["load_pad".to_string(), "contact_surface".to_string()],
+                }],
+            }],
+        };
+        let combined = build_direct_occt_manifest(
+            "model-1",
+            &source_path,
+            &[("body".to_string(), "Body".to_string())],
+            &[],
+            &combined_selector_tags,
+            Some(&combined_topology),
+            &HashMap::from([(String::from("body"), 42_u64)]),
+        )
+        .expect("combined manifest");
+        assert_eq!(combined.tagged_anchors["combined_load"].target_ids.len(), 1);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn direct_occt_manifest_records_exact_vertex_tagged_anchor_ids() {
         let root = temp_root("direct-occt-tagged-vertex-anchor");
         let source_path = root.join(SOURCE_FILE_NAME);
@@ -4055,6 +5457,7 @@ echo "fake runner plan: $plan"
                         y: 0.0,
                         z: 0.0,
                     }),
+                    authored_bindings: Vec::new(),
                 }],
                 edges: Vec::new(),
                 faces: Vec::new(),
@@ -4115,6 +5518,7 @@ echo "fake runner plan: $plan"
                         }),
                         normal: Some([0.0, 0.0, -1.0]),
                         area: Some(200.0),
+                        authored_bindings: Vec::new(),
                     },
                     DirectOcctTopologyFace {
                         target_id: None,
@@ -4128,6 +5532,7 @@ echo "fake runner plan: $plan"
                         }),
                         normal: Some([0.0, 0.0, 1.0]),
                         area: Some(200.0),
+                        authored_bindings: Vec::new(),
                     },
                 ],
             }],
@@ -4245,6 +5650,200 @@ echo "fake runner plan: $plan"
     }
 
     #[test]
+    fn direct_occt_authored_face_binding_maps_only_named_shape_parameter_keys() {
+        let source = r#"
+            (model
+              (params
+                (number width 20 :label "Width")
+                (number bore_diameter 4 :label "Bore Diameter"))
+              (part body
+                (build
+                  (shape base (box width 20 10))
+                  (shape bore (cylinder (/ bore_diameter 2) 10))
+                  (result (difference base bore)))))
+        "#;
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("program");
+        let provenance = direct_occt_program_provenance(&program);
+        let root = temp_root("direct-occt-authored-face-parameter-keys");
+        let source_path = root.join(SOURCE_FILE_NAME);
+        fs::create_dir_all(&root).expect("root");
+        fs::write(&source_path, source).expect("source");
+        let topology = DirectOcctTopologyReport {
+            parts: vec![DirectOcctTopologyPart {
+                part_id: "body".to_string(),
+                label: "Body".to_string(),
+                vertices: Vec::new(),
+                edges: Vec::new(),
+                faces: vec![DirectOcctTopologyFace {
+                    target_id: Some("body:face:0:5-5-5:25".to_string()),
+                    face_index: Some(0),
+                    originating_slot_index: None,
+                    label: "Body.Face1".to_string(),
+                    center: Some(DirectOcctTopologyPoint {
+                        x: 5.0,
+                        y: 5.0,
+                        z: 5.0,
+                    }),
+                    normal: Some([0.0, 0.0, 1.0]),
+                    area: Some(25.0),
+                    authored_bindings: vec!["bore".to_string()],
+                }],
+                source_geometry_digest: None,
+            }],
+        };
+        let parts = vec![("body".to_string(), "Body".to_string())];
+        let mut manifest = build_direct_occt_manifest_with_program_provenance(
+            "model-1",
+            &source_path,
+            &parts,
+            &["width".to_string(), "bore_diameter".to_string()],
+            &[],
+            Some(&topology),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &provenance,
+        )
+        .expect("manifest");
+        apply_direct_occt_program_provenance(&mut manifest, &program, &provenance);
+
+        let face = manifest
+            .selection_targets
+            .iter()
+            .find(|target| target.kind == SelectionTargetKind::Face)
+            .expect("face");
+        assert_eq!(face.parameter_keys, ["bore_diameter"]);
+        assert!(face.editable);
+        assert_eq!(manifest.parts[0].parameter_keys, ["bore_diameter", "width"]);
+        assert!(manifest.parameter_groups.iter().any(|group| {
+            group.group_id == "shape:body:bore" && group.parameter_keys == ["bore_diameter"]
+        }));
+        let feature_graph = manifest.feature_graph.as_ref().expect("feature graph");
+        assert!(feature_graph.nodes.iter().any(|node| {
+            node.feature_id == "part:body" && node.dependency_ids == ["bore_diameter", "width"]
+        }));
+        assert!(feature_graph.nodes.iter().any(|node| {
+            node.feature_id == "shape:body:bore" && node.dependency_ids == ["bore_diameter"]
+        }));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn direct_occt_provenance_marks_whole_part_mesh_bridge_roots() {
+        let source = r#"(model
+          (part relief (solidify (import-stl "/tmp/relief.stl")))
+          (part handle (box 20 20 20)))"#;
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("program");
+        let provenance = direct_occt_program_provenance(&program);
+
+        assert!(provenance["relief"].faceted_mesh_root);
+        assert!(!provenance["handle"].faceted_mesh_root);
+    }
+
+    #[test]
+    fn direct_occt_selection_targets_skip_whole_part_mesh_bridge_facets() {
+        let source = r#"(model
+          (part relief (solidify (import-stl "/tmp/relief.stl")))
+          (part handle (box 20 20 20)))"#;
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("program");
+        let provenance = direct_occt_program_provenance(&program);
+        let parts = vec![
+            ("relief".to_string(), "Relief".to_string()),
+            ("handle".to_string(), "Handle".to_string()),
+        ];
+        let bindings = direct_occt_part_bindings_with_provenance(
+            &parts,
+            &provenance,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        let face = |index| DirectOcctTopologyFace {
+            target_id: None,
+            face_index: Some(index),
+            originating_slot_index: None,
+            label: String::new(),
+            center: Some(DirectOcctTopologyPoint {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            }),
+            normal: Some([0.0, 0.0, 1.0]),
+            area: Some(1.0),
+            authored_bindings: Vec::new(),
+        };
+        let topology = DirectOcctTopologyReport {
+            parts: vec![
+                DirectOcctTopologyPart {
+                    part_id: "relief".to_string(),
+                    label: "Relief".to_string(),
+                    vertices: Vec::new(),
+                    edges: Vec::new(),
+                    faces: vec![face(0)],
+                    source_geometry_digest: None,
+                },
+                DirectOcctTopologyPart {
+                    part_id: "handle".to_string(),
+                    label: "Handle".to_string(),
+                    vertices: Vec::new(),
+                    edges: Vec::new(),
+                    faces: vec![face(0)],
+                    source_geometry_digest: None,
+                },
+            ],
+        };
+
+        let targets = direct_occt_selection_targets(
+            &bindings,
+            Some(&topology),
+            &HashMap::new(),
+            &HashMap::new(),
+            &provenance,
+        )
+        .expect("selection targets");
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].part_id, "handle");
+    }
+
+    #[test]
+    fn direct_occt_program_provenance_keeps_component_named_shape_dependencies() {
+        let source = r#"
+            (define-component dryer-shell
+              ((number shell_width) (number bore_diameter))
+              (build
+                (shape base (box shell_width 20 10))
+                (shape bore (cylinder (/ bore_diameter 2) 10))
+                (result (difference base bore))))
+            (model
+              (params
+                (number width 40 :label "Width")
+                (number bore 6 :label "Bore"))
+              (part body (dryer-shell :shell_width width :bore_diameter bore)))
+        "#;
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("program");
+        let provenance = direct_occt_program_provenance(&program);
+        let body = provenance.get("body").expect("body provenance");
+
+        assert_eq!(body.parameter_keys, ["bore", "width"]);
+        assert_eq!(
+            body.named_shapes
+                .iter()
+                .find(|(name, _)| name == "base")
+                .map(|(_, keys)| keys.clone()),
+            Some(vec!["width".to_string()])
+        );
+        assert_eq!(
+            body.named_shapes
+                .iter()
+                .find(|(name, _)| name == "bore")
+                .map(|(_, keys)| keys.clone()),
+            Some(vec!["bore".to_string()])
+        );
+    }
+
+    #[test]
     fn direct_occt_selection_targets_remain_non_editable_without_exact_binding() {
         let root = temp_root("direct-occt-non-editable-targets");
         let source_path = root.join(SOURCE_FILE_NAME);
@@ -4271,6 +5870,7 @@ echo "fake runner plan: $plan"
                         y: 0.0,
                         z: 0.0,
                     }),
+                    authored_bindings: Vec::new(),
                 }],
                 faces: vec![DirectOcctTopologyFace {
                     target_id: None,
@@ -4284,6 +5884,7 @@ echo "fake runner plan: $plan"
                     }),
                     normal: Some([0.0, 0.0, 1.0]),
                     area: Some(100.0),
+                    authored_bindings: Vec::new(),
                 }],
             }],
         };
@@ -4344,6 +5945,7 @@ echo "fake runner plan: $plan"
                         y: 0.0,
                         z: 0.0,
                     }),
+                    authored_bindings: Vec::new(),
                 }],
                 faces: vec![DirectOcctTopologyFace {
                     target_id: None,
@@ -4357,6 +5959,7 @@ echo "fake runner plan: $plan"
                     }),
                     normal: Some([0.0, 0.0, 1.0]),
                     area: Some(100.0),
+                    authored_bindings: Vec::new(),
                 }],
             }],
         };
@@ -4421,6 +6024,7 @@ echo "fake runner plan: $plan"
                         y: 0.0,
                         z: 0.0,
                     }),
+                    authored_bindings: Vec::new(),
                 }],
                 faces: vec![DirectOcctTopologyFace {
                     target_id: None,
@@ -4434,6 +6038,7 @@ echo "fake runner plan: $plan"
                     }),
                     normal: Some([0.0, 0.0, 1.0]),
                     area: Some(100.0),
+                    authored_bindings: Vec::new(),
                 }],
             }],
         };
@@ -4495,6 +6100,7 @@ echo "fake runner plan: $plan"
                         y: 0.0,
                         z: 0.0,
                     }),
+                    authored_bindings: Vec::new(),
                 }],
                 faces: Vec::new(),
             }],
@@ -4564,6 +6170,7 @@ echo "fake runner plan: $plan"
                 y: 0.0,
                 z: 0.0,
             }),
+            authored_bindings: Vec::new(),
         };
         let reversed = DirectOcctTopologyEdge {
             target_id: None,
@@ -4572,6 +6179,7 @@ echo "fake runner plan: $plan"
             label: String::new(),
             start: forward.end.clone(),
             end: forward.start.clone(),
+            authored_bindings: Vec::new(),
         };
 
         assert_eq!(
@@ -4725,13 +6333,13 @@ echo "fake runner plan: $plan"
         )
         .expect("direct OCCT runtime bundle");
 
-        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
         let bundle_dir =
             crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
         assert!(bundle_dir.join(TOPOLOGY_FILE_NAME).is_file());
         assert!(
-            std::fs::metadata(&bundle.preview_stl_path)
+            std::fs::metadata(&bundle.model_stl_path)
                 .expect("stl")
                 .len()
                 > 512
@@ -5007,7 +6615,7 @@ echo "fake runner plan: $plan"
             .brep_target_ids
             .is_empty());
 
-        let preview_path = Path::new(&bundle.preview_stl_path);
+        let preview_path = Path::new(&bundle.model_stl_path);
         let step_path = Path::new(&bundle.export_artifacts[0].path);
         let preview_before = fs::read(preview_path).expect("preview bytes");
         let step_before = fs::read(step_path).expect("STEP bytes");
@@ -5086,7 +6694,7 @@ echo "fake runner plan: $plan"
         let bundle_dir =
             crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
 
-        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
         assert!(bundle_dir.join(TOPOLOGY_FILE_NAME).is_file());
         if crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
@@ -5157,10 +6765,10 @@ echo "fake runner plan: $plan"
         )
         .expect("direct OCCT exact-target fillet bundle");
 
-        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
         assert!(
-            std::fs::metadata(&bundle.preview_stl_path)
+            std::fs::metadata(&bundle.model_stl_path)
                 .expect("stl")
                 .len()
                 > 512
@@ -5240,7 +6848,7 @@ echo "fake runner plan: $plan"
         )
         .expect("direct OCCT exact-target chamfer bundle");
 
-        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
         assert_eq!(manifest.parts[0].part_id, "body");
         let bundle_dir =
@@ -5299,7 +6907,7 @@ echo "fake runner plan: $plan"
         let bundle_dir =
             crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
 
-        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
         assert!(bundle_dir.join(TOPOLOGY_FILE_NAME).is_file());
         assert!(
@@ -5359,7 +6967,7 @@ echo "fake runner plan: $plan"
         let bundle_dir =
             crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
 
-        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
         assert!(bundle_dir.join(TOPOLOGY_FILE_NAME).is_file());
         assert!(
@@ -5420,7 +7028,7 @@ echo "fake runner plan: $plan"
         let bundle_dir =
             crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
 
-        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
         assert!(bundle_dir.join(TOPOLOGY_FILE_NAME).is_file());
         assert!(
@@ -5480,7 +7088,7 @@ echo "fake runner plan: $plan"
         let bundle_dir =
             crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
 
-        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
         assert!(bundle_dir.join(TOPOLOGY_FILE_NAME).is_file());
         assert!(
@@ -5538,7 +7146,7 @@ echo "fake runner plan: $plan"
         let bundle_dir =
             crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
 
-        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
         assert!(bundle_dir.join(TOPOLOGY_FILE_NAME).is_file());
         if crate::ecky_cad_host::direct_occt_runner::discover_direct_occt_runner_with_mode(
@@ -5598,7 +7206,7 @@ echo "fake runner plan: $plan"
         let bundle_dir =
             crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
 
-        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
         assert!(bundle_dir.join(TOPOLOGY_FILE_NAME).is_file());
         assert!(
@@ -5663,7 +7271,7 @@ echo "fake runner plan: $plan"
         )
         .expect("direct OCCT exact-alias fillet bundle");
 
-        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
         assert_eq!(manifest.parts[0].part_id, "body");
         validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
@@ -5724,7 +7332,7 @@ echo "fake runner plan: $plan"
             )
             .expect("direct OCCT edge alias fillet bundle");
 
-            assert!(Path::new(&bundle.preview_stl_path).is_file());
+            assert!(Path::new(&bundle.model_stl_path).is_file());
             assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
             assert_eq!(manifest.parts[0].part_id, "body");
             validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
@@ -5786,7 +7394,7 @@ echo "fake runner plan: $plan"
             )
             .expect("direct OCCT face alias shell bundle");
 
-            assert!(Path::new(&bundle.preview_stl_path).is_file());
+            assert!(Path::new(&bundle.model_stl_path).is_file());
             assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
             assert_eq!(manifest.parts[0].part_id, "body");
             validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
@@ -5844,10 +7452,10 @@ echo "fake runner plan: $plan"
         )
         .expect("direct OCCT exact-target shell bundle");
 
-        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
         assert!(
-            std::fs::metadata(&bundle.preview_stl_path)
+            std::fs::metadata(&bundle.model_stl_path)
                 .expect("stl")
                 .len()
                 > 512
@@ -5924,7 +7532,7 @@ echo "fake runner plan: $plan"
         )
         .expect("direct OCCT exact-alias shell bundle");
 
-        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
         assert_eq!(manifest.parts[0].part_id, "body");
         validate_model_runtime_bundle(&manifest, &bundle).expect("runtime contract");
@@ -5964,7 +7572,7 @@ echo "fake runner plan: $plan"
         )
         .expect("direct OCCT runtime bundle");
 
-        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
         assert_eq!(manifest.document.object_count, 2);
         assert_eq!(
@@ -6007,10 +7615,90 @@ echo "fake runner plan: $plan"
             render_core_program_runtime_bundle(&program, source, &params, &layout, &resolver)
                 .expect("direct OCCT runtime bundle");
 
-        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
         assert_eq!(manifest.parts[0].parameter_keys, vec!["width"]);
         assert_eq!(manifest.parameter_groups[0].parameter_keys, vec!["width"]);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_direct_occt_runtime_renders_front_side_and_mirrored_latch_when_sdk_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
+            return;
+        }
+
+        let root = temp_root("direct-occt-live-component-placement");
+        let resolver = TestResolver { root: root.clone() };
+        let source =
+            include_str!("../../tests/fixtures/component-placement/dryer-latch-front-side.ecky");
+        let program = compile(source);
+        let (bundle, manifest) = render_core_program_runtime_bundle(
+            &program,
+            source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("component placement runtime bundle");
+
+        assert!(Path::new(&bundle.model_stl_path).is_file());
+        assert!(
+            bundle
+                .export_artifacts
+                .iter()
+                .any(|artifact| artifact.format == "step" && Path::new(&artifact.path).is_file()),
+            "placed fixture must produce STEP through native OCC"
+        );
+        assert_eq!(bundle.viewer_assets.len(), 4);
+        assert!(
+            bundle
+                .viewer_assets
+                .iter()
+                .all(|asset| Path::new(&asset.path).is_file()),
+            "placed multipart STL assets must exist"
+        );
+        assert_eq!(manifest.document.object_count, 4);
+        let bounds = |part_id: &str| {
+            manifest
+                .parts
+                .iter()
+                .find(|part| part.part_id == part_id)
+                .and_then(|part| part.bounds.as_ref())
+                .expect("placed part bounds")
+        };
+        let front = bounds("front-latch");
+        let side = bounds("side-latch");
+        assert!(front.x_max - front.x_min > front.y_max - front.y_min);
+        assert!(side.y_max - side.y_min > side.x_max - side.x_min);
+        if let Some(provenance) = bundle.geometry_provenance.as_ref() {
+            if let Some(edge_count) = provenance.boundary_or_non_manifold_edge_count {
+                assert_eq!(edge_count, 0);
+            }
+            if let Some(closed) = provenance.closed {
+                assert!(closed);
+            }
+        }
+        let evidence = crate::ecky_scheme::compiler::inspect_component_placement_evidence(
+            source,
+            &BTreeMap::new(),
+        )
+        .expect("placement evidence");
+        assert_eq!(evidence.len(), 3);
+        assert_eq!(evidence[1].target_port_id, "side-left");
+        assert_eq!(
+            evidence[2].mirror_axis,
+            Some(ecky_render::component_placement::MirrorAxis::X)
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -6043,10 +7731,10 @@ echo "fake runner plan: $plan"
         )
         .expect("direct OCCT snap clip runtime bundle");
 
-        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
         assert!(
-            std::fs::metadata(&bundle.preview_stl_path)
+            std::fs::metadata(&bundle.model_stl_path)
                 .expect("stl")
                 .len()
                 > 512
@@ -6070,6 +7758,64 @@ echo "fake runner plan: $plan"
             .export_artifacts
             .iter()
             .any(|artifact| artifact.format == "step"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn live_direct_occt_runtime_bounds_male_thread_fixture_when_sdk_ready() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root = bundled_occt_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let layout = inspect_occt_runtime(&runtime_root);
+        if !layout.runtime_complete() {
+            return;
+        }
+
+        let root = temp_root("direct-occt-live-bounded-male-thread");
+        let resolver = TestResolver { root: root.clone() };
+        let source = include_str!("../../tests/fixtures/cad/surface/bounded_thread_pair.ecky");
+        let program = compile(source);
+
+        let (bundle, manifest) = render_core_program_runtime_bundle(
+            &program,
+            source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("bounded male thread runtime bundle");
+
+        assert!(Path::new(&bundle.model_stl_path).is_file());
+        assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
+        let bounds = manifest.parts[0]
+            .bounds
+            .as_ref()
+            .expect("male thread bounds");
+        let tolerance = 1.0e-3;
+        assert!(
+            bounds.x_min >= -9.0 - tolerance
+                && bounds.x_max <= 9.0 + tolerance
+                && bounds.y_min >= -9.0 - tolerance
+                && bounds.y_max <= 9.0 + tolerance,
+            "male thread escaped radius-9 envelope: {bounds:?}"
+        );
+        assert!(
+            bounds.z_min >= -tolerance && bounds.z_max <= 12.0 + tolerance,
+            "male thread escaped z=0..12 envelope: {bounds:?}"
+        );
+        let female_bounds = manifest.parts[1]
+            .bounds
+            .as_ref()
+            .expect("female threaded tube bounds");
+        assert!(
+            female_bounds.z_min >= -tolerance && female_bounds.z_max <= 12.0 + tolerance,
+            "female subtraction escaped host z=0..12 bounds: {female_bounds:?}"
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -6113,10 +7859,10 @@ echo "fake runner plan: $plan"
             Err(err) => panic!("direct OCCT frame/array bracket runtime bundle: {err:?}"),
         };
 
-        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
         assert!(
-            std::fs::metadata(&bundle.preview_stl_path)
+            std::fs::metadata(&bundle.model_stl_path)
                 .expect("stl")
                 .len()
                 > 512
@@ -6165,10 +7911,10 @@ echo "fake runner plan: $plan"
         )
         .expect("direct OCCT voronoi panel runtime bundle");
 
-        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&bundle.export_artifacts[0].path).is_file());
         assert!(
-            std::fs::metadata(&bundle.preview_stl_path)
+            std::fs::metadata(&bundle.model_stl_path)
                 .expect("stl")
                 .len()
                 > 512
@@ -6230,7 +7976,7 @@ echo "fake runner plan: $plan"
     }
 
     #[test]
-    fn direct_occt_part_bindings_falls_back_to_preview_stl_without_per_part_paths() {
+    fn direct_occt_part_bindings_falls_back_to_model_stl_without_per_part_paths() {
         let parts = vec![("body".to_string(), "Body".to_string())];
         let param_keys = vec![];
         let asset_paths = std::collections::HashMap::new();
@@ -6240,7 +7986,7 @@ echo "fake runner plan: $plan"
         assert_eq!(bindings.len(), 1);
         assert_eq!(
             bindings[0].viewer_asset_path,
-            Some(PREVIEW_STL_FILE_NAME.to_string())
+            Some(MODEL_STL_FILE_NAME.to_string())
         );
     }
 
@@ -6254,7 +8000,7 @@ echo "fake runner plan: $plan"
         // global-cache races.
         let bundle_dir = PathBuf::from(format!("/tmp/ecky-hot-cache-evict-fixture-{content_hash}"));
         let source_path = bundle_dir.join(SOURCE_FILE_NAME);
-        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let preview_path = bundle_dir.join(MODEL_STL_FILE_NAME);
         let step_path = bundle_dir.join(STEP_FILE_NAME);
         let manifest = build_direct_occt_manifest(
             content_hash,
@@ -6369,7 +8115,7 @@ echo "fake runner plan: $plan"
     fn resident_artifact_bytes_sums_cached_artifact_path_sizes() {
         // BDD: the resident byte count that drives byte-budgeted eviction is the
         // sum of the on-disk artifact sizes reported by `cached_artifact_paths`
-        // (preview STL, STEP export, and source macro).
+        // (model STL, STEP export, and source macro).
         let root = temp_root("direct-occt-resident-bytes");
         let resolver = TestResolver { root: root.clone() };
         let source = "(model (part body (box 10 20 30)))";
@@ -6383,7 +8129,7 @@ echo "fake runner plan: $plan"
             crate::model_runtime::runtime_bundle_dir(&resolver, &model_id).expect("dir");
         fs::create_dir_all(&bundle_dir).expect("bundle dir");
         let source_path = bundle_dir.join(SOURCE_FILE_NAME);
-        let preview_path = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+        let preview_path = bundle_dir.join(MODEL_STL_FILE_NAME);
         let step_path = bundle_dir.join(STEP_FILE_NAME);
         let source_bytes = source.as_bytes();
         let preview_bytes: &[u8] = b"solid resident preview payload";

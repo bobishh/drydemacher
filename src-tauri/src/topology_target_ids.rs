@@ -21,6 +21,22 @@ pub(crate) fn resolve_tagged_anchors(
     edge_targets: &[ViewerEdgeTarget],
     face_targets: &[ViewerFaceTarget],
 ) -> AppResult<BTreeMap<String, TaggedAnchorBinding>> {
+    resolve_tagged_anchors_with_authored_bindings(
+        selector_tags,
+        selection_targets,
+        edge_targets,
+        face_targets,
+        &BTreeMap::new(),
+    )
+}
+
+pub(crate) fn resolve_tagged_anchors_with_authored_bindings(
+    selector_tags: &[CoreSelectorTagDecl],
+    selection_targets: &[SelectionTarget],
+    edge_targets: &[ViewerEdgeTarget],
+    face_targets: &[ViewerFaceTarget],
+    authored_binding_target_ids: &BTreeMap<(String, String), Vec<String>>,
+) -> AppResult<BTreeMap<String, TaggedAnchorBinding>> {
     let mut tagged_anchors = BTreeMap::new();
     for selector_tag in selector_tags {
         if tagged_anchors.contains_key(selector_tag.name.as_str()) {
@@ -42,21 +58,53 @@ pub(crate) fn resolve_tagged_anchors(
                 )
             }
             CoreSelectorTagKind::Face => {
-                match parse_face_selector_value(&selector_tag.authored_selector)? {
-                    FaceSelector::TargetIds(target_ids) => {
-                        tagged_anchor_binding_from_selection_targets(
-                            selector_tag,
-                            &resolve_requested_selection_targets(
-                                selector_tag,
-                                selection_targets,
-                                &target_ids,
-                            )?,
-                        )
+                if let Some(binding_names) = created_by_binding_names(
+                    &selector_tag.authored_selector,
+                    selector_tag.name.as_str(),
+                )? {
+                    let mut target_ids = Vec::new();
+                    for binding_name in binding_names {
+                        let key = (selector_tag.target.clone(), binding_name.to_string());
+                        let binding_target_ids = authored_binding_target_ids.get(&key).ok_or_else(|| {
+                            AppError::validation(format!(
+                                "tagged anchor '{}' selector '{}' matched no faces created by binding '{}' on part '{}'.",
+                                selector_tag.name,
+                                selector_tag.authored_selector,
+                                binding_name,
+                                selector_tag.target
+                            ))
+                        })?;
+                        for target_id in binding_target_ids {
+                            if !target_ids.contains(target_id) {
+                                target_ids.push(target_id.clone());
+                            }
+                        }
                     }
-                    FaceSelector::Clauses(clauses) => tagged_anchor_binding_from_face_targets(
+                    tagged_anchor_binding_from_selection_targets(
                         selector_tag,
-                        &resolve_clause_face_targets(selector_tag, face_targets, &clauses)?,
-                    )?,
+                        &resolve_requested_selection_targets(
+                            selector_tag,
+                            selection_targets,
+                            &target_ids,
+                        )?,
+                    )
+                } else {
+                    match parse_face_selector_value(&selector_tag.authored_selector)? {
+                        FaceSelector::TargetIds(target_ids) => {
+                            tagged_anchor_binding_from_selection_targets(
+                                selector_tag,
+                                &resolve_requested_selection_targets(
+                                    selector_tag,
+                                    selection_targets,
+                                    &target_ids,
+                                )?,
+                            )
+                        }
+                        FaceSelector::Clauses(clauses) => tagged_anchor_binding_from_face_targets(
+                            selector_tag,
+                            &resolve_clause_face_targets(selector_tag, face_targets, &clauses)?,
+                        )?,
+                    }
                 }
             }
             CoreSelectorTagKind::Edge => {
@@ -81,6 +129,34 @@ pub(crate) fn resolve_tagged_anchors(
         tagged_anchors.insert(selector_tag.name.clone(), binding);
     }
     Ok(tagged_anchors)
+}
+
+fn created_by_binding_names<'a>(
+    authored_selector: &'a str,
+    tag_name: &str,
+) -> AppResult<Option<Vec<&'a str>>> {
+    let raw = authored_selector.trim();
+    let lower = raw.to_ascii_lowercase();
+    let Some(prefix_len) = lower
+        .starts_with("created-by:")
+        .then_some("created-by:".len())
+    else {
+        return Ok(None);
+    };
+    let binding_names = raw[prefix_len..]
+        .split('|')
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    if binding_names.is_empty()
+        || binding_names
+            .iter()
+            .any(|binding_name| binding_name.is_empty())
+    {
+        return Err(AppError::validation(format!(
+            "tagged anchor '{tag_name}' has empty `created-by:<shape>|<shape>` binding name."
+        )));
+    }
+    Ok(Some(binding_names))
 }
 
 fn parse_vertex_target_ids(selector: &str) -> AppResult<Vec<String>> {
@@ -1625,6 +1701,7 @@ mod tests {
         ModelManifest {
             geometry_provenance: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: 1,
             model_id: "model-1".to_string(),
             source_kind: ModelSourceKind::Generated,

@@ -746,9 +746,9 @@ mod tests {
         )
         .expect_err("folded fill");
 
-        assert!(matches!(
-            error,
-            SurfaceTrimCapError::SurfaceFillFoldover { .. }
-        ), "unexpected error: {error:?}");
+        assert!(
+            matches!(error, SurfaceTrimCapError::SurfaceFillFoldover { .. }),
+            "unexpected error: {error:?}"
+        );
     }
 }

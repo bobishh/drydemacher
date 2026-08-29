@@ -495,6 +495,7 @@ fn normalize_node_for_direct_occt(
                             || name == "rib"
                             || name == "groove"
                             || name == "regular-polygon"
+                            || name == "voronoi-cell"
                             || name == "trapezoid"
                             || name == "slot-center-to-center"
                             || name == "slot_center_to_center"
@@ -1354,6 +1355,7 @@ fn is_scalar_eval_custom_op(name: &str) -> bool {
             | "max"
             | "clamp"
             | "abs"
+            | "sqrt"
             | "floor"
             | "sin"
             | "cos"
@@ -1796,6 +1798,41 @@ mod tests {
             op,
             CoreOperation::Primitive(crate::ecky_core_ir::CorePrimitive::Box)
         ));
+    }
+
+    #[test]
+    fn resolves_chained_derived_scalar_bindings() {
+        let program = compile(
+            r#"
+            (model
+              (part body
+                (let* ((dx 3)
+                       (dy 4)
+                       (length (sqrt (+ (* dx dx) (* dy dy))))
+                       (scale (/ length 5)))
+                  (box (* scale 10) 1 1))))
+            "#,
+        );
+        let normalized = normalize_core_program_for_direct_occt(&program, &Default::default())
+            .expect("chained derived scalars normalize");
+
+        let mut node = &normalized.parts[0].root;
+        let mut scale_value = None;
+        while let CoreNodeKind::Let { bindings, body } = &node.kind {
+            for binding in bindings {
+                if binding.name.contains("scale") {
+                    scale_value = match binding.value.kind {
+                        CoreNodeKind::Literal(CoreLiteral::Number(value)) => Some(value),
+                        _ => None,
+                    };
+                }
+            }
+            node = body;
+        }
+        let CoreNodeKind::Call { .. } = &node.kind else {
+            panic!("expected box call");
+        };
+        assert_eq!(scale_value, Some(1.0));
     }
 
     #[test]

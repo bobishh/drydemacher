@@ -1,5 +1,6 @@
 <script lang="ts">
   import Viewer from './Viewer.svelte';
+  import AsyncActionButton from './components/AsyncActionButton.svelte';
   import { formatBackendError } from './tauri/client';
   import type {
     CaptureCropBounds,
@@ -967,13 +968,15 @@
                     disabled={planeApplying || planePickerActive}
                     onclick={() => startPlanePicker(crop.nodeId, crop.keepPositive)}
                   >EDIT</button>
-                  <button
-                    type="button"
+                  <AsyncActionButton
+                    className="compact"
                     title={`Remove plane ${index + 1} while preserving other cuts.`}
-                    aria-label={`Remove plane ${index + 1}`}
+                    ariaLabel={`Remove plane ${index + 1}`}
                     disabled={planeApplying || planePickerActive}
-                    onclick={() => void removePlaneCrop(crop.nodeId)}
-                  >REMOVE</button>
+                    label="REMOVE"
+                    pendingLabel="REMOVING…"
+                    action={() => removePlaneCrop(crop.nodeId)}
+                  />
                 </div>
               </div>
             {/each}
@@ -999,13 +1002,15 @@
                     disabled={surfaceTrimApplying || surfaceTrimActive || planePickerActive}
                     onclick={() => void startSurfaceTrim(trim)}
                   >EDIT</button>
-                  <button
-                    type="button"
+                  <AsyncActionButton
+                    className="compact"
                     title={`Remove surface trim ${index + 1} while preserving its source child.`}
-                    aria-label={`Remove surface trim ${index + 1}`}
+                    ariaLabel={`Remove surface trim ${index + 1}`}
                     disabled={surfaceTrimApplying || surfaceTrimActive || planePickerActive}
-                    onclick={() => void removeSurfaceTrim(trim.nodeId)}
-                  >REMOVE</button>
+                    label="REMOVE"
+                    pendingLabel="REMOVING…"
+                    action={() => removeSurfaceTrim(trim.nodeId)}
+                  />
                 </div>
               </div>
             {/each}

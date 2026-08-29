@@ -13,6 +13,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::Engine;
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair,
     SanType,
@@ -42,6 +43,13 @@ struct TrustHttpState {
     ca_der: Arc<Vec<u8>>,
     app: AppState,
     trust_url: String,
+}
+
+struct CaptureCa {
+    certificate: Certificate,
+    key_pair: KeyPair,
+    pem: String,
+    der: Vec<u8>,
 }
 
 #[derive(Serialize)]
@@ -125,15 +133,31 @@ fn rcgen_io(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
 }
 
-fn capture_ca(certificate_root: &FsPath) -> io::Result<Certificate> {
+fn certificate_der_from_pem(pem: &str) -> io::Result<Vec<u8>> {
+    let body: String = pem
+        .lines()
+        .filter(|line| !line.starts_with("---"))
+        .collect();
+    base64::engine::general_purpose::STANDARD
+        .decode(body)
+        .map_err(rcgen_io)
+}
+
+fn capture_ca(certificate_root: &FsPath) -> io::Result<CaptureCa> {
     let cert_path = certificate_root.join("capture-ca.pem");
     let key_path = certificate_root.join("capture-ca-key.pem");
     if cert_path.exists() && key_path.exists() {
         let cert_pem = std::fs::read_to_string(cert_path)?;
         let key_pem = std::fs::read_to_string(key_path)?;
         let key = KeyPair::from_pem(&key_pem).map_err(rcgen_io)?;
-        let params = CertificateParams::from_ca_cert_pem(&cert_pem, key).map_err(rcgen_io)?;
-        return Certificate::from_params(params).map_err(rcgen_io);
+        let params = CertificateParams::from_ca_cert_pem(&cert_pem).map_err(rcgen_io)?;
+        let certificate = params.self_signed(&key).map_err(rcgen_io)?;
+        return Ok(CaptureCa {
+            certificate,
+            key_pair: key,
+            der: certificate_der_from_pem(&cert_pem)?,
+            pem: cert_pem,
+        });
     }
 
     std::fs::create_dir_all(certificate_root)?;
@@ -143,26 +167,32 @@ fn capture_ca(certificate_root: &FsPath) -> io::Result<Certificate> {
     name.push(DnType::CommonName, "Ecky Local Capture CA");
     name.push(DnType::OrganizationName, "Ecky");
     params.distinguished_name = name;
-    let certificate = Certificate::from_params(params).map_err(rcgen_io)?;
-    std::fs::write(&cert_path, certificate.serialize_pem().map_err(rcgen_io)?)?;
-    std::fs::write(&key_path, certificate.serialize_private_key_pem())?;
-    Ok(certificate)
+    let key_pair = KeyPair::generate().map_err(rcgen_io)?;
+    let certificate = params.self_signed(&key_pair).map_err(rcgen_io)?;
+    std::fs::write(&cert_path, certificate.pem())?;
+    std::fs::write(&key_path, key_pair.serialize_pem())?;
+    Ok(CaptureCa {
+        pem: certificate.pem(),
+        der: certificate.der().to_vec(),
+        certificate,
+        key_pair,
+    })
 }
 
-fn capture_leaf(ca: &Certificate, ip: IpAddr) -> io::Result<(Vec<u8>, Vec<u8>)> {
-    let mut params = CertificateParams::new(Vec::new());
+fn capture_leaf(ca: &CaptureCa, ip: IpAddr) -> io::Result<(Vec<u8>, Vec<u8>)> {
+    let mut params = CertificateParams::new(Vec::new()).map_err(rcgen_io)?;
     params.subject_alt_names.push(SanType::IpAddress(ip));
     let mut name = DistinguishedName::new();
     name.push(DnType::CommonName, "Ecky Capture");
     params.distinguished_name = name;
-    let certificate = Certificate::from_params(params).map_err(rcgen_io)?;
-    let leaf_pem = certificate
-        .serialize_pem_with_signer(ca)
+    let key_pair = KeyPair::generate().map_err(rcgen_io)?;
+    let certificate = params
+        .signed_by(&key_pair, &ca.certificate, &ca.key_pair)
         .map_err(rcgen_io)?;
-    let chain_pem = format!("{leaf_pem}\n{}", ca.serialize_pem().map_err(rcgen_io)?);
+    let chain_pem = format!("{}\n{}", certificate.pem(), ca.pem);
     Ok((
         chain_pem.into_bytes(),
-        certificate.serialize_private_key_pem().into_bytes(),
+        key_pair.serialize_pem().into_bytes(),
     ))
 }
 
@@ -725,7 +755,7 @@ pub async fn serve(state: AppState, app: Arc<dyn PathResolver + Send + Sync>) ->
     let ip = local_lan_ip();
     let certificate_root = app.app_data_dir().join("capture-certificates");
     let ca = capture_ca(&certificate_root)?;
-    let ca_der = ca.serialize_der().map_err(rcgen_io)?;
+    let ca_der = ca.der.clone();
     let (certificate_pem, key_pem) = capture_leaf(&ca, ip)?;
     let tls = axum_server::tls_rustls::RustlsConfig::from_pem(certificate_pem, key_pem)
         .await
@@ -802,8 +832,10 @@ mod tests {
             microwave: None,
             voice: VoiceConfig::default(),
             mcp: McpConfig::default(),
+            fem_compute: crate::contracts::FemComputeConfig::default(),
             has_seen_onboarding: true,
             connection_type: None,
+            provider_models: crate::contracts::ProviderModels::default(),
             default_engine_kind: EngineKind::EckyIrV0,
             default_source_language: SourceLanguage::EckyIrV0,
             default_geometry_backend: GeometryBackend::EckyRust,

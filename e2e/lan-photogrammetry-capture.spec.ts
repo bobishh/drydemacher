@@ -207,7 +207,7 @@ async function installCaptureShellMocks(page: Page, config: MockConfig = {}) {
         id: 'durable-capture-1', targetThreadId: 'capture-thread', targetMessageId: null,
         title: 'Finger fixture capture', state: 'preview', createdAt: 10, updatedAt: 50,
         acceptedFrameCount: 48,
-        meshPreview: { stlPath: '/tmp/capture-preview.stl', triangleCount: 1234,
+        meshPreview: { stlPath: '/tmp/capture-model.stl', triangleCount: 1234,
           boundsMm: [42, 31, 18], scaleLabel: 'Restored capture coordinates', warnings: ['Verify dimensions'] },
         derivedStlPath: null, cropBounds: null, previewScale: 0.05,
         targetSource: '', targetSourceLanguage: 'ecky', startedFromEmpty: false, rawError: null,
@@ -235,7 +235,7 @@ async function installCaptureShellMocks(page: Page, config: MockConfig = {}) {
             sessionId: 'abc123', pairingToken: 'abc123', pairingUrl: '', trustUrl: '',
             protocolVersion: 1, clientCapabilities: {}, state: 'preview', createdAt: 1,
             expiresAt: 999999, acceptedFrameCount: 48, reconstructionProgress: 1,
-            meshPreview: { stlPath: '/tmp/capture-preview.stl', triangleCount: 1234,
+            meshPreview: { stlPath: '/tmp/capture-model.stl', triangleCount: 1234,
               boundsMm: [42, 31, 18], scaleLabel: 'meters converted to millimeters', warnings: ['Verify dimensions'] },
           };
         }
@@ -277,20 +277,20 @@ async function installCaptureShellMocks(page: Page, config: MockConfig = {}) {
       };
       if (cmd === 'import_freecad_library_part') return {
         modelId: 'capture-mesh', sourceKind: 'importedMesh', contentHash: 'capture', artifactVersion: 1,
-        fcstdPath: '', manifestPath: '/tmp/capture-manifest.json', previewStlPath: '/tmp/capture-preview.stl',
+        fcstdPath: '', manifestPath: '/tmp/capture-manifest.json', modelStlPath: '/tmp/capture-model.stl',
         viewerAssets: [], exportArtifacts: [], geometryBackend: 'mesh', sourceLanguage: 'ecky', engineKind: 'ecky',
       };
       if (cmd === 'get_model_manifest') return {
         schemaVersion: 1, modelId: 'capture-mesh', sourceKind: 'importedMesh', engineKind: 'ecky',
         sourceLanguage: 'ecky', geometryBackend: 'mesh',
-        document: { documentName: 'Capture', documentLabel: 'Capture', sourcePath: '/tmp/capture-preview.stl', objectCount: 1, warnings: [] },
+        document: { documentName: 'Capture', documentLabel: 'Capture', sourcePath: '/tmp/capture-model.stl', objectCount: 1, warnings: [] },
         parts: [], parameterGroups: [], controlPrimitives: [], controlRelations: [], controlViews: [],
         advisories: [], selectionTargets: [], measurementAnnotations: [], warnings: [],
         enrichmentState: { status: 'none', proposals: [] },
       };
       if (cmd === 'render_model') return {
         modelId: 'capture-solidified', sourceKind: 'generated', contentHash: 'capture-solidified', artifactVersion: 1,
-        fcstdPath: '', manifestPath: '/tmp/capture-manifest.json', previewStlPath: '/tmp/capture-preview.stl',
+        fcstdPath: '', manifestPath: '/tmp/capture-manifest.json', modelStlPath: '/tmp/capture-model.stl',
         viewerAssets: [], exportArtifacts: [], geometryBackend: 'mesh', sourceLanguage: 'ecky', engineKind: 'ecky',
       };
       if (cmd === 'add_manual_version') return 'capture-version';
@@ -299,13 +299,13 @@ async function installCaptureShellMocks(page: Page, config: MockConfig = {}) {
         return { artifactBundle: {
           modelId: 'capture-mesh', sourceKind: 'generated', contentHash: 'capture', artifactVersion: 1,
           fcstdPath: '', manifestPath: '/tmp/capture-manifest.json',
-          previewStlPath: args?.cropBounds ? '/tmp/capture-box-crop.stl' : '/tmp/capture-preview.stl',
+          modelStlPath: args?.cropBounds ? '/tmp/capture-box-crop.stl' : '/tmp/capture-model.stl',
           viewerAssets: [], exportArtifacts: [], geometryBackend: 'mesh', sourceLanguage: 'ecky', engineKind: 'ecky',
         },
         modelManifest: {
           schemaVersion: 1, modelId: 'capture-mesh', sourceKind: 'generated', engineKind: 'ecky',
           sourceLanguage: 'ecky', geometryBackend: 'mesh',
-          document: { documentName: 'Capture', documentLabel: 'Capture', sourcePath: '/tmp/capture-preview.stl', objectCount: 1, warnings: [] },
+          document: { documentName: 'Capture', documentLabel: 'Capture', sourcePath: '/tmp/capture-model.stl', objectCount: 1, warnings: [] },
           parts: [], parameterGroups: [], controlPrimitives: [], controlRelations: [], controlViews: [],
           advisories: [], selectionTargets: [], measurementAnnotations: [], warnings: [],
           enrichmentState: { status: 'none', proposals: [] },
@@ -322,7 +322,7 @@ async function installCaptureShellMocks(page: Page, config: MockConfig = {}) {
   }, { config });
 }
 
-async function routeRestoredCaptureStl(page: Page, urlPattern = '**/*capture-preview.stl*') {
+async function routeRestoredCaptureStl(page: Page, urlPattern = '**/*capture-model.stl*') {
   const previewStl = Buffer.alloc(84 + 50);
   previewStl.writeUInt32LE(1, 80);
   [[0, 0, 0], [40, 0, 0], [0, 30, 10]].forEach((vertex, vertexIndex) => {
@@ -521,7 +521,7 @@ test('Given reconstruction completes When desktop polls Then preview exposes ins
       ));
     });
   });
-  await page.route('**/*capture-preview.stl*', async (route) => {
+  await page.route('**/*capture-model.stl*', async (route) => {
     await route.fulfill({
       status: 200,
       contentType: 'model/stl',
@@ -615,7 +615,7 @@ test('Given crop excludes the mesh When Apply runs Then raw preview and backend 
   [[0, 0, 0], [40, 0, 0], [0, 30, 0]].forEach((vertex, vertexIndex) => {
     vertex.forEach((value, axis) => previewStl.writeFloatLE(value, 84 + 12 + vertexIndex * 12 + axis * 4));
   });
-  await page.route('**/*capture-preview.stl*', route => route.fulfill({
+  await page.route('**/*capture-model.stl*', route => route.fulfill({
     status: 200,
     contentType: 'model/stl',
     body: previewStl,

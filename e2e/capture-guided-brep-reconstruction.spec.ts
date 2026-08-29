@@ -14,7 +14,7 @@ async function installGuidedCaptureFixture(page: Page, mode: GuideMockMode) {
     const generatedArtifactBundle = {
       modelId: 'generated-model-1', sourceKind: 'generated', contentHash: 'generated-content', artifactVersion: 1,
       fcstdPath: '', manifestPath: '/fixtures/generated-manifest.json',
-      previewStlPath: '/fixtures/generated-brep.stl', viewerAssets: [], exportArtifacts: [],
+      modelStlPath: '/fixtures/generated-brep.stl', viewerAssets: [], exportArtifacts: [],
       geometryBackend: 'mesh', sourceLanguage: 'ecky', engineKind: 'ecky',
     };
     const generatedManifest = {
@@ -113,7 +113,7 @@ async function installGuidedCaptureFixture(page: Page, mode: GuideMockMode) {
       if (cmd === 'prepare_capture_preview') return { artifactBundle: {
         modelId: 'partial-insert-mesh', sourceKind: 'generated', contentHash: fixture.contentDigest, artifactVersion: 1,
         fcstdPath: '', manifestPath: '/fixtures/partial-insert-manifest.json',
-        previewStlPath: '/fixtures/partial-symmetric-mechanical-insert.stl', viewerAssets: [], exportArtifacts: [],
+        modelStlPath: '/fixtures/partial-symmetric-mechanical-insert.stl', viewerAssets: [], exportArtifacts: [],
         geometryBackend: 'mesh', sourceLanguage: 'ecky', engineKind: 'ecky',
       }, modelManifest: {
         schemaVersion: 1, modelId: 'partial-insert-mesh', sourceKind: 'generated', engineKind: 'ecky',

@@ -1,5 +1,5 @@
 //! Filesystem project mirror: exposes one thread's active macro as a plain
-//! folder (`model.ecky` + `ecky-project.json`) so external editors and LLM
+//! folder (`model.ecky` + `ecky-project.edn`) so external editors and LLM
 //! file skills can author source directly, while threads/versions remain the
 //! canonical record. See `openspec/changes/filesystem-project-mirror`.
 //!
@@ -19,15 +19,18 @@ use crate::component_package_runtime::{
     read_payload_inventory, validate_payload_archive, ValidatedPayload, ValidatedPayloadEntry,
 };
 use crate::contracts::{
-    AppError, AppResult, ComponentDependencyLock, PackagePayloadInventoryEntry,
+    AppError, AppResult, ComponentDependencyLock, ComponentDependencyLockComponent,
+    ComponentDependencyLockEntry, ComponentPayloadKind, GeometryRepresentation,
+    PackagePayloadInventoryEntry, COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION,
 };
 use crate::models::PathResolver;
+use crate::steel_data::{parse_steel_data, write_steel_data, SteelDataValue};
 
 pub const PROJECT_SOURCE_FILE_NAME: &str = "model.ecky";
-pub const PROJECT_MANIFEST_FILE_NAME: &str = "ecky-project.json";
+pub const PROJECT_MANIFEST_FILE_NAME: &str = "ecky-project.edn";
 /// Canonical dependency lock mirrored beside `model.ecky` for a live-reference
 /// version. It is never inferred from installed packages during apply.
-pub const PROJECT_LOCK_FILE_NAME: &str = "ecky.lock.json";
+pub const PROJECT_LOCK_FILE_NAME: &str = "ecky.lock.edn";
 const PORTABLE_DEPENDENCIES_DIR_NAME: &str = "dependencies";
 const PROJECT_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const PROJECTS_DIR_NAME: &str = "projects";
@@ -59,7 +62,8 @@ pub enum ProjectSyncState {
     FileChanged,
     /// Thread gained versions past the binding; folder is stale. Re-export.
     ThreadAdvanced,
-    /// Both sides moved. Applying requires an explicit force.
+    /// Legacy wire value. New classification never emits conflicts; a changed
+    /// file is an append regardless of thread movement.
     Conflict,
 }
 
@@ -74,6 +78,16 @@ pub struct ProjectFolderStatus {
     pub file_digest: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_head_message_id: Option<String>,
+}
+
+/// File-sync render currently owned by the project-folder watcher. Kept in
+/// AppState so a frontend attaching after the one-shot `detected` event can
+/// recover the active render without guessing from CPU or folder digests.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFolderRenderActivity {
+    pub slug: String,
+    pub thread_id: String,
 }
 
 pub fn source_digest(source: &str) -> String {
@@ -148,6 +162,142 @@ pub fn project_dir(
     Ok(root.join(slug))
 }
 
+fn edn_map(entries: Vec<(&str, SteelDataValue)>) -> SteelDataValue {
+    SteelDataValue::Map(
+        entries
+            .into_iter()
+            .map(|(key, value)| (format!(":{key}"), value))
+            .collect(),
+    )
+}
+
+fn edn_key(value: &str) -> SteelDataValue {
+    SteelDataValue::Keyword(format!(":{value}"))
+}
+
+fn edn_optional_string(value: &Option<String>) -> SteelDataValue {
+    value
+        .clone()
+        .map(SteelDataValue::String)
+        .unwrap_or(SteelDataValue::Nil)
+}
+
+fn edn_entries<'a>(
+    value: &'a SteelDataValue,
+    context: &str,
+) -> AppResult<&'a [(String, SteelDataValue)]> {
+    match value {
+        SteelDataValue::Map(entries) => Ok(entries),
+        _ => Err(AppError::parse(format!("{context}: expected map"))),
+    }
+}
+
+fn edn_get<'a>(
+    entries: &'a [(String, SteelDataValue)],
+    key: &str,
+    context: &str,
+) -> AppResult<&'a SteelDataValue> {
+    let key = format!(":{key}");
+    entries
+        .iter()
+        .find_map(|(candidate, value)| (candidate == &key).then_some(value))
+        .ok_or_else(|| AppError::parse(format!("{context}: missing {key}")))
+}
+
+fn edn_string(entries: &[(String, SteelDataValue)], key: &str, context: &str) -> AppResult<String> {
+    match edn_get(entries, key, context)? {
+        SteelDataValue::String(value) => Ok(value.clone()),
+        _ => Err(AppError::parse(format!("{context}: {key} must be string"))),
+    }
+}
+
+fn edn_optional_string_field(
+    entries: &[(String, SteelDataValue)],
+    key: &str,
+    context: &str,
+) -> AppResult<Option<String>> {
+    match edn_get(entries, key, context)? {
+        SteelDataValue::Nil => Ok(None),
+        SteelDataValue::String(value) => Ok(Some(value.clone())),
+        _ => Err(AppError::parse(format!(
+            "{context}: {key} must be string or nil"
+        ))),
+    }
+}
+
+fn edn_u32(entries: &[(String, SteelDataValue)], key: &str, context: &str) -> AppResult<u32> {
+    match edn_get(entries, key, context)? {
+        SteelDataValue::Integer(value) if *value >= 0 && *value <= i64::from(u32::MAX) => {
+            Ok(*value as u32)
+        }
+        _ => Err(AppError::parse(format!("{context}: {key} must be u32"))),
+    }
+}
+
+fn edn_u64(entries: &[(String, SteelDataValue)], key: &str, context: &str) -> AppResult<u64> {
+    match edn_get(entries, key, context)? {
+        SteelDataValue::Integer(value) if *value >= 0 => Ok(*value as u64),
+        _ => Err(AppError::parse(format!("{context}: {key} must be u64"))),
+    }
+}
+
+fn edn_optional_keyword(
+    entries: &[(String, SteelDataValue)],
+    key: &str,
+    context: &str,
+) -> AppResult<Option<String>> {
+    match edn_get(entries, key, context)? {
+        SteelDataValue::Nil => Ok(None),
+        SteelDataValue::Keyword(value) => Ok(Some(value.trim_start_matches(':').to_string())),
+        _ => Err(AppError::parse(format!(
+            "{context}: {key} must be keyword or nil"
+        ))),
+    }
+}
+
+fn encode_project_manifest(manifest: &ProjectManifest) -> SteelDataValue {
+    edn_map(vec![
+        (
+            "schema-version",
+            SteelDataValue::Integer(i64::from(manifest.schema_version)),
+        ),
+        (
+            "project-id",
+            SteelDataValue::String(manifest.project_id.clone()),
+        ),
+        (
+            "thread-id",
+            SteelDataValue::String(manifest.thread_id.clone()),
+        ),
+        (
+            "message-id",
+            SteelDataValue::String(manifest.message_id.clone()),
+        ),
+        ("model-id", edn_optional_string(&manifest.model_id)),
+        (
+            "source-digest",
+            SteelDataValue::String(manifest.source_digest.clone()),
+        ),
+        (
+            "exported-at",
+            SteelDataValue::Integer(manifest.exported_at as i64),
+        ),
+    ])
+}
+
+fn decode_project_manifest(value: &SteelDataValue) -> AppResult<ProjectManifest> {
+    let entries = edn_entries(value, "project manifest")?;
+    Ok(ProjectManifest {
+        schema_version: edn_u32(entries, "schema-version", "project manifest")?,
+        project_id: edn_string(entries, "project-id", "project manifest")?,
+        thread_id: edn_string(entries, "thread-id", "project manifest")?,
+        message_id: edn_string(entries, "message-id", "project manifest")?,
+        model_id: edn_optional_string_field(entries, "model-id", "project manifest")?,
+        source_digest: edn_string(entries, "source-digest", "project manifest")?,
+        exported_at: edn_u64(entries, "exported-at", "project manifest")?,
+    })
+}
+
 pub fn read_manifest(dir: &Path) -> AppResult<Option<ProjectManifest>> {
     let path = dir.join(PROJECT_MANIFEST_FILE_NAME);
     if !path.is_file() {
@@ -156,7 +306,9 @@ pub fn read_manifest(dir: &Path) -> AppResult<Option<ProjectManifest>> {
     let raw = fs::read_to_string(&path).map_err(|err| {
         AppError::persistence(format!("Failed to read '{}': {}", path.display(), err))
     })?;
-    serde_json::from_str(&raw)
+    let value = parse_steel_data(&raw)
+        .map_err(|err| AppError::persistence(format!("Invalid '{}': {}", path.display(), err)))?;
+    decode_project_manifest(&value)
         .map(Some)
         .map_err(|err| AppError::persistence(format!("Invalid '{}': {}", path.display(), err)))
 }
@@ -311,17 +463,207 @@ fn copy_existing_permissions(_dest: &Path, _temp: &fs::File) {}
 
 pub fn write_manifest(dir: &Path, manifest: &ProjectManifest) -> AppResult<()> {
     let path = dir.join(PROJECT_MANIFEST_FILE_NAME);
-    let json = serde_json::to_string_pretty(manifest)
+    let edn = write_steel_data(&encode_project_manifest(manifest))
         .map_err(|err| AppError::internal(format!("Failed to serialize manifest: {err}")))?;
-    atomic_write(&path, json.as_bytes())
+    atomic_write(&path, edn.as_bytes())
 }
 
-/// Write the canonical dependency lock as the exact compact JSON bytes that
-/// define its digest. The lock is a version input, never a mutable discovery
-/// record, so callers must supply it from the version artifact bundle.
+fn encode_payload_kind(kind: Option<ComponentPayloadKind>) -> SteelDataValue {
+    match kind {
+        Some(ComponentPayloadKind::Source) => edn_key("source"),
+        Some(ComponentPayloadKind::Step) => edn_key("step"),
+        None => SteelDataValue::Nil,
+    }
+}
+
+fn decode_payload_kind(
+    value: Option<String>,
+    context: &str,
+) -> AppResult<Option<ComponentPayloadKind>> {
+    match value.as_deref() {
+        None => Ok(None),
+        Some("source") => Ok(Some(ComponentPayloadKind::Source)),
+        Some("step") => Ok(Some(ComponentPayloadKind::Step)),
+        Some(other) => Err(AppError::parse(format!(
+            "{context}: unsupported payload-kind {other}"
+        ))),
+    }
+}
+
+fn encode_geometry_representation(value: Option<GeometryRepresentation>) -> SteelDataValue {
+    match value {
+        Some(GeometryRepresentation::MeshNative) => edn_key("mesh-native"),
+        Some(GeometryRepresentation::FacetedPolyBrep) => edn_key("faceted-poly-brep"),
+        Some(GeometryRepresentation::AnalyticBrep) => edn_key("analytic-brep"),
+        Some(GeometryRepresentation::Hybrid) => edn_key("hybrid"),
+        None => SteelDataValue::Nil,
+    }
+}
+
+fn decode_geometry_representation(
+    value: Option<String>,
+    context: &str,
+) -> AppResult<Option<GeometryRepresentation>> {
+    match value.as_deref() {
+        None => Ok(None),
+        Some("mesh-native") => Ok(Some(GeometryRepresentation::MeshNative)),
+        Some("faceted-poly-brep") => Ok(Some(GeometryRepresentation::FacetedPolyBrep)),
+        Some("analytic-brep") => Ok(Some(GeometryRepresentation::AnalyticBrep)),
+        Some("hybrid") => Ok(Some(GeometryRepresentation::Hybrid)),
+        Some(other) => Err(AppError::parse(format!(
+            "{context}: unsupported geometry-representation {other}"
+        ))),
+    }
+}
+
+fn encode_lock_component(component: &ComponentDependencyLockComponent) -> SteelDataValue {
+    edn_map(vec![
+        (
+            "component-id",
+            SteelDataValue::String(component.component_id.clone()),
+        ),
+        ("entry-symbol", edn_optional_string(&component.entry_symbol)),
+        (
+            "payload-digest",
+            SteelDataValue::String(component.payload_digest.clone()),
+        ),
+        ("payload-kind", encode_payload_kind(component.payload_kind)),
+        (
+            "geometry-representation",
+            encode_geometry_representation(component.geometry_representation.clone()),
+        ),
+    ])
+}
+
+fn decode_lock_component(value: &SteelDataValue) -> AppResult<ComponentDependencyLockComponent> {
+    let entries = edn_entries(value, "component dependency lock component")?;
+    Ok(ComponentDependencyLockComponent {
+        component_id: edn_string(
+            entries,
+            "component-id",
+            "component dependency lock component",
+        )?,
+        entry_symbol: edn_optional_string_field(
+            entries,
+            "entry-symbol",
+            "component dependency lock component",
+        )?,
+        payload_digest: edn_string(
+            entries,
+            "payload-digest",
+            "component dependency lock component",
+        )?,
+        payload_kind: decode_payload_kind(
+            edn_optional_keyword(
+                entries,
+                "payload-kind",
+                "component dependency lock component",
+            )?,
+            "component dependency lock component",
+        )?,
+        geometry_representation: decode_geometry_representation(
+            edn_optional_keyword(
+                entries,
+                "geometry-representation",
+                "component dependency lock component",
+            )?,
+            "component dependency lock component",
+        )?,
+    })
+}
+
+fn encode_lock_entry(entry: &ComponentDependencyLockEntry) -> SteelDataValue {
+    edn_map(vec![
+        (
+            "package-id",
+            SteelDataValue::String(entry.package_id.clone()),
+        ),
+        ("version", SteelDataValue::String(entry.version.clone())),
+        (
+            "package-digest",
+            SteelDataValue::String(entry.package_digest.clone()),
+        ),
+        (
+            "components",
+            SteelDataValue::Vector(entry.components.iter().map(encode_lock_component).collect()),
+        ),
+    ])
+}
+
+fn decode_lock_entry(value: &SteelDataValue) -> AppResult<ComponentDependencyLockEntry> {
+    let entries = edn_entries(value, "component dependency lock entry")?;
+    let components = match edn_get(entries, "components", "component dependency lock entry")? {
+        SteelDataValue::Vector(values) => values
+            .iter()
+            .map(decode_lock_component)
+            .collect::<AppResult<Vec<_>>>()?,
+        _ => {
+            return Err(AppError::parse(
+                "component dependency lock entry: components must be vector",
+            ))
+        }
+    };
+    Ok(ComponentDependencyLockEntry {
+        package_id: edn_string(entries, "package-id", "component dependency lock entry")?,
+        version: edn_string(entries, "version", "component dependency lock entry")?,
+        package_digest: edn_string(entries, "package-digest", "component dependency lock entry")?,
+        components,
+    })
+}
+
+fn encode_component_dependency_lock(lock: &ComponentDependencyLock) -> SteelDataValue {
+    let canonical = lock.clone().canonical();
+    edn_map(vec![
+        (
+            "schema-version",
+            SteelDataValue::Integer(i64::from(canonical.schema_version)),
+        ),
+        (
+            "dependencies",
+            SteelDataValue::Vector(
+                canonical
+                    .dependencies
+                    .iter()
+                    .map(encode_lock_entry)
+                    .collect(),
+            ),
+        ),
+    ])
+}
+
+fn decode_component_dependency_lock(value: &SteelDataValue) -> AppResult<ComponentDependencyLock> {
+    let entries = edn_entries(value, "component dependency lock")?;
+    let dependencies = match edn_get(entries, "dependencies", "component dependency lock")? {
+        SteelDataValue::Vector(values) => values
+            .iter()
+            .map(decode_lock_entry)
+            .collect::<AppResult<Vec<_>>>()?,
+        _ => {
+            return Err(AppError::parse(
+                "component dependency lock: dependencies must be vector",
+            ))
+        }
+    };
+    Ok(ComponentDependencyLock {
+        schema_version: edn_u32(entries, "schema-version", "component dependency lock")
+            .unwrap_or(COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION),
+        dependencies,
+    })
+}
+
+fn canonical_lock_edn_bytes(lock: &ComponentDependencyLock) -> AppResult<Vec<u8>> {
+    let edn = write_steel_data(&encode_component_dependency_lock(lock)).map_err(|err| {
+        AppError::internal(format!("Cannot serialize component dependency lock: {err}"))
+    })?;
+    Ok(edn.into_bytes())
+}
+
+/// Write the canonical dependency lock as EDN. The lock is a version input,
+/// never a mutable discovery record, so callers must supply it from the
+/// version artifact bundle.
 pub fn write_project_lock(dir: &Path, lock: &ComponentDependencyLock) -> AppResult<()> {
     lock.validate()?;
-    let bytes = lock.clone().canonical().canonical_bytes()?;
+    let bytes = canonical_lock_edn_bytes(&lock.clone().canonical())?;
     atomic_write(&dir.join(PROJECT_LOCK_FILE_NAME), &bytes)
 }
 
@@ -333,14 +675,16 @@ pub fn read_project_lock(dir: &Path) -> AppResult<Option<ComponentDependencyLock
     if !path.is_file() {
         return Ok(None);
     }
-    let bytes = fs::read(&path).map_err(|err| {
+    let raw = fs::read_to_string(&path).map_err(|err| {
         AppError::persistence(format!("Failed to read '{}': {}", path.display(), err))
     })?;
-    let lock: ComponentDependencyLock = serde_json::from_slice(&bytes)
+    let value = parse_steel_data(&raw)
+        .map_err(|err| AppError::persistence(format!("Invalid '{}': {}", path.display(), err)))?;
+    let lock = decode_component_dependency_lock(&value)
         .map_err(|err| AppError::persistence(format!("Invalid '{}': {}", path.display(), err)))?;
     lock.validate()?;
     let canonical = lock.clone().canonical();
-    if bytes != canonical.canonical_bytes()? {
+    if raw.as_bytes() != canonical_lock_edn_bytes(&canonical)? {
         return Err(AppError::validation(format!(
             "Project lock '{}' is not canonical; re-export the committed version instead of rewriting its dependency lock.",
             path.display()
@@ -577,7 +921,7 @@ pub fn export_project(
 }
 
 /// Export a version source and its lock together. This is the project-mirror
-/// integration seam for version handlers: it writes `ecky.lock.json` from the
+/// integration seam for version handlers: it writes `ecky.lock.edn` from the
 /// committed bundle lock, and removes a stale lock when exporting a vendored
 /// (lock-free) version.
 pub fn export_project_with_lock(
@@ -628,7 +972,7 @@ pub fn import_portable_project(
     })?;
     let lock = lock.ok_or_else(|| {
         AppError::validation(format!(
-            "Portable project '{}' has no ecky.lock.json.",
+            "Portable project '{}' has no ecky.lock.edn.",
             dir.display()
         ))
     })?;
@@ -651,7 +995,7 @@ pub fn classify_sync_state(
         (false, false) => ProjectSyncState::Clean,
         (true, false) => ProjectSyncState::FileChanged,
         (false, true) => ProjectSyncState::ThreadAdvanced,
-        (true, true) => ProjectSyncState::Conflict,
+        (true, true) => ProjectSyncState::FileChanged,
     }
 }
 
@@ -812,16 +1156,23 @@ mod tests {
         assert_eq!(reread.source_digest, source_digest(source));
         assert!(reread.project_id.starts_with("proj-"));
 
+        assert!(
+            fs::read_dir(&dir)
+                .expect("read dir")
+                .flatten()
+                .all(|entry| entry.path().extension().and_then(|ext| ext.to_str()) != Some("json")),
+            "new exports must not write JSON project files"
+        );
         let raw = fs::read_to_string(dir.join(PROJECT_MANIFEST_FILE_NAME)).expect("raw");
         assert!(
-            raw.contains("\"sourceDigest\""),
-            "camelCase manifest: {raw}"
+            raw.contains(":source-digest"),
+            "EDN manifest must use kebab-case keywords: {raw}"
         );
-        assert!(raw.contains("\"threadId\""), "camelCase manifest: {raw}");
+        assert!(raw.contains(":thread-id"), "EDN manifest: {raw}");
     }
 
     #[test]
-    fn project_lock_round_trips_canonical_bytes() {
+    fn project_lock_round_trips_canonical_edn() {
         use crate::contracts::{
             ComponentDependencyLockComponent, ComponentDependencyLockEntry,
             COMPONENT_DEPENDENCY_LOCK_SCHEMA_VERSION,
@@ -850,14 +1201,16 @@ mod tests {
         };
 
         write_project_lock(&dir, &lock).expect("write canonical lock");
-        let raw = fs::read(dir.join(PROJECT_LOCK_FILE_NAME)).expect("lock bytes");
-        assert_eq!(
-            raw,
-            lock.clone()
-                .canonical()
-                .canonical_bytes()
-                .expect("canonical bytes")
+        assert!(
+            fs::read_dir(&dir)
+                .expect("read dir")
+                .flatten()
+                .all(|entry| entry.path().extension().and_then(|ext| ext.to_str()) != Some("json")),
+            "project locks must not write JSON files"
         );
+        let raw = fs::read_to_string(dir.join(PROJECT_LOCK_FILE_NAME)).expect("lock bytes");
+        assert!(raw.contains(":package-digest"), "EDN lock: {raw}");
+        assert!(raw.contains(":component-id"), "EDN lock: {raw}");
         assert_eq!(
             read_project_lock(&dir).expect("read lock"),
             Some(lock.clone().canonical())
@@ -1292,7 +1645,7 @@ mod tests {
         );
         assert_eq!(
             classify_sync_state(Some(&edited), Some(&manifest), Some("msg-2")),
-            ProjectSyncState::Conflict
+            ProjectSyncState::FileChanged
         );
         assert_eq!(
             classify_sync_state(Some(&edited), Some(&manifest), None),

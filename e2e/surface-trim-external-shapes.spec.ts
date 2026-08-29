@@ -450,7 +450,7 @@ async function installSurfaceTrimMocks(page: Page, config: MockConfig = {}) {
           contentHash: 'sha256:render-1',
           fcstdPath: '/tmp/surface-trim.FCStd',
           manifestPath: '/tmp/surface-trim-manifest.json',
-          previewStlPath: '/tmp/surface-trim-preview.stl',
+          modelStlPath: '/tmp/surface-trim-model.stl',
           viewerAssets: [],
           edgeTargets: [],
           faceTargets: [],

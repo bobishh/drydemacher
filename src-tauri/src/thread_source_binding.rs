@@ -2,7 +2,7 @@
 //!
 //! This module is a thin SQLite **binding index** layered over the existing
 //! `project_mirror` service. `filesystem-project-mirror` already owns the
-//! folder, the `model.ecky` working copy, the `ecky-project.json` manifest
+//! folder, the `model.ecky` working copy, the `ecky-project.edn` manifest
 //! (which is the recoverable sidecar), the sync-state classifier, and the
 //! single folder watcher. Nothing here duplicates that surface: every
 //! file/folder/digest/manifest operation delegates to `project_mirror`.
@@ -13,16 +13,15 @@
 //!     survives even if the folder is temporarily missing;
 //!   - immediate binding on blank-thread creation;
 //!   - safe backfill/adoption of existing mirror folders (no second folder);
-//!   - a guarded, single-direction Ecky-commit refresh that refuses on a
-//!     digest mismatch and never creates duplicate versions.
+//!   - a single-direction durable-version refresh that preserves dirty external
+//!     bytes while version appends remain lossless and never duplicate content.
 //!
-//! Sync-direction mapping (constraint from product review):
+//! Sync-direction mapping:
 //!   - `FileChanged`        -> external edit -> existing watcher applies it
 //!     as a new version.
-//!   - `ThreadAdvanced`     -> Ecky advanced; refresh the file from the new
-//!     Ecky source ONLY when the file digest is
-//!     still clean vs the manifest.
-//!   - `Conflict`           -> refuse; no overwrite, no version.
+//!   - `ThreadAdvanced`     -> informational head movement. A dirty file is
+//!     preserved and can be appended as the next head.
+//!   - `Conflict`           -> informational only; no version-write refusal.
 //!
 //! See `openspec/changes/thread-source-binding`.
 
@@ -53,22 +52,12 @@ pub(crate) fn is_blank_thread_source(source: &str) -> bool {
     source == DEFAULT_THREAD_SOURCE || source == LEGACY_DEMO_THREAD_SOURCE
 }
 
-pub(crate) fn is_blank_source_digest(digest: &str) -> bool {
-    digest == source_digest(DEFAULT_THREAD_SOURCE)
-        || digest == source_digest(LEGACY_DEMO_THREAD_SOURCE)
-}
-
-pub(crate) fn thread_is_blank(
-    conn: &Connection,
-    thread_id: &str,
-    has_visible_messages: bool,
-) -> rusqlite::Result<bool> {
-    if has_visible_messages {
-        return Ok(false);
-    }
-    Ok(get_binding(conn, thread_id)?
-        .map(|binding| is_blank_source_digest(&binding.source_digest))
-        .unwrap_or(true))
+pub(crate) fn thread_is_blank(conn: &Connection, thread_id: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT created_at = updated_at FROM threads WHERE id = ?1",
+        [thread_id],
+        |row| row.get::<_, bool>(0),
+    )
 }
 
 pub(crate) fn migrate_legacy_blank_source(
@@ -123,6 +112,70 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
          ON thread_source_bindings(folder_path)",
         [],
     )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS project_folder_watch_failures (
+            thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+            source_digest TEXT NOT NULL,
+            error TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectFolderWatchFailure {
+    pub source_digest: String,
+    pub error: String,
+}
+
+pub fn get_project_folder_watch_failure(
+    conn: &Connection,
+    thread_id: &str,
+) -> AppResult<Option<ProjectFolderWatchFailure>> {
+    conn.query_row(
+        "SELECT source_digest, error
+         FROM project_folder_watch_failures
+         WHERE thread_id = ?1",
+        [thread_id],
+        |row| {
+            Ok(ProjectFolderWatchFailure {
+                source_digest: row.get(0)?,
+                error: row.get(1)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|error| AppError::persistence(error.to_string()))
+}
+
+pub fn set_project_folder_watch_failure(
+    conn: &Connection,
+    thread_id: &str,
+    source_digest: &str,
+    error: &str,
+    updated_at: u64,
+) -> AppResult<()> {
+    conn.execute(
+        "INSERT INTO project_folder_watch_failures (thread_id, source_digest, error, updated_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(thread_id) DO UPDATE SET
+             source_digest = excluded.source_digest,
+             error = excluded.error,
+             updated_at = excluded.updated_at",
+        params![thread_id, source_digest, error, updated_at as i64],
+    )
+    .map_err(|error| AppError::persistence(error.to_string()))?;
+    Ok(())
+}
+
+pub fn clear_project_folder_watch_failure(conn: &Connection, thread_id: &str) -> AppResult<()> {
+    conn.execute(
+        "DELETE FROM project_folder_watch_failures WHERE thread_id = ?1",
+        [thread_id],
+    )
+    .map_err(|error| AppError::persistence(error.to_string()))?;
     Ok(())
 }
 
@@ -314,6 +367,13 @@ pub fn upsert_binding_row(
     source_digest: &str,
     existing_created_at: Option<u64>,
 ) -> rusqlite::Result<ThreadSourceBinding> {
+    let previous_digest = conn
+        .query_row(
+            "SELECT source_digest FROM thread_source_bindings WHERE thread_id = ?1",
+            [thread_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
     let now = now_secs();
     let created_at = existing_created_at.unwrap_or(now);
     let source_path = folder.join(PROJECT_SOURCE_FILE_NAME);
@@ -335,6 +395,17 @@ pub fn upsert_binding_row(
             now as i64,
         ],
     )?;
+    if previous_digest
+        .as_deref()
+        .is_some_and(|digest| digest != source_digest)
+    {
+        conn.execute(
+            "UPDATE threads
+             SET updated_at = MAX(updated_at + 1, CAST(strftime('%s','now') AS INTEGER))
+             WHERE id = ?1",
+            [thread_id],
+        )?;
+    }
     Ok(ThreadSourceBinding {
         thread_id: thread_id.to_string(),
         folder_path: folder.to_string_lossy().to_string(),
@@ -415,9 +486,9 @@ fn write_and_index(
 /// manifest via the mirror, then indexes the binding. Idempotent: an existing
 /// binding is returned unchanged so repeated binds never rewrite the file.
 ///
-/// `message_id` is the placeholder for the not-yet-committed blank thread
+/// `message_id` is the placeholder for the blank thread before its first version
 /// (empty is allowed; the manifest `messageId` is rebased on the first real
-/// commit through `refresh_on_commit`).
+/// append through `refresh_on_version_append`).
 pub fn bind_new_thread(
     app: &dyn PathResolver,
     conn: &Connection,
@@ -532,64 +603,15 @@ pub fn prepare_editor_source(
     )
 }
 
-// --- Guarded Ecky-commit refresh -----------------------------------------
+// --- Durable-version mirror refresh -------------------------------------
 
-/// Pre-commit guard. Refuses ONLY when a bound folder already exists with a
-/// manifest and the on-disk file diverges from that manifest (a pending
-/// external edit that an Ecky commit would clobber). Unbound threads and
-/// folders without a manifest pass through; `refresh_on_commit` will seed
-/// them after the version is safely persisted.
+/// Refresh the bound source after an Ecky-originated version append.
 ///
-/// Call this BEFORE the version is written so a refusal prevents version
-/// creation entirely. Then call `refresh_on_commit` after the save with the
-/// committed message id to publish the refreshed source + manifest + binding.
-pub fn pre_commit_guard(
-    _app: &dyn PathResolver,
-    conn: &Connection,
-    _configured_root: Option<&str>,
-    thread_id: &str,
-    _title: &str,
-) -> AppResult<()> {
-    // The bound folder is authoritative: a pending external edit lives at the
-    // STORED path, so a title rename or `projectsRoot` change must still check
-    // that path. Re-deriving would point at a different, possibly empty
-    // folder and let the commit clobber the pending edit. Unbound threads pass.
-    let Some(existing) =
-        get_binding(conn, thread_id).map_err(|err| AppError::persistence(err.to_string()))?
-    else {
-        return Ok(());
-    };
-    let folder = PathBuf::from(existing.folder_path.clone());
-    let Some(manifest) = project_mirror::read_manifest(&folder)? else {
-        return Ok(());
-    };
-    let on_disk = project_mirror::read_project_source(&folder)?;
-    let disk_digest = on_disk.as_deref().map(project_mirror::source_digest);
-    let clean = disk_digest.as_deref() == Some(manifest.source_digest.as_str());
-    if !clean {
-        return Err(AppError::validation(format!(
-            "Source for thread '{thread_id}' changed on disk since the last sync; \
-             refusing to overwrite the pending edit. Apply or revert the file before committing."
-        )));
-    }
-    Ok(())
-}
-
-/// Refresh the bound source after an Ecky-originated commit. Implements the
-/// thread-source-binding guard:
-///   - No binding yet (first commit): create it with the committed source.
-///   - Binding + manifest present, file digest clean vs manifest, thread
-///     head is at the bound message: refresh the file and rebased manifest.
-///   - File digest mismatch (external edit pending): refuse, no overwrite,
-///     no version. Caller MUST NOT persist the version.
-///   - `ThreadAdvanced` / `Conflict`: refresh only when the file is still
-///     clean vs the manifest; otherwise refuse.
-///
-/// In the commit handler this is called AFTER the version is safely
-/// persisted, with the committed message id; the refusal that must prevent
-/// version creation is handled separately by `pre_commit_guard` before the
-/// save. Returns the refreshed binding index row.
-pub fn refresh_on_commit(
+/// Dirty external bytes are never overwritten. When the appended durable
+/// source exactly matches those bytes, the edit has already entered history:
+/// rebase the manifest instead of leaving the watcher to render it again.
+/// A different dirty source remains pending and is preserved unchanged.
+pub fn refresh_on_version_append(
     app: &dyn PathResolver,
     conn: &Connection,
     configured_root: Option<&str>,
@@ -607,8 +629,8 @@ pub fn refresh_on_commit(
     let on_disk = project_mirror::read_project_source(&folder)?;
     let disk_digest = on_disk.as_deref().map(project_mirror::source_digest);
 
-    // First commit on an unbound thread, or folder with no manifest yet:
-    // seed the binding with the committed source as baseline.
+    // First append on an unbound thread, or folder with no manifest yet:
+    // seed the binding with the appended source as baseline.
     if existing.is_none() || manifest.is_none() {
         return write_and_index(
             app,
@@ -623,14 +645,19 @@ pub fn refresh_on_commit(
     }
 
     let manifest = manifest.expect("manifest present after the None check");
-    // Guard: refuse to clobber a pending external edit. The file must still
-    // match the manifest digest Ecky last wrote.
+    // Preserve a different pending external edit. If the appended durable
+    // version is byte-identical to the dirty working copy, rebasing is safe
+    // and prevents the watcher from treating known source as a new edit after
+    // every process restart.
     let clean = disk_digest.as_deref() == Some(manifest.source_digest.as_str());
-    if !clean {
-        return Err(AppError::validation(format!(
-            "Source for thread '{thread_id}' changed on disk since the last sync; \
-             refusing to overwrite the pending edit. Apply or revert the file before committing."
-        )));
+    let appended_digest = project_mirror::source_digest(source);
+    let appended_matches_disk = disk_digest.as_deref() == Some(appended_digest.as_str());
+    if !clean && !appended_matches_disk {
+        return existing.ok_or_else(|| {
+            AppError::persistence(format!(
+                "Missing source binding for dirty thread '{thread_id}'."
+            ))
+        });
     }
 
     write_and_index(
@@ -816,10 +843,10 @@ mod tests {
         let row = get_binding(conn, "thread-1").unwrap().expect("row");
         assert_eq!(row.source_digest, binding.source_digest);
 
-        // Manifest is the mirror manifest (camelCase JSON).
+        // Manifest is the mirror manifest (kebab-case EDN).
         let raw = std::fs::read_to_string(folder.join(PROJECT_MANIFEST_FILE_NAME)).unwrap();
-        assert!(raw.contains("\"sourceDigest\""), "{raw}");
-        assert!(raw.contains("\"threadId\""), "{raw}");
+        assert!(raw.contains(":source-digest"), "{raw}");
+        assert!(raw.contains(":thread-id"), "{raw}");
     }
 
     fn temp_db_with_schema() -> Connection {
@@ -934,13 +961,13 @@ mod tests {
     }
 
     #[test]
-    fn refresh_on_commit_creates_binding_on_first_commit() {
+    fn refresh_on_version_append_creates_binding_on_first_version() {
         let resolver = temp_resolver("refresh-first");
         let conn = temp_db_with_schema();
         let conn = &conn;
         seed_thread(conn, "thread-1");
 
-        let first = refresh_on_commit(
+        let first = refresh_on_version_append(
             &resolver,
             conn,
             None,
@@ -951,7 +978,7 @@ mod tests {
             Some("model-1"),
             Some("msg-1"),
         )
-        .expect("first commit binds");
+        .expect("first version binds");
         assert_eq!(
             first.source_digest,
             source_digest("(model (part body (box 1 1 1)))")
@@ -964,12 +991,12 @@ mod tests {
     }
 
     #[test]
-    fn refresh_on_commit_writes_clean_file_and_rebases_manifest() {
+    fn refresh_on_version_append_writes_clean_file_and_rebases_manifest() {
         let resolver = temp_resolver("refresh-clean");
         let conn = temp_db_with_schema();
         let conn = &conn;
         seed_thread(conn, "thread-1");
-        refresh_on_commit(
+        refresh_on_version_append(
             &resolver,
             conn,
             None,
@@ -983,7 +1010,7 @@ mod tests {
         .unwrap();
 
         let next = "(model (part body (box 2 2 2)))";
-        let refreshed = refresh_on_commit(
+        let refreshed = refresh_on_version_append(
             &resolver,
             conn,
             None,
@@ -1007,12 +1034,12 @@ mod tests {
     }
 
     #[test]
-    fn refresh_on_commit_refuses_on_digest_mismatch() {
+    fn refresh_on_version_append_preserves_dirty_file_on_digest_mismatch() {
         let resolver = temp_resolver("refresh-guard");
         let conn = temp_db_with_schema();
         let conn = &conn;
         seed_thread(conn, "thread-1");
-        let binding = refresh_on_commit(
+        let binding = refresh_on_version_append(
             &resolver,
             conn,
             None,
@@ -1032,7 +1059,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = refresh_on_commit(
+        let refreshed = refresh_on_version_append(
             &resolver,
             conn,
             None,
@@ -1043,12 +1070,8 @@ mod tests {
             Some("model-2"),
             Some("msg-1"),
         )
-        .expect_err("must refuse");
-        assert!(
-            err.message.contains("refusing to overwrite"),
-            "{}",
-            err.message
-        );
+        .expect("dirty file must not turn a durable append into an error");
+        assert_eq!(refreshed.source_digest, binding.source_digest);
 
         // File bytes + binding digest unchanged (no clobber, no version).
         let on_disk =
@@ -1056,6 +1079,57 @@ mod tests {
         assert!(on_disk.contains("box 9 9 9"));
         let row = get_binding(conn, "thread-1").unwrap().unwrap();
         assert_eq!(row.source_digest, binding.source_digest);
+    }
+
+    #[test]
+    fn refresh_on_version_append_rebases_dirty_file_matching_durable_source() {
+        let resolver = temp_resolver("refresh-matching-dirty");
+        let conn = temp_db_with_schema();
+        let conn = &conn;
+        seed_thread(conn, "thread-1");
+        let binding = refresh_on_version_append(
+            &resolver,
+            conn,
+            None,
+            "thread-1",
+            "Bracket",
+            "(model (part body (box 1 1 1)))",
+            "msg-1",
+            Some("model-1"),
+            Some("msg-1"),
+        )
+        .unwrap();
+
+        let dirty_source = "(model (part body (box 9 9 9)))";
+        std::fs::write(
+            folder_of(&binding).join(PROJECT_SOURCE_FILE_NAME),
+            dirty_source,
+        )
+        .unwrap();
+
+        let refreshed = refresh_on_version_append(
+            &resolver,
+            conn,
+            None,
+            "thread-1",
+            "Bracket",
+            dirty_source,
+            "msg-2",
+            Some("model-2"),
+            Some("msg-2"),
+        )
+        .expect("matching durable source rebases dirty working copy");
+
+        assert_eq!(refreshed.source_digest, source_digest(dirty_source));
+        let manifest = project_mirror::read_manifest(&folder_of(&refreshed))
+            .unwrap()
+            .expect("manifest");
+        assert_eq!(manifest.message_id, "msg-2");
+        assert_eq!(manifest.model_id.as_deref(), Some("model-2"));
+        assert_eq!(manifest.source_digest, source_digest(dirty_source));
+        let on_disk =
+            std::fs::read_to_string(folder_of(&refreshed).join(PROJECT_SOURCE_FILE_NAME)).unwrap();
+        assert_eq!(on_disk, dirty_source);
     }
 
     #[test]
@@ -1228,42 +1302,7 @@ mod tests {
     }
 
     #[test]
-    fn pre_commit_guard_refuses_external_edit_at_stored_path_after_rename() {
-        let resolver_a = temp_resolver("guard-a");
-        let resolver_b = temp_resolver("guard-b");
-        let conn = temp_db_with_schema();
-        let conn = &conn;
-        seed_thread(conn, "thread-1");
-
-        let binding = bind_new_thread(&resolver_a, conn, None, "thread-1", "Alpha").expect("bind");
-        let stored_folder = folder_of(&binding);
-
-        // Pending external edit at the STORED (original) path.
-        std::fs::write(
-            stored_folder.join(PROJECT_SOURCE_FILE_NAME),
-            "(model (part body (box 9 9 9)))",
-        )
-        .unwrap();
-
-        // Guard called with a totally different root + title must STILL refuse:
-        // the pending edit lives at the stored path, which is the authority.
-        let err = pre_commit_guard(
-            &resolver_b,
-            conn,
-            Some("/totally/different/root"),
-            "thread-1",
-            "Beta",
-        )
-        .expect_err("must refuse at stored path");
-        assert!(
-            err.message.contains("refusing to overwrite"),
-            "{}",
-            err.message
-        );
-    }
-
-    #[test]
-    fn refresh_on_commit_after_rename_writes_original_folder_no_second_folder() {
+    fn refresh_on_version_append_after_rename_writes_original_folder_no_second_folder() {
         let resolver_a = temp_resolver("refresh-rename-a");
         let resolver_b = temp_resolver("refresh-rename-b");
         let conn = temp_db_with_schema();
@@ -1273,11 +1312,11 @@ mod tests {
         let binding = bind_new_thread(&resolver_a, conn, None, "thread-1", "Alpha").expect("bind");
         let original_folder = folder_of(&binding);
 
-        // Commit a new source under a NEW title + NEW root. The file at the
+        // Append a new source under a NEW title + NEW root. The file at the
         // original folder is still clean, so refresh writes to the ORIGINAL
         // folder and creates no second folder under the new title/root.
         let next = "(model (part body (box 5 5 5)))";
-        let refreshed = refresh_on_commit(
+        let refreshed = refresh_on_version_append(
             &resolver_b,
             conn,
             Some("/different/root"),

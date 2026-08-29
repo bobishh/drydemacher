@@ -33,6 +33,7 @@
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepBuilderAPI_TransitionMode.hxx>
+#include <gp_Lin.hxx>
 #include <BinTools.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepLib.hxx>
@@ -82,6 +83,7 @@
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Shell.hxx>
 #include <TopoDS_Vertex.hxx>
@@ -372,6 +374,9 @@ struct ExecutionContext {
     std::uint64_t partial_boolean_cache_hit_count = 0;
     std::uint64_t partial_boolean_cache_miss_count = 0;
     std::uint64_t partial_boolean_cache_write_count = 0;
+    std::uint64_t topology_cache_hit_count = 0;
+    std::uint64_t topology_cache_miss_count = 0;
+    std::uint64_t topology_cache_write_count = 0;
     std::uint64_t four_way_intersection_count = 0;
     std::map<std::string, std::uint32_t> stage_execution_counts;
     std::map<std::string, std::chrono::steady_clock::duration> stage_elapsed;
@@ -505,6 +510,9 @@ void write_stage_report(const fs::path& path, ExecutionContext& context) {
         << ",\"partialBooleanCacheHitCount\":" << context.partial_boolean_cache_hit_count
         << ",\"partialBooleanCacheMissCount\":" << context.partial_boolean_cache_miss_count
         << ",\"partialBooleanCacheWriteCount\":" << context.partial_boolean_cache_write_count
+        << ",\"topologyCacheHitCount\":" << context.topology_cache_hit_count
+        << ",\"topologyCacheMissCount\":" << context.topology_cache_miss_count
+        << ",\"topologyCacheWriteCount\":" << context.topology_cache_write_count
         << ",\"fourWayIntersectionCount\":" << context.four_way_intersection_count
         << ",\"previewFacetCount\":" << context.preview_facet_count
         << ",\"parts\":[";
@@ -1206,12 +1214,110 @@ void write_topology_direction(std::ostream& out, const gp_Dir& direction) {
     out << "]";
 }
 
-void write_part_topology(
+bool faces_share_support_surface(const TopoDS_Face& lhs, const TopoDS_Face& rhs) {
+    constexpr double linear_tolerance = 1.0e-6;
+    constexpr double angular_tolerance = 1.0e-9;
+    try {
+        BRepAdaptor_Surface lhs_surface(lhs);
+        BRepAdaptor_Surface rhs_surface(rhs);
+        if (lhs_surface.GetType() != rhs_surface.GetType()) return false;
+        switch (lhs_surface.GetType()) {
+            case GeomAbs_Plane: {
+                const gp_Pln lhs_plane = lhs_surface.Plane();
+                const gp_Pln rhs_plane = rhs_surface.Plane();
+                return lhs_plane.Axis().Direction().IsParallel(
+                           rhs_plane.Axis().Direction(), angular_tolerance) &&
+                       lhs_plane.Distance(rhs_plane.Location()) <= linear_tolerance;
+            }
+            case GeomAbs_Cylinder: {
+                const gp_Cylinder lhs_cylinder = lhs_surface.Cylinder();
+                const gp_Cylinder rhs_cylinder = rhs_surface.Cylinder();
+                return std::abs(lhs_cylinder.Radius() - rhs_cylinder.Radius()) <=
+                           linear_tolerance &&
+                       lhs_cylinder.Axis().Direction().IsParallel(
+                           rhs_cylinder.Axis().Direction(), angular_tolerance) &&
+                       gp_Lin(lhs_cylinder.Axis()).Distance(rhs_cylinder.Location()) <=
+                           linear_tolerance;
+            }
+            case GeomAbs_Cone: {
+                const gp_Cone lhs_cone = lhs_surface.Cone();
+                const gp_Cone rhs_cone = rhs_surface.Cone();
+                return std::abs(lhs_cone.SemiAngle() - rhs_cone.SemiAngle()) <=
+                           angular_tolerance &&
+                       std::abs(lhs_cone.RefRadius() - rhs_cone.RefRadius()) <=
+                           linear_tolerance &&
+                       lhs_cone.Axis().Direction().IsParallel(
+                           rhs_cone.Axis().Direction(), angular_tolerance) &&
+                       gp_Lin(lhs_cone.Axis()).Distance(rhs_cone.Location()) <= linear_tolerance;
+            }
+            case GeomAbs_Torus: {
+                const gp_Torus lhs_torus = lhs_surface.Torus();
+                const gp_Torus rhs_torus = rhs_surface.Torus();
+                return lhs_torus.Location().Distance(rhs_torus.Location()) <= linear_tolerance &&
+                       std::abs(lhs_torus.MajorRadius() - rhs_torus.MajorRadius()) <=
+                           linear_tolerance &&
+                       std::abs(lhs_torus.MinorRadius() - rhs_torus.MinorRadius()) <=
+                           linear_tolerance &&
+                       lhs_torus.Axis().Direction().IsParallel(
+                           rhs_torus.Axis().Direction(), angular_tolerance);
+            }
+            default: {
+                TopLoc_Location lhs_location;
+                TopLoc_Location rhs_location;
+                const Handle(Geom_Surface) lhs_geometry = BRep_Tool::Surface(lhs, lhs_location);
+                const Handle(Geom_Surface) rhs_geometry = BRep_Tool::Surface(rhs, rhs_location);
+                if (lhs_geometry.IsNull() || lhs_geometry != rhs_geometry) return false;
+                const gp_Trsf lhs_transform = lhs_location.Transformation();
+                const gp_Trsf rhs_transform = rhs_location.Transformation();
+                for (int row = 1; row <= 3; ++row) {
+                    for (int column = 1; column <= 4; ++column) {
+                        if (std::abs(lhs_transform.Value(row, column) -
+                                     rhs_transform.Value(row, column)) > linear_tolerance) {
+                            return false;
+                        }
+                    }
+                }
+                return true;
+            }
+        }
+    } catch (...) {
+        return false;
+    }
+}
+
+struct CachedTopologyFragment {
+    std::string json;
+    std::string source_geometry_digest;
+};
+
+std::string topology_fragment_cache_key(
+    const Part& part,
+    const ExecutionContext& context,
+    double boundary_linear_deflection,
+    double boundary_angular_deflection,
+    const std::optional<std::string>& source_geometry_digest_override
+);
+std::optional<CachedTopologyFragment> read_cached_topology_fragment(
+    const fs::path& root,
+    const std::string& key,
+    ExecutionContext& context
+);
+void write_cached_topology_fragment(
+    const fs::path& root,
+    const std::string& key,
+    const CachedTopologyFragment& fragment,
+    ExecutionContext& context
+);
+
+std::string write_part_topology(
     std::ostream& out,
     const std::string& part_id,
     const std::string& label,
     const TopoDS_Shape& shape,
     const std::map<std::string, TopoDS_Shape>& authored_bindings,
+    double boundary_linear_deflection,
+    double boundary_angular_deflection,
+    const std::optional<std::string>& source_geometry_digest_override,
     bool& first_part
 ) {
     if (!first_part) {
@@ -1233,15 +1339,41 @@ void write_part_topology(
     const bool brep_valid = !shape.IsNull() && BRepCheck_Analyzer(shape).IsValid();
     out << ",\"solidCount\":" << solid_count;
     out << ",\"brepValid\":" << (brep_valid ? "true" : "false");
+    out << ",\"solidBounds\":[";
+    bool first_solid_bound = true;
+    auto write_solid_bound = [&](const TopoDS_Shape& solid) {
+        Bnd_Box bounds;
+        BRepBndLib::Add(solid, bounds);
+        if (bounds.IsVoid()) return;
+        double x_min, y_min, z_min, x_max, y_max, z_max;
+        bounds.Get(x_min, y_min, z_min, x_max, y_max, z_max);
+        if (!first_solid_bound) out << ",";
+        first_solid_bound = false;
+        out << "{\"xMin\":" << x_min
+            << ",\"yMin\":" << y_min
+            << ",\"zMin\":" << z_min
+            << ",\"xMax\":" << x_max
+            << ",\"yMax\":" << y_max
+            << ",\"zMax\":" << z_max << "}";
+    };
+    if (shape.ShapeType() == TopAbs_SOLID) {
+        write_solid_bound(shape);
+    } else {
+        for (TopExp_Explorer explorer(shape, TopAbs_SOLID); explorer.More(); explorer.Next()) {
+            write_solid_bound(explorer.Current());
+        }
+    }
+    out << "]";
 
-    const double boundary_linear_deflection = 0.04;
-    const double angular_deflection = std::clamp(
-        boundary_linear_deflection * 5.0 + 0.005, 0.005, 0.1);
     BRepBuilderAPI_Copy private_topology(shape, Standard_False, Standard_False);
     const TopoDS_Shape mesh_shape = private_topology.Shape();
     if (!mesh_shape.IsNull()) {
         BRepMesh_IncrementalMesh mesher(
-            mesh_shape, boundary_linear_deflection, Standard_False, angular_deflection, Standard_True);
+            mesh_shape,
+            boundary_linear_deflection,
+            Standard_False,
+            boundary_angular_deflection,
+            Standard_True);
         (void)mesher;
     }
     TopTools_IndexedMapOfShape edge_map;
@@ -1303,28 +1435,64 @@ void write_part_topology(
     }
     out << "]";
     out << ",\"vertices\":[";
+    struct AuthoredBindingTopologyIndex {
+        std::string name;
+        TopTools_IndexedMapOfShape copied_vertices;
+        TopTools_IndexedMapOfShape copied_edges;
+        TopTools_IndexedMapOfShape copied_faces;
+        std::vector<TopoDS_Face> source_faces;
+    };
+    std::vector<AuthoredBindingTopologyIndex> authored_binding_indices;
+    authored_binding_indices.reserve(authored_bindings.size());
+    for (const auto& [name, binding_shape] : authored_bindings) {
+        AuthoredBindingTopologyIndex index;
+        index.name = name;
+        const TopoDS_Shape indexed_binding_shape = binding_shape;
+        const auto index_subshapes = [&](TopAbs_ShapeEnum shape_type,
+                                         TopTools_IndexedMapOfShape& copied_shapes) {
+            TopTools_IndexedMapOfShape source_shapes;
+            TopExp::MapShapes(indexed_binding_shape, shape_type, source_shapes);
+            for (int ordinal = 1; ordinal <= source_shapes.Extent(); ++ordinal) {
+                const TopoDS_Shape source_shape = source_shapes.FindKey(ordinal);
+                if (shape_type == TopAbs_FACE) {
+                    index.source_faces.push_back(TopoDS::Face(source_shape));
+                }
+                try {
+                    const TopoDS_Shape copied = private_topology.ModifiedShape(source_shape);
+                    if (!copied.IsNull() && copied.ShapeType() == shape_type) {
+                        copied_shapes.Add(copied);
+                    }
+                } catch (...) {
+                }
+            }
+        };
+        index_subshapes(TopAbs_VERTEX, index.copied_vertices);
+        index_subshapes(TopAbs_EDGE, index.copied_edges);
+        index_subshapes(TopAbs_FACE, index.copied_faces);
+        authored_binding_indices.push_back(std::move(index));
+    }
     auto write_authored_bindings = [&](const TopoDS_Shape& target) {
         out << ",\"authoredBindings\":[";
         bool first_binding = true;
-        for (const auto& [name, binding_shape] : authored_bindings) {
-            TopTools_IndexedMapOfShape binding_subshapes;
-            TopExp::MapShapes(binding_shape, target.ShapeType(), binding_subshapes);
-            bool matched = false;
-            for (int index = 1; index <= binding_subshapes.Extent(); ++index) {
-                try {
-                    const TopoDS_Shape copied =
-                        private_topology.ModifiedShape(binding_subshapes.FindKey(index));
-                    if (!copied.IsNull() && copied.IsSame(target)) {
+        for (const AuthoredBindingTopologyIndex& index : authored_binding_indices) {
+            bool matched = target.ShapeType() == TopAbs_VERTEX
+                ? index.copied_vertices.FindIndex(target) > 0
+                : target.ShapeType() == TopAbs_EDGE
+                    ? index.copied_edges.FindIndex(target) > 0
+                    : target.ShapeType() == TopAbs_FACE &&
+                        index.copied_faces.FindIndex(target) > 0;
+            if (!matched && target.ShapeType() == TopAbs_FACE) {
+                for (const TopoDS_Face& source_face : index.source_faces) {
+                    if (faces_share_support_surface(TopoDS::Face(target), source_face)) {
                         matched = true;
                         break;
                     }
-                } catch (...) {
                 }
             }
             if (!matched) continue;
             if (!first_binding) out << ",";
             first_binding = false;
-            out << quote_json_string(name);
+            out << quote_json_string(index.name);
         }
         out << "]";
     };
@@ -1638,27 +1806,98 @@ void write_part_topology(
         }
         out << triangle_face_group_indices[index];
     }
+    const std::string computed_source_geometry_digest =
+        "sha256:" + source_geometry_hash.finish_hex();
+    const std::string& source_geometry_digest = source_geometry_digest_override.has_value()
+        ? *source_geometry_digest_override
+        : computed_source_geometry_digest;
     out << "],\"sourceGeometryDigest\":";
-    out << quote_json_string("sha256:" + source_geometry_hash.finish_hex());
+    out << quote_json_string(source_geometry_digest);
     out << "}";
+    return source_geometry_digest;
 }
 
-void write_topology_report(const fs::path& topology_path, const std::vector<ShapeRecord>& parts) {
+// FEM volume meshing must not inherit the dense display/export tessellation.
+// These errors stay well below the authored 1.2 mm local Tet4 target while the
+// wider angular bound avoids preserving tens of thousands of display facets.
+static constexpr double kAnalysisBoundaryLinearDeflection = 0.25;
+static constexpr double kAnalysisBoundaryAngularDeflection = 0.30;
+
+std::map<std::string, std::string> write_topology_report(
+    const fs::path& topology_path,
+    const Plan& plan,
+    const std::vector<ShapeRecord>& parts,
+    double boundary_linear_deflection,
+    double boundary_angular_deflection,
+    const std::optional<fs::path>& cache_root,
+    ecky::RenderCacheTransaction* cache_transaction,
+    ExecutionContext& context,
+    const std::map<std::string, std::string>& source_geometry_digest_overrides = {}
+) {
+    if (plan.parts.size() != parts.size()) {
+        throw EvalError("topology report plan/shape part count mismatch");
+    }
+    if (cache_root.has_value() != (cache_transaction != nullptr)) {
+        throw EvalError("topology cache transaction must match cache configuration");
+    }
     std::ofstream out(topology_path);
     if (!out) {
         throw IoError("failed to open topology file");
     }
-    out << "{\"schemaVersion\":1,\"parts\":[";
+    out << "{\"schemaVersion\":1,\"tessellationPolicy\":{\"linearDeflectionMm\":";
+    write_json_number(out, boundary_linear_deflection);
+    out << ",\"angularDeflectionRad\":";
+    write_json_number(out, boundary_angular_deflection);
+    out << "},\"parts\":[";
     bool first_part = true;
-    for (const auto& part : parts) {
+    std::map<std::string, std::string> source_geometry_digests;
+    for (std::size_t part_index = 0; part_index < parts.size(); ++part_index) {
+        const auto& part = parts[part_index];
         if (part.kind == ShapeRecord::Kind::Shape) {
-            write_part_topology(
-                out,
-                part.part_id,
-                part.label,
-                part.shape,
-                part.authored_bindings,
-                first_part);
+            const auto override_it = source_geometry_digest_overrides.find(part.part_id);
+            const std::optional<std::string> source_geometry_digest_override =
+                override_it == source_geometry_digest_overrides.end()
+                    ? std::nullopt
+                    : std::optional<std::string>(override_it->second);
+            const std::string cache_key = topology_fragment_cache_key(
+                plan.parts[part_index],
+                context,
+                boundary_linear_deflection,
+                boundary_angular_deflection,
+                source_geometry_digest_override);
+            std::optional<CachedTopologyFragment> fragment;
+            if (cache_root.has_value()) {
+                fragment = read_cached_topology_fragment(*cache_root, cache_key, context);
+                std::lock_guard<std::mutex> lock(context.mutex);
+                if (fragment.has_value()) ++context.topology_cache_hit_count;
+                else ++context.topology_cache_miss_count;
+            }
+            if (!fragment.has_value()) {
+                std::ostringstream fragment_json;
+                bool first_fragment_part = true;
+                const std::string source_geometry_digest = write_part_topology(
+                    fragment_json,
+                    part.part_id,
+                    part.label,
+                    part.shape,
+                    part.authored_bindings,
+                    boundary_linear_deflection,
+                    boundary_angular_deflection,
+                    source_geometry_digest_override,
+                    first_fragment_part);
+                fragment = CachedTopologyFragment{
+                    fragment_json.str(), source_geometry_digest};
+                if (cache_transaction != nullptr) {
+                    write_cached_topology_fragment(
+                        cache_transaction->staging_root(), cache_key, *fragment, context);
+                    std::lock_guard<std::mutex> lock(context.mutex);
+                    ++context.topology_cache_write_count;
+                }
+            }
+            if (!first_part) out << ',';
+            first_part = false;
+            out << fragment->json;
+            source_geometry_digests[part.part_id] = fragment->source_geometry_digest;
         } else {
             if (!first_part) out << ',';
             first_part = false;
@@ -1671,6 +1910,7 @@ void write_topology_report(const fs::path& topology_path, const std::vector<Shap
     if (!out.good()) {
         throw IoError("failed to write topology file");
     }
+    return source_geometry_digests;
 }
 
 Arg require_ref_arg(const std::vector<Arg>& args, std::size_t index, const std::string& op) {
@@ -3149,7 +3389,54 @@ TopoDS_Shape solidify_swept_shell(const TopoDS_Shape& shape) {
 }
 
 TopoDS_Shape sweep_shape(const TopoDS_Shape& profile, const TopoDS_Shape& path, bool frenet) {
-    BRepOffsetAPI_MakePipeShell pipe(first_wire(path, "sweep"));
+    const TopoDS_Wire spine = first_wire(path, "sweep");
+    if (frenet) {
+        TopExp_Explorer edge_explorer(spine, TopAbs_EDGE);
+        if (!edge_explorer.More()) {
+            throw EvalError("helical sweep path has no edge");
+        }
+        BRepAdaptor_Curve curve(TopoDS::Edge(edge_explorer.Current()));
+        constexpr std::size_t kHelicalSectionCount = 64;
+        BRepOffsetAPI_ThruSections loft(Standard_True, Standard_False, 1.0e-6);
+        for (std::size_t index = 0; index <= kHelicalSectionCount; ++index) {
+            const double ratio = static_cast<double>(index) /
+                static_cast<double>(kHelicalSectionCount);
+            const double parameter = curve.FirstParameter() +
+                (curve.LastParameter() - curve.FirstParameter()) * ratio;
+            gp_Pnt point;
+            gp_Vec tangent;
+            curve.D1(parameter, point, tangent);
+            if (tangent.Magnitude() <= 1.0e-12) {
+                throw EvalError("helical sweep has a zero tangent");
+            }
+            tangent.Normalize();
+
+            gp_Vec radial(point.X(), point.Y(), 0.0);
+            radial.Subtract(tangent.Multiplied(radial.Dot(tangent)));
+            if (radial.Magnitude() <= 1.0e-12) {
+                throw EvalError("helical sweep section is on its axis");
+            }
+            radial.Normalize();
+            gp_Vec section_axis = radial.Crossed(tangent);
+            section_axis.Normalize();
+
+            gp_Trsf placement;
+            placement.SetValues(
+                radial.X(), tangent.X(), section_axis.X(), point.X(),
+                radial.Y(), tangent.Y(), section_axis.Y(), point.Y(),
+                radial.Z(), tangent.Z(), section_axis.Z(), point.Z());
+            const TopoDS_Shape section =
+                BRepBuilderAPI_Transform(profile, placement, true).Shape();
+            loft.AddWire(first_wire(section, "helical sweep"));
+        }
+        loft.Build();
+        if (!loft.IsDone() || loft.Shape().IsNull()) {
+            throw EvalError("helical sweep loft failed to build");
+        }
+        return loft.Shape();
+    }
+
+    BRepOffsetAPI_MakePipeShell pipe(spine);
     // Match build123d's `Solid.sweep`: corrected-Frenet trihedron
     // (is_frenet=False) for generic spines, Transformed transition, and
     // Add(profile, withContact=False, withCorrection=False). A helical spine
@@ -3166,7 +3453,48 @@ TopoDS_Shape sweep_shape(const TopoDS_Shape& profile, const TopoDS_Shape& path, 
     // Transformed to match build123d's `Solid.sweep`.
     pipe.SetMode(frenet ? Standard_True : Standard_False);
     pipe.SetTransitionMode(frenet ? BRepBuilderAPI_RightCorner : BRepBuilderAPI_Transformed);
-    pipe.Add(first_wire(profile, "sweep"), Standard_False, Standard_False);
+    BRepTools_WireExplorer start_explorer(spine);
+    if (!start_explorer.More()) {
+        throw EvalError("sweep path has no edge");
+    }
+    const TopoDS_Edge start_edge = TopoDS::Edge(start_explorer.Current());
+    BRepAdaptor_Curve start_curve(start_edge);
+    const bool reversed = start_edge.Orientation() == TopAbs_REVERSED;
+    const double start_parameter = reversed
+        ? start_curve.LastParameter()
+        : start_curve.FirstParameter();
+    gp_Pnt start_point;
+    gp_Vec start_tangent;
+    start_curve.D1(start_parameter, start_point, start_tangent);
+    if (reversed) {
+        start_tangent.Reverse();
+    }
+    if (start_tangent.Magnitude() <= 1.0e-12) {
+        throw EvalError("sweep path has a zero start tangent");
+    }
+    start_tangent.Normalize();
+
+    gp_Vec profile_x(0.0, 0.0, 1.0);
+    profile_x.Subtract(start_tangent.Multiplied(profile_x.Dot(start_tangent)));
+    if (profile_x.Magnitude() <= 1.0e-12) {
+        profile_x = gp_Vec(0.0, 1.0, 0.0);
+        profile_x.Subtract(start_tangent.Multiplied(profile_x.Dot(start_tangent)));
+    }
+    profile_x.Normalize();
+    gp_Vec profile_y = start_tangent.Crossed(profile_x);
+    profile_y.Normalize();
+    profile_x = profile_y.Crossed(start_tangent);
+    profile_x.Normalize();
+
+    gp_Trsf start_frame;
+    start_frame.SetValues(
+        profile_x.X(), profile_y.X(), start_tangent.X(), start_point.X(),
+        profile_x.Y(), profile_y.Y(), start_tangent.Y(), start_point.Y(),
+        profile_x.Z(), profile_y.Z(), start_tangent.Z(), start_point.Z()
+    );
+    const TopoDS_Shape placed_profile =
+        BRepBuilderAPI_Transform(profile, start_frame, true).Shape();
+    pipe.Add(first_wire(placed_profile, "sweep"), Standard_False, Standard_False);
     pipe.Build();
     if (!pipe.IsDone()) {
         throw EvalError("sweep failed to build");
@@ -3285,10 +3613,59 @@ TopoDS_Shape private_boolean_operand(const TopoDS_Shape& shape) {
     return result;
 }
 
+void append_private_boolean_solids(
+    const TopoDS_Shape& shape,
+    TopTools_ListOfShape& destination,
+    std::vector<TopoDS_Shape>& storage
+) {
+    bool appended = false;
+    if (shape.ShapeType() == TopAbs_SOLID) {
+        storage.push_back(private_boolean_operand(shape));
+        destination.Append(storage.back());
+        return;
+    }
+    for (TopExp_Explorer solid(shape, TopAbs_SOLID); solid.More(); solid.Next()) {
+        storage.push_back(private_boolean_operand(solid.Current()));
+        destination.Append(storage.back());
+        appended = true;
+    }
+    if (!appended) {
+        storage.push_back(private_boolean_operand(shape));
+        destination.Append(storage.back());
+    }
+}
+
 bool boolean_inputs_are_valid_solids(const std::vector<TopoDS_Shape>& shapes) {
     return std::all_of(shapes.begin(), shapes.end(), [](const TopoDS_Shape& shape) {
         return !shape.IsNull() && shape_has_solid(shape) && BRepCheck_Analyzer(shape).IsValid();
     });
+}
+
+constexpr std::size_t kMaximumBooleanUnifyFaceCount = 24;
+constexpr std::size_t kMaximumBooleanUnifyEdgeCount = 96;
+
+bool boolean_result_is_within_unify_budget(const TopoDS_Shape& shape) {
+    std::size_t face_count = 0;
+    for (TopExp_Explorer face(shape, TopAbs_FACE); face.More(); face.Next()) {
+        if (++face_count > kMaximumBooleanUnifyFaceCount) return false;
+    }
+    std::size_t edge_count = 0;
+    for (TopExp_Explorer edge(shape, TopAbs_EDGE); edge.More(); edge.Next()) {
+        if (++edge_count > kMaximumBooleanUnifyEdgeCount) return false;
+    }
+    return true;
+}
+
+TopoDS_Shape unify_boolean_same_domain(const TopoDS_Shape& shape) {
+    if (!boolean_result_is_within_unify_budget(shape)) return shape;
+    ShapeUpgrade_UnifySameDomain unify(
+        shape, Standard_True, Standard_True, Standard_False);
+    unify.Build();
+    const TopoDS_Shape unified = unify.Shape();
+    if (unified.IsNull() || !BRepCheck_Analyzer(unified).IsValid()) {
+        return shape;
+    }
+    return unified;
 }
 
 template <typename BooleanBuilder>
@@ -3300,12 +3677,14 @@ TopoDS_Shape checked_boolean_shapes(
 ) {
     StageExecutionTimer stage_timer(context, "boolean");
     TopTools_ListOfShape arguments;
+    std::vector<TopoDS_Shape> private_arguments;
     for (const TopoDS_Shape& shape : argument_shapes) {
-        arguments.Append(private_boolean_operand(shape));
+        append_private_boolean_solids(shape, arguments, private_arguments);
     }
     TopTools_ListOfShape tools;
+    std::vector<TopoDS_Shape> private_tools;
     for (const TopoDS_Shape& shape : tool_shapes) {
-        tools.Append(private_boolean_operand(shape));
+        append_private_boolean_solids(shape, tools, private_tools);
     }
     BooleanBuilder builder;
     builder.SetArguments(arguments);
@@ -3337,7 +3716,7 @@ TopoDS_Shape checked_boolean_shapes(
             "` produced empty geometry; operands do not overlap or the crop plane lies outside the source bounds"
         );
     }
-    return result;
+    return unify_boolean_same_domain(result);
 }
 
 TopoDS_Shape fuse_shapes(
@@ -3393,7 +3772,7 @@ PreparedUnionResult prepare_four_way_union(
         if (builder.HasErrors() || builder.Shape().IsNull()) {
             throw EvalError("Direct OCCT union materialization failed");
         }
-        return builder.Shape();
+        return unify_boolean_same_domain(builder.Shape());
     };
     std::vector<TopoDS_Shape> partials(2);
     for (const PartialBooleanGroupPlan& group : groups) {
@@ -3415,10 +3794,9 @@ TopoDS_Shape fuse_shapes(const std::vector<TopoDS_Shape>& shapes, ExecutionConte
     StageExecutionTimer stage_timer(context, "boolean");
     TopTools_ListOfShape arguments;
     std::vector<TopoDS_Shape> prepared;
-    prepared.reserve(shapes.size());
+    prepared.reserve(shapes.size() * 2);
     for (const TopoDS_Shape& shape : shapes) {
-        prepared.push_back(private_boolean_operand(shape));
-        arguments.Append(prepared.back());
+        append_private_boolean_solids(shape, arguments, prepared);
     }
     BOPAlgo_PaveFiller filler;
     filler.SetArguments(arguments);
@@ -3445,7 +3823,7 @@ TopoDS_Shape fuse_shapes(const std::vector<TopoDS_Shape>& shapes, ExecutionConte
     if (builder.HasErrors() || builder.Shape().IsNull()) {
         throw EvalError("Direct OCCT boolean `union` failed");
     }
-    return builder.Shape();
+    return unify_boolean_same_domain(builder.Shape());
 }
 
 TopoDS_Shape cut_shapes(
@@ -3797,6 +4175,56 @@ TopoDS_Shape clip_box_shape(
     if (!shape_has_solid(result) && shape_has_solid(shape)) {
         throw EvalError(
             "clip-box removed all geometry: the clip box keeps no solid of the input shape");
+    }
+    return result;
+}
+
+// Bound a fused external thread to its authored major-radius and length
+// envelope. Trim the spill at both helix ends with Cut first: OCCT Common can
+// collapse an untrimmed swept helicoid to an empty shape. The now-bounded solid
+// can then be intersected with its exact cylindrical/conical radial envelope.
+// If OCCT still rejects Common for a valid swept solid, the axial Cut result is
+// safe because the authored radial sweep already uses these same major radii.
+TopoDS_Shape clip_thread_envelope_shape(
+    const TopoDS_Shape& shape,
+    double bottom_major_radius,
+    double top_major_radius,
+    double length
+) {
+    if (!std::isfinite(bottom_major_radius) || bottom_major_radius <= 0.0 ||
+        !std::isfinite(top_major_radius) || top_major_radius <= 0.0 ||
+        !std::isfinite(length) || length <= 0.0) {
+        throw EvalError(
+            "clip-thread-envelope radii and length must be positive and finite");
+    }
+
+    const double radial_extent = std::max(bottom_major_radius, top_major_radius);
+    TopoDS_Shape axial_result = clip_by_cut(
+        shape,
+        {-radial_extent, radial_extent},
+        {-radial_extent, radial_extent},
+        {0.0, length});
+    const TopoDS_Shape envelope =
+        std::abs(bottom_major_radius - top_major_radius) <= 1.0e-12
+        ? BRepPrimAPI_MakeCylinder(bottom_major_radius, length).Shape()
+        : BRepPrimAPI_MakeCone(bottom_major_radius, top_major_radius, length).Shape();
+    BRepAlgoAPI_Common radial_common(axial_result, envelope);
+    radial_common.Build();
+    TopoDS_Shape result = axial_result;
+    if (radial_common.IsDone() && shape_has_solid(radial_common.Shape()) &&
+        BRepCheck_Analyzer(radial_common.Shape()).IsValid()) {
+        result = radial_common.Shape();
+    }
+    if (!shape_has_solid(result)) {
+        throw EvalError("clip-thread-envelope removed the external thread solid");
+    }
+    if (!BRepCheck_Analyzer(result).IsValid()) {
+        ShapeFix_Shape fixer(result);
+        fixer.Perform();
+        const TopoDS_Shape fixed = fixer.Shape();
+        if (shape_has_solid(fixed) && BRepCheck_Analyzer(fixed).IsValid()) {
+            result = fixed;
+        }
     }
     return result;
 }
@@ -5538,6 +5966,17 @@ SlotValue evaluate_command(
         }
         return place_shape(get_ref_frame(0), get_ref_shape(1));
     }
+    if (op == "clip-thread-envelope") {
+        if (command.args.size() != 4) {
+            throw EvalError(
+                "clip-thread-envelope expects bottom radius, top radius, length, and shape");
+        }
+        return SlotValue::shape_value(clip_thread_envelope_shape(
+            get_ref_shape(3),
+            require_number_arg(command.args, 0, op),
+            require_number_arg(command.args, 1, op),
+            require_number_arg(command.args, 2, op)));
+    }
     if (op == "bspline") {
         return make_bspline_shape(bspline_args(command));
     }
@@ -6050,6 +6489,28 @@ std::string part_cache_key(const Part& part, const ExecutionContext& context) {
     return ecky::execution_identity(input);
 }
 
+std::string authored_part_cache_key(
+    const Part& part,
+    const std::vector<std::string>& command_cache_keys,
+    const ExecutionContext& context
+) {
+    ecky::ExecutionIdentityInput input = execution_identity_base("part-authored-slots", context);
+    input.resolved_args.push_back(part_cache_key(part, context));
+    for (const Part::AuthoredBinding& binding : part.authored_bindings) {
+        const auto command = std::find_if(
+            part.commands.begin(), part.commands.end(), [&](const Command& candidate) {
+                return candidate.output == binding.slot;
+            });
+        if (command == part.commands.end()) {
+            throw EvalError("cache identity missing authored binding producer");
+        }
+        const std::size_t command_index = static_cast<std::size_t>(
+            std::distance(part.commands.begin(), command));
+        input.ordered_dependency_identities.push_back(command_cache_keys.at(command_index));
+    }
+    return ecky::execution_identity(input);
+}
+
 bool command_cache_admitted(const Command& command) {
     static const std::set<std::string> kExpensive = {
         "union", "difference", "intersection", "fillet", "chamfer", "shell", "loft",
@@ -6060,6 +6521,133 @@ bool command_cache_admitted(const Command& command) {
 
 std::string file_digest(const fs::path& path) {
     return "sha256:" + ecky::sha256_hex(read_binary_file(path));
+}
+
+std::vector<std::string> part_command_cache_keys(
+    const Part& part, const ExecutionContext& context
+) {
+    std::map<std::uint64_t, std::string> dependencies;
+    std::vector<std::string> keys;
+    keys.reserve(part.commands.size());
+    for (const Command& command : part.commands) {
+        const std::string key = command_cache_key(command, dependencies, context);
+        keys.push_back(key);
+        dependencies.emplace(command.output, key);
+    }
+    return keys;
+}
+
+std::string topology_fragment_cache_key(
+    const Part& part,
+    const ExecutionContext& context,
+    double boundary_linear_deflection,
+    double boundary_angular_deflection,
+    const std::optional<std::string>& source_geometry_digest_override
+) {
+    ecky::ExecutionIdentityInput input = execution_identity_base(
+        "part-topology-json-v1", context);
+    input.resolved_args = {
+        "part-id:" + part.part_id,
+        "label:" + part.label,
+        "representation:" + std::string(geometry_representation_name(part.representation)),
+        "linear-deflection:" + ecky::canonical_f64(boundary_linear_deflection),
+        "angular-deflection:" + ecky::canonical_f64(boundary_angular_deflection),
+        "source-geometry-digest:" + source_geometry_digest_override.value_or("computed"),
+    };
+    input.ordered_dependency_identities.push_back(part_cache_key(part, context));
+    if (!part.authored_bindings.empty()) {
+        const std::vector<std::string> command_keys = part_command_cache_keys(part, context);
+        input.ordered_dependency_identities.push_back(
+            authored_part_cache_key(part, command_keys, context));
+        for (const Part::AuthoredBinding& binding : part.authored_bindings) {
+            input.resolved_args.push_back("authored-binding:" + binding.name);
+        }
+    }
+    return ecky::execution_identity(input);
+}
+
+std::optional<CachedTopologyFragment> read_cached_topology_fragment(
+    const fs::path& root,
+    const std::string& key,
+    ExecutionContext& context
+) {
+    {
+        std::lock_guard<std::mutex> lock(context.mutex);
+        ++context.cache_read_count;
+    }
+    const fs::path cache_dir = root / "topology-parts";
+    const fs::path artifact = cache_dir / (key + ".json");
+    const fs::path metadata = cache_dir / (key + ".meta");
+    try {
+        std::ifstream meta(metadata);
+        std::string schema;
+        std::string stored_key;
+        std::string stored_representation;
+        std::string stored_digest;
+        std::string stored_size;
+        std::string source_geometry_digest;
+        if (!(meta >> schema >> stored_key >> stored_representation >> stored_digest >>
+              stored_size >> source_geometry_digest) ||
+            schema != kSelectiveCacheSchema || stored_key != key ||
+            stored_representation != "topologyJson" ||
+            !fs::is_regular_file(artifact) || file_digest(artifact) != stored_digest ||
+            std::to_string(fs::file_size(artifact)) != stored_size) {
+            fs::remove(artifact);
+            fs::remove(metadata);
+            std::lock_guard<std::mutex> lock(context.mutex);
+            ++context.cache_rejection_count;
+            return std::nullopt;
+        }
+        const std::string json = read_binary_file(artifact);
+        const std::string digest_field =
+            "\"sourceGeometryDigest\":" + quote_json_string(source_geometry_digest);
+        if (json.size() < 2 || json.front() != '{' || json.back() != '}' ||
+            json.find(digest_field) == std::string::npos) {
+            fs::remove(artifact);
+            fs::remove(metadata);
+            std::lock_guard<std::mutex> lock(context.mutex);
+            ++context.cache_rejection_count;
+            return std::nullopt;
+        }
+        const auto now = fs::file_time_type::clock::now();
+        std::error_code touch_error;
+        fs::last_write_time(artifact, now, touch_error);
+        fs::last_write_time(metadata, now, touch_error);
+        return CachedTopologyFragment{json, source_geometry_digest};
+    } catch (...) {
+        std::error_code ignored;
+        fs::remove(artifact, ignored);
+        fs::remove(metadata, ignored);
+        std::lock_guard<std::mutex> lock(context.mutex);
+        ++context.cache_rejection_count;
+        return std::nullopt;
+    }
+}
+
+void write_cached_topology_fragment(
+    const fs::path& root,
+    const std::string& key,
+    const CachedTopologyFragment& fragment,
+    ExecutionContext& context
+) {
+    const fs::path cache_dir = root / "topology-parts";
+    fs::create_directories(cache_dir);
+    const fs::path artifact = cache_dir / (key + ".json");
+    const fs::path metadata = cache_dir / (key + ".meta");
+    {
+        std::ofstream output(artifact, std::ios::binary);
+        output.write(fragment.json.data(), static_cast<std::streamsize>(fragment.json.size()));
+        if (!output.good()) throw IoError("failed to stage topology cache artifact");
+    }
+    const std::string digest = file_digest(artifact);
+    {
+        std::ofstream meta(metadata);
+        meta << kSelectiveCacheSchema << ' ' << key << " topologyJson " << digest << ' '
+             << fs::file_size(artifact) << ' ' << fragment.source_geometry_digest << '\n';
+        if (!meta.good()) throw IoError("failed to stage topology cache metadata");
+    }
+    std::lock_guard<std::mutex> lock(context.mutex);
+    ++context.cache_write_count;
 }
 
 std::optional<TopoDS_Shape> read_cached_shape(
@@ -6089,8 +6677,11 @@ std::optional<TopoDS_Shape> read_cached_shape(
             return std::nullopt;
         }
         TopoDS_Shape shape;
-        if (!BinTools::Read(shape, artifact.string().c_str()) || shape.IsNull() ||
-            !BRepCheck_Analyzer(shape).IsValid()) {
+        // The writer admits only BRepCheck-valid shapes. On read, metadata size
+        // plus SHA-256 protects those bytes and BinTools proves decodability.
+        // Re-running deep BRepCheck here turns an unchanged multipart render
+        // into a full-model traversal and defeats selective recomputation.
+        if (!BinTools::Read(shape, artifact.string().c_str()) || shape.IsNull()) {
             fs::remove(artifact);
             fs::remove(metadata);
             {
@@ -6127,13 +6718,15 @@ void evict_cache_to_budget(const fs::path& root) {
     struct Entry { fs::path artifact; fs::path metadata; fs::file_time_type used; std::uintmax_t bytes; };
     std::vector<Entry> entries;
     std::uintmax_t total = 0;
-    for (const char* kind : {"parts", "commands", "partial-booleans", "part-meshes"}) {
+    for (const char* kind : {
+             "parts", "commands", "authored-parts", "partial-booleans", "part-meshes",
+             "topology-parts"}) {
         const fs::path dir = root / kind;
         if (!fs::is_directory(dir)) continue;
         for (const auto& item : fs::directory_iterator(dir)) {
             const std::string extension = item.path().extension().string();
             if (extension != ".brepbin" && extension != ".meshbin" &&
-                extension != ".partmesh") {
+                extension != ".partmesh" && extension != ".json") {
                 continue;
             }
             const fs::path metadata = item.path().parent_path() /
@@ -6418,29 +7011,9 @@ std::vector<ShapeRecord> evaluate_plan(
         for (std::size_t part_index = 0; part_index < plan.parts.size(); ++part_index) {
             const Part& part = plan.parts[part_index];
             cache_keys[part_index] = part_cache_key(part, context);
-            std::optional<SlotValue> cached_part;
-            if (part.authored_bindings.empty()) {
-                cached_part = read_cached_geometry(
-                    *cache_root, "parts", cache_keys[part_index],
-                    part.representation, context);
-            }
-            if (cached_part.has_value()) {
-                ShapeRecord record;
-                record.part_id = part.part_id;
-                record.label = part.label;
-                if (cached_part->kind == SlotValue::Kind::Manifold) {
-                    record.kind = ShapeRecord::Kind::Manifold;
-                    record.manifold = std::move(cached_part->manifold);
-                } else {
-                    record.shape = std::move(cached_part->shape);
-                }
-                cached_parts[part_index] = std::move(record);
-                std::lock_guard<std::mutex> lock(context.mutex);
-                context.part_cache_hits[part.part_id] = true;
-            } else {
-                std::lock_guard<std::mutex> lock(context.mutex);
-                context.part_cache_hits[part.part_id] = false;
-            }
+            std::optional<SlotValue> cached_part = read_cached_geometry(
+                *cache_root, "parts", cache_keys[part_index],
+                part.representation, context);
             std::map<std::uint64_t, std::string> fingerprints;
             command_cache_keys[part_index].reserve(part.commands.size());
             for (const Command& command : part.commands) {
@@ -6455,7 +7028,7 @@ std::vector<ShapeRecord> evaluate_plan(
                     const std::string group_key = partial_boolean_group_cache_key(
                         command, group, fingerprints, context);
                     partial_group_cache_keys.emplace(group_id, group_key);
-                    if (!cached_parts[part_index].has_value()) {
+                    if (!cached_part.has_value()) {
                         if (auto value = read_cached_geometry(
                                 *cache_root, "partial-booleans", group_key,
                                 group.representation, context)) {
@@ -6473,7 +7046,7 @@ std::vector<ShapeRecord> evaluate_plan(
                     }
                 }
                 fingerprints.emplace(command.output, key);
-                if (!cached_parts[part_index].has_value() && command_cache_admitted(command)) {
+                if (!cached_part.has_value() && command_cache_admitted(command)) {
                     const std::string command_id = part.part_id + ":" + std::to_string(command.output);
                     if (auto shape = read_cached_shape(*cache_root, "commands", key, context)) {
                         cached_command_slots[part_index].emplace(command.output, SlotValue::shape_value(*shape));
@@ -6482,6 +7055,46 @@ std::vector<ShapeRecord> evaluate_plan(
                         context.command_cache_evidence.push_back({command_id, false, true});
                     }
                 }
+            }
+            if (cached_part.has_value()) {
+                ShapeRecord record;
+                record.part_id = part.part_id;
+                record.label = part.label;
+                if (part.authored_bindings.empty()) {
+                    if (cached_part->kind == SlotValue::Kind::Manifold) {
+                        record.kind = ShapeRecord::Kind::Manifold;
+                        record.manifold = std::move(cached_part->manifold);
+                    } else {
+                        record.shape = std::move(cached_part->shape);
+                    }
+                    cached_parts[part_index] = std::move(record);
+                } else if (auto authored_payload = read_cached_shape(
+                               *cache_root, "authored-parts",
+                               authored_part_cache_key(
+                                   part, command_cache_keys[part_index], context),
+                               context)) {
+                    TopoDS_Iterator children(*authored_payload);
+                    if (children.More()) {
+                        record.shape = children.Value();
+                        children.Next();
+                        bool complete = true;
+                        for (const Part::AuthoredBinding& binding : part.authored_bindings) {
+                            if (!children.More()) {
+                                complete = false;
+                                break;
+                            }
+                            record.authored_bindings.emplace(binding.name, children.Value());
+                            children.Next();
+                        }
+                        if (complete && !children.More()) {
+                            cached_parts[part_index] = std::move(record);
+                        }
+                    }
+                }
+            }
+            {
+                std::lock_guard<std::mutex> lock(context.mutex);
+                context.part_cache_hits[part.part_id] = cached_parts[part_index].has_value();
             }
         }
     }
@@ -6895,6 +7508,19 @@ std::vector<ShapeRecord> evaluate_plan(
                     "` is not analytic BRep geometry");
             }
             record.authored_bindings.emplace(binding.name, authored->second.shape);
+        }
+        if (cache_root.has_value() && !part.authored_bindings.empty()) {
+            TopoDS_Compound authored_payload;
+            BRep_Builder builder;
+            builder.MakeCompound(authored_payload);
+            builder.Add(authored_payload, root->second.shape);
+            for (const Part::AuthoredBinding& binding : part.authored_bindings) {
+                builder.Add(authored_payload, slots[part_index].at(binding.slot).shape);
+            }
+            write_cached_shape(
+                cache_transaction->staging_root(), "authored-parts",
+                authored_part_cache_key(part, command_cache_keys[part_index], context),
+                authored_payload, context);
         }
         if (cache_root.has_value()) {
             write_cached_geometry(
@@ -7449,8 +8075,9 @@ int run(int argc, char** argv, ExecutionContext& context) {
 
     fs::create_directories(out_dir);
     const fs::path step_path = out_dir / "model.step";
-    const fs::path stl_path = out_dir / "preview.stl";
+    const fs::path stl_path = out_dir / "model.stl";
     const fs::path topology_path = out_dir / "topology.json";
+    const fs::path analysis_boundary_path = out_dir / "analysis-boundary.json";
     const fs::path stage_report_path = out_dir / "stage-report.json";
 
     const bool mesh_only = std::all_of(parts.begin(), parts.end(), [](const ShapeRecord& part) {
@@ -7491,7 +8118,7 @@ int run(int argc, char** argv, ExecutionContext& context) {
             context.preview_facet_count += mesh.triangles.size();
         }
     }
-    run_occt_export_stage("write-preview-stl", [&]() {
+    run_occt_export_stage("write-model-stl", [&]() {
         StageExecutionTimer stage_timer(context, "export");
         write_part_mesh_stl_file(stl_path, preview_meshes);
     }, context);
@@ -7517,7 +8144,27 @@ int run(int argc, char** argv, ExecutionContext& context) {
         }
     }
     context.set_stage("write-topology");
-    write_topology_report(topology_path, parts);
+    const std::map<std::string, std::string> source_geometry_digests =
+        write_topology_report(
+            topology_path,
+            plan,
+            parts,
+            kStlLinearDeflection,
+            stl_angular_deflection_for_linear(kStlLinearDeflection),
+            cache_root,
+            cache_transaction ? &*cache_transaction : nullptr,
+            context);
+    context.set_stage("write-analysis-boundary");
+    write_topology_report(
+        analysis_boundary_path,
+        plan,
+        parts,
+        kAnalysisBoundaryLinearDeflection,
+        kAnalysisBoundaryAngularDeflection,
+        cache_root,
+        cache_transaction ? &*cache_transaction : nullptr,
+        context,
+        source_geometry_digests);
     context.set_stage("write-stage-report");
     write_stage_report(stage_report_path, context);
     if (cache_transaction.has_value()) {

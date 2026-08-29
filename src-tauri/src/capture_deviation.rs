@@ -311,6 +311,7 @@ mod tests {
             crate::capture_guidance::source_mesh_content_digest(&source_path).expect("mesh digest");
         guide.canonical_digest = guide.compute_canonical_digest().expect("guide digest");
         let boundary = AnalysisBoundarySurface {
+            tessellation_policy: Default::default(),
             part_id: "part-1".into(),
             label: "Part".into(),
             source_geometry_digest: "sha256:part-geometry".into(),

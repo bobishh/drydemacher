@@ -464,6 +464,22 @@ pub enum CoreAnalysisClauseKind {
         face_tag: String,
         size: CoreAnalysisScalarExpr,
     },
+    TopologyControls {
+        volume_fraction: CoreAnalysisScalarExpr,
+        penalty: CoreAnalysisScalarExpr,
+        minimum_density: CoreAnalysisScalarExpr,
+        filter_radius: CoreAnalysisScalarExpr,
+        move_limit: CoreAnalysisScalarExpr,
+        convergence_tolerance: CoreAnalysisScalarExpr,
+    },
+    PassiveSolid {
+        face_tag: String,
+        depth: CoreAnalysisScalarExpr,
+    },
+    PassiveVoid {
+        face_tag: String,
+        depth: CoreAnalysisScalarExpr,
+    },
     Fixed {
         face_tag: String,
     },
@@ -632,6 +648,13 @@ impl CoreKeywordArg {
             None => CoreKeywordValue::Expr(source),
         };
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoreStlPreparationPolicy {
+    pub target_triangles: CoreNode,
+    pub max_error: CoreNode,
+    pub preserve_boundaries: CoreNode,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -830,6 +853,18 @@ impl CoreNode {
     pub fn with_span(mut self, span: SourceSpan) -> Self {
         self.span = Some(span);
         self
+    }
+
+    pub fn stl_preparation_policy(&self) -> CoreResult<Option<CoreStlPreparationPolicy>> {
+        let CoreNodeKind::Call {
+            op: CoreOperation::Primitive(CorePrimitive::Stl),
+            keywords,
+            ..
+        } = &self.kind
+        else {
+            return Ok(None);
+        };
+        signatures::normalize_stl_preparation_policy(keywords)
     }
 }
 

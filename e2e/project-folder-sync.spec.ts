@@ -20,7 +20,10 @@ declare global {
       status: 'missing' | 'clean' | 'fileChanged' | 'threadAdvanced' | 'conflict';
       applyError?: { code: string; message: string; details?: string } | null;
       applied?: boolean;
+      renderActivity?: Array<{ slug: string; threadId: string }>;
+      timelineRows?: Array<Record<string, unknown>>;
     };
+    __PROJECT_FOLDER_HOLD_BOOT__?: boolean;
     __emitTauriEvent?: (event: string, payload: unknown) => void;
   }
 }
@@ -31,6 +34,8 @@ function projectFolderMockScript() {
     status: 'missing',
     applyError: null,
     applied: false,
+    renderActivity: [],
+    timelineRows: [],
   };
 
   window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
@@ -104,8 +109,29 @@ function projectFolderMockScript() {
       };
     }
     if (cmd === 'check_freecad') return true;
-    if (cmd === 'get_history') return [];
-    if (cmd === 'get_last_design') return null;
+    if (cmd === 'get_history') {
+      if (((window as any).__PROJECT_FOLDER_STATE__.timelineRows ?? []).length > 0) {
+        return [{
+          id: 'mock-thread-1',
+          title: 'Bracket',
+          summary: 'Bracket thread',
+          messages: [],
+          updatedAt: 1781200100,
+          versionCount: 1,
+          pendingCount: 0,
+          queuedCount: 0,
+          errorCount: 0,
+          status: 'active',
+        }];
+      }
+      return [];
+    }
+    if (cmd === 'get_last_design') {
+      if (window.__PROJECT_FOLDER_HOLD_BOOT__) {
+        return new Promise(() => {});
+      }
+      return null;
+    }
     if (cmd === 'get_default_macro') return '# macro';
     if (cmd === 'init_generation_attempt') return 'mock-msg-1';
     if (cmd === 'classify_intent') {
@@ -148,7 +174,7 @@ function projectFolderMockScript() {
         fcstdPath: '/mock.FCStd',
         manifestPath: '/mock/manifest.json',
         macroPath: '/mock.py',
-        previewStlPath: '/mock.stl',
+        modelStlPath: '/mock.stl',
         viewerAssets: [],
         calloutAnchors: [],
         measurementGuides: [],
@@ -182,7 +208,7 @@ function projectFolderMockScript() {
         issues: [],
         metrics: {
           partCount: 1,
-          previewStlSizeBytes: 1024,
+          modelStlSizeBytes: 1024,
           totalVolume: 1000,
           totalArea: 500,
           bbox: { xMin: 0, yMin: 0, zMin: 0, xMax: 10, yMax: 10, zMax: 10 },
@@ -203,6 +229,15 @@ function projectFolderMockScript() {
         messages: [],
       };
     }
+    if (cmd === 'get_thread_messages_page') {
+      return {
+        messages: (window as any).__PROJECT_FOLDER_STATE__.timelineRows ?? [],
+        nextBefore: null,
+        hasMore: false,
+        observedBytes: 0,
+        truncatedFields: [],
+      };
+    }
     if (cmd === 'save_model_manifest') return null;
     if (cmd === 'add_manual_version') return 'mock-param-version-1';
     if (cmd === 'update_version_runtime') return null;
@@ -213,6 +248,7 @@ function projectFolderMockScript() {
     if (cmd === 'save_config') return null;
     if (cmd === 'get_active_agent_sessions') return [];
     if (cmd === 'get_agent_terminal_snapshots') return [];
+    if (cmd === 'get_agent_activity') return { events: [], latestCursor: 0 };
     if (cmd === 'get_thread_agent_state') {
       return {
         threadId: args?.threadId ?? null,
@@ -234,21 +270,8 @@ function projectFolderMockScript() {
     if (cmd === 'project_folder_status') {
       return statusBody();
     }
-    if (cmd === 'project_folder_apply') {
-      const state = (window as any).__PROJECT_FOLDER_STATE__;
-      if (state.applyError) {
-        throw state.applyError;
-      }
-      state.applied = true;
-      state.status = 'clean';
-      return {
-        stateBefore: 'fileChanged',
-        noOp: false,
-        threadId: 'mock-thread-1',
-        messageId: 'mock-msg-2',
-        modelId: 'mock-model-2',
-        manifest: { ...manifest, messageId: 'mock-msg-2', sourceDigest: 'sha256:edited' },
-      };
+    if (cmd === 'project_folder_render_activity') {
+      return (window as any).__PROJECT_FOLDER_STATE__.renderActivity ?? [];
     }
     if (cmd === 'get_project_source') {
       return {
@@ -314,19 +337,264 @@ endsolid mock
 }
 
 test.describe('Project folder mirror (filesystem-project-mirror T5.2/T5.3)', () => {
-  test('Given model.ecky changes in an editor When the watcher detects it Then a global source notice appears with Params closed', async ({ page }) => {
+  test('Given an active thread When history changes Then the timeline refreshes without loading the full thread aggregate', async ({ page }) => {
+    await bootIntoBracketWorkspace(page);
+
+    const before = await page.evaluate(() => ({
+      history: (window.__PROJECT_FOLDER_CALLS__ ?? []).filter((call) => call.cmd === 'get_history').length,
+      fullThread: (window.__PROJECT_FOLDER_CALLS__ ?? []).filter((call) => call.cmd === 'get_thread').length,
+    }));
+
+    await page.evaluate(() => {
+      window.__emitTauriEvent?.('history-updated', {
+        threadId: 'mock-thread-1',
+        messageId: 'mock-msg-2',
+        revision: 2,
+        kind: 'messageUpdated',
+      });
+    });
+
+    await expect.poll(() => page.evaluate(() =>
+      (window.__PROJECT_FOLDER_CALLS__ ?? []).filter((call) => call.cmd === 'get_history').length,
+    )).toBeGreaterThan(before.history);
+    await page.waitForTimeout(100);
+
+    const fullThreadCalls = await page.evaluate(() =>
+      (window.__PROJECT_FOLDER_CALLS__ ?? []).filter((call) => call.cmd === 'get_thread').length,
+    );
+    expect(fullThreadCalls).toBe(before.fullThread);
+    await expect(page.locator('.param-panel')).toBeVisible();
+  });
+
+  test('Given timeline UI state When fifty invalidations burst Then refresh coalesces and preserves local state', async ({ page }) => {
+    await bootIntoBracketWorkspace(page);
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    const search = page.getByPlaceholder('SEARCH TIMELINE');
+    await search.fill('bracket');
+    const before = await page.evaluate(() => ({
+      pages: (window.__PROJECT_FOLDER_CALLS__ ?? []).filter((call) => call.cmd === 'get_thread_messages_page').length,
+      full: (window.__PROJECT_FOLDER_CALLS__ ?? []).filter((call) => call.cmd === 'get_thread').length,
+    }));
+
+    await page.evaluate(() => {
+      for (let revision = 10; revision < 60; revision += 1) {
+        window.__emitTauriEvent?.('history-updated', {
+          threadId: 'mock-thread-1',
+          messageId: `burst-${revision}`,
+          revision,
+          kind: 'messageUpdated',
+        });
+      }
+    });
+
+    await expect.poll(() => page.evaluate(() =>
+      (window.__PROJECT_FOLDER_CALLS__ ?? []).filter((call) => call.cmd === 'get_thread_messages_page').length,
+    )).toBeGreaterThan(before.pages);
+    await expect(search).toHaveValue('bracket');
+    const after = await page.evaluate(() => ({
+      pages: (window.__PROJECT_FOLDER_CALLS__ ?? []).filter((call) => call.cmd === 'get_thread_messages_page').length,
+      full: (window.__PROJECT_FOLDER_CALLS__ ?? []).filter((call) => call.cmd === 'get_thread').length,
+    }));
+    expect(after.pages - before.pages).toBeLessThanOrEqual(2);
+    expect(after.full).toBe(before.full);
+  });
+
+  test('Given an oversized timeline field When its bounded row arrives Then raw truncation sizes stay visible', async ({ page }) => {
+    await bootIntoBracketWorkspace(page);
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    const pagesBefore = await page.evaluate(() =>
+      (window.__PROJECT_FOLDER_CALLS__ ?? []).filter(
+        (call) => call.cmd === 'get_thread_messages_page',
+      ).length,
+    );
+    await page.evaluate(() => {
+      window.__PROJECT_FOLDER_STATE__!.timelineRows = [{
+        id: 'oversized-user-row',
+        role: 'user',
+        content: 'bounded message preview',
+        contentTruncated: true,
+        contentObservedBytes: 120000,
+        contentAllowedBytes: 8192,
+        status: 'success',
+        agentOrigin: null,
+        timestamp: 1781200100,
+        timelineOrder: 42,
+        versionSummary: null,
+        hasImage: false,
+        attachmentCount: 0,
+        visualKind: null,
+      }];
+      window.__emitTauriEvent?.('history-updated', {
+        threadId: null,
+        messageId: 'oversized-user-row',
+        revision: 3000,
+        kind: 'messageUpdated',
+      });
+    });
+
+    await expect.poll(() => page.evaluate(() =>
+      (window.__PROJECT_FOLDER_CALLS__ ?? []).filter(
+        (call) => call.cmd === 'get_thread_messages_page',
+      ).length,
+    )).toBeGreaterThan(pagesBefore);
+    await expect(page.getByText(/120000 BYTES OBSERVED · 8192 ALLOWED/)).toBeVisible();
+  });
+
+  test('Given startup has no restored workspace When a folder render exists Then ordinary Loading remains visible', async ({ page }) => {
+    await page.addInitScript(projectFolderMockScript);
+    await page.addInitScript(() => {
+      window.__PROJECT_FOLDER_HOLD_BOOT__ = true;
+      window.__PROJECT_FOLDER_STATE__!.renderActivity = [
+        { slug: 'filament-dryer-dc939cfd', threadId: 'mock-thread-1' },
+      ];
+    });
+
+    await page.goto('/');
+
+    await expect.poll(() => page.evaluate(() =>
+      (window.__PROJECT_FOLDER_CALLS__ ?? []).some(
+        (call) => call.cmd === 'project_folder_render_activity',
+      ),
+    )).toBe(true);
+    await expect(page.locator('.boot-overlay')).toBeVisible();
+    await expect(page.locator('.viewport-transmutation')).toHaveCount(0);
+  });
+
+  test('Given startup has no file-sync render When boot remains pending Then ordinary Loading remains visible', async ({ page }) => {
+    await page.addInitScript(projectFolderMockScript);
+    await page.addInitScript(() => {
+      window.__PROJECT_FOLDER_HOLD_BOOT__ = true;
+    });
+
+    await page.goto('/');
+
+    await expect(page.locator('.boot-overlay')).toBeVisible();
+    await expect(page.locator('.viewport-transmutation')).toHaveCount(0);
+  });
+
+  test('Given backend render lock changes When geometry runs Then its single activity signal shows and clears render overlay', async ({ page }) => {
+    await bootIntoBracketWorkspace(page);
+
+    await page.evaluate(() => {
+      window.__PROJECT_FOLDER_STATE__!.renderActivity = [
+        { slug: 'bracket-abc12345', threadId: 'mock-thread-1' },
+      ];
+      window.__emitTauriEvent?.('geometry-render-activity', { activeCount: 1 });
+    });
+
+    await expect(page.locator('.viewport-transmutation')).toBeVisible();
+    await expect(page.locator('.viewport-transmutation')).toHaveAttribute('data-phase', 'rendering');
+    await expect(page.getByRole('img', { name: 'Rendering geometry.' })).toBeVisible();
+
+    await page.evaluate(() => {
+      window.__PROJECT_FOLDER_STATE__!.renderActivity = [];
+      window.__emitTauriEvent?.('geometry-render-activity', { activeCount: 0 });
+    });
+
+    await expect(page.locator('.viewport-transmutation')).toHaveCount(0);
+  });
+
+  test('Given a watcher batch contains multiple folders When active source changes Then its render overlay wins', async ({ page }) => {
+    await bootIntoBracketWorkspace(page);
+
+    await page.evaluate(() => {
+      window.__emitTauriEvent?.('geometry-render-activity', { activeCount: 1 });
+      window.__emitTauriEvent?.('project-folder-sync', [
+        { kind: 'detected', slug: 'bracket-abc12345', threadId: 'mock-thread-1' },
+        {
+          kind: 'applied',
+          slug: 'background-part',
+          threadId: 'background-thread',
+          messageId: 'background-message',
+          modelId: 'background-model',
+        },
+      ]);
+    });
+
+    await expect(page.locator('.viewport-transmutation')).toBeVisible();
+    await expect(page.locator('.viewport-transmutation')).toHaveAttribute('data-phase', 'rendering');
+    await expect(page.locator('.agent-notification-center')).toContainText('bracket-abc12345/model.ecky');
+    await expect(page.locator('.agent-notification-center')).not.toContainText('background-part');
+  });
+
+  test('Given a foreign folder notification without backend render activity Then render UI stays hidden', async ({ page }) => {
     await bootIntoBracketWorkspace(page);
 
     await page.evaluate(() => {
       window.__emitTauriEvent?.('project-folder-sync', [
-        { kind: 'detected', slug: 'bracket-abc12345', threadId: 'mock-thread-1' },
+        { kind: 'detected', slug: 'background-part', threadId: 'background-thread' },
       ]);
     });
 
-    const notice = page.getByTestId('project-folder-notice');
+    await expect(page.locator('.viewport-transmutation')).toHaveCount(0);
+    await expect(page.locator('.agent-notification-center')).not.toContainText('background-part');
+  });
+
+  test('Given model.ecky changes in an editor When auto-render runs Then one global source card advances from rendering to applied', async ({ page }) => {
+    await bootIntoBracketWorkspace(page);
+
+    await page.evaluate(() => {
+      for (const [cursor, kind, summary] of [
+        [1, 'tool_start', 'Replacing macro source for the active target.'],
+        [2, 'backend_resolved', 'Resolved macro render backend.'],
+        [3, 'auto_heal_applied', 'Reconciled legacy parameters.'],
+      ] as const) {
+        window.__emitTauriEvent?.('agent-activity-event', {
+          eventId: `folder-sync-trace-${cursor}`,
+          cursor,
+          sessionId: 'project-folder-watcher',
+          threadId: 'mock-thread-1',
+          messageId: `mock-draft-${cursor}`,
+          versionId: null,
+          actor: { kind: 'agent', id: 'project-folder-watcher', label: 'folder-sync' },
+          kind: 'trace',
+          lifecycleKey: `folder-sync:${kind}`,
+          phase: 'rendering',
+          summary,
+          detail: null,
+          severity: 'info',
+          state: 'active',
+          requiresAttention: false,
+          occurredAt: 1_800_000_000_000 + cursor,
+          raw: JSON.stringify({ kind }),
+        });
+      }
+      window.__emitTauriEvent?.('project-folder-sync', [
+        { kind: 'detected', slug: 'bracket-abc12345', threadId: 'mock-thread-1' },
+      ]);
+      window.__emitTauriEvent?.('geometry-render-activity', { activeCount: 1 });
+    });
+
+    const notice = page.locator('.agent-notification-center .agent-card').filter({ hasText: 'SOURCE RENDERING' });
     await expect(notice).toBeVisible();
-    await expect(notice).toContainText('SOURCE CHANGED');
+    await expect(notice).toContainText('SOURCE RENDERING');
     await expect(notice).toContainText('bracket-abc12345/model.ecky');
+    await expect(notice).not.toContainText('mock-thread-1');
+    await expect(notice).not.toContainText('FOLDER-SYNC');
+    await expect(page.locator('.agent-notification-center .agent-card')).toHaveCount(1);
+    await expect(page.locator('.viewport-transmutation')).toBeVisible();
+    await expect(page.locator('.viewport-transmutation')).toHaveAttribute('data-phase', 'rendering');
+
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'CODE' }).click();
+    await expect(page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR:' })).toBeVisible();
+
+    await page.evaluate(() => {
+      window.__emitTauriEvent?.('project-folder-sync', [
+        {
+          kind: 'applied',
+          slug: 'bracket-abc12345',
+          threadId: 'mock-thread-1',
+          messageId: 'mock-msg-2',
+          modelId: 'mock-model-2',
+        },
+      ]);
+      window.__emitTauriEvent?.('geometry-render-activity', { activeCount: 0 });
+    });
+
+    await expect(page.locator('.agent-notification-center .agent-card')).toHaveCount(1);
+    await expect(page.locator('.agent-notification-center .agent-card')).toContainText('SOURCE APPLIED');
+    await expect(page.locator('.viewport-transmutation')).toHaveCount(0);
+    await expect(page.getByTestId('project-folder-notice')).toHaveCount(0);
   });
 
   test('Given an external source edit fails When the watcher reports it Then the raw error is globally visible', async ({ page }) => {
@@ -347,15 +615,11 @@ test.describe('Project folder mirror (filesystem-project-mirror T5.2/T5.3)', () 
       ]);
     });
 
-    const notice = page.getByTestId('project-folder-notice');
-    await expect(notice).toHaveAttribute('role', 'alert');
+    const notice = page.locator('.agent-notification-center .agent-card').filter({ hasText: 'SOURCE APPLY FAILED' });
+    await expect(notice).toBeVisible();
     await expect(notice).toContainText('line 17: unexpected closing parenthesis');
-    await expect(modal).toContainText('solidify');
-
-    await modal.getByRole('button', { name: 'OPEN FILE' }).click();
-    await expect.poll(() => page.evaluate(() =>
-      (window.__PROJECT_FOLDER_CALLS__ ?? []).find((call) => call.cmd === 'open_project_in_editor')?.args,
-    )).toMatchObject({ threadId: 'mock-thread-1' });
+    await expect(page.getByTestId('project-folder-notice')).toHaveCount(0);
+    await expect(modal).toContainText('MACRO INSPECTOR:');
   });
 
   test('Given a blank UI thread When generation starts Then thread initialization runs before design generation', async ({
@@ -371,7 +635,7 @@ test.describe('Project folder mirror (filesystem-project-mirror T5.2/T5.3)', () 
     expect(calls[initIndex]?.args?.threadId).toBe(calls[generateIndex]?.args?.threadId);
   });
 
-  test('Given an exported folder with an external edit When Apply runs Then a new version is committed and the chip goes clean', async ({
+  test('Given an exported folder with an external edit When watcher owns sync Then manual Apply is not offered', async ({
     page,
   }) => {
     await bootIntoBracketWorkspace(page);
@@ -405,24 +669,16 @@ test.describe('Project folder mirror (filesystem-project-mirror T5.2/T5.3)', () 
     });
 
     await expect(chip).toContainText(/changed/i, { timeout: 10000 });
-    await expect(chip.getByRole('button', { name: /APPLY/i })).toBeVisible();
-
-    await chip.getByRole('button', { name: /APPLY/i }).click();
-
-    await expect.poll(() =>
-      page.evaluate(() =>
+    await expect(chip.getByRole('button', { name: /APPLY/i })).toHaveCount(0);
+    await expect(chip.getByRole('button', { name: /RE-EXPORT/i })).toBeVisible();
+    expect(
+      await page.evaluate(() =>
         (window.__PROJECT_FOLDER_CALLS__ ?? []).some((c) => c.cmd === 'project_folder_apply'),
       ),
-    ).toBeTruthy();
-    await expect.poll(() =>
-      page.evaluate(() => (window as any).__PROJECT_FOLDER_STATE__?.applied === true),
-    ).toBe(true);
-
-    // After a successful apply the chip refreshes to clean.
-    await expect(chip).toContainText(/clean/i, { timeout: 10000 });
+    ).toBe(false);
   });
 
-  test('Given a stale folder When Apply runs without force Then it refuses and surfaces the exact reason', async ({
+  test('Given a stale folder When watcher owns sync Then manual Apply is not offered and re-export remains', async ({
     page,
   }) => {
     await bootIntoBracketWorkspace(page);
@@ -433,11 +689,6 @@ test.describe('Project folder mirror (filesystem-project-mirror T5.2/T5.3)', () 
     await chip.getByRole('button', { name: /EXPORT/i }).click();
     await page.evaluate(() => {
       (window as any).__PROJECT_FOLDER_STATE__.status = 'threadAdvanced';
-      (window as any).__PROJECT_FOLDER_STATE__.applyError = {
-        code: 'validation',
-        message: 'Project folder is stale: thread advanced past the exported version.',
-        details: 'Run project_folder_export to refresh the folder.',
-      };
     });
     await page.evaluate(() => {
       window.__emitTauriEvent?.('project-folder-sync', []);
@@ -445,17 +696,12 @@ test.describe('Project folder mirror (filesystem-project-mirror T5.2/T5.3)', () 
 
     await expect(chip).toContainText(/stale|advanced/i, { timeout: 10000 });
 
-    // Apply must be offered (the user can still attempt it) but the backend
-    // refuses; the raw error text is surfaced verbatim, not a generic message.
-    await chip.getByRole('button', { name: /APPLY/i }).click();
-
-    await expect.poll(() =>
-      page.evaluate(() =>
+    await expect(chip.getByRole('button', { name: /APPLY/i })).toHaveCount(0);
+    await expect(chip.getByRole('button', { name: /RE-EXPORT/i })).toBeVisible();
+    expect(
+      await page.evaluate(() =>
         (window.__PROJECT_FOLDER_CALLS__ ?? []).some((c) => c.cmd === 'project_folder_apply'),
       ),
-    ).toBeTruthy();
-    await expect(chip).toContainText(/stale: thread advanced past the exported version/i);
-    // Re-export is the documented remediation and must be available.
-    await expect(chip.getByRole('button', { name: /RE-EXPORT/i })).toBeVisible();
+    ).toBe(false);
   });
 });

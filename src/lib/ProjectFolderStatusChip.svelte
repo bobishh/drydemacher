@@ -2,9 +2,9 @@
   import { onMount, onDestroy } from 'svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import {
-    projectFolderApply,
     projectFolderExport,
     projectFolderStatus,
+    projectFolderApply,
     formatBackendError,
     type ProjectFolderStatus,
     type ProjectSyncState,
@@ -25,7 +25,8 @@
   let status: ProjectFolderStatus | null = $state(null);
   let chipState: ChipState = $state('loading');
   let lastError: string | null = $state(null);
-  let busy: 'export' | 'apply' | null = $state(null);
+  let busy: 'export' | null = $state(null);
+  let applyBusy: boolean = $state(false);
   let listenCleanups: UnlistenFn[] = [];
 
   // Avoid re-entrancy and stale races when the active version flips quickly.
@@ -70,21 +71,18 @@
     }
   }
 
-  async function handleApply(force: boolean) {
-    if (!threadId || busy) return;
-    busy = 'apply';
+  async function handleApplySource() {
+    if (!threadId || applyBusy) return;
+    applyBusy = true;
     lastError = null;
     try {
-      await projectFolderApply(threadId, messageId, force);
+      await projectFolderApply(threadId, messageId, true, null, null);
       await refresh();
     } catch (error) {
-      // Raw backend reason surfaces verbatim (e.g. "stale: thread advanced
-      // past the exported version"); keep the last known status so the
-      // remediation buttons stay accurate.
       lastError = formatBackendError(error);
-      await refresh();
+      chipState = 'error';
     } finally {
-      busy = null;
+      applyBusy = false;
     }
   }
 
@@ -137,9 +135,9 @@
   const STATE_HINT: Record<ProjectSyncState, string> = {
     missing: 'Export to edit model.ecky in your editor',
     clean: 'model.ecky matches this version',
-    fileChanged: 'model.ecky edited; apply to commit a new version',
+    fileChanged: 'model.ecky edited; watcher will sync it',
     threadAdvanced: 'thread advanced past the export; re-export to refresh',
-    conflict: 'file and thread both changed; re-export or force-apply',
+    conflict: 'file and thread both changed; re-export to refresh',
   };
 
   let label = $derived(
@@ -181,12 +179,6 @@
         >EXPORT</button>
       {:else if chipState === 'fileChanged'}
         <button
-          class="chip-btn chip-btn-primary"
-          onclick={() => handleApply(false)}
-          disabled={busy !== null}
-          title="Compile, preview, and commit the edited file as a new version"
-        >APPLY</button>
-        <button
           class="chip-btn"
           onclick={handleExport}
           disabled={busy !== null}
@@ -199,25 +191,13 @@
           disabled={busy !== null}
           title="Refresh the folder onto the current thread head"
         >RE-EXPORT</button>
-        <button
-          class="chip-btn"
-          onclick={() => handleApply(false)}
-          disabled={busy !== null}
-          title="Attempt to apply; a stale folder is refused without force"
-        >APPLY</button>
       {:else if chipState === 'conflict'}
         <button
           class="chip-btn chip-btn-primary"
-          onclick={handleExport}
-          disabled={busy !== null}
-          title="Re-export discards the file edit and rebases onto the current head"
-        >RE-EXPORT</button>
-        <button
-          class="chip-btn"
-          onclick={() => handleApply(true)}
-          disabled={busy !== null}
-          title="Force-apply the file on top of the current head"
-        >FORCE APPLY</button>
+          onclick={handleApplySource}
+          disabled={applyBusy}
+          title="Apply the edited folder source on top of current head"
+        >APPLY SOURCE</button>
       {:else if chipState === 'clean'}
         <button
           class="chip-btn"
@@ -260,9 +240,9 @@
   }
 
   .chip-changed {
-    border-color: var(--secondary);
-    background: color-mix(in srgb, var(--secondary) 14%, var(--bg-200));
-    color: var(--secondary);
+    border-color: var(--bg-300);
+    background: var(--bg-200);
+    color: var(--text-dim);
   }
 
   .chip-stale {

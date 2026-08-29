@@ -527,7 +527,7 @@ fn latest_legacy_capture_stl(root: &std::path::Path) -> AppResult<Option<std::pa
             .map_err(|error| AppError::persistence(error.to_string()))?
             .path();
         let reconstruction = run_root.join("reconstruction");
-        for name in ["preview.stl", "model.stl"] {
+        for name in ["model.stl", "preview.stl"] {
             let candidate = reconstruction.join(name);
             if !candidate.is_file() {
                 continue;
@@ -618,8 +618,10 @@ mod guided_tests {
             microwave: None,
             voice: crate::contracts::VoiceConfig::default(),
             mcp: crate::contracts::McpConfig::default(),
+            fem_compute: crate::contracts::FemComputeConfig::default(),
             has_seen_onboarding: true,
             connection_type: None,
+            provider_models: crate::contracts::ProviderModels::default(),
             default_engine_kind: crate::contracts::EngineKind::EckyIrV0,
             default_source_language: crate::contracts::SourceLanguage::EckyIrV0,
             default_geometry_backend: crate::contracts::GeometryBackend::EckyRust,

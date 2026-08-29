@@ -204,7 +204,7 @@ impl ReconstructionProvider for AppleObjectCaptureProvider {
             }
             let obj_path = find_first_extension(&object_dir, "obj")?
                 .ok_or_else(|| AppError::provider("Apple Object Capture produced no OBJ mesh."))?;
-            let stl_path = input.output_dir.join("preview.stl");
+            let stl_path = input.output_dir.join("model.stl");
             let conversion = convert_obj_to_stl(&obj_path, &stl_path, 1_000.0)?;
             let source = MeshAssetSource::Generated {
                 provider: self.id().to_string(),
