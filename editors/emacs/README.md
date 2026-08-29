@@ -116,7 +116,7 @@ If you use `use-package`, add this to your configuration:
 ### CAD Operations (EckyRust-only)
 - `mesh` — Indexed triangle geometry
 - `polyhedron` — Closed solid from triangles
-- `heightfield` — Relief from image data
+- `protrude` — Continuous relief from image data
 - `wall-pattern` — Procedural wall textures
 - `hull` — Convex hull of solids
 

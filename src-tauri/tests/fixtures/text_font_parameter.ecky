@@ -1,0 +1,7 @@
+(model
+  (params
+    (select font "Arial"
+      :label "Font"
+      :options (("Arial" "Arial") ("Impact" "Impact"))))
+  (part label
+    (extrude (text "ECKY" 12 :font font) 2)))

@@ -2,7 +2,7 @@
 const ECKY_FORMS = new Set([
   'model', 'part', 'feature', 'params', 'build', 'shape', 'result', 'verify', 'tag', 'metric', 'expect',
   'define', 'define-component', 'define-syntax', 'let', 'let*', 'lambda', 'if', 'cond', 'when', 'unless',
-  'begin', 'quote', 'meta',
+  'begin', 'quote', 'meta', 'ports', 'port', 'frame', 'place-component', 'port-ref',
 ]);
 
 /** Parameter/signature entry kinds. */
@@ -32,7 +32,7 @@ const ECKY_HELPERS = new Set([
 ]);
 
 /** Heads whose next symbol is a user-given name worth its own color. */
-const ECKY_NAMING_FORMS = new Set(['part', 'feature', 'define-component', 'define', 'shape']);
+const ECKY_NAMING_FORMS = new Set(['part', 'feature', 'define-component', 'define', 'shape', 'port']);
 
 export type EckyTokenKind =
   | 'comment' | 'keyword' | 'kind' | 'op' | 'helper' | 'name' | 'call' | 'string' | 'number' | 'atom'

@@ -32,6 +32,35 @@ test('preserves highlighting state across lines and handles escaped strings', ()
   );
 });
 
+test('highlights import-stl preparation keywords without losing source text', () => {
+  const source = '(model (part body (import-stl "/tmp/part.stl" :target-triangles 4000 :max-error 0.05 :preserve-boundaries #t)))';
+  const tokens = lexEcky(source);
+
+  assert.equal(tokens.map((token) => token.text).join(''), source);
+  assert.deepEqual(
+    tokens.filter((token) => token.kind).map(({ text, kind }) => ({ text, kind })),
+    [
+      { text: '(', kind: 'paren1' },
+      { text: 'model', kind: 'keyword' },
+      { text: '(', kind: 'paren2' },
+      { text: 'part', kind: 'keyword' },
+      { text: 'body', kind: 'name' },
+      { text: '(', kind: 'paren3' },
+      { text: 'import-stl', kind: 'op' },
+      { text: '"/tmp/part.stl"', kind: 'string' },
+      { text: ':target-triangles', kind: 'atom' },
+      { text: '4000', kind: 'number' },
+      { text: ':max-error', kind: 'atom' },
+      { text: '0.05', kind: 'number' },
+      { text: ':preserve-boundaries', kind: 'atom' },
+      { text: '#t', kind: 'atom' },
+      { text: ')', kind: 'paren3' },
+      { text: ')', kind: 'paren2' },
+      { text: ')', kind: 'paren1' },
+    ],
+  );
+});
+
 test('never drops unknown punctuation or whitespace', () => {
   const source = '(custom @ value)\n';
   const tokens = lexEcky(source);

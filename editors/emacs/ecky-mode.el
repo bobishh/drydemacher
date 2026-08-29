@@ -61,7 +61,8 @@
 
 ;; Language constants from ecky_language_surface.rs
 (defconst ecky-model-clauses
-  '("params" "part" "meta")
+  '("params" "verify" "part" "feature" "meta"
+    "tag-vertex" "tag-face" "tag-edge" "tag-edges" "view" "analysis")
   "Model clauses in Ecky.")
 
 (defconst ecky-model-wrappers
@@ -75,14 +76,15 @@
   "Expression forms in Ecky.")
 
 (defconst ecky-numeric-helpers
-  '("+" "-" "*" "/" "min" "max" "abs" "floor"
+  '("pi" "tau" "+" "-" "*" "/" "min" "max" "abs" "floor"
     "sin" "cos" "tan" "atan" "atan2" "deg" "rad"
-    "deg->rad" "rad->deg" "clamp" "lerp" "smoothstep"
+    "deg->rad" "rad->deg" "clamp" "lerp" "invlerp" "remap" "smoothstep"
+    "square" "cube"
     "hash01" "hash-signed" "noise2" "fbm2" "voronoi2" "cell-distance2")
   "Numeric helpers in Ecky.")
 
 (defconst ecky-point-list-helpers
-  '("jitter2" "jittered-grid" "polar-points" "organic-loop"
+  '("vec2" "vec3" "jitter2" "jittered-grid" "polar-points" "organic-loop"
     "wave-loop" "superellipse-point" "voronoi-cells"
     "lorenz-points" "rossler-points" "logistic-bifurcation-points"
     "henon-points")
@@ -103,19 +105,23 @@
     "regular-polygon" "trapezoid" "wedge" "slot-overall"
     "slot-center-to-center" "slot-center-point" "slot-arc"
     "shell" "offset" "offset-rounded" "fillet" "chamfer"
-    "taper" "twist" "union" "fuse" "difference" "cut"
+    "taper" "draft" "twist" "union" "fuse" "difference" "cut"
     "intersection" "common" "xor" "compound"
     "translate" "rotate" "scale" "mirror"
     "linear-array" "radial-array" "grid-array" "arc-array"
     "repeat" "repeat-union" "repeat-compound" "repeat-pick"
     "for-union" "for-compound"
-    "plane" "location" "path-frame" "place" "clip-box"
+    "plane" "location" "path-frame" "place" "clip-box" "clip-plane"
     "build" "shape" "result" "sampled-radial-loft")
   "Portable CAD operations in Ecky.")
 
 (defconst ecky-cad-ops-ecky-rust-only
-  '("mesh" "polyhedron" "heightfield" "wall-pattern" "hull")
+  '("mesh" "polyhedron" "protrude" "wall-pattern" "surface-trim" "mesh-anchor")
   "EckyRust-only CAD operations in Ecky.")
+
+(defconst ecky-cad-ops-ecky-rust-direct-only
+  '("hull" "voronoi-cell" "import-step")
+  "EckyRust direct-OCCT-only CAD operations in Ecky.")
 
 (defconst ecky-wall-pattern-modes
   '("ribs" "rings" "spiral" "diamond" "hammered"
@@ -140,6 +146,7 @@
           ecky-boolean-helpers
           ecky-cad-ops-portable
           ecky-cad-ops-ecky-rust-only
+          ecky-cad-ops-ecky-rust-direct-only
           ecky-wall-pattern-modes
           ecky-structural-forms)
   "All built-in functions in Ecky.")

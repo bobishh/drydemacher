@@ -12,7 +12,8 @@ pub mod compiler {
         try_compile_to_legacy_source,
     };
     pub use ecky_render::scheme::compiler::{
-        collect_free_variables, expr_head_name, expr_identifier, expr_list_items,
+        collect_free_variables, emit_component_interface_source, expr_head_name, expr_identifier,
+        expr_list_items, inspect_component_placement_evidence,
     };
 }
 

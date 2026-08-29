@@ -20,7 +20,8 @@ fn api_prompt_projects_the_canonical_book_agent_reference() {
 
     assert!(prompt.contains(canonical));
     assert!(canonical.contains("`mesh` and `polyhedron`"));
-    assert!(canonical.contains("`heightfield`"));
+    assert!(canonical.contains("`protrude`"));
+    assert!(!canonical.contains("`heightfield`"));
     assert!(canonical.contains("single perspective image"));
     assert!(canonical.contains("faceted poly-BRep"));
 }
@@ -110,6 +111,32 @@ fn human_reference_operation_index_links_only_registered_documented_forms() {
 }
 
 #[test]
+fn human_reference_complete_surface_table_covers_runtime_registry() {
+    let documented = HUMAN_REFERENCE
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("| `")
+                .and_then(|rest| rest.split_once("` |"))
+                .map(|(name, _)| name.to_owned())
+        })
+        .collect::<BTreeSet<_>>();
+
+    for backend in [
+        GeometryBackend::EckyRust,
+        GeometryBackend::Build123d,
+        GeometryBackend::Freecad,
+    ] {
+        for entry in supported_surface_reference(backend).entries {
+            assert!(
+                documented.contains(&entry.name),
+                "human generated surface table is missing `{}` for {backend:?}",
+                entry.name
+            );
+        }
+    }
+}
+
+#[test]
 fn canonical_references_explain_live_packages_locks_and_native_step_truth() {
     let human_reference = HUMAN_REFERENCE
         .split_whitespace()
@@ -120,7 +147,7 @@ fn canonical_references_explain_live_packages_locks_and_native_step_truth() {
         "(import-component",
         "No semver ranges, `latest`, network fallback, or transitive package lookup",
         "application-global content-addressed store",
-        "`ecky.lock.json`",
+        "`ecky.lock.edn`",
         "never calls FreeCAD, converts through STL, invokes `solidify`",
     ] {
         assert!(

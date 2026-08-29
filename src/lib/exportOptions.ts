@@ -122,8 +122,8 @@ export function buildExportChooserOptions(
     subtitle: isMultipart
       ? 'Flattened single-mesh export. Use 3MF or Multipart STL to preserve separate bodies.'
       : 'Single-mesh STL export.',
-    disabled: !Boolean(bundle?.previewStlPath),
-    disabledReason: bundle?.previewStlPath ? undefined : 'Preview STL is not available for this model.',
+    disabled: !Boolean(bundle?.modelStlPath),
+    disabledReason: bundle?.modelStlPath ? undefined : 'Model STL is not available for this model.',
   });
 
   options.push({

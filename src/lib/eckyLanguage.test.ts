@@ -110,6 +110,16 @@ test('part and component names get their own token', () => {
   ]);
 });
 
+test('component placement forms and port ids are structural tokens', () => {
+  const tokens = tokenize('(ports (port mount :type "mount.v1" :frame (frame :origin (0 0 0))))').map(
+    (entry) => entry.token,
+  );
+  assert.equal(tokens[1], 'keyword');
+  assert.equal(tokens[3], 'keyword');
+  assert.equal(tokens[4], 'name');
+  assert.ok(tokens.filter((token) => token === 'keyword').length >= 3);
+});
+
 test('paren depth cycles through three rainbow classes and state survives lines', () => {
   const state = { depth: 0, afterOpen: false, expectName: false };
   tokenize('(model', state);

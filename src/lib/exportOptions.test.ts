@@ -19,7 +19,7 @@ function sampleBundle(viewerAssetCount: number): ArtifactBundle {
     fcstdPath: '/tmp/model.FCStd',
     manifestPath: '/tmp/model.json',
     macroPath: '/tmp/model.FCMacro',
-    previewStlPath: '/tmp/model.stl',
+    modelStlPath: '/tmp/model.stl',
     viewerAssets: Array.from({ length: viewerAssetCount }, (_, index) => ({
       partId: `part-${index + 1}`,
       nodeId: `node-${index + 1}`,

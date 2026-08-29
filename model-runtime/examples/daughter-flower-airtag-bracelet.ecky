@@ -60,7 +60,7 @@
 
   (verify
     (tag preview_exists)
-    (metric preview (manifest has-preview-stl))
+    (metric preview (manifest has-model-stl))
     (expect preview (= true)))
   (verify
     (tag capsule_lid_and_strap)
