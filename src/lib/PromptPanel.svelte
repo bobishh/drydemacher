@@ -2,12 +2,13 @@
   import { convertFileSrc } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
   import { readFile } from '@tauri-apps/plugin-fs';
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import Modal from './Modal.svelte';
+  import AsyncActionButton from './components/AsyncActionButton.svelte';
   import Viewer from './Viewer.svelte';
   import { appendTranscriptToPrompt, createPromptAudioRecorder, type PromptAudioRecorder } from './audio/pushToTalk';
-  import { formatBackendError, transcribePromptAudio } from './tauri/client';
+  import { formatBackendError, releaseVersionPreview, transcribePromptAudio } from './tauri/client';
   import { resolveVersionLoupeRuntime } from './versionLoupeRuntime';
   import type {
     Attachment,
@@ -29,8 +30,14 @@
   } from './threadTimeline';
   import { modelEngineLabel } from './modelEngineLabel';
   import type { DialogueState } from './composables/dialogueState';
+  import type { AgyProviderSnapshot, CodexTakeoverSnapshot } from './tauri/contracts';
   import type { AuthoredVerifyChip } from './controllers/structuralVerification';
   import { buildVersionAuthoredVerifyChipMap } from './versionAuthoredVerifyCards';
+  import {
+    providerMessagePresentation,
+    providerMessageText,
+    type ProviderCodeReference,
+  } from './providerMessagePresentation';
 
   type TauriBridgeWindow = Window & typeof globalThis & {
     __TAURI_INTERNALS__?: {
@@ -60,6 +67,8 @@
     loading: boolean;
     previewUrl: string | null;
     viewerAssets: ViewerAsset[];
+    modelManifest: Message['modelManifest'];
+    leaseId: string | null;
   };
 
   let {
@@ -68,6 +77,13 @@
     generationUnavailableReason = null,
     imageAttachmentUnavailableReason = null,
     dialogueState = { mode: 'generate' } as DialogueState,
+    codexTakeover = null,
+    codexTakeoverError = null,
+    onLoadEarlierCodexMessages,
+    onSteerCodexTakeover,
+    onStopCodexTakeover,
+    onRetryCodexQueue,
+    onRemoveCodexQueue,
     messages = [],
     captureRuns = [],
     messagesLoading = false,
@@ -76,6 +92,7 @@
     requests = [],
     onLoadOlderMessages,
     onShowCode,
+    onOpenCodeReference,
     activeThreadId = null,
     sendWorkspaceCapture = false,
     workspaceCaptureHint = null,
@@ -87,12 +104,20 @@
     onRestoreVersion,
     onAuthoredVerifyFocus,
     onOpenCapture,
+    focusRequest = 0,
   }: {
     onGenerate: (prompt: string, attachments: Attachment[]) => Promise<unknown>;
     isGenerating?: boolean;
     generationUnavailableReason?: string | null;
     imageAttachmentUnavailableReason?: string | null;
     dialogueState?: DialogueState;
+    codexTakeover?: CodexTakeoverSnapshot | AgyProviderSnapshot | null;
+    codexTakeoverError?: string | null;
+    onLoadEarlierCodexMessages?: () => Promise<void>;
+    onSteerCodexTakeover?: (prompt: string) => Promise<void>;
+    onStopCodexTakeover?: () => Promise<void>;
+    onRetryCodexQueue?: (queueId: string) => Promise<void>;
+    onRemoveCodexQueue?: (queueId: string) => Promise<void>;
     messages?: Message[];
     captureRuns?: CaptureRun[];
     messagesLoading?: boolean;
@@ -101,6 +126,7 @@
     requests?: Request[];
     onLoadOlderMessages?: () => Promise<void> | void;
     onShowCode: (message: CodeVersionMessage) => void;
+    onOpenCodeReference?: (reference: ProviderCodeReference) => Promise<void> | void;
     activeThreadId?: string | null;
     sendWorkspaceCapture?: boolean;
     workspaceCaptureHint?: string | null;
@@ -112,6 +138,7 @@
     onRestoreVersion?: (messageId: string) => void;
     onAuthoredVerifyFocus?: (message: VersionMessage, stableNodeId: string) => Promise<void> | void;
     onOpenCapture?: (runId: string) => Promise<void> | void;
+    focusRequest?: number;
   } = $props();
 
   const PROMPT_DRAFTS_STORAGE_KEY = 'ecky:prompt-drafts:v1';
@@ -121,6 +148,8 @@
 
   let prompt = $state('');
   let attachments = $state<Attachment[]>([]);
+  let providerCodeReferenceError = $state<{ messageId: string; text: string } | null>(null);
+  const visibleProviderQueue = $derived(codexTakeover?.queue.filter((item) => item.status !== 'sending') ?? []);
   let isDragging = $state(false);
   let versionToDelete = $state<VersionMessage | null>(null);
   let visualLoupe = $state<VisualLoupeState | null>(null);
@@ -132,14 +161,110 @@
   let voiceRecorder = $state<PromptAudioRecorder | null>(null);
   let voiceState = $state<VoiceState>('idle');
   let voiceStatus = $state('');
+  let promptInputEl = $state<HTMLTextAreaElement | null>(null);
+  let codexControlBusy = $state(false);
+  let codexControlAction = $state<'history' | 'steer' | 'stop' | null>(null);
+  let providerWorkingExpanded = $state<Record<string, boolean>>({});
+  let preserveTrailAnchor: { scrollHeight: number; scrollTop: number } | null = null;
+  let timelineFilter = $state<'all' | 'versions'>('all');
+  let timelineSearch = $state('');
+  let timelineScopeThreadId = $state<string | null>(null);
   const voiceBusy = $derived(voiceState === 'listening' || voiceState === 'transcribing');
   const hasImageAttachments = $derived(attachments.some((attachment) => attachment.type === 'image'));
+  const promptPlaceholder = $derived(
+    dialogueState.mode === 'provider' && codexTakeover?.runtime.activeTurnId
+      ? dialogueState.supportsSteer
+        ? 'Type a question or design change... (Cmd+Enter steer · Cmd+Shift+Enter queue)'
+        : 'Type a question or design change... (Cmd+Enter queue)'
+      : 'Type a question or design change... (Cmd+Enter to process)',
+  );
+
+  function providerWorkingOpen(message: Message): boolean {
+    const stored = providerWorkingExpanded[message.id];
+    if (stored !== undefined) return stored;
+    return message.providerActivity?.phase === 'interrupted' || message.providerActivity?.phase === 'error';
+  }
+
+  function toggleProviderWorking(message: Message, event: MouseEvent) {
+    event.preventDefault();
+    providerWorkingExpanded = {
+      ...providerWorkingExpanded,
+      [message.id]: !providerWorkingOpen(message),
+    };
+  }
+
+  $effect(() => {
+    if (focusRequest <= 0 || !promptInputEl) return;
+    const frame = requestAnimationFrame(() => promptInputEl?.focus());
+    return () => cancelAnimationFrame(frame);
+  });
   const submitUnavailableReason = $derived.by<string | null>(() => {
+    if (dialogueState.mode === 'provider' && attachments.length > 0) {
+      return `${dialogueState.label} provider currently accepts text only; remove attachments before sending.`;
+    }
     if (dialogueState.mode !== 'generate') return null;
     if (generationUnavailableReason) return generationUnavailableReason;
     if (hasImageAttachments && imageAttachmentUnavailableReason) return imageAttachmentUnavailableReason;
     return null;
   });
+
+  async function stopCodex() {
+    if (!onStopCodexTakeover || codexControlBusy) return;
+    codexControlBusy = true;
+    codexControlAction = 'stop';
+    try {
+      await onStopCodexTakeover();
+    } finally {
+      codexControlBusy = false;
+      codexControlAction = null;
+    }
+  }
+
+  async function steerCodex() {
+    if (!onSteerCodexTakeover || codexControlBusy || !prompt.trim()) return;
+    codexControlBusy = true;
+    codexControlAction = 'steer';
+    const currentPrompt = prompt;
+    try {
+      await onSteerCodexTakeover(currentPrompt);
+      prompt = '';
+      persistPromptDraftNow(currentDraftScopeKey(activeThreadId), '');
+    } finally {
+      codexControlBusy = false;
+      codexControlAction = null;
+    }
+  }
+
+  async function loadEarlierTimeline() {
+    if (codexControlBusy || messagesPageLoading || !trailListEl) return;
+    const loads: Promise<void>[] = [];
+    if (messagesHasMore && onLoadOlderMessages) {
+      loads.push(Promise.resolve(onLoadOlderMessages()));
+    }
+    if (codexTakeover?.nextCursor && onLoadEarlierCodexMessages) {
+      loads.push(onLoadEarlierCodexMessages());
+    }
+    if (loads.length === 0) return;
+    preserveTrailAnchor = {
+      scrollHeight: trailListEl.scrollHeight,
+      scrollTop: trailListEl.scrollTop,
+    };
+    codexControlBusy = true;
+    codexControlAction = 'history';
+    try {
+      await Promise.all(loads);
+      await tick();
+      if (trailListEl && preserveTrailAnchor) {
+        trailListEl.scrollTop = preserveTrailAnchor.scrollTop
+          + trailListEl.scrollHeight
+          - preserveTrailAnchor.scrollHeight;
+      }
+    } finally {
+      preserveTrailAnchor = null;
+      codexControlBusy = false;
+      codexControlAction = null;
+    }
+  }
 
   function currentDraftScopeKey(threadId: string | null | undefined) {
     const normalized = `${threadId ?? ''}`.trim();
@@ -283,7 +408,7 @@
     void finishVoiceInput();
   }
 
-  function isVersionMessage(message: Message): message is VersionMessage {
+  function isVersionMessage(message: Message): boolean {
     return isVersionTimelineMessage(message);
   }
 
@@ -424,15 +549,16 @@
   }
 
   let isSubmitting = $state(false);
+  let submissionSerial = 0;
 
   async function submit() {
     if (!isGenerating && !isSubmitting && (prompt.trim() || attachments.length > 0)) {
+      const currentSubmission = ++submissionSerial;
       isSubmitting = true;
+      const currentPrompt = prompt;
+      const currentAttachments = [...attachments];
+      const scopeKey = currentDraftScopeKey(activeThreadId);
       try {
-        const currentPrompt = prompt;
-        const currentAttachments = [...attachments];
-        const scopeKey = currentDraftScopeKey(activeThreadId);
-        
         prompt = '';
         attachments = [];
         pendingDraftWrite = null;
@@ -442,8 +568,21 @@
         }
         persistPromptDraftNow(scopeKey, '');
         
-        await onGenerate(currentPrompt, currentAttachments);
+        const submission = onGenerate(currentPrompt, currentAttachments);
+        if (dialogueState.mode === 'provider') isSubmitting = false;
+        await submission;
       } catch (error) {
+        const hasNewDraft = dialogueState.mode === 'provider'
+          && (
+            currentSubmission !== submissionSerial
+            || prompt.trim().length > 0
+            || attachments.length > 0
+          );
+        if (!hasNewDraft) {
+          prompt = currentPrompt;
+          attachments = currentAttachments;
+          persistPromptDraftNow(scopeKey, currentPrompt);
+        }
         console.error('Failed to submit prompt:', error);
       } finally {
         isSubmitting = false;
@@ -493,7 +632,17 @@
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Enter' && e.metaKey) {
-      submit();
+      e.preventDefault();
+      if (
+        dialogueState.mode === 'provider'
+        && codexTakeover?.runtime.activeTurnId
+        && dialogueState.supportsSteer
+        && !e.shiftKey
+      ) {
+        void steerCodex();
+        return;
+      }
+      void submit();
     }
   }
 
@@ -513,6 +662,7 @@
   }
 
   async function openVersionLoupe(message: VersionMessage) {
+    closeVersionLoupe();
     const loadSeq = ++versionLoupeLoadSeq;
     versionLoupe = {
       message,
@@ -520,10 +670,13 @@
       loading: true,
       previewUrl: null,
       viewerAssets: [],
+      modelManifest: message.modelManifest ?? null,
+      leaseId: null,
     };
     try {
       const runtime = await resolveVersionLoupeRuntime(message, activeThreadId, toAssetUrl);
       if (!versionLoupe || loadSeq !== versionLoupeLoadSeq || versionLoupe.message.id !== message.id) {
+        if (runtime.leaseId) void releaseVersionPreview(runtime.leaseId);
         return;
       }
       versionLoupe = {
@@ -531,6 +684,8 @@
         loading: false,
         previewUrl: runtime.previewUrl,
         viewerAssets: runtime.viewerAssets,
+        modelManifest: runtime.modelManifest,
+        leaseId: runtime.leaseId,
       };
     } catch (error) {
       if (!versionLoupe || loadSeq !== versionLoupeLoadSeq || versionLoupe.message.id !== message.id) {
@@ -544,10 +699,19 @@
     }
   }
 
+  function closeVersionLoupe() {
+    versionLoupeLoadSeq += 1;
+    const leaseId = versionLoupe?.leaseId ?? null;
+    versionLoupe = null;
+    if (leaseId) void releaseVersionPreview(leaseId);
+  }
+
   function setVersionLoupeLoadError(message: string) {
     if (!versionLoupe) return;
     versionLoupe = { ...versionLoupe, loading: false, loadError: message };
   }
+
+  onDestroy(closeVersionLoupe);
 
   function openVisualLoupe(message: Message, visual: TimelineVisual) {
     visualLoupe = {
@@ -559,6 +723,21 @@
   }
 
   const timelineMessages = $derived(threadTimelineMessages(messages));
+  const filteredTimelineMessages = $derived.by(() => {
+    const query = timelineSearch.trim().toLocaleLowerCase();
+    return timelineMessages.filter((message) => {
+      if (timelineFilter === 'versions' && !isVersionMessage(message)) return false;
+      if (!query) return true;
+      const searchable = [
+        message.content,
+        message.output?.title,
+        message.output?.versionName,
+        message.output?.response,
+        message.providerActivity?.items.join('\n'),
+      ].filter(Boolean).join('\n').toLocaleLowerCase();
+      return searchable.includes(query);
+    });
+  });
   const authoredVerifyChipMap = $derived(buildVersionAuthoredVerifyChipMap(messages, requests));
   const versionMessages = $derived(versionTimelineMessages(messages));
   const activeVersionIndex = $derived(
@@ -575,7 +754,15 @@
   let copiedTrailTimer = $state<number | null>(null);
 
   $effect(() => {
-    if (!trailListEl || !timelineMessages.length) return;
+    if (timelineScopeThreadId === activeThreadId) return;
+    timelineScopeThreadId = activeThreadId;
+    timelineFilter = 'all';
+    timelineSearch = '';
+  });
+
+  $effect(() => {
+    if (!trailListEl || !filteredTimelineMessages.length) return;
+    if (preserveTrailAnchor) return;
     requestAnimationFrame(() => {
       if (trailListEl) trailListEl.scrollTop = trailListEl.scrollHeight;
     });
@@ -589,7 +776,7 @@
     if (msg.role === 'assistant' && msg.output) {
       return `[${msg.output.interactionMode.toUpperCase()}] ${msg.output.title} (${msg.output.versionName})\n${msg.output.response || msg.content}`;
     }
-    return msg.content;
+    return msg.role === 'assistant' ? providerMessageText(msg.content) : msg.content;
   }
 
   async function copyTrailMessage(msg: Message) {
@@ -604,6 +791,19 @@
       }, 1200);
     } catch (error) {
       console.error('Failed to copy dialogue preview text:', error);
+    }
+  }
+
+  async function openProviderCodeReference(messageId: string, reference: ProviderCodeReference) {
+    providerCodeReferenceError = null;
+    if (!onOpenCodeReference) return;
+    try {
+      await onOpenCodeReference(reference);
+    } catch (error) {
+      providerCodeReferenceError = {
+        messageId,
+        text: formatBackendError(error),
+      };
     }
   }
 
@@ -707,6 +907,14 @@
   });
 
   function messageStatusLabel(message: Message) {
+    if (message.providerActivity) {
+      switch (message.providerActivity.phase) {
+        case 'active': return 'WORKING';
+        case 'completed': return 'WORKED';
+        case 'interrupted': return 'STOPPED';
+        case 'error': return 'FAILED';
+      }
+    }
     if (message.status === 'discarded' && isVersionMessage(message)) {
       return 'OFF CAROUSEL';
     }
@@ -723,6 +931,9 @@
   }
 
   function messageRoleLabel(message: Message, isVersion: boolean) {
+    if (message.providerActivity) {
+      return message.providerActivity.providerLabel.toUpperCase();
+    }
     if (isVersion) {
       if ((message as VersionMessage).output?.interactionMode === 'question') return 'TUNE';
       return 'VERSION';
@@ -791,7 +1002,7 @@
   {/if}
 
   {#if versionLoupe}
-    <Modal title="Version Preview" onclose={() => (versionLoupe = null)}>
+    <Modal title="Version Preview" onclose={closeVersionLoupe}>
       <div class="version-loupe">
         <div class="version-loupe__meta">
           <div class="version-loupe__title">{versionTimelineTitle(versionLoupe.message)}</div>
@@ -807,7 +1018,7 @@
               modelKey={versionLoupe.message.artifactBundle?.modelId ?? versionLoupe.message.id}
               stlUrl={versionLoupe.previewUrl}
               viewerAssets={versionLoupe.viewerAssets}
-              manifestParts={versionLoupe.message.modelManifest?.parts ?? []}
+              manifestParts={versionLoupe.modelManifest?.parts ?? []}
               showContextOverlay={false}
               onModelLoadError={setVersionLoupeLoadError}
             />
@@ -875,6 +1086,36 @@
     </div>
   {/if}
 
+  {#if codexTakeoverError}
+    <div class="provider-conversation-error" role="alert">{codexTakeoverError}</div>
+  {/if}
+
+  {#if timelineMessages.length > 0}
+    <div class="timeline-tools" aria-label="Timeline controls">
+      <input
+        class="timeline-search"
+        type="search"
+        aria-label="Search timeline"
+        placeholder="SEARCH TIMELINE"
+        bind:value={timelineSearch}
+      />
+      <button
+        class="timeline-filter"
+        class:timeline-filter--active={timelineFilter === 'all'}
+        type="button"
+        aria-pressed={timelineFilter === 'all'}
+        onclick={() => (timelineFilter = 'all')}
+      >ALL</button>
+      <button
+        class="timeline-filter"
+        class:timeline-filter--active={timelineFilter === 'versions'}
+        type="button"
+        aria-pressed={timelineFilter === 'versions'}
+        onclick={() => (timelineFilter = 'versions')}
+      >VERSIONS</button>
+    </div>
+  {/if}
+
   <div class="trail-list" bind:this={trailListEl}>
     {#if captureRuns.length > 0}
       <section class="trail-captures" aria-label="Capture history">
@@ -890,14 +1131,14 @@
         {/each}
       </section>
     {/if}
-    {#if messagesHasMore}
+    {#if messagesHasMore || codexTakeover?.nextCursor}
       <button
         class="load-older-btn"
         type="button"
-        disabled={messagesPageLoading}
-        onclick={() => onLoadOlderMessages?.()}
+        disabled={messagesPageLoading || codexControlBusy}
+        onclick={loadEarlierTimeline}
       >
-        {messagesPageLoading ? 'LOADING OLDER...' : 'LOAD OLDER'}
+        {messagesPageLoading || codexControlBusy ? 'LOADING OLDER...' : 'SHOW OLDER MESSAGES'}
       </button>
     {/if}
     {#if messagesLoading}
@@ -906,7 +1147,7 @@
         <span>LOADING THREAD MESSAGES...</span>
       </div>
     {/if}
-    {#each timelineMessages as msg (msg.id)}
+    {#each filteredTimelineMessages as msg (msg.id)}
       {@const visuals = timelineVisuals(msg, toAssetUrl)}
       {@const isVersion = isVersionMessage(msg)}
       {@const isTuneVersion = isVersion && msg.output?.interactionMode === 'question'}
@@ -914,8 +1155,11 @@
       {@const isDiscardedVersion = isVersion && msg.status === 'discarded'}
       {@const statusLabel = messageStatusLabel(msg)}
       {@const authoredVerifyChips = isVersion ? timelineAuthoredVerifyChips(msg) : []}
+      {@const providerPresentation = !isVersion && msg.role === 'assistant'
+        ? providerMessagePresentation(msg.content)
+        : null}
       <div
-        class="trail-item {msg.role === 'assistant' ? 'trail-assistant' : 'trail-user'} {isActiveVersion ? 'trail-active-version' : ''} {isDiscardedVersion ? 'trail-discarded-version' : ''} {isTuneVersion ? 'trail-tune-version' : ''} {msg.status === 'error' ? 'trail-error' : ''}"
+        class="trail-item {msg.role === 'assistant' ? 'trail-assistant' : 'trail-user'} {isVersion ? 'trail-version-event' : ''} {isActiveVersion ? 'trail-active-version' : ''} {isDiscardedVersion ? 'trail-discarded-version' : ''} {isTuneVersion ? 'trail-tune-version' : ''} {msg.status === 'error' ? 'trail-error' : ''}"
       >
         <div class="trail-header-row">
           <div class="trail-meta">
@@ -988,13 +1232,70 @@
               {/each}
             </div>
           {/if}
-          {#if isVersion && msg.output}
+          {#if msg.providerActivity}
+            {@const providerActivityLabel = msg.providerActivity.phase === 'active'
+              ? 'WORKING …'
+              : msg.providerActivity.phase === 'completed'
+                ? 'WORKED'
+                : msg.providerActivity.phase === 'interrupted'
+                  ? 'STOPPED'
+                  : 'FAILED'}
+            <section
+              class="provider-working provider-working--{msg.providerActivity.phase}"
+              aria-label={`${msg.providerActivity.providerLabel} working activity`}
+            >
+              <details
+                open={providerWorkingOpen(msg)}
+              >
+                <summary
+                  aria-label={`Show ${msg.providerActivity.providerLabel} working details`}
+                  onclick={(event) => toggleProviderWorking(msg, event)}
+                >
+                  <span class="provider-working__state">{providerActivityLabel}</span>
+                  <span class="provider-working__count">{msg.providerActivity.items.length} EVENTS</span>
+                  <span class="provider-working__summary">{msg.providerActivity.summary}</span>
+                </summary>
+                <ol class="provider-working__details">
+                  {#each msg.providerActivity.items as item, index (`${msg.id}-${index}`)}
+                    <li>{item}</li>
+                  {/each}
+                </ol>
+              </details>
+            </section>
+          {:else if isVersion && msg.output}
             <div class="trail-version-title">
-              [{msg.output.interactionMode.toUpperCase()}] {versionTimelineTitle(msg)}
+              <span>{isTuneVersion ? 'TUNING NOTE' : msg.status === 'success' || msg.status === 'discarded' ? 'VERSION COMMITTED' : 'VERSION ATTEMPT'}</span>
+              <strong>{versionTimelineTitle(msg)}</strong>
             </div>
             {msg.output.response || msg.content}
           {:else}
-            {msg.content}
+            {#if providerPresentation}
+              {#each providerPresentation.segments as segment, index (`${msg.id}-provider-segment-${index}`)}
+                {#if segment.kind === 'codeReference'}
+                  <button
+                    type="button"
+                    class="provider-code-reference"
+                    aria-label={`Open ${segment.label} at line ${segment.line}`}
+                    onclick={() => void openProviderCodeReference(msg.id, segment)}
+                  >
+                    <span>{segment.label}</span>
+                    <small>LINE {segment.line}</small>
+                  </button>
+                {:else}{segment.text}{/if}
+              {/each}
+            {:else}
+              {msg.content}
+            {/if}
+          {/if}
+          {#if msg.contentTruncated}
+            <div class="trail-truncation" role="status">
+              PREVIEW TRUNCATED · {msg.contentObservedBytes ?? '?'} BYTES OBSERVED · {msg.contentAllowedBytes ?? 8192} ALLOWED · OPEN VERSION FOR DETAIL
+            </div>
+          {/if}
+          {#if providerCodeReferenceError?.messageId === msg.id}
+            <div class="provider-code-reference-error" role="alert">
+              {providerCodeReferenceError.text}
+            </div>
           {/if}
           {#if authoredVerifyChips.length > 0}
             <div class="trail-authored-verify" aria-label="Authored verify results">
@@ -1032,7 +1333,38 @@
     {/each}
   </div>
 
-  <div class="input-area">
+  <div class="input-area" class:input-area--codex={Boolean(codexTakeover)}>
+    {#if visibleProviderQueue.length}
+      <div class="codex-queue" role="region" aria-label={`${dialogueState.mode === 'provider' ? dialogueState.label : 'Provider'} prompt queue`}>
+        {#each visibleProviderQueue as item, index (item.id)}
+          <div class="codex-queue__item" class:codex-queue__item--failed={item.status === 'failed'}>
+            <span>#{index + 1} {item.status.toUpperCase()}</span>
+            <strong>{item.promptText}</strong>
+            <div class="codex-queue__actions">
+              {#if item.status === 'failed'}
+                <AsyncActionButton
+                  className="btn btn-xs btn-secondary"
+                  label="RETRY"
+                  pendingLabel="RETRYING…"
+                  disabled={codexControlBusy}
+                  action={() => onRetryCodexQueue?.(item.id)}
+                />
+              {/if}
+              {#if item.status !== 'sending'}
+                <AsyncActionButton
+                  className="btn btn-xs btn-ghost"
+                  label="REMOVE"
+                  pendingLabel="REMOVING…"
+                  disabled={codexControlBusy}
+                  action={() => onRemoveCodexQueue?.(item.id)}
+                />
+              {/if}
+            </div>
+            {#if item.error}<small role="alert">{item.error}</small>{/if}
+          </div>
+        {/each}
+      </div>
+    {/if}
     {#if attachments.length > 0}
       <div class="attachments-list">
         {#if hasImageAttachments}
@@ -1062,11 +1394,12 @@
     {/if}
 
     <textarea
+      bind:this={promptInputEl}
       class="input-mono prompt-input"
       value={prompt}
       oninput={handlePromptInput}
       onkeydown={handleKeydown}
-      placeholder="Type a question or design change... (Cmd+Enter to process)"
+      placeholder={promptPlaceholder}
       spellcheck="false"
     ></textarea>
     <div class="prompt-actions">
@@ -1084,6 +1417,24 @@
         {/if}
       </div>
       <div class="prompt-actions__right">
+        {#if dialogueState.mode === 'provider' && codexTakeover?.runtime.activeTurnId}
+          {#if dialogueState.supportsSteer}
+            <button
+              class="btn provider-control provider-control--steer"
+              type="button"
+              disabled={codexControlBusy || isSubmitting || !prompt.trim()}
+              onclick={steerCodex}
+            >{codexControlAction === 'steer' ? 'STEERING…' : 'STEER'}</button>
+          {/if}
+          {#if dialogueState.supportsStop}
+            <button
+              class="btn provider-control provider-control--stop"
+              type="button"
+              disabled={codexControlBusy || codexTakeover.runtime.phase === 'stopping'}
+              onclick={stopCodex}
+            >{codexControlAction === 'stop' || codexTakeover.runtime.phase === 'stopping' ? 'STOPPING…' : 'STOP'}</button>
+          {/if}
+        {/if}
         <button
           class="btn btn-xs btn-ghost voice-btn"
           class:voice-btn--active={voiceState === 'listening'}
@@ -1122,6 +1473,8 @@
             SEND TO AGENT
           {:else if dialogueState.mode === 'mcp-idle'}
             QUEUE
+          {:else if dialogueState.mode === 'provider'}
+            {codexTakeover?.runtime.activeTurnId ? 'QUEUE' : `SEND TO ${dialogueState.label.toUpperCase()}`}
           {:else}
             PROCESS
           {/if}
@@ -1172,6 +1525,100 @@
     letter-spacing: 0.1em;
     box-shadow: 0 0 20px rgba(0,0,0,0.5);
   }
+
+  .provider-conversation-error {
+    flex: 0 0 auto;
+    padding: 7px 10px;
+    border: 1px solid var(--red);
+    background: color-mix(in srgb, var(--red) 10%, var(--bg-100));
+    color: var(--red);
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    overflow: auto;
+    max-height: 110px;
+  }
+
+  .timeline-tools {
+    flex: 0 0 auto;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 5px;
+    padding: 5px 8px;
+    border-bottom: 1px solid var(--bg-300);
+    background: var(--bg-100);
+    overflow: hidden;
+  }
+
+  .timeline-search,
+  .timeline-filter {
+    min-width: 0;
+    border: 1px solid var(--bg-300);
+    border-radius: 0;
+    background: var(--bg-200);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 0.6rem;
+    letter-spacing: 0.08em;
+  }
+
+  .timeline-search {
+    padding: 5px 7px;
+    outline: none;
+  }
+
+  .timeline-search:focus {
+    border-color: var(--primary);
+  }
+
+  .timeline-filter {
+    padding: 4px 8px;
+    cursor: pointer;
+  }
+
+  .timeline-filter--active {
+    border-color: var(--primary);
+    color: var(--primary);
+  }
+
+  .trail-truncation {
+    margin-top: 0.55rem;
+    padding: 0.4rem 0.5rem;
+    border: 1px solid var(--secondary);
+    color: var(--secondary);
+    font-size: 0.72rem;
+    overflow: hidden;
+  }
+
+  .codex-queue {
+    max-height: min(132px, 26vh);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+
+  .codex-queue__item {
+    border: 1px solid var(--bg-400);
+    background: var(--bg-200);
+    padding: 5px 7px;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 6px;
+    align-items: center;
+    font-family: var(--font-mono);
+    overflow: hidden;
+    min-height: 34px;
+    flex: 0 0 auto;
+  }
+
+  .codex-queue__item--failed { border-color: var(--red); }
+  .codex-queue__item span { color: var(--primary); font-size: 0.56rem; }
+  .codex-queue__item strong { color: var(--text); font-size: 0.62rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .codex-queue__item small { grid-column: 1 / -1; color: var(--red); white-space: pre-wrap; }
+  .codex-queue__actions { display: flex; gap: 4px; }
 
   .attachments-list {
     display: flex;
@@ -1614,6 +2061,17 @@
     align-self: flex-start;
   }
 
+  .trail-version-event {
+    width: min(960px, 96%);
+    max-width: 96%;
+    border-color: color-mix(in srgb, var(--secondary) 58%, var(--bg-300));
+    border-left: 4px solid var(--secondary);
+    background:
+      linear-gradient(90deg, color-mix(in srgb, var(--secondary) 14%, transparent), transparent 54%),
+      var(--bg-100);
+    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--secondary) 16%, transparent);
+  }
+
   .trail-active-version {
     border-color: var(--primary);
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 35%, transparent);
@@ -1743,12 +2201,146 @@
     user-select: text;
   }
 
+  .provider-code-reference {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    max-width: 100%;
+    overflow: hidden;
+    border: 1px solid var(--primary);
+    border-radius: 0;
+    padding: 2px 6px;
+    background: color-mix(in srgb, var(--primary) 12%, var(--bg-100));
+    color: var(--primary);
+    font: inherit;
+    font-family: var(--font-mono);
+    cursor: pointer;
+    vertical-align: baseline;
+  }
+
+  .provider-code-reference:hover,
+  .provider-code-reference:focus-visible {
+    background: color-mix(in srgb, var(--primary) 22%, var(--bg-100));
+    outline: 1px solid var(--secondary);
+    outline-offset: 1px;
+  }
+
+  .provider-code-reference span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .provider-code-reference small {
+    color: var(--text-dim);
+    font-size: 0.52rem;
+    white-space: nowrap;
+  }
+
+  .provider-code-reference-error {
+    max-width: 100%;
+    overflow: hidden;
+    margin-top: 7px;
+    border-left: 2px solid var(--error);
+    padding: 5px 8px;
+    background: color-mix(in srgb, var(--error) 10%, var(--bg-100));
+    color: var(--error);
+    overflow-wrap: anywhere;
+  }
+
+  .provider-working {
+    width: min(620px, 72vw);
+    max-width: 100%;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .provider-working details {
+    overflow: hidden;
+  }
+
+  .provider-working summary,
+  .provider-working__current {
+    display: grid;
+    grid-template-columns: auto auto minmax(0, 1fr);
+    align-items: center;
+    gap: 9px;
+    cursor: pointer;
+    list-style: none;
+    color: var(--text);
+    overflow: hidden;
+    user-select: none;
+  }
+
+  .provider-working--interrupted {
+    border-left: 3px solid var(--red);
+  }
+
+  .provider-working--error .provider-working__state,
+  .provider-working--interrupted .provider-working__state {
+    color: var(--red);
+  }
+
+  .provider-working summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .provider-working__state {
+    color: var(--primary);
+    font-weight: 800;
+    letter-spacing: 0.08em;
+  }
+
+  .provider-working__count {
+    padding: 1px 5px;
+    border: 1px solid color-mix(in srgb, var(--primary) 45%, var(--bg-400));
+    color: var(--text-dim);
+    font-size: 0.54rem;
+    letter-spacing: 0.06em;
+  }
+
+  .provider-working__summary {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-dim);
+  }
+
+  .provider-working__details {
+    display: grid;
+    gap: 4px;
+    margin: 8px 0 0;
+    padding: 8px 8px 2px 24px;
+    border-top: 1px solid var(--bg-300);
+    color: var(--text-dim);
+  }
+
+  .provider-working__details li::marker {
+    color: var(--primary);
+  }
+
   .trail-version-title {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
     margin-bottom: 6px;
     color: var(--secondary);
     font-family: var(--font-mono);
     font-size: 0.62rem;
     letter-spacing: 0.04em;
+  }
+
+  .trail-version-title span {
+    padding: 1px 5px;
+    border: 1px solid color-mix(in srgb, var(--secondary) 48%, var(--bg-400));
+    font-size: 0.54rem;
+    white-space: nowrap;
+  }
+
+  .trail-version-title strong {
+    color: var(--text);
+    font-size: 0.72rem;
+    letter-spacing: 0.02em;
   }
 
   .trail-usage {
@@ -1968,6 +2560,22 @@
     z-index: 1;
   }
 
+  .input-area--codex {
+    position: static;
+    z-index: auto;
+    padding: 4px 8px 6px;
+    gap: 4px;
+  }
+
+  .input-area--codex .prompt-input {
+    min-height: 34px;
+    max-height: 46px;
+  }
+
+  .input-area--codex .prompt-actions {
+    min-height: 28px;
+  }
+
   .prompt-input {
     width: 100%;
     min-height: 52px;
@@ -2072,6 +2680,43 @@
     text-transform: uppercase;
     letter-spacing: 0.05em;
     white-space: nowrap;
+  }
+
+  .provider-control {
+    min-height: 34px;
+    padding: 8px 16px;
+    border-width: 1px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    white-space: nowrap;
+  }
+
+  .provider-control--steer {
+    border-color: var(--secondary);
+    background: color-mix(in srgb, var(--secondary) 76%, #000 24%);
+    color: #fff;
+  }
+
+  .provider-control--steer:hover:not(:disabled) {
+    background: var(--secondary);
+    color: var(--bg-100);
+  }
+
+  .provider-control--stop {
+    border-color: var(--red);
+    background: color-mix(in srgb, var(--red) 82%, #000 18%);
+    color: #fff;
+  }
+
+  .provider-control--stop:hover:not(:disabled) {
+    background: var(--red);
+    color: #fff;
+  }
+
+  .provider-control:disabled {
+    opacity: 0.48;
+    cursor: not-allowed;
   }
 
   .error-msg-box {

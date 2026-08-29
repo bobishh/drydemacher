@@ -303,6 +303,12 @@
     background: color-mix(in srgb, var(--bg) 95%, transparent);
   }
 
+  .window-content > :global(.param-panel) {
+    flex: 1 1 0;
+    min-height: 0;
+    height: 100%;
+  }
+
   .window-resize-handle {
     position: absolute;
     right: 2px;

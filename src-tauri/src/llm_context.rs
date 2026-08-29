@@ -620,6 +620,7 @@ mod tests {
         ModelManifest {
             geometry_provenance: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: 2,
             model_id: "model-1".to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -722,7 +723,7 @@ mod tests {
             } else {
                 vec![StructuralIssue {
                     code: "PREVIEW_STL_MISSING".to_string(),
-                    message: "Preview STL not found.".to_string(),
+                    message: "Model STL not found.".to_string(),
                     part_id: None,
                     numeric_payload: None,
                     diagnostic_context: None,
@@ -731,12 +732,12 @@ mod tests {
             authored_verify_checks: Vec::new(),
             metrics: StructuralMetrics {
                 part_count: 2,
-                preview_stl_size_bytes: Some(4096),
-                preview_stl_triangle_count: Some(256),
-                preview_stl_component_count: Some(1),
-                preview_stl_non_manifold_edge_count: Some(0),
-                preview_stl_overhang_triangle_count: Some(12),
-                preview_stl_overhang_ratio: Some(0.046875),
+                model_stl_size_bytes: Some(4096),
+                model_stl_triangle_count: Some(256),
+                model_stl_component_count: Some(1),
+                model_stl_non_manifold_edge_count: Some(0),
+                model_stl_overhang_triangle_count: Some(12),
+                model_stl_overhang_ratio: Some(0.046875),
                 total_volume: Some(88548.0),
                 total_area: Some(15254.0),
                 bbox: Some(ManifestBounds {

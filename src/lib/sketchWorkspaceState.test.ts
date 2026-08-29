@@ -458,7 +458,7 @@ test('clientPointToSvgPoint clamps SVG coordinates to sketch viewbox', () => {
 
 test('sourceLineCount and basename summarize generated preview without full path wall', () => {
   assert.equal(sourceLineCount('one\ntwo\nthree'), 3);
-  assert.equal(basename('/tmp/ecky/sketch-preview.stl'), 'sketch-preview.stl');
+  assert.equal(basename('/tmp/ecky/sketch-model.stl'), 'sketch-model.stl');
 });
 
 test('artifactEvidenceSummary separates backend bucket from geometry representation truth', () => {

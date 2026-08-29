@@ -56,7 +56,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
       '/mock/output.stl': boxStl('output', [-35, 0, -20], [35, 28, 20]),
       '/mock/parts/shell.stl': boxStl('shell', [-120, 0, -42], [-10, 60, 42]),
       '/mock/parts/lid.stl': boxStl('lid', [18, 24, -24], [120, 46, 24]),
-      '/mock/imported-preview.stl': boxStl('imported_preview', [-28, 0, -18], [28, 30, 18]),
+      '/mock/imported-model.stl': boxStl('imported_preview', [-28, 0, -18], [28, 30, 18]),
       '/mock/parts/outer-shell.stl': boxStl('outer_shell', [-34, 0, -22], [34, 30, 22]),
       '/mock/mess.stl': boxStl('mess', [-12, 0, -12], [12, 10, 12]),
     };
@@ -93,7 +93,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
         contentHash: 'abc123',
         fcstdPath: '/mock/output.FCStd',
         manifestPath: '/mock/manifest.json',
-        previewStlPath: '/mock/output.stl',
+        modelStlPath: '/mock/output.stl',
         viewerAssets: [
           {
             partId: 'part-shell',
@@ -182,7 +182,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
         artifactVersion: 1,
         fcstdPath: '/mock/imported.FCStd',
         manifestPath: '/mock/imported-manifest.json',
-        previewStlPath: '/mock/imported-preview.stl',
+        modelStlPath: '/mock/imported-model.stl',
         viewerAssets: [
           {
             partId: 'part-outer-shell',
@@ -583,7 +583,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
             issues: [],
             metrics: {
               partCount: 2,
-              previewStlSizeBytes: 1024,
+              modelStlSizeBytes: 1024,
               totalVolume: null,
               totalArea: null,
               bbox: null,
@@ -1221,8 +1221,6 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await expect(page.locator('.param-field', { hasText: 'Size' })).toBeVisible();
     await expect(page.locator('.param-field', { hasText: 'Height' })).toBeVisible();
 
-    await page.locator('.live-toggle').click();
-
     const beforeRenderCount = await page.evaluate(
       () => (window as any).__MOCK_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
     );
@@ -1233,13 +1231,13 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
       element.dispatchEvent(new Event('input', { bubbles: true }));
     });
 
-    await expect
-      .poll(async () =>
-        page.evaluate(
-          () => (window as any).__MOCK_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
-        ),
-      )
-      .toBeGreaterThan(beforeRenderCount);
+    await expect.poll(() => page.evaluate(
+      () => (window as any).__MOCK_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+    )).toBe(beforeRenderCount);
+    await page.getByRole('button', { name: 'APPLY', exact: true }).click();
+    await expect.poll(() => page.evaluate(
+      () => (window as any).__MOCK_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+    )).toBeGreaterThan(beforeRenderCount);
   });
 
   test('Params edits stage values when live is disabled and viewer overlay stays disabled', async ({ page }) => {
@@ -1338,7 +1336,6 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     const relationManifest = [...saveCalls].reverse()[0]?.args?.manifest;
     expect(relationManifest?.controlRelations?.length).toBeGreaterThan(0);
 
-    await page.locator('.live-toggle').click();
     const beforeRenderCount = await page.evaluate(
       () => (window as any).__MOCK_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
     );
@@ -1350,13 +1347,13 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
       element.dispatchEvent(new Event('input', { bubbles: true }));
     });
 
-    await expect
-      .poll(async () =>
-        page.evaluate(
-          () => (window as any).__MOCK_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
-        ),
-      )
-      .toBeGreaterThan(beforeRenderCount);
+    await expect.poll(() => page.evaluate(
+      () => (window as any).__MOCK_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+    )).toBe(beforeRenderCount);
+    await page.getByRole('button', { name: 'APPLY', exact: true }).click();
+    await expect.poll(() => page.evaluate(
+      () => (window as any).__MOCK_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+    )).toBeGreaterThan(beforeRenderCount);
 
     const lastRenderCall = await page.evaluate(() => {
       const calls = (window as any).__MOCK_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model');

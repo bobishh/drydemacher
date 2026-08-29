@@ -143,6 +143,66 @@ test('attaches backend source ranges to model and part nodes', () => {
   assert.deepEqual(part?.sourceRange, { startByte: 7, endByte: 30 });
 });
 
+test('projects backend typed nodes, canonical ports, and read-only reasons', () => {
+  const projection = buildMacroAstMapProjection({
+    macroCode: '(model (part body (difference base holes)))',
+    modelManifest: {
+      parts: [{ partId: 'body', label: 'Body', parameterKeys: [] }],
+    } as any,
+    uiSpec: { fields: [] } as any,
+    parameters: {},
+    authoringGraph: {
+      sourceDigest: 'sha256:source',
+      coreDigest: 'sha256:core',
+      astNodes: [
+        {
+          path: '/parts/body/root',
+          stableNodeKey: 'stable:difference',
+          kind: 'Call',
+          valueKind: 'Solid',
+          operation: 'difference',
+          partId: 'body',
+          sourceAddressable: true,
+          editableOps: ['replace'],
+          childPaths: ['/parts/body/root/call/args/0'],
+          inputPorts: [{
+            role: 'base',
+            valueKind: 'Solid',
+            cardinality: 'one',
+            childPath: '/parts/body/root/call/args/0',
+          }],
+        },
+        {
+          path: '/parts/body/root/expanded/0',
+          stableNodeKey: 'stable:expanded',
+          kind: 'Call',
+          valueKind: 'Solid',
+          operation: 'union',
+          partId: 'body',
+          sourceAddressable: false,
+          editableOps: [],
+          nonEditableReason: 'Macro-expanded node has no exact authored source target.',
+          childPaths: [],
+          inputPorts: [],
+        },
+      ],
+      features: [],
+      dependencies: [],
+      constraints: [],
+      targets: [],
+      handles: [],
+    },
+  });
+
+  const body = projection.root.children.find((node) => node.id === 'part:body');
+  const difference = body?.children.find((node) => node.id === 'stable:difference');
+  assert.equal(difference?.kind, 'operation');
+  assert.equal(difference?.inputPorts?.[0]?.role, 'base');
+  const expanded = body?.children.find((node) => node.id === 'stable:expanded');
+  assert.equal(expanded?.kind, 'readonly');
+  assert.equal(expanded?.title, 'Macro-expanded node has no exact authored source target.');
+});
+
 test('leaves sourceRange undefined without backend entries', () => {
   const projection = buildMacroAstMapProjection({
     macroCode: '(model (part body (box 1 2 3)))',

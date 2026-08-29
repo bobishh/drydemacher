@@ -41,7 +41,7 @@ test('confirmAction awaits Tauri dialog confirm when Tauri runtime exists', asyn
       invoke: async (cmd, args) => {
         capturedCommand = cmd;
         capturedArgs = args;
-        return 'OK';
+    return 'OK';
       },
       transformCallback: () => 0,
     },
@@ -62,7 +62,7 @@ test('confirmAction awaits Tauri dialog confirm when Tauri runtime exists', asyn
 test('confirmAction treats undefined Tauri confirmation as cancelled', async () => {
   setWindow({
     __TAURI_INTERNALS__: {
-      invoke: async () => undefined,
+      invoke: async () => 'Cancel',
       transformCallback: () => 0,
     },
   });

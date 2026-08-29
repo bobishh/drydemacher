@@ -1,43 +1,51 @@
 <script lang="ts">
-  import { cycleTopologyMode, topologyModeLabel, type TopologyMode } from '../viewerDisplayMode';
-
   let {
-    activeTab = 'views',
-    outlineEnabled = true,
-    topologyMode = 'mesh',
-    selectionMode = 'orbit',
+    activeTab = 'params',
     macroCode = '',
+    viewsEnabled = false,
     onActiveTabChange,
     onShowCode,
     onOpenInEditor,
-    onViewerDisplayChange,
-    onViewerSelectionModeChange,
   }: {
-    activeTab?: 'views' | 'raw' | 'litho' | 'newParams';
-    outlineEnabled?: boolean;
-    topologyMode?: TopologyMode;
-    selectionMode?: 'orbit' | 'select' | 'measure';
+    activeTab?: 'params' | 'mesh' | 'edit' | 'litho' | 'newParams' | 'views';
     macroCode?: string;
-    onActiveTabChange?: (tab: 'views' | 'raw' | 'litho' | 'newParams') => void;
+    viewsEnabled?: boolean;
+    onActiveTabChange?: (tab: 'params' | 'mesh' | 'edit' | 'litho' | 'newParams' | 'views') => void;
     onShowCode?: () => void;
     onOpenInEditor?: () => void;
-    onViewerDisplayChange?: (display: { outlineEnabled: boolean; topologyMode: TopologyMode }) => void;
-    onViewerSelectionModeChange?: (mode: 'orbit' | 'select' | 'measure') => void;
   } = $props();
 </script>
 
-<div class="panel-mode-tabs">
+<div class="panel-mode-tabs" role="group" aria-label="Parameter workspaces">
   <button
     class="panel-mode-tab"
-    class:panel-mode-tab-active={activeTab === 'views'}
-    onclick={() => onActiveTabChange?.('views')}
+    class:panel-mode-tab-active={activeTab === 'params'}
+    aria-pressed={activeTab === 'params'}
+    onclick={() => onActiveTabChange?.('params')}
   >
-    VIEWS
+    PARAMETERS
+  </button>
+  <button
+    class="panel-mode-tab"
+    class:panel-mode-tab-active={activeTab === 'mesh'}
+    aria-pressed={activeTab === 'mesh'}
+    onclick={() => onActiveTabChange?.('mesh')}
+  >
+    MESH
+  </button>
+  <button
+    class="panel-mode-tab"
+    class:panel-mode-tab-active={activeTab === 'edit'}
+    aria-pressed={activeTab === 'edit'}
+    onclick={() => onActiveTabChange?.('edit')}
+  >
+    ✏️ EDIT CONTROLS
   </button>
   {#if macroCode}
     <button
       class="panel-mode-tab"
       class:panel-mode-tab-active={activeTab === 'newParams'}
+      aria-pressed={activeTab === 'newParams'}
       aria-label="new params"
       onclick={() => onActiveTabChange?.('newParams')}
     >
@@ -46,58 +54,22 @@
   {/if}
   <button
     class="panel-mode-tab"
-    class:panel-mode-tab-active={activeTab === 'raw'}
-    onclick={() => onActiveTabChange?.('raw')}
-  >
-    RAW
-  </button>
-  <button
-    class="panel-mode-tab"
     class:panel-mode-tab-active={activeTab === 'litho'}
+    aria-pressed={activeTab === 'litho'}
     onclick={() => onActiveTabChange?.('litho')}
   >
     LITHO
   </button>
-  <button
-    class="panel-mode-tab panel-mode-tab-compact"
-    class:panel-mode-tab-active={outlineEnabled}
-    onclick={() => onViewerDisplayChange?.({ outlineEnabled: !outlineEnabled, topologyMode })}
-    title="Toggle part outlines in the viewport"
-  >
-    OUTLINE
-  </button>
-  <button
-    class="panel-mode-tab panel-mode-tab-compact"
-    class:panel-mode-tab-active={topologyMode !== 'off'}
-    onclick={() => onViewerDisplayChange?.({ outlineEnabled, topologyMode: cycleTopologyMode(topologyMode) })}
-    title="Cycle topology overlay: off, feature edges, mesh wireframe"
-  >
-    {topologyModeLabel(topologyMode)}
-  </button>
-  <button
-    class="panel-mode-tab panel-mode-tab-compact"
-    class:panel-mode-tab-active={selectionMode === 'orbit'}
-    onclick={() => onViewerSelectionModeChange?.('orbit')}
-    title="Camera orbit mode"
-  >
-    ORBIT
-  </button>
-  <button
-    class="panel-mode-tab panel-mode-tab-compact"
-    class:panel-mode-tab-active={selectionMode === 'select'}
-    onclick={() => onViewerSelectionModeChange?.('select')}
-    title="Lock camera and click model targets for parameter focus"
-  >
-    SELECT
-  </button>
-  <button
-    class="panel-mode-tab panel-mode-tab-compact"
-    class:panel-mode-tab-active={selectionMode === 'measure'}
-    onclick={() => onViewerSelectionModeChange?.('measure')}
-    title="Measure mode keeps parameter focus unchanged on viewport click/drag"
-  >
-    MEASURE
-  </button>
+  {#if viewsEnabled}
+    <button
+      class="panel-mode-tab"
+      class:panel-mode-tab-active={activeTab === 'views'}
+      aria-pressed={activeTab === 'views'}
+      onclick={() => onActiveTabChange?.('views')}
+    >
+      VIEWS
+    </button>
+  {/if}
   {#if macroCode && onShowCode}
     <button class="panel-mode-tab panel-code-btn" onclick={onShowCode} title="View macro code">
       CODE
@@ -144,11 +116,6 @@
     border-color: var(--secondary);
     background: color-mix(in srgb, var(--secondary) 14%, var(--bg-200));
     color: var(--text);
-  }
-
-  .panel-mode-tab-compact {
-    white-space: normal;
-    overflow-wrap: anywhere;
   }
 
   .panel-code-btn {

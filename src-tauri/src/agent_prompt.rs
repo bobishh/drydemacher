@@ -75,15 +75,22 @@ fn op_catalogue(backend: GeometryBackend) -> String {
          a `[...]` note marks a backend restriction.\n\n```scheme\n",
     );
     for entry in &reference.entries {
-        out.push_str("; `");
-        out.push_str(&entry.name);
-        out.push_str("`\n");
+        if entry.kind == "componentPlacementForm" {
+            continue;
+        }
         // Prefer the real example; fall back to the signature shape if absent.
         let code = if entry.example.trim().is_empty() {
             entry.signature.as_str()
         } else {
             entry.example.as_str()
         };
+        // Most examples already name their form. Avoid repeating a catalogue
+        // heading unless the executable snippet cannot identify the entry.
+        if !code.contains(&entry.name) {
+            out.push_str("; ");
+            out.push_str(&entry.name);
+            out.push('\n');
+        }
         out.push_str(code);
         let mut comment = first_line(&entry.description).to_string();
         // Catalogue is already backend-filtered, so surface support only when restricted.
@@ -147,7 +154,8 @@ mod tests {
     fn agent_prompt_body_is_projected_verbatim_from_the_canonical_book() {
         let body = canonical_agent_reference();
         assert!(body.contains("`mesh` and `polyhedron`"));
-        assert!(body.contains("`heightfield`"));
+        assert!(body.contains("`protrude`"));
+        assert!(!body.contains("`heightfield`"));
 
         for backend in backends() {
             assert!(agent_language_reference(backend).contains(body));

@@ -65,12 +65,12 @@ pub(crate) struct StructuralAuthorMetrics {
     pub passed: bool,
     pub issue_count: usize,
     pub issue_codes: BTreeMap<String, usize>,
-    pub preview_stl_size_bytes: Option<u64>,
-    pub preview_stl_triangle_count: Option<u32>,
-    pub preview_stl_component_count: Option<u32>,
-    pub preview_stl_non_manifold_edge_count: Option<u32>,
-    pub preview_stl_overhang_triangle_count: Option<u32>,
-    pub preview_stl_overhang_ratio: Option<f64>,
+    pub model_stl_size_bytes: Option<u64>,
+    pub model_stl_triangle_count: Option<u32>,
+    pub model_stl_component_count: Option<u32>,
+    pub model_stl_non_manifold_edge_count: Option<u32>,
+    pub model_stl_overhang_triangle_count: Option<u32>,
+    pub model_stl_overhang_ratio: Option<f64>,
     pub total_volume_mm3: Option<f64>,
     pub total_area_mm2: Option<f64>,
     pub bbox: Option<ManifestBounds>,
@@ -337,17 +337,66 @@ pub(crate) fn verify_structure_with_author_verification(
     bundle: &ArtifactBundle,
     manifest: &ModelManifest,
 ) -> StructuralVerificationResult {
-    let result = crate::services::structural_verification::verify_structure(bundle, manifest);
-    merge_author_verification_into_structural_result(bundle, manifest, result)
+    match load_authored_verify_clauses(bundle) {
+        LoadedAuthoredVerifyClauses::Unavailable => {
+            crate::services::structural_verification::verify_structure(bundle, manifest)
+        }
+        LoadedAuthoredVerifyClauses::Error(message) => {
+            let mut result =
+                crate::services::structural_verification::verify_structure(bundle, manifest);
+            push_authored_verify_error(&mut result, message);
+            finalize_structural_verification_result(result)
+        }
+        LoadedAuthoredVerifyClauses::Loaded(verify_clauses) => {
+            let expected_component_count = exact_stl_component_count_contract(&verify_clauses);
+            let result = crate::services::structural_verification::verify_structure_with_expected_component_count(
+                bundle,
+                manifest,
+                expected_component_count,
+            );
+            merge_loaded_author_verification_into_structural_result(
+                bundle,
+                manifest,
+                result,
+                &verify_clauses,
+            )
+        }
+    }
 }
 
+#[cfg(test)]
 pub(crate) fn merge_author_verification_into_structural_result(
     bundle: &ArtifactBundle,
     manifest: &ModelManifest,
-    mut result: StructuralVerificationResult,
+    result: StructuralVerificationResult,
 ) -> StructuralVerificationResult {
+    match load_authored_verify_clauses(bundle) {
+        LoadedAuthoredVerifyClauses::Unavailable => result,
+        LoadedAuthoredVerifyClauses::Error(message) => {
+            let mut result = result;
+            push_authored_verify_error(&mut result, message);
+            finalize_structural_verification_result(result)
+        }
+        LoadedAuthoredVerifyClauses::Loaded(verify_clauses) => {
+            merge_loaded_author_verification_into_structural_result(
+                bundle,
+                manifest,
+                result,
+                &verify_clauses,
+            )
+        }
+    }
+}
+
+enum LoadedAuthoredVerifyClauses {
+    Unavailable,
+    Loaded(Vec<CoreVerifyClause>),
+    Error(String),
+}
+
+fn load_authored_verify_clauses(bundle: &ArtifactBundle) -> LoadedAuthoredVerifyClauses {
     if bundle.source_language != crate::contracts::SourceLanguage::EckyIrV0 {
-        return result;
+        return LoadedAuthoredVerifyClauses::Unavailable;
     }
     let Some(source_path) = bundle
         .macro_path
@@ -355,48 +404,76 @@ pub(crate) fn merge_author_verification_into_structural_result(
         .map(str::trim)
         .filter(|path| !path.is_empty())
     else {
-        return result;
+        return LoadedAuthoredVerifyClauses::Unavailable;
     };
     let Ok(source) = fs::read_to_string(source_path) else {
-        return result;
+        return LoadedAuthoredVerifyClauses::Unavailable;
     };
     let program = match crate::ecky_scheme::compile_to_core_program(&source) {
         Ok(program) => program,
         Err(err) => {
-            result.issues.push(StructuralIssue {
-                code: "AUTHORED_VERIFY_ERROR".to_string(),
-                message: format!(
-                    "Authored verify source could not compile for evaluation: {}",
-                    err
-                ),
-                part_id: None,
-                numeric_payload: None,
-                diagnostic_context: None,
-            });
-            return finalize_structural_verification_result(result);
+            return LoadedAuthoredVerifyClauses::Error(format!(
+                "Authored verify source could not compile for evaluation: {}",
+                err
+            ));
         }
     };
     if program.constraints.verify_clauses.is_empty() {
-        return result;
+        return LoadedAuthoredVerifyClauses::Unavailable;
     }
+    match expand_printed_thread_verify_sets(&program.constraints.verify_clauses) {
+        Ok(clauses) => LoadedAuthoredVerifyClauses::Loaded(clauses),
+        Err(message) => LoadedAuthoredVerifyClauses::Error(message),
+    }
+}
 
-    let verify_clauses =
-        match expand_printed_thread_verify_sets(&program.constraints.verify_clauses) {
-            Ok(clauses) => clauses,
-            Err(message) => {
-                result.issues.push(StructuralIssue {
-                    code: "AUTHORED_VERIFY_ERROR".to_string(),
-                    message,
-                    part_id: None,
-                    numeric_payload: None,
-                    diagnostic_context: None,
-                });
-                return finalize_structural_verification_result(result);
-            }
+fn exact_stl_component_count_contract(clauses: &[CoreVerifyClause]) -> Option<usize> {
+    let mut declared = None;
+    for clause in clauses {
+        let metric = parse_metric_ref(clause.metric.items.get(1)?).ok()?;
+        if metric.source != "stl" || metric.key != "connected-component-count" {
+            continue;
+        }
+        let (operator, expected) = parse_expected_comparison(clause.expect.items.get(1)?).ok()?;
+        let AuthorVerifyResolvedValue::Number(expected) = expected else {
+            return None;
         };
+        if operator != "="
+            || !expected.is_finite()
+            || expected < 1.0
+            || expected.fract() != 0.0
+            || expected > usize::MAX as f64
+        {
+            return None;
+        }
+        let expected = expected as usize;
+        match declared {
+            Some(previous) if previous != expected => return None,
+            Some(_) => {}
+            None => declared = Some(expected),
+        }
+    }
+    declared
+}
 
+fn push_authored_verify_error(result: &mut StructuralVerificationResult, message: String) {
+    result.issues.push(StructuralIssue {
+        code: "AUTHORED_VERIFY_ERROR".to_string(),
+        message,
+        part_id: None,
+        numeric_payload: None,
+        diagnostic_context: None,
+    });
+}
+
+fn merge_loaded_author_verification_into_structural_result(
+    bundle: &ArtifactBundle,
+    manifest: &ModelManifest,
+    mut result: StructuralVerificationResult,
+    verify_clauses: &[CoreVerifyClause],
+) -> StructuralVerificationResult {
     let evaluation =
-        evaluate_author_verify_clauses(&verify_clauses, bundle, manifest, Some(&result));
+        evaluate_author_verify_clauses(verify_clauses, bundle, manifest, Some(&result));
     result.authored_verify_checks = evaluation
         .checks
         .iter()
@@ -568,12 +645,12 @@ fn collect_structural_author_metrics(
         passed: result.passed,
         issue_count: result.issues.len(),
         issue_codes,
-        preview_stl_size_bytes: result.metrics.preview_stl_size_bytes,
-        preview_stl_triangle_count: result.metrics.preview_stl_triangle_count,
-        preview_stl_component_count: result.metrics.preview_stl_component_count,
-        preview_stl_non_manifold_edge_count: result.metrics.preview_stl_non_manifold_edge_count,
-        preview_stl_overhang_triangle_count: result.metrics.preview_stl_overhang_triangle_count,
-        preview_stl_overhang_ratio: result.metrics.preview_stl_overhang_ratio,
+        model_stl_size_bytes: result.metrics.model_stl_size_bytes,
+        model_stl_triangle_count: result.metrics.model_stl_triangle_count,
+        model_stl_component_count: result.metrics.model_stl_component_count,
+        model_stl_non_manifold_edge_count: result.metrics.model_stl_non_manifold_edge_count,
+        model_stl_overhang_triangle_count: result.metrics.model_stl_overhang_triangle_count,
+        model_stl_overhang_ratio: result.metrics.model_stl_overhang_ratio,
         total_volume_mm3: result.metrics.total_volume,
         total_area_mm2: result.metrics.total_area,
         bbox: result.metrics.bbox.clone(),
@@ -1643,8 +1720,8 @@ fn resolve_manifest_metric_value(
                     || artifact.role.eq_ignore_ascii_case("step")
             }),
         )),
-        "has-preview-stl" => Ok(AuthorVerifyResolvedValue::Boolean(
-            !bundle.preview_stl_path.trim().is_empty(),
+        "has-model-stl" | "has-preview-stl" => Ok(AuthorVerifyResolvedValue::Boolean(
+            !bundle.model_stl_path.trim().is_empty(),
         )),
         "edge-target-count" => Ok(AuthorVerifyResolvedValue::Number(
             bundle.edge_targets.len() as f64
@@ -1676,21 +1753,21 @@ fn resolve_stl_metric_value(
         .ok_or_else(|| "Structural verification evidence missing.".to_string())?;
     match key {
         "triangle-count" => structural
-            .preview_stl_triangle_count
+            .model_stl_triangle_count
             .map(|value| AuthorVerifyResolvedValue::Number(value as f64))
             .ok_or_else(|| "Triangle count missing from structural evidence.".to_string()),
         "connected-component-count" => structural
-            .preview_stl_component_count
+            .model_stl_component_count
             .map(|value| AuthorVerifyResolvedValue::Number(value as f64))
             .ok_or_else(|| {
                 "Connected component count missing from structural evidence.".to_string()
             }),
         "non-manifold-edge-count" => structural
-            .preview_stl_non_manifold_edge_count
+            .model_stl_non_manifold_edge_count
             .map(|value| AuthorVerifyResolvedValue::Number(value as f64))
             .ok_or_else(|| "Non-manifold edge count missing from structural evidence.".to_string()),
         "overhang-face-count" => structural
-            .preview_stl_overhang_triangle_count
+            .model_stl_overhang_triangle_count
             .map(|value| AuthorVerifyResolvedValue::Number(value as f64))
             .ok_or_else(|| "Overhang face count missing from structural evidence.".to_string()),
         other => Err(format!("Unsupported stl verify metric `{other}`.")),
@@ -1847,6 +1924,7 @@ mod tests {
         ModelManifest {
             geometry_provenance: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: 1,
             model_id: "model-1".to_string(),
             source_kind: ModelSourceKind::Generated,
@@ -1952,6 +2030,7 @@ mod tests {
             component_dependency_lock: None,
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: 1,
             model_id: "model-1".to_string(),
             source_kind: ModelSourceKind::Generated,
@@ -1963,7 +2042,7 @@ mod tests {
             fcstd_path: "/tmp/model.FCStd".to_string(),
             manifest_path: "/tmp/model-manifest.json".to_string(),
             macro_path: None,
-            preview_stl_path: "/tmp/preview.stl".to_string(),
+            model_stl_path: "/tmp/model.stl".to_string(),
             viewer_assets: vec![],
             edge_targets: vec![crate::contracts::ViewerEdgeTarget {
                 target_id: "edge-1".to_string(),
@@ -2014,9 +2093,9 @@ mod tests {
                 },
                 ExportArtifact {
                     geometry_provenance: None,
-                    label: "Preview STL".to_string(),
+                    label: "Model STL".to_string(),
                     format: "stl".to_string(),
-                    path: "/tmp/preview.stl".to_string(),
+                    path: "/tmp/model.stl".to_string(),
                     role: "preview".to_string(),
                 },
             ],
@@ -2074,12 +2153,12 @@ mod tests {
             authored_verify_checks: Vec::new(),
             metrics: StructuralMetrics {
                 part_count: 2,
-                preview_stl_size_bytes: Some(2048),
-                preview_stl_triangle_count: Some(512),
-                preview_stl_component_count: Some(1),
-                preview_stl_non_manifold_edge_count: Some(0),
-                preview_stl_overhang_triangle_count: Some(10),
-                preview_stl_overhang_ratio: Some(0.02),
+                model_stl_size_bytes: Some(2048),
+                model_stl_triangle_count: Some(512),
+                model_stl_component_count: Some(1),
+                model_stl_non_manifold_edge_count: Some(0),
+                model_stl_overhang_triangle_count: Some(10),
+                model_stl_overhang_ratio: Some(0.02),
                 total_volume: Some(410.0),
                 total_area: Some(350.0),
                 bbox: Some(bounds(0.0, 0.0, 0.0, 10.0, 8.0, 7.0)),
@@ -2099,6 +2178,69 @@ mod tests {
         bundle.geometry_backend = GeometryBackend::EckyRust;
         bundle.macro_path = Some(path.display().to_string());
         bundle
+    }
+
+    fn write_two_closed_tetrahedra(path: &std::path::Path) {
+        let tetra = |x: f32| {
+            [
+                [[x, 0.0, 0.0], [x + 1.0, 0.0, 0.0], [x, 1.0, 0.0]],
+                [[x, 0.0, 0.0], [x, 0.0, 1.0], [x + 1.0, 0.0, 0.0]],
+                [[x, 0.0, 0.0], [x, 1.0, 0.0], [x, 0.0, 1.0]],
+                [[x + 1.0, 0.0, 0.0], [x, 0.0, 1.0], [x, 1.0, 0.0]],
+            ]
+        };
+        let triangles = tetra(0.0)
+            .into_iter()
+            .chain(tetra(10.0))
+            .collect::<Vec<_>>();
+        let mut bytes = vec![0_u8; 80];
+        bytes.extend_from_slice(&(triangles.len() as u32).to_le_bytes());
+        for triangle in triangles {
+            for value in [0.0_f32; 3] {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            for vertex in triangle {
+                for value in vertex {
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            bytes.extend_from_slice(&0_u16.to_le_bytes());
+        }
+        fs::write(path, bytes).expect("write multipart STL");
+    }
+
+    #[test]
+    fn authored_component_count_is_structural_topology_contract() {
+        let dir = std::env::temp_dir().join(format!(
+            "ecky-authored-component-contract-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).expect("create test dir");
+        let stl_path = dir.join("two-components.stl");
+        write_two_closed_tetrahedra(&stl_path);
+
+        let mut bundle = authored_bundle_with_source(
+            "(model\n  (verify\n    (tag two-print-bodies)\n    (metric components (stl connected-component-count))\n    (expect components (= 2)))\n  (part body (box 1 1 1)))",
+        );
+        bundle.model_stl_path = stl_path.display().to_string();
+
+        let mut manifest = sample_manifest();
+        manifest.parts.truncate(1);
+        manifest.parts[0].viewer_asset_path = None;
+
+        let result = verify_structure_with_author_verification(&bundle, &manifest);
+
+        assert!(result.passed, "Expected pass, got: {:?}", result.issues);
+        assert_eq!(result.metrics.model_stl_component_count, Some(2));
+        assert!(!result
+            .issues
+            .iter()
+            .any(|issue| issue.code == "PREVIEW_STL_DISCONNECTED_COMPONENTS"));
+        assert_eq!(
+            result.authored_verify_checks[0].status,
+            PublicAuthorVerifyCheckStatus::Passed
+        );
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -2678,9 +2820,9 @@ mod tests {
             "#,
         );
         let structural = sample_structural_result(true);
-        assert_eq!(structural.metrics.preview_stl_component_count, Some(1));
+        assert_eq!(structural.metrics.model_stl_component_count, Some(1));
         assert_eq!(
-            structural.metrics.preview_stl_non_manifold_edge_count,
+            structural.metrics.model_stl_non_manifold_edge_count,
             Some(0)
         );
 

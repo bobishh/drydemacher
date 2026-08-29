@@ -5,7 +5,7 @@ pub(crate) const ECKY_AUTHORING_CARD: &str = concat!(
     "Ecky authoring card\n",
     "- First read current target settings from `workspace_overview`, `target_macro_get`, or `target_detail_get`: `sourceLanguage`, `macroDialect`, `geometryBackend`.\n",
     "- Preserve model-version settings. For empty threads, use session config/defaults; threads do not own language/backend.\n",
-    "- If `sourceLanguage=ecky`, write valid `.ecky` only. Generated Ecky model policy requires top-level `(model ...)` and `(verify ...)` together. Do not generate a model without authored verification clauses; if metric support is missing, state the blocker instead of omitting verification.\n",
+    "- If `sourceLanguage=ecky`, write valid `.ecky` only. Generated Ecky model policy requires one top-level `(model ...)` containing direct `(verify ...)` clauses. Do not generate a model without authored verification clauses; if metric support is missing, state the blocker instead of omitting verification.\n",
     "- Only when `sourcePath` is absent, use `macro_buffer_get` for non-trivial edits, edit against line numbers/digest, then render with `macro_buffer_replace_and_preview`; use full `macro_preview_render` only for small complete rewrites.\n",
     "- Do not reuse parameter keys with different meanings. Keep macroCode, uiSpec, and initialParams aligned; remove stale params.\n",
     "- Valid basics: `(box 40 20 10 :align '(min center min))`, `(extrude (polygon ((0 0) (100 0) (100 20) (0 20))) 8)`, `(place (location (plane :origin '(80 0 6)) :rotate '(0 90 0)) (cylinder 4 18))`.\n",
@@ -13,14 +13,21 @@ pub(crate) const ECKY_AUTHORING_CARD: &str = concat!(
     "- `let` is parallel; use `let*` when later bindings depend on earlier bindings.\n",
     "- NEVER use `(define ...)` inside `(model ...)`. It fails with a misleading TypeMismatch because Steel evaluates it eagerly before params have values. Use `let*` inside each `(part ...)` to compute derived values from params. Top-level `(define (fn args) ...)` helper functions OUTSIDE `(model ...)` are allowed and correct for reusable pure functions.\n",
     "- Guide routing is dynamic. For `sourceLanguage=ecky`, read `ecky://guides/ecky-source` as the primary language guide. Read backend manifests only when checking a specific op/support question. Read prose backend guides only after a lowerer/render error or artifact/export claim.\n",
-    "- For repeated structures in new CAD models, prefer `repeat`, `instance`, or a named `define-component`; avoid copy-paste duplicate geometry blocks.\n",
+    "- For repeated structures in new CAD models, prefer `repeat`, array forms, or a named `define-component`; avoid copy-paste duplicate geometry blocks.\n",
+    "- Stable `part` IDs identify generated objects and must survive revisions; never derive them from display labels, source position, or traversal order.\n",
+    "- Inside `build`, use meaningful named `(shape ...)` stages for geometry units that users may inspect or tune; names should describe design intent, not operation order.\n",
+    "- `feature :params` declares primary controls for that semantic feature. It supplements inferred dependencies; it does not replace or constrain them.\n",
+    "- Tag interaction-critical faces and edges with `tag-face` / `tag-edges`; use `:created-by <shape>` when the owning build stage is known. Do not tag every incidental topology element.\n",
+    "- AST/compiler dependency inference is authoritative for actual parameter ownership across shapes, features, and parts. Prompt-authored names and `feature :params` add intent, but must never override inferred dependencies.\n",
+    "- Do not author or generate Ecky `controlViews`. Native Ecky parameter groups and viewport controls are deterministic projections of AST dependencies plus runtime topology provenance.\n",
     "- For authored `mesh`/`polyhedron`, prefer bounded formula-generated vertex/triangle lists over copied literal blocks. Add topology verification for boundary/non-manifold edges and connected components before printability or solid claims.\n",
     "- Reference images are inferred approximation inputs; treat geometry from them as inferred approximation source. Vision text cannot claim reconstruction or accepted CAD; normal compile, preview, structural verification, and exact artifact gates decide artifact truth.\n",
-    "- Components: `(define-component name ((number key default :label ...) ...) body)` defines a closed, parameterized geometry unit; instantiate with keywords `(name :key value)`. Bodies may only reference signature keys and local bindings; pasted components carry their own `(verify ...)` clauses, tag-namespaced per instantiating part (`partkey/tag`).\n",
+    "- Components: `(define-component name ((number key default :label ...) ...) body)` defines a closed, parameterized geometry unit; instantiate with keywords `(name :key value)`. Bodies may reference signature keys, local bindings, other components, and immutable top-level `define` helpers from the same source; model params must be passed explicitly. Pasted components carry their own `(verify ...)` clauses, tag-namespaced per instantiating part (`partkey/tag`).\n",
+    "- Mounted components: keep body geometry in one local frame; declare `(ports (port mount :type \"type.v1\" :frame (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1))))`, declare matching ports on the target part, then use `(place-component (component ...) :from mount :to (port-ref target-part target-port) :normal aligned|opposed)`. Change the target `port-ref` to move the unchanged body between faces. Use optional `:roll`, target-local `:offset`, and local `:mirror x|y|none`; never derive reusable placement with handwritten Euler angles.\n",
     "- Component library workflow: lift a proven part with `component_extract` (pass the part key and source; `save=true` stores it), discover reusable components with `component_search` (compact headers only), fetch full copy-inline source with `component_get`, then paste the `define-component` into the model and instantiate it.\n",
     "- Component reuse modes are explicit: `component_get` vendors copy-inline source and creates no dependency; authored `(import-component \"package.id\" :version \"1.2.0\" :component \"component-id\" :as alias)` keeps an exact live package reference. Live imports use the committed canonical lock. Never use ranges, `latest`, implicit upgrades, or per-model dependency copies.\n",
     "- STEP live components require locked payload digest plus package-carried geometry provenance. They enter native Direct OCCT as BRep. Never route STEP through FreeCAD, STL conversion, `solidify`, hidden repair, or implicit fuse.\n",
-    "- Bound source authoring: a bound target exposes `sourcePath`, `sourceFolder`, and `sourceState` in `workspace_overview.defaultTarget` and `target_meta_get`. When `sourcePath` is present, this file flow takes precedence over macro buffer/rewrite tools. Edit the file at `sourcePath` directly with normal file tools, then run the source sync flow (`project_folder_apply`, slug = the bound folder name) to validate, preview, and commit the edited file as a new version. `sourceState` / `project_folder_status` reports clean/fileChanged/threadAdvanced/conflict; conflicts need `force=true`. Do NOT export a fresh mirror first — `project_folder_export` only re-seeds a missing folder. Never write version history outside this flow.\n",
+    "- Bound source authoring: a bound target exposes `sourcePath`, `sourceFolder`, and `sourceState` in `workspace_overview.defaultTarget` and `target_meta_get`. When `sourcePath` is present, this file flow takes precedence over macro buffer/rewrite tools. Edit the file at `sourcePath` directly with normal file tools; the project-folder watcher appends, validates, and previews settled edits as a new version. `sourceState` reports file freshness, never a version-write conflict. Do NOT export a fresh mirror first — `project_folder_export` only re-seeds a missing folder. Never write version history outside this flow.\n",
     "- Derived values should appear once. If the same fit math or repeated body setup appears across parts, lift it into model-level `let*`, helper `define`, or a `define-component` instead of copy-paste.\n",
     "- Physical fit relations need explicit names. Do not leave anonymous offsets like `(+ holder_w 12)` in fit-critical placement/dimension expressions; introduce named bindings or named constraints.\n",
     "- Any fit-critical face/edge selector should be tagged with `tag-face` or `tag-edges` before downstream shell/fillet/chamfer/cut use so topology can rebind across param changes.\n",
@@ -29,19 +36,49 @@ pub(crate) const ECKY_AUTHORING_CARD: &str = concat!(
     "- Fillet/chamfer are topology-sensitive. If a selector matches no edges after one smaller-radius retry and one selector retry, stop retrying fillet/chamfer; rebuild the shape with rounded source geometry (`rounded-rect`, `rounded-polygon`, `offset-rounded`, `loft`, `taper`, `cone`, or explicit profiles).\n",
     "- Do not promise STEP unless current artifact truth says `hasStepExport=true` or exportArtifacts contains `format=step`; `mesh`/`native` selects Ecky native lowering, not an automatic STEP guarantee.\n",
     "- Before describing STEP representation, inspect artifact digest `geometryRepresentation`, `facetedStep`, and `analyticStep`. A solidified mesh STEP is faceted poly-BRep, never analytic source CAD.\n",
-    "- MCP-first workflow: inspect with `target_detail_get(section=\"shapeGraph\")`, patch with `ecky_ast_*` when possible, validate with `ecky_constraints_validate`, preview via render, call `verify_generated_model`, repair red verification with another preview, then commit only green verification.\n",
-    "- Prefer AST patches over full macro rewrites when an `ecky_ast_*` operation can express the edit.\n",
-    "- For geometry with explicit topology/printability requirements, add top-level `(verify ...)` clauses before preview when shipped manifest/STL metrics can express the requirement; example metrics: `(stl non-manifold-edge-count)`, `(stl connected-component-count)`, `(stl overhang-face-count)`, and `(manifest has-step)`.\n",
-    "- After preview/render, call `verify_generated_model` before commit. This runs authored `(verify ...)` clauses plus structural verification. Use `get_structural_verification_summary` only for summary/readback, not as the primary gate.\n",
-    "- For an existing design target, call `thread_borrow`; for a brand-new design, call `thread_create`. Then read `sourcePath`, edit that bound file, and sync it with `project_folder_apply`.\n",
+    "- Bound-source workflow: inspect with `target_detail_get(section=\"shapeGraph\")`, validate planned source with `ecky_constraints_validate` when useful, edit `sourcePath`, wait for watcher preview, call `verify_generated_model`, then repair red verification with another changed file edit. The watcher preview already created the version.\n",
+    "- Unbound compatibility workflow only: prefer guarded `ecky_ast_*` patches over full macro rewrites when an AST operation can express the edit. AST render mutations append their own draft version.\n",
+    "- For geometry with explicit topology/printability requirements, add direct `(verify ...)` clauses under `(model ...)` before preview when shipped manifest/STL metrics can express the requirement; example metrics: `(stl non-manifold-edge-count)`, `(stl connected-component-count)`, `(stl overhang-face-count)`, and `(manifest has-step)`.\n",
+    "- After preview/render, call `verify_generated_model`. This runs authored `(verify ...)` clauses plus structural verification and attaches evidence to that same version. Use `get_structural_verification_summary` only for summary/readback, not as the primary gate.\n",
+    "- For a targetless session choosing an existing design, call `thread_borrow`; for a brand-new design, call `thread_create`. Ecky provider sessions are already pre-bound: call `workspace_overview` directly and do not borrow the assigned thread again. Then read `sourcePath` and edit that bound file; the watcher syncs settled file changes.\n",
     "- For an unbound legacy target only, render with `macro_preview_render`. If validation fails, surface exact raw error, fix source properly, and render again.\n",
-    "- Persist green verified previews with `commit_preview_version`; include returned `threadId`, `messageId`, and `modelId` in agent evidence. If repair cap is exhausted and verification stays red, do not commit; report capped red with exact failing issue codes/messages.\n",
+    "- Edits append versions before validation. Preview/render and verify attach outcomes to that version automatically; there is no commit or finalize step. Include returned `threadId`, `messageId`, and `modelId` in agent evidence. If repair cap is exhausted and verification stays red, report capped red with exact failing issue codes/messages.\n",
     "- Never write `history.sqlite` directly from scripts or agents. Version updates must flow through MCP tools only.\n",
     "- Verify geometry visually with `get_model_screenshot` after `verify_generated_model` passes; authored verify covers measurable structure, not visual/mechanical intent.\n"
 );
 
 pub(crate) fn authoring_card_text() -> &'static str {
     ECKY_AUTHORING_CARD
+}
+
+pub(crate) fn codex_provider_bootstrap_text(
+    bootstrap_version: u32,
+    ecky_thread_id: &str,
+    title: &str,
+    cwd: &str,
+    handoff_context: &str,
+) -> String {
+    format!(
+        "Ecky provider bootstrap v{bootstrap_version}.\n\
+         Ecky thread: {ecky_thread_id}\n\
+         Ecky project: {title}\n\
+         Working directory: {cwd}\n\
+         Expected bound source: {cwd}/model.ecky\n\
+         Project manifest: {cwd}/ecky-project.edn\n\n\
+         ECKY CANONICAL HANDOFF\n{handoff_context}\n\n\
+         PROVIDER SESSION CONTRACT\n\
+         Use CAD tools from MCP server ecky_provider_mcp. Do not open a browser for local files, model inspection, or proof when MCP/file tools suffice; browser use is for explicit web or UI work.\n\
+         The working directory is a project mirror, not the canonical database. Do not start another user-prompt loop; answer the current turn directly.\n\
+         You are the direct Codex provider behind this Ecky CAD dialogue. User messages and answers already flow through this Codex task; never call `request_user_prompt` or `session_reply_save`.\n\
+         This provider MCP connection is already pre-bound to Ecky thread `{ecky_thread_id}`. Do not call `thread_borrow` for this thread; that tool is only for an intentional switch to another existing target. Call `workspace_overview` directly, read `agentBrief.primaryGuideUri` and every URI in `agentBrief.mustRead`, and inspect `defaultTarget.sourcePath`, `sourceState`, `sourceLanguage`, `macroDialect`, and `geometryBackend`.\n\
+         When `sourcePath` exists, read and edit that exact file with normal file tools. The project-folder watcher appends one version, validates, renders, and records status after settled writes. Do not export first. Do not call a manual commit/finalize operation. Check watcher/project status and raw validation diagnostics after the edit.\n\
+         Only when `sourcePath` is absent may you use compatibility macro-buffer or AST render-mutation tools.\n\
+         After a successful preview, call `verify_generated_model`; inspect artifact truth before STEP/export claims and inspect a screenshot for visual/mechanical intent. Report exact issue codes when verification stays red.\n\
+         When useful, cite the bound source in the user-facing answer as `[model.ecky]({cwd}/model.ecky:LINE)` so Ecky can open the exact line. Do not include internal `messageId` or `modelId` fields in the user-facing answer; keep those identifiers only in internal tool evidence.\n\
+         Never write `history.sqlite` directly. Never claim a CAD change complete from a file save alone.\n\n\
+         SHARED ECKY AUTHORING POLICY\n{authoring_card}",
+        authoring_card = authoring_card_text(),
+    )
 }
 
 pub(crate) fn target_authoring_context(design_output: &DesignOutput) -> TargetAuthoringContext {
@@ -156,7 +193,19 @@ mod tests {
         assert!(card.contains("target_detail_get(section=\"shapeGraph\")"));
         assert!(card.contains("ecky_ast_*"));
         assert!(card.contains("ecky_constraints_validate"));
-        assert!(card.contains("Prefer AST patches over full macro rewrites"));
+        assert!(card.contains("prefer guarded `ecky_ast_*` patches over full macro rewrites"));
+    }
+
+    #[test]
+    fn authoring_card_requires_deterministic_parameter_provenance() {
+        let card = authoring_card_text();
+
+        assert!(card.contains("Stable `part` IDs"));
+        assert!(card.contains("meaningful named `(shape ...)` stages"));
+        assert!(card.contains("`feature :params` declares primary controls"));
+        assert!(card.contains("interaction-critical faces and edges"));
+        assert!(card.contains("AST/compiler dependency inference is authoritative"));
+        assert!(card.contains("Do not author or generate Ecky `controlViews`"));
     }
 
     #[test]
@@ -193,7 +242,7 @@ mod tests {
     fn authoring_card_requires_model_with_verify_for_generated_policy() {
         let card = authoring_card_text();
 
-        assert!(card.contains("Generated Ecky model policy requires top-level `(model ...)` and `(verify ...)` together"));
+        assert!(card.contains("Generated Ecky model policy requires one top-level `(model ...)` containing direct `(verify ...)` clauses"));
         assert!(card.contains("Do not generate a model without authored verification clauses"));
     }
 
@@ -209,14 +258,12 @@ mod tests {
     }
 
     #[test]
-    fn authoring_card_requires_verify_repair_before_green_commit() {
+    fn authoring_card_requires_verify_to_update_existing_version() {
         let card = authoring_card_text();
 
-        assert!(card.contains("preview via render, call `verify_generated_model`, repair red verification with another preview, then commit only green verification"));
-        assert!(card.contains("Persist green verified previews with `commit_preview_version`"));
-        assert!(
-            card.contains("If repair cap is exhausted and verification stays red, do not commit")
-        );
+        assert!(card.contains("watcher preview already created the version"));
+        assert!(card.contains("there is no commit or finalize step"));
+        assert!(card.contains("report capped red with exact failing issue codes/messages"));
     }
 
     #[test]
@@ -259,18 +306,18 @@ mod tests {
             "card must point at target_meta_get for the fields"
         );
 
-        // Edit the supplied file, then run the existing source sync flow.
+        // Edit the supplied file, then let the watcher run source sync.
         assert!(
             card.contains("Edit the file at `sourcePath`"),
             "card must direct editing the supplied sourcePath file"
         );
         assert!(
-            card.contains("source sync flow"),
-            "card must name the source sync flow"
+            card.contains("watcher"),
+            "card must name watcher-backed source sync"
         );
         assert!(
-            card.contains("project_folder_apply"),
-            "card must name the existing source sync tool"
+            !card.contains("project_folder_apply"),
+            "card must not expose a manual source sync tool"
         );
 
         // Export-first framing is removed.
@@ -294,5 +341,28 @@ mod tests {
             card.contains("Only when `sourcePath` is absent"),
             "legacy macro mutation tools must be scoped to unbound targets"
         );
+    }
+
+    #[test]
+    fn codex_provider_bootstrap_embeds_shared_policy_and_bound_session_flow() {
+        let bootstrap = codex_provider_bootstrap_text(
+            3,
+            "thread-1",
+            "Dryer",
+            "/tmp/dryer",
+            "latest design state",
+        );
+
+        assert!(bootstrap.contains("Ecky provider bootstrap v3"));
+        assert!(bootstrap.contains("already pre-bound to Ecky thread `thread-1`"));
+        assert!(bootstrap.contains("Do not call `thread_borrow` for this thread"));
+        assert!(bootstrap.contains("`workspace_overview`"));
+        assert!(bootstrap.contains("agentBrief.primaryGuideUri"));
+        assert!(bootstrap.contains("defaultTarget.sourcePath"));
+        assert!(bootstrap.contains("project-folder watcher"));
+        assert!(bootstrap.contains("Do not call a manual commit/finalize operation"));
+        assert!(bootstrap.contains("`verify_generated_model`"));
+        assert!(bootstrap.contains(authoring_card_text()));
+        assert!(!bootstrap.contains("inspect -> validate -> preview -> commit"));
     }
 }

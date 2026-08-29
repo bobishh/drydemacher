@@ -140,7 +140,6 @@ pub fn updatable_agent_message_for_request(
         .find(|message| {
             message.id == base_message_id
                 && message.role == MessageRole::Assistant
-                && message.status != MessageStatus::Error
                 && (message.output.is_some() || message.artifact_bundle.is_some())
                 && message
                     .agent_origin
@@ -201,12 +200,16 @@ pub async fn save_or_update_agent_version_for_session(
         let existing_agent_message = if force_create_new_message {
             None
         } else {
-            updatable_agent_message_for_request(
-                &db::get_thread_messages(&conn, &thread_id)
-                    .map_err(|e| AppError::persistence(e.to_string()))?,
-                &session_id,
-                &base_message_id,
-            )
+            db::get_thread_message_version(&conn, &thread_id, &base_message_id)
+                .map_err(|e| AppError::persistence(e.to_string()))?
+                .filter(|message| {
+                    updatable_agent_message_for_request(
+                        std::slice::from_ref(message),
+                        &session_id,
+                        &base_message_id,
+                    )
+                    .is_some()
+                })
         };
         (stored_session, existing_agent_message)
     };
@@ -546,8 +549,10 @@ mod tests {
             microwave: None,
             voice: crate::contracts::VoiceConfig::default(),
             mcp: McpConfig::default(),
+            fem_compute: crate::contracts::FemComputeConfig::default(),
             has_seen_onboarding: true,
             connection_type: None,
+            provider_models: crate::contracts::ProviderModels::default(),
             default_engine_kind: crate::contracts::EngineKind::Freecad,
             default_source_language: crate::contracts::SourceLanguage::LegacyPython,
             default_geometry_backend: crate::contracts::GeometryBackend::Freecad,

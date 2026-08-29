@@ -86,7 +86,7 @@ test("normalizeMessage migrates build123d runtime bundle to native", () => {
       contentHash: "x",
       fcstdPath: "",
       manifestPath: "",
-      previewStlPath: "",
+      modelStlPath: "",
       geometryBackend: "build123d",
     } as any,
     modelManifest: null,
@@ -128,12 +128,12 @@ test("normalizeMessage preserves structural verification authored checks from ca
         totalVolume: 1,
         totalArea: 1,
         bbox: null,
-        previewStlSizeBytes: 1,
-        previewStlTriangleCount: 1,
-        previewStlComponentCount: 1,
-        previewStlNonManifoldEdgeCount: 0,
-        previewStlOverhangTriangleCount: 0,
-        previewStlOverhangRatio: 0,
+        modelStlSizeBytes: 1,
+        modelStlTriangleCount: 1,
+        modelStlComponentCount: 1,
+        modelStlNonManifoldEdgeCount: 0,
+        modelStlOverhangTriangleCount: 0,
+        modelStlOverhangRatio: 0,
       },
       verifierStatus: "ok",
       verifierSource: "rust_structural",
@@ -199,7 +199,7 @@ test("normalizeArtifactBundle preserves topology target alias ids", () => {
     contentHash: "x",
     fcstdPath: "",
     manifestPath: "",
-    previewStlPath: "",
+    modelStlPath: "",
     edgeTargets: [
       {
         targetId: "body:edge:0-0-0_10-0-0",
@@ -242,6 +242,19 @@ test("normalizeArtifactBundle preserves topology target alias ids", () => {
   assert.deepEqual(bundle.faceTargets[0].aliasIds, ["body:face:5:0-0-10:100"]);
 });
 
+test("normalizeArtifactBundle enforces canonical model.stl filename", () => {
+  const bundle = normalizeArtifactBundle({
+    modelId: "persisted-model",
+    sourceKind: "generated",
+    contentHash: "persisted",
+    fcstdPath: "",
+    manifestPath: "/runtime/manifest.json",
+    modelStlPath: "/runtime/noncanonical-name.stl",
+  } as any);
+
+  assert.equal(bundle.modelStlPath, "/runtime/model.stl");
+});
+
 test("normalizeMessage preserves durable topology target ids on manifest", () => {
   const sourceManifest = {
     modelId: "model",
@@ -249,7 +262,7 @@ test("normalizeMessage preserves durable topology target ids on manifest", () =>
     contentHash: "x",
     fcstdPath: "",
     manifestPath: "",
-    previewStlPath: "",
+    modelStlPath: "",
     document: {
       documentName: "Doc",
       documentLabel: "Doc",
@@ -335,7 +348,7 @@ test("normalizeLastDesignSnapshot migrates build123d runtime bundle to native", 
       contentHash: "x",
       fcstdPath: "",
       manifestPath: "",
-      previewStlPath: "",
+      modelStlPath: "",
       geometryBackend: "build123d",
     },
     modelManifest: null,

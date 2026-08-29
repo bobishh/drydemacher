@@ -10,7 +10,7 @@ const artifact = (modelId: string): ArtifactBundle => ({
   contentHash: modelId,
   fcstdPath: '',
   manifestPath: '',
-  previewStlPath: `/previews/${modelId}.stl`,
+  modelStlPath: `/previews/${modelId}.stl`,
 });
 
 test('Given an identical edited source/runtime/backend When preview is warm Then cache returns its immutable artifact', () => {

@@ -1,4 +1,4 @@
-use crate::contracts::{AppError, AppResult};
+use crate::contracts::AppResult;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -96,35 +96,10 @@ impl AuthoringActorRegistry {
         thread_id: &str,
         token: AuthoringActorRevision,
     ) -> AppResult<AuthoringActorPublishPermit> {
-        let actor_id = format!("{}:{}", session_id, thread_id);
         let state = self.actor_state(session_id, thread_id);
         let state = state.lock_owned().await;
-        let current_revision = state.current_revision;
-        let current_generation = state.generation;
-        let already_published = state.published_revision == Some(token.revision);
-        if token.generation != current_generation
-            || token.revision != current_revision
-            || already_published
-        {
-            let reason = if already_published {
-                "already published"
-            } else {
-                "superseded"
-            };
-            return Err(AppError::with_details(
-                crate::contracts::AppErrorCode::Conflict,
-                format!(
-                    "Authoring actor render result {reason}: requested revision {}, current revision {current_revision}.",
-                    token.revision
-                ),
-                format!(
-                    "actorId={actor_id} requestedGeneration={} currentGeneration={current_generation} requestedRevision={} currentRevision={current_revision}",
-                    token.generation, token.revision
-                ),
-            )
-            .with_operation("authoring_actor_publish"));
-        }
-
+        // Publishing is serialized, never rejected. Superseded work finalizes
+        // its own immutable version; append order alone determines thread head.
         Ok(AuthoringActorPublishPermit { token, state })
     }
 
@@ -192,7 +167,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn old_actor_generation_cannot_publish_after_registry_recovery() {
+    async fn old_actor_generation_still_publishes_after_registry_recovery() {
         let registry = AuthoringActorRegistry::default();
         let old = registry
             .reserve_authoring_actor_revision("session-1", "thread-a")
@@ -202,19 +177,10 @@ mod tests {
             .reserve_authoring_actor_revision("session-1", "thread-a")
             .await;
 
-        let error = match registry
+        registry
             .acquire_authoring_actor_publish_permit("session-1", "thread-a", old)
             .await
-        {
-            Ok(_) => panic!("old actor generation published"),
-            Err(error) => error,
-        };
-        assert_eq!(error.code, crate::contracts::AppErrorCode::Conflict);
-        assert!(error
-            .details
-            .as_deref()
-            .unwrap_or_default()
-            .contains("requestedGeneration"));
+            .expect("older append result remains publishable");
 
         registry
             .acquire_authoring_actor_publish_permit("session-1", "thread-a", current)
@@ -239,14 +205,14 @@ mod tests {
             .invalidate_authoring_actors_for_thread("thread-a")
             .await;
 
-        assert!(registry
+        registry
             .acquire_authoring_actor_publish_permit("session-a", "thread-a", stale_a)
             .await
-            .is_err());
-        assert!(registry
+            .expect("session A append remains publishable");
+        registry
             .acquire_authoring_actor_publish_permit("session-b", "thread-a", stale_b)
             .await
-            .is_err());
+            .expect("session B append remains publishable");
         registry
             .acquire_authoring_actor_publish_permit("session-a", "thread-b", other_thread)
             .await

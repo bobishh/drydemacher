@@ -80,11 +80,10 @@ pub fn resolve_target(
         db::get_visible_thread_title(conn, &tid)
             .map_err(|e| AppError::persistence(e.to_string()))?
             .ok_or_else(|| AppError::not_found(format!("Thread {} not found.", tid)))?;
-        let message_id = db::get_latest_successful_message_id_in_thread(conn, &tid)
+        let message_id = db::get_thread_latest_version(conn, &tid)
             .map_err(|e| AppError::persistence(e.to_string()))?
-            .ok_or_else(|| {
-                AppError::validation(format!("Thread {} has no successful versions.", tid))
-            })?;
+            .map(|message| message.id)
+            .ok_or_else(|| AppError::validation(format!("Thread {} has no versions.", tid)))?;
 
         let target = resolve_target(conn, app, Some(tid.clone()), Some(message_id.clone()))?;
 

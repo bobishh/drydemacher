@@ -8,10 +8,12 @@
 
   let {
     events = [],
+    activeThreadId = null,
     selectedEventId = null,
     onSelectEvent,
   }: {
     events?: SessionEvent[];
+    activeThreadId?: string | null;
     selectedEventId?: string | null;
     onSelectEvent?: (id: string) => void;
   } = $props();
@@ -50,6 +52,49 @@
     }
   }
 
+  type ValidationFeedbackView = {
+    status: string;
+    items: Array<{ code: string; message: string }>;
+    authoringLints: Array<{ message: string }>;
+  };
+
+  function validationFeedback(value: unknown): ValidationFeedbackView | null {
+    let candidate = value;
+    if (typeof candidate === 'string') {
+      try {
+        candidate = JSON.parse(candidate);
+      } catch {
+        return null;
+      }
+    }
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
+    const payload = candidate as Record<string, unknown>;
+    if (payload.source !== 'structuralVerification' || !Array.isArray(payload.items)) return null;
+    const items = payload.items.flatMap((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+      const entry = item as Record<string, unknown>;
+      if (typeof entry.message !== 'string') return [];
+      return [{
+        code: typeof entry.code === 'string' ? entry.code : 'VALIDATION',
+        message: entry.message,
+      }];
+    });
+    const authoringLints = Array.isArray(payload.authoringLints)
+      ? payload.authoringLints.flatMap((lint) => {
+          if (!lint || typeof lint !== 'object' || Array.isArray(lint)) return [];
+          const message = (lint as Record<string, unknown>).message;
+          return typeof message === 'string' ? [{ message }] : [];
+        })
+      : [];
+    return {
+      status: typeof payload.status === 'string' ? payload.status : 'unknown',
+      items,
+      authoringLints,
+    };
+  }
+
+  const selectedValidationFeedback = $derived.by(() => validationFeedback(selectedEvent?.raw));
+
   function diffLabel(diff: SessionEventDiff): string {
     return diff.label ?? diff.path ?? diff.key ?? diff.kind.toUpperCase();
   }
@@ -69,7 +114,10 @@
           type="button"
           class="activity-event"
           class:activity-event--selected={event.id === selectedEvent?.id}
+          class:activity-event--active-thread={Boolean(activeThreadId && event.threadId === activeThreadId)}
+          class:activity-event--background-thread={Boolean(activeThreadId && event.threadId !== activeThreadId)}
           data-severity={event.severity}
+          data-thread-id={event.threadId ?? undefined}
           onclick={() => onSelectEvent?.(event.id)}
         >
           <span class="activity-event__meta">
@@ -96,6 +144,24 @@
       </div>
 
       <pre class="activity-summary">{selectedEvent.summary}</pre>
+
+      {#if selectedValidationFeedback}
+        <section class="activity-section validation-feedback" data-testid="activity-validation-feedback">
+          <h4>STRUCTURAL VERIFICATION · {selectedValidationFeedback.status.toUpperCase()}</h4>
+          {#each selectedValidationFeedback.items as item (`${item.code}:${item.message}`)}
+            <div class="validation-feedback__item">
+              <code>{item.code}</code>
+              <span>{item.message}</span>
+            </div>
+          {/each}
+          {#each selectedValidationFeedback.authoringLints as lint (lint.message)}
+            <div class="validation-feedback__item validation-feedback__item--lint">
+              <code>AUTHORING LINT</code>
+              <span>{lint.message}</span>
+            </div>
+          {/each}
+        </section>
+      {/if}
 
       {#if selectedEvent.diffs?.length}
         <section class="activity-section">
@@ -152,7 +218,7 @@
         </section>
       {/if}
 
-      {#if selectedEvent.raw !== undefined}
+      {#if selectedEvent.raw !== undefined && !selectedValidationFeedback}
         <section class="activity-section">
           <h4>RAW</h4>
           <pre class="activity-raw">{formatRaw(selectedEvent.raw)}</pre>
@@ -176,6 +242,19 @@
     color: var(--text);
     font-family: var(--font-mono);
   }
+
+  .validation-feedback__item {
+    display: grid;
+    grid-template-columns: minmax(150px, auto) minmax(0, 1fr);
+    gap: 12px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--bg-300);
+    overflow: hidden;
+  }
+
+  .validation-feedback__item code { color: var(--primary); }
+  .validation-feedback__item span { min-width: 0; overflow-wrap: anywhere; }
+  .validation-feedback__item--lint code { color: var(--secondary); }
 
   .activity-list {
     min-width: 0;
@@ -202,6 +281,15 @@
   .activity-event:hover,
   .activity-event--selected {
     background: color-mix(in srgb, var(--primary) 14%, var(--bg-200));
+  }
+
+  .activity-event--active-thread {
+    box-shadow: inset 3px 0 0 var(--secondary);
+  }
+
+  .activity-event--background-thread {
+    color: var(--text-muted);
+    opacity: 0.72;
   }
 
   .activity-event__meta {

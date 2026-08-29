@@ -2812,6 +2812,7 @@ mod tests {
             component_dependency_lock: None,
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: "generated-abc123".to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -2823,7 +2824,7 @@ mod tests {
             fcstd_path: "/tmp/model.FCStd".to_string(),
             manifest_path: manifest_path.to_string(),
             macro_path: Some("/tmp/model.py".to_string()),
-            preview_stl_path: "/tmp/model.stl".to_string(),
+            model_stl_path: "/tmp/model.stl".to_string(),
             viewer_assets: Vec::new(),
             edge_targets: vec![crate::contracts::ViewerEdgeTarget {
                 target_id: "alias-edge".to_string(),
@@ -3108,7 +3109,7 @@ mod tests {
         let step_artifact =
             require_step_export_artifact(&bundle).expect("accepted candidate STEP artifact");
 
-        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.model_stl_path).is_file());
         assert!(Path::new(&step_artifact.path).is_file());
 
         let accepted_prism =
@@ -3137,7 +3138,7 @@ mod tests {
             .expect("direct STEP bundle for exact prism");
         let prism_step_artifact = require_step_export_artifact(&prism_bundle)
             .expect("accepted exact prism STEP artifact");
-        assert!(Path::new(&prism_bundle.preview_stl_path).is_file());
+        assert!(Path::new(&prism_bundle.model_stl_path).is_file());
         assert!(Path::new(&prism_step_artifact.path).is_file());
 
         let _ = std::fs::remove_dir_all(root);

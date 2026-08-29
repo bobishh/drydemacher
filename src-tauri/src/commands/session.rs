@@ -5,56 +5,11 @@ use std::path::Path;
 use portable_pty::PtySize;
 use tauri::{AppHandle, Manager, State};
 
-use crate::contracts::{
-    AgentSession, AppError, AppResult, LastDesignSnapshot, McpServerStatus, ThreadAgentState,
-};
+use crate::contracts::{AgentSession, AppError, AppResult, LastDesignSnapshot, McpServerStatus};
 use crate::db;
 use crate::mcp::runtime;
 use crate::models::{AppState, ViewportScreenshotCapture};
 use crate::services::agent_dialogue;
-
-const HARD_BUSY_STALE_TIMEOUT_SECS: u64 = 30;
-
-fn is_hard_busy_phase(phase: &str) -> bool {
-    matches!(phase, "rendering" | "saving_version" | "restoring_version")
-}
-
-async fn clear_stale_hard_busy_session_for_thread(
-    state: &AppState,
-    thread_id: &str,
-    now: u64,
-) -> Option<String> {
-    let stale_before = now.saturating_sub(HARD_BUSY_STALE_TIMEOUT_SECS);
-    let mut sessions = state.mcp_sessions.lock().await;
-    for (session_id, session) in sessions.iter_mut() {
-        let matches_thread = session
-            .last_target
-            .as_ref()
-            .map(|target| target.thread_id.as_str())
-            == Some(thread_id)
-            || session.bound_thread_id.as_deref() == Some(thread_id);
-        let Some(phase) = session.phase.as_deref() else {
-            continue;
-        };
-        if !matches_thread
-            || !session.busy
-            || !is_hard_busy_phase(phase)
-            || session.updated_at >= stale_before
-        {
-            continue;
-        }
-        session.phase = Some("idle".to_string());
-        session.status_text = Some("Ready.".to_string());
-        session.busy = false;
-        session.activity_label = None;
-        session.activity_started_at = None;
-        session.attention_kind = None;
-        session.waiting_on_prompt = false;
-        session.updated_at = now;
-        return Some(session_id.clone());
-    }
-    None
-}
 
 fn encode_control_key(key: &str) -> Option<u8> {
     if key.eq_ignore_ascii_case("space") {
@@ -519,13 +474,10 @@ async fn get_message_attachments_impl(
         let thread_id = crate::db::get_message_thread_id(&conn, message_id)
             .map_err(|err| AppError::persistence(err.to_string()))?
             .ok_or_else(|| AppError::not_found(format!("Message {} not found.", message_id)))?;
-        let legacy_message = crate::db::get_thread_messages(&conn, &thread_id)
+        let legacy_images = crate::db::get_message_attachment_images(&conn, &thread_id, message_id)
             .map_err(|err| AppError::persistence(err.to_string()))?
-            .into_iter()
-            .find(|message| message.id == message_id)
             .ok_or_else(|| AppError::not_found(format!("Message {} not found.", message_id)))?;
-        attachments = legacy_message
-            .attachment_images
+        attachments = legacy_images
             .into_iter()
             .map(|image_ref| {
                 let is_inline = image_ref.trim_start().starts_with("data:image/");
@@ -679,7 +631,11 @@ pub(crate) async fn queue_agent_prompt_impl(
         .map_err(AppError::persistence)?;
     }
 
-    state.emit_history_updated();
+    state.emit_history_changed(
+        Some(thread_id.clone()),
+        Some(message_id.clone()),
+        "messageQueued",
+    );
     Ok(crate::contracts::QueuedAgentPrompt {
         thread_id,
         message_id,
@@ -704,62 +660,186 @@ pub async fn get_message_attachments(
     get_message_attachments_impl(&message_id, &state).await
 }
 
-async fn resolve_thread_agent_state_inputs(
-    state: &AppState,
-    thread_id: &str,
-) -> AppResult<runtime::ThreadAgentStateInputs> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let _ = clear_stale_hard_busy_session_for_thread(state, thread_id, now).await;
-    let conn = state.db.lock().await;
-    let last_session = db::get_thread_last_agent_session(&conn, thread_id)
-        .map_err(|e| AppError::persistence(e.to_string()))?;
-    drop(conn);
-
-    let (live_session_id, live_session) = {
-        let sessions = state.mcp_sessions.lock().await;
-        if let Some((session_id, session)) = sessions.iter().find(|(_, session)| {
-            session
-                .last_target
-                .as_ref()
-                .map(|target| target.thread_id.as_str())
-                == Some(thread_id)
-                || session.bound_thread_id.as_deref() == Some(thread_id)
-        }) {
-            (Some(session_id.clone()), Some(session.clone()))
-        } else if let Some(last_session) = last_session.as_ref() {
-            (
-                Some(last_session.session_id.clone()),
-                sessions.get(&last_session.session_id).cloned(),
-            )
-        } else {
-            (None, None)
-        }
-    };
-
-    let candidate_session_id = live_session_id.clone().or_else(|| {
-        last_session
-            .as_ref()
-            .map(|session| session.session_id.clone())
-    });
-    let runtime_snapshot =
-        runtime::runtime_snapshot_for_thread(state, thread_id, candidate_session_id.as_deref());
-
-    Ok(runtime::ThreadAgentStateInputs {
-        live_session_id,
-        runtime: runtime_snapshot,
-        live_session,
-        last_session,
-        now,
-    })
+#[tauri::command]
+#[specta::specta]
+pub async fn get_last_design(state: State<'_, AppState>) -> AppResult<Option<LastDesignSnapshot>> {
+    Ok(state
+        .last_snapshot
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|snapshot| LastDesignSnapshot {
+            design: None,
+            thread_id: snapshot.thread_id.clone(),
+            message_id: snapshot.message_id.clone(),
+            artifact_bundle: None,
+            model_manifest: None,
+            selected_part_id: snapshot.selected_part_id.clone(),
+            target_ref: snapshot.target_ref.clone(),
+        }))
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn get_last_design(state: State<'_, AppState>) -> AppResult<Option<LastDesignSnapshot>> {
-    Ok(state.last_snapshot.lock().unwrap().clone())
+pub async fn get_web_content_recovery_state() -> AppResult<crate::contracts::WebContentRecoveryState>
+{
+    Ok(crate::web_content_recovery::state())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn acknowledge_web_content_recovery() -> AppResult<()> {
+    crate::web_content_recovery::acknowledge_stable();
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_agent_draft_preview(
+    thread_id: String,
+    preview_id: String,
+    state: State<'_, AppState>,
+) -> AppResult<crate::contracts::AgentDraftProjection> {
+    let conn = state.db.lock().await;
+    let mut projection = db::get_agent_draft_projection_by_preview_id(&conn, &preview_id)
+        .map_err(|error| AppError::persistence(error.to_string()))?
+        .ok_or_else(|| AppError::not_found("Draft preview not found."))?;
+    if projection.thread_id != thread_id {
+        return Err(AppError::validation(
+            "Draft preview does not belong to the requested thread.",
+        ));
+    }
+    crate::services::render_snapshot::validate_render_compatibility(
+        &projection.design_output,
+        &projection.artifact_bundle,
+        &projection.model_manifest,
+    )?;
+    let initial_bytes = crate::transport_budget::serialized_size(&projection)?;
+    if initial_bytes > crate::transport_budget::VERSION_CORE_MAX_BYTES {
+        projection.design_output.response =
+            crate::transport_budget::bounded_text(&projection.design_output.response, 64 * 1024);
+        projection.design_output.macro_code =
+            crate::transport_budget::bounded_text(&projection.design_output.macro_code, 512 * 1024);
+        projection
+            .truncated_fields
+            .push("designOutput.source".to_string());
+    }
+    projection.observed_bytes = crate::transport_budget::require_serialized_budget(
+        "agentDraftProjection",
+        &projection,
+        crate::transport_budget::VERSION_CORE_MAX_BYTES,
+        "version source window or dense topology page",
+    )?;
+    Ok(projection)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_agent_draft_topology_page(
+    thread_id: String,
+    preview_id: String,
+    kind: crate::contracts::DenseTopologyKind,
+    cursor: Option<String>,
+    limit: Option<usize>,
+    state: State<'_, AppState>,
+) -> AppResult<crate::contracts::DenseTopologyPage> {
+    use crate::contracts::{DenseTopologyItem, DenseTopologyKind, DenseTopologyPage};
+    let conn = state.db.lock().await;
+    let stored_thread_id = db::get_agent_draft_thread_id(&conn, &preview_id)
+        .map_err(|error| AppError::persistence(error.to_string()))?
+        .ok_or_else(|| AppError::not_found("Draft preview not found."))?;
+    if stored_thread_id != thread_id {
+        return Err(AppError::validation(
+            "Draft preview does not belong to the requested thread.",
+        ));
+    }
+    let kind_name = match kind {
+        DenseTopologyKind::Edge => "edge",
+        DenseTopologyKind::Face => "face",
+        DenseTopologyKind::Selection => "selection",
+    };
+    let identity = format!("{thread_id}\0{preview_id}\0{kind_name}")
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    let offset = if let Some(cursor) = cursor {
+        let mut parts = cursor.split(':');
+        let valid = parts.next() == Some("v1")
+            && parts
+                .next()
+                .is_some_and(|part| part == format!("{identity:016x}"));
+        let offset = parts.next().and_then(|part| part.parse::<usize>().ok());
+        if !valid || parts.next().is_some() || offset.is_none() {
+            return Err(AppError::validation("Invalid draft topology cursor."));
+        }
+        offset.unwrap_or(0)
+    } else {
+        0
+    };
+    let safe_limit = limit.unwrap_or(500).clamp(1, 500);
+    let (json_column, json_path) = match kind {
+        DenseTopologyKind::Edge => ("artifact_bundle", "$.edgeTargets"),
+        DenseTopologyKind::Face => ("artifact_bundle", "$.faceTargets"),
+        DenseTopologyKind::Selection => ("model_manifest", "$.selectionTargets"),
+    };
+    let (raw_items, total_count) = db::get_agent_draft_topology_json_page(
+        &conn,
+        &preview_id,
+        json_column,
+        json_path,
+        offset,
+        safe_limit,
+    )
+    .map_err(|error| AppError::persistence(error.to_string()))?;
+    let mut observed_bytes = 2usize;
+    let mut items = Vec::new();
+    for raw_item in raw_items {
+        let item = match kind {
+            DenseTopologyKind::Edge => DenseTopologyItem::Edge(
+                serde_json::from_str(&raw_item)
+                    .map_err(|error| AppError::persistence(error.to_string()))?,
+            ),
+            DenseTopologyKind::Face => DenseTopologyItem::Face(
+                serde_json::from_str(&raw_item)
+                    .map_err(|error| AppError::persistence(error.to_string()))?,
+            ),
+            DenseTopologyKind::Selection => DenseTopologyItem::Selection(
+                serde_json::from_str(&raw_item)
+                    .map_err(|error| AppError::persistence(error.to_string()))?,
+            ),
+        };
+        let bytes = crate::transport_budget::serialized_size(&item)?;
+        if observed_bytes.saturating_add(bytes) > crate::transport_budget::TOPOLOGY_PAGE_MAX_BYTES {
+            if items.is_empty() {
+                return Err(AppError::validation(format!(
+                    "Draft topology item is {bytes} bytes; allowed page is {} bytes.",
+                    crate::transport_budget::TOPOLOGY_PAGE_MAX_BYTES
+                )));
+            }
+            break;
+        }
+        observed_bytes = observed_bytes.saturating_add(bytes);
+        items.push(item);
+    }
+    let next_offset = offset + items.len();
+    Ok(DenseTopologyPage {
+        snapshot_ref: format!("draft-topology:{thread_id}:{preview_id}"),
+        kind,
+        items,
+        next_cursor: (next_offset < total_count)
+            .then(|| format!("v1:{identity:016x}:{next_offset}")),
+        total_count,
+        observed_bytes,
+    })
+}
+
+fn snapshot_thread_changed(
+    previous: Option<&LastDesignSnapshot>,
+    next: Option<&LastDesignSnapshot>,
+) -> bool {
+    previous.and_then(|snapshot| snapshot.thread_id.as_deref())
+        != next.and_then(|snapshot| snapshot.thread_id.as_deref())
 }
 
 #[tauri::command]
@@ -769,27 +849,17 @@ pub async fn save_last_design(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<()> {
-    {
+    let thread_changed = {
         let mut last = state.last_snapshot.lock().unwrap();
+        let changed = snapshot_thread_changed(last.as_ref(), snapshot.as_ref());
         *last = snapshot.clone();
+        changed
+    };
+    if thread_changed {
+        crate::mcp::handlers::cancel_active_project_folder_render();
     }
     crate::services::session::write_last_snapshot(&app, snapshot.as_ref());
     Ok(())
-}
-
-/// Returns the current agent state for the given thread — for status bar display.
-#[tauri::command]
-#[specta::specta]
-pub async fn get_thread_agent_state(
-    thread_id: String,
-    state: State<'_, AppState>,
-) -> AppResult<ThreadAgentState> {
-    let config = state.config.lock().unwrap().clone();
-    let inputs = resolve_thread_agent_state_inputs(&state, &thread_id).await?;
-
-    Ok(runtime::derive_thread_agent_state(
-        &config, &thread_id, inputs,
-    ))
 }
 
 async fn resolve_agent_prompt_impl(
@@ -893,7 +963,13 @@ async fn resolve_agent_prompt_impl(
                 .map_err(|err| AppError::persistence(err.to_string()))?;
             }
         }
-        state.emit_history_updated();
+        state.emit_history_changed(
+            prompt_control
+                .as_ref()
+                .and_then(|control| control.thread_id.clone()),
+            working_message_ids.last().cloned(),
+            "messageUpdated",
+        );
     } else if let Some(thread_id) = prompt_control
         .as_ref()
         .and_then(|control| control.thread_id.clone())
@@ -926,8 +1002,12 @@ async fn resolve_agent_prompt_impl(
             },
         )
         .await?;
-        working_message_ids = vec![message_id];
-        state.emit_history_updated();
+        working_message_ids = vec![message_id.clone()];
+        state.emit_history_changed(
+            Some(thread_id.clone()),
+            Some(message_id.clone()),
+            "messageUpdated",
+        );
     }
 
     if let Some(control) = prompt_control.as_ref() {
@@ -1019,54 +1099,10 @@ pub async fn reject_agent_viewport_screenshot(
     Ok(())
 }
 
-/// Called by the frontend when the user queues a message in MCP mode and no agent is running.
-/// Fires the wake notifier so the supervisor loop can respawn the named agent.
-/// Safe to call redundantly — noop if the agent is already running.
-#[tauri::command]
-#[specta::specta]
-pub async fn wake_auto_agent(label: String, state: State<'_, AppState>) -> AppResult<()> {
-    runtime::wake_auto_agent_by_label(&state, &label, None).await
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn wake_primary_auto_agent(
-    thread_id: Option<String>,
-    message_id: Option<String>,
-    model_id: Option<String>,
-    state: State<'_, AppState>,
-) -> AppResult<()> {
-    runtime::wake_primary_auto_agent(&state, thread_id, message_id, model_id).await
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn stop_primary_auto_agent(
-    thread_id: Option<String>,
-    message_id: Option<String>,
-    model_id: Option<String>,
-    state: State<'_, AppState>,
-) -> AppResult<()> {
-    runtime::stop_primary_auto_agent(&state, thread_id, message_id, model_id).await
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn restart_primary_auto_agent(
-    thread_id: Option<String>,
-    message_id: Option<String>,
-    model_id: Option<String>,
-    state: State<'_, AppState>,
-) -> AppResult<()> {
-    runtime::restart_primary_auto_agent(&state, thread_id, message_id, model_id).await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contracts::AgentSession;
     use crate::contracts::{Config, McpConfig};
-    use crate::models::{McpSessionState, McpTargetRef};
     use portable_pty::native_pty_system;
     use std::path::PathBuf;
 
@@ -1085,8 +1121,10 @@ mod tests {
             microwave: None,
             voice: crate::contracts::VoiceConfig::default(),
             mcp: McpConfig::default(),
+            fem_compute: crate::contracts::FemComputeConfig::default(),
             has_seen_onboarding: true,
             connection_type: None,
+            provider_models: crate::contracts::ProviderModels::default(),
             default_engine_kind: crate::contracts::EngineKind::Freecad,
             default_source_language: crate::contracts::SourceLanguage::LegacyPython,
             default_geometry_backend: crate::contracts::GeometryBackend::Freecad,
@@ -1094,6 +1132,26 @@ mod tests {
             max_verify_attempts: 0,
             projects_root: None,
         }
+    }
+
+    #[test]
+    fn changing_restart_thread_requires_canceling_old_folder_render() {
+        let snapshot = |thread_id: &str| LastDesignSnapshot {
+            design: None,
+            thread_id: Some(thread_id.to_string()),
+            message_id: None,
+            artifact_bundle: None,
+            model_manifest: None,
+            selected_part_id: None,
+            target_ref: None,
+        };
+        let previous = snapshot("thread-old");
+        let same = snapshot("thread-old");
+        let next = snapshot("thread-next");
+
+        assert!(!snapshot_thread_changed(Some(&previous), Some(&same)));
+        assert!(snapshot_thread_changed(Some(&previous), Some(&next)));
+        assert!(snapshot_thread_changed(Some(&previous), None));
     }
 
     #[tokio::test]
@@ -1694,97 +1752,5 @@ mod tests {
         let size = pty.lock().unwrap().get_size().expect("size");
         assert_eq!(size.cols, 132);
         assert_eq!(size.rows, 41);
-    }
-
-    #[tokio::test]
-    async fn resolve_thread_agent_state_inputs_do_not_leak_primary_runtime_into_other_thread() {
-        let conn = crate::db::init_db(&test_db_path("thread-state-sources")).expect("db");
-        let mut config = test_config();
-        config.connection_type = Some("mcp".to_string());
-        config.mcp.mode = crate::contracts::McpMode::Active;
-        config.mcp.primary_agent_id = Some("agent-primary".to_string());
-        config.mcp.auto_agents = vec![crate::contracts::AutoAgent {
-            id: "agent-primary".to_string(),
-            label: "Primary".to_string(),
-            cmd: "claude".to_string(),
-            model: None,
-            args: Vec::new(),
-            enabled: true,
-            start_on_demand: true,
-        }];
-        let state = AppState::new(config, None, conn);
-        crate::mcp::runtime::initialize_auto_agent_supervisors(state.clone());
-
-        {
-            let conn = state.db.lock().await;
-            crate::db::upsert_agent_session(
-                &conn,
-                &AgentSession {
-                    session_id: "session-thread-a".to_string(),
-                    client_kind: "mcp-http".to_string(),
-                    host_label: "Gemini CLI".to_string(),
-                    agent_label: "gemini".to_string(),
-                    llm_model_id: None,
-                    llm_model_label: Some("Gemini".to_string()),
-                    thread_id: Some("thread-a".to_string()),
-                    message_id: Some("msg-a".to_string()),
-                    model_id: None,
-                    phase: "waiting_for_user".to_string(),
-                    status_text: "Waiting".to_string(),
-                    updated_at: 10,
-                },
-            )
-            .expect("agent session");
-        }
-
-        state.mcp_sessions.lock().await.insert(
-            "session-thread-a".to_string(),
-            McpSessionState {
-                client_kind: "mcp-http".to_string(),
-                host_label: "Gemini CLI".to_string(),
-                agent_label: "gemini".to_string(),
-                llm_model_id: None,
-                llm_model_label: Some("Gemini".to_string()),
-                bound_thread_id: None,
-                last_target: Some(McpTargetRef {
-                    thread_id: "thread-a".to_string(),
-                    message_id: "msg-a".to_string(),
-                    model_id: None,
-                }),
-                phase: Some("waiting_for_user".to_string()),
-                status_text: Some("Waiting".to_string()),
-                busy: false,
-                activity_label: None,
-                activity_started_at: None,
-                attention_kind: None,
-                waiting_on_prompt: true,
-                current_turn_id: None,
-                current_turn_thread_id: None,
-                current_turn_working_message_ids: Vec::new(),
-                current_turn_working_version_message_id: None,
-                updated_at: 11,
-            },
-        );
-
-        crate::mcp::runtime::mark_agent_active(
-            &state,
-            "Primary",
-            Some("session-thread-b".to_string()),
-            Some("thread-b".to_string()),
-            None,
-            Some("Busy elsewhere.".to_string()),
-        );
-
-        let inputs = resolve_thread_agent_state_inputs(&state, "thread-a")
-            .await
-            .expect("thread inputs");
-        assert!(inputs.runtime.is_none());
-        assert_eq!(
-            inputs
-                .live_session
-                .as_ref()
-                .map(|session| session.agent_label.as_str()),
-            Some("gemini")
-        );
     }
 }

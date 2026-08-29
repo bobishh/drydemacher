@@ -71,8 +71,10 @@ fn test_config() -> Config {
         microwave: None,
         voice: crate::contracts::VoiceConfig::default(),
         mcp: McpConfig::default(),
+        fem_compute: crate::contracts::FemComputeConfig::default(),
         has_seen_onboarding: true,
         connection_type: None,
+        provider_models: crate::contracts::ProviderModels::default(),
         default_engine_kind: crate::contracts::EngineKind::Freecad,
         default_geometry_backend: crate::contracts::GeometryBackend::Freecad,
         default_source_language: crate::contracts::SourceLanguage::LegacyPython,
@@ -119,6 +121,30 @@ fn test_ctx_other() -> AgentContext {
         llm_model_id: None,
         llm_model_label: Some("GPT-5.4".to_string()),
     }
+}
+
+async fn appended_preview_version(
+    state: &AppState,
+    _app: &dyn PathResolver,
+    req: VersionSaveRequest,
+    _ctx: &AgentContext,
+) -> AppResult<VersionSaveResponse> {
+    let preview_id = req
+        .message_id
+        .as_deref()
+        .ok_or_else(|| AppError::validation("preview message id required"))?;
+    let conn = state.db.lock().await;
+    let draft = db::get_agent_draft_by_preview_id(&conn, preview_id)
+        .map_err(|error| AppError::persistence(error.to_string()))?
+        .ok_or_else(|| AppError::not_found("preview draft not found"))?;
+    let message_id = draft
+        .base_message_id
+        .ok_or_else(|| AppError::persistence("preview has no durable version"))?;
+    Ok(VersionSaveResponse {
+        thread_id: draft.thread_id,
+        message_id,
+        model_id: draft.artifact_bundle.model_id,
+    })
 }
 
 #[test]
@@ -385,6 +411,7 @@ fn sample_bundle(model_id: &str, preview_name: &str) -> ArtifactBundle {
         component_dependency_lock: None,
         component_dependency_lock_digest: None,
         component_import_origins: Vec::new(),
+        component_placement_evidence: Vec::new(),
         schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind: ModelSourceKind::Generated,
@@ -396,7 +423,7 @@ fn sample_bundle(model_id: &str, preview_name: &str) -> ArtifactBundle {
         fcstd_path: format!("/tmp/{}.FCStd", model_id),
         manifest_path: format!("/tmp/{}.json", model_id),
         macro_path: Some(format!("/tmp/{}.py", model_id)),
-        preview_stl_path: format!("/tmp/{}", preview_name),
+        model_stl_path: format!("/tmp/{}", preview_name),
         viewer_assets: Vec::new(),
         edge_targets: Vec::new(),
         face_targets: Vec::new(),
@@ -410,6 +437,7 @@ fn sample_manifest(model_id: &str) -> ModelManifest {
     ModelManifest {
         geometry_provenance: None,
         component_import_origins: Vec::new(),
+        component_placement_evidence: Vec::new(),
         schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.to_string(),
         source_kind: ModelSourceKind::Generated,
@@ -579,8 +607,8 @@ async fn seed_ecky_verify_target(
     include_step_export: bool,
 ) -> (AppState, TestPathResolver) {
     let (state, resolver) = seed_target_with_macro("Verify Target", "V-verify", source).await;
-    let preview_stl_path = resolver.root.join(preview_name);
-    write_closed_tetra_binary_stl(&preview_stl_path);
+    let model_stl_path = resolver.root.join(preview_name);
+    write_closed_tetra_binary_stl(&model_stl_path);
     let source_path = resolver.root.join(format!("{model_id}.ecky"));
     fs::write(&source_path, source).expect("write ecky source");
 
@@ -597,7 +625,7 @@ async fn seed_ecky_verify_target(
     bundle.source_language = crate::contracts::SourceLanguage::EckyIrV0;
     bundle.content_hash = format!("verify-{model_id}");
     bundle.macro_path = Some(source_path.display().to_string());
-    bundle.preview_stl_path = preview_stl_path.display().to_string();
+    bundle.model_stl_path = model_stl_path.display().to_string();
     if include_step_export {
         bundle
             .export_artifacts
@@ -708,6 +736,96 @@ fn carry_forward_semantic_manifest_keeps_controls_and_face_bindings() {
         vec!["main".to_string()]
     );
     assert!(merged.warnings.is_empty());
+}
+
+#[test]
+fn carry_forward_semantic_manifest_does_not_restore_ecky_control_views() {
+    let previous = sample_manifest("model-base");
+    let mut next = sample_manifest("model-next");
+    next.engine_kind = crate::contracts::EngineKind::EckyIrV0;
+    next.source_language = crate::contracts::SourceLanguage::EckyIrV0;
+    next.geometry_backend = crate::contracts::GeometryBackend::EckyRust;
+    next.control_primitives.clear();
+    next.control_relations.clear();
+    next.control_views.clear();
+    next.selection_targets[1].view_ids.clear();
+    let bundle = sample_bundle("model-next", "next.stl");
+
+    let merged = carry_forward_semantic_manifest(Some(&previous), next, &bundle);
+
+    assert!(merged.control_primitives.is_empty());
+    assert!(merged.control_relations.is_empty());
+    assert!(merged.control_views.is_empty());
+    assert!(merged.selection_targets[1].view_ids.is_empty());
+}
+
+#[test]
+fn carry_forward_semantic_manifest_keeps_new_ecky_ast_provenance() {
+    let mut previous = sample_manifest("model-base");
+    previous.engine_kind = crate::contracts::EngineKind::EckyIrV0;
+    previous.source_language = crate::contracts::SourceLanguage::EckyIrV0;
+    previous.geometry_backend = crate::contracts::GeometryBackend::EckyRust;
+    previous.feature_graph = Some(crate::contracts::FeatureGraph {
+        nodes: vec![crate::contracts::FeatureNode {
+            feature_id: "part:body".to_string(),
+            kind: "part".to_string(),
+            label: "Body".to_string(),
+            source_ref: None,
+            dependency_ids: vec!["width".to_string()],
+            output_refs: Vec::new(),
+            ports: Vec::new(),
+        }],
+    });
+
+    let mut next = sample_manifest("model-next");
+    next.engine_kind = crate::contracts::EngineKind::EckyIrV0;
+    next.source_language = crate::contracts::SourceLanguage::EckyIrV0;
+    next.geometry_backend = crate::contracts::GeometryBackend::EckyRust;
+    next.parts[0].parameter_keys = vec!["width".to_string(), "radius".to_string()];
+    next.parameter_groups = vec![crate::contracts::ParameterGroup {
+        group_id: "shape:body:rounded".to_string(),
+        label: "Rounded".to_string(),
+        parameter_keys: vec!["width".to_string(), "radius".to_string()],
+        part_ids: vec!["body".to_string()],
+        editable: true,
+        presentation: Some("advanced".to_string()),
+        order: Some(0),
+    }];
+    next.feature_graph = Some(crate::contracts::FeatureGraph {
+        nodes: vec![
+            crate::contracts::FeatureNode {
+                feature_id: "part:body".to_string(),
+                kind: "part".to_string(),
+                label: "Body".to_string(),
+                source_ref: None,
+                dependency_ids: vec!["radius".to_string(), "width".to_string()],
+                output_refs: Vec::new(),
+                ports: Vec::new(),
+            },
+            crate::contracts::FeatureNode {
+                feature_id: "shape:body:rounded".to_string(),
+                kind: "shape".to_string(),
+                label: "Rounded".to_string(),
+                source_ref: None,
+                dependency_ids: vec!["radius".to_string(), "width".to_string()],
+                output_refs: Vec::new(),
+                ports: Vec::new(),
+            },
+        ],
+    });
+    let bundle = sample_bundle("model-next", "next.stl");
+
+    let merged = carry_forward_semantic_manifest(Some(&previous), next, &bundle);
+
+    assert!(merged.parameter_groups.iter().any(|group| {
+        group.group_id == "shape:body:rounded" && group.parameter_keys == ["width", "radius"]
+    }));
+    assert!(merged.feature_graph.is_some_and(|graph| {
+        graph
+            .nodes
+            .iter()
+            .any(|node| node.feature_id == "shape:body:rounded")
+    }));
 }
 
 #[test]
@@ -932,7 +1050,7 @@ async fn seed_live_session(state: &AppState) {
 }
 
 #[tokio::test]
-async fn thread_create_creates_blank_thread_and_binds_session() {
+async fn thread_create_creates_visible_named_thread_and_binds_session() {
     let conn = crate::db::init_db(&test_db_path("thread-create")).expect("db");
     let state = AppState::new(test_config(), None, conn);
     let resolver = TestPathResolver {
@@ -959,6 +1077,10 @@ async fn thread_create_creates_blank_thread_and_binds_session() {
     let thread = history::get_thread(&conn, &response.thread_id).expect("created thread");
     assert_eq!(thread.title, "Seven Petal Badge");
     assert_eq!(thread.version_count, 0);
+    assert!(
+        !thread.is_blank,
+        "a named MCP-created thread must be visible before its first version"
+    );
     let stored_session = db::get_sessions_by_ids(&conn, &[test_session_id()])
         .expect("stored session")
         .into_iter()
@@ -1273,11 +1395,11 @@ async fn target_meta_get_exposes_bound_source_path_folder_state() {
     let (state, resolver) = seed_target().await;
 
     // Bind thread-1 through the commit-sync flow (the realistic path for a
-    // thread that already has a committed version): refresh_on_commit aligns
+    // thread that already has an appended version): mirror refresh aligns
     // the on-disk source + manifest with the thread head message.
     let binding = {
         let conn = state.db.lock().await;
-        crate::thread_source_binding::refresh_on_commit(
+        crate::thread_source_binding::refresh_on_version_append(
             &resolver,
             &conn,
             state.config.lock().unwrap().projects_root.as_deref(),
@@ -1934,7 +2056,7 @@ async fn thread_messages_get_compacts_content_and_keeps_payload_flags() {
                 status: MessageStatus::Success,
                 output: None,
                 usage: None,
-                artifact_bundle: Some(sample_bundle("model-2", "preview.stl")),
+                artifact_bundle: Some(sample_bundle("model-2", "model.stl")),
                 model_manifest: Some(sample_manifest("model-2")),
                 structural_verification: None,
                 agent_origin: None,
@@ -4550,11 +4672,11 @@ async fn given_film_coupon_fixture_when_film_gap_patch_validate_then_patch_previ
         preview.artifact_bundle.source_language,
         crate::contracts::SourceLanguage::EckyIrV0
     );
-    assert!(!preview.artifact_bundle.preview_stl_path.trim().is_empty());
+    assert!(!preview.artifact_bundle.model_stl_path.trim().is_empty());
 }
 
 #[tokio::test]
-async fn given_film_coupon_fixture_when_film_gap_patch_preview_then_commit_returns_model_id_and_digest(
+async fn given_film_coupon_fixture_when_film_gap_patch_preview_then_verify_returns_model_id_and_digest(
 ) {
     let source =
         include_str!("../../../../model-runtime/examples/film-adapter-film-gap-coupon.ecky");
@@ -4588,7 +4710,7 @@ async fn given_film_coupon_fixture_when_film_gap_patch_preview_then_commit_retur
         &test_ctx(),
     )
     .await
-    .expect("film gap preview for commit");
+    .expect("film gap preview for verification");
 
     assert_eq!(preview.thread_id, "thread-1");
     assert_eq!(
@@ -4609,14 +4731,14 @@ async fn given_film_coupon_fixture_when_film_gap_patch_preview_then_commit_retur
         "",
     )
     .await
-    .expect("verify film gap preview before commit");
+    .expect("verify film gap preview");
     assert!(
         verification.result.passed,
         "{}",
         verification.result.summary
     );
 
-    let commit = handle_commit_preview_version(
+    let commit = appended_preview_version(
         &state,
         &resolver,
         VersionSaveRequest {
@@ -4691,7 +4813,7 @@ async fn given_wrapper_param_path_when_ecky_ast_replace_and_render_then_only_num
         .macro_code
         .contains("(number film_gap 0.45 :label \"film gap\" :min 0.2 :max 1.2 :step 0.01)"));
     assert!(!preview.macro_code.contains("(number film_gap 0.35 "));
-    assert!(!preview.artifact_bundle.preview_stl_path.trim().is_empty());
+    assert!(!preview.artifact_bundle.model_stl_path.trim().is_empty());
 }
 
 #[tokio::test]
@@ -4938,7 +5060,173 @@ async fn macro_preview_uses_saved_ecky_dialect_when_request_omits_it() {
 }
 
 #[tokio::test]
-async fn bounded_polyhedron_mcp_inspect_validate_preview_verify_commit_smoke() {
+async fn given_invalid_macro_change_when_preview_fails_then_exact_source_is_latest_version() {
+    let source = "(model (part body (box 1 2 3)))";
+    let invalid_source = "(model (part body (box 1 2";
+    let (state, resolver) = seed_target_with_macro("Failed draft", "V-base", source).await;
+
+    let error = handle_macro_preview_render(
+        &state,
+        &resolver,
+        MacroReplaceRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some("thread-1".to_string()),
+            message_id: Some("msg-1".to_string()),
+            macro_code: invalid_source.to_string(),
+            macro_dialect: Some(MacroDialect::EckyIrV0),
+            ui_spec: None,
+            parameters: None,
+            post_processing: None,
+            geometry_backend: None,
+            source_window: None,
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect_err("invalid macro must fail preview");
+
+    let conn = state.db.lock().await;
+    let latest = db::get_thread_latest_version(&conn, "thread-1")
+        .expect("latest version query")
+        .expect("failed draft version");
+    assert_eq!(latest.status, MessageStatus::Error);
+    assert_eq!(
+        latest
+            .output
+            .as_ref()
+            .map(|output| output.macro_code.as_str()),
+        Some(invalid_source)
+    );
+    assert_eq!(latest.content, error.to_string());
+    assert!(latest.artifact_bundle.is_none());
+}
+
+#[tokio::test]
+async fn given_unchanged_macro_preview_retry_then_no_duplicate_version_is_appended() {
+    let source = "(model (part body (box 1 2 3)))";
+    let (state, resolver) = seed_target_with_macro("Stable draft", "V-base", source).await;
+    let ctx = test_ctx();
+    let request = |message_id: String| MacroReplaceRequest {
+        identity: AgentIdentityOverride::default(),
+        thread_id: Some("thread-1".to_string()),
+        message_id: Some(message_id),
+        macro_code: source.to_string(),
+        macro_dialect: Some(MacroDialect::EckyIrV0),
+        ui_spec: None,
+        parameters: None,
+        post_processing: None,
+        geometry_backend: None,
+        source_window: None,
+    };
+
+    let first = handle_macro_preview_render(&state, &resolver, request("msg-1".to_string()), &ctx)
+        .await
+        .expect("first preview");
+    let count_after_first = {
+        let conn = state.db.lock().await;
+        db::get_thread_messages(&conn, "thread-1").unwrap().len()
+    };
+
+    handle_macro_preview_render(&state, &resolver, request(first.message_id), &ctx)
+        .await
+        .expect("unchanged retry preview");
+
+    let conn = state.db.lock().await;
+    assert_eq!(
+        db::get_thread_messages(&conn, "thread-1").unwrap().len(),
+        count_after_first
+    );
+}
+
+#[tokio::test]
+async fn given_draft_returns_to_older_content_then_new_append_is_not_deduplicated() {
+    let source = "(model (part body (box 1 2 3)))";
+    let invalid_a = "(model (part body (box 4 5";
+    let invalid_b = "(model (part body (box 7 8";
+    let (state, resolver) = seed_target_with_macro("A B A draft", "V-base", source).await;
+    let ctx = test_ctx();
+
+    for draft_source in [invalid_a, invalid_b, invalid_a] {
+        handle_macro_preview_render(
+            &state,
+            &resolver,
+            MacroReplaceRequest {
+                identity: AgentIdentityOverride::default(),
+                thread_id: Some("thread-1".to_string()),
+                message_id: Some("msg-1".to_string()),
+                macro_code: draft_source.to_string(),
+                macro_dialect: Some(MacroDialect::EckyIrV0),
+                ui_spec: None,
+                parameters: None,
+                post_processing: None,
+                geometry_backend: None,
+                source_window: None,
+            },
+            &ctx,
+        )
+        .await
+        .expect_err("each invalid changed draft must remain as a failed version");
+    }
+
+    let conn = state.db.lock().await;
+    let versions = db::get_thread_messages(&conn, "thread-1")
+        .expect("thread messages")
+        .into_iter()
+        .filter(|message| message.output.is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(versions.len(), 4, "base plus A, B, and returned A");
+    assert_eq!(
+        versions
+            .iter()
+            .map(|message| message.output.as_ref().unwrap().macro_code.as_str())
+            .collect::<Vec<_>>(),
+        vec![source, invalid_a, invalid_b, invalid_a]
+    );
+    assert_ne!(versions[1].id, versions[3].id);
+    assert_eq!(versions[3].status, MessageStatus::Error);
+}
+
+#[tokio::test]
+async fn given_invalid_parameter_change_when_preview_fails_then_patch_is_latest_version() {
+    let source = "(model (params (number width 10)) (part body (box width 2 3)))";
+    let (state, resolver) = seed_target_with_macro("Failed params", "V-base", source).await;
+
+    handle_params_preview_render(
+        &state,
+        &resolver,
+        ParamsPatchRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some("thread-1".to_string()),
+            message_id: Some("msg-1".to_string()),
+            parameter_patch: BTreeMap::from([(
+                "unknownParam".to_string(),
+                ParamValue::Number(9.0),
+            )]),
+            post_processing: None,
+            geometry_backend: None,
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect_err("unknown parameter must fail preview");
+
+    let conn = state.db.lock().await;
+    let latest = db::get_thread_latest_version(&conn, "thread-1")
+        .expect("latest version query")
+        .expect("failed parameter draft");
+    assert_eq!(latest.status, MessageStatus::Error);
+    assert_eq!(
+        latest
+            .output
+            .as_ref()
+            .and_then(|output| output.initial_params.get("unknownParam")),
+        Some(&ParamValue::Number(9.0))
+    );
+    assert!(latest.artifact_bundle.is_none());
+}
+
+#[tokio::test]
+async fn bounded_polyhedron_mcp_inspect_validate_preview_verify_smoke() {
     let source = r#"(model
   (params
     (number size 1 :label "Scale" :min 0.5 :max 4 :step 0.5))
@@ -5048,7 +5336,7 @@ async fn bounded_polyhedron_mcp_inspect_validate_preview_verify_commit_smoke() {
         .any(|check| check.tag == "mesh_clean"
             && check.status == crate::contracts::AuthoredVerifyCheckStatus::Passed));
 
-    let commit = handle_commit_preview_version(
+    let commit = appended_preview_version(
         &state,
         &resolver,
         VersionSaveRequest {
@@ -5062,7 +5350,7 @@ async fn bounded_polyhedron_mcp_inspect_validate_preview_verify_commit_smoke() {
         &test_ctx(),
     )
     .await
-    .expect("commit verified preview");
+    .expect("resolve verified appended version");
     assert_eq!(commit.model_id, preview.artifact_bundle.model_id);
 }
 
@@ -5442,6 +5730,29 @@ async fn version_restore_returns_artifact_digest_for_export_truth() {
 }
 
 #[tokio::test]
+async fn version_delete_moves_saved_version_to_trash() {
+    let (state, _resolver) = seed_target().await;
+    let response = handle_version_delete(
+        &state,
+        VersionDeleteRequest {
+            identity: AgentIdentityOverride::default(),
+            message_id: "msg-1".to_string(),
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("version delete");
+
+    assert_eq!(response.thread_id, "thread-1");
+    assert_eq!(response.message_id, "msg-1");
+    assert!(response.deleted);
+
+    let conn = state.db.lock().await;
+    let deleted = crate::db::get_deleted_messages(&conn).expect("deleted messages");
+    assert!(deleted.iter().any(|message| message.id == "msg-1"));
+}
+
+#[tokio::test]
 async fn target_detail_get_returns_requested_ui_spec_only() {
     let (state, resolver) = seed_target().await;
     let response = handle_target_detail_get(
@@ -5522,7 +5833,7 @@ async fn target_detail_get_returns_active_artifact_bundle_only() {
     assert_eq!(value["artifactBundle"]["modelId"], "model-base");
     assert_eq!(value["artifactBundle"]["sourceLanguage"], "legacyPython");
     assert_eq!(value["artifactBundle"]["geometryBackend"], "freecad");
-    assert_eq!(value["artifactBundle"]["hasPreviewStl"], true);
+    assert_eq!(value["artifactBundle"]["hasModelStl"], true);
     assert_eq!(
         value["artifactBundle"]["exportFormats"],
         serde_json::json!(["step"])
@@ -6531,13 +6842,13 @@ async fn structural_verification_summary_reflects_authored_verify_failures() {
 }
 
 #[tokio::test]
-async fn printability_analyze_reads_preview_stl_and_includes_artifact_digest() {
+async fn printability_analyze_reads_model_stl_and_includes_artifact_digest() {
     let (state, resolver) = seed_target().await;
     let model_id = "generated-printability";
-    let preview_stl_path = resolver.root.join("printability-preview.stl");
-    write_closed_tetra_binary_stl(&preview_stl_path);
-    let mut bundle = sample_bundle(model_id, "printability-preview.stl");
-    bundle.preview_stl_path = preview_stl_path.display().to_string();
+    let model_stl_path = resolver.root.join("printability-model.stl");
+    write_closed_tetra_binary_stl(&model_stl_path);
+    let mut bundle = sample_bundle(model_id, "printability-model.stl");
+    bundle.model_stl_path = model_stl_path.display().to_string();
     bundle
         .export_artifacts
         .push(crate::contracts::ExportArtifact {
@@ -6560,8 +6871,8 @@ async fn printability_analyze_reads_preview_stl_and_includes_artifact_digest() {
     assert_eq!(response.artifact_digest.model_id, model_id);
     assert!(response.artifact_digest.has_step_export);
     assert_eq!(
-        response.preview_stl_path,
-        preview_stl_path.display().to_string()
+        response.model_stl_path,
+        model_stl_path.display().to_string()
     );
     assert_eq!(response.analysis.triangle_count, 4);
     assert_eq!(response.analysis.topology.component_count, Some(1));
@@ -6570,10 +6881,7 @@ async fn printability_analyze_reads_preview_stl_and_includes_artifact_digest() {
 
     let value = serde_json::to_value(&response).expect("printability json");
     assert_eq!(value["artifactDigest"]["modelId"], model_id);
-    assert_eq!(
-        value["previewStlPath"],
-        preview_stl_path.display().to_string()
-    );
+    assert_eq!(value["modelStlPath"], model_stl_path.display().to_string());
     assert_eq!(value["analysis"]["triangleCount"], 4);
     assert_eq!(value["analysis"]["topology"]["componentCount"], 1);
     assert_eq!(value["analysis"]["riskMetrics"]["bridgeSpanMm"], 1.0);
@@ -6584,16 +6892,16 @@ async fn printability_analyze_reads_preview_stl_and_includes_artifact_digest() {
 async fn printability_analyze_anchors_suggestions_when_feature_graph_has_one_clear_target() {
     let (state, resolver) = seed_target().await;
     let model_id = "generated-printability-anchor";
-    let preview_stl_path = resolver.root.join("printability-anchor-preview.stl");
+    let model_stl_path = resolver.root.join("printability-anchor-model.stl");
     write_binary_stl(
-        &preview_stl_path,
+        &model_stl_path,
         &[
             [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
             [[0.0, 0.0, 2.0], [0.0, 1.0, 2.0], [1.0, 0.0, 2.0]],
         ],
     );
-    let mut bundle = sample_bundle(model_id, "printability-anchor-preview.stl");
-    bundle.preview_stl_path = preview_stl_path.display().to_string();
+    let mut bundle = sample_bundle(model_id, "printability-anchor-model.stl");
+    bundle.model_stl_path = model_stl_path.display().to_string();
     let mut manifest = sample_manifest(model_id);
     manifest.feature_graph = Some(crate::contracts::FeatureGraph {
         nodes: vec![crate::contracts::FeatureNode {
@@ -6680,12 +6988,9 @@ async fn printability_helicoid_fixture_analysis_and_recipes_include_risk_suggest
     let source =
         include_str!("../../../../model-runtime/examples/film-adapter-film-gap-coupon.ecky");
     let model_id = "generated-printability-helicoid-fixture";
-    let (state, resolver, _) = seed_ecky_printability_target(
-        source,
-        model_id,
-        "printability-helicoid-fixture-preview.stl",
-    )
-    .await;
+    let (state, resolver, _) =
+        seed_ecky_printability_target(source, model_id, "printability-helicoid-fixture-model.stl")
+            .await;
 
     let mut bundle =
         crate::model_runtime::read_artifact_bundle(&resolver, model_id).expect("runtime bundle");
@@ -6808,18 +7113,18 @@ async fn printability_helicoid_fixture_analysis_and_recipes_include_risk_suggest
 async fn printability_analyze_preserves_empty_anchor_when_feature_graph_is_ambiguous() {
     let (state, resolver) = seed_target().await;
     let model_id = "generated-printability-ambiguous-anchor";
-    let preview_stl_path = resolver
+    let model_stl_path = resolver
         .root
-        .join("printability-ambiguous-anchor-preview.stl");
+        .join("printability-ambiguous-anchor-model.stl");
     write_binary_stl(
-        &preview_stl_path,
+        &model_stl_path,
         &[
             [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
             [[0.0, 0.0, 2.0], [0.0, 1.0, 2.0], [1.0, 0.0, 2.0]],
         ],
     );
-    let mut bundle = sample_bundle(model_id, "printability-ambiguous-anchor-preview.stl");
-    bundle.preview_stl_path = preview_stl_path.display().to_string();
+    let mut bundle = sample_bundle(model_id, "printability-ambiguous-anchor-model.stl");
+    bundle.model_stl_path = model_stl_path.display().to_string();
     let mut manifest = sample_manifest(model_id);
     manifest.feature_graph = Some(crate::contracts::FeatureGraph {
         nodes: vec![
@@ -6863,16 +7168,16 @@ async fn printability_analyze_preserves_empty_anchor_when_feature_graph_is_ambig
 async fn printability_transform_recipes_get_returns_digest_guarded_overhang_recipes() {
     let (state, resolver) = seed_target().await;
     let model_id = "generated-printability-recipes";
-    let preview_stl_path = resolver.root.join("printability-recipes-preview.stl");
+    let model_stl_path = resolver.root.join("printability-recipes-model.stl");
     write_binary_stl(
-        &preview_stl_path,
+        &model_stl_path,
         &[
             [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
             [[0.0, 0.0, 2.0], [0.0, 1.0, 2.0], [1.0, 0.0, 2.0]],
         ],
     );
-    let mut bundle = sample_bundle(model_id, "printability-recipes-preview.stl");
-    bundle.preview_stl_path = preview_stl_path.display().to_string();
+    let mut bundle = sample_bundle(model_id, "printability-recipes-model.stl");
+    bundle.model_stl_path = model_stl_path.display().to_string();
     let mut manifest = sample_manifest(model_id);
     manifest.feature_graph = Some(crate::contracts::FeatureGraph {
         nodes: vec![crate::contracts::FeatureNode {
@@ -6901,8 +7206,8 @@ async fn printability_transform_recipes_get_returns_digest_guarded_overhang_reci
     assert_eq!(response.model_id, model_id);
     assert_eq!(response.artifact_digest.model_id, model_id);
     assert_eq!(
-        response.preview_stl_path,
-        preview_stl_path.display().to_string()
+        response.model_stl_path,
+        model_stl_path.display().to_string()
     );
     let recipe = response
         .recipes
@@ -6975,7 +7280,7 @@ async fn printability_transform_recipes_get_returns_digest_guarded_overhang_reci
 async fn printability_transform_recipes_get_returns_empty_for_no_risk_stl() {
     let (state, resolver) = seed_target().await;
     let model_id = "generated-printability-no-risk-recipes";
-    let preview_stl_path = resolver.root.join("printability-no-risk-preview.stl");
+    let model_stl_path = resolver.root.join("printability-no-risk-model.stl");
     // A unit tetra reads as a 1.00 mm thin wall (below the 1.20 mm
     // advisory); scale it up so the mesh is genuinely risk-free.
     let triangles = [
@@ -6984,9 +7289,9 @@ async fn printability_transform_recipes_get_returns_empty_for_no_risk_stl() {
         [[0.0f32, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]],
         [[10.0f32, 0.0, 0.0], [0.0, 0.0, 10.0], [0.0, 10.0, 0.0]],
     ];
-    write_binary_stl(&preview_stl_path, &triangles);
-    let mut bundle = sample_bundle(model_id, "printability-no-risk-preview.stl");
-    bundle.preview_stl_path = preview_stl_path.display().to_string();
+    write_binary_stl(&model_stl_path, &triangles);
+    let mut bundle = sample_bundle(model_id, "printability-no-risk-model.stl");
+    bundle.model_stl_path = model_stl_path.display().to_string();
     let manifest = sample_manifest(model_id);
     crate::model_runtime::write_runtime_bundle(&resolver, model_id, &bundle, &manifest)
         .expect("runtime bundle");
@@ -6999,21 +7304,21 @@ async fn printability_transform_recipes_get_returns_empty_for_no_risk_stl() {
 }
 
 #[tokio::test]
-async fn printability_transform_recipes_get_reports_missing_preview_stl() {
+async fn printability_transform_recipes_get_reports_missing_model_stl() {
     let (state, resolver) = seed_target().await;
     let model_id = "generated-printability-missing-preview";
-    let mut bundle = sample_bundle(model_id, "missing-preview.stl");
-    bundle.preview_stl_path.clear();
+    let mut bundle = sample_bundle(model_id, "missing-model.stl");
+    bundle.model_stl_path.clear();
     let manifest = sample_manifest(model_id);
     crate::model_runtime::write_runtime_bundle(&resolver, model_id, &bundle, &manifest)
         .expect("runtime bundle");
 
     let err =
         handle_printability_transform_recipes_get(&state, &resolver, "thread-1", "msg-1", model_id)
-            .expect_err("missing preview STL should fail");
+            .expect_err("missing model STL should fail");
 
     assert_eq!(err.code, AppErrorCode::Validation);
-    assert_eq!(err.message, "Artifact bundle has no preview STL path.");
+    assert_eq!(err.message, "Artifact bundle has no model STL path.");
 }
 
 async fn seed_ecky_printability_target(
@@ -7022,9 +7327,9 @@ async fn seed_ecky_printability_target(
     preview_name: &str,
 ) -> (AppState, TestPathResolver, SemanticTransformArtifactGuard) {
     let (state, resolver) = seed_target_with_macro("Ecky Pot", "V-ecky", source).await;
-    let preview_stl_path = resolver.root.join(preview_name);
+    let model_stl_path = resolver.root.join(preview_name);
     write_binary_stl(
-        &preview_stl_path,
+        &model_stl_path,
         &[
             [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
             [[0.0, 0.0, 2.0], [0.0, 1.0, 2.0], [1.0, 0.0, 2.0]],
@@ -7046,7 +7351,7 @@ async fn seed_ecky_printability_target(
     bundle.source_language = crate::contracts::SourceLanguage::EckyIrV0;
     bundle.content_hash = format!("content-{model_id}");
     bundle.macro_path = Some(source_path.display().to_string());
-    bundle.preview_stl_path = preview_stl_path.display().to_string();
+    bundle.model_stl_path = model_stl_path.display().to_string();
 
     let mut manifest = sample_manifest(model_id);
     manifest.engine_kind = crate::contracts::EngineKind::EckyIrV0;
@@ -7071,15 +7376,14 @@ async fn seed_ecky_printability_target(
 
     let guard = SemanticTransformArtifactGuard {
         model_id: model_id.to_string(),
-        preview_stl_path: bundle.preview_stl_path.clone(),
+        model_stl_path: bundle.model_stl_path.clone(),
         content_hash: bundle.content_hash.clone(),
     };
     (state, resolver, guard)
 }
 
 #[tokio::test]
-async fn semantic_transform_preview_reorient_recipe_creates_preview_draft_without_committed_message(
-) {
+async fn semantic_transform_preview_reorient_recipe_creates_preview_draft_and_appended_version() {
     let source = "(model (part body (box 10 20 30)))";
     let (state, resolver, expected_artifact) = seed_ecky_printability_target(
         source,
@@ -7135,14 +7439,16 @@ async fn semantic_transform_preview_reorient_recipe_creates_preview_draft_withou
 
     let draft = {
         let conn = state.db.lock().await;
-        let committed_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM messages WHERE id = ?1",
-                [&response.preview_id],
-                |row| row.get(0),
-            )
-            .expect("message count");
-        assert_eq!(committed_count, 0);
+        let version = db::get_thread_latest_version(&conn, "thread-1")
+            .expect("latest version query")
+            .expect("appended preview version");
+        assert_eq!(
+            version
+                .output
+                .as_ref()
+                .map(|output| crate::mcp::macro_buffer::source_digest(&output.macro_code)),
+            Some(response.new_source_digest.clone())
+        );
         db::get_agent_draft_for_session(&conn, &test_ctx().session_id)
             .expect("draft query")
             .expect("draft")
@@ -7153,7 +7459,7 @@ async fn semantic_transform_preview_reorient_recipe_creates_preview_draft_withou
 }
 
 #[tokio::test]
-async fn semantic_transform_preview_stale_model_id_or_preview_stl_guard_rejects_because_digest_lacks_preview_path(
+async fn semantic_transform_preview_stale_model_id_or_model_stl_guard_rejects_because_digest_lacks_preview_path(
 ) {
     let (state, resolver, mut expected_artifact) = seed_ecky_printability_target(
         "(model (part body (box 10 20 30)))",
@@ -7161,7 +7467,7 @@ async fn semantic_transform_preview_stale_model_id_or_preview_stl_guard_rejects_
         "semantic-stale.stl",
     )
     .await;
-    expected_artifact.preview_stl_path = "/tmp/stale-preview.stl".to_string();
+    expected_artifact.model_stl_path = "/tmp/stale-model.stl".to_string();
 
     let err = handle_semantic_transform_preview(
         &state,
@@ -7194,7 +7500,7 @@ async fn semantic_transform_preview_missing_content_hash_guard_rejects_at_reques
         "actionKind": "reorient",
         "expectedArtifact": {
             "modelId": "generated-semantic-missing-hash",
-            "previewStlPath": "/tmp/semantic-missing-hash.stl"
+            "modelStlPath": "/tmp/semantic-missing-hash.stl"
         }
     });
 
@@ -7284,9 +7590,9 @@ async fn semantic_transform_preview_unsupported_actions_return_explicit_validati
 #[tokio::test]
 async fn semantic_transform_preview_non_ecky_source_is_unsupported() {
     let (state, resolver) = seed_target().await;
-    let preview_stl_path = resolver.root.join("semantic-legacy.stl");
+    let model_stl_path = resolver.root.join("semantic-legacy.stl");
     write_binary_stl(
-        &preview_stl_path,
+        &model_stl_path,
         &[
             [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
             [[0.0, 0.0, 2.0], [0.0, 1.0, 2.0], [1.0, 0.0, 2.0]],
@@ -7294,7 +7600,7 @@ async fn semantic_transform_preview_non_ecky_source_is_unsupported() {
     );
     let model_id = "generated-semantic-legacy";
     let mut bundle = sample_bundle(model_id, "semantic-legacy.stl");
-    bundle.preview_stl_path = preview_stl_path.display().to_string();
+    bundle.model_stl_path = model_stl_path.display().to_string();
     let manifest = sample_manifest(model_id);
     crate::model_runtime::write_runtime_bundle(&resolver, model_id, &bundle, &manifest)
         .expect("runtime bundle");
@@ -7311,7 +7617,7 @@ async fn semantic_transform_preview_non_ecky_source_is_unsupported() {
             action_kind: crate::services::printability::SupportlessFdmRecipeActionKind::Reorient,
             expected_artifact: SemanticTransformArtifactGuard {
                 model_id: model_id.to_string(),
-                preview_stl_path: bundle.preview_stl_path.clone(),
+                model_stl_path: bundle.model_stl_path.clone(),
                 content_hash: bundle.content_hash.clone(),
             },
         },
@@ -7329,11 +7635,11 @@ async fn given_durable_preview_feedback_when_latest_draft_requested_then_respons
 ) {
     let (state, resolver) = seed_target().await;
     let ctx = test_ctx();
-    let preview_stl_path = resolver.root.join("preview-pass.stl");
-    write_closed_tetra_binary_stl(&preview_stl_path);
+    let model_stl_path = resolver.root.join("preview-pass.stl");
+    write_closed_tetra_binary_stl(&model_stl_path);
 
     let mut preview_bundle = sample_bundle("model-preview-pass", "preview-pass.stl");
-    preview_bundle.preview_stl_path = preview_stl_path.display().to_string();
+    preview_bundle.model_stl_path = model_stl_path.display().to_string();
     let preview = store_session_render_preview(
         &state,
         &resolver,
@@ -7414,7 +7720,7 @@ async fn target_detail_get_returns_latest_draft_null_when_absent() {
 }
 
 #[tokio::test]
-async fn given_preview_render_when_commit_runs_then_history_gets_one_version() {
+async fn given_preview_render_when_verified_then_history_keeps_the_same_single_version() {
     let (state, resolver) = seed_target().await;
     let ctx = test_ctx();
     let initial_count = {
@@ -7422,10 +7728,10 @@ async fn given_preview_render_when_commit_runs_then_history_gets_one_version() {
         db::get_thread_messages(&conn, "thread-1").unwrap().len()
     };
     let preview_design = sample_design("Preview Pot", "", "preview_macro()");
-    let preview_stl_path = resolver.root.join("preview.stl");
-    write_closed_tetra_binary_stl(&preview_stl_path);
-    let mut preview_bundle = sample_bundle("model-preview", "preview.stl");
-    preview_bundle.preview_stl_path = preview_stl_path.display().to_string();
+    let model_stl_path = resolver.root.join("model.stl");
+    write_closed_tetra_binary_stl(&model_stl_path);
+    let mut preview_bundle = sample_bundle("model-preview", "model.stl");
+    preview_bundle.model_stl_path = model_stl_path.display().to_string();
     let preview_manifest = sample_manifest("model-preview");
 
     let preview = store_session_render_preview(
@@ -7448,7 +7754,7 @@ async fn given_preview_render_when_commit_runs_then_history_gets_one_version() {
         let conn = state.db.lock().await;
         assert_eq!(
             db::get_thread_messages(&conn, "thread-1").unwrap().len(),
-            initial_count
+            initial_count + 1
         );
     }
     assert_eq!(
@@ -7474,26 +7780,30 @@ async fn given_preview_render_when_commit_runs_then_history_gets_one_version() {
     .expect("verify preview");
     assert!(verified.result.passed, "{}", verified.result.summary);
 
-    let response = handle_commit_preview_version(
+    let response = appended_preview_version(
         &state,
         &resolver,
         VersionSaveRequest {
             identity: AgentIdentityOverride::default(),
             thread_id: Some("thread-1".to_string()),
             message_id: Some(preview.preview_id.clone()),
-            title: Some("Committed Pot".to_string()),
-            version_name: Some("V-preview".to_string()),
+            title: None,
+            version_name: None,
             capture_guided_result: None,
         },
         &ctx,
     )
     .await
-    .expect("commit preview");
+    .expect("resolve appended preview version");
 
     {
         let conn = state.db.lock().await;
         let messages = db::get_thread_messages(&conn, "thread-1").unwrap();
         assert_eq!(messages.len(), initial_count + 1);
+        assert_eq!(
+            response.message_id,
+            preview.base_message_id.clone().unwrap()
+        );
         let committed = messages
             .iter()
             .find(|message| message.id == response.message_id)
@@ -7502,18 +7812,17 @@ async fn given_preview_render_when_commit_runs_then_history_gets_one_version() {
             committed.output.as_ref().unwrap().macro_code,
             "preview_macro()"
         );
-        assert_eq!(committed.output.as_ref().unwrap().version_name, "V-preview");
     }
     assert!(session_render_preview_for_request(
         &ctx,
         Some("thread-1"),
         Some(preview.preview_id.as_str())
     )
-    .is_none());
+    .is_some());
 }
 
 #[tokio::test]
-async fn given_unverified_preview_when_commit_runs_then_commit_is_rejected_without_history_write() {
+async fn given_unverified_preview_then_version_remains_working_without_extra_command() {
     let (state, resolver) = seed_target().await;
     let ctx = test_ctx();
     let initial_count = {
@@ -7528,7 +7837,7 @@ async fn given_unverified_preview_when_commit_runs_then_commit_is_rejected_witho
             thread_id: "thread-1".to_string(),
             base_message_id: Some("msg-1".to_string()),
             design_output: sample_design("Unverified", "", "unverified_preview_macro()"),
-            artifact_bundle: sample_bundle("model-unverified-preview", "unverified-preview.stl"),
+            artifact_bundle: sample_bundle("model-unverified-preview", "unverified-model.stl"),
             model_manifest: sample_manifest("model-unverified-preview"),
             draft_feedback: None,
         },
@@ -7536,40 +7845,30 @@ async fn given_unverified_preview_when_commit_runs_then_commit_is_rejected_witho
     .await
     .expect("store preview");
 
-    let error = handle_commit_preview_version(
-        &state,
-        &resolver,
-        VersionSaveRequest {
-            identity: AgentIdentityOverride::default(),
-            thread_id: Some(preview.thread_id.clone()),
-            message_id: Some(preview.preview_id.clone()),
-            title: None,
-            version_name: None,
-            capture_guided_result: None,
-        },
-        &ctx,
-    )
-    .await
-    .expect_err("unverified preview must not commit");
-
-    assert_eq!(error.code, AppErrorCode::Conflict);
-    assert_eq!(error.operation.as_deref(), Some("commit_preview_version"));
     let conn = state.db.lock().await;
     assert_eq!(
         db::get_thread_messages(&conn, "thread-1").unwrap().len(),
-        initial_count
+        initial_count + 1
     );
+    let version = db::get_thread_message_version(
+        &conn,
+        &preview.thread_id,
+        preview.base_message_id.as_deref().unwrap(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(version.status, MessageStatus::Working);
 }
 
 #[tokio::test]
-async fn given_green_verified_preview_after_ram_cache_loss_when_commit_runs_then_durable_record_allows_commit(
-) {
+async fn given_green_verified_preview_after_ram_cache_loss_then_durable_version_remains_resolvable()
+{
     let (state, resolver) = seed_target().await;
     let ctx = test_ctx();
-    let preview_stl_path = resolver.root.join("verified-preview.stl");
-    write_closed_tetra_binary_stl(&preview_stl_path);
-    let mut bundle = sample_bundle("model-verified-preview", "verified-preview.stl");
-    bundle.preview_stl_path = preview_stl_path.display().to_string();
+    let model_stl_path = resolver.root.join("verified-model.stl");
+    write_closed_tetra_binary_stl(&model_stl_path);
+    let mut bundle = sample_bundle("model-verified-preview", "verified-model.stl");
+    bundle.model_stl_path = model_stl_path.display().to_string();
     let preview = store_session_render_preview(
         &state,
         &resolver,
@@ -7599,7 +7898,7 @@ async fn given_green_verified_preview_after_ram_cache_loss_when_commit_runs_then
     assert!(verified.result.passed, "{}", verified.result.summary);
 
     clear_session_render_preview(&ctx.session_id);
-    let committed = handle_commit_preview_version(
+    let committed = appended_preview_version(
         &state,
         &resolver,
         VersionSaveRequest {
@@ -7613,24 +7912,24 @@ async fn given_green_verified_preview_after_ram_cache_loss_when_commit_runs_then
         &ctx,
     )
     .await
-    .expect("verified durable preview commits");
+    .expect("resolve durable verified version");
 
     assert_eq!(committed.model_id, preview.artifact_bundle.model_id);
 }
 
 #[tokio::test]
-async fn given_verified_snapshot_a_when_params_change_to_snapshot_b_then_commit_b_rejects_stale_verification(
-) {
+async fn given_verified_snapshot_a_when_params_change_to_snapshot_b_then_b_awaits_own_verification()
+{
     let (state, resolver) = seed_target().await;
     let ctx = test_ctx();
-    let preview_stl_path = resolver.root.join("snapshot-a.stl");
-    write_closed_tetra_binary_stl(&preview_stl_path);
+    let model_stl_path = resolver.root.join("snapshot-a.stl");
+    write_closed_tetra_binary_stl(&model_stl_path);
     let mut first_design = sample_design("Snapshot A", "", "snapshot_macro()");
     first_design
         .initial_params
         .insert("diameter".to_string(), ParamValue::Number(10.0));
     let mut first_bundle = sample_bundle("model-snapshot", "snapshot-a.stl");
-    first_bundle.preview_stl_path = preview_stl_path.display().to_string();
+    first_bundle.model_stl_path = model_stl_path.display().to_string();
     let first = store_session_render_preview(
         &state,
         &resolver,
@@ -7678,27 +7977,27 @@ async fn given_verified_snapshot_a_when_params_change_to_snapshot_b_then_commit_
     .await
     .expect("store snapshot b");
 
-    let error = handle_commit_preview_version(
-        &state,
-        &resolver,
-        VersionSaveRequest {
-            identity: AgentIdentityOverride::default(),
-            thread_id: Some(second.thread_id),
-            message_id: Some(second.preview_id),
-            title: None,
-            version_name: None,
-            capture_guided_result: None,
-        },
-        &ctx,
+    let conn = state.db.lock().await;
+    let first_version = db::get_thread_message_version(
+        &conn,
+        &first.thread_id,
+        first.base_message_id.as_deref().unwrap(),
     )
-    .await
-    .expect_err("changed parameters require a new verification");
-    assert_eq!(error.code, AppErrorCode::Conflict);
-    assert!(error.message.contains("green verification"));
+    .unwrap()
+    .unwrap();
+    let second_version = db::get_thread_message_version(
+        &conn,
+        &second.thread_id,
+        second.base_message_id.as_deref().unwrap(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(first_version.status, MessageStatus::Success);
+    assert_eq!(second_version.status, MessageStatus::Working);
 }
 
 #[tokio::test]
-async fn given_unverified_preview_after_session_memory_clears_when_commit_runs_then_commit_is_rejected(
+async fn given_unverified_preview_after_session_memory_clears_then_working_version_and_draft_remain(
 ) {
     let (state, resolver) = seed_target().await;
     let ctx = test_ctx();
@@ -7715,7 +8014,7 @@ async fn given_unverified_preview_after_session_memory_clears_when_commit_runs_t
             thread_id: "thread-1".to_string(),
             base_message_id: Some("msg-1".to_string()),
             design_output: sample_design("Durable Pot", "", "durable_preview_macro()"),
-            artifact_bundle: sample_bundle("model-durable-preview", "durable-preview.stl"),
+            artifact_bundle: sample_bundle("model-durable-preview", "durable-model.stl"),
             model_manifest: sample_manifest("model-durable-preview"),
             draft_feedback: Some(DraftFeedbackSeed {
                 status: crate::contracts::AgentDraftFeedbackStatus::Failed,
@@ -7765,26 +8064,10 @@ async fn given_unverified_preview_after_session_memory_clears_when_commit_runs_t
         "Draft failed structural verification."
     );
 
-    let error = handle_commit_preview_version(
-        &state,
-        &resolver,
-        VersionSaveRequest {
-            identity: AgentIdentityOverride::default(),
-            thread_id: Some("thread-1".to_string()),
-            message_id: Some(preview.preview_id.clone()),
-            title: None,
-            version_name: Some("V-durable".to_string()),
-            capture_guided_result: None,
-        },
-        &ctx,
-    )
-    .await
-    .expect_err("unverified durable preview must not commit");
-
     let conn = state.db.lock().await;
     let messages = db::get_thread_messages(&conn, "thread-1").unwrap();
-    assert_eq!(messages.len(), initial_count);
-    assert_eq!(error.code, AppErrorCode::Conflict);
+    assert_eq!(messages.len(), initial_count + 1);
+    assert_eq!(messages.last().unwrap().status, MessageStatus::Working);
     assert!(db::get_agent_draft_for_session(&conn, &ctx.session_id)
         .unwrap()
         .is_some());
@@ -7809,7 +8092,7 @@ async fn given_draft_persistence_failure_when_preview_stored_then_ram_preview_is
             thread_id: "thread-1".to_string(),
             base_message_id: Some("msg-1".to_string()),
             design_output: sample_design("Failed preview", "", "failed_preview_macro()"),
-            artifact_bundle: sample_bundle("model-failed-preview", "failed-preview.stl"),
+            artifact_bundle: sample_bundle("model-failed-preview", "failed-model.stl"),
             model_manifest: sample_manifest("model-failed-preview"),
             draft_feedback: None,
         },
@@ -7823,8 +8106,8 @@ async fn given_draft_persistence_failure_when_preview_stored_then_ram_preview_is
 }
 
 #[tokio::test]
-async fn given_parallel_preview_revisions_when_older_finishes_last_then_newer_draft_remains_active()
-{
+async fn given_parallel_preview_revisions_when_older_finishes_last_then_both_persist_and_last_is_head(
+) {
     let (state, resolver) = seed_target().await;
     let ctx = test_ctx();
     let older_revision = state
@@ -7836,7 +8119,7 @@ async fn given_parallel_preview_revisions_when_older_finishes_last_then_newer_dr
         .reserve_authoring_actor_revision(&ctx.session_id, "thread-1")
         .await;
 
-    let newer = store_session_render_preview_at_revision(
+    let _newer = store_session_render_preview_at_revision(
         &state,
         &resolver,
         &ctx,
@@ -7853,7 +8136,7 @@ async fn given_parallel_preview_revisions_when_older_finishes_last_then_newer_dr
     .await
     .expect("newer revision publishes");
 
-    let error = store_session_render_preview_at_revision(
+    let older = store_session_render_preview_at_revision(
         &state,
         &resolver,
         &ctx,
@@ -7868,23 +8151,35 @@ async fn given_parallel_preview_revisions_when_older_finishes_last_then_newer_dr
         },
     )
     .await
-    .expect_err("older completion is superseded");
-
-    assert_eq!(error.code, AppErrorCode::Conflict);
-    assert_eq!(error.operation.as_deref(), Some("authoring_actor_publish"));
-    assert!(error.message.contains("superseded"));
+    .expect("older completion still publishes its append");
 
     let active =
-        session_render_preview_for_request(&ctx, Some("thread-1"), Some(newer.preview_id.as_str()))
-            .expect("newer preview remains active");
-    assert_eq!(active.artifact_bundle.model_id, "model-newer");
+        session_render_preview_for_request(&ctx, Some("thread-1"), Some(older.preview_id.as_str()))
+            .expect("last published preview is active");
+    assert_eq!(active.artifact_bundle.model_id, "model-older");
 
     let conn = state.db.lock().await;
     let durable = db::get_agent_draft_for_session(&conn, &ctx.session_id)
         .expect("durable draft query")
-        .expect("durable newer draft");
-    assert_eq!(durable.preview_id, newer.preview_id);
-    assert_eq!(durable.artifact_bundle.model_id, "model-newer");
+        .expect("durable last draft");
+    assert_eq!(durable.preview_id, older.preview_id);
+    assert_eq!(durable.artifact_bundle.model_id, "model-older");
+    let versions = db::get_thread_messages(&conn, "thread-1").expect("versions");
+    assert!(versions.iter().any(|message| {
+        message
+            .artifact_bundle
+            .as_ref()
+            .is_some_and(|bundle| bundle.model_id == "model-newer")
+    }));
+    assert_eq!(
+        db::get_thread_latest_version(&conn, "thread-1")
+            .expect("head query")
+            .expect("head")
+            .artifact_bundle
+            .expect("head artifact")
+            .model_id,
+        "model-older"
+    );
 }
 
 #[tokio::test]
@@ -8749,7 +9044,204 @@ async fn project_folder_export_edit_apply_commits_new_version() {
 }
 
 #[tokio::test]
-async fn project_folder_apply_refuses_stale_and_conflicted_folders() {
+async fn project_folder_apply_accepts_declared_separated_print_layout_and_keeps_evidence() {
+    let original = "(model (part body (box 10 10 5)))";
+    let separated = r#"(model
+      (params (toggle assembly-preview false))
+      (part body (box 10 10 5))
+      (part tray-copy (translate 100 0 0 (box 10 10 5))))"#;
+    let (state, resolver) = seed_target_with_macro("Print Tray", "V-base", original).await;
+    let export = handle_project_folder_export(
+        &state,
+        &resolver,
+        ProjectFolderExportRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some("thread-1".to_string()),
+            message_id: Some("msg-1".to_string()),
+            slug: Some("print-tray".to_string()),
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("export");
+    let source_path =
+        std::path::Path::new(&export.folder).join(crate::project_mirror::PROJECT_SOURCE_FILE_NAME);
+    std::fs::write(source_path, separated).expect("write separated print layout");
+
+    let applied = handle_project_folder_apply(
+        &state,
+        &resolver,
+        ProjectFolderApplyRequest {
+            identity: AgentIdentityOverride::default(),
+            slug: export.slug,
+            force: false,
+            title: None,
+            version_name: None,
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("declared separated print layout applies");
+
+    let conn = state.db.lock().await;
+    let version = db::get_thread_message_version(&conn, "thread-1", &applied.message_id)
+        .expect("load applied version")
+        .expect("applied version");
+    assert_eq!(version.status, MessageStatus::Success);
+    let verification = version
+        .structural_verification
+        .expect("disconnected evidence remains attached");
+    assert!(verification
+        .issues
+        .iter()
+        .any(|issue| issue.code == "PART_DISCONNECTED"));
+}
+
+#[tokio::test]
+async fn project_folder_apply_keeps_real_verification_failure_blocking_in_print_layout() {
+    let original = "(model (part body (box 10 10 5)))";
+    let invalid = r#"(model
+      (params (toggle assembly-preview false))
+      (verify
+        (tag expected_parts)
+        (metric count (manifest part-count))
+        (expect count (= 3)))
+      (part body (box 10 10 5))
+      (part tray-copy (translate 100 0 0 (box 10 10 5))))"#;
+    let (state, resolver) = seed_target_with_macro("Invalid Print Tray", "V-base", original).await;
+    let export = handle_project_folder_export(
+        &state,
+        &resolver,
+        ProjectFolderExportRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some("thread-1".to_string()),
+            message_id: Some("msg-1".to_string()),
+            slug: Some("invalid-print-tray".to_string()),
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("export");
+    let source_path =
+        std::path::Path::new(&export.folder).join(crate::project_mirror::PROJECT_SOURCE_FILE_NAME);
+    std::fs::write(source_path, invalid).expect("write invalid print layout");
+
+    let error = handle_project_folder_apply(
+        &state,
+        &resolver,
+        ProjectFolderApplyRequest {
+            identity: AgentIdentityOverride::default(),
+            slug: export.slug,
+            force: false,
+            title: None,
+            version_name: None,
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect_err("authored verification failure remains blocking");
+
+    assert!(
+        error.message.contains("AUTHORED_VERIFY_FAILED"),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn project_folder_reexport_discards_bound_file_edit() {
+    let original_source = "(model (part body (box 10 10 5)))";
+    let edited_source = "(model (part body (box 99 99 99)))";
+    let head_source = "(model (part body (box 12 10 5)))";
+    let (state, resolver) = seed_target_with_macro("Bracket", "V-base", original_source).await;
+
+    let first_export = handle_project_folder_export(
+        &state,
+        &resolver,
+        ProjectFolderExportRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some("thread-1".to_string()),
+            message_id: Some("msg-1".to_string()),
+            slug: None,
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("initial export");
+    let source_path = std::path::Path::new(&first_export.folder)
+        .join(crate::project_mirror::PROJECT_SOURCE_FILE_NAME);
+    std::fs::write(&source_path, edited_source).expect("external edit");
+    {
+        let conn = state.db.lock().await;
+        db::add_message(
+            &conn,
+            "thread-1",
+            &Message {
+                id: "msg-2".to_string(),
+                role: MessageRole::Assistant,
+                content: "New head".to_string(),
+                status: MessageStatus::Success,
+                output: Some(sample_design("Bracket", "V-head", head_source)),
+                usage: None,
+                artifact_bundle: Some(sample_bundle("model-head", "head.stl")),
+                model_manifest: Some(sample_manifest("model-head")),
+                structural_verification: None,
+                agent_origin: None,
+                image_data: None,
+                visual_kind: None,
+                attachment_images: Vec::new(),
+                timestamp: now_secs() + 1,
+            },
+        )
+        .expect("advance thread head");
+    }
+    let changed = handle_project_folder_status(
+        &state,
+        &resolver,
+        ProjectFolderStatusRequest {
+            slug: first_export.slug.clone(),
+        },
+    )
+    .await
+    .expect("changed status");
+    assert_eq!(
+        changed.state,
+        crate::project_mirror::ProjectSyncState::FileChanged
+    );
+
+    let reexport = handle_project_folder_export(
+        &state,
+        &resolver,
+        ProjectFolderExportRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some("thread-1".to_string()),
+            message_id: Some("msg-2".to_string()),
+            slug: None,
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("re-export");
+
+    assert_eq!(std::fs::read_to_string(&source_path).unwrap(), head_source);
+    assert_eq!(reexport.manifest.message_id, "msg-2");
+    assert_eq!(
+        reexport.manifest.source_digest,
+        crate::project_mirror::source_digest(head_source)
+    );
+    let status = handle_project_folder_status(
+        &state,
+        &resolver,
+        ProjectFolderStatusRequest {
+            slug: reexport.slug,
+        },
+    )
+    .await
+    .expect("status after re-export");
+    assert_eq!(status.state, crate::project_mirror::ProjectSyncState::Clean);
+}
+
+#[tokio::test]
+async fn project_folder_apply_appends_stale_and_dirty_folders() {
     let (state, resolver) =
         seed_target_with_macro("Mount", "V-base", "(model (part body (box 8 8 4)))").await;
 
@@ -8811,7 +9303,7 @@ async fn project_folder_apply_refuses_stale_and_conflicted_folders() {
         "{}",
         verification.result.summary
     );
-    handle_commit_preview_version(
+    appended_preview_version(
         &state,
         &resolver,
         VersionSaveRequest {
@@ -8825,10 +9317,11 @@ async fn project_folder_apply_refuses_stale_and_conflicted_folders() {
         &test_ctx(),
     )
     .await
-    .expect("in-app commit");
+    .expect("resolve in-app appended version");
 
-    // File untouched + thread advanced -> stale, must re-export.
-    let err = handle_project_folder_apply(
+    // File untouched + thread advanced is informational only. The exact file
+    // source still appends against the latest head.
+    let applied_stale = handle_project_folder_apply(
         &state,
         &resolver,
         ProjectFolderApplyRequest {
@@ -8841,20 +9334,18 @@ async fn project_folder_apply_refuses_stale_and_conflicted_folders() {
         &test_ctx(),
     )
     .await
-    .expect_err("stale folder refused");
-    assert!(err.message.contains("stale"), "{}", err.message);
-    assert!(
-        err.message.contains("project_folder_export"),
-        "{}",
-        err.message
+    .expect("stale folder appends");
+    assert_eq!(
+        applied_stale.state_before,
+        crate::project_mirror::ProjectSyncState::ThreadAdvanced
     );
 
-    // File ALSO edited -> conflict; refused without force, applied with it.
+    // A dirty file also appends without a force decision.
     let source_path =
         std::path::Path::new(&export.folder).join(crate::project_mirror::PROJECT_SOURCE_FILE_NAME);
     std::fs::write(&source_path, "(model (part body (box 7 7 7)))").expect("edit file");
 
-    let err = handle_project_folder_apply(
+    let applied_dirty = handle_project_folder_apply(
         &state,
         &resolver,
         ProjectFolderApplyRequest {
@@ -8867,33 +9358,16 @@ async fn project_folder_apply_refuses_stale_and_conflicted_folders() {
         &test_ctx(),
     )
     .await
-    .expect_err("conflict refused without force");
-    assert!(err.message.contains("conflict"), "{}", err.message);
-    assert!(err.message.contains("force"), "{}", err.message);
-
-    let applied = handle_project_folder_apply(
-        &state,
-        &resolver,
-        ProjectFolderApplyRequest {
-            identity: AgentIdentityOverride::default(),
-            slug: export.slug.clone(),
-            force: true,
-            title: None,
-            version_name: Some("V-forced".to_string()),
-        },
-        &test_ctx(),
-    )
-    .await
-    .expect("forced apply");
+    .expect("dirty folder appends without force");
     assert_eq!(
-        applied.state_before,
-        crate::project_mirror::ProjectSyncState::Conflict
+        applied_dirty.state_before,
+        crate::project_mirror::ProjectSyncState::FileChanged
     );
     let conn = state.db.lock().await;
     let messages = db::get_thread_messages(&conn, "thread-1").expect("messages");
     assert!(messages
         .iter()
-        .any(|message| message.id == applied.message_id));
+        .any(|message| message.id == applied_dirty.message_id));
 }
 
 #[tokio::test]
@@ -8920,6 +9394,18 @@ async fn project_folder_apply_reports_missing_folder() {
     );
 }
 
+fn set_active_project_thread(state: &AppState, thread_id: &str) {
+    *state.last_snapshot.lock().unwrap() = Some(crate::contracts::LastDesignSnapshot {
+        design: None,
+        thread_id: Some(thread_id.to_string()),
+        message_id: None,
+        artifact_bundle: None,
+        model_manifest: None,
+        selected_part_id: None,
+        target_ref: None,
+    });
+}
+
 #[tokio::test]
 async fn project_folder_watcher_applies_settled_edits_in_place() {
     let (state, resolver) = seed_target_with_macro(
@@ -8928,6 +9414,7 @@ async fn project_folder_watcher_applies_settled_edits_in_place() {
         "(model (part body (box 10 10 5)))",
     )
     .await;
+    set_active_project_thread(&state, "thread-1");
     let export = handle_project_folder_export(
         &state,
         &resolver,
@@ -8942,8 +9429,17 @@ async fn project_folder_watcher_applies_settled_edits_in_place() {
     .await
     .expect("export");
 
-    let mut watcher = ProjectFolderWatcher::new();
+    let mut watcher = ProjectFolderWatcher::with_debounce(std::time::Duration::ZERO);
     let ctx = test_ctx();
+
+    let version_count_before_edit = {
+        let conn = state.db.lock().await;
+        db::get_thread_messages(&conn, "thread-1")
+            .expect("messages")
+            .into_iter()
+            .filter(|message| message.role == MessageRole::Assistant && message.output.is_some())
+            .count()
+    };
 
     // Clean folder: ticks are silent.
     assert!(watcher.tick(&state, &resolver, &ctx).await.is_empty());
@@ -8959,6 +9455,15 @@ async fn project_folder_watcher_applies_settled_edits_in_place() {
         [ProjectFolderWatchEvent::Detected { slug, thread_id }]
             if slug == "live-bracket-watch" && thread_id == "thread-1"
     ));
+    assert_eq!(
+        state
+            .project_folder_render_activity
+            .lock()
+            .await
+            .get("live-bracket-watch")
+            .map(|activity| activity.thread_id.as_str()),
+        Some("thread-1")
+    );
 
     // Second tick: digest unchanged -> applied and committed.
     let events = watcher.tick(&state, &resolver, &ctx).await;
@@ -8970,6 +9475,7 @@ async fn project_folder_watcher_applies_settled_edits_in_place() {
         panic!("expected Applied, got {events:?}");
     };
     assert_eq!(slug, "live-bracket-watch");
+    assert!(state.project_folder_render_activity.lock().await.is_empty());
     {
         let conn = state.db.lock().await;
         let messages = db::get_thread_messages(&conn, "thread-1").expect("messages");
@@ -8985,7 +9491,198 @@ async fn project_folder_watcher_applies_settled_edits_in_place() {
             .contains("box 11 10 5"));
     }
 
-    // Folder is clean again; nothing further happens.
+    let version_count_after_apply = {
+        let conn = state.db.lock().await;
+        db::get_thread_messages(&conn, "thread-1")
+            .expect("messages")
+            .into_iter()
+            .filter(|message| message.role == MessageRole::Assistant && message.output.is_some())
+            .count()
+    };
+    assert_eq!(version_count_after_apply, version_count_before_edit + 1);
+
+    // Folder is clean again; watcher must not append the same digest a second
+    // time after apply has rebased the manifest.
+    assert!(watcher.tick(&state, &resolver, &ctx).await.is_empty());
+    let version_count_after_clean_tick = {
+        let conn = state.db.lock().await;
+        db::get_thread_messages(&conn, "thread-1")
+            .expect("messages")
+            .into_iter()
+            .filter(|message| message.role == MessageRole::Assistant && message.output.is_some())
+            .count()
+    };
+    assert_eq!(version_count_after_clean_tick, version_count_after_apply);
+}
+
+#[tokio::test]
+async fn project_folder_watcher_ignores_edits_for_another_open_thread() {
+    let (state, resolver) = seed_target_with_macro(
+        "Background Bracket",
+        "V-base",
+        "(model (part body (box 10 10 5)))",
+    )
+    .await;
+    let export = handle_project_folder_export(
+        &state,
+        &resolver,
+        ProjectFolderExportRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some("thread-1".to_string()),
+            message_id: Some("msg-1".to_string()),
+            slug: Some("background-bracket-watch".to_string()),
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("export");
+    set_active_project_thread(&state, "open-thread");
+    let source_path =
+        std::path::Path::new(&export.folder).join(crate::project_mirror::PROJECT_SOURCE_FILE_NAME);
+    std::fs::write(&source_path, "(model (part body (box 11 10 5)))").expect("edit");
+
+    let mut watcher = ProjectFolderWatcher::with_debounce(std::time::Duration::ZERO);
+    assert!(watcher
+        .tick(&state, &resolver, &test_ctx())
+        .await
+        .is_empty());
+    assert!(state.project_folder_render_activity.lock().await.is_empty());
+
+    set_active_project_thread(&state, "thread-1");
+    assert!(matches!(
+        &watcher.tick(&state, &resolver, &test_ctx()).await[..],
+        [ProjectFolderWatchEvent::Detected { thread_id, .. }] if thread_id == "thread-1"
+    ));
+}
+
+#[tokio::test]
+async fn project_folder_watcher_ignores_duplicate_folder_for_bound_thread() {
+    let (state, resolver) = seed_target_with_macro(
+        "Bound Bracket",
+        "V-base",
+        "(model (part body (box 10 10 5)))",
+    )
+    .await;
+    set_active_project_thread(&state, "thread-1");
+    handle_project_folder_export(
+        &state,
+        &resolver,
+        ProjectFolderExportRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some("thread-1".to_string()),
+            message_id: Some("msg-1".to_string()),
+            slug: Some("canonical-bracket".to_string()),
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("canonical export");
+    let configured_root = state.config.lock().unwrap().projects_root.clone();
+    let (duplicate_folder, _) = crate::project_mirror::export_project(
+        &resolver,
+        &crate::project_mirror::ExportProjectRequest {
+            slug: "legacy-duplicate-bracket",
+            thread_id: "thread-1",
+            message_id: "msg-1",
+            model_id: None,
+            source: "(model (part body (box 99 99 99)))",
+            projects_root: configured_root.as_deref(),
+        },
+    )
+    .expect("legacy duplicate export");
+    std::fs::write(
+        duplicate_folder.join(crate::project_mirror::PROJECT_SOURCE_FILE_NAME),
+        "(model (part body (box 100 99 99)))",
+    )
+    .expect("dirty duplicate");
+
+    let mut watcher = ProjectFolderWatcher::with_debounce(std::time::Duration::ZERO);
+    assert!(
+        watcher
+            .tick(&state, &resolver, &test_ctx())
+            .await
+            .is_empty(),
+        "only the stored binding may drive a thread watcher"
+    );
+}
+
+#[tokio::test]
+async fn given_file_change_when_watcher_runs_then_sync_emits_within_two_seconds_and_applies_once() {
+    let (state, resolver) = seed_target_with_macro(
+        "Latency Bracket",
+        "V-base",
+        "(model (part body (box 10 10 5)))",
+    )
+    .await;
+    set_active_project_thread(&state, "thread-1");
+    state.config.lock().unwrap().default_geometry_backend =
+        crate::contracts::GeometryBackend::EckyRust;
+    let export = handle_project_folder_export(
+        &state,
+        &resolver,
+        ProjectFolderExportRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some("thread-1".to_string()),
+            message_id: Some("msg-1".to_string()),
+            slug: Some("latency-bracket-watch".to_string()),
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("export");
+    let source_path =
+        std::path::Path::new(&export.folder).join(crate::project_mirror::PROJECT_SOURCE_FILE_NAME);
+    let mut watcher = ProjectFolderWatcher::new();
+    let mut transport = ProjectFolderWatchTransport::new(&state, &resolver).await;
+    let ctx = test_ctx();
+
+    std::fs::write(&source_path, "(model (part body (box 11 10 5)))").expect("edit");
+    let started = std::time::Instant::now();
+    let detected = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            transport.wait().await;
+            let events = watcher.tick(&state, &resolver, &ctx).await;
+            if let Some(event) = events
+                .into_iter()
+                .find(|event| matches!(event, ProjectFolderWatchEvent::Detected { .. }))
+            {
+                break event;
+            }
+        }
+    })
+    .await
+    .expect("file change must emit within two seconds");
+    let detected_elapsed = started.elapsed();
+
+    assert!(
+        matches!(detected, ProjectFolderWatchEvent::Detected { .. }),
+        "expected detected event"
+    );
+    eprintln!(
+        "watcher fileChanged emit latency: {}ms",
+        detected_elapsed.as_millis()
+    );
+    assert!(
+        detected_elapsed <= std::time::Duration::from_secs(2),
+        "elapsed={:?}",
+        detected_elapsed
+    );
+
+    let applied = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            transport.wait().await;
+            let events = watcher.tick(&state, &resolver, &ctx).await;
+            if let Some(event) = events
+                .into_iter()
+                .find(|event| matches!(event, ProjectFolderWatchEvent::Applied { .. }))
+            {
+                break event;
+            }
+        }
+    })
+    .await
+    .expect("settled file edit must eventually apply");
+    assert!(matches!(applied, ProjectFolderWatchEvent::Applied { .. }));
     assert!(watcher.tick(&state, &resolver, &ctx).await.is_empty());
 }
 
@@ -8993,6 +9690,7 @@ async fn project_folder_watcher_applies_settled_edits_in_place() {
 async fn project_folder_watcher_reports_broken_edit_once_and_retries_after_change() {
     let (state, resolver) =
         seed_target_with_macro("Watch Errors", "V-base", "(model (part body (box 8 8 4)))").await;
+    set_active_project_thread(&state, "thread-1");
     let export = handle_project_folder_export(
         &state,
         &resolver,
@@ -9009,7 +9707,7 @@ async fn project_folder_watcher_reports_broken_edit_once_and_retries_after_chang
     let source_path =
         std::path::Path::new(&export.folder).join(crate::project_mirror::PROJECT_SOURCE_FILE_NAME);
 
-    let mut watcher = ProjectFolderWatcher::new();
+    let mut watcher = ProjectFolderWatcher::with_debounce(std::time::Duration::ZERO);
     let ctx = test_ctx();
 
     std::fs::write(&source_path, "(model (part body (box 1 1 1))$)").expect("broken edit");
@@ -9017,24 +9715,34 @@ async fn project_folder_watcher_reports_broken_edit_once_and_retries_after_chang
         &watcher.tick(&state, &resolver, &ctx).await[..],
         [ProjectFolderWatchEvent::Detected { .. }]
     ));
+    assert_eq!(state.project_folder_render_activity.lock().await.len(), 1);
     let events = watcher.tick(&state, &resolver, &ctx).await;
     assert_eq!(events.len(), 1, "{events:?}");
     assert!(
         matches!(&events[0], ProjectFolderWatchEvent::ApplyFailed { slug, .. } if slug == "watch-errors"),
         "{events:?}"
     );
+    assert!(state.project_folder_render_activity.lock().await.is_empty());
 
     // Same broken digest: memoized, no re-render attempts.
     assert!(watcher.tick(&state, &resolver, &ctx).await.is_empty());
     assert!(watcher.tick(&state, &resolver, &ctx).await.is_empty());
 
+    // Restart: persisted failed digest stays silent and never re-renders.
+    let mut restarted_watcher = ProjectFolderWatcher::with_debounce(std::time::Duration::ZERO);
+    assert!(restarted_watcher
+        .tick(&state, &resolver, &ctx)
+        .await
+        .is_empty());
+    assert!(state.project_folder_render_activity.lock().await.is_empty());
+
     // Fixing the file retries and applies.
     std::fs::write(&source_path, "(model (part body (box 2 2 2)))").expect("fixed edit");
     assert!(matches!(
-        &watcher.tick(&state, &resolver, &ctx).await[..],
+        &restarted_watcher.tick(&state, &resolver, &ctx).await[..],
         [ProjectFolderWatchEvent::Detected { .. }]
     ));
-    let events = watcher.tick(&state, &resolver, &ctx).await;
+    let events = restarted_watcher.tick(&state, &resolver, &ctx).await;
     assert!(
         matches!(&events[0], ProjectFolderWatchEvent::Applied { .. }),
         "{events:?}"
@@ -9154,7 +9862,7 @@ async fn project_folder_export_indexes_binding_row_digest_safe() {
 }
 
 #[tokio::test]
-async fn commit_preview_version_refreshes_clean_bound_source() {
+async fn preview_persistence_refreshes_clean_bound_source() {
     let (state, resolver) =
         seed_target_with_macro("Cog", "V-base", "(model (part body (box 3 3 3)))").await;
     // Establish the binding from the current version, like an agent export.
@@ -9173,12 +9881,12 @@ async fn commit_preview_version_refreshes_clean_bound_source() {
     .expect("export");
     let folder = std::path::PathBuf::from(&export.folder);
 
-    // Render + verify an in-app Ecky advance, then commit.
+    // Preview persistence refreshes the clean bound source automatically.
     let ctx = test_ctx();
-    let preview_stl = resolver.root.join("cog-v2.stl");
-    write_closed_tetra_binary_stl(&preview_stl);
+    let model_stl = resolver.root.join("cog-v2.stl");
+    write_closed_tetra_binary_stl(&model_stl);
     let mut bundle = sample_bundle("model-cog-v2", "cog-v2.stl");
-    bundle.preview_stl_path = preview_stl.display().to_string();
+    bundle.model_stl_path = model_stl.display().to_string();
     let new_macro = "(model (part body (box 6 6 3)))";
     let (design, bundle, manifest) = coerce_preview_trio_to_ecky(
         sample_design("Cog", "", new_macro),
@@ -9212,7 +9920,7 @@ async fn commit_preview_version_refreshes_clean_bound_source() {
     .expect("verify");
     assert!(verified.result.passed, "{}", verified.result.summary);
 
-    let committed = handle_commit_preview_version(
+    let appended = appended_preview_version(
         &state,
         &resolver,
         VersionSaveRequest {
@@ -9226,18 +9934,18 @@ async fn commit_preview_version_refreshes_clean_bound_source() {
         &ctx,
     )
     .await
-    .expect("commit refreshes bound source");
+    .expect("resolve appended version");
 
-    // The bound working copy advanced to the committed Ecky source.
+    // The bound working copy advanced to the appended Ecky source.
     let on_disk =
         std::fs::read_to_string(folder.join(crate::project_mirror::PROJECT_SOURCE_FILE_NAME))
             .unwrap();
     assert_eq!(on_disk, new_macro);
-    // Manifest rebased onto the committed version id.
+    // Manifest rebased onto the appended version id.
     let manifest = crate::project_mirror::read_manifest(&folder)
         .unwrap()
         .expect("manifest");
-    assert_eq!(manifest.message_id, committed.message_id);
+    assert_eq!(manifest.message_id, appended.message_id);
     assert_eq!(
         manifest.source_digest,
         crate::project_mirror::source_digest(new_macro)
@@ -9256,7 +9964,7 @@ async fn commit_preview_version_refreshes_clean_bound_source() {
 }
 
 #[tokio::test]
-async fn commit_preview_version_refuses_on_pending_external_edit() {
+async fn preview_persistence_preserves_pending_external_edit_without_rejection() {
     let (state, resolver) =
         seed_target_with_macro("Cog", "V-base", "(model (part body (box 3 3 3)))").await;
     let export = handle_project_folder_export(
@@ -9290,10 +9998,10 @@ async fn commit_preview_version_refuses_on_pending_external_edit() {
 
     // An in-app Ecky advance that would clobber the pending edit.
     let ctx = test_ctx();
-    let preview_stl = resolver.root.join("cog-clobber.stl");
-    write_closed_tetra_binary_stl(&preview_stl);
+    let model_stl = resolver.root.join("cog-clobber.stl");
+    write_closed_tetra_binary_stl(&model_stl);
     let mut bundle = sample_bundle("model-cog-clobber", "cog-clobber.stl");
-    bundle.preview_stl_path = preview_stl.display().to_string();
+    bundle.model_stl_path = model_stl.display().to_string();
     let new_macro = "(model (part body (box 6 6 3)))";
     let (design, bundle, manifest) = coerce_preview_trio_to_ecky(
         sample_design("Cog", "", new_macro),
@@ -9340,28 +10048,7 @@ async fn commit_preview_version_refuses_on_pending_external_edit() {
             .count()
     };
 
-    let error = handle_commit_preview_version(
-        &state,
-        &resolver,
-        VersionSaveRequest {
-            identity: AgentIdentityOverride::default(),
-            thread_id: Some(preview.thread_id.clone()),
-            message_id: Some(preview.preview_id.clone()),
-            title: None,
-            version_name: Some("V-cog-clobber".to_string()),
-            capture_guided_result: None,
-        },
-        &ctx,
-    )
-    .await
-    .expect_err("pending edit must block the version");
-    assert!(
-        error.message.contains("refusing to overwrite"),
-        "raw error: {}",
-        error.message
-    );
-
-    // No version was created.
+    // No extra persistence/finalization command exists.
     let after_message_count = {
         let conn = state.db.lock().await;
         db::get_thread_messages(&conn, "thread-1")
@@ -9389,6 +10076,210 @@ async fn commit_preview_version_refuses_on_pending_external_edit() {
             .expect("binding")
     };
     assert_eq!(binding.source_digest, baseline_binding.source_digest);
+}
+
+#[tokio::test]
+async fn given_durable_version_matches_dirty_source_when_watcher_restarts_then_no_render_starts() {
+    let (state, resolver) =
+        seed_target_with_macro("Cog", "V-base", "(model (part body (box 3 3 3)))").await;
+    set_active_project_thread(&state, "thread-1");
+    let export = handle_project_folder_export(
+        &state,
+        &resolver,
+        ProjectFolderExportRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some("thread-1".to_string()),
+            message_id: Some("msg-1".to_string()),
+            slug: None,
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("export");
+    let folder = std::path::PathBuf::from(&export.folder);
+    let durable_source = "(model (part body (box 9 9 9)))";
+    std::fs::write(
+        folder.join(crate::project_mirror::PROJECT_SOURCE_FILE_NAME),
+        durable_source,
+    )
+    .expect("external edit");
+
+    let model_stl = resolver.root.join("cog-matching-dirty-source.stl");
+    write_closed_tetra_binary_stl(&model_stl);
+    let mut bundle = sample_bundle("model-cog-matching-dirty", "cog-matching-dirty-source.stl");
+    bundle.model_stl_path = model_stl.display().to_string();
+    let (design, bundle, manifest) = coerce_preview_trio_to_ecky(
+        sample_design("Cog", "", durable_source),
+        bundle,
+        sample_manifest("model-cog-matching-dirty"),
+    );
+    let preview = store_session_render_preview(
+        &state,
+        &resolver,
+        &test_ctx(),
+        StoreSessionRenderPreviewRequest {
+            thread_id: "thread-1".to_string(),
+            base_message_id: Some("msg-1".to_string()),
+            design_output: design,
+            artifact_bundle: bundle,
+            model_manifest: manifest,
+            draft_feedback: None,
+        },
+    )
+    .await
+    .expect("store durable preview version");
+    {
+        let conn = state.db.lock().await;
+        conn.execute(
+            "UPDATE messages SET status = 'success' WHERE id = ?1",
+            [preview
+                .base_message_id
+                .as_deref()
+                .expect("durable preview version")],
+        )
+        .expect("mark preview version durable");
+    }
+
+    // Simulate a project created before matching dirty sources were rebased:
+    // history already knows these exact bytes, but manifest + binding still
+    // point at the older export.
+    crate::project_mirror::write_manifest(&folder, &export.manifest)
+        .expect("restore stale legacy manifest");
+    {
+        let conn = state.db.lock().await;
+        crate::thread_source_binding::index_export(
+            &conn,
+            "thread-1",
+            &folder,
+            &export.manifest.source_digest,
+        )
+        .expect("restore stale legacy binding");
+    }
+
+    let mut restarted_watcher = ProjectFolderWatcher::with_debounce(std::time::Duration::ZERO);
+    assert!(
+        restarted_watcher
+            .tick(&state, &resolver, &test_ctx())
+            .await
+            .is_empty(),
+        "a durable source identical to model.ecky must not render again after restart"
+    );
+    assert!(state.project_folder_render_activity.lock().await.is_empty());
+    let rebased = crate::project_mirror::read_manifest(&folder)
+        .expect("read manifest")
+        .expect("manifest");
+    assert_eq!(
+        rebased.message_id,
+        preview.base_message_id.expect("durable preview version")
+    );
+    tsb_assert_digest_triplet(
+        &folder,
+        &crate::project_mirror::source_digest(durable_source),
+    );
+}
+
+#[tokio::test]
+async fn given_failed_version_matches_dirty_source_when_watcher_restarts_then_no_render_restarts() {
+    let (state, resolver) =
+        seed_target_with_macro("Cog", "V-base", "(model (part body (box 3 3 3)))").await;
+    set_active_project_thread(&state, "thread-1");
+    let export = handle_project_folder_export(
+        &state,
+        &resolver,
+        ProjectFolderExportRequest {
+            identity: AgentIdentityOverride::default(),
+            thread_id: Some("thread-1".to_string()),
+            message_id: Some("msg-1".to_string()),
+            slug: None,
+        },
+        &test_ctx(),
+    )
+    .await
+    .expect("export");
+    let folder = std::path::PathBuf::from(&export.folder);
+    let failed_source = "(model (part body (box 9 9 9)))";
+    std::fs::write(
+        folder.join(crate::project_mirror::PROJECT_SOURCE_FILE_NAME),
+        failed_source,
+    )
+    .expect("external edit");
+
+    let model_stl = resolver.root.join("cog-failed-dirty-source.stl");
+    write_closed_tetra_binary_stl(&model_stl);
+    let mut bundle = sample_bundle("model-cog-failed-dirty", "cog-failed-dirty-source.stl");
+    bundle.model_stl_path = model_stl.display().to_string();
+    let (design, bundle, manifest) = coerce_preview_trio_to_ecky(
+        sample_design("Cog", "", failed_source),
+        bundle,
+        sample_manifest("model-cog-failed-dirty"),
+    );
+    let watcher_ctx = project_folder_watcher_context();
+    let preview = store_session_render_preview(
+        &state,
+        &resolver,
+        &watcher_ctx,
+        StoreSessionRenderPreviewRequest {
+            thread_id: "thread-1".to_string(),
+            base_message_id: Some("msg-1".to_string()),
+            design_output: design,
+            artifact_bundle: bundle,
+            model_manifest: manifest,
+            draft_feedback: None,
+        },
+    )
+    .await
+    .expect("store failed preview version");
+    let manifest_while_verification_pending = crate::project_mirror::read_manifest(&folder)
+        .expect("read manifest")
+        .expect("manifest");
+    assert_eq!(
+        manifest_while_verification_pending.source_digest, export.manifest.source_digest,
+        "watcher preview must not mark external bytes clean before verification"
+    );
+    let failed_version_id = preview.base_message_id.expect("durable preview version");
+    {
+        let conn = state.db.lock().await;
+        conn.execute(
+            "UPDATE messages SET status = 'error' WHERE id = ?1",
+            [&failed_version_id],
+        )
+        .expect("mark preview version failed");
+    }
+    let polluted_manifest = crate::project_mirror::ProjectManifest {
+        message_id: failed_version_id,
+        model_id: Some("model-cog-failed-dirty".to_string()),
+        source_digest: crate::project_mirror::source_digest(failed_source),
+        exported_at: now_secs(),
+        ..export.manifest.clone()
+    };
+    crate::project_mirror::write_manifest(&folder, &polluted_manifest)
+        .expect("simulate legacy failed manifest");
+    {
+        let conn = state.db.lock().await;
+        crate::thread_source_binding::index_export(
+            &conn,
+            "thread-1",
+            &folder,
+            &polluted_manifest.source_digest,
+        )
+        .expect("simulate legacy failed binding");
+    }
+
+    let mut restarted_watcher = ProjectFolderWatcher::new();
+    let events = restarted_watcher.tick(&state, &resolver, &test_ctx()).await;
+    assert!(
+        matches!(&events[..], [ProjectFolderWatchEvent::ApplyFailed { thread_id, error, .. }]
+            if thread_id == "thread-1" && error.contains("verification")),
+        "failed history must stay dirty without rendering again: {events:?}"
+    );
+    assert!(state.project_folder_render_activity.lock().await.is_empty());
+    let manifest_after_tick = crate::project_mirror::read_manifest(&folder)
+        .expect("read manifest")
+        .expect("manifest");
+    assert_eq!(
+        manifest_after_tick.source_digest,
+        export.manifest.source_digest
+    );
 }
 
 #[tokio::test]

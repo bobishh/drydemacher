@@ -124,7 +124,7 @@ pub fn build_artifact_digest(bundle: Option<&ArtifactBundle>) -> String {
             "geometryBackend: {}",
             geometry_backend_label(bundle.geometry_backend)
         ),
-        format!("hasPreviewStl: {}", !bundle.preview_stl_path.trim().is_empty()),
+        format!("hasModelStl: {}", !bundle.model_stl_path.trim().is_empty()),
         format!("viewerAssetCount: {}", bundle.viewer_assets.len()),
         format!("edgeTargetCount: {}", bundle.edge_targets.len()),
         format!("faceTargetCount: {}", bundle.face_targets.len()),
@@ -392,7 +392,29 @@ pub fn assemble_context(
 ) -> PromptContext {
     if let Some(tid) = thread_id {
         let messages = crate::db::get_thread_messages_for_context(db, &tid).unwrap_or_default();
-        let latest_snapshot = latest_assistant_snapshot(&messages);
+        let latest_version = crate::db::get_thread_version_detail(db, &tid, None)
+            .ok()
+            .flatten()
+            .map(|detail| detail.message);
+        let latest_snapshot = latest_version
+            .as_ref()
+            .map(|message| latest_assistant_snapshot(std::slice::from_ref(message)))
+            .unwrap_or_else(|| latest_assistant_snapshot(&messages));
+        let mut summary_messages = messages.clone();
+        if let Some(latest) = latest_version {
+            if !summary_messages
+                .iter()
+                .any(|message| message.id == latest.id)
+            {
+                summary_messages.push(latest);
+                summary_messages.sort_by_key(|message| message.timestamp);
+            } else if let Some(existing) = summary_messages
+                .iter_mut()
+                .find(|message| message.id == latest.id)
+            {
+                *existing = latest;
+            }
+        }
         let summary = crate::db::get_thread_summary(db, &tid)
             .ok()
             .flatten()
@@ -403,7 +425,7 @@ pub fn assemble_context(
                         .ok()
                         .flatten()
                         .unwrap_or_default(),
-                    &messages,
+                    &summary_messages,
                 )
             });
         let dialogue = build_recent_dialogue(&messages);
@@ -1000,6 +1022,7 @@ mod tests {
             component_dependency_lock: None,
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: 1,
             model_id: model_id.to_string(),
             source_kind: ModelSourceKind::Generated,
@@ -1011,7 +1034,7 @@ mod tests {
             fcstd_path: String::new(),
             manifest_path: format!("/tmp/{model_id}/manifest.json"),
             macro_path: None,
-            preview_stl_path: format!("/tmp/{model_id}/preview.stl"),
+            model_stl_path: format!("/tmp/{model_id}/model.stl"),
             viewer_assets: Vec::new(),
             edge_targets: Vec::new(),
             face_targets: Vec::new(),
@@ -1025,6 +1048,7 @@ mod tests {
         ModelManifest {
             geometry_provenance: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: 1,
             model_id: model_id.to_string(),
             source_kind: ModelSourceKind::Generated,

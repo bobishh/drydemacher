@@ -7,11 +7,16 @@ export type TimelineVisual = {
 };
 
 export function isVersionTimelineMessage(message: Message): boolean {
-  return message.role === 'assistant' && Boolean(message.artifactBundle);
+  if (message.role !== 'assistant' || isAgentToolErrorMessage(message)) return false;
+  // Authoring output is the durable version identity. Runtime artifacts are
+  // optional: failed/partial drafts still remain in history.
+  return Boolean(message.output || message.artifactBundle || message.versionSummary);
 }
 
 export function isRenderableVersionTimelineMessage(message: Message): boolean {
-  return isVersionTimelineMessage(message) && message.status === 'success';
+  return isVersionTimelineMessage(message)
+    && message.status === 'success'
+    && Boolean(message.artifactBundle || message.versionSummary?.hasRuntime);
 }
 
 function isAgentToolErrorMessage(message: Message): boolean {
@@ -19,6 +24,7 @@ function isAgentToolErrorMessage(message: Message): boolean {
     message.role === 'assistant' &&
     message.status === 'error' &&
     Boolean(message.agentOrigin) &&
+    !message.output &&
     !message.artifactBundle
   );
 }
@@ -27,9 +33,11 @@ export function versionTimelineTitle(message: Message | null | undefined): strin
   if (!message) return 'this version';
   return (
     message.output?.title ||
+    message.versionSummary?.title ||
     message.modelManifest?.document?.documentLabel ||
     message.modelManifest?.document?.documentName ||
     message.artifactBundle?.modelId ||
+    message.versionSummary?.modelId ||
     'Imported Model'
   );
 }
@@ -56,15 +64,25 @@ export function threadTimelineMessages(messages: Message[]): Message[] {
       if (left.message.timestamp !== right.message.timestamp) {
         return left.message.timestamp - right.message.timestamp;
       }
+      if (
+        typeof left.message.timelineOrder === 'number'
+        && typeof right.message.timelineOrder === 'number'
+        && left.message.timelineOrder !== right.message.timelineOrder
+      ) {
+        return left.message.timelineOrder - right.message.timelineOrder;
+      }
       return left.index - right.index;
     })
     .map(({ message }) => message);
 }
 
 export function versionTimelineMessages(messages: Message[]): Message[] {
-  return threadTimelineMessages(messages).filter(
-    (message) => isRenderableVersionTimelineMessage(message),
-  );
+  return threadTimelineMessages(messages).filter((message) => isVersionTimelineMessage(message));
+}
+
+/** Successful versions used by render/carousel/printable surfaces. */
+export function renderableVersionTimelineMessages(messages: Message[]): Message[] {
+  return versionTimelineMessages(messages).filter(isRenderableVersionTimelineMessage);
 }
 
 export function activeVersionTimelineIndex(

@@ -92,7 +92,6 @@
     isSelectMode,
     selectionTargetCount,
     highlightedParamKey,
-    liveApply,
     onSelectControlView,
     onOpenCreateViewComposer,
     onOpenPrimitiveComposer,
@@ -192,7 +191,6 @@
     isSelectMode: boolean;
     selectionTargetCount: number;
     highlightedParamKey: string | null;
-    liveApply: boolean;
     onSelectControlView?: (viewId: string | null) => void;
     onOpenCreateViewComposer?: () => void;
     onOpenPrimitiveComposer?: () => void;
@@ -411,7 +409,11 @@
   />
 {/if}
 
-<ParamPanelAdvisoryList {advisories} onDeleteManualAdvisory={onDeleteManualAdvisory} />
+<ParamPanelAdvisoryList
+  {advisories}
+  controls={advisoryCandidateControls}
+  onDeleteManualAdvisory={onDeleteManualAdvisory}
+/>
 
 {#if activeViewRelations.length > 0}
   <div class="warning-stack">
@@ -464,7 +466,6 @@
               rangeProps={field.type === 'range' || field.type === 'number' ? getRangeProps(field) : null}
               editable={control.editable}
               highlighted={highlightedParamKey === field.key}
-              {liveApply}
               semanticSource={control.source}
               showSemanticSource={shouldShowSemanticSource(control.source)}
               canEdit={isManualPrimitive(control)}

@@ -44,6 +44,11 @@ mod tests {
             value_kind: "Part".to_string(),
             operation: None,
             part_id: Some("body".to_string()),
+            source_addressable: true,
+            editable_ops: vec!["replace".to_string()],
+            non_editable_reason: None,
+            child_paths: Vec::new(),
+            input_ports: Vec::new(),
         })
         .expect("serialize node");
 
@@ -51,6 +56,7 @@ mod tests {
         assert!(request.get("model_id").is_none());
         assert_eq!(node["stableNodeKey"], "sha256:key");
         assert_eq!(node["partId"], "body");
+        assert_eq!(node["sourceAddressable"], true);
         assert!(node.get("stable_node_key").is_none());
     }
 }

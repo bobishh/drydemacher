@@ -118,6 +118,7 @@ pub(super) fn eval_number(value: &IrExpr, env: &BTreeMap<String, ParamValue>) ->
         "deg" | "deg->rad" => unary_op(args, env, |value| value.to_radians()),
         "rad" | "rad->deg" => unary_op(args, env, |value| value.to_degrees()),
         "abs" => unary_op(args, env, f64::abs),
+        "sqrt" => unary_op(args, env, f64::sqrt),
         "floor" => unary_op(args, env, f64::floor),
         "signed-pow" => binary_op(args, env, |value, exponent| {
             value.signum() * value.abs().powf(exponent)

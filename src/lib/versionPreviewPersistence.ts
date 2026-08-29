@@ -8,7 +8,8 @@ export function sameArtifactVersion(
   return (
     versionBundle.modelId === runtimeBundle.modelId &&
     versionBundle.contentHash === runtimeBundle.contentHash &&
-    (versionBundle.artifactVersion ?? null) === (runtimeBundle.artifactVersion ?? null)
+    (versionBundle.artifactVersion ?? null) === (runtimeBundle.artifactVersion ?? null) &&
+    versionBundle.modelStlPath === runtimeBundle.modelStlPath
   );
 }
 

@@ -1,14 +1,15 @@
 use crate::contracts::{
-    AgentTerminalSnapshot, AgentWorkingVersionEvent, AppError, AppLogEntry, AppResult,
-    CaptureClientCapabilities, CaptureFrameManifestEntry, CaptureSessionInfo, CaptureSessionState,
-    Config, LastDesignSnapshot, McpServerStatus, ResolveAgentPromptInput, ViewportCameraState,
+    AgentActivityCatchUp, AgentActivityEvent, AgentActivityEventInput, AgentTerminalSnapshot,
+    AgentWorkingVersionEvent, AppError, AppLogEntry, AppResult, CaptureClientCapabilities,
+    CaptureFrameManifestEntry, CaptureSessionInfo, CaptureSessionState, Config, LastDesignSnapshot,
+    McpServerStatus, ResolveAgentPromptInput, ViewportCameraState,
 };
 #[cfg(unix)]
 use libc;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
@@ -18,6 +19,27 @@ use tokio::sync::oneshot;
 type PromptChannels = Arc<
     tokio::sync::Mutex<HashMap<String, oneshot::Sender<Result<ResolveAgentPromptInput, String>>>>,
 >;
+
+static HISTORY_REVISION: AtomicU64 = AtomicU64::new(0);
+
+pub fn next_history_changed_event(
+    thread_id: Option<String>,
+    message_id: Option<String>,
+    kind: impl Into<String>,
+) -> crate::contracts::HistoryChangedEvent {
+    let event = crate::contracts::HistoryChangedEvent {
+        thread_id,
+        message_id,
+        revision: HISTORY_REVISION.fetch_add(1, Ordering::Relaxed) + 1,
+        kind: kind.into(),
+    };
+    debug_assert!(
+        crate::transport_budget::serialized_size(&event)
+            .is_ok_and(|bytes| bytes <= crate::transport_budget::ACTIVITY_EVENT_MAX_BYTES),
+        "history invalidation event must remain payload-free and under the event budget",
+    );
+    event
+}
 
 pub trait PathResolver: Send + Sync {
     fn app_config_dir(&self) -> PathBuf;
@@ -187,6 +209,36 @@ pub struct ConfigPersistenceStatus {
     pub warnings: Vec<String>,
 }
 
+pub struct GeometryRenderGuard {
+    _lock: tokio::sync::OwnedMutexGuard<()>,
+    active_count: Arc<AtomicUsize>,
+    app_handle: Arc<Mutex<Option<tauri::AppHandle>>>,
+}
+
+fn emit_geometry_render_activity(
+    app_handle: &Arc<Mutex<Option<tauri::AppHandle>>>,
+    active_count: usize,
+) {
+    let handle = app_handle
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    if let Some(handle) = handle {
+        let _ = handle.emit(
+            "geometry-render-activity",
+            serde_json::json!({ "activeCount": active_count }),
+        );
+    }
+}
+
+impl Drop for GeometryRenderGuard {
+    fn drop(&mut self) {
+        let previous = self.active_count.fetch_sub(1, Ordering::AcqRel);
+        let active_count = previous.saturating_sub(1);
+        emit_geometry_render_activity(&self.app_handle, active_count);
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Mutex<Config>>,
@@ -195,7 +247,15 @@ pub struct AppState {
     pub db: Arc<tokio::sync::Mutex<rusqlite::Connection>>,
     pub db_read: Option<Arc<tokio::sync::Mutex<rusqlite::Connection>>>,
     pub render_lock: Arc<tokio::sync::Mutex<()>>,
+    geometry_render_active_count: Arc<AtomicUsize>,
+    /// Active project-folder renders keyed by project slug. Snapshot source
+    /// for clients attaching after the watcher's one-shot detected event.
+    pub project_folder_render_activity: Arc<
+        tokio::sync::Mutex<BTreeMap<String, crate::project_mirror::ProjectFolderRenderActivity>>,
+    >,
     pub mcp_status: Arc<Mutex<McpServerStatus>>,
+    pub codex_app_server: Arc<crate::services::codex_app_server::CodexAppServerSupervisor>,
+    pub agy_provider: Arc<crate::services::agy_provider::AgyProviderSupervisor>,
     pub mcp_sessions: Arc<tokio::sync::Mutex<HashMap<String, McpSessionState>>>,
     /// MCP guide/resource URIs read by each live session.
     pub mcp_session_read_resources: Arc<tokio::sync::Mutex<HashMap<String, HashSet<String>>>>,
@@ -247,6 +307,8 @@ pub struct AppState {
     /// `thread_id` strings), while a UI mutation still invalidates every
     /// session's actor for that thread within this `AppState`.
     pub authoring_actor_registry: Arc<crate::mcp::handlers::AuthoringActorRegistry>,
+    /// App-global journal of typed agent activity events.
+    pub agent_activity: Arc<Mutex<crate::services::agent_activity::AgentActivityJournal>>,
     /// App handle for emitting runtime PTY events back into the frontend.
     pub app_handle: Arc<Mutex<Option<tauri::AppHandle>>>,
 }
@@ -273,11 +335,17 @@ impl AppState {
             db: Arc::new(tokio::sync::Mutex::new(conn)),
             db_read: read_conn.map(|conn| Arc::new(tokio::sync::Mutex::new(conn))),
             render_lock: Arc::new(tokio::sync::Mutex::new(())),
+            geometry_render_active_count: Arc::new(AtomicUsize::new(0)),
+            project_folder_render_activity: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
             mcp_status: Arc::new(Mutex::new(McpServerStatus {
                 running: false,
                 endpoint_url: "http://127.0.0.1:39249/mcp".to_string(),
                 last_startup_error: None,
             })),
+            codex_app_server: Arc::new(
+                crate::services::codex_app_server::CodexAppServerSupervisor::new(),
+            ),
+            agy_provider: Arc::new(crate::services::agy_provider::AgyProviderSupervisor::new()),
             mcp_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             mcp_session_read_resources: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             mcp_session_enabled_groups: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -299,7 +367,28 @@ impl AppState {
             authoring_actor_registry: Arc::new(
                 crate::mcp::handlers::AuthoringActorRegistry::default(),
             ),
+            agent_activity: Arc::new(Mutex::new(
+                crate::services::agent_activity::AgentActivityJournal::default(),
+            )),
             app_handle: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub fn geometry_render_active_count(&self) -> usize {
+        self.geometry_render_active_count.load(Ordering::Acquire)
+    }
+
+    pub async fn acquire_geometry_render(&self) -> GeometryRenderGuard {
+        let lock = self.render_lock.clone().lock_owned().await;
+        let active_count = self
+            .geometry_render_active_count
+            .fetch_add(1, Ordering::AcqRel)
+            + 1;
+        emit_geometry_render_activity(&self.app_handle, active_count);
+        GeometryRenderGuard {
+            _lock: lock,
+            active_count: self.geometry_render_active_count.clone(),
+            app_handle: self.app_handle.clone(),
         }
     }
 
@@ -665,7 +754,13 @@ impl AppState {
     }
 
     pub fn set_app_handle(&self, handle: tauri::AppHandle) {
-        *self.app_handle.lock().unwrap() = Some(handle);
+        *self.app_handle.lock().unwrap() = Some(handle.clone());
+        let codex_app_server = self.codex_app_server.clone();
+        let agy_provider = self.agy_provider.clone();
+        tauri::async_runtime::spawn(async move {
+            codex_app_server.set_app_handle(handle.clone()).await;
+            agy_provider.set_app_handle(handle).await;
+        });
     }
 
     pub fn push_log(&self, message: String) {
@@ -730,20 +825,68 @@ impl AppState {
         }
     }
 
-    pub fn emit_agent_draft_preview_updated(
+    pub fn record_agent_activity_event(
         &self,
-        event: &crate::contracts::AgentDraftPreviewUpdatedEvent,
+        input: AgentActivityEventInput,
+    ) -> AgentActivityEvent {
+        self.agent_activity.lock().unwrap().record(input)
+    }
+
+    pub fn get_agent_activity(&self, after_cursor: Option<u64>) -> AgentActivityCatchUp {
+        self.agent_activity.lock().unwrap().catch_up(after_cursor)
+    }
+
+    pub fn emit_agent_activity_event(&self, event: &AgentActivityEvent) {
+        let handle = self.app_handle.lock().unwrap().clone();
+        if let Some(handle) = handle {
+            match crate::transport_budget::require_serialized_budget(
+                "agentActivityEvent",
+                event,
+                crate::transport_budget::ACTIVITY_EVENT_MAX_BYTES,
+                "get_agent_activity cursor catch-up",
+            ) {
+                Ok(_) => {
+                    let _ = handle.emit("agent-activity-event", event);
+                }
+                Err(error) => self.push_log(format!("[IPC] {}", error.message)),
+            }
+        }
+    }
+
+    pub fn emit_agent_draft_preview_changed(
+        &self,
+        event: &crate::contracts::AgentDraftPreviewChangedEvent,
     ) {
         let handle = self.app_handle.lock().unwrap().clone();
         if let Some(handle) = handle {
-            let _ = handle.emit("agent-draft-preview-updated", event);
+            match crate::transport_budget::require_serialized_budget(
+                "agentDraftPreviewChanged",
+                event,
+                crate::transport_budget::ACTIVITY_EVENT_MAX_BYTES,
+                "get_agent_draft_preview",
+            ) {
+                Ok(_) => {
+                    let _ = handle.emit("agent-draft-preview-changed", event);
+                }
+                Err(error) => self.push_log(format!("[IPC] {}", error.message)),
+            }
         }
     }
 
     pub fn emit_history_updated(&self) {
+        self.emit_history_changed(None, None, "unknown");
+    }
+
+    pub fn emit_history_changed(
+        &self,
+        thread_id: Option<String>,
+        message_id: Option<String>,
+        kind: impl Into<String>,
+    ) {
+        let event = next_history_changed_event(thread_id, message_id, kind);
         let handle = self.app_handle.lock().unwrap().clone();
         if let Some(handle) = handle {
-            let _ = handle.emit("history-updated", ());
+            let _ = handle.emit("history-updated", event);
         }
     }
 
@@ -863,8 +1006,10 @@ mod tests {
             microwave: None,
             voice: crate::contracts::VoiceConfig::default(),
             mcp: crate::contracts::McpConfig::default(),
+            fem_compute: crate::contracts::FemComputeConfig::default(),
             has_seen_onboarding: false,
             connection_type: None,
+            provider_models: crate::contracts::ProviderModels::default(),
             default_engine_kind: EngineKind::Freecad,
             default_source_language: SourceLanguage::LegacyPython,
             default_geometry_backend: GeometryBackend::Freecad,
@@ -878,6 +1023,18 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().expect("in-memory db");
         crate::capture_runs::ensure_schema(&conn).expect("capture schema");
         AppState::new(minimal_config(), None, conn)
+    }
+
+    #[tokio::test]
+    async fn geometry_render_activity_follows_the_backend_render_lock() {
+        let state = state();
+        assert_eq!(state.geometry_render_active_count(), 0);
+
+        let guard = state.acquire_geometry_render().await;
+        assert_eq!(state.geometry_render_active_count(), 1);
+
+        drop(guard);
+        assert_eq!(state.geometry_render_active_count(), 0);
     }
 
     /// 4.2: `record_context_telemetry` emits the envelope shape plus provider

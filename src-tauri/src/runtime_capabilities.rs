@@ -183,34 +183,6 @@ pub(crate) fn resolve_direct_occt_runtime_root(app: &dyn PathResolver) -> AppRes
     ))
 }
 
-pub fn resolve_ftetwild_runtime_root(app: &dyn PathResolver) -> AppResult<PathBuf> {
-    if let Some(path) = std::env::var_os("ECKY_FTETWILD_RUNTIME_ROOT") {
-        let path = PathBuf::from(path);
-        if path.is_dir() {
-            return Ok(path);
-        }
-        return Err(AppError::render(format!(
-            "Configured fTetWild runtime root '{}' is unavailable.",
-            path.display()
-        )));
-    }
-    if let Some(path) = app.resource_path("runtime/ftetwild") {
-        if path.is_dir() {
-            return Ok(path);
-        }
-    }
-    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
-    let repository_runtime = repository_root.join(".dist/runtime/ftetwild");
-    if repository_runtime.is_dir() {
-        return Ok(repository_runtime);
-    }
-    Err(AppError::render(
-        "fTetWild runtime unavailable; run `npm run ftetwild:prepare`.",
-    ))
-}
-
 fn resolve_existing_freecad_path(configured_freecad_cmd: Option<&str>) -> AppResult<PathBuf> {
     if let Some(configured_cmd) = configured_freecad_cmd.map(str::trim) {
         if configured_cmd.is_empty() {

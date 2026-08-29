@@ -6,6 +6,7 @@ use crate::db;
 use crate::mcp::contracts::*;
 use crate::mcp::runtime;
 use crate::models::{AppState, PathResolver};
+use crate::services::agent_activity::{record_trace_agent_activity, TraceAgentActivityInput};
 use crate::services::agent_dialogue;
 use crate::services::agent_versions::{
     save_or_update_agent_version_for_session, SaveOrUpdateAgentVersionRequest,
@@ -27,7 +28,7 @@ mod artifact_read;
 mod authoring_actor;
 mod compare;
 mod component;
-pub(super) mod ecky_ast;
+pub(crate) mod ecky_ast;
 pub(super) mod macro_buffer;
 mod printability;
 mod project_folder;
@@ -74,11 +75,12 @@ pub use printability::{
     handle_printability_analyze, handle_printability_transform_recipes_get,
     handle_semantic_transform_preview,
 };
+pub(crate) use project_folder::cancel_active_project_folder_render;
 pub use project_folder::{
     handle_project_folder_apply, handle_project_folder_export, handle_project_folder_status,
     project_folder_watcher_context, ProjectFolderApplyRequest, ProjectFolderApplyResponse,
     ProjectFolderExportRequest, ProjectFolderStatusRequest, ProjectFolderWatchEvent,
-    ProjectFolderWatcher,
+    ProjectFolderWatchTransport, ProjectFolderWatcher,
 };
 #[cfg(test)]
 use render_preview::{
@@ -105,8 +107,8 @@ pub use target_read::{handle_target_get, handle_target_macro_get, handle_target_
 pub use thread_read::{handle_agent_identity_set, handle_thread_get, handle_thread_messages_get};
 pub use verify::{handle_structural_verification_summary, handle_verify_generated_model};
 pub use version_write::{
-    handle_commit_fem_verified_preview, handle_commit_preview_version, handle_saved_target_version,
-    handle_thread_fork_from_target, handle_version_restore,
+    handle_publish_fem_verified_result, handle_saved_target_version,
+    handle_thread_fork_from_target, handle_version_delete, handle_version_restore,
 };
 
 pub(super) const THREAD_MESSAGE_CONTENT_MAX_CHARS: usize = 240;
@@ -176,6 +178,19 @@ pub(super) fn now_secs() -> u64 {
         .as_secs()
 }
 
+pub(super) fn same_authored_payload(left: &DesignOutput, right: &DesignOutput) -> bool {
+    left.title == right.title
+        && left.interaction_mode == right.interaction_mode
+        && left.macro_code == right.macro_code
+        && left.macro_dialect == right.macro_dialect
+        && left.engine_kind == right.engine_kind
+        && left.source_language == right.source_language
+        && left.geometry_backend == right.geometry_backend
+        && left.ui_spec == right.ui_spec
+        && left.initial_params == right.initial_params
+        && left.post_processing == right.post_processing
+}
+
 /// openspec thread-source-binding 4.1: resolve the bound-source view for an
 /// agent target metadata response (`sourcePath`, `sourceFolder`,
 /// `sourceState`). Reads the authoritative (stored) binding via
@@ -196,9 +211,10 @@ pub fn resolve_target_source_binding(
     Option<crate::project_mirror::ProjectSyncState>,
 ) {
     let configured_root = state.config.lock().unwrap().projects_root.clone();
-    let thread_head_message_id = db::get_latest_successful_message_id_in_thread(conn, thread_id)
+    let thread_head_message_id = db::get_thread_latest_version(conn, thread_id)
         .ok()
-        .flatten();
+        .flatten()
+        .map(|message| message.id);
     match crate::thread_source_binding::binding_info(
         app,
         conn,
@@ -317,6 +333,11 @@ pub(super) fn carry_forward_semantic_manifest(
     next: ModelManifest,
     artifact_bundle: &ArtifactBundle,
 ) -> ModelManifest {
+    let mut next = next;
+    crate::model_runtime::remove_ecky_control_views(&mut next);
+    if next.source_language == crate::contracts::SourceLanguage::EckyIrV0 {
+        return next;
+    }
     let Some(previous) = previous else {
         return next;
     };
@@ -333,10 +354,8 @@ pub(super) fn carry_forward_semantic_manifest(
     if !previous.measurement_annotations.is_empty() {
         merged.measurement_annotations = previous.measurement_annotations.clone();
     }
-    let previous_feature_graph = previous.feature_graph.clone();
-    let previous_correspondence_graph = previous.correspondence_graph.clone();
-    merged.feature_graph = previous_feature_graph;
-    merged.correspondence_graph = previous_correspondence_graph;
+    merged.feature_graph = previous.feature_graph.clone();
+    merged.correspondence_graph = previous.correspondence_graph.clone();
     if previous.enrichment_state.status != crate::contracts::EnrichmentStatus::None
         || !previous.enrichment_state.proposals.is_empty()
     {
@@ -363,6 +382,7 @@ pub(super) fn carry_forward_semantic_manifest(
             }
         }
     }
+    crate::model_runtime::remove_ecky_control_views(&mut merged);
 
     if crate::contracts::validate_model_runtime_bundle(&merged, artifact_bundle).is_ok() {
         return merged;
@@ -388,6 +408,7 @@ pub(super) fn carry_forward_semantic_manifest(
     }
 
     let mut fallback = next;
+    crate::model_runtime::remove_ecky_control_views(&mut fallback);
     fallback.warnings.push(
         "Semantic manifest was not carried forward because rendered topology no longer validates old semantic bindings."
             .to_string(),
@@ -654,7 +675,7 @@ pub(super) struct TraceEvent<'a> {
     pub(super) details: Option<String>,
 }
 
-fn log_trace_event(state: &AppState, ctx: &AgentContext, event: TraceEvent<'_>) {
+fn log_trace_event(state: &AppState, ctx: &AgentContext, event: &TraceEvent<'_>) {
     let target = match (event.thread_id.as_deref(), event.message_id.as_deref()) {
         (Some(thread_id), Some(message_id)) => {
             format!(" thread={} message={}", thread_id, message_id)
@@ -686,7 +707,20 @@ fn log_trace_event(state: &AppState, ctx: &AgentContext, event: TraceEvent<'_>) 
 }
 
 pub(super) fn push_trace_event(state: &AppState, ctx: &AgentContext, event: TraceEvent<'_>) {
-    log_trace_event(state, ctx, event);
+    log_trace_event(state, ctx, &event);
+    let _ = record_trace_agent_activity(
+        state,
+        ctx,
+        TraceAgentActivityInput {
+            thread_id: event.thread_id,
+            message_id: event.message_id,
+            version_id: None,
+            phase: event.phase.to_string(),
+            kind: event.kind.to_string(),
+            summary: event.summary,
+            details: event.details,
+        },
+    );
 }
 
 pub(super) fn push_trace_event_with_conn(
@@ -695,7 +729,20 @@ pub(super) fn push_trace_event_with_conn(
     ctx: &AgentContext,
     event: TraceEvent<'_>,
 ) {
-    log_trace_event(state, ctx, event);
+    log_trace_event(state, ctx, &event);
+    let _ = record_trace_agent_activity(
+        state,
+        ctx,
+        TraceAgentActivityInput {
+            thread_id: event.thread_id,
+            message_id: event.message_id,
+            version_id: None,
+            phase: event.phase.to_string(),
+            kind: event.kind.to_string(),
+            summary: event.summary,
+            details: event.details,
+        },
+    );
 }
 
 pub(super) fn has_managed_runtime_session(state: &AppState, session_id: &str) -> bool {
@@ -1538,6 +1585,86 @@ async fn store_session_render_preview_unchecked(
         base_message_id_for_log.as_deref(),
         Some(&model_id_for_log),
     );
+
+    let (unchanged_version_id, can_update_existing_draft) = if let Some(base_message_id) =
+        req.base_message_id.as_deref()
+    {
+        let conn = state.db.lock().await;
+        let can_finalize = db::get_thread_message_version(&conn, &req.thread_id, base_message_id)
+            .map_err(|error| AppError::persistence(error.to_string()))?
+            .is_some_and(|message| {
+                matches!(
+                    message.status,
+                    crate::contracts::MessageStatus::Working
+                        | crate::contracts::MessageStatus::Error
+                ) && message
+                    .agent_origin
+                    .as_ref()
+                    .is_some_and(|origin| origin.session_id == ctx.session_id)
+            });
+        let unchanged = db::get_thread_latest_version(&conn, &req.thread_id)
+            .map_err(|error| AppError::persistence(error.to_string()))?
+            .filter(|message| message.status == crate::contracts::MessageStatus::Success)
+            .filter(|message| {
+                message
+                    .output
+                    .as_ref()
+                    .is_some_and(|output| same_authored_payload(output, &req.design_output))
+            })
+            .map(|message| message.id);
+        (unchanged, can_finalize)
+    } else {
+        (None, false)
+    };
+    let (saved_draft_message_id, should_mark_working) = if let Some(message_id) =
+        unchanged_version_id
+    {
+        (message_id, false)
+    } else {
+        let saved = save_or_update_agent_version_for_session(
+            state,
+            app,
+            SaveOrUpdateAgentVersionRequest {
+                session_id: ctx.session_id.clone(),
+                thread_id: req.thread_id.clone(),
+                base_message_id: req.base_message_id.clone().unwrap_or_default(),
+                model_id: Some(req.artifact_bundle.model_id.clone()),
+                design_output: req.design_output.clone(),
+                artifact_bundle: Some(req.artifact_bundle.clone()),
+                model_manifest: Some(req.model_manifest.clone()),
+                updated_at: now_secs(),
+                response_text_created: format!(
+                    "{} created a rendered draft version.",
+                    ctx.agent_label
+                ),
+                response_text_updated: format!("{} rendered the draft version.", ctx.agent_label),
+                preserve_existing_title: can_update_existing_draft,
+                preserve_existing_version_name: can_update_existing_draft,
+                force_create_new_message: !can_update_existing_draft,
+                announce_created_working_version: false,
+            },
+        )
+        .await?;
+        (saved.message_id, true)
+    };
+    if should_mark_working {
+        let conn = state.db.lock().await;
+        db::update_message_status_and_output(
+            &conn,
+            &saved_draft_message_id,
+            db::MessageStatusUpdate {
+                status: &crate::contracts::MessageStatus::Working,
+                output: Some(&req.design_output),
+                usage: None,
+                artifact_bundle: Some(&req.artifact_bundle),
+                model_manifest: Some(&req.model_manifest),
+                structural_verification: None,
+                visual_kind: None,
+                content: Some("Preview rendered; verification pending."),
+            },
+        )
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+    }
     let feedback_started = Instant::now();
     let draft_feedback = req.draft_feedback.clone().or_else(|| {
         Some(draft_feedback_from_structural_verification(
@@ -1569,7 +1696,7 @@ async fn store_session_render_preview_unchecked(
         session_id: ctx.session_id.clone(),
         preview_id: Uuid::new_v4().to_string(),
         thread_id: req.thread_id,
-        base_message_id: req.base_message_id,
+        base_message_id: Some(saved_draft_message_id),
         design_output: req.design_output,
         artifact_bundle: req.artifact_bundle,
         model_manifest: req.model_manifest,
@@ -1599,6 +1726,23 @@ async fn store_session_render_preview_unchecked(
             },
         )
         .map_err(|e| AppError::persistence(e.to_string()))?;
+        if ctx.client_kind != "watcher" {
+            let configured_root = state.config.lock().unwrap().projects_root.clone();
+            crate::thread_source_binding::refresh_on_version_append(
+                app,
+                &conn,
+                configured_root.as_deref(),
+                &preview.thread_id,
+                &preview.design_output.title,
+                &preview.design_output.macro_code,
+                preview
+                    .base_message_id
+                    .as_deref()
+                    .ok_or_else(|| AppError::persistence("Preview has no durable version."))?,
+                Some(&preview.artifact_bundle.model_id),
+                preview.base_message_id.as_deref(),
+            )?;
+        }
         push_mcp_profile(
             state,
             ctx,
@@ -1644,16 +1788,21 @@ async fn store_session_render_preview_unchecked(
     );
 
     let emit_started = Instant::now();
-    state.emit_agent_draft_preview_updated(&crate::contracts::AgentDraftPreviewUpdatedEvent {
+    state.emit_agent_draft_preview_changed(&crate::contracts::AgentDraftPreviewChangedEvent {
         session_id: preview.session_id.clone(),
         thread_id: preview.thread_id.clone(),
         preview_id: preview.preview_id.clone(),
         base_message_id: preview.base_message_id.clone(),
         model_id: Some(preview.artifact_bundle.model_id.clone()),
-        design: preview.design_output.clone(),
-        artifact_bundle: preview.artifact_bundle.clone(),
-        model_manifest: preview.model_manifest.clone(),
-        feedback: preview.draft_feedback.clone(),
+        revision: preview.updated_at,
+        feedback_status: preview
+            .draft_feedback
+            .as_ref()
+            .map(|feedback| feedback.status.clone()),
+        feedback_summary: preview
+            .draft_feedback
+            .as_ref()
+            .map(|feedback| feedback.summary.clone()),
     });
     push_mcp_profile(
         state,
@@ -1714,7 +1863,7 @@ pub(super) fn artifact_bundle_digest(bundle: &ArtifactBundle) -> ArtifactBundleD
         content_hash: bundle.content_hash.clone(),
         source_language: bundle.source_language.as_str().to_string(),
         geometry_backend: bundle.geometry_backend.as_str().to_string(),
-        has_preview_stl: !bundle.preview_stl_path.is_empty(),
+        has_model_stl: !bundle.model_stl_path.is_empty(),
         viewer_asset_count: bundle.viewer_assets.len(),
         edge_target_count: bundle.edge_targets.len(),
         face_target_count: bundle.face_targets.len(),
@@ -1727,6 +1876,7 @@ pub(super) fn artifact_bundle_digest(bundle: &ArtifactBundle) -> ArtifactBundleD
         faceted_step,
         analytic_step,
         source_mesh_digests,
+        component_placement_count: bundle.component_placement_evidence.len(),
     }
 }
 

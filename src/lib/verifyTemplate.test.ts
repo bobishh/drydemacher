@@ -10,6 +10,14 @@ import {
 
 test('detects ecky model sources only', () => {
   assert.equal(looksLikeEckyModelSource('(model (part body (box 1 1 1)))'), true);
+  assert.equal(
+    looksLikeEckyModelSource([
+      '(define (double value) (+ value value))',
+      '(define-component bracket ((number width)) (box width 10 4))',
+      '(model (part body (bracket :width 20)))',
+    ].join('\n')),
+    true,
+  );
   assert.equal(looksLikeEckyModelSource('print("box")'), false);
 });
 

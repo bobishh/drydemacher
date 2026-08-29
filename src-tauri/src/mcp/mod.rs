@@ -1,5 +1,6 @@
 pub mod authoring;
 pub mod contracts;
+pub(crate) mod empty_thread_target;
 pub mod handlers;
 pub mod macro_buffer;
 pub mod runtime;

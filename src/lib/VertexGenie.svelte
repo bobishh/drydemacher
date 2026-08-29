@@ -17,27 +17,15 @@
     hasSpeech: boolean;
     motionScale: number;
     wakeStartedAt: number;
-	    pokeState: 'calm' | 'poked' | 'angry';
-	    pokeStartedAt: number;
-	    userYaw: number;
-	    userPitch: number;
-	    relayHue: number | null;
-	  };
+    pokeState: 'calm' | 'poked' | 'angry';
+    pokeStartedAt: number;
+    userYaw: number;
+    userPitch: number;
+    relayHue: number | null;
+  };
 
   let {
     mode = 'idle',
-    bubble = '',
-    compact = false,
-    badge = null,
-    contextLabel = null,
-    errorLayer = null,
-    errorFix = null,
-    question = '',
-    onDismiss = null,
-    onBubbleClick = null,
-    bubbleAriaLabel = 'Open session activity',
-    bubbleTestId = undefined,
-    actions = null,
     traits = {},
     intensity = 1.0,
     wakeUp = 0,
@@ -45,20 +33,10 @@
     safeRightInset = 360,
     fitToCanvas = false,
     relay = null,
+    onOpenProjects = null,
+    onOpenActivity = null,
   }: {
     mode?: GenieMode;
-    bubble?: string;
-    compact?: boolean;
-    badge?: string | null;
-    contextLabel?: string | null;
-    errorLayer?: string | null;
-    errorFix?: string | null;
-    question?: string;
-    onDismiss?: (() => void) | null;
-    onBubbleClick?: (() => void) | null;
-    bubbleAriaLabel?: string;
-    bubbleTestId?: string;
-    actions?: Array<{ label: string; onclick: () => void }> | null;
     traits?: Partial<GenieTraits> | null;
     intensity?: number;
     wakeUp?: number;
@@ -66,17 +44,17 @@
     safeRightInset?: number;
     fitToCanvas?: boolean;
     relay?: { hue: number; label: string } | null;
+    onOpenProjects?: (() => void) | null;
+    onOpenActivity?: (() => void) | null;
   } = $props();
 
-  let copyFeedback = $state('');
-  let copyFeedbackTimer: number | null = null;
   let wakePulse = $state(0);
   let stoneCanvas = $state<HTMLCanvasElement | null>(null);
   let pokeState = $state<'calm' | 'poked' | 'angry'>('calm');
 	  let pokeCount = 0;
 	  let lastPokeAt = 0;
 	  let pokeResetTimer: number | null = null;
-	  let angryTimer: number | null = null;
+	  let projectOpenTimer: number | null = null;
 	  let dragPointerId: number | null = null;
 	  let dragStartX = 0;
 	  let dragStartY = 0;
@@ -85,7 +63,6 @@
 	  let repelX = $state(0);
 	  let repelY = $state(0);
 
-  const MAX_BUBBLE_LEN = 1200;
   const effectiveMode = $derived(mode === 'sleeping' ? 'sleeping' : agentConnected ? mode : 'sleeping');
   const profile = $derived.by(() =>
     resolveModeTraits(traits ?? DEFAULT_GENIE_TRAITS, effectiveMode),
@@ -99,12 +76,12 @@
     hasSpeech: false,
     motionScale: 1,
     wakeStartedAt: 0,
-	    pokeState: 'calm',
-	    pokeStartedAt: 0,
-	    userYaw: 0,
-	    userPitch: 0,
-	    relayHue: null,
-	  };
+    pokeState: 'calm',
+    pokeStartedAt: 0,
+    userYaw: 0,
+    userPitch: 0,
+    relayHue: null,
+  };
 
   $effect(() => {
     if (wakeUp !== wakePulse) {
@@ -115,62 +92,28 @@
 
   $effect(() => {
     stoneRuntime.mode = effectiveMode;
-    stoneRuntime.hasSpeech = Boolean(cleanBubble);
+    stoneRuntime.hasSpeech = effectiveMode === 'speaking';
     stoneRuntime.motionScale = motionScale;
     stoneRuntime.pokeState = pokeState;
     stoneRuntime.relayHue =
       relay && Number.isFinite(relay.hue) ? ((relay.hue % 360) + 360) % 360 : null;
   });
 
-  const cleanBubble = $derived.by(() => {
-    const text = `${bubble ?? ''}`.replace(/\s+/g, ' ').trim();
-    if (!text) return '';
-    return text.length > MAX_BUBBLE_LEN ? `${text.slice(0, MAX_BUBBLE_LEN - 1)}…` : text;
+  $effect(() => {
+    if (pokeState !== 'angry' || typeof window === 'undefined') return;
+    const resetTimer = window.setTimeout(() => {
+      pokeCount = 0;
+      pokeState = 'calm';
+      repelX = 0;
+      repelY = 0;
+    }, 2600);
+    return () => window.clearTimeout(resetTimer);
   });
-  const cleanQuestion = $derived.by(() => `${question ?? ''}`.replace(/\s+/g, ' ').trim());
   const relayHue = $derived(
     relay && Number.isFinite(relay.hue) ? (((relay.hue % 360) + 360) % 360) : null,
   );
-  const relayLabel = $derived(`${relay?.label ?? ''}`.trim());
-
   function clamp(value: number, min: number, max: number): number {
     return Math.max(min, Math.min(max, value));
-  }
-
-  async function copyBubbleText(event?: MouseEvent) {
-    event?.stopPropagation();
-    if (!cleanBubble) return;
-    try {
-      await navigator.clipboard.writeText(cleanBubble);
-      copyFeedback = 'COPIED';
-    } catch {
-      copyFeedback = 'COPY FAILED';
-    }
-    if (copyFeedbackTimer) clearTimeout(copyFeedbackTimer);
-    copyFeedbackTimer = window.setTimeout(() => {
-      copyFeedback = '';
-    }, 1400);
-  }
-
-  function openBubble() {
-    onBubbleClick?.();
-  }
-
-  function handleBubbleKeydown(event: KeyboardEvent) {
-    if (!onBubbleClick) return;
-    if (event.key !== 'Enter' && event.key !== ' ') return;
-    event.preventDefault();
-    openBubble();
-  }
-
-  function dismissBubble(event: MouseEvent) {
-    event.stopPropagation();
-    onDismiss?.();
-  }
-
-  function runBubbleAction(event: MouseEvent, action: { label: string; onclick: () => void }) {
-    event.stopPropagation();
-    action.onclick();
   }
 
   function pokeGenie(event: MouseEvent) {
@@ -179,6 +122,11 @@
 	      dragged = false;
 	      return;
 	    }
+	    if (projectOpenTimer) window.clearTimeout(projectOpenTimer);
+	    projectOpenTimer = window.setTimeout(() => {
+	      projectOpenTimer = null;
+	      onOpenProjects?.();
+	    }, 220);
 	    const now = performance.now();
     if (now - lastPokeAt < 140) return;
     lastPokeAt = now;
@@ -195,13 +143,6 @@
 	      const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
 	      repelX = clamp(rect.left + rect.width / 2 - event.clientX, -1, 1) * 14;
 	      repelY = clamp(rect.top + rect.height / 2 - event.clientY, -1, 1) * 10;
-	      if (angryTimer) clearTimeout(angryTimer);
-	      angryTimer = window.setTimeout(() => {
-	        pokeCount = 0;
-	        pokeState = 'calm';
-	        repelX = 0;
-	        repelY = 0;
-	      }, 2600);
       return;
     }
 
@@ -640,10 +581,17 @@
   });
 
   onDestroy(() => {
-    if (copyFeedbackTimer) clearTimeout(copyFeedbackTimer);
     if (pokeResetTimer) clearTimeout(pokeResetTimer);
-    if (angryTimer) clearTimeout(angryTimer);
+    if (projectOpenTimer) clearTimeout(projectOpenTimer);
   });
+
+  function openActivity() {
+    if (projectOpenTimer) {
+      clearTimeout(projectOpenTimer);
+      projectOpenTimer = null;
+    }
+    onOpenActivity?.();
+  }
 </script>
 
 <div
@@ -664,85 +612,17 @@
 	    onpointerup={endStoneDrag}
 	    onpointercancel={endStoneDrag}
 	    onclick={pokeGenie}
-	  >
-	    <canvas
-	      class="genie-stone-canvas"
-	      data-mode={effectiveMode}
-	      bind:this={stoneCanvas}
+	    ondblclick={openActivity}
+  >
+    <canvas
+      class="genie-stone-canvas"
+      data-mode={effectiveMode}
+      bind:this={stoneCanvas}
       width="150"
       height="150"
-	      aria-hidden="true"
-	    ></canvas>
-	  </button>
-  {#if cleanBubble}
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      class="genie-bubble"
-      class:genie-bubble--compact={compact}
-      class:genie-bubble--clickable={Boolean(onBubbleClick)}
-      class:genie-bubble--relay={relayLabel.length > 0}
-      data-bubble-layout={compact ? 'compact' : 'full'}
-      data-relay={relayLabel.length > 0 ? 'true' : undefined}
-      data-relay-label={relayLabel.length > 0 ? relayLabel : undefined}
-      data-testid={bubbleTestId}
-      role="button"
-      tabindex="0"
-      aria-label={bubbleAriaLabel}
-      style={relayHue != null ? `--relay-hue: ${relayHue};` : undefined}
-      onclick={openBubble}
-      onkeydown={handleBubbleKeydown}
-    >
-      <button class="bubble-copy" type="button" onclick={copyBubbleText} aria-label="Copy advisor response">
-        {copyFeedback || 'COPY'}
-      </button>
-      <button class="bubble-close" type="button" onclick={dismissBubble} aria-label="Dismiss advisor bubble"></button>
-      {#if relayLabel.length > 0}
-        <div class="bubble-relay-tag" data-testid="bubble-relay-tag">
-          <span class="relay-arrow" aria-hidden="true">⟿</span>
-          <span class="relay-from">{relayLabel}</span>
-          <span class="relay-via">via ECKY</span>
-        </div>
-      {/if}
-      <div class="bubble-header">
-        {#if compact}
-          <div class="bubble-meta">
-            {#if badge}
-              <span class="bubble-badge">{badge}</span>
-            {/if}
-            {#if contextLabel}
-              <span class="bubble-context">{contextLabel}</span>
-            {/if}
-          </div>
-        {:else}
-          <div class="bubble-speaker"><strong>ECKY EINACS:</strong></div>
-        {/if}
-      </div>
-      {#if !compact && cleanQuestion}
-        <div class="bubble-question-block">
-          <div class="bubble-question-label">YOU ASKED</div>
-          <div class="bubble-question">"{cleanQuestion}"</div>
-        </div>
-      {/if}
-      <div class="bubble-text">{cleanBubble}</div>
-      {#if errorLayer || errorFix}
-        <div class="authoring-error-details" data-testid="authoring-error-details">
-          {#if errorLayer}
-            <span class="authoring-error-layer">{errorLayer}</span>
-          {/if}
-          {#if errorFix}
-            <span class="authoring-error-fix">{errorFix}</span>
-          {/if}
-        </div>
-      {/if}
-      {#if actions?.length}
-        <div class="bubble-actions">
-          {#each actions as action}
-            <button class="bubble-action-btn" type="button" onclick={(event) => runBubbleAction(event, action)}>{action.label}</button>
-          {/each}
-        </div>
-      {/if}
-    </div>
-  {/if}
+      aria-hidden="true"
+    ></canvas>
+  </button>
 </div>
 
 <style>
@@ -782,335 +662,4 @@
 	    pointer-events: none;
 	  }
 
-	  .genie-bubble {
-    position: absolute;
-    left: 126px;
-    top: 6px;
-    width: min(380px, max(248px, calc(100vw - var(--genie-safe-right, 360px) - 188px)));
-    max-width: min(380px, max(248px, calc(100vw - var(--genie-safe-right, 360px) - 188px)));
-    min-height: 74px;
-    max-height: min(34vh, 240px);
-    padding: 12px 72px 12px 14px;
-    border: 2px solid color-mix(in srgb, var(--primary) 42%, var(--bg-300));
-    background: color-mix(in srgb, var(--bg-100) 90%, transparent);
-    color: var(--text);
-    font-family: var(--font-mono);
-    font-size: 0.74rem;
-    line-height: 1.42;
-    text-transform: none;
-    letter-spacing: 0.01em;
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--bg-300) 85%, transparent), var(--shadow);
-    backdrop-filter: blur(9px);
-    pointer-events: auto;
-    -webkit-user-select: text !important;
-    user-select: text !important;
-    overflow-y: auto;
-  }
-
-  .genie-bubble--clickable {
-    cursor: pointer;
-  }
-
-  .genie-bubble--clickable:focus-visible {
-    outline: 2px solid color-mix(in srgb, var(--secondary) 74%, var(--text));
-    outline-offset: 3px;
-  }
-
-  .genie-bubble--compact {
-    width: min(340px, max(236px, calc(100vw - var(--genie-safe-right, 360px) - 188px)));
-    max-width: min(340px, max(236px, calc(100vw - var(--genie-safe-right, 360px) - 188px)));
-    min-height: 66px;
-    max-height: min(24vh, 176px);
-    padding: 10px 64px 10px 12px;
-    font-size: 0.72rem;
-    line-height: 1.38;
-  }
-
-  .genie-bubble::before {
-    content: '';
-    position: absolute;
-    left: -12px;
-    top: 26px;
-    width: 12px;
-    height: 20px;
-    background: color-mix(in srgb, var(--bg-100) 90%, transparent);
-    border-left: 2px solid color-mix(in srgb, var(--primary) 42%, var(--bg-300));
-    border-top: 2px solid color-mix(in srgb, var(--primary) 42%, var(--bg-300));
-    border-bottom: 2px solid color-mix(in srgb, var(--primary) 42%, var(--bg-300));
-  }
-
-  .genie-bubble::after {
-    content: '';
-    position: absolute;
-    left: -18px;
-    top: 31px;
-    width: 6px;
-    height: 10px;
-    background: color-mix(in srgb, var(--bg-100) 90%, transparent);
-    border-left: 2px solid color-mix(in srgb, var(--primary) 42%, var(--bg-300));
-    border-top: 2px solid color-mix(in srgb, var(--primary) 42%, var(--bg-300));
-    border-bottom: 2px solid color-mix(in srgb, var(--primary) 42%, var(--bg-300));
-  }
-
-  .genie-bubble::selection,
-  .genie-bubble *::selection {
-    background: color-mix(in srgb, var(--primary) 52%, transparent);
-    color: var(--text);
-  }
-
-  .bubble-copy,
-  .bubble-close {
-    position: absolute;
-    top: 8px;
-    height: 18px;
-    border: 2px solid var(--bg-300);
-    background: color-mix(in srgb, var(--bg) 78%, transparent);
-    cursor: pointer;
-    padding: 0;
-    font-family: var(--font-mono);
-    line-height: 1;
-  }
-
-  .bubble-copy {
-    right: 34px;
-    min-width: 38px;
-    height: 18px;
-    padding: 0 5px;
-    color: var(--text-dim);
-    font-size: 0.54rem;
-    letter-spacing: 0.06em;
-  }
-
-  .bubble-copy:hover {
-    border-color: var(--primary);
-    color: var(--primary);
-  }
-
-  .bubble-close {
-    right: 10px;
-    width: 18px;
-  }
-
-  .bubble-close::before,
-  .bubble-close::after {
-    content: '';
-    position: absolute;
-    left: 3px;
-    top: 7px;
-    width: 10px;
-    height: 2px;
-    background: var(--text-dim);
-  }
-
-  .bubble-close::before {
-    transform: rotate(45deg);
-  }
-
-  .bubble-close::after {
-    transform: rotate(-45deg);
-  }
-
-  .bubble-close:hover {
-    border-color: var(--secondary);
-  }
-
-  .bubble-close:hover::before,
-  .bubble-close:hover::after {
-    background: var(--secondary);
-  }
-
-  .bubble-text {
-    white-space: pre-wrap;
-    word-break: break-word;
-    text-wrap: pretty;
-    -webkit-user-select: text !important;
-    user-select: text !important;
-    max-width: 100%;
-  }
-
-  .authoring-error-details {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    align-items: center;
-    margin-top: 9px;
-    overflow: hidden;
-  }
-
-  .authoring-error-layer {
-    border: 1px solid color-mix(in srgb, var(--secondary) 68%, var(--bg-300));
-    color: var(--secondary);
-    background: color-mix(in srgb, var(--bg) 76%, transparent);
-    padding: 2px 6px;
-    font-size: 0.56rem;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    white-space: nowrap;
-  }
-
-  .authoring-error-fix {
-    color: var(--text-dim);
-    font-size: 0.68rem;
-    min-width: 0;
-    overflow-wrap: anywhere;
-  }
-
-  .bubble-header {
-    display: flex;
-    align-items: flex-start;
-    min-height: 16px;
-    margin-bottom: 6px;
-    min-width: 0;
-  }
-
-  .bubble-meta {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-  }
-
-  .bubble-badge,
-  .bubble-context {
-    min-width: 0;
-    border: 1px solid var(--bg-300);
-    background: color-mix(in srgb, var(--bg) 72%, transparent);
-    padding: 2px 6px;
-    font-size: 0.56rem;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .bubble-badge {
-    color: var(--secondary);
-    border-color: color-mix(in srgb, var(--secondary) 54%, var(--bg-300));
-  }
-
-  .bubble-context {
-    color: var(--text-dim);
-    max-width: 132px;
-  }
-
-  .bubble-question-block {
-    margin-bottom: 10px;
-    padding: 8px 10px;
-    border: 1px solid color-mix(in srgb, var(--bg-300) 85%, transparent);
-    background: color-mix(in srgb, var(--bg) 54%, transparent);
-    max-height: 18vh;
-    overflow-y: auto;
-  }
-
-  .bubble-question-label {
-    margin-bottom: 4px;
-    color: var(--text-dim);
-    font-size: 0.62rem;
-    letter-spacing: 0.06em;
-  }
-
-  .bubble-question {
-    color: var(--text-dim);
-    font-size: 0.74rem;
-    line-height: 1.45;
-    -webkit-user-select: text !important;
-    user-select: text !important;
-  }
-
-  .bubble-speaker {
-    color: var(--secondary);
-    letter-spacing: 0.06em;
-    font-size: 0.64rem;
-  }
-
-  .genie-bubble--relay {
-    border-color: hsl(var(--relay-hue, 144) 58% 56%);
-    box-shadow:
-      0 0 0 2px color-mix(in srgb, var(--bg-300) 85%, transparent),
-      0 0 14px hsl(var(--relay-hue, 144) 70% 52% / 0.32),
-      var(--shadow);
-  }
-
-  .genie-bubble--relay::before,
-  .genie-bubble--relay::after {
-    border-color: hsl(var(--relay-hue, 144) 58% 56%);
-  }
-
-  .bubble-relay-tag {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-bottom: 6px;
-    padding-bottom: 5px;
-    border-bottom: 1px solid hsl(var(--relay-hue, 144) 45% 50% / 0.45);
-    color: hsl(var(--relay-hue, 144) 60% 62%);
-    font-size: 0.58rem;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
-
-  .bubble-relay-tag .relay-arrow {
-    font-size: 0.78rem;
-    line-height: 1;
-  }
-
-  .bubble-relay-tag .relay-from {
-    color: hsl(var(--relay-hue, 144) 65% 70%);
-  }
-
-  .bubble-relay-tag .relay-via {
-    margin-left: auto;
-    color: var(--text-dim);
-    font-weight: 600;
-    letter-spacing: 0.1em;
-  }
-
-  .bubble-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin-top: 14px;
-    padding-top: 10px;
-    border-top: 1px solid color-mix(in srgb, var(--bg-300) 70%, transparent);
-  }
-
-  .bubble-action-btn {
-    padding: 5px 14px;
-    background: var(--bg-300);
-    border: 1px solid var(--bg-400);
-    color: var(--text);
-    font-family: var(--font-mono);
-    font-size: 0.68rem;
-    font-weight: bold;
-    letter-spacing: 0.06em;
-    cursor: pointer;
-  }
-
-  .bubble-action-btn:hover {
-    border-color: var(--primary);
-    color: var(--primary);
-    background: color-mix(in srgb, var(--primary) 10%, var(--bg-300));
-  }
-
-  @media (max-width: 960px) {
-    .genie-bubble {
-      left: 14px;
-      top: 126px;
-      width: min(calc(100vw - 28px), 320px);
-      max-width: min(calc(100vw - 28px), 320px);
-      min-height: 72px;
-      max-height: min(32vh, 220px);
-      font-size: 0.72rem;
-      line-height: 1.4;
-    }
-
-    .genie-bubble--compact {
-      min-height: 64px;
-      max-height: min(24vh, 160px);
-    }
-  }
 </style>

@@ -18,10 +18,10 @@ mod tests {
 
         let bundle = render_model(source, &DesignParams::new(), &resolver)
             .expect("typed polyhedron should render");
-        let preview = Path::new(&bundle.preview_stl_path);
-        assert!(preview.is_file(), "preview STL must exist");
+        let preview = Path::new(&bundle.model_stl_path);
+        assert!(preview.is_file(), "model STL must exist");
         assert_eq!(
-            crate::services::structural_verification::preview_stl_non_manifold_edge_count(preview)
+            crate::services::structural_verification::model_stl_non_manifold_edge_count(preview)
                 .expect("topology summary"),
             0,
             "tetrahedron must be manifold"
@@ -66,8 +66,8 @@ mod tests {
         let bundle = render_model(source, &DesignParams::new(), &resolver)
             .expect("bounded map/range vertices should render");
         assert_eq!(
-            crate::services::structural_verification::preview_stl_non_manifold_edge_count(
-                Path::new(&bundle.preview_stl_path),
+            crate::services::structural_verification::model_stl_non_manifold_edge_count(
+                Path::new(&bundle.model_stl_path),
             )
             .expect("topology summary"),
             0
@@ -82,8 +82,8 @@ mod tests {
         )
         .expect("equivalent literal polyhedron");
         assert_eq!(
-            std::fs::read(&bundle.preview_stl_path).expect("formula STL"),
-            std::fs::read(&literal.preview_stl_path).expect("literal STL"),
+            std::fs::read(&bundle.model_stl_path).expect("formula STL"),
+            std::fs::read(&literal.model_stl_path).expect("literal STL"),
             "formula and literal mesh digests must match"
         );
         let manifest = crate::model_runtime::read_model_manifest(&resolver, &bundle.model_id)
@@ -135,7 +135,7 @@ mod tests {
             &resolver,
         )
         .expect("seed last-good artifact");
-        let last_good_bytes = std::fs::read(&last_good.preview_stl_path).expect("last-good STL");
+        let last_good_bytes = std::fs::read(&last_good.model_stl_path).expect("last-good STL");
         let source = r#"(model
           (part open-tetra
             (polyhedron
@@ -147,11 +147,11 @@ mod tests {
         assert_eq!(error.operation.as_deref(), Some("polyhedron"));
         assert!(error.to_string().contains("boundary edges: 3"), "{error}");
         assert!(
-            Path::new(&last_good.preview_stl_path).is_file(),
+            Path::new(&last_good.model_stl_path).is_file(),
             "invalid polyhedron must preserve last-good artifact"
         );
         assert_eq!(
-            std::fs::read(&last_good.preview_stl_path).expect("preserved last-good STL"),
+            std::fs::read(&last_good.model_stl_path).expect("preserved last-good STL"),
             last_good_bytes
         );
         std::fs::remove_dir_all(root).expect("cleanup");
@@ -171,8 +171,8 @@ mod tests {
         let bundle = render_model(source, &DesignParams::new(), &resolver)
             .expect("open mesh should render without topology repair");
         assert_eq!(
-            crate::services::structural_verification::preview_stl_non_manifold_edge_count(
-                Path::new(&bundle.preview_stl_path),
+            crate::services::structural_verification::model_stl_non_manifold_edge_count(
+                Path::new(&bundle.model_stl_path),
             )
             .expect("boundary evidence"),
             3
@@ -216,10 +216,10 @@ mod tests {
 
         let first = render_model(&source, &DesignParams::new(), &resolver)
             .expect("heightfield should render");
-        let first_bytes = std::fs::read(&first.preview_stl_path).expect("first preview");
+        let first_bytes = std::fs::read(&first.model_stl_path).expect("first preview");
         assert_eq!(
-            crate::services::structural_verification::preview_stl_non_manifold_edge_count(
-                Path::new(&first.preview_stl_path),
+            crate::services::structural_verification::model_stl_non_manifold_edge_count(
+                Path::new(&first.model_stl_path),
             )
             .expect("heightfield topology"),
             0
@@ -228,7 +228,54 @@ mod tests {
             .expect("same heightfield should rerender");
         assert_eq!(
             first_bytes,
-            std::fs::read(&second.preview_stl_path).expect("second preview")
+            std::fs::read(&second.model_stl_path).expect("second preview")
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn renders_alpha_encoded_stamp_as_luminance_relief() {
+        let root = render_root();
+        std::fs::create_dir_all(&root).expect("temp root");
+        let image_path = root.join("alpha-stamp.png");
+        let mut image = image::RgbaImage::new(2, 2);
+        image.put_pixel(0, 0, image::Rgba([0, 0, 0, 0]));
+        image.put_pixel(1, 0, image::Rgba([0, 0, 0, 255]));
+        image.put_pixel(0, 1, image::Rgba([0, 0, 0, 0]));
+        image.put_pixel(1, 1, image::Rgba([0, 0, 0, 255]));
+        image.save(&image_path).expect("alpha stamp fixture");
+        let resolver = TestResolver { root: root.clone() };
+        let source = format!(
+            r#"(model
+              (part relief
+                (heightfield "{}"
+                  :width 30
+                  :depth 20
+                  :relief-height 2
+                  :base-thickness 1
+                  :invert #f)))"#,
+            image_path.display()
+        );
+
+        let bundle = render_model(&source, &DesignParams::new(), &resolver)
+            .expect("alpha stamp should render");
+        let viewer_asset = bundle.viewer_assets.first().expect("viewer asset");
+        let indexed_asset = crate::ecky_ir::mesh_asset::IndexedMeshAsset::read_cache(
+            &Path::new(&viewer_asset.path).with_extension("indexed-mesh.json"),
+        )
+        .expect("indexed heightfield asset");
+        let mut positive_z = indexed_asset
+            .vertices()
+            .iter()
+            .map(|vertex| vertex[2])
+            .filter(|z| *z > 0.0);
+        let first_z = positive_z.next().expect("positive heightfield vertices");
+        let (min_z, max_z) = positive_z.fold((first_z, first_z), |(min_z, max_z), z| {
+            (min_z.min(z), max_z.max(z))
+        });
+        assert!(
+            max_z - min_z > 1.5,
+            "alpha-encoded black artwork must produce relief variation, got min={min_z} max={max_z}"
         );
         std::fs::remove_dir_all(root).expect("cleanup");
     }
@@ -250,7 +297,7 @@ mod tests {
 
         let last_good = render_model(&source, &DesignParams::new(), &resolver)
             .expect("valid heightmap seeds last-good preview");
-        let last_good_bytes = std::fs::read(&last_good.preview_stl_path).expect("last-good STL");
+        let last_good_bytes = std::fs::read(&last_good.model_stl_path).expect("last-good STL");
         std::fs::write(&image_path, b"not a png").expect("corrupt fixture");
 
         let error = render_model(&source, &DesignParams::new(), &resolver)
@@ -263,7 +310,7 @@ mod tests {
             "{error}"
         );
         assert_eq!(
-            std::fs::read(&last_good.preview_stl_path).expect("preserved last-good STL"),
+            std::fs::read(&last_good.model_stl_path).expect("preserved last-good STL"),
             last_good_bytes
         );
         std::fs::remove_dir_all(root).expect("cleanup");
@@ -463,7 +510,7 @@ mod tests {
         .expect("render");
 
         assert_eq!(bundle.engine_kind, EngineKind::EckyIrV0);
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
         assert_eq!(bundle.viewer_assets.len(), 1);
     }
 
@@ -485,7 +532,7 @@ mod tests {
         .expect("render");
 
         assert_eq!(bundle.engine_kind, EngineKind::EckyIrV0);
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
     }
 
     #[allow(dead_code)]
@@ -534,7 +581,7 @@ mod tests {
         .expect("render");
 
         assert_eq!(bundle.viewer_assets.len(), 3);
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
     }
 
     #[test]
@@ -559,7 +606,7 @@ mod tests {
         .expect("render");
 
         assert_eq!(bundle.viewer_assets.len(), 1);
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
     }
 
     #[test]
@@ -591,7 +638,7 @@ mod tests {
         .expect("render");
 
         assert_eq!(bundle.viewer_assets.len(), 3);
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
     }
 
     #[test]
@@ -648,7 +695,7 @@ mod tests {
         .expect("render");
 
         assert_eq!(bundle.viewer_assets.len(), 8);
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
     }
 
     #[test]
@@ -667,7 +714,7 @@ mod tests {
 
             assert_eq!(bundle.engine_kind, EngineKind::EckyIrV0, "{fixture}");
             assert_eq!(bundle.viewer_assets.len(), 1, "{fixture}");
-            assert!(Path::new(&bundle.preview_stl_path).exists(), "{fixture}");
+            assert!(Path::new(&bundle.model_stl_path).exists(), "{fixture}");
         }
     }
 
@@ -688,8 +735,8 @@ mod tests {
         .expect("wall-pattern accepts evaluated solid meshes");
 
         assert_eq!(
-            crate::services::structural_verification::preview_stl_non_manifold_edge_count(
-                Path::new(&bundle.preview_stl_path),
+            crate::services::structural_verification::model_stl_non_manifold_edge_count(
+                Path::new(&bundle.model_stl_path),
             )
             .expect("STL topology"),
             0
@@ -734,7 +781,7 @@ mod tests {
         .expect("render");
 
         assert_eq!(bundle.viewer_assets.len(), 4);
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
     }
 
     #[test]
@@ -757,7 +804,7 @@ mod tests {
         .expect("render");
 
         assert_eq!(bundle.viewer_assets.len(), 1);
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
     }
 
     #[test]
@@ -792,7 +839,7 @@ mod tests {
         .expect("render");
 
         assert_eq!(bundle.viewer_assets.len(), 4);
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
     }
 
     #[test]
@@ -918,10 +965,10 @@ mod tests {
         )
         .expect("render wall-pattern over LLM-generated polyhedron");
 
-        assert!(Path::new(&bundle.preview_stl_path).is_file());
+        assert!(Path::new(&bundle.model_stl_path).is_file());
         assert_eq!(
-            crate::services::structural_verification::preview_stl_non_manifold_edge_count(
-                Path::new(&bundle.preview_stl_path),
+            crate::services::structural_verification::model_stl_non_manifold_edge_count(
+                Path::new(&bundle.model_stl_path),
             )
             .expect("STL topology"),
             0
@@ -1006,7 +1053,7 @@ mod tests {
             &resolver,
         )
         .expect("render");
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
         assert_eq!(bundle.viewer_assets.len(), 1);
     }
 

@@ -6,7 +6,7 @@ import { selectThreadPreviewImage } from './projectPreview';
 const renderableMessage = (imageData: string) => ({
   role: 'assistant' as const,
   status: 'success' as const,
-  artifactBundle: { previewStlPath: '/tmp/model.stl' },
+  artifactBundle: { modelStlPath: '/tmp/model.stl' },
   imageData,
 });
 
@@ -21,14 +21,14 @@ test('selectThreadPreviewImage prefers fresh viewport preview over stale latest 
   );
 });
 
-test('selectThreadPreviewImage uses older fresh preview when latest lacks preview', () => {
+test('selectThreadPreviewImage does not present an older preview for a head without an image', () => {
   assert.equal(
     selectThreadPreviewImage(
       { messages: [{ imageData: 'data:image/png;base64,old-message' }] },
       { id: 'latest-version', imageData: null },
       { messageId: 'older-version', imageData: 'data:image/png;base64,stale' },
     ),
-    'data:image/png;base64,stale',
+    null,
   );
 });
 

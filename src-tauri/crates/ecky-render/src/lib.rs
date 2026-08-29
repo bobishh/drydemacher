@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod component_placement;
 pub mod core_ir;
 pub mod deterministic;
 mod kernel_planner;

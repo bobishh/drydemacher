@@ -10,8 +10,9 @@ use crate::contracts::{
     AnalysisDeclarationBinding, AppError, AppResult, ArtifactBundle, DesignParams,
     DocumentMetadata, EngineKind, ExportArtifact, FeatureGraph, FeatureNode, FeatureOutputRef,
     GeometryBackend, GeometryProvenance, GeometryRepresentation, ManifestBounds, ModelManifest,
-    ModelSourceKind, ParamValue, ParameterGroup, ParsedParamsResult, PartBinding, SelectionTarget,
-    SourceLanguage, SourceRef, ViewerAsset, ViewerAssetFormat, MODEL_RUNTIME_SCHEMA_VERSION,
+    ModelSourceKind, ParamValue, ParameterGroup, ParsedParamsResult, PartBinding, PreviewView,
+    PreviewViewOffset, SelectionTarget, SourceLanguage, SourceRef, ViewerAsset, ViewerAssetFormat,
+    MODEL_RUNTIME_SCHEMA_VERSION,
 };
 use crate::models::PathResolver;
 
@@ -37,7 +38,7 @@ pub(super) const GENERATED_ARTIFACT_DIR: &str = "generated";
 pub(super) const BUNDLE_FILE_NAME: &str = "bundle.json";
 pub(super) const MANIFEST_FILE_NAME: &str = "manifest.json";
 pub(super) const SOURCE_FILE_NAME: &str = "source.ecky";
-pub(super) const PREVIEW_STL_FILE_NAME: &str = "preview.stl";
+pub(super) const MODEL_STL_FILE_NAME: &str = "model.stl";
 pub(super) const PARTS_DIR_NAME: &str = "parts";
 const CORE_AST_SCHEMA_VERSION: u32 = 1;
 pub(super) fn mesh_volume(mesh: &IrMesh) -> Option<f64> {
@@ -161,7 +162,7 @@ pub(super) fn load_cached_bundle(bundle_dir: &Path) -> AppResult<Option<Artifact
         .map_err(|e| AppError::persistence(format!("Failed to read bundle: {}", e)))?;
     let bundle: ArtifactBundle = serde_json::from_str(&raw)
         .map_err(|e| AppError::parse(format!("Failed to parse bundle: {}", e)))?;
-    if !Path::new(&bundle.manifest_path).exists() || !Path::new(&bundle.preview_stl_path).exists() {
+    if !Path::new(&bundle.manifest_path).exists() || !Path::new(&bundle.model_stl_path).exists() {
         return Ok(None);
     }
     Ok(Some(bundle))
@@ -203,6 +204,14 @@ struct RuntimePart {
     feature_decl: Option<CoreFeatureDecl>,
     source_ref: Option<SourceRef>,
     dependency_ids: Vec<String>,
+    named_shapes: Vec<RuntimeNamedShape>,
+}
+
+#[derive(Clone)]
+struct RuntimeNamedShape {
+    name: String,
+    source_ref: Option<SourceRef>,
+    dependency_ids: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -228,13 +237,30 @@ fn runtime_part_source_ref(part_id: &str, span: Option<SourceSpan>) -> Option<So
     })
 }
 
+fn runtime_shape_source_ref(
+    part_id: &str,
+    shape_name: &str,
+    span: Option<SourceSpan>,
+) -> Option<SourceRef> {
+    if part_id.trim().is_empty() || shape_name.trim().is_empty() {
+        return None;
+    }
+
+    Some(SourceRef {
+        source_id: None,
+        path: Some(format!("/parts/{part_id}/build/{shape_name}")),
+        start_byte: span.map(|span| span.start),
+        end_byte: span.map(|span| span.end),
+    })
+}
+
 fn runtime_part_feature_graph(
     parts: &[RuntimePart],
     selection_targets: &[SelectionTarget],
 ) -> FeatureGraph {
     let nodes = parts
         .iter()
-        .map(|part| {
+        .flat_map(|part| {
             let fallback_feature_id = runtime_part_feature_id(&part.part_id);
             let feature_id = part
                 .feature_decl
@@ -266,7 +292,7 @@ fn runtime_part_feature_graph(
                 }]
             };
 
-            FeatureNode {
+            let mut nodes = vec![FeatureNode {
                 feature_id,
                 kind,
                 label: if part.label.trim().is_empty() {
@@ -278,11 +304,40 @@ fn runtime_part_feature_graph(
                 dependency_ids: runtime_feature_dependency_ids(part),
                 output_refs,
                 ports: Vec::new(),
-            }
+            }];
+            nodes.extend(part.named_shapes.iter().map(|shape| FeatureNode {
+                feature_id: format!("shape:{}:{}", part.part_id, shape.name),
+                kind: "shape".to_string(),
+                label: humanize_runtime_name(&shape.name),
+                source_ref: shape.source_ref.clone(),
+                dependency_ids: shape.dependency_ids.clone(),
+                output_refs: Vec::new(),
+                ports: Vec::new(),
+            }));
+            nodes
         })
         .collect();
 
     FeatureGraph { nodes }
+}
+
+fn humanize_runtime_name(name: &str) -> String {
+    let words = name
+        .split(['_', '-'])
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>();
+    if words.is_empty() {
+        name.to_string()
+    } else {
+        words.join(" ")
+    }
 }
 
 fn runtime_selection_target_output_id(target: &SelectionTarget) -> Option<&str> {
@@ -322,6 +377,98 @@ fn runtime_feature_dependency_ids(part: &RuntimePart) -> Vec<String> {
     }
 
     ids
+}
+
+fn runtime_parameter_groups(
+    parts: &[RuntimePart],
+    parameter_keys: &[String],
+) -> Vec<ParameterGroup> {
+    let part_keys = parts
+        .iter()
+        .map(|part| (part.part_id.as_str(), runtime_feature_dependency_ids(part)))
+        .collect::<Vec<_>>();
+    let mut claim_counts = BTreeMap::<String, usize>::new();
+    for (_, keys) in &part_keys {
+        for key in keys {
+            *claim_counts.entry(key.clone()).or_default() += 1;
+        }
+    }
+
+    let mut groups = Vec::new();
+    let model_keys = parameter_keys
+        .iter()
+        .filter(|key| claim_counts.get(*key).copied().unwrap_or_default() != 1)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !model_keys.is_empty() {
+        groups.push(ParameterGroup {
+            group_id: "model:parameters".to_string(),
+            label: "Model Parameters".to_string(),
+            parameter_keys: model_keys,
+            part_ids: parts.iter().map(|part| part.part_id.clone()).collect(),
+            editable: true,
+            presentation: Some("primary".to_string()),
+            order: Some(groups.len() as u32),
+        });
+    }
+
+    for part in parts {
+        let inferred_keys = part_keys
+            .iter()
+            .find(|(part_id, _)| *part_id == part.part_id)
+            .map(|(_, keys)| keys.as_slice())
+            .unwrap_or_default();
+        let (group_id, primary_keys) = match part.feature_decl.as_ref() {
+            Some(feature) if !feature.param_keys.is_empty() => (
+                feature.feature_id.clone(),
+                feature
+                    .param_keys
+                    .iter()
+                    .filter(|key| parameter_keys.contains(key))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            ),
+            _ => (
+                format!("part:{}", part.part_id),
+                inferred_keys
+                    .iter()
+                    .filter(|key| claim_counts.get(*key) == Some(&1))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            ),
+        };
+        if !primary_keys.is_empty() {
+            groups.push(ParameterGroup {
+                group_id,
+                label: if part.label.trim().is_empty() {
+                    humanize_runtime_name(&part.part_id)
+                } else {
+                    part.label.clone()
+                },
+                parameter_keys: primary_keys,
+                part_ids: vec![part.part_id.clone()],
+                editable: true,
+                presentation: Some("primary".to_string()),
+                order: Some(groups.len() as u32),
+            });
+        }
+        for shape in &part.named_shapes {
+            if shape.dependency_ids.is_empty() {
+                continue;
+            }
+            groups.push(ParameterGroup {
+                group_id: format!("shape:{}:{}", part.part_id, shape.name),
+                label: humanize_runtime_name(&shape.name),
+                parameter_keys: shape.dependency_ids.clone(),
+                part_ids: vec![part.part_id.clone()],
+                editable: true,
+                presentation: Some("advanced".to_string()),
+                order: Some(groups.len() as u32),
+            });
+        }
+    }
+
+    groups
 }
 
 pub(crate) fn build_core_program_param_env_for_eval(
@@ -386,6 +533,7 @@ fn runtime_core_part_to_runtime_part(
     param_names: &BTreeMap<u64, String>,
     feature_decls: &BTreeMap<String, CoreFeatureDecl>,
 ) -> AppResult<RuntimePart> {
+    let provenance = core_part_dependency_projection(part, param_names);
     let mut used_local_names = BTreeMap::new();
     Ok(RuntimePart {
         part_id: part.key.clone(),
@@ -399,24 +547,187 @@ fn runtime_core_part_to_runtime_part(
         )?)?,
         feature_decl: feature_decls.get(&part.key).cloned(),
         source_ref: runtime_part_source_ref(&part.key, part.root.span),
-        dependency_ids: core_node_parameter_dependencies(&part.root, param_names),
+        dependency_ids: provenance.dependency_ids,
+        named_shapes: provenance.named_shapes,
     })
 }
 
-fn core_node_parameter_dependencies(
+struct CorePartDependencyProjection {
+    dependency_ids: Vec<String>,
+    named_shapes: Vec<RuntimeNamedShape>,
+}
+
+fn core_part_dependency_projection(
+    part: &CorePart,
+    param_names: &BTreeMap<u64, String>,
+) -> CorePartDependencyProjection {
+    let mut node_index = BTreeMap::new();
+    let mut shape_bindings = Vec::new();
+    index_core_nodes_and_shapes(
+        &part.root,
+        &BTreeMap::new(),
+        &mut node_index,
+        &mut shape_bindings,
+    );
+
+    let mut reachable_node_ids = BTreeSet::new();
+    let dependency_ids = core_node_reachable_parameter_dependencies(
+        &part.root,
+        param_names,
+        &node_index,
+        &BTreeMap::new(),
+        &mut reachable_node_ids,
+    );
+    let mut shape_name_counts = BTreeMap::<String, usize>::new();
+    for (name, _, _) in &shape_bindings {
+        *shape_name_counts.entry(name.clone()).or_default() += 1;
+    }
+    let named_shapes = shape_bindings
+        .into_iter()
+        .filter(|(name, value, _)| {
+            shape_name_counts.get(name) == Some(&1) && reachable_node_ids.contains(&value.id.raw())
+        })
+        .map(|(name, value, locals)| {
+            let mut shape_reachable = BTreeSet::new();
+            RuntimeNamedShape {
+                source_ref: runtime_shape_source_ref(&part.key, &name, value.span),
+                dependency_ids: core_node_reachable_parameter_dependencies(
+                    value,
+                    param_names,
+                    &node_index,
+                    &locals,
+                    &mut shape_reachable,
+                ),
+                name,
+            }
+        })
+        .collect();
+
+    CorePartDependencyProjection {
+        dependency_ids,
+        named_shapes,
+    }
+}
+
+fn index_core_nodes_and_shapes<'a>(
+    node: &'a CoreNode,
+    locals: &BTreeMap<String, u64>,
+    node_index: &mut BTreeMap<u64, &'a CoreNode>,
+    shape_bindings: &mut Vec<(String, &'a CoreNode, BTreeMap<String, u64>)>,
+) {
+    node_index.insert(node.id.raw(), node);
+    match &node.kind {
+        CoreNodeKind::Literal(_) | CoreNodeKind::Reference(_) => {}
+        CoreNodeKind::Build { bindings, result } => {
+            let mut nested = locals.clone();
+            for binding in bindings {
+                shape_bindings.push((binding.name.clone(), &binding.value, nested.clone()));
+                index_core_nodes_and_shapes(&binding.value, &nested, node_index, shape_bindings);
+                nested.insert(binding.name.clone(), binding.value.id.raw());
+            }
+            index_core_nodes_and_shapes(result, &nested, node_index, shape_bindings);
+        }
+        CoreNodeKind::Let { bindings, body } => {
+            let mut nested = locals.clone();
+            for binding in bindings {
+                index_core_nodes_and_shapes(&binding.value, &nested, node_index, shape_bindings);
+                nested.insert(binding.name.clone(), binding.value.id.raw());
+            }
+            index_core_nodes_and_shapes(body, &nested, node_index, shape_bindings);
+        }
+        CoreNodeKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            index_core_nodes_and_shapes(condition, locals, node_index, shape_bindings);
+            index_core_nodes_and_shapes(then_branch, locals, node_index, shape_bindings);
+            index_core_nodes_and_shapes(else_branch, locals, node_index, shape_bindings);
+        }
+        CoreNodeKind::Call { args, keywords, .. } => {
+            for arg in args {
+                index_core_nodes_and_shapes(arg, locals, node_index, shape_bindings);
+            }
+            for keyword in keywords {
+                index_core_nodes_and_shapes(
+                    keyword.source_node(),
+                    locals,
+                    node_index,
+                    shape_bindings,
+                );
+            }
+        }
+        CoreNodeKind::Range { start, end } => {
+            index_core_nodes_and_shapes(start, locals, node_index, shape_bindings);
+            index_core_nodes_and_shapes(end, locals, node_index, shape_bindings);
+        }
+        CoreNodeKind::Map { sources, body, .. } => {
+            for source in sources {
+                index_core_nodes_and_shapes(source, locals, node_index, shape_bindings);
+            }
+            index_core_nodes_and_shapes(body, locals, node_index, shape_bindings);
+        }
+        CoreNodeKind::Apply { args, list, .. } => {
+            for arg in args {
+                index_core_nodes_and_shapes(arg, locals, node_index, shape_bindings);
+            }
+            index_core_nodes_and_shapes(list, locals, node_index, shape_bindings);
+        }
+        CoreNodeKind::List(items) | CoreNodeKind::Group(items) => {
+            for item in items {
+                index_core_nodes_and_shapes(item, locals, node_index, shape_bindings);
+            }
+        }
+    }
+}
+
+fn core_node_reachable_parameter_dependencies(
     node: &CoreNode,
     param_names: &BTreeMap<u64, String>,
+    node_index: &BTreeMap<u64, &CoreNode>,
+    locals: &BTreeMap<String, u64>,
+    reachable_node_ids: &mut BTreeSet<u64>,
 ) -> Vec<String> {
     let mut keys = BTreeSet::new();
-    collect_core_node_parameter_dependencies(node, param_names, &mut keys);
+    let mut visiting = BTreeSet::new();
+    collect_reachable_core_node_dependencies(
+        node,
+        param_names,
+        node_index,
+        locals,
+        reachable_node_ids,
+        &mut visiting,
+        &mut keys,
+    );
     keys.into_iter().collect()
 }
 
-fn collect_core_node_parameter_dependencies(
+fn collect_reachable_core_node_dependencies(
     node: &CoreNode,
     param_names: &BTreeMap<u64, String>,
+    node_index: &BTreeMap<u64, &CoreNode>,
+    locals: &BTreeMap<String, u64>,
+    reachable_node_ids: &mut BTreeSet<u64>,
+    visiting: &mut BTreeSet<u64>,
     keys: &mut BTreeSet<String>,
 ) {
+    let node_id = node.id.raw();
+    reachable_node_ids.insert(node_id);
+    if !visiting.insert(node_id) {
+        return;
+    }
+
+    let mut visit = |child: &CoreNode, child_locals: &BTreeMap<String, u64>| {
+        collect_reachable_core_node_dependencies(
+            child,
+            param_names,
+            node_index,
+            child_locals,
+            reachable_node_ids,
+            visiting,
+            keys,
+        );
+    };
     match &node.kind {
         CoreNodeKind::Literal(_) => {}
         CoreNodeKind::Reference(CoreReference::Parameter(param_id)) => {
@@ -424,58 +735,71 @@ fn collect_core_node_parameter_dependencies(
                 keys.insert(key.clone());
             }
         }
-        CoreNodeKind::Reference(_) => {}
-        CoreNodeKind::Build { bindings, result } => {
-            for binding in bindings {
-                collect_core_node_parameter_dependencies(&binding.value, param_names, keys);
+        CoreNodeKind::Reference(CoreReference::Node(id)) => {
+            if let Some(target) = node_index.get(&id.raw()) {
+                visit(target, locals);
             }
-            collect_core_node_parameter_dependencies(result, param_names, keys);
+        }
+        CoreNodeKind::Reference(CoreReference::Local(name)) => {
+            if let Some(id) = locals.get(name).and_then(|id| node_index.get(id)) {
+                visit(id, locals);
+            }
+        }
+        CoreNodeKind::Reference(CoreReference::Part(_)) => {}
+        CoreNodeKind::Build { bindings, result } => {
+            let mut nested = locals.clone();
+            for binding in bindings {
+                nested.insert(binding.name.clone(), binding.value.id.raw());
+            }
+            visit(result, &nested);
         }
         CoreNodeKind::Let { bindings, body } => {
+            let mut nested = locals.clone();
             for binding in bindings {
-                collect_core_node_parameter_dependencies(&binding.value, param_names, keys);
+                nested.insert(binding.name.clone(), binding.value.id.raw());
             }
-            collect_core_node_parameter_dependencies(body, param_names, keys);
+            visit(body, &nested);
         }
         CoreNodeKind::If {
             condition,
             then_branch,
             else_branch,
         } => {
-            collect_core_node_parameter_dependencies(condition, param_names, keys);
-            collect_core_node_parameter_dependencies(then_branch, param_names, keys);
-            collect_core_node_parameter_dependencies(else_branch, param_names, keys);
+            visit(condition, locals);
+            visit(then_branch, locals);
+            visit(else_branch, locals);
         }
         CoreNodeKind::Call { args, keywords, .. } => {
             for arg in args {
-                collect_core_node_parameter_dependencies(arg, param_names, keys);
+                visit(arg, locals);
             }
             for keyword in keywords {
-                collect_core_node_parameter_dependencies(keyword.source_node(), param_names, keys);
+                visit(keyword.source_node(), locals);
             }
         }
         CoreNodeKind::Range { start, end } => {
-            collect_core_node_parameter_dependencies(start, param_names, keys);
-            collect_core_node_parameter_dependencies(end, param_names, keys);
+            visit(start, locals);
+            visit(end, locals);
         }
         CoreNodeKind::Map { sources, body, .. } => {
             for source in sources {
-                collect_core_node_parameter_dependencies(source, param_names, keys);
+                visit(source, locals);
             }
-            collect_core_node_parameter_dependencies(body, param_names, keys);
+            visit(body, locals);
         }
         CoreNodeKind::Apply { args, list, .. } => {
             for arg in args {
-                collect_core_node_parameter_dependencies(arg, param_names, keys);
+                visit(arg, locals);
             }
-            collect_core_node_parameter_dependencies(list, param_names, keys);
+            visit(list, locals);
         }
         CoreNodeKind::List(items) | CoreNodeKind::Group(items) => {
             for item in items {
-                collect_core_node_parameter_dependencies(item, param_names, keys);
+                visit(item, locals);
             }
         }
     }
+    visiting.remove(&node_id);
 }
 
 fn ir_expr_parameter_dependencies(expr: &IrExpr, parameter_keys: &[String]) -> Vec<String> {
@@ -1023,6 +1347,8 @@ fn cached_bundle_satisfies_manifest_identity(
     bundle: &ArtifactBundle,
     source_digest: &str,
     ast_identity: Option<&CoreAstIdentity>,
+    parts: &[RuntimePart],
+    expected_parameter_groups: &[ParameterGroup],
 ) -> bool {
     let Ok(raw) = fs::read_to_string(&bundle.manifest_path) else {
         return false;
@@ -1034,6 +1360,30 @@ fn cached_bundle_satisfies_manifest_identity(
         return false;
     }
     if manifest.feature_graph.is_none() {
+        return false;
+    }
+    if parts.iter().any(|expected| {
+        let expected_keys = runtime_feature_dependency_ids(expected);
+        manifest
+            .parts
+            .iter()
+            .find(|part| part.part_id == expected.part_id)
+            .map(|part| &part.parameter_keys)
+            != Some(&expected_keys)
+    }) {
+        return false;
+    }
+    if manifest.parameter_groups.len() != expected_parameter_groups.len()
+        || manifest
+            .parameter_groups
+            .iter()
+            .zip(expected_parameter_groups)
+            .any(|(actual, expected)| {
+                actual.group_id != expected.group_id
+                    || actual.parameter_keys != expected.parameter_keys
+                    || actual.part_ids != expected.part_ids
+            })
+    {
         return false;
     }
 
@@ -1055,29 +1405,31 @@ fn render_prepared_parts(
     app: &dyn PathResolver,
     ast_identity: Option<CoreAstIdentity>,
     analysis_declarations: Vec<AnalysisDeclarationBinding>,
+    preview_views: Vec<PreviewView>,
 ) -> AppResult<ArtifactBundle> {
     let exposes_mesh_literal = parts
         .iter()
         .any(|part| ir_expr_contains_mesh_literal(&part.expr));
-    let part_ids = parts
+    let part_parameter_keys = parts
         .iter()
-        .map(|part| part.part_id.clone())
-        .collect::<Vec<_>>();
+        .map(|part| (part.part_id.clone(), runtime_feature_dependency_ids(part)))
+        .collect::<BTreeMap<_, _>>();
+    let parameter_groups = runtime_parameter_groups(parts, parameter_keys);
     let params_json = serde_json::to_string(parameters).unwrap_or_default();
-    let heightfield_digest = heightfield_asset_digest(parts, env)?;
+    let raster_geometry_digest = raster_geometry_asset_digest(parts, env)?;
     let mut hasher = Sha256::new();
     hasher.update(source_identity.as_bytes());
     hasher.update(b"|");
     hasher.update(params_json.as_bytes());
-    if let Some(digest) = heightfield_digest.as_deref() {
-        hasher.update(b"|heightfield-assets|");
+    if let Some(digest) = raster_geometry_digest.as_deref() {
+        hasher.update(b"|raster-geometry-assets-v2|");
         hasher.update(digest.as_bytes());
     }
     let hash = format!("{:x}", hasher.finalize());
     let mut source_hasher = Sha256::new();
     source_hasher.update(source_identity.as_bytes());
-    if let Some(digest) = heightfield_digest.as_deref() {
-        source_hasher.update(b"|heightfield-assets|");
+    if let Some(digest) = raster_geometry_digest.as_deref() {
+        source_hasher.update(b"|raster-geometry-assets-v2|");
         source_hasher.update(digest.as_bytes());
     }
     let source_digest = format!("sha256:{:x}", source_hasher.finalize());
@@ -1085,8 +1437,13 @@ fn render_prepared_parts(
     let dir = bundle_dir(app, &model_id)?;
 
     if let Some(cached) = load_cached_bundle(&dir)? {
-        if cached_bundle_satisfies_manifest_identity(&cached, &source_digest, ast_identity.as_ref())
-            && cached_indexed_mesh_assets_are_valid(&cached)
+        if cached_bundle_satisfies_manifest_identity(
+            &cached,
+            &source_digest,
+            ast_identity.as_ref(),
+            parts,
+            &parameter_groups,
+        ) && cached_indexed_mesh_assets_are_valid(&cached)
             && (!exposes_mesh_literal
                 || cached
                     .export_artifacts
@@ -1181,7 +1538,10 @@ fn render_prepared_parts(
             semantic_role: Some("generated".to_string()),
             viewer_asset_path: Some(asset_path),
             viewer_node_ids: vec![part.part_id.clone()],
-            parameter_keys: parameter_keys.to_vec(),
+            parameter_keys: part_parameter_keys
+                .get(&part.part_id)
+                .cloned()
+                .unwrap_or_default(),
             editable: true,
             bounds: Some(bounds_from_mesh(&mesh)),
             volume: mesh_volume(&mesh),
@@ -1192,12 +1552,12 @@ fn render_prepared_parts(
     let preview_mesh =
         preview_mesh.ok_or_else(|| validation("`.ecky` model produced no printable parts."))?;
     let preview_mesh = sanitize_mesh_for_export(&preview_mesh);
-    let preview_path = dir.join(PREVIEW_STL_FILE_NAME);
+    let preview_path = dir.join(MODEL_STL_FILE_NAME);
     fs::write(
         &preview_path,
-        preview_mesh.to_stl_binary("preview").map_err(|err| {
-            AppError::persistence(format!("Failed to encode preview STL: {}", err))
-        })?,
+        preview_mesh
+            .to_stl_binary("preview")
+            .map_err(|err| AppError::persistence(format!("Failed to encode model STL: {}", err)))?,
     )
     .map_err(|err| AppError::persistence(err.to_string()))?;
 
@@ -1216,6 +1576,7 @@ fn render_prepared_parts(
     let manifest = ModelManifest {
         geometry_provenance: geometry_provenance.clone(),
         component_import_origins: Vec::new(),
+        component_placement_evidence: Vec::new(),
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id: model_id.clone(),
         source_kind: ModelSourceKind::Generated,
@@ -1233,19 +1594,11 @@ fn render_prepared_parts(
             warnings: mesh_warnings.clone(),
         },
         parts: part_bindings,
-        parameter_groups: vec![ParameterGroup {
-            group_id: "core".to_string(),
-            label: "Core".to_string(),
-            parameter_keys: parameter_keys.to_vec(),
-            part_ids,
-            editable: true,
-            presentation: Some("primary".to_string()),
-            order: Some(0),
-        }],
+        parameter_groups,
         control_primitives: Vec::new(),
         control_relations: Vec::new(),
         control_views: Vec::new(),
-        preview_views: Vec::new(),
+        preview_views,
         advisories: Vec::new(),
         selection_targets,
         measurement_annotations: Vec::new(),
@@ -1279,6 +1632,7 @@ fn render_prepared_parts(
         component_dependency_lock: None,
         component_dependency_lock_digest: None,
         component_import_origins: Vec::new(),
+        component_placement_evidence: Vec::new(),
         schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
         model_id,
         source_kind: ModelSourceKind::Generated,
@@ -1290,7 +1644,7 @@ fn render_prepared_parts(
         fcstd_path: String::new(),
         manifest_path: manifest_path.to_string_lossy().to_string(),
         macro_path: Some(macro_path.to_string_lossy().to_string()),
-        preview_stl_path: preview_path.to_string_lossy().to_string(),
+        model_stl_path: preview_path.to_string_lossy().to_string(),
         viewer_assets,
         edge_targets: Vec::new(),
         face_targets: Vec::new(),
@@ -1309,7 +1663,11 @@ fn ir_expr_contains_mesh_literal(expr: &IrExpr) -> bool {
                 .first()
                 .and_then(IrExpr::as_symbol)
                 .is_some_and(|name| {
-                    matches!(name, "mesh" | "polyhedron" | "heightfield" | "import-stl")
+                    matches!(
+                        name,
+                        "mesh" | "polyhedron" | "heightfield" | "protrude" | "import-stl"
+                    ) || (name == "extrude"
+                        && items.get(1).is_some_and(|source| source.as_str().is_some()))
                 })
                 || items.iter().any(ir_expr_contains_mesh_literal)
         }
@@ -1337,13 +1695,13 @@ fn ir_expr_contains_open_mesh_literal(expr: &IrExpr) -> bool {
     }
 }
 
-fn heightfield_asset_digest(
+fn raster_geometry_asset_digest(
     parts: &[RuntimePart],
     env: &BTreeMap<String, ParamValue>,
 ) -> AppResult<Option<String>> {
     let mut paths = Vec::new();
     for part in parts {
-        collect_heightfield_asset_paths(&part.expr, env, &mut paths)?;
+        collect_raster_geometry_asset_paths(&part.expr, env, &mut paths)?;
     }
     if paths.is_empty() {
         return Ok(None);
@@ -1353,18 +1711,18 @@ fn heightfield_asset_digest(
         if path.trim().is_empty() {
             return Err(AppError::with_details(
                 crate::contracts::AppErrorCode::Validation,
-                "Invalid `heightfield` geometry.",
+                "Invalid image geometry.",
                 "image path is empty; image selection remains pending",
             )
-            .with_operation("heightfield"));
+            .with_operation("raster-geometry"));
         }
         let bytes = fs::read(&path).map_err(|error| {
             AppError::with_details(
                 crate::contracts::AppErrorCode::Validation,
-                "Invalid `heightfield` geometry.",
+                "Invalid image geometry.",
                 format!("failed to read '{path}': {error}"),
             )
-            .with_operation("heightfield")
+            .with_operation("raster-geometry")
         })?;
         hasher.update(path.as_bytes());
         hasher.update(b"\0");
@@ -1373,7 +1731,7 @@ fn heightfield_asset_digest(
     Ok(Some(format!("sha256:{:x}", hasher.finalize())))
 }
 
-fn collect_heightfield_asset_paths(
+fn collect_raster_geometry_asset_paths(
     expr: &IrExpr,
     env: &BTreeMap<String, ParamValue>,
     paths: &mut Vec<String>,
@@ -1381,14 +1739,23 @@ fn collect_heightfield_asset_paths(
     let IrExpr::List(items) = expr else {
         return Ok(());
     };
-    if items.first().and_then(IrExpr::as_symbol) == Some("heightfield") {
+    let head = items.first().and_then(IrExpr::as_symbol);
+    let raster_extrude = head == Some("extrude")
+        && items.get(1).is_some_and(|image| {
+            image.as_str().is_some()
+                || image
+                    .as_symbol()
+                    .and_then(|symbol| env.get(symbol))
+                    .is_some_and(|value| matches!(value, ParamValue::String(_)))
+        });
+    if matches!(head, Some("heightfield" | "protrude")) || raster_extrude {
         let image = items
             .get(1)
-            .ok_or_else(|| validation("`heightfield` expects an image path."))?;
+            .ok_or_else(|| validation("raster geometry expects an image path."))?;
         paths.push(eval_stringish(image, env)?);
     }
     for item in items {
-        collect_heightfield_asset_paths(item, env, paths)?;
+        collect_raster_geometry_asset_paths(item, env, paths)?;
     }
     Ok(())
 }
@@ -1415,6 +1782,7 @@ pub(crate) fn render_model_from_model(
             feature_decl: None,
             source_ref: runtime_part_source_ref(&part.part_id, None),
             dependency_ids: ir_expr_parameter_dependencies(&part.expr, &parameter_keys),
+            named_shapes: Vec::new(),
         })
         .collect::<Vec<_>>();
     render_prepared_parts(
@@ -1425,6 +1793,7 @@ pub(crate) fn render_model_from_model(
         &env,
         app,
         None,
+        Vec::new(),
         Vec::new(),
     )
 }
@@ -1470,6 +1839,24 @@ pub(crate) fn render_core_program(
                 element_kind: analysis.element.clone(),
                 source_start: analysis.span.map(|span| span.start),
                 source_end: analysis.span.map(|span| span.end),
+            })
+            .collect(),
+        program
+            .preview_views
+            .iter()
+            .map(|view| PreviewView {
+                view_id: view.name.clone(),
+                label: view.name.clone(),
+                offsets: view
+                    .part_offsets
+                    .iter()
+                    .map(|offset| PreviewViewOffset {
+                        part_id: offset.part_key.clone(),
+                        dx: offset.dx,
+                        dy: offset.dy,
+                        dz: offset.dz,
+                    })
+                    .collect(),
             })
             .collect(),
     )
@@ -1560,7 +1947,7 @@ mod tests {
             .expect("render");
 
         assert_eq!(bundle.viewer_assets.len(), 1);
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
     }
 
     #[test]
@@ -1876,6 +2263,215 @@ mod tests {
     }
 
     #[test]
+    fn render_component_placement_fixture_has_orthogonal_closed_meshes() {
+        let source =
+            include_str!("../../tests/fixtures/component-placement/dryer-latch-front-side.ecky");
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("program");
+        let root = render_root();
+        std::fs::create_dir_all(&root).expect("root");
+        let bundle = render_core_program(
+            &program,
+            source,
+            &DesignParams::new(),
+            &TestResolver { root: root.clone() },
+        )
+        .expect("render component placement fixture");
+        let manifest = read_manifest(&bundle);
+
+        assert_eq!(manifest.document.object_count, 4);
+        assert_eq!(bundle.viewer_assets.len(), 4);
+        let bounds = |part_id: &str| {
+            manifest
+                .parts
+                .iter()
+                .find(|part| part.part_id == part_id)
+                .and_then(|part| part.bounds.as_ref())
+                .expect("placed part bounds")
+        };
+        let front = bounds("front-latch");
+        let side = bounds("side-latch");
+        assert!(front.x_max - front.x_min > front.y_max - front.y_min);
+        assert!(side.y_max - side.y_min > side.x_max - side.x_min);
+
+        for viewer_asset in &bundle.viewer_assets {
+            let indexed_path = Path::new(&viewer_asset.path).with_extension("indexed-mesh.json");
+            let indexed = crate::ecky_ir::mesh_asset::IndexedMeshAsset::read_cache(&indexed_path)
+                .expect("indexed mesh handoff cache");
+            let topology = indexed.topology();
+            assert_eq!(topology.boundary_edge_count, 0, "{}", viewer_asset.part_id);
+            assert_eq!(
+                topology.non_manifold_edge_count, 0,
+                "{}",
+                viewer_asset.part_id
+            );
+            assert_eq!(
+                topology.winding_mismatch_count, 0,
+                "{}",
+                viewer_asset.part_id
+            );
+            assert!(topology.closed, "{}", viewer_asset.part_id);
+        }
+
+        let evidence = crate::ecky_scheme::compiler::inspect_component_placement_evidence(
+            source,
+            &std::collections::BTreeMap::new(),
+        )
+        .expect("placement evidence");
+        assert_eq!(evidence.len(), 3);
+        assert_eq!(evidence[0].target_port_id, "front");
+        assert_eq!(evidence[1].target_port_id, "side-left");
+        assert_eq!(evidence[2].target_port_id, "side-right");
+        assert_eq!(
+            evidence[2].mirror_axis,
+            Some(ecky_render::component_placement::MirrorAxis::X)
+        );
+        let frame = evidence[2].placement_frame;
+        let cross = [
+            frame.x_axis[1] * frame.y_axis[2] - frame.x_axis[2] * frame.y_axis[1],
+            frame.x_axis[2] * frame.y_axis[0] - frame.x_axis[0] * frame.y_axis[2],
+            frame.x_axis[0] * frame.y_axis[1] - frame.x_axis[1] * frame.y_axis[0],
+        ];
+        let handedness = cross
+            .iter()
+            .zip(frame.z_axis)
+            .map(|(left, right)| left * right)
+            .sum::<f64>();
+        assert!(handedness > 0.999_999, "right-handed frame: {frame:?}");
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn legacy_source_without_ports_keeps_core_identity_bounds_and_emission() {
+        let source = "(model\n  (part body (translate 1 2 3 (box 10 20 30))))\n";
+        let first_program = crate::ecky_scheme::compile_to_core_program(source).expect("first");
+        let second_program = crate::ecky_scheme::compile_to_core_program(source).expect("second");
+        assert_eq!(
+            first_program
+                .parts
+                .iter()
+                .map(|part| part.key.as_str())
+                .collect::<Vec<_>>(),
+            second_program
+                .parts
+                .iter()
+                .map(|part| part.key.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            crate::ecky_scheme::compile_to_legacy_source(source).expect("first emission"),
+            crate::ecky_scheme::compile_to_legacy_source(source).expect("second emission")
+        );
+
+        let first_root = render_root();
+        let second_root = render_root();
+        std::fs::create_dir_all(&first_root).expect("first root");
+        std::fs::create_dir_all(&second_root).expect("second root");
+        let first_bundle = render_core_program(
+            &first_program,
+            source,
+            &DesignParams::new(),
+            &TestResolver {
+                root: first_root.clone(),
+            },
+        )
+        .expect("first render");
+        let second_bundle = render_core_program(
+            &second_program,
+            source,
+            &DesignParams::new(),
+            &TestResolver {
+                root: second_root.clone(),
+            },
+        )
+        .expect("second render");
+        let first_manifest = read_manifest(&first_bundle);
+        let second_manifest = read_manifest(&second_bundle);
+        assert_eq!(first_manifest.core_digest, second_manifest.core_digest);
+        assert_eq!(
+            first_manifest.parts[0].bounds,
+            second_manifest.parts[0].bounds
+        );
+
+        std::fs::remove_dir_all(first_root).expect("first cleanup");
+        std::fs::remove_dir_all(second_root).expect("second cleanup");
+    }
+
+    #[test]
+    fn exploded_component_view_is_manifest_only_and_keeps_mesh_bytes() {
+        let source = |with_view: bool| {
+            format!(
+                r#"
+                (define-component latch ()
+                  (ports (port mount :type "mount.v1" :frame
+                    (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1))))
+                  (box 20 4 2))
+                (model
+                  (part enclosure
+                    (ports (port side :type "mount.v1" :frame
+                      (frame :origin '(50 0 15) :x-axis '(0 1 0) :z-axis '(1 0 0))))
+                    (box 100 50 30))
+                  (part side-latch
+                    (place-component (latch) :from mount
+                      :to (port-ref enclosure side) :normal opposed))
+                  {})
+                "#,
+                if with_view {
+                    "(view exploded (offset-part side-latch 0 0 40))"
+                } else {
+                    ""
+                }
+            )
+        };
+        let normal_source = source(false);
+        let exploded_source = source(true);
+        let normal_program =
+            crate::ecky_scheme::compile_to_core_program(&normal_source).expect("normal program");
+        let exploded_program = crate::ecky_scheme::compile_to_core_program(&exploded_source)
+            .expect("exploded program");
+        let normal_root = render_root();
+        let exploded_root = render_root();
+        std::fs::create_dir_all(&normal_root).expect("normal root");
+        std::fs::create_dir_all(&exploded_root).expect("exploded root");
+        let normal_bundle = render_core_program(
+            &normal_program,
+            &normal_source,
+            &DesignParams::new(),
+            &TestResolver {
+                root: normal_root.clone(),
+            },
+        )
+        .expect("normal render");
+        let exploded_bundle = render_core_program(
+            &exploded_program,
+            &exploded_source,
+            &DesignParams::new(),
+            &TestResolver {
+                root: exploded_root.clone(),
+            },
+        )
+        .expect("exploded render");
+
+        assert_eq!(
+            std::fs::read(&normal_bundle.model_stl_path).expect("normal STL"),
+            std::fs::read(&exploded_bundle.model_stl_path).expect("exploded STL")
+        );
+        let normal_manifest = read_manifest(&normal_bundle);
+        let exploded_manifest = read_manifest(&exploded_bundle);
+        assert!(normal_manifest.preview_views.is_empty());
+        assert_eq!(exploded_manifest.preview_views.len(), 1);
+        assert_eq!(exploded_manifest.preview_views[0].view_id, "exploded");
+        assert_eq!(
+            exploded_manifest.preview_views[0].offsets[0].part_id,
+            "side-latch"
+        );
+        assert_eq!(exploded_manifest.preview_views[0].offsets[0].dz, 40.0);
+
+        std::fs::remove_dir_all(normal_root).expect("normal cleanup");
+        std::fs::remove_dir_all(exploded_root).expect("exploded cleanup");
+    }
+
+    #[test]
     fn render_model_rebuilds_tampered_indexed_mesh_cache() {
         let root = render_root();
         std::fs::create_dir_all(&root).expect("root");
@@ -1946,6 +2542,112 @@ mod tests {
     }
 
     #[test]
+    fn render_core_program_manifest_scopes_parameter_keys_to_reachable_parts() {
+        let source = r#"
+            (model
+              (params
+                (number width 10 :label "Width")
+                (number radius 2 :label "Radius"))
+              (part enclosure (box width 8 6))
+              (part axle (cylinder radius 12)))
+        "#;
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("program");
+        let root = render_root();
+        std::fs::create_dir_all(&root).expect("root");
+        let bundle = render_core_program(
+            &program,
+            source,
+            &DesignParams::new(),
+            &TestResolver { root },
+        )
+        .expect("render");
+
+        let manifest = read_manifest(&bundle);
+        let enclosure = manifest
+            .parts
+            .iter()
+            .find(|part| part.part_id == "enclosure")
+            .expect("enclosure");
+        let axle = manifest
+            .parts
+            .iter()
+            .find(|part| part.part_id == "axle")
+            .expect("axle");
+
+        assert_eq!(enclosure.parameter_keys, ["width"]);
+        assert_eq!(axle.parameter_keys, ["radius"]);
+        assert!(manifest
+            .parameter_groups
+            .iter()
+            .any(|group| group.group_id == "part:enclosure" && group.parameter_keys == ["width"]));
+        assert!(manifest
+            .parameter_groups
+            .iter()
+            .any(|group| group.group_id == "part:axle" && group.parameter_keys == ["radius"]));
+        assert!(manifest.control_views.is_empty());
+    }
+
+    #[test]
+    fn render_core_program_manifest_tracks_transitive_reachable_named_shapes() {
+        let source = r#"
+            (model
+              (params
+                (number width 10 :label "Width")
+                (number height 8 :label "Height")
+                (number radius 2 :label "Radius")
+                (number unused 99 :label "Unused"))
+              (part body
+                (build
+                  (shape base (box width height 5))
+                  (shape rounded (translate radius 0 0 base))
+                  (shape discarded (box unused 1 1))
+                  (result rounded))))
+        "#;
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("program");
+        let root = render_root();
+        std::fs::create_dir_all(&root).expect("root");
+        let bundle = render_core_program(
+            &program,
+            source,
+            &DesignParams::new(),
+            &TestResolver { root },
+        )
+        .expect("render");
+
+        let manifest = read_manifest(&bundle);
+        assert_eq!(
+            manifest.parts[0].parameter_keys,
+            ["height", "radius", "width"]
+        );
+        let base = manifest
+            .parameter_groups
+            .iter()
+            .find(|group| group.group_id == "shape:body:base")
+            .expect("base group");
+        let rounded = manifest
+            .parameter_groups
+            .iter()
+            .find(|group| group.group_id == "shape:body:rounded")
+            .expect("rounded group");
+        assert_eq!(base.parameter_keys, ["height", "width"]);
+        assert_eq!(rounded.parameter_keys, ["height", "radius", "width"]);
+        assert!(!manifest
+            .parameter_groups
+            .iter()
+            .any(|group| group.group_id == "shape:body:discarded"));
+
+        let graph = manifest.feature_graph.expect("feature graph");
+        assert!(graph.nodes.iter().any(|node| {
+            node.feature_id == "shape:body:rounded"
+                && node.dependency_ids == ["height", "radius", "width"]
+        }));
+        assert!(!graph
+            .nodes
+            .iter()
+            .any(|node| node.feature_id == "shape:body:discarded"));
+    }
+
+    #[test]
     fn render_core_program_manifest_uses_feature_metadata_for_feature_graph_nodes() {
         let source = r#"
             (model
@@ -1974,6 +2676,44 @@ mod tests {
     }
 
     #[test]
+    fn render_core_program_manifest_keeps_explicit_feature_params_primary() {
+        let source = r#"
+            (model
+              (params
+                (number width 10 :label "Width")
+                (number gap 1 :label "Gap"))
+              (feature shell-cutout :role subtraction :params (gap) (box width 8 6)))
+        "#;
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("program");
+        let root = render_root();
+        std::fs::create_dir_all(&root).expect("root");
+        let bundle = render_core_program(
+            &program,
+            source,
+            &DesignParams::new(),
+            &TestResolver { root },
+        )
+        .expect("render");
+        let manifest = read_manifest(&bundle);
+
+        assert_eq!(manifest.parts[0].parameter_keys, ["gap", "width"]);
+        let group = manifest
+            .parameter_groups
+            .iter()
+            .find(|group| group.group_id == "shell-cutout")
+            .expect("feature primary group");
+        assert_eq!(group.parameter_keys, ["gap"]);
+        let feature = manifest
+            .feature_graph
+            .expect("feature graph")
+            .nodes
+            .into_iter()
+            .find(|node| node.feature_id == "shell-cutout")
+            .expect("feature");
+        assert_eq!(feature.dependency_ids, ["gap", "width"]);
+    }
+
+    #[test]
     fn runtime_part_feature_graph_links_selection_target_outputs() {
         let parts = vec![RuntimePart {
             part_id: "body".to_string(),
@@ -1982,6 +2722,7 @@ mod tests {
             feature_decl: None,
             source_ref: runtime_part_source_ref("body", None),
             dependency_ids: vec!["width".to_string()],
+            named_shapes: Vec::new(),
         }];
         let selection_targets = vec![crate::contracts::SelectionTarget {
             target_id: Some("target-body".to_string()),
@@ -2164,7 +2905,7 @@ mod tests {
         .expect("direct render");
 
         assert_eq!(bundle.viewer_assets.len(), 1);
-        assert!(Path::new(&bundle.preview_stl_path).exists());
+        assert!(Path::new(&bundle.model_stl_path).exists());
     }
 
     #[test]

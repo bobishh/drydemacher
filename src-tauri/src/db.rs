@@ -2,10 +2,11 @@ use crate::contracts::{
     normalize_design_output, upgraded_or_default_genie_traits, AgentDraft, ArtifactBundle,
     DeletedMessage, DeletedThreadSummary, DeletedThreadsPage, DesignOutput, DesignParams,
     GenieTraits, Message, MessageRole, MessageStatus, ModelManifest, TargetLeaseInfo, Thread,
-    ThreadMessagesPage, ThreadReference, UiSpec,
+    ThreadMessagesPage, ThreadReference, ThreadStatus, UiSpec,
 };
 use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 
 #[derive(Debug, Clone)]
 struct ThreadMessageRow {
@@ -19,7 +20,1375 @@ pub struct LatestSuccessfulTarget {
     pub message_id: String,
 }
 
-pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
+const PAYLOAD_READ_CHUNK_BYTES: usize = 256 * 1024;
+const PAYLOAD_CODEC_VERSION: i64 = 1;
+const PAYLOAD_CODEC_MAGIC: &[u8; 4] = b"EKP1";
+const TOPOLOGY_CHUNK_ITEMS: usize = 500;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PayloadOwnerKind {
+    Message,
+    Draft,
+}
+
+impl PayloadOwnerKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Message => "message",
+            Self::Draft => "draft",
+        }
+    }
+
+    fn table(self) -> &'static str {
+        match self {
+            Self::Message => "messages",
+            Self::Draft => "agent_drafts",
+        }
+    }
+
+    fn id_column(self) -> &'static str {
+        match self {
+            Self::Message => "id",
+            Self::Draft => "preview_id",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PayloadColumn {
+    ArtifactBundle,
+    ModelManifest,
+}
+
+impl PayloadColumn {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ArtifactBundle => "artifact_bundle",
+            Self::ModelManifest => "model_manifest",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DenseField {
+    Edge,
+    Face,
+    Selection,
+}
+
+impl DenseField {
+    fn json_key(self) -> &'static str {
+        match self {
+            Self::Edge => "edgeTargets",
+            Self::Face => "faceTargets",
+            Self::Selection => "selectionTargets",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct PayloadProjection {
+    model_id: Option<String>,
+    edge_count: usize,
+    face_count: usize,
+    selection_count: usize,
+}
+
+#[derive(Debug, Default)]
+struct EncodedCadPayload {
+    artifact_core: Option<Vec<u8>>,
+    model_manifest_core: Option<Vec<u8>>,
+    projection: PayloadProjection,
+}
+
+#[derive(Debug, Default)]
+struct DenseIndexes {
+    edge: Vec<u64>,
+    face: Vec<u64>,
+    selection: Vec<u64>,
+}
+
+#[derive(Debug, Default)]
+struct JsonObjectProjection {
+    core_json: String,
+    edge_count: usize,
+    face_count: usize,
+    selection_count: usize,
+    page_items: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct DenseArrayProjection {
+    count: usize,
+    page_items: Vec<String>,
+}
+
+struct DenseArraySeed {
+    collect_page: bool,
+    offset: usize,
+    limit: usize,
+}
+
+impl<'de> DeserializeSeed<'de> for DenseArraySeed {
+    type Value = DenseArrayProjection;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(DenseArrayVisitor {
+            collect_page: self.collect_page,
+            offset: self.offset,
+            limit: self.limit,
+        })
+    }
+}
+
+struct DenseArrayVisitor {
+    collect_page: bool,
+    offset: usize,
+    limit: usize,
+}
+
+impl<'de> Visitor<'de> for DenseArrayVisitor {
+    type Value = DenseArrayProjection;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a dense topology array or null")
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(DenseArrayProjection::default())
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(DenseArrayProjection::default())
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut result = DenseArrayProjection::default();
+        loop {
+            let collect = self.collect_page
+                && result.count >= self.offset
+                && result.count < self.offset.saturating_add(self.limit);
+            let present = if collect {
+                match sequence.next_element::<serde_json::Value>()? {
+                    Some(value) => {
+                        result
+                            .page_items
+                            .push(serde_json::to_string(&value).map_err(serde::de::Error::custom)?);
+                        true
+                    }
+                    None => false,
+                }
+            } else {
+                sequence.next_element::<IgnoredAny>()?.is_some()
+            };
+            if !present {
+                break;
+            }
+            result.count += 1;
+        }
+        Ok(result)
+    }
+}
+
+struct JsonObjectProjectionSeed {
+    page_field: Option<DenseField>,
+    offset: usize,
+    limit: usize,
+}
+
+impl<'de> DeserializeSeed<'de> for JsonObjectProjectionSeed {
+    type Value = JsonObjectProjection;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(JsonObjectProjectionVisitor {
+            page_field: self.page_field,
+            offset: self.offset,
+            limit: self.limit,
+        })
+    }
+}
+
+struct JsonObjectProjectionVisitor {
+    page_field: Option<DenseField>,
+    offset: usize,
+    limit: usize,
+}
+
+impl<'de> Visitor<'de> for JsonObjectProjectionVisitor {
+    type Value = JsonObjectProjection;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON object payload")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut core = serde_json::Map::new();
+        let mut result = JsonObjectProjection::default();
+        while let Some(key) = map.next_key::<String>()? {
+            let dense_field = [DenseField::Edge, DenseField::Face, DenseField::Selection]
+                .into_iter()
+                .find(|field| field.json_key() == key);
+            if let Some(field) = dense_field {
+                let dense = map.next_value_seed(DenseArraySeed {
+                    collect_page: self.page_field == Some(field),
+                    offset: self.offset,
+                    limit: self.limit,
+                })?;
+                match field {
+                    DenseField::Edge => result.edge_count = dense.count,
+                    DenseField::Face => result.face_count = dense.count,
+                    DenseField::Selection => result.selection_count = dense.count,
+                }
+                if self.page_field == Some(field) {
+                    result.page_items = dense.page_items;
+                }
+            } else {
+                core.insert(key, map.next_value::<serde_json::Value>()?);
+            }
+        }
+        result.core_json = serde_json::to_string(&core).map_err(serde::de::Error::custom)?;
+        Ok(result)
+    }
+}
+
+fn sqlite_conversion_error(
+    error: impl std::error::Error + Send + Sync + 'static,
+) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+}
+
+fn project_json_reader(
+    reader: impl Read,
+    page_field: Option<DenseField>,
+    offset: usize,
+    limit: usize,
+) -> SqlResult<JsonObjectProjection> {
+    let mut deserializer = serde_json::Deserializer::from_reader(reader);
+    let projection = JsonObjectProjectionSeed {
+        page_field,
+        offset,
+        limit,
+    }
+    .deserialize(&mut deserializer)
+    .map_err(sqlite_conversion_error)?;
+    deserializer.end().map_err(sqlite_conversion_error)?;
+    Ok(projection)
+}
+
+struct PositionedReader<R> {
+    inner: BufReader<R>,
+    position: u64,
+}
+
+impl<R: Read> PositionedReader<R> {
+    fn new(reader: R) -> Self {
+        Self::with_position(reader, 0)
+    }
+
+    fn with_position(reader: R, position: u64) -> Self {
+        Self {
+            inner: BufReader::with_capacity(PAYLOAD_READ_CHUNK_BYTES, reader),
+            position,
+        }
+    }
+
+    fn peek(&mut self) -> io::Result<Option<u8>> {
+        Ok(self.inner.fill_buf()?.first().copied())
+    }
+
+    fn next(&mut self) -> io::Result<Option<u8>> {
+        let byte = self.peek()?;
+        if byte.is_some() {
+            self.inner.consume(1);
+            self.position += 1;
+        }
+        Ok(byte)
+    }
+
+    fn skip_whitespace(&mut self) -> io::Result<()> {
+        while self.peek()?.is_some_and(|byte| byte.is_ascii_whitespace()) {
+            self.next()?;
+        }
+        Ok(())
+    }
+}
+
+fn read_raw_json_value<R: Read>(
+    reader: &mut PositionedReader<R>,
+    max_bytes: usize,
+) -> io::Result<Option<Vec<u8>>> {
+    reader.skip_whitespace()?;
+    if reader.peek()? == Some(b']') {
+        return Ok(None);
+    }
+    let first = reader
+        .next()?
+        .ok_or_else(|| invalid_json("missing indexed topology item"))?;
+    let mut raw = vec![first];
+    let mut push = |byte: u8| -> io::Result<()> {
+        if raw.len() >= max_bytes {
+            return Err(invalid_json("dense topology item exceeds transport budget"));
+        }
+        raw.push(byte);
+        Ok(())
+    };
+    if first == b'"' {
+        let mut escaped = false;
+        loop {
+            let byte = reader
+                .next()?
+                .ok_or_else(|| invalid_json("unterminated indexed JSON string"))?;
+            push(byte)?;
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                return Ok(Some(raw));
+            }
+        }
+    }
+    if first == b'{' || first == b'[' {
+        let mut depth = 1usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        while depth > 0 {
+            let byte = reader
+                .next()?
+                .ok_or_else(|| invalid_json("unterminated indexed JSON value"))?;
+            push(byte)?;
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match byte {
+                b'"' => in_string = true,
+                b'{' | b'[' => depth += 1,
+                b'}' | b']' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        return Ok(Some(raw));
+    }
+    while let Some(byte) = reader.peek()? {
+        if matches!(byte, b',' | b']') || byte.is_ascii_whitespace() {
+            break;
+        }
+        reader.next()?;
+        push(byte)?;
+    }
+    Ok(Some(raw))
+}
+
+fn invalid_json(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.to_string())
+}
+
+fn read_json_string<R: Read>(reader: &mut PositionedReader<R>) -> io::Result<String> {
+    if reader.next()? != Some(b'"') {
+        return Err(invalid_json("expected JSON string"));
+    }
+    let mut raw = vec![b'"'];
+    let mut escaped = false;
+    loop {
+        let byte = reader
+            .next()?
+            .ok_or_else(|| invalid_json("unterminated JSON string"))?;
+        raw.push(byte);
+        if escaped {
+            escaped = false;
+        } else if byte == b'\\' {
+            escaped = true;
+        } else if byte == b'"' {
+            break;
+        }
+    }
+    serde_json::from_slice(&raw).map_err(io::Error::other)
+}
+
+fn skip_json_value<R: Read>(reader: &mut PositionedReader<R>) -> io::Result<()> {
+    reader.skip_whitespace()?;
+    let first = reader
+        .peek()?
+        .ok_or_else(|| invalid_json("missing JSON value"))?;
+    if first == b'"' {
+        read_json_string(reader)?;
+        return Ok(());
+    }
+    if first != b'{' && first != b'[' {
+        while let Some(byte) = reader.peek()? {
+            if matches!(byte, b',' | b']' | b'}') || byte.is_ascii_whitespace() {
+                break;
+            }
+            reader.next()?;
+        }
+        return Ok(());
+    }
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    loop {
+        let byte = reader
+            .next()?
+            .ok_or_else(|| invalid_json("unterminated composite JSON value"))?;
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Ok(());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn scan_dense_array<R: Read>(reader: &mut PositionedReader<R>) -> io::Result<Vec<u64>> {
+    if reader.next()? != Some(b'[') {
+        return Err(invalid_json("dense topology field is not an array"));
+    }
+    let mut offsets = Vec::new();
+    let mut count = 0usize;
+    loop {
+        reader.skip_whitespace()?;
+        if reader.peek()? == Some(b']') {
+            reader.next()?;
+            return Ok(offsets);
+        }
+        if count % 500 == 0 {
+            offsets.push(reader.position);
+        }
+        skip_json_value(reader)?;
+        count += 1;
+        reader.skip_whitespace()?;
+        match reader.next()? {
+            Some(b',') => {}
+            Some(b']') => return Ok(offsets),
+            _ => return Err(invalid_json("invalid dense topology array delimiter")),
+        }
+    }
+}
+
+fn scan_dense_indexes(reader: impl Read) -> SqlResult<DenseIndexes> {
+    let mut reader = PositionedReader::new(reader);
+    reader.skip_whitespace().map_err(sqlite_conversion_error)?;
+    if reader.next().map_err(sqlite_conversion_error)? != Some(b'{') {
+        return Err(sqlite_conversion_error(invalid_json(
+            "payload projection root is not an object",
+        )));
+    }
+    let mut indexes = DenseIndexes::default();
+    loop {
+        reader.skip_whitespace().map_err(sqlite_conversion_error)?;
+        if reader.peek().map_err(sqlite_conversion_error)? == Some(b'}') {
+            reader.next().map_err(sqlite_conversion_error)?;
+            return Ok(indexes);
+        }
+        let key = read_json_string(&mut reader).map_err(sqlite_conversion_error)?;
+        reader.skip_whitespace().map_err(sqlite_conversion_error)?;
+        if reader.next().map_err(sqlite_conversion_error)? != Some(b':') {
+            return Err(sqlite_conversion_error(invalid_json(
+                "missing JSON object colon",
+            )));
+        }
+        reader.skip_whitespace().map_err(sqlite_conversion_error)?;
+        match key.as_str() {
+            "edgeTargets" => {
+                indexes.edge = scan_dense_array(&mut reader).map_err(sqlite_conversion_error)?
+            }
+            "faceTargets" => {
+                indexes.face = scan_dense_array(&mut reader).map_err(sqlite_conversion_error)?
+            }
+            "selectionTargets" => {
+                indexes.selection =
+                    scan_dense_array(&mut reader).map_err(sqlite_conversion_error)?
+            }
+            _ => skip_json_value(&mut reader).map_err(sqlite_conversion_error)?,
+        }
+        reader.skip_whitespace().map_err(sqlite_conversion_error)?;
+        match reader.next().map_err(sqlite_conversion_error)? {
+            Some(b',') => {}
+            Some(b'}') => return Ok(indexes),
+            _ => {
+                return Err(sqlite_conversion_error(invalid_json(
+                    "invalid JSON object delimiter",
+                )))
+            }
+        }
+    }
+}
+
+fn ensure_payload_projection_schema(conn: &Connection) -> SqlResult<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS payload_projections (
+            owner_kind TEXT NOT NULL CHECK(owner_kind IN ('message', 'draft')),
+            owner_id TEXT NOT NULL,
+            codec_version INTEGER NOT NULL DEFAULT 1,
+            model_id TEXT,
+            edge_count INTEGER NOT NULL DEFAULT 0,
+            face_count INTEGER NOT NULL DEFAULT 0,
+            selection_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(owner_kind, owner_id)
+         ) WITHOUT ROWID;
+         CREATE TABLE IF NOT EXISTS dense_topology_chunks (
+            owner_kind TEXT NOT NULL CHECK(owner_kind IN ('message', 'draft')),
+            owner_id TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('edge', 'face', 'selection')),
+            chunk_index INTEGER NOT NULL,
+            item_count INTEGER NOT NULL,
+            codec_version INTEGER NOT NULL DEFAULT 1,
+            payload BLOB NOT NULL,
+            PRIMARY KEY(owner_kind, owner_id, kind, chunk_index)
+         ) WITHOUT ROWID;
+         CREATE TRIGGER IF NOT EXISTS delete_message_payload_projection
+         AFTER DELETE ON messages BEGIN
+           DELETE FROM payload_projections
+           WHERE owner_kind = 'message' AND owner_id = OLD.id;
+           DELETE FROM dense_topology_chunks
+           WHERE owner_kind = 'message' AND owner_id = OLD.id;
+         END;
+         CREATE TRIGGER IF NOT EXISTS delete_draft_payload_projection
+         AFTER DELETE ON agent_drafts BEGIN
+           DELETE FROM payload_projections
+           WHERE owner_kind = 'draft' AND owner_id = OLD.preview_id;
+           DELETE FROM dense_topology_chunks
+           WHERE owner_kind = 'draft' AND owner_id = OLD.preview_id;
+         END;",
+    )?;
+    conn.execute_batch(
+        "DROP TRIGGER IF EXISTS invalidate_message_payload_projection;
+         DROP TRIGGER IF EXISTS invalidate_draft_payload_projection;",
+    )?;
+    let _ = conn.execute(
+        "ALTER TABLE payload_projections ADD COLUMN codec_version INTEGER NOT NULL DEFAULT 1",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE payload_projections ADD COLUMN model_id TEXT",
+        [],
+    );
+    Ok(())
+}
+
+fn encode_payload<T: serde::Serialize>(value: &T) -> SqlResult<Vec<u8>> {
+    let encoded = rmp_serde::to_vec_named(value).map_err(sqlite_conversion_error)?;
+    let mut payload = Vec::with_capacity(PAYLOAD_CODEC_MAGIC.len() + encoded.len());
+    payload.extend_from_slice(PAYLOAD_CODEC_MAGIC);
+    payload.extend_from_slice(&encoded);
+    Ok(payload)
+}
+
+fn decode_payload<T: DeserializeOwned>(payload: &[u8]) -> SqlResult<T> {
+    if !payload.starts_with(PAYLOAD_CODEC_MAGIC) {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "Unsupported CAD payload codec header.".to_string(),
+        ));
+    }
+    rmp_serde::from_slice(&payload[PAYLOAD_CODEC_MAGIC.len()..]).map_err(sqlite_conversion_error)
+}
+
+fn cached_payload_projection(
+    conn: &Connection,
+    owner: PayloadOwnerKind,
+    owner_id: &str,
+) -> SqlResult<Option<PayloadProjection>> {
+    ensure_payload_projection_schema(conn)?;
+    conn.query_row(
+        "SELECT codec_version, model_id, edge_count, face_count, selection_count
+         FROM payload_projections WHERE owner_kind = ?1 AND owner_id = ?2",
+        params![owner.as_str(), owner_id],
+        |row| {
+            Ok(PayloadProjection {
+                model_id: {
+                    let version = row.get::<_, i64>(0)?;
+                    if version != PAYLOAD_CODEC_VERSION {
+                        return Err(rusqlite::Error::InvalidParameterName(format!(
+                            "Unsupported CAD payload codec version {version}."
+                        )));
+                    }
+                    row.get(1)?
+                },
+                edge_count: row.get::<_, i64>(2)?.max(0) as usize,
+                face_count: row.get::<_, i64>(3)?.max(0) as usize,
+                selection_count: row.get::<_, i64>(4)?.max(0) as usize,
+            })
+        },
+    )
+    .optional()
+}
+
+fn store_payload_projection(
+    conn: &Connection,
+    owner: PayloadOwnerKind,
+    owner_id: &str,
+    projection: &PayloadProjection,
+) -> SqlResult<()> {
+    ensure_payload_projection_schema(conn)?;
+    conn.execute(
+        "INSERT INTO payload_projections (
+           owner_kind, owner_id, codec_version, model_id,
+           edge_count, face_count, selection_count
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(owner_kind, owner_id) DO UPDATE SET
+           codec_version = excluded.codec_version,
+           model_id = excluded.model_id,
+           edge_count = excluded.edge_count,
+           face_count = excluded.face_count,
+           selection_count = excluded.selection_count",
+        params![
+            owner.as_str(),
+            owner_id,
+            PAYLOAD_CODEC_VERSION,
+            projection.model_id,
+            projection.edge_count as i64,
+            projection.face_count as i64,
+            projection.selection_count as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+fn artifact_bundle_core(bundle: &ArtifactBundle) -> ArtifactBundle {
+    ArtifactBundle {
+        schema_version: bundle.schema_version,
+        model_id: bundle.model_id.clone(),
+        source_kind: bundle.source_kind.clone(),
+        engine_kind: bundle.engine_kind,
+        source_language: bundle.source_language,
+        geometry_backend: bundle.geometry_backend,
+        content_hash: bundle.content_hash.clone(),
+        artifact_version: bundle.artifact_version,
+        fcstd_path: bundle.fcstd_path.clone(),
+        manifest_path: bundle.manifest_path.clone(),
+        macro_path: bundle.macro_path.clone(),
+        model_stl_path: bundle.model_stl_path.clone(),
+        viewer_assets: bundle.viewer_assets.clone(),
+        edge_targets: Vec::new(),
+        face_targets: Vec::new(),
+        callout_anchors: bundle.callout_anchors.clone(),
+        measurement_guides: bundle.measurement_guides.clone(),
+        export_artifacts: bundle.export_artifacts.clone(),
+        geometry_provenance: bundle.geometry_provenance.clone(),
+        component_dependency_lock: bundle.component_dependency_lock.clone(),
+        component_dependency_lock_digest: bundle.component_dependency_lock_digest.clone(),
+        component_import_origins: bundle.component_import_origins.clone(),
+        component_placement_evidence: bundle.component_placement_evidence.clone(),
+    }
+}
+
+fn model_manifest_core(manifest: &ModelManifest) -> ModelManifest {
+    ModelManifest {
+        schema_version: manifest.schema_version,
+        model_id: manifest.model_id.clone(),
+        source_kind: manifest.source_kind.clone(),
+        source_digest: manifest.source_digest.clone(),
+        core_digest: manifest.core_digest.clone(),
+        ast_schema_version: manifest.ast_schema_version,
+        engine_kind: manifest.engine_kind,
+        source_language: manifest.source_language,
+        geometry_backend: manifest.geometry_backend,
+        document: manifest.document.clone(),
+        parts: manifest.parts.clone(),
+        parameter_groups: manifest.parameter_groups.clone(),
+        control_primitives: manifest.control_primitives.clone(),
+        control_relations: manifest.control_relations.clone(),
+        control_views: manifest.control_views.clone(),
+        preview_views: manifest.preview_views.clone(),
+        advisories: manifest.advisories.clone(),
+        selection_targets: Vec::new(),
+        measurement_annotations: manifest.measurement_annotations.clone(),
+        tagged_anchors: manifest.tagged_anchors.clone(),
+        feature_graph: manifest.feature_graph.clone(),
+        correspondence_graph: manifest.correspondence_graph.clone(),
+        analysis_declarations: manifest.analysis_declarations.clone(),
+        warnings: manifest.warnings.clone(),
+        enrichment_state: manifest.enrichment_state.clone(),
+        geometry_provenance: manifest.geometry_provenance.clone(),
+        component_import_origins: manifest.component_import_origins.clone(),
+        component_placement_evidence: manifest.component_placement_evidence.clone(),
+    }
+}
+
+fn replace_topology_chunks<T: serde::Serialize>(
+    conn: &Connection,
+    owner: PayloadOwnerKind,
+    owner_id: &str,
+    kind: &str,
+    items: &[T],
+) -> SqlResult<()> {
+    conn.execute(
+        "DELETE FROM dense_topology_chunks
+         WHERE owner_kind = ?1 AND owner_id = ?2 AND kind = ?3",
+        params![owner.as_str(), owner_id, kind],
+    )?;
+    for (chunk_index, chunk) in items.chunks(TOPOLOGY_CHUNK_ITEMS).enumerate() {
+        let payload = encode_payload(&chunk)?;
+        conn.execute(
+            "INSERT INTO dense_topology_chunks (
+               owner_kind, owner_id, kind, chunk_index, item_count, codec_version, payload
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                owner.as_str(),
+                owner_id,
+                kind,
+                chunk_index as i64,
+                chunk.len() as i64,
+                PAYLOAD_CODEC_VERSION,
+                payload,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn encode_cad_payload(
+    artifact_bundle: Option<&ArtifactBundle>,
+    model_manifest: Option<&ModelManifest>,
+) -> SqlResult<EncodedCadPayload> {
+    Ok(EncodedCadPayload {
+        artifact_core: artifact_bundle
+            .map(|bundle| encode_payload(&artifact_bundle_core(bundle)))
+            .transpose()?,
+        model_manifest_core: model_manifest
+            .map(|manifest| encode_payload(&model_manifest_core(manifest)))
+            .transpose()?,
+        projection: PayloadProjection {
+            model_id: artifact_bundle
+                .map(|bundle| bundle.model_id.clone())
+                .or_else(|| model_manifest.map(|manifest| manifest.model_id.clone())),
+            edge_count: artifact_bundle.map_or(0, |bundle| bundle.edge_targets.len()),
+            face_count: artifact_bundle.map_or(0, |bundle| bundle.face_targets.len()),
+            selection_count: model_manifest.map_or(0, |manifest| manifest.selection_targets.len()),
+        },
+    })
+}
+
+fn store_payload_sidecars_from_structs(
+    conn: &Connection,
+    owner: PayloadOwnerKind,
+    owner_id: &str,
+    artifact_bundle: Option<&ArtifactBundle>,
+    model_manifest: Option<&ModelManifest>,
+    projection: &PayloadProjection,
+) -> SqlResult<()> {
+    ensure_payload_projection_schema(conn)?;
+    store_payload_projection(conn, owner, owner_id, projection)?;
+    replace_topology_chunks(
+        conn,
+        owner,
+        owner_id,
+        "edge",
+        artifact_bundle.map_or(&[][..], |bundle| bundle.edge_targets.as_slice()),
+    )?;
+    replace_topology_chunks(
+        conn,
+        owner,
+        owner_id,
+        "face",
+        artifact_bundle.map_or(&[][..], |bundle| bundle.face_targets.as_slice()),
+    )?;
+    replace_topology_chunks(
+        conn,
+        owner,
+        owner_id,
+        "selection",
+        model_manifest.map_or(&[][..], |manifest| manifest.selection_targets.as_slice()),
+    )?;
+    Ok(())
+}
+
+fn load_topology_chunks<T: DeserializeOwned>(
+    conn: &Connection,
+    owner: PayloadOwnerKind,
+    owner_id: &str,
+    kind: &str,
+) -> SqlResult<Vec<T>> {
+    let mut statement = conn.prepare(
+        "SELECT codec_version, payload FROM dense_topology_chunks
+         WHERE owner_kind = ?1 AND owner_id = ?2 AND kind = ?3
+         ORDER BY chunk_index ASC",
+    )?;
+    let rows = statement
+        .query_map(params![owner.as_str(), owner_id, kind], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?
+        .collect::<SqlResult<Vec<_>>>()?;
+    let mut result = Vec::new();
+    for (version, payload) in rows {
+        if version != PAYLOAD_CODEC_VERSION {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "Unsupported topology codec version {version}."
+            )));
+        }
+        let mut chunk: Vec<T> = decode_payload(&payload)?;
+        result.append(&mut chunk);
+    }
+    Ok(result)
+}
+
+fn load_topology_json_page<T: DeserializeOwned + serde::Serialize>(
+    conn: &Connection,
+    owner: PayloadOwnerKind,
+    owner_id: &str,
+    kind: &str,
+    offset: usize,
+    limit: usize,
+) -> SqlResult<Vec<String>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut result = Vec::with_capacity(limit);
+    let mut absolute = offset;
+    while result.len() < limit {
+        let chunk_index = absolute / TOPOLOGY_CHUNK_ITEMS;
+        let within_chunk = absolute % TOPOLOGY_CHUNK_ITEMS;
+        let row = conn
+            .query_row(
+                "SELECT codec_version, payload FROM dense_topology_chunks
+                 WHERE owner_kind = ?1 AND owner_id = ?2 AND kind = ?3 AND chunk_index = ?4",
+                params![owner.as_str(), owner_id, kind, chunk_index as i64],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()?;
+        let Some((version, payload)) = row else {
+            break;
+        };
+        if version != PAYLOAD_CODEC_VERSION {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "Unsupported topology codec version {version}."
+            )));
+        }
+        let chunk: Vec<T> = decode_payload(&payload)?;
+        if within_chunk >= chunk.len() {
+            break;
+        }
+        for item in chunk.iter().skip(within_chunk).take(limit - result.len()) {
+            result.push(serde_json::to_string(item).map_err(sqlite_conversion_error)?);
+        }
+        absolute = (chunk_index + 1) * TOPOLOGY_CHUNK_ITEMS;
+    }
+    Ok(result)
+}
+
+fn load_payload_core(
+    conn: &Connection,
+    owner: PayloadOwnerKind,
+    owner_id: &str,
+) -> SqlResult<(
+    Option<ArtifactBundle>,
+    Option<ModelManifest>,
+    PayloadProjection,
+)> {
+    let projection = cached_payload_projection(conn, owner, owner_id)?.unwrap_or_default();
+    let sql = format!(
+        "SELECT artifact_bundle, model_manifest FROM {} WHERE {} = ?1",
+        owner.table(),
+        owner.id_column(),
+    );
+    let (artifact_blob, manifest_blob): (Option<Vec<u8>>, Option<Vec<u8>>) =
+        conn.query_row(&sql, [owner_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    let artifact = artifact_blob.as_deref().map(decode_payload).transpose()?;
+    let manifest = manifest_blob.as_deref().map(decode_payload).transpose()?;
+    Ok((artifact, manifest, projection))
+}
+
+fn load_payload_full(
+    conn: &Connection,
+    owner: PayloadOwnerKind,
+    owner_id: &str,
+) -> SqlResult<(Option<ArtifactBundle>, Option<ModelManifest>)> {
+    let (mut artifact, mut manifest, projection) = load_payload_core(conn, owner, owner_id)?;
+    if let Some(bundle) = artifact.as_mut() {
+        bundle.edge_targets = load_topology_chunks(conn, owner, owner_id, "edge")?;
+        bundle.face_targets = load_topology_chunks(conn, owner, owner_id, "face")?;
+        if bundle.edge_targets.len() != projection.edge_count
+            || bundle.face_targets.len() != projection.face_count
+        {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "Topology chunk count mismatch for {} {owner_id}.",
+                owner.as_str()
+            )));
+        }
+    }
+    if let Some(value) = manifest.as_mut() {
+        value.selection_targets = load_topology_chunks(conn, owner, owner_id, "selection")?;
+        if value.selection_targets.len() != projection.selection_count {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "Selection chunk count mismatch for {} {owner_id}.",
+                owner.as_str()
+            )));
+        }
+    }
+    Ok((artifact, manifest))
+}
+
+fn stream_payload_column(
+    conn: &Connection,
+    owner: PayloadOwnerKind,
+    owner_id: &str,
+    column: PayloadColumn,
+    page_field: Option<DenseField>,
+    offset: usize,
+    limit: usize,
+) -> SqlResult<Option<JsonObjectProjection>> {
+    let sql = format!(
+        "SELECT rowid FROM {} WHERE {} = ?1 AND {} IS NOT NULL",
+        owner.table(),
+        owner.id_column(),
+        column.as_str(),
+    );
+    let rowid = conn
+        .query_row(&sql, [owner_id], |row| row.get::<_, i64>(0))
+        .optional()?;
+    let Some(rowid) = rowid else {
+        return Ok(None);
+    };
+    let blob = conn.blob_open("main", owner.table(), column.as_str(), rowid, true)?;
+    project_json_reader(
+        BufReader::with_capacity(PAYLOAD_READ_CHUNK_BYTES, blob),
+        page_field,
+        offset,
+        limit,
+    )
+    .map(Some)
+}
+
+fn stream_payload_indexes(
+    conn: &Connection,
+    owner: PayloadOwnerKind,
+    owner_id: &str,
+    column: PayloadColumn,
+) -> SqlResult<Option<DenseIndexes>> {
+    let sql = format!(
+        "SELECT rowid FROM {} WHERE {} = ?1 AND {} IS NOT NULL",
+        owner.table(),
+        owner.id_column(),
+        column.as_str(),
+    );
+    let rowid = conn
+        .query_row(&sql, [owner_id], |row| row.get::<_, i64>(0))
+        .optional()?;
+    let Some(rowid) = rowid else {
+        return Ok(None);
+    };
+    let blob = conn.blob_open("main", owner.table(), column.as_str(), rowid, true)?;
+    scan_dense_indexes(blob).map(Some)
+}
+
+fn read_indexed_dense_chunk<R: Read + Seek>(
+    reader: &mut R,
+    checkpoint_offset: u64,
+    limit: usize,
+) -> SqlResult<Vec<String>> {
+    reader
+        .seek(SeekFrom::Start(checkpoint_offset))
+        .map_err(sqlite_conversion_error)?;
+    let mut reader = PositionedReader::with_position(reader, checkpoint_offset);
+    let mut items = Vec::with_capacity(limit);
+    while items.len() < limit {
+        let Some(raw) = read_raw_json_value(
+            &mut reader,
+            crate::transport_budget::TOPOLOGY_PAGE_MAX_BYTES + 1,
+        )
+        .map_err(sqlite_conversion_error)?
+        else {
+            break;
+        };
+        items.push(String::from_utf8(raw).map_err(sqlite_conversion_error)?);
+        reader.skip_whitespace().map_err(sqlite_conversion_error)?;
+        match reader.peek().map_err(sqlite_conversion_error)? {
+            Some(b',') => {
+                reader.next().map_err(sqlite_conversion_error)?;
+            }
+            Some(b']') | None => break,
+            _ => {
+                return Err(sqlite_conversion_error(invalid_json(
+                    "invalid indexed topology delimiter",
+                )))
+            }
+        }
+    }
+    Ok(items)
+}
+
+fn migrate_legacy_topology_kind<T: DeserializeOwned + serde::Serialize>(
+    conn: &Connection,
+    owner: PayloadOwnerKind,
+    owner_id: &str,
+    column: PayloadColumn,
+    kind: &str,
+    offsets: &[u64],
+    expected_count: usize,
+) -> SqlResult<()> {
+    conn.execute(
+        "DELETE FROM dense_topology_chunks
+         WHERE owner_kind = ?1 AND owner_id = ?2 AND kind = ?3",
+        params![owner.as_str(), owner_id, kind],
+    )?;
+    if offsets.is_empty() {
+        if expected_count == 0 {
+            return Ok(());
+        }
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "CAD payload migration found no {kind} checkpoints for {} {owner_id}; expected {expected_count} items.",
+            owner.as_str()
+        )));
+    }
+    let rowid_sql = format!(
+        "SELECT rowid FROM {} WHERE {} = ?1 AND {} IS NOT NULL",
+        owner.table(),
+        owner.id_column(),
+        column.as_str(),
+    );
+    let rowid = conn.query_row(&rowid_sql, [owner_id], |row| row.get::<_, i64>(0))?;
+    let mut blob = conn.blob_open("main", owner.table(), column.as_str(), rowid, true)?;
+    let mut migrated_count = 0usize;
+    for (chunk_index, checkpoint_offset) in offsets.iter().copied().enumerate() {
+        let raw_items =
+            read_indexed_dense_chunk(&mut blob, checkpoint_offset, TOPOLOGY_CHUNK_ITEMS)?;
+        let items = raw_items
+            .into_iter()
+            .map(|raw| serde_json::from_str::<T>(&raw).map_err(sqlite_conversion_error))
+            .collect::<SqlResult<Vec<_>>>()?;
+        migrated_count += items.len();
+        let payload = encode_payload(&items)?;
+        conn.execute(
+            "INSERT INTO dense_topology_chunks (
+               owner_kind, owner_id, kind, chunk_index, item_count, codec_version, payload
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                owner.as_str(),
+                owner_id,
+                kind,
+                chunk_index as i64,
+                items.len() as i64,
+                PAYLOAD_CODEC_VERSION,
+                payload,
+            ],
+        )?;
+    }
+    if migrated_count != expected_count {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "CAD payload migration count mismatch for {} {owner_id} {kind}: expected {expected_count}, wrote {migrated_count}.",
+            owner.as_str()
+        )));
+    }
+    Ok(())
+}
+
+fn migrate_legacy_payload_owner(
+    conn: &Connection,
+    owner: PayloadOwnerKind,
+    owner_id: &str,
+) -> SqlResult<()> {
+    let artifact = stream_payload_column(
+        conn,
+        owner,
+        owner_id,
+        PayloadColumn::ArtifactBundle,
+        None,
+        0,
+        0,
+    )?;
+    let manifest = stream_payload_column(
+        conn,
+        owner,
+        owner_id,
+        PayloadColumn::ModelManifest,
+        None,
+        0,
+        0,
+    )?;
+    let artifact_indexes =
+        stream_payload_indexes(conn, owner, owner_id, PayloadColumn::ArtifactBundle)?
+            .unwrap_or_default();
+    let manifest_indexes =
+        stream_payload_indexes(conn, owner, owner_id, PayloadColumn::ModelManifest)?
+            .unwrap_or_default();
+
+    let artifact_core = artifact
+        .as_ref()
+        .map(|value| {
+            serde_json::from_str::<ArtifactBundle>(&value.core_json)
+                .map_err(sqlite_conversion_error)
+        })
+        .transpose()?;
+    let manifest_core = manifest
+        .as_ref()
+        .map(|value| {
+            serde_json::from_str::<ModelManifest>(&value.core_json).map_err(sqlite_conversion_error)
+        })
+        .transpose()?;
+    let encoded_artifact = artifact_core.as_ref().map(encode_payload).transpose()?;
+    let encoded_manifest = manifest_core.as_ref().map(encode_payload).transpose()?;
+    let projection = PayloadProjection {
+        model_id: artifact_core
+            .as_ref()
+            .map(|value| value.model_id.clone())
+            .or_else(|| manifest_core.as_ref().map(|value| value.model_id.clone())),
+        edge_count: artifact.as_ref().map_or(0, |value| value.edge_count),
+        face_count: artifact.as_ref().map_or(0, |value| value.face_count),
+        selection_count: manifest.as_ref().map_or(0, |value| value.selection_count),
+    };
+    conn.execute(
+        "DELETE FROM dense_topology_chunks WHERE owner_kind = ?1 AND owner_id = ?2",
+        params![owner.as_str(), owner_id],
+    )?;
+    store_payload_projection(conn, owner, owner_id, &projection)?;
+    migrate_legacy_topology_kind::<crate::contracts::ViewerEdgeTarget>(
+        conn,
+        owner,
+        owner_id,
+        PayloadColumn::ArtifactBundle,
+        "edge",
+        &artifact_indexes.edge,
+        projection.edge_count,
+    )?;
+    migrate_legacy_topology_kind::<crate::contracts::ViewerFaceTarget>(
+        conn,
+        owner,
+        owner_id,
+        PayloadColumn::ArtifactBundle,
+        "face",
+        &artifact_indexes.face,
+        projection.face_count,
+    )?;
+    migrate_legacy_topology_kind::<crate::contracts::SelectionTarget>(
+        conn,
+        owner,
+        owner_id,
+        PayloadColumn::ModelManifest,
+        "selection",
+        &manifest_indexes.selection,
+        projection.selection_count,
+    )?;
+
+    let update_sql = format!(
+        "UPDATE {} SET artifact_bundle = ?1, model_manifest = ?2 WHERE {} = ?3",
+        owner.table(),
+        owner.id_column(),
+    );
+    conn.execute(
+        &update_sql,
+        params![
+            encoded_artifact.as_deref(),
+            encoded_manifest.as_deref(),
+            owner_id
+        ],
+    )?;
+    if owner == PayloadOwnerKind::Message {
+        let output = conn
+            .query_row(
+                "SELECT output FROM messages WHERE id = ?1",
+                [owner_id],
+                |row| row.get::<_, Option<String>>(0),
+            )?
+            .map(|raw| serde_json::from_str::<DesignOutput>(&raw).map(normalize_design_output))
+            .transpose()
+            .map_err(sqlite_conversion_error)?;
+        let (version_input_digest, runtime_cache_key) =
+            version_runtime_binding(owner_id, output.as_ref(), artifact_core.as_ref())?;
+        conn.execute(
+            "UPDATE messages SET version_input_digest = ?1, runtime_cache_key = ?2 WHERE id = ?3",
+            params![version_input_digest, runtime_cache_key, owner_id],
+        )?;
+    }
+    let (decoded_artifact, decoded_manifest, decoded_projection) =
+        load_payload_core(conn, owner, owner_id)?;
+    if decoded_artifact.is_some() != artifact_core.is_some()
+        || decoded_manifest.is_some() != manifest_core.is_some()
+        || decoded_projection.edge_count != projection.edge_count
+        || decoded_projection.face_count != projection.face_count
+        || decoded_projection.selection_count != projection.selection_count
+    {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "CAD payload migration verification failed for {} {owner_id}.",
+            owner.as_str()
+        )));
+    }
+    Ok(())
+}
+
+const BINARY_CAD_PAYLOAD_MIGRATION_KEY: &str = "binary-cad-payload-v1";
+
+fn legacy_cad_payload_counts(conn: &Connection) -> SqlResult<(i64, i64)> {
+    conn.query_row(
+        "SELECT
+           (SELECT COUNT(*) FROM messages
+            WHERE typeof(artifact_bundle) = 'text' OR typeof(model_manifest) = 'text'),
+           (SELECT COUNT(*) FROM agent_drafts
+            WHERE typeof(artifact_bundle) = 'text' OR typeof(model_manifest) = 'text')",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+}
+
+fn binary_cad_payload_migration_completed(conn: &Connection) -> SqlResult<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM schema_migrations WHERE key = ?1",
+            [BINARY_CAD_PAYLOAD_MIGRATION_KEY],
+            |_row| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+fn require_binary_cad_payloads(conn: &Connection) -> SqlResult<()> {
+    let completed = binary_cad_payload_migration_completed(conn)?;
+    let (message_count, draft_count) = legacy_cad_payload_counts(conn)?;
+    let legacy_count = message_count + draft_count;
+    if completed {
+        if legacy_count > 0 {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "CAD payload migration is marked complete but {legacy_count} legacy JSON rows remain."
+            )));
+        }
+        return Ok(());
+    }
+    if legacy_count > 0 {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "CAD payload migration required: {message_count} message rows and {draft_count} draft rows still use legacy JSON. Run migrate_history_payloads offline before opening this app."
+        )));
+    }
+    conn.execute(
+        "INSERT INTO schema_migrations(key, applied_at)
+         VALUES (?1, CAST(strftime('%s','now') AS INTEGER))",
+        [BINARY_CAD_PAYLOAD_MIGRATION_KEY],
+    )?;
+    Ok(())
+}
+
+fn migrate_legacy_cad_payloads(conn: &Connection) -> SqlResult<()> {
+    let completed = conn
+        .query_row(
+            "SELECT 1 FROM schema_migrations WHERE key = ?1",
+            [BINARY_CAD_PAYLOAD_MIGRATION_KEY],
+            |_row| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    let (message_count, draft_count) = legacy_cad_payload_counts(conn)?;
+    let legacy_count = message_count + draft_count;
+    if completed {
+        if legacy_count > 0 {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "CAD payload migration is marked complete but {legacy_count} legacy JSON rows remain."
+            )));
+        }
+        return Ok(());
+    }
+
+    let message_ids = {
+        let mut statement = conn.prepare(
+            "SELECT id FROM messages
+             WHERE typeof(artifact_bundle) = 'text' OR typeof(model_manifest) = 'text'
+             ORDER BY rowid ASC",
+        )?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<SqlResult<Vec<_>>>()?;
+        ids
+    };
+    let draft_ids = {
+        let mut statement = conn.prepare(
+            "SELECT preview_id FROM agent_drafts
+             WHERE typeof(artifact_bundle) = 'text' OR typeof(model_manifest) = 'text'
+             ORDER BY rowid ASC",
+        )?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<SqlResult<Vec<_>>>()?;
+        ids
+    };
+
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| {
+        conn.execute("DELETE FROM dense_topology_chunks", [])?;
+        conn.execute("DELETE FROM payload_projections", [])?;
+        for message_id in &message_ids {
+            migrate_legacy_payload_owner(conn, PayloadOwnerKind::Message, message_id).map_err(
+                |error| {
+                    rusqlite::Error::InvalidParameterName(format!(
+                        "CAD payload migration failed for message {message_id}: {error}"
+                    ))
+                },
+            )?;
+        }
+        for preview_id in &draft_ids {
+            migrate_legacy_payload_owner(conn, PayloadOwnerKind::Draft, preview_id).map_err(
+                |error| {
+                    rusqlite::Error::InvalidParameterName(format!(
+                        "CAD payload migration failed for draft {preview_id}: {error}"
+                    ))
+                },
+            )?;
+        }
+        conn.execute(
+            "INSERT INTO schema_migrations(key, applied_at)
+             VALUES (?1, CAST(strftime('%s','now') AS INTEGER))",
+            [BINARY_CAD_PAYLOAD_MIGRATION_KEY],
+        )?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => conn.execute_batch("COMMIT")?,
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+fn ensure_payload_projection(
+    conn: &Connection,
+    owner: PayloadOwnerKind,
+    owner_id: &str,
+) -> SqlResult<Option<PayloadProjection>> {
+    cached_payload_projection(conn, owner, owner_id)
+}
+
+#[derive(Clone, Copy)]
+enum PayloadInitializationMode {
+    RequireReady,
+    MigrateLegacy,
+}
+
+fn init_db_with_payload_mode(
+    db_path: &std::path::Path,
+    payload_mode: PayloadInitializationMode,
+) -> SqlResult<Connection> {
     let conn = Connection::open(db_path)?;
 
     // Enable WAL mode for better concurrency and prevent "database is locked" errors
@@ -34,6 +1403,7 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
             summary TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL DEFAULT 0,
             updated_at INTEGER NOT NULL,
             genie_traits TEXT,
             deleted_at INTEGER
@@ -47,7 +1417,7 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
             definition_version TEXT NOT NULL,
             title TEXT NOT NULL,
             current_step_id TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT 0,
             updated_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS campaign_run_steps (
@@ -93,6 +1463,8 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
             image_data TEXT,
             visual_kind TEXT,
             attachment_images TEXT,
+            version_input_digest TEXT,
+            runtime_cache_key TEXT,
             deleted_at INTEGER,
             trash_hidden_at INTEGER,
             FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
@@ -184,6 +1556,7 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
          ON agent_drafts(thread_id, updated_at DESC)",
         [],
     )?;
+    ensure_payload_projection_schema(&conn)?;
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS verification_records (
@@ -231,6 +1604,9 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
         )",
         [],
     )?;
+    crate::thread_source_binding::ensure_schema(&conn)?;
+
+    crate::services::codex_takeover::ensure_schema(&conn)?;
 
     crate::capture_runs::ensure_schema(&conn)?;
 
@@ -261,6 +1637,26 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
         "ALTER TABLE threads ADD COLUMN summary TEXT NOT NULL DEFAULT ''",
         [],
     );
+    let _ = conn.execute("ALTER TABLE threads ADD COLUMN created_at INTEGER", []);
+    conn.execute(
+        "UPDATE threads SET created_at = updated_at WHERE created_at IS NULL",
+        [],
+    )?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+            key TEXT PRIMARY KEY,
+            applied_at INTEGER NOT NULL
+         );
+         UPDATE threads
+         SET created_at = updated_at - 1
+         WHERE created_at = updated_at
+           AND NOT EXISTS (
+             SELECT 1 FROM schema_migrations
+             WHERE key = 'threads-created-at-v1'
+           );
+         INSERT OR IGNORE INTO schema_migrations (key, applied_at)
+         VALUES ('threads-created-at-v1', CAST(strftime('%s','now') AS INTEGER));",
+    )?;
     let _ = conn.execute("ALTER TABLE threads ADD COLUMN genie_traits TEXT", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN image_data TEXT", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN visual_kind TEXT", []);
@@ -283,6 +1679,15 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
         "ALTER TABLE messages ADD COLUMN trash_hidden_at INTEGER",
         [],
     );
+    let _ = conn.execute(
+        "ALTER TABLE messages ADD COLUMN version_input_digest TEXT",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE messages ADD COLUMN runtime_cache_key TEXT", []);
+    match payload_mode {
+        PayloadInitializationMode::RequireReady => require_binary_cad_payloads(&conn)?,
+        PayloadInitializationMode::MigrateLegacy => migrate_legacy_cad_payloads(&conn)?,
+    }
     let _ = conn.execute(
         "ALTER TABLE threads ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
         [],
@@ -314,6 +1719,15 @@ pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
     migrate_thread_genie_traits(&conn)?;
 
     Ok(conn)
+}
+
+pub fn init_db(db_path: &std::path::Path) -> SqlResult<Connection> {
+    init_db_with_payload_mode(db_path, PayloadInitializationMode::RequireReady)
+}
+
+pub fn migrate_history_payload_storage(db_path: &std::path::Path) -> SqlResult<()> {
+    init_db_with_payload_mode(db_path, PayloadInitializationMode::MigrateLegacy)?;
+    Ok(())
 }
 
 fn migrate_campaign_step_primary_key(conn: &Connection) -> SqlResult<()> {
@@ -422,6 +1836,7 @@ fn migrate_threads_drop_authoring_columns(conn: &Connection) -> SqlResult<()> {
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
             summary TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             genie_traits TEXT,
             deleted_at INTEGER,
@@ -433,6 +1848,7 @@ fn migrate_threads_drop_authoring_columns(conn: &Connection) -> SqlResult<()> {
             id,
             title,
             summary,
+            created_at,
             updated_at,
             genie_traits,
             deleted_at,
@@ -444,6 +1860,7 @@ fn migrate_threads_drop_authoring_columns(conn: &Connection) -> SqlResult<()> {
             id,
             title,
             COALESCE(summary, ''),
+            created_at,
             updated_at,
             genie_traits,
             deleted_at,
@@ -473,10 +1890,10 @@ pub fn get_all_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
             updated_at
         ) as last_used_at,
         genie_traits,
-        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'success' AND artifact_bundle IS NOT NULL AND deleted_at IS NULL) as v_count,
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status != 'discarded' AND artifact_bundle IS NOT NULL AND deleted_at IS NULL) as v_count,
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'pending' AND deleted_at IS NULL) as p_count,
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'user' AND status = 'pending' AND deleted_at IS NULL) as q_count,
-        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND agent_origin IS NULL AND deleted_at IS NULL) as e_count,
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND (agent_origin IS NULL OR output IS NOT NULL OR artifact_bundle IS NOT NULL) AND deleted_at IS NULL) as e_count,
         COALESCE(status, 'active') as thread_status,
         finalized_at,
         pending_confirm,
@@ -519,6 +1936,66 @@ pub fn get_all_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
     Ok(threads)
 }
 
+pub fn get_thread_summary_by_id(conn: &Connection, thread_id: &str) -> SqlResult<Option<Thread>> {
+    conn.query_row(
+        "SELECT
+           threads.id,
+           threads.title,
+           COALESCE(threads.summary, ''),
+           COALESCE(
+             (SELECT MAX(timestamp) FROM messages
+              WHERE thread_id = threads.id AND deleted_at IS NULL AND status != 'discarded'),
+             threads.updated_at
+           ),
+           threads.genie_traits,
+           (SELECT COUNT(*) FROM messages
+            WHERE thread_id = threads.id AND role = 'assistant'
+              AND status != 'discarded' AND deleted_at IS NULL
+              AND artifact_bundle IS NOT NULL),
+           (SELECT COUNT(*) FROM messages
+            WHERE thread_id = threads.id AND role = 'assistant'
+              AND status = 'pending' AND deleted_at IS NULL),
+           (SELECT COUNT(*) FROM messages
+            WHERE thread_id = threads.id AND role = 'user'
+              AND status = 'pending' AND deleted_at IS NULL),
+           (SELECT COUNT(*) FROM messages
+            WHERE thread_id = threads.id AND role = 'assistant'
+              AND status = 'error'
+              AND (agent_origin IS NULL OR output IS NOT NULL OR artifact_bundle IS NOT NULL)
+              AND deleted_at IS NULL),
+           COALESCE(threads.status, 'active'),
+           threads.finalized_at,
+           threads.pending_confirm,
+           (SELECT COUNT(*) FROM messages
+            WHERE thread_id = threads.id AND deleted_at IS NULL AND status != 'discarded')
+         FROM threads
+         WHERE threads.id = ?1 AND threads.deleted_at IS NULL",
+        [thread_id],
+        |row| {
+            let id: String = row.get(0)?;
+            let traits_str: Option<String> = row.get(4)?;
+            let status_str: String = row.get(9)?;
+            Ok(Thread {
+                id: id.clone(),
+                title: row.get(1)?,
+                summary: row.get(2)?,
+                updated_at: row.get::<_, i64>(3)? as u64,
+                messages: Vec::new(),
+                genie_traits: Some(deserialize_thread_genie_traits(&id, traits_str.as_deref())),
+                version_count: row.get::<_, i64>(5)? as usize,
+                pending_count: row.get::<_, i64>(6)? as usize,
+                queued_count: row.get::<_, i64>(7)? as usize,
+                error_count: row.get::<_, i64>(8)? as usize,
+                is_blank: row.get::<_, i64>(12)? == 0,
+                status: status_str.parse().unwrap_or(ThreadStatus::Active),
+                finalized_at: row.get::<_, Option<i64>>(10)?.map(|value| value as u64),
+                pending_confirm: row.get(11)?,
+            })
+        },
+    )
+    .optional()
+}
+
 pub fn get_recent_threads_limited(conn: &Connection, limit: usize) -> SqlResult<Vec<Thread>> {
     let mut stmt = conn.prepare(
         "
@@ -534,10 +2011,10 @@ pub fn get_recent_threads_limited(conn: &Connection, limit: usize) -> SqlResult<
             updated_at
         ) as last_used_at,
         genie_traits,
-        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'success' AND artifact_bundle IS NOT NULL AND deleted_at IS NULL) as v_count,
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status != 'discarded' AND artifact_bundle IS NOT NULL AND deleted_at IS NULL) as v_count,
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'pending' AND deleted_at IS NULL) as p_count,
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'user' AND status = 'pending' AND deleted_at IS NULL) as q_count,
-        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND agent_origin IS NULL AND deleted_at IS NULL) as e_count,
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND (agent_origin IS NULL OR output IS NOT NULL OR artifact_bundle IS NOT NULL) AND deleted_at IS NULL) as e_count,
         COALESCE(status, 'active') as thread_status,
         finalized_at,
         pending_confirm,
@@ -652,9 +2129,27 @@ pub fn create_or_update_thread(
     updated_at: u64,
     genie_traits: Option<&GenieTraits>,
 ) -> SqlResult<()> {
+    create_or_update_thread_with_timestamps(
+        conn,
+        thread_id,
+        title,
+        updated_at,
+        updated_at,
+        genie_traits,
+    )
+}
+
+pub fn create_or_update_thread_with_timestamps(
+    conn: &Connection,
+    thread_id: &str,
+    title: &str,
+    created_at: u64,
+    updated_at: u64,
+    genie_traits: Option<&GenieTraits>,
+) -> SqlResult<()> {
     let traits_str = genie_traits.and_then(|t| serde_json::to_string(t).ok());
     conn.execute(
-        "INSERT INTO threads (id, title, updated_at, genie_traits) VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO threads (id, title, created_at, updated_at, genie_traits) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(id) DO UPDATE SET
             title=CASE
                 WHEN threads.title IS NULL OR trim(threads.title) = '' THEN excluded.title
@@ -662,7 +2157,13 @@ pub fn create_or_update_thread(
             END,
             updated_at=excluded.updated_at,
             genie_traits=COALESCE(excluded.genie_traits, threads.genie_traits)",
-        params![thread_id, title, updated_at as i64, traits_str],
+        params![
+            thread_id,
+            title,
+            created_at as i64,
+            updated_at as i64,
+            traits_str
+        ],
     )?;
     Ok(())
 }
@@ -696,7 +2197,10 @@ pub fn update_thread_summary(conn: &Connection, thread_id: &str, summary: &str) 
 
 pub fn update_thread_title(conn: &Connection, thread_id: &str, title: &str) -> SqlResult<bool> {
     let changed = conn.execute(
-        "UPDATE threads SET title = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+        "UPDATE threads
+         SET title = ?1,
+             updated_at = MAX(updated_at + 1, CAST(strftime('%s','now') AS INTEGER))
+         WHERE id = ?2 AND deleted_at IS NULL",
         params![title, thread_id],
     )?;
     Ok(changed > 0)
@@ -727,6 +2231,31 @@ pub fn get_thread_summary(conn: &Connection, thread_id: &str) -> SqlResult<Optio
         |row| row.get(0),
     )
     .optional()
+}
+
+pub fn get_legacy_user_prompt_rows(
+    conn: &Connection,
+) -> SqlResult<Vec<(String, String, String, u64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT messages.thread_id, messages.id, messages.content, messages.timestamp
+         FROM messages
+         WHERE messages.role = 'user'
+           AND messages.deleted_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM thread_references
+             WHERE thread_references.source_message_id = messages.id
+           )
+         ORDER BY messages.timestamp ASC, messages.rowid ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get::<_, i64>(3)? as u64,
+        ))
+    })?;
+    rows.collect()
 }
 
 pub struct ThreadLifecycle {
@@ -784,10 +2313,10 @@ pub fn get_inventory_threads(conn: &Connection) -> SqlResult<Vec<Thread>> {
             updated_at
         ) as last_used_at,
         genie_traits,
-        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'success' AND artifact_bundle IS NOT NULL AND deleted_at IS NULL) as v_count,
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status != 'discarded' AND artifact_bundle IS NOT NULL AND deleted_at IS NULL) as v_count,
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'pending' AND deleted_at IS NULL) as p_count,
         (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'user' AND status = 'pending' AND deleted_at IS NULL) as q_count,
-        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND agent_origin IS NULL AND deleted_at IS NULL) as e_count,
+        (SELECT COUNT(*) FROM messages WHERE thread_id = threads.id AND role = 'assistant' AND status = 'error' AND (agent_origin IS NULL OR output IS NOT NULL OR artifact_bundle IS NOT NULL) AND deleted_at IS NULL) as e_count,
         COALESCE(status, 'active') as thread_status,
         finalized_at,
         pending_confirm,
@@ -842,6 +2371,91 @@ pub fn set_thread_pending_confirm(
     Ok(())
 }
 
+fn version_runtime_binding(
+    message_id: &str,
+    output: Option<&DesignOutput>,
+    artifact_bundle: Option<&ArtifactBundle>,
+) -> SqlResult<(Option<String>, Option<String>)> {
+    let Some(output) = output else {
+        return Ok((None, None));
+    };
+    let version_input_digest = crate::services::render_snapshot::canonical_version_input_digest(
+        output,
+        &output.initial_params,
+    )
+    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let runtime_cache_key = artifact_bundle
+        .map(|bundle| {
+            crate::services::render_snapshot::version_runtime_cache_key(
+                message_id,
+                &version_input_digest,
+                bundle,
+            )
+        })
+        .transpose()
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    Ok((Some(version_input_digest), runtime_cache_key))
+}
+
+fn is_managed_runtime_stl(path: &std::path::Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("stl"))
+        && path
+            .components()
+            .any(|component| component.as_os_str() == "model-runtime")
+}
+
+fn prune_non_latest_thread_stls(conn: &Connection, thread_id: &str) -> SqlResult<()> {
+    let protected_paths = get_latest_version_artifact_bundles(conn)?
+        .into_iter()
+        .flat_map(|bundle| {
+            std::iter::once(bundle.model_stl_path)
+                .chain(bundle.viewer_assets.into_iter().map(|asset| asset.path))
+        })
+        .map(std::path::PathBuf::from)
+        .collect::<std::collections::HashSet<_>>();
+    let latest_id = conn
+        .query_row(
+            "SELECT id FROM messages
+             WHERE thread_id = ?1 AND deleted_at IS NULL AND role = 'assistant'
+               AND status != 'discarded' AND (output IS NOT NULL OR artifact_bundle IS NOT NULL)
+             ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+            [thread_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let mut statement = conn.prepare(
+        "SELECT messages.id, messages.artifact_bundle
+         FROM messages
+         WHERE messages.thread_id = ?1
+           AND messages.deleted_at IS NULL
+           AND messages.role = 'assistant'
+           AND messages.status != 'discarded'
+           AND messages.artifact_bundle IS NOT NULL",
+    )?;
+    let rows = statement.query_map([thread_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+    })?;
+    for row in rows {
+        let (message_id, raw_bundle) = row?;
+        if latest_id.as_deref() == Some(message_id.as_str()) {
+            continue;
+        }
+        let Ok(bundle) = decode_payload::<ArtifactBundle>(&raw_bundle) else {
+            continue;
+        };
+        for raw_path in std::iter::once(bundle.model_stl_path)
+            .chain(bundle.viewer_assets.into_iter().map(|asset| asset.path))
+        {
+            let path = std::path::PathBuf::from(raw_path);
+            if is_managed_runtime_stl(&path) && !protected_paths.contains(&path) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn add_message(conn: &Connection, thread_id: &str, msg: &Message) -> SqlResult<()> {
     let output_str = msg
         .output
@@ -851,14 +2465,8 @@ pub fn add_message(conn: &Connection, thread_id: &str, msg: &Message) -> SqlResu
         .usage
         .as_ref()
         .and_then(|usage| serde_json::to_string(usage).ok());
-    let artifact_bundle_str = msg
-        .artifact_bundle
-        .as_ref()
-        .and_then(|bundle| serde_json::to_string(bundle).ok());
-    let model_manifest_str = msg
-        .model_manifest
-        .as_ref()
-        .and_then(|manifest| serde_json::to_string(manifest).ok());
+    let encoded_payload =
+        encode_cad_payload(msg.artifact_bundle.as_ref(), msg.model_manifest.as_ref())?;
     let structural_verification_str = msg
         .structural_verification
         .as_ref()
@@ -872,8 +2480,12 @@ pub fn add_message(conn: &Connection, thread_id: &str, msg: &Message) -> SqlResu
     } else {
         serde_json::to_string(&msg.attachment_images).ok()
     };
-    conn.execute(
-        "INSERT INTO messages (id, thread_id, role, content, status, output, usage, artifact_bundle, model_manifest, structural_verification, agent_origin, timestamp, image_data, visual_kind, attachment_images) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+    let (version_input_digest, runtime_cache_key) =
+        version_runtime_binding(&msg.id, msg.output.as_ref(), msg.artifact_bundle.as_ref())?;
+    conn.execute_batch("SAVEPOINT add_message_payload")?;
+    let write_result = (|| {
+        conn.execute(
+        "INSERT INTO messages (id, thread_id, role, content, status, output, usage, artifact_bundle, model_manifest, structural_verification, agent_origin, timestamp, image_data, visual_kind, attachment_images, version_input_digest, runtime_cache_key) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             msg.id,
             thread_id,
@@ -882,16 +2494,45 @@ pub fn add_message(conn: &Connection, thread_id: &str, msg: &Message) -> SqlResu
             msg.status,
             output_str,
             usage_str,
-            artifact_bundle_str,
-            model_manifest_str,
+            encoded_payload.artifact_core.as_deref(),
+            encoded_payload.model_manifest_core.as_deref(),
             structural_verification_str,
             agent_origin_str,
             msg.timestamp as i64,
             msg.image_data,
             msg.visual_kind,
             attachment_images_str,
+            version_input_digest,
+            runtime_cache_key,
         ],
     )?;
+        store_payload_sidecars_from_structs(
+            conn,
+            PayloadOwnerKind::Message,
+            &msg.id,
+            msg.artifact_bundle.as_ref(),
+            msg.model_manifest.as_ref(),
+            &encoded_payload.projection,
+        )?;
+        conn.execute(
+            "UPDATE threads
+         SET updated_at = MAX(updated_at + 1, ?1)
+         WHERE id = ?2",
+            params![msg.timestamp as i64, thread_id],
+        )?;
+        if msg.artifact_bundle.is_some() {
+            prune_non_latest_thread_stls(conn, thread_id)?;
+        }
+        Ok(())
+    })();
+    match write_result {
+        Ok(()) => conn.execute_batch("RELEASE add_message_payload")?,
+        Err(error) => {
+            let _ =
+                conn.execute_batch("ROLLBACK TO add_message_payload; RELEASE add_message_payload;");
+            return Err(error);
+        }
+    }
     Ok(())
 }
 
@@ -962,13 +2603,66 @@ pub fn get_thread_latest_version(conn: &Connection, thread_id: &str) -> SqlResul
         "thread_id = ?1
          AND deleted_at IS NULL
          AND role = 'assistant'
-         AND status = 'success'
-         AND artifact_bundle IS NOT NULL",
+         AND status != 'discarded'
+         AND (output IS NOT NULL OR artifact_bundle IS NOT NULL)",
         &[&thread_id],
         "timestamp DESC, rowid DESC",
         Some(1),
     )?;
     Ok(rows.into_iter().next().map(|row| row.message))
+}
+
+/// Returns durable authored head identity without selecting or deserializing
+/// message payload columns.
+pub fn get_thread_head_version_id(conn: &Connection, thread_id: &str) -> SqlResult<Option<String>> {
+    conn.query_row(
+        "SELECT id
+         FROM messages
+         WHERE thread_id = ?1
+           AND deleted_at IS NULL
+           AND role = 'assistant'
+           AND status != 'discarded'
+           AND output IS NOT NULL
+         ORDER BY timestamp DESC, rowid DESC
+         LIMIT 1",
+        [thread_id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+pub fn get_latest_version_artifact_bundles(conn: &Connection) -> SqlResult<Vec<ArtifactBundle>> {
+    let mut statement = conn.prepare(
+        "SELECT m.id
+         FROM messages m
+         WHERE m.deleted_at IS NULL
+           AND m.role = 'assistant'
+           AND m.status != 'discarded'
+           AND m.artifact_bundle IS NOT NULL
+           AND m.rowid = (
+             SELECT newer.rowid
+             FROM messages newer
+             WHERE newer.thread_id = m.thread_id
+               AND newer.deleted_at IS NULL
+               AND newer.role = 'assistant'
+               AND newer.status != 'discarded'
+               AND (newer.output IS NOT NULL OR newer.artifact_bundle IS NOT NULL)
+             ORDER BY newer.timestamp DESC, newer.rowid DESC
+             LIMIT 1
+           )",
+    )?;
+    let message_ids = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<SqlResult<Vec<_>>>()?;
+    drop(statement);
+    let mut bundles = Vec::new();
+    for message_id in message_ids {
+        let (bundle, _, _) = load_payload_core(conn, PayloadOwnerKind::Message, &message_id)?;
+        if let Some(bundle) = bundle {
+            bundles.push(bundle);
+        }
+    }
+    Ok(bundles)
 }
 
 pub fn get_thread_message_version(
@@ -982,13 +2676,209 @@ pub fn get_thread_message_version(
          AND id = ?2
          AND deleted_at IS NULL
          AND role = 'assistant'
-         AND status = 'success'
-         AND artifact_bundle IS NOT NULL",
+         AND status != 'discarded'
+         AND (output IS NOT NULL OR artifact_bundle IS NOT NULL)",
         &[&thread_id, &message_id],
         "timestamp DESC, rowid DESC",
         Some(1),
     )?;
     Ok(rows.into_iter().next().map(|row| row.message))
+}
+
+fn core_version_columns() -> &'static str {
+    "id, role, content, status, output, usage,
+     artifact_bundle,
+     model_manifest,
+     structural_verification, agent_origin, timestamp, NULL, visual_kind, NULL,
+     deleted_at, version_input_digest, runtime_cache_key"
+}
+
+fn get_thread_message_version_core_row(
+    conn: &Connection,
+    thread_id: &str,
+    message_id: Option<&str>,
+) -> SqlResult<Option<ThreadMessageRow>> {
+    let target_id = if let Some(message_id) = message_id {
+        conn.query_row(
+            "SELECT id FROM messages
+             WHERE thread_id = ?1 AND id = ?2 AND deleted_at IS NULL AND role = 'assistant'
+               AND status != 'discarded' AND (output IS NOT NULL OR artifact_bundle IS NOT NULL)
+             LIMIT 1",
+            params![thread_id, message_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    } else {
+        conn.query_row(
+            "SELECT id FROM messages
+             WHERE thread_id = ?1 AND deleted_at IS NULL AND role = 'assistant'
+               AND status != 'discarded' AND (output IS NOT NULL OR artifact_bundle IS NOT NULL)
+             ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+            [thread_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    };
+    let Some(target_id) = target_id else {
+        return Ok(None);
+    };
+    ensure_payload_projection(conn, PayloadOwnerKind::Message, &target_id)?;
+    let sql = format!(
+        "SELECT {} FROM messages
+         WHERE thread_id = ?1 AND id = ?2 AND deleted_at IS NULL LIMIT 1",
+        core_version_columns()
+    );
+    let mut statement = conn.prepare(&sql)?;
+    Ok(
+        load_thread_message_rows_from_stmt(&mut statement, &[&thread_id, &target_id])?
+            .into_iter()
+            .next(),
+    )
+}
+
+pub fn get_thread_version_detail(
+    conn: &Connection,
+    thread_id: &str,
+    message_id: Option<&str>,
+) -> SqlResult<Option<crate::contracts::VersionDetail>> {
+    let Some(mut message) =
+        get_thread_message_version_core_row(conn, thread_id, message_id)?.map(|row| row.message)
+    else {
+        return Ok(None);
+    };
+    let projection = ensure_payload_projection(conn, PayloadOwnerKind::Message, &message.id)?
+        .unwrap_or_default();
+    let counts = (
+        projection.edge_count as i64,
+        projection.face_count as i64,
+        projection.selection_count as i64,
+    );
+    let mut truncated_fields = Vec::new();
+    if counts.0 > 0 {
+        truncated_fields.push("artifactBundle.edgeTargets".to_string());
+    }
+    if counts.1 > 0 {
+        truncated_fields.push("artifactBundle.faceTargets".to_string());
+    }
+    if counts.2 > 0 {
+        truncated_fields.push("modelManifest.selectionTargets".to_string());
+    }
+    let initial_bytes = serde_json::to_vec(&message)
+        .map(|value| value.len())
+        .unwrap_or(0);
+    if initial_bytes > crate::transport_budget::VERSION_CORE_MAX_BYTES {
+        message.content = crate::transport_budget::bounded_text(&message.content, 64 * 1024);
+        if let Some(output) = message.output.as_mut() {
+            output.response = crate::transport_budget::bounded_text(&output.response, 64 * 1024);
+            output.macro_code =
+                crate::transport_budget::bounded_text(&output.macro_code, 512 * 1024);
+        }
+        truncated_fields.push("content/source".to_string());
+    }
+    let observed_bytes = serde_json::to_vec(&message)
+        .map(|value| value.len())
+        .unwrap_or(0);
+    Ok(Some(crate::contracts::VersionDetail {
+        dense_topology_ref: (counts.0 + counts.1 + counts.2 > 0)
+            .then(|| format!("topology:{thread_id}:{}", message.id)),
+        edge_count: counts.0.max(0) as usize,
+        face_count: counts.1.max(0) as usize,
+        selection_target_count: counts.2.max(0) as usize,
+        observed_bytes,
+        truncated_fields,
+        available_sections: vec!["sourceWindow".to_string(), "denseTopologyPage".to_string()],
+        message,
+    }))
+}
+
+pub fn get_version_source(
+    conn: &Connection,
+    thread_id: &str,
+    message_id: &str,
+) -> SqlResult<Option<(String, Option<String>)>> {
+    conn.query_row(
+        "SELECT json_extract(output, '$.macroCode'), version_input_digest
+         FROM messages WHERE thread_id = ?1 AND id = ?2 AND deleted_at IS NULL
+           AND output IS NOT NULL LIMIT 1",
+        params![thread_id, message_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+}
+
+pub fn get_dense_topology_json_page(
+    conn: &Connection,
+    thread_id: &str,
+    message_id: &str,
+    json_column: &str,
+    json_path: &str,
+    offset: usize,
+    limit: usize,
+) -> SqlResult<(Vec<String>, usize)> {
+    match json_column {
+        "artifact_bundle" | "model_manifest" => {}
+        _ => {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "Invalid topology column".into(),
+            ))
+        }
+    }
+    let field = match json_path {
+        "$.edgeTargets" => DenseField::Edge,
+        "$.faceTargets" => DenseField::Face,
+        "$.selectionTargets" => DenseField::Selection,
+        _ => {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "Invalid topology path".into(),
+            ))
+        }
+    };
+    let valid = conn
+        .query_row(
+            "SELECT 1 FROM messages
+             WHERE thread_id = ?1 AND id = ?2 AND deleted_at IS NULL LIMIT 1",
+            params![thread_id, message_id],
+            |_row| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !valid {
+        return Ok((Vec::new(), 0));
+    }
+    let projection =
+        ensure_payload_projection(conn, PayloadOwnerKind::Message, message_id)?.unwrap_or_default();
+    let total = match field {
+        DenseField::Edge => projection.edge_count,
+        DenseField::Face => projection.face_count,
+        DenseField::Selection => projection.selection_count,
+    };
+    let items = match field {
+        DenseField::Edge => load_topology_json_page::<crate::contracts::ViewerEdgeTarget>(
+            conn,
+            PayloadOwnerKind::Message,
+            message_id,
+            "edge",
+            offset,
+            limit,
+        )?,
+        DenseField::Face => load_topology_json_page::<crate::contracts::ViewerFaceTarget>(
+            conn,
+            PayloadOwnerKind::Message,
+            message_id,
+            "face",
+            offset,
+            limit,
+        )?,
+        DenseField::Selection => load_topology_json_page::<crate::contracts::SelectionTarget>(
+            conn,
+            PayloadOwnerKind::Message,
+            message_id,
+            "selection",
+            offset,
+            limit,
+        )?,
+    };
+    Ok((items, total))
 }
 
 pub fn get_latest_pending_user_message_id(
@@ -1010,79 +2900,273 @@ pub fn get_latest_pending_user_message_id(
     .optional()
 }
 
+pub fn get_visible_message_role(
+    conn: &Connection,
+    thread_id: &str,
+    message_id: &str,
+) -> SqlResult<Option<MessageRole>> {
+    conn.query_row(
+        "SELECT role FROM messages
+         WHERE thread_id = ?1 AND id = ?2 AND deleted_at IS NULL AND status != 'discarded'
+         LIMIT 1",
+        params![thread_id, message_id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+pub fn get_pending_user_message_ids(conn: &Connection, thread_id: &str) -> SqlResult<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT id FROM messages
+         WHERE thread_id = ?1 AND deleted_at IS NULL AND role = 'user' AND status = 'pending'
+         ORDER BY timestamp ASC, rowid ASC",
+    )?;
+    let ids = statement
+        .query_map([thread_id], |row| row.get(0))?
+        .collect();
+    ids
+}
+
+pub fn has_renderable_thread_version(
+    conn: &Connection,
+    thread_id: &str,
+    message_id: Option<&str>,
+) -> SqlResult<bool> {
+    let found = if let Some(message_id) = message_id {
+        conn.query_row(
+            "SELECT 1 FROM messages
+             WHERE thread_id = ?1 AND id = ?2 AND deleted_at IS NULL
+               AND role = 'assistant' AND status = 'success' AND artifact_bundle IS NOT NULL
+             LIMIT 1",
+            params![thread_id, message_id],
+            |_row| Ok(()),
+        )
+        .optional()?
+    } else {
+        conn.query_row(
+            "SELECT 1 FROM messages
+             WHERE thread_id = ?1 AND deleted_at IS NULL
+               AND role = 'assistant' AND status = 'success' AND artifact_bundle IS NOT NULL
+             ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+            [thread_id],
+            |_row| Ok(()),
+        )
+        .optional()?
+    };
+    Ok(found.is_some())
+}
+
+pub fn get_message_attachment_images(
+    conn: &Connection,
+    thread_id: &str,
+    message_id: &str,
+) -> SqlResult<Option<Vec<String>>> {
+    conn.query_row(
+        "SELECT attachment_images FROM messages
+         WHERE thread_id = ?1 AND id = ?2 AND deleted_at IS NULL LIMIT 1",
+        params![thread_id, message_id],
+        |row| {
+            let raw: Option<String> = row.get(0)?;
+            raw.map(|value| serde_json::from_str(&value).unwrap_or_default())
+                .map_or(Ok(Vec::new()), Ok)
+        },
+    )
+    .optional()
+}
+
 pub fn get_thread_messages_page(
     conn: &Connection,
     thread_id: &str,
-    before: Option<u64>,
+    before: Option<&str>,
     limit: usize,
-    include_visual_payloads: bool,
+    _include_visual_payloads: bool,
 ) -> SqlResult<ThreadMessagesPage> {
-    let safe_limit = limit.clamp(1, 200);
-    let mut rows = if let Some(before_ts) = before {
-        load_thread_message_rows_with_clause_and_projection(
-            conn,
-            "thread_id = ?1 AND status != 'discarded' AND timestamp < ?2",
-            &[&thread_id, &(before_ts as i64)],
-            "timestamp DESC, rowid DESC",
-            Some(safe_limit + 1),
-            !include_visual_payloads,
-        )?
-    } else {
-        load_thread_message_rows_with_clause_and_projection(
-            conn,
-            "thread_id = ?1 AND status != 'discarded'",
-            &[&thread_id],
-            "timestamp DESC, rowid DESC",
-            Some(safe_limit + 1),
-            !include_visual_payloads,
-        )?
-    };
+    get_thread_messages_page_filtered(conn, thread_id, before, limit, None)
+}
 
-    let has_more = rows.len() > safe_limit;
-    if has_more {
-        rows.truncate(safe_limit);
+pub fn get_thread_messages_page_filtered(
+    conn: &Connection,
+    thread_id: &str,
+    before: Option<&str>,
+    limit: usize,
+    roles: Option<&[MessageRole]>,
+) -> SqlResult<ThreadMessagesPage> {
+    use crate::contracts::{ThreadTimelineRow, ThreadTimelineVersionSummary};
+
+    ensure_payload_projection_schema(conn)?;
+    const TIMELINE_CONTENT_MAX_CHARS: i64 = 2_048;
+    const TIMELINE_CONTENT_MAX_BYTES: usize = 8_192;
+    const TIMELINE_PAGE_MAX_ROWS: usize = 50;
+    let safe_limit = limit.clamp(1, TIMELINE_PAGE_MAX_ROWS);
+    let cursor = before
+        .map(|value| decode_thread_message_cursor(thread_id, value))
+        .transpose()?;
+    let cursor_predicate = if cursor.is_some() {
+        "AND (timestamp < ?2 OR (timestamp = ?2 AND rowid < ?3))"
+    } else {
+        ""
+    };
+    let role_predicate = match roles {
+        Some([MessageRole::User]) => "AND role = 'user'",
+        Some([MessageRole::Assistant]) => "AND role = 'assistant'",
+        Some(roles) if roles.is_empty() => "AND 0",
+        _ => "",
+    };
+    let sql = format!(
+        "SELECT
+           id,
+           role,
+           substr(content, 1, {TIMELINE_CONTENT_MAX_CHARS}),
+           length(CAST(content AS BLOB)) > {TIMELINE_CONTENT_MAX_BYTES},
+           length(CAST(content AS BLOB)),
+           status,
+           agent_origin,
+           timestamp,
+           rowid,
+           deleted_at,
+           output IS NOT NULL,
+           artifact_bundle IS NOT NULL,
+           model_manifest IS NOT NULL,
+           CASE WHEN json_valid(output) THEN substr(json_extract(output, '$.title'), 1, 256) END,
+           CASE WHEN json_valid(output) THEN substr(json_extract(output, '$.versionName'), 1, 128) END,
+           COALESCE(
+             substr(payload_projections.model_id, 1, 256),
+             NULL
+           ),
+           image_data IS NOT NULL,
+           CASE WHEN json_valid(attachment_images) THEN json_array_length(attachment_images) ELSE 0 END,
+           visual_kind
+         FROM messages
+         LEFT JOIN payload_projections
+           ON payload_projections.owner_kind = 'message'
+          AND payload_projections.owner_id = messages.id
+         WHERE thread_id = ?1
+           AND status != 'discarded'
+           AND (
+             deleted_at IS NULL
+             OR (role = 'assistant' AND (output IS NOT NULL OR artifact_bundle IS NOT NULL))
+           )
+           AND NOT (
+             role = 'assistant' AND status = 'error' AND agent_origin IS NOT NULL
+             AND output IS NULL AND artifact_bundle IS NULL
+           )
+           {role_predicate}
+           {cursor_predicate}
+         ORDER BY timestamp DESC, rowid DESC
+         LIMIT {}",
+        safe_limit + 1,
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = if let Some((timestamp, row_id)) = cursor {
+        stmt.query(params![thread_id, timestamp, row_id])?
+    } else {
+        stmt.query(params![thread_id])?
+    };
+    let mut projected = Vec::with_capacity(safe_limit + 1);
+    while let Some(row) = rows.next()? {
+        let has_output: bool = row.get(10)?;
+        let has_runtime: bool = row.get(11)?;
+        let has_manifest: bool = row.get(12)?;
+        let deleted_at: Option<i64> = row.get(9)?;
+        let mut status: MessageStatus = row.get(5)?;
+        if deleted_at.is_some() {
+            status = MessageStatus::Discarded;
+        }
+        let version_summary = if has_output || has_runtime {
+            Some(ThreadTimelineVersionSummary {
+                title: row.get(13)?,
+                version_name: row.get(14)?,
+                model_id: row.get(15)?,
+                has_output,
+                has_runtime,
+                has_manifest,
+            })
+        } else {
+            None
+        };
+        let agent_origin_raw: Option<String> = row.get(6)?;
+        projected.push(ThreadTimelineRow {
+            id: row.get(0)?,
+            role: row.get(1)?,
+            content: row.get(2)?,
+            content_truncated: row.get(3)?,
+            content_observed_bytes: row.get::<_, i64>(4)?.max(0) as usize,
+            content_allowed_bytes: TIMELINE_CONTENT_MAX_BYTES,
+            status,
+            agent_origin: deserialize_agent_origin(agent_origin_raw.as_deref()),
+            timestamp: row.get::<_, i64>(7)? as u64,
+            timeline_order: row.get(8)?,
+            version_summary,
+            has_image: row.get(16)?,
+            attachment_count: row.get::<_, i64>(17)?.max(0) as usize,
+            visual_kind: row.get(18)?,
+        });
     }
 
-    let mut messages: Vec<Message> = rows
-        .into_iter()
-        .filter_map(|mut row| {
-            if row.deleted_at.is_some() {
-                if is_version_message(&row.message) {
-                    row.message.status = MessageStatus::Discarded;
-                } else {
-                    return None;
-                }
-            } else if row.message.status == MessageStatus::Discarded
-                && !is_version_message(&row.message)
-            {
-                return None;
-            }
-            if is_agent_tool_error_message(&row.message) {
-                return None;
-            }
-
-            if !include_visual_payloads {
-                row.message.image_data = None;
-                row.message.attachment_images.clear();
-                if let Some(bundle) = row.message.artifact_bundle.as_mut() {
-                    bundle.edge_targets.clear();
-                    bundle.face_targets.clear();
-                    bundle.callout_anchors.clear();
-                    bundle.measurement_guides.clear();
-                }
-                row.message.model_manifest = None;
-            }
-            Some(row.message)
-        })
-        .collect();
-
-    messages.reverse();
-    let next_before = messages.first().map(|message| message.timestamp);
+    let has_more = projected.len() > safe_limit;
+    if has_more {
+        projected.truncate(safe_limit);
+    }
+    let next_before = projected.last().map(|row| {
+        encode_thread_message_cursor(thread_id, row.timestamp as i64, row.timeline_order)
+    });
+    projected.reverse();
+    let observed_bytes = serde_json::to_vec(&projected)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
+    if observed_bytes > crate::transport_budget::TIMELINE_PAGE_MAX_BYTES {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "Timeline page is {observed_bytes} bytes; allowed {} bytes. Use a smaller page limit.",
+            crate::transport_budget::TIMELINE_PAGE_MAX_BYTES
+        )));
+    }
     Ok(ThreadMessagesPage {
-        messages,
+        messages: projected,
         next_before,
         has_more,
+        observed_bytes,
+        truncated_fields: vec![
+            "output".to_string(),
+            "artifactBundle".to_string(),
+            "modelManifest".to_string(),
+            "imageData".to_string(),
+            "attachmentImages".to_string(),
+        ],
     })
+}
+
+fn thread_cursor_identity(thread_id: &str) -> u64 {
+    thread_id
+        .as_bytes()
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+}
+
+fn encode_thread_message_cursor(thread_id: &str, timestamp: i64, row_id: i64) -> String {
+    format!(
+        "v2:{:016x}:{timestamp}:{row_id}",
+        thread_cursor_identity(thread_id)
+    )
+}
+
+fn decode_thread_message_cursor(thread_id: &str, cursor: &str) -> SqlResult<(i64, i64)> {
+    let mut parts = cursor.split(':');
+    let valid_version = parts.next() == Some("v2");
+    let valid_thread = parts
+        .next()
+        .is_some_and(|part| part == format!("{:016x}", thread_cursor_identity(thread_id)));
+    let timestamp = parts.next().and_then(|part| part.parse::<i64>().ok());
+    let row_id = parts.next().and_then(|part| part.parse::<i64>().ok());
+    if valid_version && valid_thread && parts.next().is_none() {
+        if let (Some(timestamp), Some(row_id)) = (timestamp, row_id) {
+            return Ok((timestamp, row_id));
+        }
+    }
+    Err(rusqlite::Error::InvalidParameterName(
+        "Invalid thread timeline cursor.".to_string(),
+    ))
 }
 
 pub fn get_thread_window_layout(
@@ -1141,7 +3225,16 @@ pub fn get_thread_messages_for_context(
     conn: &Connection,
     thread_id: &str,
 ) -> SqlResult<Vec<Message>> {
-    let rows = load_thread_message_rows(conn, thread_id, true)?;
+    const CONTEXT_MESSAGE_QUERY_LIMIT: usize = 10;
+    let mut rows = load_thread_message_rows_with_clause_and_projection(
+        conn,
+        "thread_id = ?1 AND status != 'discarded'",
+        &[&thread_id],
+        "timestamp DESC, rowid DESC",
+        Some(CONTEXT_MESSAGE_QUERY_LIMIT),
+        true,
+    )?;
+    rows.reverse();
     Ok(filter_thread_messages_for_context(&rows))
 }
 
@@ -1154,12 +3247,13 @@ pub fn get_recent_thread_messages_for_summary(
         return Ok(Vec::new());
     }
 
-    let mut rows = load_thread_message_rows_with_clause(
+    let mut rows = load_thread_message_rows_with_clause_and_projection(
         conn,
         "thread_id = ?1 AND status != 'discarded'",
         &[&thread_id],
         "timestamp DESC, rowid DESC",
         Some(limit),
+        true,
     )?;
     rows.reverse();
     Ok(filter_thread_messages_for_context(&rows))
@@ -1204,19 +3298,22 @@ fn load_thread_message_rows(
     include_deleted: bool,
 ) -> SqlResult<Vec<ThreadMessageRow>> {
     let sql = if include_deleted {
-        "SELECT id, role, content, status, output, usage, artifact_bundle, model_manifest, structural_verification, agent_origin, timestamp, image_data, visual_kind, attachment_images, deleted_at
+        "SELECT id, role, content, status, output, usage, artifact_bundle, model_manifest, structural_verification, agent_origin, timestamp, image_data, visual_kind, attachment_images, deleted_at, version_input_digest, runtime_cache_key
          FROM messages
          WHERE thread_id = ?1 AND status != 'discarded'
          ORDER BY timestamp ASC, rowid ASC"
     } else {
-        "SELECT id, role, content, status, output, usage, artifact_bundle, model_manifest, structural_verification, agent_origin, timestamp, image_data, visual_kind, attachment_images, deleted_at
+        "SELECT id, role, content, status, output, usage, artifact_bundle, model_manifest, structural_verification, agent_origin, timestamp, image_data, visual_kind, attachment_images, deleted_at, version_input_digest, runtime_cache_key
          FROM messages
          WHERE thread_id = ?1 AND status != 'discarded' AND deleted_at IS NULL
          ORDER BY timestamp ASC, rowid ASC"
     };
 
     let mut stmt = conn.prepare(sql)?;
-    load_thread_message_rows_from_stmt(&mut stmt, &[&thread_id])
+    let mut rows = load_thread_message_rows_from_stmt(&mut stmt, &[&thread_id])?;
+    drop(stmt);
+    hydrate_message_payloads(conn, &mut rows)?;
+    Ok(rows)
 }
 
 fn load_thread_message_rows_with_clause(
@@ -1245,29 +3342,29 @@ fn load_thread_message_rows_with_clause_and_projection(
     compact_visual_payloads: bool,
 ) -> SqlResult<Vec<ThreadMessageRow>> {
     let columns = if compact_visual_payloads {
-        "id, role, content, status, output, usage,
-         CASE
-           WHEN artifact_bundle IS NULL THEN NULL
-           ELSE json_remove(
-             artifact_bundle,
-             '$.edgeTargets',
-             '$.faceTargets',
-             '$.calloutAnchors',
-             '$.measurementGuides'
-           )
-         END,
+        "id, role, substr(content, 1, 8192), status,
+         CASE WHEN json_valid(output) THEN json_object(
+           'title', COALESCE(json_extract(output, '$.title'), ''),
+           'versionName', COALESCE(json_extract(output, '$.versionName'), ''),
+           'response', substr(COALESCE(json_extract(output, '$.response'), ''), 1, 1024),
+           'macroCode', ''
+         ) ELSE NULL END,
+         usage,
          NULL,
-         structural_verification,
+         NULL,
+         NULL,
          agent_origin,
          timestamp,
          NULL,
          visual_kind,
          NULL,
-         deleted_at"
+         deleted_at,
+         version_input_digest,
+         runtime_cache_key"
     } else {
         "id, role, content, status, output, usage, artifact_bundle, model_manifest,
          structural_verification, agent_origin, timestamp, image_data, visual_kind,
-         attachment_images, deleted_at"
+         attachment_images, deleted_at, version_input_digest, runtime_cache_key"
     };
     let mut sql = format!(
         "SELECT {}
@@ -1281,7 +3378,25 @@ fn load_thread_message_rows_with_clause_and_projection(
         sql.push_str(&limit.to_string());
     }
     let mut stmt = conn.prepare(&sql)?;
-    load_thread_message_rows_from_stmt(&mut stmt, params)
+    let mut rows = load_thread_message_rows_from_stmt(&mut stmt, params)?;
+    drop(stmt);
+    if !compact_visual_payloads {
+        hydrate_message_payloads(conn, &mut rows)?;
+    }
+    Ok(rows)
+}
+
+fn hydrate_message_payloads(conn: &Connection, rows: &mut [ThreadMessageRow]) -> SqlResult<()> {
+    for row in rows {
+        if row.message.artifact_bundle.is_none() && row.message.model_manifest.is_none() {
+            continue;
+        }
+        let (artifact, manifest) =
+            load_payload_full(conn, PayloadOwnerKind::Message, &row.message.id)?;
+        row.message.artifact_bundle = artifact;
+        row.message.model_manifest = manifest;
+    }
+    Ok(())
 }
 
 fn load_thread_message_rows_from_stmt(
@@ -1294,10 +3409,16 @@ fn load_thread_message_rows_from_stmt(
             output_str.and_then(|s| serde_json::from_str(&s).ok().map(normalize_design_output));
         let usage_str: Option<String> = row.get(5)?;
         let usage = usage_str.and_then(|s| serde_json::from_str(&s).ok());
-        let artifact_bundle_str: Option<String> = row.get(6)?;
-        let artifact_bundle = artifact_bundle_str.and_then(|s| serde_json::from_str(&s).ok());
-        let model_manifest_str: Option<String> = row.get(7)?;
-        let model_manifest = model_manifest_str.and_then(|s| serde_json::from_str(&s).ok());
+        let artifact_bundle_blob: Option<Vec<u8>> = row.get(6)?;
+        let mut artifact_bundle = artifact_bundle_blob
+            .as_deref()
+            .map(decode_payload)
+            .transpose()?;
+        let model_manifest_blob: Option<Vec<u8>> = row.get(7)?;
+        let mut model_manifest = model_manifest_blob
+            .as_deref()
+            .map(decode_payload)
+            .transpose()?;
         let structural_verification_str: Option<String> = row.get(8)?;
         let structural_verification =
             structural_verification_str.and_then(|s| serde_json::from_str(&s).ok());
@@ -1309,9 +3430,26 @@ fn load_thread_message_rows_from_stmt(
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
 
+        let message_id: String = row.get(0)?;
+        let stored_version_input_digest: Option<String> = row.get(15)?;
+        let stored_runtime_cache_key: Option<String> = row.get(16)?;
+        if artifact_bundle.is_some() {
+            let (expected_version_input_digest, expected_runtime_cache_key) =
+                version_runtime_binding(&message_id, output.as_ref(), artifact_bundle.as_ref())?;
+            let legacy_unbound =
+                stored_version_input_digest.is_none() && stored_runtime_cache_key.is_none();
+            if !legacy_unbound
+                && (stored_version_input_digest != expected_version_input_digest
+                    || stored_runtime_cache_key != expected_runtime_cache_key)
+            {
+                artifact_bundle = None;
+                model_manifest = None;
+            }
+        }
+
         Ok(ThreadMessageRow {
             message: Message {
-                id: row.get(0)?,
+                id: message_id,
                 role: row.get(1)?,
                 content: row.get(2)?,
                 status: row.get(3)?,
@@ -1337,14 +3475,16 @@ fn load_thread_message_rows_from_stmt(
     Ok(messages)
 }
 
-fn is_version_message(message: &Message) -> bool {
-    message.role == MessageRole::Assistant && message.artifact_bundle.is_some()
+pub(crate) fn is_version_message(message: &Message) -> bool {
+    message.role == MessageRole::Assistant
+        && (message.output.is_some() || message.artifact_bundle.is_some())
 }
 
 fn is_agent_tool_error_message(message: &Message) -> bool {
     message.role == MessageRole::Assistant
         && message.status == MessageStatus::Error
         && message.agent_origin.is_some()
+        && message.output.is_none()
         && message.artifact_bundle.is_none()
 }
 
@@ -1444,39 +3584,70 @@ pub fn update_message_status_and_output(
     } = update;
     let output_str = output.and_then(|o| serde_json::to_string(o).ok());
     let usage_str = usage.and_then(|value| serde_json::to_string(value).ok());
-    let artifact_bundle_str = artifact_bundle.and_then(|value| serde_json::to_string(value).ok());
-    let model_manifest_str = model_manifest.and_then(|value| serde_json::to_string(value).ok());
+    let encoded_payload = encode_cad_payload(artifact_bundle, model_manifest)?;
     let structural_verification_str =
         structural_verification.and_then(|value| serde_json::to_string(value).ok());
-    if let Some(text) = content {
-        conn.execute(
-            "UPDATE messages SET status = ?1, output = ?2, usage = ?3, artifact_bundle = ?4, model_manifest = ?5, structural_verification = ?6, visual_kind = COALESCE(?7, visual_kind), content = ?8 WHERE id = ?9",
+    let (version_input_digest, runtime_cache_key) =
+        version_runtime_binding(message_id, output, artifact_bundle)?;
+    conn.execute_batch("SAVEPOINT update_message_payload")?;
+    let write_result = (|| {
+        if let Some(text) = content {
+            conn.execute(
+            "UPDATE messages SET status = ?1, output = ?2, usage = ?3, artifact_bundle = ?4, model_manifest = ?5, structural_verification = ?6, visual_kind = COALESCE(?7, visual_kind), content = ?8, version_input_digest = ?9, runtime_cache_key = ?10 WHERE id = ?11",
             params![
                 status,
                 output_str,
                 usage_str,
-                artifact_bundle_str,
-                model_manifest_str,
+                encoded_payload.artifact_core.as_deref(),
+                encoded_payload.model_manifest_core.as_deref(),
                 structural_verification_str,
                 visual_kind,
                 text,
+                version_input_digest,
+                runtime_cache_key,
                 message_id
             ],
         )?;
-    } else {
-        conn.execute(
-            "UPDATE messages SET status = ?1, output = ?2, usage = ?3, artifact_bundle = ?4, model_manifest = ?5, structural_verification = ?6, visual_kind = COALESCE(?7, visual_kind) WHERE id = ?8",
+        } else {
+            conn.execute(
+            "UPDATE messages SET status = ?1, output = ?2, usage = ?3, artifact_bundle = ?4, model_manifest = ?5, structural_verification = ?6, visual_kind = COALESCE(?7, visual_kind), version_input_digest = ?8, runtime_cache_key = ?9 WHERE id = ?10",
             params![
                 status,
                 output_str,
                 usage_str,
-                artifact_bundle_str,
-                model_manifest_str,
+                encoded_payload.artifact_core.as_deref(),
+                encoded_payload.model_manifest_core.as_deref(),
                 structural_verification_str,
                 visual_kind,
+                version_input_digest,
+                runtime_cache_key,
                 message_id
             ],
         )?;
+        }
+        store_payload_sidecars_from_structs(
+            conn,
+            PayloadOwnerKind::Message,
+            message_id,
+            artifact_bundle,
+            model_manifest,
+            &encoded_payload.projection,
+        )?;
+        if artifact_bundle.is_some() {
+            if let Some(thread_id) = get_message_thread_id(conn, message_id)? {
+                prune_non_latest_thread_stls(conn, &thread_id)?;
+            }
+        }
+        Ok(())
+    })();
+    match write_result {
+        Ok(()) => conn.execute_batch("RELEASE update_message_payload")?,
+        Err(error) => {
+            let _ = conn.execute_batch(
+                "ROLLBACK TO update_message_payload; RELEASE update_message_payload;",
+            );
+            return Err(error);
+        }
     }
     Ok(())
 }
@@ -1514,6 +3685,26 @@ pub fn delete_message(conn: &Connection, id: &str) -> SqlResult<()> {
         params![now, id],
     )?;
     Ok(())
+}
+
+pub fn discard_orphaned_project_folder_working_versions(conn: &Connection) -> SqlResult<usize> {
+    let ids = {
+        let mut stmt = conn.prepare(
+            "SELECT id
+             FROM messages
+             WHERE deleted_at IS NULL
+               AND status = 'working'
+               AND json_extract(agent_origin, '$.clientKind') = 'watcher'",
+        )?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids
+    };
+    for id in &ids {
+        delete_message(conn, id)?;
+    }
+    Ok(ids.len())
 }
 
 pub fn restore_message(conn: &Connection, id: &str) -> SqlResult<()> {
@@ -1634,7 +3825,7 @@ pub fn get_deleted_threads_page(
                    FROM messages m
                    WHERE m.thread_id = t.id
                      AND m.role = 'assistant'
-                     AND m.status = 'success'
+                     AND m.status != 'discarded'
                      AND m.artifact_bundle IS NOT NULL
                      AND m.deleted_at IS NULL
                ) AS version_count
@@ -1700,7 +3891,7 @@ pub fn restore_deleted_thread(conn: &Connection, id: &str) -> SqlResult<bool> {
     Ok(changed > 0)
 }
 
-fn get_thread_preview_for_deleted_state(
+fn get_previous_thread_preview_for_deleted_state(
     conn: &Connection,
     thread_id: &str,
     deleted: bool,
@@ -1728,11 +3919,30 @@ fn get_thread_preview_for_deleted_state(
 }
 
 pub fn get_thread_preview(conn: &Connection, thread_id: &str) -> SqlResult<Option<String>> {
-    get_thread_preview_for_deleted_state(conn, thread_id, false)
+    let current = conn
+        .query_row(
+            "
+        SELECT messages.image_data
+        FROM messages
+        JOIN threads ON threads.id = messages.thread_id
+        WHERE messages.thread_id = ?1
+          AND threads.deleted_at IS NULL
+          AND messages.role = 'assistant'
+          AND messages.status != 'discarded'
+          AND (messages.output IS NOT NULL OR messages.artifact_bundle IS NOT NULL)
+          AND messages.deleted_at IS NULL
+        ORDER BY messages.timestamp DESC, messages.rowid DESC
+        LIMIT 1
+        ",
+            [thread_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?;
+    Ok(current.flatten())
 }
 
 pub fn get_deleted_thread_preview(conn: &Connection, thread_id: &str) -> SqlResult<Option<String>> {
-    get_thread_preview_for_deleted_state(conn, thread_id, true)
+    get_previous_thread_preview_for_deleted_state(conn, thread_id, true)
 }
 
 pub fn get_deleted_messages(conn: &Connection) -> SqlResult<Vec<DeletedMessage>> {
@@ -1743,7 +3953,7 @@ pub fn get_deleted_messages(conn: &Connection) -> SqlResult<Vec<DeletedMessage>>
         WHERE m.deleted_at IS NOT NULL
           AND m.trash_hidden_at IS NULL
           AND m.role = 'assistant'
-          AND m.artifact_bundle IS NOT NULL
+          AND (m.output IS NOT NULL OR m.artifact_bundle IS NOT NULL)
         ORDER BY m.deleted_at DESC
     ")?;
     let iter = stmt.query_map([], |row| {
@@ -1757,12 +3967,16 @@ pub fn get_deleted_messages(conn: &Connection) -> SqlResult<Vec<DeletedMessage>>
         };
         let usage_str: Option<String> = row.get(6)?;
         let usage = usage_str.and_then(|json_str| serde_json::from_str(&json_str).ok());
-        let artifact_bundle_str: Option<String> = row.get(7)?;
-        let artifact_bundle =
-            artifact_bundle_str.and_then(|json_str| serde_json::from_str(&json_str).ok());
-        let model_manifest_str: Option<String> = row.get(8)?;
-        let model_manifest =
-            model_manifest_str.and_then(|json_str| serde_json::from_str(&json_str).ok());
+        let artifact_bundle_blob: Option<Vec<u8>> = row.get(7)?;
+        let artifact_bundle = artifact_bundle_blob
+            .as_deref()
+            .map(decode_payload)
+            .transpose()?;
+        let model_manifest_blob: Option<Vec<u8>> = row.get(8)?;
+        let model_manifest = model_manifest_blob
+            .as_deref()
+            .map(decode_payload)
+            .transpose()?;
         let structural_verification_str: Option<String> = row.get(9)?;
         let structural_verification =
             structural_verification_str.and_then(|json_str| serde_json::from_str(&json_str).ok());
@@ -1835,9 +4049,10 @@ pub fn update_message_ui_spec(
         output.ui_spec = ui_spec.clone();
         let updated = serde_json::to_string(&output)
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let (version_input_digest, _) = version_runtime_binding(message_id, Some(&output), None)?;
         conn.execute(
-            "UPDATE messages SET output = ?1 WHERE id = ?2",
-            params![updated, message_id],
+            "UPDATE messages SET output = ?1, version_input_digest = ?2, runtime_cache_key = NULL WHERE id = ?3",
+            params![updated, version_input_digest, message_id],
         )?;
     }
     Ok(())
@@ -1861,9 +4076,10 @@ pub fn update_message_parameters(
         output.initial_params = parameters.clone();
         let updated = serde_json::to_string(&output)
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let (version_input_digest, _) = version_runtime_binding(message_id, Some(&output), None)?;
         conn.execute(
-            "UPDATE messages SET output = ?1 WHERE id = ?2",
-            params![updated, message_id],
+            "UPDATE messages SET output = ?1, version_input_digest = ?2, runtime_cache_key = NULL WHERE id = ?3",
+            params![updated, version_input_digest, message_id],
         )?;
     }
     Ok(())
@@ -1874,12 +4090,36 @@ pub fn update_message_model_manifest(
     message_id: &str,
     manifest: &crate::contracts::ModelManifest,
 ) -> SqlResult<()> {
-    let serialized = serde_json::to_string(manifest)
-        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-    conn.execute(
-        "UPDATE messages SET model_manifest = ?1 WHERE id = ?2",
-        params![serialized, message_id],
-    )?;
+    let mut projection =
+        ensure_payload_projection(conn, PayloadOwnerKind::Message, message_id)?.unwrap_or_default();
+    let encoded = encode_payload(&model_manifest_core(manifest))?;
+    projection.model_id = Some(manifest.model_id.clone());
+    projection.selection_count = manifest.selection_targets.len();
+    conn.execute_batch("SAVEPOINT update_manifest_payload")?;
+    let write_result = (|| {
+        conn.execute(
+            "UPDATE messages SET model_manifest = ?1 WHERE id = ?2",
+            params![encoded, message_id],
+        )?;
+        store_payload_projection(conn, PayloadOwnerKind::Message, message_id, &projection)?;
+        replace_topology_chunks(
+            conn,
+            PayloadOwnerKind::Message,
+            message_id,
+            "selection",
+            &manifest.selection_targets,
+        )?;
+        Ok(())
+    })();
+    match write_result {
+        Ok(()) => conn.execute_batch("RELEASE update_manifest_payload")?,
+        Err(error) => {
+            let _ = conn.execute_batch(
+                "ROLLBACK TO update_manifest_payload; RELEASE update_manifest_payload;",
+            );
+            return Err(error);
+        }
+    }
     Ok(())
 }
 
@@ -1888,38 +4128,83 @@ pub fn update_message_artifact_bundle(
     message_id: &str,
     bundle: &crate::contracts::ArtifactBundle,
 ) -> SqlResult<()> {
-    let serialized = serde_json::to_string(bundle)
+    let mut projection =
+        ensure_payload_projection(conn, PayloadOwnerKind::Message, message_id)?.unwrap_or_default();
+    let encoded = encode_payload(&artifact_bundle_core(bundle))?;
+    projection.model_id = Some(bundle.model_id.clone());
+    projection.edge_count = bundle.edge_targets.len();
+    projection.face_count = bundle.face_targets.len();
+    let output = conn
+        .query_row(
+            "SELECT output FROM messages WHERE id = ?1",
+            [message_id],
+            |row| row.get::<_, Option<String>>(0),
+        )?
+        .map(|json| serde_json::from_str::<DesignOutput>(&json).map(normalize_design_output))
+        .transpose()
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-    conn.execute(
-        "UPDATE messages SET artifact_bundle = ?1 WHERE id = ?2",
-        params![serialized, message_id],
+    let (version_input_digest, runtime_cache_key) =
+        version_runtime_binding(message_id, output.as_ref(), Some(bundle))?;
+    conn.execute_batch("SAVEPOINT update_artifact_payload")?;
+    let write_result = (|| {
+        conn.execute(
+        "UPDATE messages SET artifact_bundle = ?1, version_input_digest = ?2, runtime_cache_key = ?3 WHERE id = ?4",
+        params![encoded, version_input_digest, runtime_cache_key, message_id],
     )?;
+        store_payload_projection(conn, PayloadOwnerKind::Message, message_id, &projection)?;
+        replace_topology_chunks(
+            conn,
+            PayloadOwnerKind::Message,
+            message_id,
+            "edge",
+            &bundle.edge_targets,
+        )?;
+        replace_topology_chunks(
+            conn,
+            PayloadOwnerKind::Message,
+            message_id,
+            "face",
+            &bundle.face_targets,
+        )?;
+        if let Some(thread_id) = get_message_thread_id(conn, message_id)? {
+            prune_non_latest_thread_stls(conn, &thread_id)?;
+        }
+        Ok(())
+    })();
+    match write_result {
+        Ok(()) => conn.execute_batch("RELEASE update_artifact_payload")?,
+        Err(error) => {
+            let _ = conn.execute_batch(
+                "ROLLBACK TO update_artifact_payload; RELEASE update_artifact_payload;",
+            );
+            return Err(error);
+        }
+    }
     Ok(())
 }
 
-/// Persisted dependency locks are GC roots. Invalid bundle JSON aborts root
+/// Persisted dependency locks are GC roots. Invalid binary core aborts root
 /// collection: retaining too much is safer than deleting historical payloads.
 pub fn component_dependency_package_digests(
     conn: &Connection,
 ) -> SqlResult<std::collections::BTreeSet<String>> {
     let mut statement = conn.prepare(
-        "SELECT artifact_bundle
+        "SELECT id
          FROM messages
          WHERE artifact_bundle IS NOT NULL
            AND deleted_at IS NULL
            AND status != 'discarded'",
     )?;
-    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    let message_ids = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<SqlResult<Vec<_>>>()?;
+    drop(statement);
     let mut roots = std::collections::BTreeSet::new();
-    for row in rows {
-        let raw = row?;
-        let bundle: ArtifactBundle = serde_json::from_str(&raw).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Text,
-                Box::new(error),
-            )
-        })?;
+    for message_id in message_ids {
+        let (bundle, _, _) = load_payload_core(conn, PayloadOwnerKind::Message, &message_id)?;
+        let Some(bundle) = bundle else {
+            continue;
+        };
         if let Some(lock) = bundle.component_dependency_lock {
             for dependency in lock.dependencies {
                 roots.insert(dependency.package_digest);
@@ -1950,14 +4235,23 @@ pub fn update_message_structural_verification(
 
 pub fn upsert_agent_draft(conn: &Connection, draft: &AgentDraft) -> SqlResult<()> {
     let design_output = serialize_json(&draft.design_output)?;
-    let artifact_bundle = serialize_json(&draft.artifact_bundle)?;
-    let model_manifest = serialize_json(&draft.model_manifest)?;
+    let encoded_payload =
+        encode_cad_payload(Some(&draft.artifact_bundle), Some(&draft.model_manifest))?;
     let draft_feedback = match &draft.draft_feedback {
         Some(feedback) => Some(serialize_json(feedback)?),
         None => None,
     };
-    conn.execute(
-        "INSERT INTO agent_drafts (
+    let replaced_preview_id = conn
+        .query_row(
+            "SELECT preview_id FROM agent_drafts WHERE session_id = ?1 AND thread_id = ?2",
+            params![draft.session_id, draft.thread_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    conn.execute_batch("SAVEPOINT upsert_agent_draft_payload")?;
+    let write_result = (|| {
+        conn.execute(
+            "INSERT INTO agent_drafts (
             preview_id,
             session_id,
             thread_id,
@@ -1977,18 +4271,49 @@ pub fn upsert_agent_draft(conn: &Connection, draft: &AgentDraft) -> SqlResult<()
             model_manifest = excluded.model_manifest,
             draft_feedback = excluded.draft_feedback,
             updated_at = excluded.updated_at",
-        params![
-            draft.preview_id,
-            draft.session_id,
-            draft.thread_id,
-            draft.base_message_id,
-            design_output,
-            artifact_bundle,
-            model_manifest,
-            draft_feedback,
-            draft.updated_at as i64,
-        ],
-    )?;
+            params![
+                draft.preview_id,
+                draft.session_id,
+                draft.thread_id,
+                draft.base_message_id,
+                design_output,
+                encoded_payload.artifact_core.as_deref(),
+                encoded_payload.model_manifest_core.as_deref(),
+                draft_feedback,
+                draft.updated_at as i64,
+            ],
+        )?;
+        if let Some(old_preview_id) = replaced_preview_id.as_deref() {
+            if old_preview_id != draft.preview_id {
+                conn.execute(
+                    "DELETE FROM payload_projections WHERE owner_kind = 'draft' AND owner_id = ?1",
+                    [old_preview_id],
+                )?;
+                conn.execute(
+                "DELETE FROM dense_topology_chunks WHERE owner_kind = 'draft' AND owner_id = ?1",
+                [old_preview_id],
+            )?;
+            }
+        }
+        store_payload_sidecars_from_structs(
+            conn,
+            PayloadOwnerKind::Draft,
+            &draft.preview_id,
+            Some(&draft.artifact_bundle),
+            Some(&draft.model_manifest),
+            &encoded_payload.projection,
+        )?;
+        Ok(())
+    })();
+    match write_result {
+        Ok(()) => conn.execute_batch("RELEASE upsert_agent_draft_payload")?,
+        Err(error) => {
+            let _ = conn.execute_batch(
+                "ROLLBACK TO upsert_agent_draft_payload; RELEASE upsert_agent_draft_payload;",
+            );
+            return Err(error);
+        }
+    }
     Ok(())
 }
 
@@ -2049,8 +4374,8 @@ pub fn get_verification_record(
 
 fn agent_draft_from_row(row: &rusqlite::Row<'_>) -> SqlResult<AgentDraft> {
     let design_output: String = row.get(4)?;
-    let artifact_bundle: String = row.get(5)?;
-    let model_manifest: String = row.get(6)?;
+    let artifact_bundle: Vec<u8> = row.get(5)?;
+    let model_manifest: Vec<u8> = row.get(6)?;
     let draft_feedback: Option<String> = row.get(7)?;
     Ok(AgentDraft {
         preview_id: row.get(0)?,
@@ -2058,14 +4383,31 @@ fn agent_draft_from_row(row: &rusqlite::Row<'_>) -> SqlResult<AgentDraft> {
         thread_id: row.get(2)?,
         base_message_id: row.get(3)?,
         design_output: deserialize_design_output_json(&design_output)?,
-        artifact_bundle: deserialize_json(&artifact_bundle)?,
-        model_manifest: deserialize_json(&model_manifest)?,
+        artifact_bundle: decode_payload(&artifact_bundle)?,
+        model_manifest: decode_payload(&model_manifest)?,
         draft_feedback: draft_feedback
             .as_deref()
             .map(deserialize_json)
             .transpose()?,
         updated_at: row.get::<_, i64>(8)? as u64,
     })
+}
+
+fn hydrate_agent_draft(conn: &Connection, mut draft: AgentDraft) -> SqlResult<AgentDraft> {
+    let (artifact, manifest) = load_payload_full(conn, PayloadOwnerKind::Draft, &draft.preview_id)?;
+    draft.artifact_bundle = artifact.ok_or_else(|| {
+        rusqlite::Error::InvalidParameterName(format!(
+            "Draft {} has no binary artifact core.",
+            draft.preview_id
+        ))
+    })?;
+    draft.model_manifest = manifest.ok_or_else(|| {
+        rusqlite::Error::InvalidParameterName(format!(
+            "Draft {} has no binary manifest core.",
+            draft.preview_id
+        ))
+    })?;
+    Ok(draft)
 }
 
 pub fn get_agent_draft_for_session(
@@ -2081,7 +4423,9 @@ pub fn get_agent_draft_for_session(
         params![session_id],
         agent_draft_from_row,
     )
-    .optional()
+    .optional()?
+    .map(|draft| hydrate_agent_draft(conn, draft))
+    .transpose()
 }
 
 pub fn get_agent_draft_for_session_thread(
@@ -2096,7 +4440,9 @@ pub fn get_agent_draft_for_session_thread(
         params![session_id, thread_id],
         agent_draft_from_row,
     )
-    .optional()
+    .optional()?
+    .map(|draft| hydrate_agent_draft(conn, draft))
+    .transpose()
 }
 
 pub fn get_agent_draft_for_session_preview_id(
@@ -2111,7 +4457,9 @@ pub fn get_agent_draft_for_session_preview_id(
         params![session_id, preview_id],
         agent_draft_from_row,
     )
-    .optional()
+    .optional()?
+    .map(|draft| hydrate_agent_draft(conn, draft))
+    .transpose()
 }
 
 pub fn get_unambiguous_agent_draft_for_session(
@@ -2132,7 +4480,9 @@ pub fn get_unambiguous_agent_draft_for_session(
     if rows.next()?.is_some() {
         return Ok(None);
     }
-    Ok(Some(first))
+    drop(rows);
+    drop(statement);
+    hydrate_agent_draft(conn, first).map(Some)
 }
 
 pub fn get_agent_draft_for_session_message(
@@ -2155,7 +4505,9 @@ pub fn get_agent_draft_for_session_message(
     if rows.next()?.is_some() {
         return Ok(None);
     }
-    Ok(Some(first))
+    drop(rows);
+    drop(statement);
+    hydrate_agent_draft(conn, first).map(Some)
 }
 
 pub fn get_agent_draft_by_preview_id(
@@ -2169,7 +4521,139 @@ pub fn get_agent_draft_by_preview_id(
         params![preview_id],
         agent_draft_from_row,
     )
+    .optional()?
+    .map(|draft| hydrate_agent_draft(conn, draft))
+    .transpose()
+}
+
+pub fn get_agent_draft_projection_by_preview_id(
+    conn: &Connection,
+    preview_id: &str,
+) -> SqlResult<Option<crate::contracts::AgentDraftProjection>> {
+    let Some(projection) = ensure_payload_projection(conn, PayloadOwnerKind::Draft, preview_id)?
+    else {
+        return Ok(None);
+    };
+    conn.query_row(
+        "SELECT
+           preview_id,
+           session_id,
+           thread_id,
+           base_message_id,
+           design_output,
+           artifact_bundle,
+           model_manifest,
+           draft_feedback,
+           updated_at
+         FROM agent_drafts
+         WHERE preview_id = ?1",
+        params![preview_id],
+        |row| {
+            let preview_id: String = row.get(0)?;
+            let thread_id: String = row.get(2)?;
+            let design_output: String = row.get(4)?;
+            let artifact_bundle: Vec<u8> = row.get(5)?;
+            let model_manifest: Vec<u8> = row.get(6)?;
+            let draft_feedback: Option<String> = row.get(7)?;
+            let edge_count = projection.edge_count;
+            let face_count = projection.face_count;
+            let selection_target_count = projection.selection_count;
+            let has_dense_topology = edge_count + face_count + selection_target_count > 0;
+            Ok(crate::contracts::AgentDraftProjection {
+                dense_topology_ref: has_dense_topology
+                    .then(|| format!("draft-topology:{thread_id}:{preview_id}")),
+                preview_id,
+                session_id: row.get(1)?,
+                thread_id,
+                base_message_id: row.get(3)?,
+                design_output: deserialize_design_output_json(&design_output)?,
+                artifact_bundle: decode_payload(&artifact_bundle)?,
+                model_manifest: decode_payload(&model_manifest)?,
+                draft_feedback: draft_feedback
+                    .as_deref()
+                    .map(deserialize_json)
+                    .transpose()?,
+                updated_at: row.get::<_, i64>(8)? as u64,
+                edge_count,
+                face_count,
+                selection_target_count,
+                observed_bytes: 0,
+                truncated_fields: Vec::new(),
+            })
+        },
+    )
     .optional()
+}
+
+pub fn get_agent_draft_thread_id(conn: &Connection, preview_id: &str) -> SqlResult<Option<String>> {
+    conn.query_row(
+        "SELECT thread_id FROM agent_drafts WHERE preview_id = ?1",
+        params![preview_id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+pub fn get_agent_draft_topology_json_page(
+    conn: &Connection,
+    preview_id: &str,
+    json_column: &str,
+    json_path: &str,
+    offset: usize,
+    limit: usize,
+) -> SqlResult<(Vec<String>, usize)> {
+    match json_column {
+        "artifact_bundle" | "model_manifest" => {}
+        _ => {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "Invalid draft topology column".into(),
+            ))
+        }
+    }
+    let field = match json_path {
+        "$.edgeTargets" => DenseField::Edge,
+        "$.faceTargets" => DenseField::Face,
+        "$.selectionTargets" => DenseField::Selection,
+        _ => {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "Invalid draft topology path".into(),
+            ))
+        }
+    };
+    let projection =
+        ensure_payload_projection(conn, PayloadOwnerKind::Draft, preview_id)?.unwrap_or_default();
+    let total = match field {
+        DenseField::Edge => projection.edge_count,
+        DenseField::Face => projection.face_count,
+        DenseField::Selection => projection.selection_count,
+    };
+    let items = match field {
+        DenseField::Edge => load_topology_json_page::<crate::contracts::ViewerEdgeTarget>(
+            conn,
+            PayloadOwnerKind::Draft,
+            preview_id,
+            "edge",
+            offset,
+            limit,
+        )?,
+        DenseField::Face => load_topology_json_page::<crate::contracts::ViewerFaceTarget>(
+            conn,
+            PayloadOwnerKind::Draft,
+            preview_id,
+            "face",
+            offset,
+            limit,
+        )?,
+        DenseField::Selection => load_topology_json_page::<crate::contracts::SelectionTarget>(
+            conn,
+            PayloadOwnerKind::Draft,
+            preview_id,
+            "selection",
+            offset,
+            limit,
+        )?,
+    };
+    Ok((items, total))
 }
 
 pub fn delete_agent_draft_for_session(conn: &Connection, session_id: &str) -> SqlResult<()> {
@@ -2630,9 +5114,10 @@ pub fn get_message_runtime_and_thread(
     conn: &Connection,
     message_id: &str,
 ) -> SqlResult<Option<MessageRuntimeAndThread>> {
-    let row: Option<(Option<String>, Option<String>, String)> = conn
+    let row: Option<(String, Option<String>, Option<String>, Option<String>)> = conn
         .query_row(
-            "SELECT m.artifact_bundle, m.model_manifest, m.thread_id
+            "SELECT m.thread_id, m.output,
+                    m.version_input_digest, m.runtime_cache_key
              FROM messages m
              JOIN threads t ON t.id = m.thread_id
              WHERE m.id = ?1
@@ -2640,18 +5125,33 @@ pub fn get_message_runtime_and_thread(
                AND m.status != 'discarded'
                AND t.deleted_at IS NULL",
             [message_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()?;
 
-    let Some((artifact_bundle_str, model_manifest_str, thread_id)) = row else {
+    let Some((thread_id, output_str, stored_version_input_digest, stored_runtime_cache_key)) = row
+    else {
         return Ok(None);
     };
 
-    let artifact_bundle =
-        artifact_bundle_str.and_then(|json_str| serde_json::from_str(&json_str).ok());
-    let model_manifest =
-        model_manifest_str.and_then(|json_str| serde_json::from_str(&json_str).ok());
+    let (artifact_bundle, model_manifest) =
+        load_payload_full(conn, PayloadOwnerKind::Message, message_id)?;
+    let output = output_str.and_then(|json_str| {
+        serde_json::from_str::<DesignOutput>(&json_str)
+            .ok()
+            .map(normalize_design_output)
+    });
+    if artifact_bundle.is_some() {
+        let (expected_version_input_digest, expected_runtime_cache_key) =
+            version_runtime_binding(message_id, output.as_ref(), artifact_bundle.as_ref())?;
+        if stored_version_input_digest != expected_version_input_digest
+            || stored_runtime_cache_key != expected_runtime_cache_key
+        {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "Binary runtime binding mismatch for message {message_id}."
+            )));
+        }
+    }
 
     Ok(Some((artifact_bundle, model_manifest, thread_id)))
 }
@@ -2673,6 +5173,7 @@ mod tests {
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
                 summary TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL DEFAULT 0,
                 updated_at INTEGER NOT NULL,
                 genie_traits TEXT,
                 deleted_at INTEGER
@@ -2696,10 +5197,24 @@ mod tests {
                 image_data TEXT,
                 visual_kind TEXT,
                 attachment_images TEXT,
+                version_input_digest TEXT,
+                runtime_cache_key TEXT,
                 deleted_at INTEGER,
                 trash_hidden_at INTEGER,
                 FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
             )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_thread_visible_timestamp
+             ON messages(thread_id, timestamp DESC)
+             WHERE deleted_at IS NULL",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_thread_target_candidates
+             ON messages(thread_id, role, status, timestamp DESC)
+             WHERE deleted_at IS NULL",
             [],
         )?;
         conn.execute(
@@ -2790,6 +5305,11 @@ mod tests {
             "ALTER TABLE threads ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
             [],
         );
+        let _ = conn.execute("ALTER TABLE threads ADD COLUMN created_at INTEGER", []);
+        let _ = conn.execute(
+            "UPDATE threads SET created_at = updated_at WHERE created_at IS NULL",
+            [],
+        );
         let _ = conn.execute("ALTER TABLE threads ADD COLUMN finalized_at INTEGER", []);
         let _ = conn.execute("ALTER TABLE threads ADD COLUMN pending_confirm TEXT", []);
         Ok(())
@@ -2818,6 +5338,7 @@ mod tests {
             component_dependency_lock: None,
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: 1,
             model_id: model_id.to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -2829,7 +5350,7 @@ mod tests {
             fcstd_path: format!("/tmp/{model_id}.FCStd"),
             manifest_path: format!("/tmp/{model_id}.json"),
             macro_path: None,
-            preview_stl_path: format!("/tmp/{model_id}.stl"),
+            model_stl_path: format!("/tmp/{model_id}.stl"),
             viewer_assets: Vec::new(),
             edge_targets: Vec::new(),
             face_targets: Vec::new(),
@@ -2837,6 +5358,63 @@ mod tests {
             measurement_guides: Vec::new(),
             export_artifacts: Vec::new(),
         }
+    }
+
+    fn sample_version_message(id: &str, timestamp: u64, bundle: ArtifactBundle) -> Message {
+        Message {
+            id: id.to_string(),
+            role: MessageRole::Assistant,
+            content: String::new(),
+            status: MessageStatus::Success,
+            output: Some(sample_output()),
+            usage: None,
+            artifact_bundle: Some(bundle),
+            model_manifest: None,
+            structural_verification: None,
+            agent_origin: None,
+            timestamp,
+            image_data: None,
+            visual_kind: None,
+            attachment_images: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn committing_new_thread_version_keeps_latest_stl_and_prunes_previous_stl() {
+        let conn = Connection::open_in_memory().expect("memory db");
+        init_db_internal(&conn).expect("schema");
+        create_or_update_thread(&conn, "stl-thread", "STL", 1, None).expect("thread");
+        let root = std::env::temp_dir()
+            .join(format!("ecky-db-stl-{}", uuid::Uuid::new_v4()))
+            .join("model-runtime");
+        fs::create_dir_all(&root).expect("runtime root");
+        let old_path = root.join("old").join("model.stl");
+        let latest_path = root.join("latest").join("model.stl");
+        fs::create_dir_all(old_path.parent().unwrap()).expect("old bundle");
+        fs::create_dir_all(latest_path.parent().unwrap()).expect("latest bundle");
+        fs::write(&old_path, b"old").expect("old stl");
+        fs::write(&latest_path, b"latest").expect("latest stl");
+
+        let mut old_bundle = sample_artifact_bundle("old");
+        old_bundle.model_stl_path = old_path.to_string_lossy().to_string();
+        add_message(
+            &conn,
+            "stl-thread",
+            &sample_version_message("old-version", 1, old_bundle),
+        )
+        .expect("old version");
+        let mut latest_bundle = sample_artifact_bundle("latest");
+        latest_bundle.model_stl_path = latest_path.to_string_lossy().to_string();
+        add_message(
+            &conn,
+            "stl-thread",
+            &sample_version_message("latest-version", 2, latest_bundle),
+        )
+        .expect("latest version");
+
+        assert!(!old_path.exists(), "previous STL must become ephemeral");
+        assert!(latest_path.exists(), "latest STL must stay durable");
+        fs::remove_dir_all(root.parent().unwrap()).expect("cleanup");
     }
 
     fn bundle_with_package_lock(
@@ -3003,6 +5581,85 @@ mod tests {
         assert_eq!(tid, thread_id);
         assert_eq!(output.ui_spec, new_spec);
         assert_eq!(output.initial_params, new_params);
+    }
+
+    #[test]
+    fn durable_version_runtime_binding_rejects_digest_mismatch() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db_internal(&conn).unwrap();
+        create_or_update_thread(&conn, "runtime-thread", "Runtime", 1, None).unwrap();
+        let message = Message {
+            id: "runtime-version".to_string(),
+            role: MessageRole::Assistant,
+            content: "Rendered".to_string(),
+            status: MessageStatus::Success,
+            output: Some(sample_output()),
+            usage: None,
+            artifact_bundle: Some(sample_artifact_bundle("generated-runtime")),
+            model_manifest: None,
+            structural_verification: None,
+            agent_origin: None,
+            timestamp: 1,
+            image_data: None,
+            visual_kind: None,
+            attachment_images: Vec::new(),
+        };
+        add_message(&conn, "runtime-thread", &message).unwrap();
+
+        let (version_digest, cache_key): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT version_input_digest, runtime_cache_key FROM messages WHERE id = ?1",
+                [&message.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(version_digest.is_some());
+        assert!(cache_key.is_some());
+
+        conn.execute(
+            "UPDATE messages SET runtime_cache_key = 'sha256:stale' WHERE id = ?1",
+            [&message.id],
+        )
+        .unwrap();
+        let loaded = get_thread_message_version(&conn, "runtime-thread", &message.id)
+            .unwrap()
+            .unwrap();
+        assert!(loaded.artifact_bundle.is_none());
+        assert!(loaded.model_manifest.is_none());
+    }
+
+    #[test]
+    fn legacy_unbound_version_keeps_runtime_until_explicitly_rewritten() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db_internal(&conn).unwrap();
+        create_or_update_thread(&conn, "legacy-thread", "Legacy", 1, None).unwrap();
+        let message = Message {
+            id: "legacy-version".to_string(),
+            role: MessageRole::Assistant,
+            content: "Rendered".to_string(),
+            status: MessageStatus::Success,
+            output: Some(sample_output()),
+            usage: None,
+            artifact_bundle: Some(sample_artifact_bundle("legacy-runtime")),
+            model_manifest: None,
+            structural_verification: None,
+            agent_origin: None,
+            timestamp: 1,
+            image_data: None,
+            visual_kind: None,
+            attachment_images: Vec::new(),
+        };
+        add_message(&conn, "legacy-thread", &message).unwrap();
+        conn.execute(
+            "UPDATE messages SET version_input_digest = NULL, runtime_cache_key = NULL WHERE id = ?1",
+            [&message.id],
+        )
+        .unwrap();
+
+        let loaded = get_thread_message_version(&conn, "legacy-thread", &message.id)
+            .unwrap()
+            .unwrap();
+        assert!(loaded.artifact_bundle.is_some());
     }
 
     #[test]
@@ -3258,10 +5915,7 @@ mod tests {
             .unwrap();
         }
 
-        assert_eq!(
-            get_thread_preview(&conn, thread_id).unwrap().as_deref(),
-            Some("data:image/png;base64,preview")
-        );
+        assert_eq!(get_thread_preview(&conn, thread_id).unwrap(), None);
 
         assert!(delete_thread(&conn, thread_id).unwrap());
         assert_eq!(get_thread_preview(&conn, thread_id).unwrap(), None);
@@ -3702,16 +6356,22 @@ mod tests {
             visual_kind: None,
             attachment_images: Vec::new(),
         };
+        let mut authored_error = agent_error.clone();
+        authored_error.id = "authored-error".to_string();
+        authored_error.content = "Draft failed validation.".to_string();
+        authored_error.output = Some(sample_output());
+        authored_error.timestamp = 103;
         add_message(&conn, "thread-agent-errors", &visible_user).unwrap();
         add_message(&conn, "thread-agent-errors", &agent_error).unwrap();
         add_message(&conn, "thread-agent-errors", &generation_error).unwrap();
+        add_message(&conn, "thread-agent-errors", &authored_error).unwrap();
 
         let full = get_thread_messages(&conn, "thread-agent-errors").unwrap();
         assert_eq!(
             full.iter()
                 .map(|message| message.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["user-visible", "generation-error"]
+            vec!["user-visible", "generation-error", "authored-error"]
         );
 
         let page = get_thread_messages_page(&conn, "thread-agent-errors", None, 50, true).unwrap();
@@ -3720,7 +6380,7 @@ mod tests {
                 .iter()
                 .map(|message| message.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["user-visible", "generation-error"]
+            vec!["user-visible", "generation-error", "authored-error"]
         );
 
         let context = get_thread_messages_for_context(&conn, "thread-agent-errors").unwrap();
@@ -3729,11 +6389,11 @@ mod tests {
                 .iter()
                 .map(|message| message.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["user-visible", "generation-error"]
+            vec!["user-visible", "generation-error", "authored-error"]
         );
 
         let threads = get_all_threads(&conn).unwrap();
-        assert_eq!(threads[0].error_count, 1);
+        assert_eq!(threads[0].error_count, 2);
     }
 
     #[test]
@@ -4100,7 +6760,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db_internal(&conn).unwrap();
 
-        let draft = AgentDraft {
+        let mut draft = AgentDraft {
             preview_id: "preview-1".to_string(),
             session_id: "session-1".to_string(),
             thread_id: "thread-1".to_string(),
@@ -4127,6 +6787,7 @@ mod tests {
                 component_dependency_lock: None,
                 component_dependency_lock_digest: None,
                 component_import_origins: Vec::new(),
+                component_placement_evidence: Vec::new(),
                 schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
                 model_id: "model-1".to_string(),
                 source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -4138,7 +6799,7 @@ mod tests {
                 fcstd_path: "/tmp/model-1.FCStd".to_string(),
                 manifest_path: "/tmp/model-1.json".to_string(),
                 macro_path: Some("/tmp/model-1.py".to_string()),
-                preview_stl_path: "/tmp/model-1.stl".to_string(),
+                model_stl_path: "/tmp/model-1.stl".to_string(),
                 viewer_assets: Vec::new(),
                 edge_targets: Vec::new(),
                 face_targets: Vec::new(),
@@ -4149,6 +6810,7 @@ mod tests {
             model_manifest: crate::contracts::ModelManifest {
                 geometry_provenance: None,
                 component_import_origins: Vec::new(),
+                component_placement_evidence: Vec::new(),
                 schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
                 model_id: "model-1".to_string(),
                 source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -4202,10 +6864,10 @@ mod tests {
                 thread_id: "thread-1".to_string(),
                 preview_id: "preview-1".to_string(),
                 status: crate::contracts::AgentDraftFeedbackStatus::Failed,
-                summary: "Preview STL file not found.".to_string(),
+                summary: "Model STL file not found.".to_string(),
                 items: vec![crate::contracts::AgentDraftFeedbackItem {
                     code: "PREVIEW_STL_MISSING".to_string(),
-                    message: "Preview STL file not found.".to_string(),
+                    message: "Model STL file not found.".to_string(),
                 }],
                 authoring_lints: Vec::new(),
                 source: crate::contracts::AgentDraftFeedbackSource::StructuralVerification,
@@ -4213,12 +6875,74 @@ mod tests {
             updated_at: 123,
         };
 
+        draft.artifact_bundle.edge_targets = vec![crate::contracts::ViewerEdgeTarget {
+            target_id: "edge-1".to_string(),
+            durable_target_id: None,
+            canonical_target_id: None,
+            alias_ids: Vec::new(),
+            part_id: "body".to_string(),
+            viewer_node_id: "body".to_string(),
+            label: "Edge 1".to_string(),
+            editable: true,
+            start: crate::contracts::ViewerEdgePoint {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            end: crate::contracts::ViewerEdgePoint {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        }];
+        draft.model_manifest.selection_targets = vec![crate::contracts::SelectionTarget {
+            target_id: Some("selection-1".to_string()),
+            durable_target_id: None,
+            canonical_target_id: None,
+            alias_ids: Vec::new(),
+            part_id: "body".to_string(),
+            viewer_node_id: "body".to_string(),
+            label: "Body".to_string(),
+            kind: crate::contracts::SelectionTargetKind::Part,
+            editable: true,
+            parameter_keys: Vec::new(),
+            primitive_ids: Vec::new(),
+            view_ids: Vec::new(),
+        }];
+
         upsert_agent_draft(&conn, &draft).unwrap();
         let loaded = get_agent_draft_for_session(&conn, "session-1")
             .unwrap()
             .expect("draft");
 
         assert_eq!(loaded.draft_feedback, draft.draft_feedback);
+
+        let projection = get_agent_draft_projection_by_preview_id(&conn, "preview-1")
+            .unwrap()
+            .expect("projected draft");
+        assert_eq!(projection.edge_count, 1);
+        assert_eq!(projection.face_count, 0);
+        assert_eq!(projection.selection_target_count, 1);
+        assert!(projection.artifact_bundle.edge_targets.is_empty());
+        assert!(projection.model_manifest.selection_targets.is_empty());
+        assert_eq!(
+            projection.dense_topology_ref.as_deref(),
+            Some("draft-topology:thread-1:preview-1")
+        );
+
+        let (edge_page, edge_total) = get_agent_draft_topology_json_page(
+            &conn,
+            "preview-1",
+            "artifact_bundle",
+            "$.edgeTargets",
+            0,
+            1,
+        )
+        .unwrap();
+        assert_eq!(edge_total, 1);
+        assert_eq!(edge_page.len(), 1);
+        let edge: crate::contracts::ViewerEdgeTarget = serde_json::from_str(&edge_page[0]).unwrap();
+        assert_eq!(edge.target_id, "edge-1");
 
         let other_thread = AgentDraft {
             preview_id: "preview-2".to_string(),
@@ -4360,5 +7084,338 @@ mod tests {
         // Thread B layout should still work
         let loaded = get_thread_window_layout(&conn, t2).unwrap();
         assert_eq!(loaded, Some(layout2));
+    }
+
+    #[test]
+    fn thread_head_version_id_does_not_deserialize_message_payloads() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db_internal(&conn).unwrap();
+        create_or_update_thread(&conn, "dense-thread", "Dense", 100, None).unwrap();
+        conn.execute(
+            "INSERT INTO messages (
+                id, thread_id, role, content, status, output, artifact_bundle,
+                model_manifest, timestamp
+             ) VALUES (?1, ?2, 'assistant', '', 'success', ?3, ?4, ?5, ?6)",
+            params![
+                "older-version",
+                "dense-thread",
+                "{not-valid-design-json",
+                "{not-valid-artifact-json",
+                "{not-valid-manifest-json",
+                100_i64,
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (
+                id, thread_id, role, content, status, output, artifact_bundle,
+                model_manifest, timestamp
+             ) VALUES (?1, ?2, 'assistant', '', 'error', ?3, ?4, ?5, ?6)",
+            params![
+                "latest-version",
+                "dense-thread",
+                "{also-not-valid-design-json",
+                "{also-not-valid-artifact-json",
+                "{also-not-valid-manifest-json",
+                101_i64,
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            get_thread_head_version_id(&conn, "dense-thread").unwrap(),
+            Some("latest-version".to_string()),
+        );
+        let query_plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN
+                 SELECT id FROM messages
+                 WHERE thread_id = ?1
+                   AND deleted_at IS NULL
+                   AND role = 'assistant'
+                   AND status != 'discarded'
+                   AND output IS NOT NULL
+                 ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+                ["dense-thread"],
+                |row| row.get(3),
+            )
+            .unwrap();
+        assert!(
+            query_plan.contains("idx_messages_thread_visible_timestamp")
+                || query_plan.contains("idx_messages_thread_target_candidates"),
+            "head lookup must use a thread/timestamp index: {query_plan}",
+        );
+    }
+
+    #[test]
+    fn context_messages_are_bounded_before_payload_materialization() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db_internal(&conn).unwrap();
+        create_or_update_thread(&conn, "context-thread", "Context", 1, None).unwrap();
+        for index in 0..40_u64 {
+            add_message(
+                &conn,
+                "context-thread",
+                &Message {
+                    id: format!("message-{index}"),
+                    role: if index % 2 == 0 {
+                        MessageRole::User
+                    } else {
+                        MessageRole::Assistant
+                    },
+                    content: format!("dialogue {index}"),
+                    status: MessageStatus::Success,
+                    output: None,
+                    usage: None,
+                    artifact_bundle: None,
+                    model_manifest: None,
+                    structural_verification: None,
+                    agent_origin: None,
+                    timestamp: index,
+                    image_data: None,
+                    visual_kind: None,
+                    attachment_images: Vec::new(),
+                },
+            )
+            .unwrap();
+        }
+
+        let messages = get_thread_messages_for_context(&conn, "context-thread").unwrap();
+        assert_eq!(messages.len(), 10);
+        assert_eq!(
+            messages.first().map(|message| message.id.as_str()),
+            Some("message-30")
+        );
+        assert_eq!(
+            messages.last().map(|message| message.id.as_str()),
+            Some("message-39")
+        );
+    }
+
+    #[test]
+    fn legacy_json_payloads_migrate_once_to_binary_without_losing_dense_topology() {
+        let db_path = std::env::temp_dir().join(format!(
+            "ecky-binary-payload-migration-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let conn = init_db(&db_path).unwrap();
+        create_or_update_thread(&conn, "legacy-thread", "Legacy", 1, None).unwrap();
+
+        let mut artifact = sample_artifact_bundle("legacy-model");
+        artifact
+            .edge_targets
+            .push(crate::contracts::ViewerEdgeTarget {
+                target_id: "edge-1".to_string(),
+                durable_target_id: None,
+                canonical_target_id: None,
+                alias_ids: Vec::new(),
+                part_id: "body".to_string(),
+                viewer_node_id: "Body".to_string(),
+                label: "Edge 1".to_string(),
+                editable: true,
+                start: crate::contracts::ViewerEdgePoint {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                end: crate::contracts::ViewerEdgePoint {
+                    x: 1.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            });
+        let manifest = serde_json::json!({
+            "modelId": "legacy-model",
+            "sourceKind": "generated",
+            "document": {
+                "documentName": "Legacy",
+                "documentLabel": "Legacy"
+            },
+            "selectionTargets": [{
+                "targetId": "selection-1",
+                "partId": "body",
+                "viewerNodeId": "Body",
+                "label": "Body",
+                "kind": "part",
+                "editable": true
+            }],
+            "enrichmentState": { "status": "none", "proposals": [] }
+        });
+        conn.execute(
+            "INSERT INTO messages (
+                id, thread_id, role, content, status, artifact_bundle,
+                model_manifest, timestamp
+             ) VALUES (?1, ?2, 'assistant', '', 'success', ?3, ?4, 2)",
+            params![
+                "legacy-message",
+                "legacy-thread",
+                serde_json::to_string(&artifact).unwrap(),
+                manifest.to_string()
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM schema_migrations WHERE key = 'binary-cad-payload-v1'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        migrate_history_payload_storage(&db_path).unwrap();
+        let conn = init_db(&db_path).unwrap();
+        let storage_types: (String, String) = conn
+            .query_row(
+                "SELECT typeof(artifact_bundle), typeof(model_manifest)
+                 FROM messages WHERE id = 'legacy-message'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(storage_types, ("blob".to_string(), "blob".to_string()));
+        let (artifact, manifest) =
+            load_payload_full(&conn, PayloadOwnerKind::Message, "legacy-message").unwrap();
+        assert_eq!(artifact.unwrap().edge_targets[0].target_id, "edge-1");
+        assert_eq!(
+            manifest.unwrap().selection_targets[0].target_id.as_deref(),
+            Some("selection-1")
+        );
+        let projection =
+            cached_payload_projection(&conn, PayloadOwnerKind::Message, "legacy-message")
+                .unwrap()
+                .unwrap();
+        assert_eq!(projection.edge_count, 1);
+        assert_eq!(projection.selection_count, 1);
+        drop(conn);
+        let _ = fs::remove_file(&db_path);
+        let _ = fs::remove_file(format!("{}-wal", db_path.display()));
+        let _ = fs::remove_file(format!("{}-shm", db_path.display()));
+    }
+
+    #[test]
+    fn startup_rejects_unmigrated_legacy_payload_without_rewriting_history() {
+        let db_path = std::env::temp_dir().join(format!(
+            "ecky-binary-payload-startup-gate-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let conn = init_db(&db_path).unwrap();
+        create_or_update_thread(&conn, "legacy-thread", "Legacy", 1, None).unwrap();
+        let legacy_artifact =
+            serde_json::to_string(&sample_artifact_bundle("legacy-model")).unwrap();
+        conn.execute(
+            "INSERT INTO messages (
+                id, thread_id, role, content, status, artifact_bundle, timestamp
+             ) VALUES ('legacy-message', 'legacy-thread', 'assistant', '', 'success', ?1, 2)",
+            [legacy_artifact],
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM schema_migrations WHERE key = 'binary-cad-payload-v1'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let error = init_db(&db_path).unwrap_err().to_string();
+        assert!(error.contains("CAD payload migration required"), "{error}");
+        assert!(error.contains("1 message rows"), "{error}");
+        assert!(error.contains("0 draft rows"), "{error}");
+
+        let conn = Connection::open(&db_path).unwrap();
+        let payload_type: String = conn
+            .query_row(
+                "SELECT typeof(artifact_bundle) FROM messages WHERE id = 'legacy-message'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let marker_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations
+                 WHERE key = 'binary-cad-payload-v1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(payload_type, "text");
+        assert_eq!(marker_count, 0);
+        drop(conn);
+        let _ = fs::remove_file(&db_path);
+        let _ = fs::remove_file(format!("{}-wal", db_path.display()));
+        let _ = fs::remove_file(format!("{}-shm", db_path.display()));
+    }
+
+    #[test]
+    fn completed_binary_migration_rejects_late_legacy_text_instead_of_falling_back() {
+        let db_path = std::env::temp_dir().join(format!(
+            "ecky-binary-payload-no-fallback-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let conn = init_db(&db_path).unwrap();
+        create_or_update_thread(&conn, "strict-thread", "Strict", 1, None).unwrap();
+        conn.execute(
+            "INSERT INTO messages (
+                id, thread_id, role, content, status, artifact_bundle, timestamp
+             ) VALUES ('late-text', 'strict-thread', 'assistant', '', 'success', '{}', 2)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let error = init_db(&db_path).unwrap_err().to_string();
+        assert!(error.contains("migration is marked complete"), "{error}");
+        assert!(error.contains("legacy JSON rows remain"), "{error}");
+        let _ = fs::remove_file(&db_path);
+        let _ = fs::remove_file(format!("{}-wal", db_path.display()));
+        let _ = fs::remove_file(format!("{}-shm", db_path.display()));
+    }
+
+    #[test]
+    fn malformed_legacy_payload_rolls_back_binary_migration_and_names_owner() {
+        let db_path = std::env::temp_dir().join(format!(
+            "ecky-binary-payload-rollback-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let conn = init_db(&db_path).unwrap();
+        create_or_update_thread(&conn, "broken-thread", "Broken", 1, None).unwrap();
+        conn.execute(
+            "INSERT INTO messages (
+                id, thread_id, role, content, status, artifact_bundle, timestamp
+             ) VALUES ('broken-message', 'broken-thread', 'assistant', '', 'success', '{broken', 2)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM schema_migrations WHERE key = 'binary-cad-payload-v1'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let error = migrate_history_payload_storage(&db_path)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("message broken-message"), "{error}");
+        let conn = Connection::open(&db_path).unwrap();
+        let payload_type: String = conn
+            .query_row(
+                "SELECT typeof(artifact_bundle) FROM messages WHERE id = 'broken-message'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let marker_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations
+                 WHERE key = 'binary-cad-payload-v1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(payload_type, "text");
+        assert_eq!(marker_count, 0);
+        drop(conn);
+        let _ = fs::remove_file(&db_path);
+        let _ = fs::remove_file(format!("{}-wal", db_path.display()));
+        let _ = fs::remove_file(format!("{}-shm", db_path.display()));
     }
 }

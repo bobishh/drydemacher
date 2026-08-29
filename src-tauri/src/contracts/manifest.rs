@@ -241,7 +241,8 @@ pub struct EnrichmentProposal {
     pub part_ids: Vec<String>,
     #[serde(default)]
     pub parameter_keys: Vec<String>,
-    pub confidence: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
     pub status: EnrichmentStatus,
     pub provenance: String,
 }
@@ -545,6 +546,10 @@ pub struct ModelManifest {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[specta(optional)]
     pub component_import_origins: Vec<ComponentImportOrigin>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[specta(optional)]
+    pub component_placement_evidence: Vec<super::ComponentPlacementEvidence>,
 }
 
 impl ModelManifest {

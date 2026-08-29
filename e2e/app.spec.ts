@@ -73,6 +73,18 @@ test('Given workbench dock When settings opens and closes Then workbench control
   await expect(dock.getByRole('button', { name: /(PARAMS|Parameters)/i, exact: true })).toBeVisible();
 });
 
+test('Given workbench When Ecky is clicked once Then Projects opens for model work', async ({ page }) => {
+  await page.goto('/');
+  const projectsWindow = page.locator('[data-window-id="projects"]');
+  if (await projectsWindow.isVisible()) {
+    await projectsWindow.locator('.window-close').click();
+  }
+
+  await page.getByRole('button', { name: 'Poke Ecky' }).click();
+
+  await expect(projectsWindow).toBeVisible();
+});
+
 test('Given workbench dock When focused Code repeats Then inspector closes and reopens', async ({ page }) => {
   await page.goto('/');
   const dock = page.getByTestId('workbench-bottom-dock');
@@ -114,7 +126,6 @@ test('Given workbench dock When docs opens Then floating docs window renders les
   await expect(codeModal.locator('.cm-content')).toContainText('(box 40 8 6)');
   await expect(codeModal.getByRole('button', { name: 'APPLY' })).toBeVisible();
   await expect(codeModal.getByRole('button', { name: 'FORK TO NEW THREAD' })).toHaveCount(0);
-  await expect(codeModal.getByRole('button', { name: 'COMMIT VERSION' })).toBeVisible();
   await expect(codeModal.getByRole('button', { name: 'INSERT VERIFY' })).toBeVisible();
   await expect(codeModal.getByText('ECKY SOURCE')).toHaveCount(0);
   await expect(codeModal.getByText('SCRATCH SNIPPET ONLY')).toHaveCount(0);
@@ -130,7 +141,6 @@ test('Given workbench dock When docs opens Then floating docs window renders les
   await expect(tutorialModal).toBeVisible();
   await expect(tutorialModal.getByRole('button', { name: 'COPY CODE' })).toBeVisible();
   await expect(tutorialModal.getByRole('button', { name: 'APPLY' })).toBeVisible();
-  await expect(tutorialModal.getByRole('button', { name: 'COMMIT VERSION' })).toBeVisible();
   await expect(tutorialModal.getByRole('button', { name: 'INSERT VERIFY' })).toBeVisible();
   await expect(tutorialModal.getByText('ECKY SOURCE')).toHaveCount(0);
   await expect(tutorialModal.getByText('SCRATCH SNIPPET ONLY')).toHaveCount(0);
@@ -153,7 +163,6 @@ test('Given fresh thread When docs snippet opens in code Then modal can apply as
   const codeModal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR: Corner Bracket.ecky' });
   await expect(codeModal).toBeVisible();
   await expect(codeModal.getByRole('button', { name: 'APPLY' })).toBeVisible();
-  await expect(codeModal.getByRole('button', { name: 'COMMIT VERSION' })).toBeVisible();
 });
 
 test('Given projects window When plus new opens chooser Then chooser is global not nested in projects window', async ({ page }) => {

@@ -13,8 +13,9 @@ pub use authoring_graph::*;
 mod config;
 mod config_edn;
 pub use config::{
-    AppLogEntry, Asset, AutoAgent, Config, Engine, FreecadLibraryImportRequest, FreecadLibraryItem,
-    FreecadLibrarySearchRequest, McpConfig, McpMode, MicrowaveConfig, VoiceConfig,
+    AppLogEntry, Asset, AutoAgent, Config, Engine, FemComputeConfig, FemComputeQuality,
+    FreecadLibraryImportRequest, FreecadLibraryItem, FreecadLibrarySearchRequest, McpConfig,
+    McpMode, MicrowaveConfig, ProviderModels, VoiceConfig,
 };
 pub use config_edn::{
     decode_config, encode_config, normalize_legacy_config_for_edn, ConfigNormalizationWarning,
@@ -48,6 +49,12 @@ mod agent;
 pub use agent::*;
 mod mcp;
 pub use mcp::*;
+mod codex;
+pub use codex::*;
+mod agy;
+pub use agy::*;
+mod provider;
+pub use provider::*;
 pub type DesignParams = BTreeMap<String, ParamValue>;
 pub const GENIE_TRAITS_VERSION: u8 = 2;
 
@@ -1276,10 +1283,115 @@ fn campaign_run_kind() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct ThreadTimelineVersionSummary {
+    pub title: Option<String>,
+    pub version_name: Option<String>,
+    pub model_id: Option<String>,
+    pub has_output: bool,
+    pub has_runtime: bool,
+    pub has_manifest: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadTimelineRow {
+    pub id: String,
+    pub role: MessageRole,
+    pub content: String,
+    pub content_truncated: bool,
+    pub content_observed_bytes: usize,
+    pub content_allowed_bytes: usize,
+    pub status: MessageStatus,
+    pub agent_origin: Option<AgentOrigin>,
+    pub timestamp: u64,
+    pub timeline_order: i64,
+    pub version_summary: Option<ThreadTimelineVersionSummary>,
+    pub has_image: bool,
+    pub attachment_count: usize,
+    pub visual_kind: Option<MessageVisualKind>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ThreadMessagesPage {
-    pub messages: Vec<Message>,
-    pub next_before: Option<u64>,
+    pub messages: Vec<ThreadTimelineRow>,
+    pub next_before: Option<String>,
     pub has_more: bool,
+    pub observed_bytes: usize,
+    pub truncated_fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryChangedEvent {
+    pub thread_id: Option<String>,
+    pub message_id: Option<String>,
+    pub revision: u64,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WebContentRecoveryState {
+    pub termination_count: u32,
+    pub automatic_reload_used: bool,
+    pub blocked: bool,
+    pub raw_error: Option<String>,
+    pub occurred_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionDetail {
+    pub message: Message,
+    pub dense_topology_ref: Option<String>,
+    pub edge_count: usize,
+    pub face_count: usize,
+    pub selection_target_count: usize,
+    pub observed_bytes: usize,
+    pub truncated_fields: Vec<String>,
+    pub available_sections: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DenseTopologyKind {
+    Edge,
+    Face,
+    Selection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(tag = "kind", content = "value", rename_all = "camelCase")]
+pub enum DenseTopologyItem {
+    Edge(ViewerEdgeTarget),
+    Face(ViewerFaceTarget),
+    Selection(SelectionTarget),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DenseTopologyPage {
+    pub snapshot_ref: String,
+    pub kind: DenseTopologyKind,
+    pub items: Vec<DenseTopologyItem>,
+    pub next_cursor: Option<String>,
+    pub total_count: usize,
+    pub observed_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceWindow {
+    pub thread_id: String,
+    pub message_id: String,
+    pub digest: String,
+    pub content: String,
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub total_bytes: usize,
+    pub next_start_byte: Option<usize>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -3254,6 +3366,7 @@ mod tests {
         ModelManifest {
             geometry_provenance: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: "generated-abc123".to_string(),
             source_kind: ModelSourceKind::Generated,
@@ -3414,6 +3527,7 @@ mod tests {
             component_dependency_lock: None,
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: "generated-abc123".to_string(),
             source_kind: ModelSourceKind::Generated,
@@ -3425,7 +3539,7 @@ mod tests {
             fcstd_path: "/tmp/sample.fcstd".to_string(),
             manifest_path: "/tmp/sample.manifest.json".to_string(),
             macro_path: None,
-            preview_stl_path: "/tmp/sample.stl".to_string(),
+            model_stl_path: "/tmp/sample.stl".to_string(),
             viewer_assets: Vec::new(),
             edge_targets: Vec::new(),
             face_targets: Vec::new(),
@@ -3433,6 +3547,14 @@ mod tests {
             measurement_guides: Vec::new(),
             export_artifacts: Vec::new(),
         }
+    }
+
+    #[test]
+    fn artifact_bundle_owns_model_stl_contract() {
+        let bundle = sample_artifact_bundle();
+        let value = serde_json::to_value(&bundle).expect("serialize artifact bundle");
+        assert_eq!(value["modelStlPath"], "/tmp/sample.stl");
+        assert!(value.get("previewStlPath").is_none());
     }
 
     fn sample_manifest_with_shape(
@@ -3506,6 +3628,7 @@ mod tests {
         ModelManifest {
             geometry_provenance: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: format!(
                 "generated-shape-{}-{}-{}",
@@ -3965,10 +4088,10 @@ mod tests {
                 thread_id: "thread-1".to_string(),
                 preview_id: "preview-1".to_string(),
                 status: AgentDraftFeedbackStatus::Failed,
-                summary: "Preview STL file not found. (+1 more)".to_string(),
+                summary: "Model STL file not found. (+1 more)".to_string(),
                 items: vec![AgentDraftFeedbackItem {
                     code: "PREVIEW_STL_MISSING".to_string(),
-                    message: "Preview STL file not found.".to_string(),
+                    message: "Model STL file not found.".to_string(),
                 }],
                 authoring_lints: Vec::new(),
                 source: AgentDraftFeedbackSource::StructuralVerification,
@@ -4135,6 +4258,7 @@ mod tests {
             component_dependency_lock: None,
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: manifest.model_id.clone(),
             source_kind: ModelSourceKind::Generated,
@@ -4146,7 +4270,7 @@ mod tests {
             fcstd_path: "/tmp/model.FCStd".to_string(),
             manifest_path: "/tmp/model.json".to_string(),
             macro_path: Some("/tmp/model.py".to_string()),
-            preview_stl_path: "/tmp/model.stl".to_string(),
+            model_stl_path: "/tmp/model.stl".to_string(),
             viewer_assets: Vec::new(),
             edge_targets: Vec::new(),
             face_targets: Vec::new(),
@@ -4178,6 +4302,7 @@ mod tests {
             component_dependency_lock: None,
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: manifest.model_id.clone(),
             source_kind: ModelSourceKind::Generated,
@@ -4189,7 +4314,7 @@ mod tests {
             fcstd_path: "/tmp/model.FCStd".to_string(),
             manifest_path: "/tmp/model.json".to_string(),
             macro_path: Some("/tmp/model.py".to_string()),
-            preview_stl_path: "/tmp/model.stl".to_string(),
+            model_stl_path: "/tmp/model.stl".to_string(),
             viewer_assets: Vec::new(),
             edge_targets: vec![ViewerEdgeTarget {
                 target_id: "legacy-target-shell-edge".to_string(),
@@ -4259,6 +4384,7 @@ mod tests {
             component_dependency_lock: None,
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: manifest.model_id.clone(),
             source_kind: ModelSourceKind::Generated,
@@ -4270,7 +4396,7 @@ mod tests {
             fcstd_path: "/tmp/model.FCStd".to_string(),
             manifest_path: "/tmp/model.json".to_string(),
             macro_path: Some("/tmp/model.py".to_string()),
-            preview_stl_path: "/tmp/model.stl".to_string(),
+            model_stl_path: "/tmp/model.stl".to_string(),
             viewer_assets: Vec::new(),
             edge_targets: vec![ViewerEdgeTarget {
                 target_id: "legacy-target-shell".to_string(),
@@ -4336,6 +4462,7 @@ mod tests {
             component_dependency_lock: None,
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: manifest.model_id.clone(),
             source_kind: ModelSourceKind::Generated,
@@ -4347,7 +4474,7 @@ mod tests {
             fcstd_path: "/tmp/model.FCStd".to_string(),
             manifest_path: "/tmp/model.json".to_string(),
             macro_path: Some("/tmp/model.py".to_string()),
-            preview_stl_path: "/tmp/model.stl".to_string(),
+            model_stl_path: "/tmp/model.stl".to_string(),
             viewer_assets: Vec::new(),
             edge_targets: vec![ViewerEdgeTarget {
                 target_id: "missing-edge-target".to_string(),
@@ -4389,6 +4516,7 @@ mod tests {
             component_dependency_lock: None,
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: manifest.model_id.clone(),
             source_kind: ModelSourceKind::Generated,
@@ -4400,7 +4528,7 @@ mod tests {
             fcstd_path: "/tmp/model.FCStd".to_string(),
             manifest_path: "/tmp/model.json".to_string(),
             macro_path: Some("/tmp/model.py".to_string()),
-            preview_stl_path: "/tmp/model.stl".to_string(),
+            model_stl_path: "/tmp/model.stl".to_string(),
             viewer_assets: Vec::new(),
             edge_targets: Vec::new(),
             face_targets: vec![ViewerFaceTarget {
@@ -4836,5 +4964,45 @@ mod tests {
 \"\"\""#;
 
         assert_eq!(infer_macro_dialect_from_code(code), MacroDialect::Legacy);
+    }
+
+    #[test]
+    fn component_placement_evidence_uses_camel_case_boundary_fields() {
+        let evidence = ComponentPlacementEvidence {
+            instance_id: "side-latch".to_string(),
+            component_id: "latch".to_string(),
+            source_port_ref: PortReference {
+                instance_id: "side-latch".to_string(),
+                port_id: "mount".to_string(),
+            },
+            target_port_ref: PortReference {
+                instance_id: "enclosure".to_string(),
+                port_id: "side".to_string(),
+            },
+            placement_frame: PortFrame::identity(),
+            normal_mode: ComponentMateNormalMode::Opposed,
+            roll_degrees: 0.0,
+            offset: [0.0; 3],
+            mirror_axis: Some(ComponentMirrorAxis::X),
+            mate_status: ComponentMateStatus::Solved,
+            resolved_fit_values: BTreeMap::from([(
+                "clearance".to_string(),
+                ComponentInterfaceValue::Number(0.3),
+            )]),
+            diagnostics: Vec::new(),
+            source_start: Some(10),
+            source_end: Some(90),
+        };
+
+        let value = serde_json::to_value(evidence).expect("serialize evidence");
+        assert_eq!(value["instanceId"], "side-latch");
+        assert_eq!(value["sourcePortRef"]["portId"], "mount");
+        assert_eq!(
+            value["placementFrame"]["zAxis"],
+            serde_json::json!([0.0, 0.0, 1.0])
+        );
+        assert_eq!(value["normalMode"], "opposed");
+        assert_eq!(value["mateStatus"], "solved");
+        assert!(value.get("instance_id").is_none());
     }
 }

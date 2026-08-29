@@ -13,7 +13,7 @@ function bundle(): ArtifactBundle {
     artifactVersion: 1,
     fcstdPath: '/tmp/model.FCStd',
     manifestPath: '/tmp/model.json',
-    previewStlPath: '/tmp/preview.stl',
+    modelStlPath: '/tmp/model.stl',
     viewerAssets: [
       {
         partId: 'body',
@@ -79,17 +79,17 @@ test('resolveVersionLoupeRuntime returns renderable preview urls when runtime ex
     'thread-1',
     (path) => `asset:${path ?? ''}`,
     {
-      inspectRuntime: async (bundle) => ({
-        bundle: bundle ?? null,
-        previewAvailable: true,
-        degradedToPreview: false,
-        skippedOversizedPreview: false,
+      materializePreview: async () => ({
+        artifactBundle: bundle(),
+        modelManifest: message().modelManifest!,
+        leaseId: null,
+        ephemeral: false,
       }),
     },
   );
 
   assert.equal(resolved.available, true);
-  assert.equal(resolved.previewUrl, 'asset:/tmp/preview.stl');
+  assert.equal(resolved.previewUrl, 'asset:/tmp/model.stl');
   assert.equal(resolved.viewerAssets[0]?.path, 'asset:/tmp/body.stl');
 });
 
@@ -98,70 +98,46 @@ test('resolveVersionLoupeRuntime hides the viewer when runtime is gone', async (
     {
       ...message(),
       output: null,
+      artifactBundle: null,
     },
     'thread-1',
     (path) => `asset:${path ?? ''}`,
     {
       getThreadMessageVersion: async () => null,
-      inspectRuntime: async () => ({
-        bundle: null,
-        previewAvailable: false,
-        degradedToPreview: false,
-        skippedOversizedPreview: false,
-      }),
+      materializePreview: async () => assert.fail('runtime must not materialize without a version'),
     },
   );
 
   assert.equal(resolved.available, false);
   assert.equal(resolved.previewUrl, null);
   assert.deepEqual(resolved.viewerAssets, []);
+  assert.equal(resolved.leaseId, null);
 });
 
-test('resolveVersionLoupeRuntime rebuilds missing runtime from source payload and persists it', async () => {
+test('resolveVersionLoupeRuntime materializes an ephemeral lease for an old version', async () => {
   const calls: string[] = [];
   const resolved = await resolveVersionLoupeRuntime(
     message(),
     'thread-1',
     (path) => `asset:${path ?? ''}`,
     {
-      inspectRuntime: async (bundle) => {
-        calls.push(`inspect:${bundle?.modelId ?? 'null'}`);
-        if (bundle?.modelId === 'model-rebuilt') {
-          return {
-            bundle,
-            previewAvailable: true,
-            degradedToPreview: false,
-            skippedOversizedPreview: false,
-          };
-        }
+      materializePreview: async (threadId, messageId) => {
+        calls.push(`materialize:${threadId}:${messageId}`);
         return {
-          bundle: null,
-          previewAvailable: false,
-          degradedToPreview: false,
-          skippedOversizedPreview: false,
+          artifactBundle: {
+            ...bundle(),
+            modelStlPath: '/tmp/history-preview/lease-1/model.stl',
+          },
+          modelManifest: message().modelManifest!,
+          leaseId: 'lease-1',
+          ephemeral: true,
         };
-      },
-      renderModel: async () => ({
-        ...bundle(),
-        modelId: 'model-rebuilt',
-        contentHash: 'hash-rebuilt',
-        previewStlPath: '/tmp/rebuilt-preview.stl',
-      }),
-      getModelManifest: async (modelId) => ({
-        ...message().modelManifest!,
-        modelId,
-      }),
-      updateVersionRuntime: async (messageId, artifactBundle, modelManifest) => {
-        calls.push(`persist:${messageId}:${artifactBundle.modelId}:${modelManifest.modelId}`);
       },
     },
   );
 
   assert.equal(resolved.available, true);
-  assert.equal(resolved.previewUrl, 'asset:/tmp/rebuilt-preview.stl');
-  assert.deepEqual(calls, [
-    'inspect:model-1',
-    'inspect:model-rebuilt',
-    'persist:version-1:model-rebuilt:model-rebuilt',
-  ]);
+  assert.equal(resolved.previewUrl, 'asset:/tmp/history-preview/lease-1/model.stl');
+  assert.equal(resolved.leaseId, 'lease-1');
+  assert.deepEqual(calls, ['materialize:thread-1:version-1']);
 });

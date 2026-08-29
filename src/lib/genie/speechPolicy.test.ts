@@ -45,7 +45,7 @@ test('resolveAssistantSpeechText speaks final generated LLM responses', () => {
       contentHash: 'hash',
       fcstdPath: '/tmp/model.FCStd',
       manifestPath: '/tmp/manifest.json',
-      previewStlPath: '/tmp/preview.stl',
+      modelStlPath: '/tmp/model.stl',
       viewerAssets: [],
     },
   });
@@ -76,7 +76,7 @@ test('resolveAssistantSpeechText suppresses MCP working version draft updates', 
       contentHash: 'hash',
       fcstdPath: '/tmp/draft.FCStd',
       manifestPath: '/tmp/draft-manifest.json',
-      previewStlPath: '/tmp/draft.stl',
+      modelStlPath: '/tmp/draft.stl',
       viewerAssets: [],
     },
     agentOrigin: {

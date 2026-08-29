@@ -30,6 +30,7 @@ const ALL_CORE_OPERATION_NAMES: &[&str] = &[
     "mesh",
     "polyhedron",
     "heightfield",
+    "protrude",
     "sphere",
     "cylinder",
     "cone",
@@ -88,6 +89,7 @@ const NATIVE_OCCT_OPS: &[BackendOperationCapability] = &[
     supported("mesh"),
     supported("polyhedron"),
     supported("heightfield"),
+    supported("protrude"),
     supported("sphere"),
     supported("cylinder"),
     supported("cone"),
@@ -165,6 +167,10 @@ const FREECAD_OPS: &[BackendOperationCapability] = &[
     ),
     unsupported(
         "heightfield",
+        "image-derived mesh operation requires the EckyRust renderer",
+    ),
+    unsupported(
+        "protrude",
         "image-derived mesh operation requires the EckyRust renderer",
     ),
     supported("sphere"),

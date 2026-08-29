@@ -51,6 +51,10 @@ export type MaterializedSemanticView = {
   advisories: Advisory[];
 };
 
+export function usesPersistedControlViews(manifest: ModelManifest | null): boolean {
+  return manifest?.sourceLanguage !== 'ecky';
+}
+
 const PRIMARY_CONTROL_WORDS = [
   'size',
   'diameter',
@@ -531,7 +535,14 @@ export function ensureSemanticManifest(
   params: DesignParams,
   previousManifest: ModelManifest | null = null,
 ): ModelManifest | null {
-  if (!manifest || !uiSpec) return manifest;
+  if (!manifest) return null;
+  if (!usesPersistedControlViews(manifest)) {
+    return {
+      ...manifest,
+      controlViews: [],
+    };
+  }
+  if (!uiSpec) return manifest;
   const fields = uiSpec.fields || [];
   if (fields.length === 0) {
     return {
@@ -584,6 +595,7 @@ export function resolveActiveControlViewId(
   selectedPartId: string | null,
   requestedViewId: string | null,
 ): string | null {
+  if (!usesPersistedControlViews(manifest)) return null;
   const views = manifest?.controlViews || [];
   if (views.length === 0) return null;
 
@@ -636,7 +648,7 @@ export function materializeControlViews(
   uiSpec: UiSpec | null | undefined,
   params: DesignParams,
 ): MaterializedSemanticView[] {
-  if (!manifest || !uiSpec) return [];
+  if (!manifest || !uiSpec || !usesPersistedControlViews(manifest)) return [];
   const primitivesById = new Map(
     (manifest.controlPrimitives || [])
       .map((primitive) => [primitive.primitiveId, materializePrimitive(primitive, uiSpec, params)] as const)

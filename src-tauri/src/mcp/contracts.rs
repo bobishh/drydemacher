@@ -143,7 +143,7 @@ pub struct AgentViewportScreenshotEvent {
     pub message_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
-    pub preview_stl_path: String,
+    pub model_stl_path: String,
     #[serde(default)]
     pub viewer_assets: Vec<crate::contracts::ViewerAsset>,
     pub include_overlays: bool,
@@ -212,6 +212,32 @@ pub struct FemConvergenceToolRequest {
     pub mesh_sizes_mm: Vec<f64>,
     pub displacement_relative_tolerance: f64,
     pub stress_relative_tolerance: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FemTopologyToolRequest {
+    #[serde(flatten)]
+    pub target: FemTargetRequest,
+    #[serde(default)]
+    pub resume_state_digest: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FemTopologyReconstructToolRequest {
+    #[serde(flatten)]
+    pub target: FemTargetRequest,
+    pub analysis_identity_digest: String,
+    pub mesh_content_digest: String,
+    pub input_digest: String,
+    pub state_digest: String,
+    #[serde(default = "default_density_threshold")]
+    pub density_threshold: f64,
+}
+
+fn default_density_threshold() -> f64 {
+    0.5
 }
 
 // --- user_confirm_request ---
@@ -394,6 +420,9 @@ pub struct ThreadMessageEntry {
 pub struct ThreadMessagesResponse {
     pub thread_id: String,
     pub messages: Vec<ThreadMessageEntry>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+    pub observed_bytes: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1145,6 +1174,8 @@ pub struct ShapeGraphInstance {
     pub dependency_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<crate::contracts::ComponentPlacementEvidence>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1215,7 +1246,7 @@ pub struct ArtifactBundleDigest {
     pub content_hash: String,
     pub source_language: String,
     pub geometry_backend: String,
-    pub has_preview_stl: bool,
+    pub has_model_stl: bool,
     pub viewer_asset_count: usize,
     pub edge_target_count: usize,
     pub face_target_count: usize,
@@ -1228,6 +1259,7 @@ pub struct ArtifactBundleDigest {
     pub faceted_step: bool,
     pub analytic_step: bool,
     pub source_mesh_digests: Vec<String>,
+    pub component_placement_count: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1645,13 +1677,11 @@ pub struct VersionSaveRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct FemVerifiedCommitRequest {
+pub struct FemVerifiedPublishRequest {
     #[serde(flatten)]
     pub identity: AgentIdentityOverride,
     pub thread_id: Option<String>,
     pub message_id: Option<String>,
-    pub title: Option<String>,
-    pub version_name: Option<String>,
     pub analysis_name: String,
     pub analysis_identity_digest: String,
     pub solution_digest: String,
@@ -1733,6 +1763,22 @@ pub struct VersionRestoreResponse {
     pub thread_id: String,
     pub message_id: String,
     pub artifact_digest: Option<ArtifactBundleDigest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionDeleteRequest {
+    #[serde(flatten)]
+    pub identity: AgentIdentityOverride,
+    pub message_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionDeleteResponse {
+    pub thread_id: String,
+    pub message_id: String,
+    pub deleted: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1891,7 +1937,7 @@ pub struct PrintabilityAnalyzeResponse {
     pub message_id: String,
     pub model_id: String,
     pub artifact_digest: ArtifactBundleDigest,
-    pub preview_stl_path: String,
+    pub model_stl_path: String,
     pub analysis: crate::services::printability::PrintabilityAnalysis,
 }
 
@@ -1912,7 +1958,7 @@ pub struct PrintabilityTransformRecipesGetResponse {
     pub message_id: String,
     pub model_id: String,
     pub artifact_digest: ArtifactBundleDigest,
-    pub preview_stl_path: String,
+    pub model_stl_path: String,
     pub recipes: Vec<crate::services::printability::SupportlessFdmTransformRecipe>,
 }
 
@@ -1920,7 +1966,7 @@ pub struct PrintabilityTransformRecipesGetResponse {
 #[serde(rename_all = "camelCase")]
 pub struct SemanticTransformArtifactGuard {
     pub model_id: String,
-    pub preview_stl_path: String,
+    pub model_stl_path: String,
     pub content_hash: String,
 }
 
@@ -1985,6 +2031,52 @@ mod tests {
                 thread_id: "thread-1".to_string(),
                 message_id: "msg-1".to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn shape_graph_instance_exposes_component_mate_without_mesh_coordinates() {
+        let placement = crate::contracts::ComponentPlacementEvidence {
+            instance_id: "side-latch".to_string(),
+            component_id: "dryer-latch".to_string(),
+            source_port_ref: crate::contracts::PortReference {
+                instance_id: "side-latch".to_string(),
+                port_id: "mount".to_string(),
+            },
+            target_port_ref: crate::contracts::PortReference {
+                instance_id: "enclosure".to_string(),
+                port_id: "side-left".to_string(),
+            },
+            placement_frame: crate::contracts::PortFrame {
+                origin: [50.0, 0.0, 15.0],
+                x_axis: [0.0, 1.0, 0.0],
+                y_axis: [0.0, 0.0, 1.0],
+                z_axis: [1.0, 0.0, 0.0],
+            },
+            normal_mode: crate::contracts::ComponentMateNormalMode::Opposed,
+            roll_degrees: 0.0,
+            offset: [0.0; 3],
+            mirror_axis: None,
+            mate_status: crate::contracts::ComponentMateStatus::Solved,
+            resolved_fit_values: Default::default(),
+            diagnostics: Vec::new(),
+            source_start: Some(100),
+            source_end: Some(220),
+        };
+        let instance = ShapeGraphInstance {
+            instance_id: "side-latch".to_string(),
+            prototype_feature_id: Some("dryer-latch".to_string()),
+            dependency_ids: vec!["enclosure".to_string()],
+            target_ids: Vec::new(),
+            placement: Some(placement),
+        };
+
+        let value = serde_json::to_value(instance).expect("serialize shape graph instance");
+        assert_eq!(value["placement"]["targetPortRef"]["portId"], "side-left");
+        assert_eq!(value["placement"]["normalMode"], "opposed");
+        assert_eq!(
+            value["placement"]["placementFrame"]["zAxis"],
+            serde_json::json!([1.0, 0.0, 0.0])
         );
     }
 }

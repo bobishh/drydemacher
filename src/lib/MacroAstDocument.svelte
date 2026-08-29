@@ -34,7 +34,6 @@
     parameters = {},
     fields = [],
     highlightedParamKey = null,
-    liveApply = false,
     focusNodeId = null,
     onFocusNodeHandled,
     onApplyMacroCode = undefined,
@@ -48,7 +47,6 @@
     parameters?: DesignParams;
     fields?: ResolvedUiField[];
     highlightedParamKey?: string | null;
-    liveApply?: boolean;
     focusNodeId?: string | null;
     onFocusNodeHandled?: () => void;
     onApplyMacroCode?: (code: string) => Promise<unknown>;
@@ -275,7 +273,6 @@
             autoField={field._auto}
             highlighted={highlightedParamKey === field.key}
             cadTone={getCadTone(field)}
-            {liveApply}
             compact={true}
             onDraftValue={(nextValue) => onDraftValue?.(field.key, nextValue)}
             onUpdate={(nextValue) => onUpdate?.(field.key, nextValue)}

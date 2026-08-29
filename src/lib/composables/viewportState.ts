@@ -10,6 +10,7 @@ export type ViewportStateInput = {
   activeVersionId: string | null;
   activeVersionMessage: Message | null;
   cameraStateByTarget: Record<string, ViewportCameraState>;
+  runtimeRevision: number;
   stlUrl: string | null;
   toAssetUrl: (path: string | null | undefined) => string;
 };
@@ -54,9 +55,10 @@ export function deriveViewportState(input: ViewportStateInput): ViewportState {
         input.activeArtifactBundle.artifactVersion ?? '',
         input.activeArtifactBundle.contentHash ?? '',
         input.stlUrl ?? '',
+        input.runtimeRevision,
       ].join(':')
     : input.stlUrl
-      ? [input.activeThreadId ?? '', input.activeVersionId ?? '', input.stlUrl].join(':')
+      ? [input.activeThreadId ?? '', input.activeVersionId ?? '', input.stlUrl, input.runtimeRevision].join(':')
       : input.activeThreadId && input.activeVersionId
         ? viewportTargetKey(input.activeThreadId, input.activeVersionId)
         : null;

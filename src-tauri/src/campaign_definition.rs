@@ -102,7 +102,7 @@ struct PreviewIndexEntry {
     canonical_source_digest: String,
     runtime_digest: String,
     artifact_bundle_path: String,
-    preview_stl_path: String,
+    model_stl_path: String,
 }
 
 pub fn packaged_root(app: &tauri::AppHandle) -> AppResult<PathBuf> {
@@ -296,7 +296,7 @@ fn resolve_canonical_preview(
     }
     let bundle_path =
         preview_package_path(root, &entry.artifact_bundle_path, "artifactBundlePath")?;
-    let preview_stl_path = preview_package_path(root, &entry.preview_stl_path, "previewStlPath")?;
+    let model_stl_path = preview_package_path(root, &entry.model_stl_path, "modelStlPath")?;
     let raw_bundle = fs::read(&bundle_path).map_err(|error| {
         AppError::not_found(format!("Campaign preview bundle unavailable: {error}"))
     })?;
@@ -306,23 +306,23 @@ fn resolve_canonical_preview(
             "Campaign preview runtime digest mismatch for {step_id}."
         )));
     }
-    if !preview_stl_path.is_file()
-        || fs::metadata(&preview_stl_path)
+    if !model_stl_path.is_file()
+        || fs::metadata(&model_stl_path)
             .map_err(|error| {
-                AppError::not_found(format!("Campaign preview STL unavailable: {error}"))
+                AppError::not_found(format!("Campaign model STL unavailable: {error}"))
             })?
             .len()
             == 0
     {
         return Err(AppError::validation(format!(
-            "Campaign preview STL missing or empty for {step_id}."
+            "Campaign model STL missing or empty for {step_id}."
         )));
     }
     let mut artifact_bundle: ArtifactBundle =
         serde_json::from_slice(&raw_bundle).map_err(|error| {
             AppError::parse(format!("Campaign preview bundle invalid JSON: {error}"))
         })?;
-    artifact_bundle.preview_stl_path = preview_stl_path.to_string_lossy().into_owned();
+    artifact_bundle.model_stl_path = model_stl_path.to_string_lossy().into_owned();
     validate_artifact_bundle(&artifact_bundle)?;
     Ok(Some(CampaignCanonicalPreview {
         canonical_source_digest: entry.canonical_source_digest,
@@ -367,11 +367,12 @@ fn load_preview_index(index_path: &Path) -> AppResult<Vec<PreviewIndexEntry>> {
                 "preview artifact-bundle-path",
             )?
             .to_owned(),
-            preview_stl_path: string(
-                required(entry, "preview-stl-path")?,
-                "preview preview-stl-path",
-            )?
-            .to_owned(),
+            model_stl_path: optional_string(entry, "model-stl-path")?
+                .or(optional_string(entry, "preview-stl-path")?)
+                .ok_or_else(|| {
+                    AppError::validation("Campaign preview index missing model-stl-path.")
+                })?
+                .to_owned(),
         };
         if !seen.insert(parsed.step_id.clone()) {
             return Err(AppError::validation(format!(
@@ -508,7 +509,7 @@ fn reusable_runtime_bundle(
             if format!("sha256:{:x}", Sha256::digest(source.as_bytes())) != source_digest {
                 continue;
             }
-            if !Path::new(&bundle.preview_stl_path).is_file() {
+            if !Path::new(&bundle.model_stl_path).is_file() {
                 continue;
             }
             if validate_artifact_bundle(&bundle).is_ok() {
@@ -525,24 +526,24 @@ fn store_preview_package(
     source_digest: &str,
     bundle: &ArtifactBundle,
 ) -> AppResult<()> {
-    let preview_source = Path::new(&bundle.preview_stl_path);
+    let preview_source = Path::new(&bundle.model_stl_path);
     if !preview_source.is_file() {
         return Err(AppError::validation(format!(
-            "Cannot package preview for {step_id}: runtime preview STL is missing."
+            "Cannot package preview for {step_id}: runtime model STL is missing."
         )));
     }
     let package_key = source_digest.trim_start_matches("sha256:");
     let package_relative = format!("{package_key}/bundle.json");
-    let stl_relative = format!("{package_key}/preview.stl");
+    let stl_relative = format!("{package_key}/model.stl");
     let package_dir = root.join("previews").join(package_key);
     fs::create_dir_all(&package_dir).map_err(|error| {
         AppError::persistence(format!("Cannot create campaign preview package: {error}"))
     })?;
-    fs::copy(preview_source, package_dir.join("preview.stl")).map_err(|error| {
-        AppError::persistence(format!("Cannot copy campaign preview STL: {error}"))
+    fs::copy(preview_source, package_dir.join("model.stl")).map_err(|error| {
+        AppError::persistence(format!("Cannot copy campaign model STL: {error}"))
     })?;
     let mut packaged_bundle = bundle.clone();
-    packaged_bundle.preview_stl_path = "preview.stl".to_owned();
+    packaged_bundle.model_stl_path = "model.stl".to_owned();
     let bundle_bytes = serde_json::to_vec_pretty(&packaged_bundle).map_err(|error| {
         AppError::persistence(format!("Cannot serialize campaign preview bundle: {error}"))
     })?;
@@ -556,7 +557,7 @@ fn store_preview_package(
             canonical_source_digest: source_digest.to_owned(),
             runtime_digest: format!("sha256:{:x}", Sha256::digest(&bundle_bytes)),
             artifact_bundle_path: package_relative,
-            preview_stl_path: stl_relative,
+            model_stl_path: stl_relative,
         },
     )
 }
@@ -590,8 +591,8 @@ fn upsert_preview_index(root: &Path, entry: PreviewIndexEntry) -> AppResult<()> 
                     SteelDataValue::String(entry.artifact_bundle_path),
                 ),
                 (
-                    ":preview-stl-path".to_owned(),
-                    SteelDataValue::String(entry.preview_stl_path),
+                    ":model-stl-path".to_owned(),
+                    SteelDataValue::String(entry.model_stl_path),
                 ),
             ])
         })

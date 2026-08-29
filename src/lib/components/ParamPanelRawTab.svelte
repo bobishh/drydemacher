@@ -12,7 +12,6 @@
     selectedPart = null,
     parameters,
     highlightedParamKey = null,
-    liveApply = false,
     getRangeProps,
     getCadTone,
     onDraftValue,
@@ -27,7 +26,6 @@
     selectedPart?: PartBinding | null;
     parameters: DesignParams;
     highlightedParamKey?: string | null;
-    liveApply?: boolean;
     getRangeProps: (field: ResolvedUiField) => RangeProps;
     getCadTone: (field: ResolvedUiField) => CadTone;
     onDraftValue: (key: string, value: ParamValue) => void;
@@ -56,7 +54,6 @@
           focused={true}
           highlighted={highlightedParamKey === field.key}
           cadTone={getCadTone(field)}
-          {liveApply}
           onDraftValue={(nextValue) => onDraftValue(field.key, nextValue)}
           onUpdate={(nextValue) => onUpdate(field.key, nextValue)}
           onPickImage={() => onPickImage(field.key)}
@@ -88,7 +85,6 @@
         autoField={field._auto}
         highlighted={highlightedParamKey === field.key}
         cadTone={getCadTone(field)}
-        {liveApply}
         onDraftValue={(nextValue) => onDraftValue(field.key, nextValue)}
         onUpdate={(nextValue) => onUpdate(field.key, nextValue)}
         onPickImage={() => onPickImage(field.key)}

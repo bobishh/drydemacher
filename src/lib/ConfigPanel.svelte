@@ -16,6 +16,7 @@
     getMcpServerStatus,
     exportEckyMcpSkillZip,
     listAgentModels,
+    listProviderModels,
     saveRecordedAudio,
     uploadAsset,
     type AppLogEntry,
@@ -28,9 +29,8 @@
     GenieTraits,
   } from './types/domain';
 
-  type ActiveSection = 'app' | 'agents' | 'engines';
-  type ConnectionType = 'api_key' | 'mcp' | null;
-  type McpMode = 'passive' | 'active';
+  type ActiveSection = 'app' | 'compute' | 'agents' | 'engines';
+  type ConnectionType = 'api_key' | 'mcp' | 'provider' | null;
   type RecordingTarget = 'hum' | 'ding';
   type MicLoadState = 'idle' | 'loading' | 'ready' | 'error';
   type MicrophoneOption = {
@@ -73,8 +73,20 @@
   if (!Number.isFinite(config.mcp.promptTimeoutSecs)) {
     config.mcp.promptTimeoutSecs = 1800;
   }
+  if (!config.femCompute) {
+    config.femCompute = {
+      quality: 'balanced',
+      maximumWallTimeMinutes: 30,
+      maximumMemoryMiB: 8192,
+      threadCount: 0,
+    };
+  }
+  if (!config.providerModels) {
+    config.providerModels = { codex: '', agy: '' };
+  }
 
   function deriveConnectionType(): ConnectionType {
+    if (config.connectionType?.startsWith('provider:')) return 'provider';
     if (config.connectionType === 'mcp') return 'mcp';
     if (config.connectionType === 'api_key') return 'api_key';
     // fallback heuristic for configs without persisted connectionType
@@ -105,27 +117,11 @@
   }
 
   const connectionType = $derived.by<ConnectionType>(() => deriveConnectionType());
-  const mcpMode = $derived.by<McpMode>(() =>
-    normalizeMcpMode(config.mcp?.mode, config.mcp?.autoAgents ?? []),
-  );
-
   function setConnectionType(type: ConnectionType) {
     config = {
       ...config,
-      connectionType: type,
+      connectionType: type === 'provider' ? 'provider:codex' : type,
     };
-  }
-
-  function setMcpMode(mode: McpMode) {
-    const currentMcp = getMcpConfig();
-    config = {
-      ...config,
-      mcp: {
-        ...currentMcp,
-        mode,
-      },
-    };
-    ensurePrimaryAutoAgent();
   }
 
   // Recording state
@@ -193,7 +189,6 @@
     'control_view_delete',
     'measurement_annotation_save',
     'measurement_annotation_delete',
-    'commit_preview_version',
     'thread_fork_from_target',
     'version_restore',
     'user_confirm_request',
@@ -208,11 +203,63 @@
     { id: 'openai', name: 'OpenAI (or Compatible)' },
     { id: 'ollama', name: 'Ollama (Local)' }
   ];
+  const providerIntegrations = [
+    { id: 'codex', label: 'CODEX' },
+    { id: 'agy', label: 'AGY' },
+  ] as const;
 
   // Per-agent fetched model lists (keyed by agent id)
   let agentModelLists = $state<Record<string, string[]>>({});
   let agentModelIsLive = $state<Record<string, boolean>>({});
   let agentModelFetching = $state<Record<string, boolean>>({});
+  let providerModelLists = $state<Record<'codex' | 'agy', string[]>>({ codex: [], agy: [] });
+  let providerModelFetching = $state<Record<'codex' | 'agy', boolean>>({ codex: false, agy: false });
+  let providerModelAutoFetched = $state<Record<'codex' | 'agy', boolean>>({ codex: false, agy: false });
+
+  async function fetchProviderModels(provider: 'codex' | 'agy') {
+    providerModelFetching = { ...providerModelFetching, [provider]: true };
+    message = '';
+    try {
+      const result = await listProviderModels(provider);
+      providerModelLists = { ...providerModelLists, [provider]: result.models };
+    } catch (error) {
+      message = `Provider models failed: ${formatBackendError(error)}`;
+    } finally {
+      providerModelFetching = { ...providerModelFetching, [provider]: false };
+    }
+  }
+
+  function selectProvider(provider: 'codex' | 'agy') {
+    config = {
+      ...config,
+      connectionType: `provider:${provider}`,
+      providerModels: { ...config.providerModels },
+    };
+  }
+
+  function selectProviderModel(provider: 'codex' | 'agy', value: unknown) {
+    config = {
+      ...config,
+      providerModels: {
+        ...config.providerModels,
+        [provider]: `${value ?? ''}`.trim(),
+      },
+    };
+  }
+
+  $effect(() => {
+    const provider = config.connectionType?.startsWith('provider:')
+      ? config.connectionType.slice('provider:'.length)
+      : '';
+    if (
+      (provider !== 'codex' && provider !== 'agy')
+      || providerModelLists[provider].length > 0
+      || providerModelFetching[provider]
+      || providerModelAutoFetched[provider]
+    ) return;
+    providerModelAutoFetched = { ...providerModelAutoFetched, [provider]: true };
+    void fetchProviderModels(provider);
+  });
 
   async function fetchAgentModels(agent: AutoAgent) {
     if (!agent.cmd.trim()) return;
@@ -240,7 +287,6 @@
   let autoFetchDone = false;
   $effect(() => {
     if (activeSection !== 'agents' || autoFetchDone) return;
-    if (mcpMode !== 'active') return;
     autoFetchDone = true;
     const agents = config.mcp?.autoAgents ?? [];
     for (const agent of agents) {
@@ -580,6 +626,9 @@
     try {
       const voiceConfig = getVoiceConfig();
       voiceConfig.sttLanguageCode = voiceConfig.sttLanguageCode.trim() || 'en-US';
+      config.femCompute.maximumWallTimeMinutes = Math.min(1440, Math.max(1, config.femCompute.maximumWallTimeMinutes || 30));
+      config.femCompute.maximumMemoryMiB = Math.min(1_048_576, Math.max(256, config.femCompute.maximumMemoryMiB || 8192));
+      config.femCompute.threadCount = Math.min(256, Math.max(0, config.femCompute.threadCount || 0));
       if (onsave) await onsave();
       message = 'Registry saved successfully.';
     } catch (e: unknown) {
@@ -919,6 +968,7 @@
 <div class="config-container">
   <aside class="config-sidebar">
     <button class="nav-item {activeSection === 'app' ? 'active' : ''}" onclick={() => activeSection = 'app'}>APP</button>
+    <button class="nav-item {activeSection === 'compute' ? 'active' : ''}" onclick={() => activeSection = 'compute'}>COMPUTE</button>
     <button class="nav-item {activeSection === 'agents' || activeSection === 'engines' ? 'active' : ''}" onclick={() => activeSection = 'agents'}>AGENTS</button>
   </aside>
 
@@ -942,7 +992,7 @@
             </div>
           </div>
           <div class="ecky-settings-card__preview" data-testid="settings-ecky-preview">
-            <VertexGenie mode="idle" bubble="" traits={eckyTraits} safeRightInset={0} />
+            <VertexGenie mode="idle" traits={eckyTraits} safeRightInset={0} />
           </div>
         </section>
         {#if runtimeCapabilities}
@@ -1167,6 +1217,38 @@
           {/if}
         </div>
 
+      {:else if activeSection === 'compute'}
+        <div class="field">
+          <div class="field-title">FEM / TOPOLOGY COMPUTE</div>
+          <div class="field-help">Global execution policy. Solver derives internal solve limits; tasks never supply them.</div>
+        </div>
+
+        <div class="field">
+          <label for="fem-quality">FEM QUALITY</label>
+          <select id="fem-quality" class="input-mono" bind:value={config.femCompute.quality}>
+            <option value="draft">DRAFT</option>
+            <option value="balanced">BALANCED</option>
+            <option value="fine">FINE</option>
+          </select>
+          <div class="field-help">Controls topology iteration and convergence refinement presets.</div>
+        </div>
+
+        <div class="field-row compute-grid">
+          <div class="field flex-1">
+            <label for="fem-wall-time-minutes">FEM WALL TIME MINUTES</label>
+            <input id="fem-wall-time-minutes" type="number" class="input-mono" min="1" max="1440" bind:value={config.femCompute.maximumWallTimeMinutes} />
+          </div>
+          <div class="field flex-1">
+            <label for="fem-memory-mib">FEM MEMORY MIB</label>
+            <input id="fem-memory-mib" type="number" class="input-mono" min="256" max="1048576" step="256" bind:value={config.femCompute.maximumMemoryMiB} />
+          </div>
+          <div class="field flex-1">
+            <label for="fem-threads">FEM THREADS</label>
+            <input id="fem-threads" type="number" class="input-mono" min="0" max="256" bind:value={config.femCompute.threadCount} />
+          </div>
+        </div>
+        <div class="field-help">Threads: 0 = automatic. Limits stop work safely and preserve resumable state.</div>
+
       {:else if activeSection === 'agents'}
         <div class="field">
           <div class="field-title">CONNECTION TYPE</div>
@@ -1179,6 +1261,10 @@
               class="conn-type-btn {connectionType === 'mcp' ? 'active' : ''}"
               onclick={() => setConnectionType('mcp')}
             >MCP</button>
+            <button
+              class="conn-type-btn {connectionType === 'provider' ? 'active' : ''}"
+              onclick={() => setConnectionType('provider')}
+            >PROVIDER</button>
           </div>
         </div>
 
@@ -1248,25 +1334,6 @@
 
         {:else if connectionType === 'mcp'}
           <div class="field">
-            <div class="field-title">MODE</div>
-            <div class="conn-type-row">
-              <button
-                class="conn-type-btn {mcpMode === 'passive' ? 'active' : ''}"
-                onclick={() => setMcpMode('passive')}
-              >PASSIVE</button>
-              <button
-                class="conn-type-btn {mcpMode === 'active' ? 'active' : ''}"
-                onclick={() => setMcpMode('active')}
-              >ACTIVE</button>
-            </div>
-            <div class="field-help">
-              {mcpMode === 'passive'
-                ? 'External agents (Claude Code, Gemini CLI, Codex) connect to Ecky\'s MCP server.'
-                : 'Ecky wakes the primary agent when a queued message arrives, then hibernates it between turns.'}
-            </div>
-          </div>
-
-          <div class="field">
             <label for="mcp-prompt-timeout">PROMPT TIMEOUT (SECONDS)</label>
             <input
               id="mcp-prompt-timeout"
@@ -1302,193 +1369,232 @@
             </div>
           </div>
 
-          {#if mcpMode === 'passive'}
-            <div class="field">
-              <div class="field-row">
-                <div class="field flex-1">
-                  <label for="mcp-port">PORT</label>
-                  <input
-                    id="mcp-port"
-                    type="number"
-                    class="input-mono"
-                    min="1024"
-                    max="65535"
-                    placeholder="39249 (default)"
-                    value={mcpConfig.port ?? ''}
-                    oninput={(e) => {
-                      const v = (e.currentTarget as HTMLInputElement).valueAsNumber;
-                      getMcpConfig().port = isNaN(v) ? null : v;
-                    }}
-                  />
-                </div>
-                <div class="field flex-1">
-                  <label for="mcp-max-sessions">MAX SESSIONS</label>
-                  <input
-                    id="mcp-max-sessions"
-                    type="number"
-                    class="input-mono"
-                    min="1"
-                    max="16"
-                    placeholder="Unlimited"
-                    value={mcpConfig.maxSessions ?? ''}
-                    oninput={(e) => {
-                      const v = (e.currentTarget as HTMLInputElement).valueAsNumber;
-                      getMcpConfig().maxSessions = isNaN(v) ? null : v;
-                    }}
-                  />
-                </div>
+          <div class="field">
+            <div class="field-row">
+              <div class="field flex-1">
+                <label for="mcp-port">PORT</label>
+                <input
+                  id="mcp-port"
+                  type="number"
+                  class="input-mono"
+                  min="1024"
+                  max="65535"
+                  placeholder="39249 (default)"
+                  value={mcpConfig.port ?? ''}
+                  oninput={(e) => {
+                    const v = (e.currentTarget as HTMLInputElement).valueAsNumber;
+                    getMcpConfig().port = isNaN(v) ? null : v;
+                  }}
+                />
               </div>
-              <div class="field-help">Server starts on launch. Requires restart to take effect.</div>
+              <div class="field flex-1">
+                <label for="mcp-max-sessions">MAX SESSIONS</label>
+                <input
+                  id="mcp-max-sessions"
+                  type="number"
+                  class="input-mono"
+                  min="1"
+                  max="16"
+                  placeholder="Unlimited"
+                  value={mcpConfig.maxSessions ?? ''}
+                  oninput={(e) => {
+                    const v = (e.currentTarget as HTMLInputElement).valueAsNumber;
+                    getMcpConfig().maxSessions = isNaN(v) ? null : v;
+                  }}
+                />
+              </div>
             </div>
+            <div class="field-help">Server starts on launch. Requires restart to take effect.</div>
+          </div>
 
-            <div class="field">
-              <div class="prompt-header">
-                <div class="field-title">CONNECT YOUR AGENT</div>
-                <div class="prompt-actions">
-                  <button class="btn btn-xs" onclick={() => copyMcpSnippet(genericMcpSnippet, 'generic JSON')}>COPY GENERIC JSON</button>
-                  <button class="btn btn-xs btn-ghost" onclick={handleExportEckyMcpSkillZip} disabled={skillExporting}>
-                    {skillExporting ? 'EXPORTING...' : 'EXPORT SKILL ZIP'}
-                  </button>
+          <div class="field">
+            <div class="prompt-header">
+              <div class="field-title">CONNECT YOUR AGENT</div>
+              <div class="prompt-actions">
+                <button class="btn btn-xs" onclick={() => copyMcpSnippet(genericMcpSnippet, 'generic JSON')}>COPY GENERIC JSON</button>
+                <button class="btn btn-xs btn-ghost" onclick={handleExportEckyMcpSkillZip} disabled={skillExporting}>
+                  {skillExporting ? 'EXPORTING...' : 'EXPORT SKILL ZIP'}
+                </button>
+              </div>
+            </div>
+            <div class="mcp-status-row">
+              <span class:mcp-running={mcpStatus?.running} class:mcp-stopped={!mcpStatus?.running}>
+                {mcpStatus?.running ? 'RUNNING' : 'STOPPED'}
+              </span>
+              <span class="mcp-endpoint">{mcpStatus?.endpointUrl || 'http://127.0.0.1:39249/mcp'}</span>
+            </div>
+            <div class="mcp-agent-grid">
+              {#each mcpAgentSnippets as agent (agent.id)}
+                <div class="mcp-agent-card">
+                  <div class="mcp-agent-card__head">
+                    <span class="mcp-agent-card__label">{agent.label}</span>
+                    <button class="btn btn-xs" onclick={() => copyMcpSnippet(agent.snippet, agent.label)}>COPY</button>
+                  </div>
+                  <div class="mcp-agent-card__path">{agent.location}</div>
+                </div>
+              {/each}
+            </div>
+            {#if mcpStatusMessage}
+              <div class="field-note">{mcpStatusMessage}</div>
+            {/if}
+            {#if mcpStatus?.lastStartupError}
+              <div class="field-note">Last startup error: {mcpStatus.lastStartupError}</div>
+            {/if}
+          </div>
+
+          <div class="field">
+            <div class="prompt-header">
+              <div class="field-title">AUTO-AGENTS</div>
+              <button class="btn btn-xs" onclick={addAutoAgent}>+ ADD</button>
+            </div>
+            <div class="field-help">External MCP processes and authoring clients (e.g. Claude Code, Gemini CLI).</div>
+            <div class="auto-agent-presets">
+              {#each autoAgentPresets as preset (preset.id)}
+                <button class="btn btn-xs btn-ghost" onclick={() => addAutoAgentPreset(preset)}>
+                  + {preset.label}
+                </button>
+              {/each}
+            </div>
+            <div class="field-help">Presets fill safe cmd/args for Ecky. Gemini/Amp home-config snippets below scope MCP access; keep AMP model empty because its CLI uses mode flags instead of <code>--model</code>.</div>
+            <div class="field-row">
+              <div class="field flex-1">
+                <label for="mcp-primary-agent">PRIMARY AGENT</label>
+                <select
+                  id="mcp-primary-agent"
+                  class="input-mono"
+                  value={mcpConfig.primaryAgentId ?? ''}
+                  onchange={(e) => {
+                    getMcpConfig().primaryAgentId = (e.currentTarget as HTMLSelectElement).value || null;
+                  }}
+                  disabled={primaryAgentOptions.length === 0}
+                >
+                  <option value="">No enabled agents</option>
+                  {#each primaryAgentOptions as agent}
+                    <option value={agent.id}>{agent.label || agent.cmd || agent.id}</option>
+                  {/each}
+                </select>
+                <div class="field-help">
+                  Kept for backward-compatibility with saved configs.
                 </div>
               </div>
-              <div class="mcp-status-row">
-                <span class:mcp-running={mcpStatus?.running} class:mcp-stopped={!mcpStatus?.running}>
-                  {mcpStatus?.running ? 'RUNNING' : 'STOPPED'}
-                </span>
-                <span class="mcp-endpoint">{mcpStatus?.endpointUrl || 'http://127.0.0.1:39249/mcp'}</span>
-              </div>
-              <div class="mcp-agent-grid">
-                {#each mcpAgentSnippets as agent (agent.id)}
-                  <div class="mcp-agent-card">
-                    <div class="mcp-agent-card__head">
-                      <span class="mcp-agent-card__label">{agent.label}</span>
-                      <button class="btn btn-xs" onclick={() => copyMcpSnippet(agent.snippet, agent.label)}>COPY</button>
+            </div>
+            {#if mcpConfig.autoAgents && mcpConfig.autoAgents.length > 0}
+              <div class="auto-agent-list">
+                {#each mcpConfig.autoAgents as agent (agent.id)}
+                  {@const modelOpts = agentModelLists[agent.id] ?? []}
+                  {@const isLive = agentModelIsLive[agent.id]}
+                  {@const isFetching = !!agentModelFetching[agent.id]}
+                  <div class="auto-agent-card">
+                    <!-- Row 1: label / cmd / toggles / remove -->
+                    <div class="aac-row aac-row-top">
+                      <input type="text" class="input-mono aac-label" placeholder="Label" bind:value={agent.label} />
+                      <input type="text" class="input-mono aac-cmd" placeholder="Command (e.g. gemini)" bind:value={agent.cmd} />
+                      <label class="aac-toggle" title="Enable this MCP process">
+                        <input type="checkbox" bind:checked={agent.enabled} onchange={ensurePrimaryAutoAgent} />
+                        <span class="tgl-track"></span>
+                        <span class="tgl-label">ON</span>
+                      </label>
+                      <button class="btn btn-xs btn-ghost aac-remove" onclick={() => removeAutoAgent(agent.id)} title="Remove">✕</button>
                     </div>
-                    <div class="mcp-agent-card__path">{agent.location}</div>
-                  </div>
-                {/each}
-              </div>
-              {#if mcpStatusMessage}
-                <div class="field-note">{mcpStatusMessage}</div>
-              {/if}
-              {#if mcpStatus?.lastStartupError}
-                <div class="field-note">Last startup error: {mcpStatus.lastStartupError}</div>
-              {/if}
-            </div>
-
-          {:else}
-            <div class="field">
-              <div class="prompt-header">
-                <div class="field-title">AUTO-AGENTS</div>
-                <button class="btn btn-xs" onclick={addAutoAgent}>+ ADD</button>
-              </div>
-              <div class="field-help">Processes Ecky can wake on demand (e.g. Codex, Gemini CLI). Requires restart to take effect.</div>
-              <div class="auto-agent-presets">
-                {#each autoAgentPresets as preset (preset.id)}
-                  <button class="btn btn-xs btn-ghost" onclick={() => addAutoAgentPreset(preset)}>
-                    + {preset.label}
-                  </button>
-                {/each}
-              </div>
-              <div class="field-help">Presets fill safe cmd/args for Ecky. Gemini/Amp home-config snippets below scope MCP access; keep AMP model empty because its CLI uses mode flags instead of <code>--model</code>.</div>
-              <div class="field-row">
-                <div class="field flex-1">
-                  <label for="mcp-primary-agent">PRIMARY AGENT</label>
-                  <select
-                    id="mcp-primary-agent"
-                    class="input-mono"
-                    value={mcpConfig.primaryAgentId ?? ''}
-                    onchange={(e) => {
-                      getMcpConfig().primaryAgentId = (e.currentTarget as HTMLSelectElement).value || null;
-                    }}
-                    disabled={primaryAgentOptions.length === 0}
-                  >
-                    <option value="">No enabled agents</option>
-                    {#each primaryAgentOptions as agent}
-                      <option value={agent.id}>{agent.label || agent.cmd || agent.id}</option>
-                    {/each}
-                  </select>
-                  <div class="field-help">
-                    After you save, only the selected primary agent will receive the next queued turn.
-                  </div>
-                </div>
-              </div>
-              {#if mcpConfig.autoAgents && mcpConfig.autoAgents.length > 0}
-                <div class="auto-agent-list">
-                  {#each mcpConfig.autoAgents as agent (agent.id)}
-                    {@const modelOpts = agentModelLists[agent.id] ?? []}
-                    {@const isLive = agentModelIsLive[agent.id]}
-                    {@const isFetching = !!agentModelFetching[agent.id]}
-                    <div class="auto-agent-card">
-                      <!-- Row 1: label / cmd / toggles / remove -->
-                      <div class="aac-row aac-row-top">
-                        <input type="text" class="input-mono aac-label" placeholder="Label" bind:value={agent.label} />
-                        <input type="text" class="input-mono aac-cmd" placeholder="Command (e.g. gemini)" bind:value={agent.cmd} />
-                        <label class="aac-toggle" title="Enabled for active MCP wake">
-                          <input type="checkbox" bind:checked={agent.enabled} onchange={ensurePrimaryAutoAgent} />
-                          <span class="tgl-track"></span>
-                          <span class="tgl-label">ON</span>
-                        </label>
-                        <button class="btn btn-xs btn-ghost aac-remove" onclick={() => removeAutoAgent(agent.id)} title="Remove">✕</button>
-                      </div>
-                      <!-- Row 2: model select + fetch + sync + fallback badge -->
-                      <div class="aac-row aac-row-model">
-                        <span class="aac-field-label">MODEL</span>
-                        {#if modelOpts.length > 0}
-                          <select
-                            class="input-mono aac-model-select"
-                            value={agent.model ?? ''}
-                            onchange={(e) => { agent.model = (e.currentTarget as HTMLSelectElement).value || null; }}
-                          >
-                            <option value="">auto</option>
-                            {#each modelOpts as m}
-                              <option value={m}>{m}</option>
-                            {/each}
-                          </select>
-                        {/if}
-                        <input
-                          type="text"
-                          class="input-mono aac-model-input"
-                          placeholder={modelOpts.length > 0 ? 'or type custom model ID' : 'Model ID (optional)'}
+                    <!-- Row 2: model select + fetch + sync + fallback badge -->
+                    <div class="aac-row aac-row-model">
+                      <span class="aac-field-label">MODEL</span>
+                      {#if modelOpts.length > 0}
+                        <select
+                          class="input-mono aac-model-select"
                           value={agent.model ?? ''}
-                          oninput={(e) => { agent.model = (e.currentTarget as HTMLInputElement).value || null; }}
-                        />
+                          onchange={(e) => { agent.model = (e.currentTarget as HTMLSelectElement).value || null; }}
+                        >
+                          <option value="">auto</option>
+                          {#each modelOpts as m}
+                            <option value={m}>{m}</option>
+                          {/each}
+                        </select>
+                      {/if}
+                      <input
+                        type="text"
+                        class="input-mono aac-model-input"
+                        placeholder={modelOpts.length > 0 ? 'or type custom model ID' : 'Model ID (optional)'}
+                        value={agent.model ?? ''}
+                        oninput={(e) => { agent.model = (e.currentTarget as HTMLInputElement).value || null; }}
+                      />
+                      <button
+                        class="btn btn-xs btn-ghost"
+                        onclick={() => fetchAgentModels(agent)}
+                        disabled={isFetching}
+                        title="Fetch live models from CLI tool env (reads GEMINI_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY)"
+                      >{isFetching ? '…' : '↻ Fetch'}</button>
+                      {#if availableModels.length > 0}
                         <button
                           class="btn btn-xs btn-ghost"
-                          onclick={() => fetchAgentModels(agent)}
-                          disabled={isFetching}
-                          title="Fetch live models from CLI tool env (reads GEMINI_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY)"
-                        >{isFetching ? '…' : '↻ Fetch'}</button>
-                        {#if availableModels.length > 0}
-                          <button
-                            class="btn btn-xs btn-ghost"
-                            onclick={() => syncAgentModelsFromApiConfig(agent)}
-                            title="Copy models from the currently configured API engine"
-                          >Sync API</button>
-                        {/if}
-                        {#if isLive === false}
-                          <span class="aac-fallback-badge" title="These are static fallback models — no API key found in env">fallback</span>
-                        {/if}
-                      </div>
-                      <!-- Row 3: args only -->
-                      <div class="aac-row aac-row-args">
-                        <span class="aac-field-label">ARGS</span>
-                        <input
-                          type="text"
-                          class="input-mono aac-args"
-                          placeholder="Extra args (e.g. -y --sandbox)"
-                          value={getAgentArgsString(agent.args)}
-                          oninput={(e) => setAgentArgsFromString(agent, (e.currentTarget as HTMLInputElement).value)}
-                        />
-                      </div>
+                          onclick={() => syncAgentModelsFromApiConfig(agent)}
+                          title="Copy models from the currently configured API engine"
+                        >Sync API</button>
+                      {/if}
+                      {#if isLive === false}
+                        <span class="aac-fallback-badge" title="These are static fallback models — no API key found in env">fallback</span>
+                      {/if}
                     </div>
-                  {/each}
-                </div>
-              {:else}
-                <div class="field-note">No auto-agents configured.</div>
-              {/if}
+                    <!-- Row 3: args only -->
+                    <div class="aac-row aac-row-args">
+                      <span class="aac-field-label">ARGS</span>
+                      <input
+                        type="text"
+                        class="input-mono aac-args"
+                        placeholder="Extra args (e.g. -y --sandbox)"
+                        value={getAgentArgsString(agent.args)}
+                        oninput={(e) => setAgentArgsFromString(agent, (e.currentTarget as HTMLInputElement).value)}
+                      />
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <div class="field-note">No auto-agents configured.</div>
+            {/if}
+          </div>
+
+        {:else if connectionType === 'provider'}
+          {@const selectedProvider = config.connectionType === 'provider:agy' ? 'agy' : 'codex'}
+          <div class="field">
+            <div class="field-title">PROVIDER INTEGRATION</div>
+            <div class="field-help">Hosted agent conversation owned by each Ecky thread.</div>
+            <div class="conn-type-row" style="margin-top: 8px;">
+              {#each providerIntegrations as providerIntegration (providerIntegration.id)}
+                <button
+                  class="conn-type-btn {config.connectionType === `provider:${providerIntegration.id}` ? 'active' : ''}"
+                  aria-pressed={config.connectionType === `provider:${providerIntegration.id}`}
+                  onclick={() => selectProvider(providerIntegration.id)}
+                >{providerIntegration.label}</button>
+              {/each}
             </div>
-          {/if}
+            <div class="field-note">Each Ecky thread retains one owned conversation per provider.</div>
+          </div>
+          <div class="field provider-model-field">
+            <label for="provider-model">{selectedProvider.toUpperCase()} MODEL</label>
+            <div class="provider-model-row">
+              <Dropdown
+                options={[
+                  { id: '', name: 'Provider default' },
+                  ...providerModelLists[selectedProvider],
+                ]}
+                value={config.providerModels[selectedProvider]}
+                placeholder={providerModelFetching[selectedProvider] ? 'Fetching...' : 'Provider default'}
+                disabled={providerModelFetching[selectedProvider]}
+                onchange={(value) => selectProviderModel(selectedProvider, value)}
+              />
+              <button
+                class="btn btn-secondary"
+                type="button"
+                disabled={providerModelFetching[selectedProvider]}
+                onclick={() => void fetchProviderModels(selectedProvider)}
+              >{providerModelFetching[selectedProvider] ? 'FETCHING…' : 'FETCH MODELS'}</button>
+            </div>
+            {#if !providerModelFetching[selectedProvider] && providerModelLists[selectedProvider].length === 0}
+              <div class="field-note">No provider models loaded.</div>
+            {/if}
+            <div class="field-help">Blank uses provider default. Change applies to the next turn.</div>
+          </div>
 
         {:else}
           <div class="no-engine">
@@ -1637,6 +1743,13 @@
 </div>
 
 <style>
+  .provider-model-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    overflow: hidden;
+  }
+
   .config-container {
     display: flex;
     height: 100%;
@@ -1826,6 +1939,10 @@
   .field-row {
     display: flex;
     gap: 16px;
+  }
+
+  .compute-grid {
+    overflow: hidden;
   }
 
   .field {

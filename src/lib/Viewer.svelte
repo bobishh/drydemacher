@@ -79,6 +79,7 @@
     activeMeasurementCallout = null,
     previewTransforms = {},
     isGenerating = false,
+    retainModelWhileLoading = false,
     hideModelWhileBusy = false,
     busyPhase = null,
     busyText = null,
@@ -144,6 +145,7 @@
     activeMeasurementCallout?: ResolvedMeasurementCallout | null;
     previewTransforms?: Record<string, ImportedPreviewTransform>;
     isGenerating?: boolean;
+    retainModelWhileLoading?: boolean;
     hideModelWhileBusy?: boolean;
     busyPhase?: ViewportBusyPhase;
     busyText?: string | null;
@@ -236,6 +238,7 @@
   let animationFrameId: number | undefined;
   let resizeObserver: ResizeObserver | undefined;
   let loadToken = 0;
+  let modelStatus = $state<'empty' | 'loaded'>('empty');
   let overlayLeft = $state(24);
   let overlayTop = $state(24);
   let overlayVisible = $state(false);
@@ -366,7 +369,7 @@
       : 'no-cap',
   ].join('|'));
   const showPartOverlay = $derived.by(
-    () => selectedTarget?.kind === 'part' && shouldDisplayViewportControlList(selectedTarget),
+    () => Boolean(selectedTarget && shouldDisplayViewportControlList(selectedTarget)),
   );
 
   const raycaster = new THREE.Raycaster();
@@ -793,7 +796,7 @@
     controls?.removeEventListener?.('start', handleOrbitStart);
     controls?.removeEventListener?.('end', handleOrbitEnd);
     controls?.removeEventListener?.('change', handleControlsChange);
-    disposeModel();
+    if (!retainModelWhileLoading || !modelRoot) disposeModel();
     controls?.dispose?.();
     if (renderer) {
       (renderer as THREE.WebGLRenderer & { renderLists?: { dispose?: () => void } }).renderLists?.dispose?.();
@@ -816,6 +819,11 @@
     if (!scene) return;
     void reloadSignature;
     void untrack(() => loadCurrentModel());
+  });
+
+  $effect(() => {
+    if (retainModelWhileLoading || stlUrl || viewerAssets.length > 0 || !scene) return;
+    disposeModel();
   });
 
   $effect(() => {
@@ -1418,6 +1426,13 @@
   async function loadCurrentModel() {
     if (!scene || !camera) return;
     const token = ++loadToken;
+    console.warn('[CAD_FLOW][viewer.load]', {
+      modelKey,
+      stlUrl,
+      viewerAssetCount: viewerAssets.length,
+      retainModelWhileLoading,
+      hasMountedModel: Boolean(modelRoot),
+    });
 
     if (viewerAssets.length > 0) {
       await loadMultipartAssets(token, viewerAssets);
@@ -1429,7 +1444,7 @@
       return;
     }
 
-    disposeModel();
+    if (!retainModelWhileLoading || !modelRoot) disposeModel();
   }
 
   async function loadMultipartAssets(token: number, assets: ViewerAsset[]) {
@@ -1461,6 +1476,7 @@
 
       disposeModel();
       modelRoot = nextRoot;
+      modelStatus = 'loaded';
       runtimeMeshes = nextMeshes;
       applyPreviewTransforms();
       scene.add(modelRoot);
@@ -1709,6 +1725,7 @@
       }
       disposeModel();
       modelRoot = nextRoot;
+      modelStatus = 'loaded';
       runtimeMeshes = captureMeshes;
       captureComparisonLoaded = captureMeshes.some((entry) => entry.captureLayer === 'generated');
       syncCaptureDeviationOverlay();
@@ -2411,6 +2428,7 @@
     captureDeviationPointCount = 0;
     captureGuideProjected = { points: [], segments: [], planePolygons: [] };
     if (!modelRoot) {
+      modelStatus = 'empty';
       runtimeMeshes = [];
       runtimeEdges = [];
       runtimeFaces = [];
@@ -2423,6 +2441,7 @@
     scene?.remove(modelRoot);
     disposeDetachedGroup(modelRoot);
     modelRoot = null;
+    modelStatus = 'empty';
     runtimeMeshes = [];
     runtimeEdges = [];
     runtimeFaces = [];
@@ -2800,6 +2819,7 @@
 <div
   bind:this={viewerHost}
   class="viewer-host"
+  data-model-status={modelStatus}
   data-window-drag-ignore
   data-capture-comparison-loaded={captureComparisonLoaded}
   data-capture-reference-visible={captureReferenceVisible}

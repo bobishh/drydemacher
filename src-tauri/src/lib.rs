@@ -49,9 +49,10 @@ pub mod ecky_language_surface;
 pub mod ecky_scheme;
 pub mod external_shapes;
 pub mod fem_engineering;
-pub mod fem_mesher;
+pub mod fem_topology_reconstruction;
 pub mod freecad;
 pub mod freecad_library;
+pub mod gmsh_mesher;
 mod image_sampling;
 pub mod legacy_python_to_ecky_ir;
 pub mod lithophane;
@@ -60,6 +61,7 @@ pub mod llm_context;
 pub mod mcp;
 pub mod model_runtime;
 pub mod models;
+pub mod netgen_mesher;
 pub mod project_mirror;
 pub mod raster_trace;
 pub mod runtime_capabilities;
@@ -67,17 +69,20 @@ pub mod services;
 pub mod shape_summary;
 pub mod sketch_brep_validation;
 pub mod sketch_draft_runtime;
-pub mod surface_trim_external_shapes;
-pub mod surface_trim_cut;
-pub mod surface_trim_mesh;
-pub mod surface_trim_diagnostics;
-pub mod surface_trim_cap;
-pub mod surface_trim_runtime;
-pub mod surface_trim_source;
 pub mod source_flavor;
 pub mod steel_data;
+pub mod strict_edn;
+pub mod surface_trim_cap;
+pub mod surface_trim_cut;
+pub mod surface_trim_diagnostics;
+pub mod surface_trim_external_shapes;
+pub mod surface_trim_mesh;
+pub mod surface_trim_runtime;
+pub mod surface_trim_source;
 pub mod thread_source_binding;
 pub mod topology_target_ids;
+pub mod transport_budget;
+pub mod web_content_recovery;
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -120,48 +125,11 @@ fn init_history_db_with_recovery(
     let db_path = config_dir.join("history.sqlite");
     match db::init_db(&db_path) {
         Ok(conn) => Ok((conn, Vec::new())),
-        Err(initial_err) => {
-            let mut warnings = vec![format!(
-                "[BOOT] Failed to initialize history database at {}: {}",
-                db_path.display(),
-                initial_err
-            )];
-
-            if db_path.exists() {
-                let backup_path = config_dir.join(format!(
-                    "history.unreadable.{}.sqlite",
-                    Uuid::new_v4().simple()
-                ));
-                fs::rename(&db_path, &backup_path).map_err(|rename_err| {
-                    format!(
-                        "[BOOT] History database init failed at {}: {}. Recovery rename to {} also failed: {}",
-                        db_path.display(),
-                        initial_err,
-                        backup_path.display(),
-                        rename_err
-                    )
-                })?;
-                warnings.push(format!(
-                    "[BOOT] Moved unreadable history database to {}",
-                    backup_path.display()
-                ));
-            }
-
-            let recovered = db::init_db(&db_path).map_err(|recovery_err| {
-                format!(
-                    "[BOOT] Recovery init failed for history database at {} after initial error {}: {}",
-                    db_path.display(),
-                    initial_err,
-                    recovery_err
-                )
-            })?;
-
-            warnings.push(format!(
-                "[BOOT] Recreated history database at {}",
-                db_path.display()
-            ));
-            Ok((recovered, warnings))
-        }
+        Err(initial_err) => Err(format!(
+            "[BOOT] Failed to initialize history database at {}. Database preserved; startup aborted: {}",
+            db_path.display(),
+            initial_err
+        )),
     }
 }
 
@@ -173,6 +141,9 @@ fn load_startup_config(
     let outcome = crate::config_store::load_config(config_dir, default, |mut config, markers| {
         if !markers.mcp_mode_present {
             config.mcp.mode = crate::mcp::runtime::default_mcp_mode(&config);
+        }
+        if config.mcp.mode == crate::contracts::McpMode::Active {
+            config.mcp.mode = crate::contracts::McpMode::Passive;
         }
         if !markers.primary_agent_id_present {
             crate::mcp::runtime::ensure_primary_agent_id(&mut config);
@@ -427,28 +398,36 @@ pub(crate) fn persist_user_prompt_references(
 }
 
 fn migrate_legacy_references(conn: &rusqlite::Connection) -> Result<(), String> {
+    const MIGRATION_KEY: &str = "legacy-prompt-references-projected-v2";
+    let already_applied = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE key = ?1)",
+            [MIGRATION_KEY],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if already_applied {
+        return Ok(());
+    }
     let threads = db::get_all_threads(conn).map_err(|e| e.to_string())?;
+    let rows = db::get_legacy_user_prompt_rows(conn).map_err(|e| e.to_string())?;
+    for (thread_id, message_id, content, timestamp) in rows {
+        persist_user_prompt_references(conn, &thread_id, &message_id, &content, None, timestamp)?;
+    }
     for thread in threads {
-        for message in thread
-            .messages
-            .iter()
-            .filter(|m| m.role == crate::contracts::MessageRole::User)
-        {
-            persist_user_prompt_references(
-                conn,
-                &thread.id,
-                &message.id,
-                &message.content,
-                None,
-                message.timestamp,
-            )?;
-        }
         if !thread.summary.trim().is_empty() {
             continue;
         }
-        let summary = build_thread_summary(&thread.title, &thread.messages);
+        let messages = db::get_recent_thread_messages_for_summary(conn, &thread.id, 32)
+            .map_err(|e| e.to_string())?;
+        let summary = build_thread_summary(&thread.title, &messages);
         db::update_thread_summary(conn, &thread.id, &summary).map_err(|e| e.to_string())?;
     }
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations(key, applied_at) VALUES (?1, CAST(strftime('%s','now') AS INTEGER))",
+        [MIGRATION_KEY],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -608,8 +587,10 @@ pub fn run() {
         microwave: None,
         voice: crate::contracts::VoiceConfig::default(),
         mcp: crate::contracts::McpConfig::default(),
+        fem_compute: crate::contracts::FemComputeConfig::default(),
         has_seen_onboarding: false,
         connection_type: None,
+        provider_models: crate::contracts::ProviderModels::default(),
         default_engine_kind: crate::contracts::EngineKind::Freecad,
         default_source_language: crate::contracts::SourceLanguage::LegacyPython,
         default_geometry_backend: crate::contracts::GeometryBackend::Freecad,
@@ -653,6 +634,22 @@ pub fn run() {
                     );
                 }
             }
+            let startup_now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            match crate::services::agy_provider::reconcile_stale_deliveries(
+                &conn,
+                &crate::services::agy_provider::SystemAgyProcessReaper,
+                startup_now,
+            ) {
+                Ok(reconciled) if reconciled > 0 => {
+                    eprintln!("[BOOT] reconciled {reconciled} interrupted Agy provider delivery(s)")
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!("[BOOT] failed to reconcile Agy providers: {error}"),
+            }
+            let _ = crate::services::codex_takeover::recover_stale_sending(&conn, startup_now);
             let _ = migrate_legacy_references(&conn);
             let last_snapshot = crate::services::session::read_last_snapshot(app.handle(), &conn);
 
@@ -662,6 +659,11 @@ pub fn run() {
             *state.config_persistence_status.lock().unwrap() = config_persistence_status.clone();
             state.set_app_handle(app.handle().clone());
             app.manage(state.clone());
+            if let Err(error) = crate::web_content_recovery::install(app.handle()) {
+                state.push_log(format!(
+                    "[WEB_CONTENT] failed to install termination hook: {error}"
+                ));
+            }
             for warning in startup_warnings {
                 eprintln!("{}", warning);
                 state.push_log(warning);
@@ -710,6 +712,14 @@ pub fn run() {
             }
 
             crate::mcp::runtime::initialize_auto_agent_supervisors(state.clone());
+            crate::commands::codex_takeover::initialize_codex_queue_supervisor(
+                state.clone(),
+                app.handle().clone(),
+            );
+            crate::commands::agy_provider::initialize_agy_queue_supervisor(
+                state.clone(),
+                app.handle().clone(),
+            );
 
             {
                 // Project folder watcher: external edits to
@@ -721,20 +731,47 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     use tauri::Emitter;
                     let mut watcher = crate::mcp::handlers::ProjectFolderWatcher::new();
+                    let mut transport = crate::mcp::handlers::ProjectFolderWatchTransport::new(
+                        &watcher_state,
+                        resolver.as_ref(),
+                    )
+                    .await;
                     let ctx = crate::mcp::handlers::project_folder_watcher_context();
                     loop {
-                        sleep(Duration::from_secs(1)).await;
+                        transport.wait().await;
                         let events = watcher.tick(&watcher_state, resolver.as_ref(), &ctx).await;
                         if events.is_empty() {
                             continue;
                         }
-                        if events.iter().any(|event| {
-                            matches!(
-                                event,
-                                crate::mcp::handlers::ProjectFolderWatchEvent::Applied { .. }
-                            )
-                        }) {
-                            let _ = watcher_handle.emit("history-updated", ());
+                        if let Some((thread_id, message_id, kind)) =
+                            events.iter().find_map(|event| match event {
+                                crate::mcp::handlers::ProjectFolderWatchEvent::Applied {
+                                    thread_id,
+                                    message_id,
+                                    ..
+                                } => Some((
+                                    thread_id.clone(),
+                                    message_id.clone(),
+                                    "project-folder-applied",
+                                )),
+                                crate::mcp::handlers::ProjectFolderWatchEvent::ApplyFailed {
+                                    thread_id,
+                                    message_id,
+                                    ..
+                                } => Some((
+                                    thread_id.clone(),
+                                    message_id.clone(),
+                                    "project-folder-failed",
+                                )),
+                                _ => None,
+                            })
+                        {
+                            let event = crate::models::next_history_changed_event(
+                                Some(thread_id),
+                                Some(message_id),
+                                kind,
+                            );
+                            let _ = watcher_handle.emit("history-updated", event);
                         }
                         let _ = watcher_handle.emit("project-folder-sync", &events);
                         for event in &events {
@@ -757,9 +794,25 @@ pub fn run() {
         })
         .invoke_handler(builder.invoke_handler());
 
-    if let Err(err) = app.run(context) {
-        eprintln!("[BOOT] Failed to run tauri application: {}", err);
-    }
+    let app = match app.build(context) {
+        Ok(app) => app,
+        Err(err) => {
+            eprintln!("[BOOT] Failed to build tauri application: {}", err);
+            return;
+        }
+    };
+    let provider_shutdown_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    app.run(move |app_handle, event| {
+        if !matches!(
+            event,
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+        ) || provider_shutdown_started.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
+        let state = app_handle.state::<AppState>();
+        tauri::async_runtime::block_on(state.agy_provider.shutdown_all());
+    });
 }
 
 #[cfg(test)]
@@ -791,8 +844,10 @@ mod tests {
             microwave: None,
             voice: crate::contracts::VoiceConfig::default(),
             mcp: crate::contracts::McpConfig::default(),
+            fem_compute: crate::contracts::FemComputeConfig::default(),
             has_seen_onboarding: false,
             connection_type: None,
+            provider_models: crate::contracts::ProviderModels::default(),
             default_engine_kind: crate::contracts::EngineKind::EckyIrV0,
             default_source_language: crate::contracts::SourceLanguage::EckyIrV0,
             default_geometry_backend: crate::contracts::GeometryBackend::Build123d,
@@ -833,7 +888,7 @@ mod tests {
         .unwrap();
         let (loaded, _) =
             load_startup_config(&paths, &paths.app_config_dir(), startup_config()).unwrap();
-        assert_eq!(loaded.mcp.mode, crate::contracts::McpMode::Active);
+        assert_eq!(loaded.mcp.mode, crate::contracts::McpMode::Passive);
         assert_eq!(loaded.mcp.primary_agent_id.as_deref(), Some("agent"));
         assert_eq!(loaded.max_verify_attempts, 2);
         assert!(!loaded.mcp.auto_agents[0].start_on_demand);
@@ -1112,7 +1167,7 @@ mod tests {
     }
 
     #[test]
-    fn init_history_db_with_recovery_moves_unreadable_path_and_recreates_database() {
+    fn init_history_db_with_recovery_preserves_unreadable_database() {
         let temp_root =
             std::env::temp_dir().join(format!("ecky-history-recovery-{}", Uuid::new_v4().simple()));
         fs::create_dir_all(&temp_root).expect("temp root should be created");
@@ -1120,24 +1175,21 @@ mod tests {
         let db_path = temp_root.join("history.sqlite");
         fs::create_dir_all(&db_path).expect("poisoned database path should be a directory");
 
-        let (conn, warnings) =
-            init_history_db_with_recovery(&temp_root).expect("recovery should succeed");
+        let error = init_history_db_with_recovery(&temp_root)
+            .expect_err("unreadable database must stop startup");
 
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| row.get(0))
-            .expect("recovered database should be queryable");
-        assert!(count > 0);
-        assert!(db_path.is_file());
-        assert!(warnings
-            .iter()
-            .any(|warning| warning.contains("Moved unreadable history database")));
-        assert!(fs::read_dir(&temp_root)
+        assert!(error.contains("Failed to initialize history database"));
+        assert!(
+            db_path.is_dir(),
+            "original database path must remain intact"
+        );
+        assert!(!fs::read_dir(&temp_root)
             .expect("temp root should be readable")
             .filter_map(Result::ok)
             .any(|entry| {
                 let file_name = entry.file_name();
                 let file_name = file_name.to_string_lossy();
-                file_name.starts_with("history.unreadable.") && entry.path().is_dir()
+                file_name.starts_with("history.unreadable.")
             }));
 
         fs::remove_dir_all(&temp_root).expect("temp root should be cleaned up");

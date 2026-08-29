@@ -1,8 +1,81 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import type { ModelManifest, UiSpec } from '../types/domain';
 import type { MaterializedSemanticControl, MaterializedSemanticView } from './semanticControls';
-import { pickOverlayControls } from './semanticControls';
+import { ensureSemanticManifest, pickOverlayControls } from './semanticControls';
+
+const semanticUiSpec: UiSpec = {
+  fields: [{ type: 'number', key: 'width', label: 'Width', frozen: false }],
+};
+
+function semanticManifest(sourceLanguage: 'ecky' | 'legacyPython'): ModelManifest {
+  return {
+    modelId: 'semantic-test',
+    sourceKind: 'generated',
+    engineKind: sourceLanguage === 'ecky' ? 'ecky' : 'freecad',
+    sourceLanguage,
+    geometryBackend: sourceLanguage === 'ecky' ? 'mesh' : 'freecad',
+    document: {
+      documentName: 'Semantic Test',
+      documentLabel: 'Semantic Test',
+      objectCount: 1,
+      warnings: [],
+    },
+    parts: [{
+      partId: 'body',
+      freecadObjectName: 'Body',
+      label: 'Body',
+      kind: 'solid',
+      editable: true,
+      parameterKeys: ['width'],
+    }],
+    parameterGroups: [],
+    controlPrimitives: [],
+    controlRelations: [],
+    controlViews: [{
+      viewId: 'legacy-view',
+      label: 'Legacy View',
+      scope: 'global',
+      partIds: [],
+      primitiveIds: [],
+      sections: [],
+      default: true,
+      source: 'manual',
+      status: 'accepted',
+      order: 0,
+    }],
+    previewViews: [],
+    advisories: [],
+    selectionTargets: [],
+    measurementAnnotations: [],
+    taggedAnchors: {},
+    featureGraph: null,
+    correspondenceGraph: null,
+    analysisDeclarations: [],
+    warnings: [],
+    enrichmentState: { status: 'none', proposals: [] },
+  } as ModelManifest;
+}
+
+test('ensureSemanticManifest removes stored views and skips generated views for Ecky', () => {
+  const manifest = semanticManifest('ecky');
+  const previous = semanticManifest('ecky');
+
+  const result = ensureSemanticManifest(manifest, semanticUiSpec, { width: 20 }, previous);
+
+  assert.deepEqual(result?.controlViews, []);
+});
+
+test('ensureSemanticManifest retains generated views for legacy FreeCAD models', () => {
+  const result = ensureSemanticManifest(
+    semanticManifest('legacyPython'),
+    semanticUiSpec,
+    { width: 20 },
+  );
+
+  assert.ok((result?.controlViews?.length ?? 0) > 0);
+});
 
 function control(
   primitiveId: string,

@@ -17,7 +17,6 @@
     focused = false,
     highlighted = false,
     cadTone = 'neutral',
-    liveApply = false,
     compact = false,
     semanticSource = undefined,
     showSemanticSource = false,
@@ -41,7 +40,6 @@
     focused?: boolean;
     highlighted?: boolean;
     cadTone?: CadTone;
-    liveApply?: boolean;
     compact?: boolean;
     semanticSource?: ControlViewSource;
     showSemanticSource?: boolean;
@@ -56,8 +54,6 @@
     onFocusOut?: (event: FocusEvent) => void;
   } = $props();
 
-  const NUMERIC_PARENT_UPDATE_DEBOUNCE_MS = 120;
-  let pendingNumericUpdateTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingNumericValue: number | null = null;
   let releaseNumericDraftTimer: ReturnType<typeof setTimeout> | null = null;
   let editingNumeric = $state(false);
@@ -101,10 +97,6 @@
   }
 
   function flushPendingNumericUpdate() {
-    if (pendingNumericUpdateTimer) {
-      clearTimeout(pendingNumericUpdateTimer);
-      pendingNumericUpdateTimer = null;
-    }
     if (pendingNumericValue === null) return;
     const nextValue = pendingNumericValue;
     pendingNumericValue = null;
@@ -118,17 +110,10 @@
     if (pendingNumericValue !== null) {
       onDraftValue?.(pendingNumericValue);
     }
-    if (!liveApply) return;
-    if (pendingNumericUpdateTimer) clearTimeout(pendingNumericUpdateTimer);
-    pendingNumericUpdateTimer = setTimeout(
-      flushPendingNumericUpdate,
-      NUMERIC_PARENT_UPDATE_DEBOUNCE_MS,
-    );
   }
 
   onDestroy(() => {
     flushPendingNumericUpdate();
-    if (pendingNumericUpdateTimer) clearTimeout(pendingNumericUpdateTimer);
     if (releaseNumericDraftTimer) clearTimeout(releaseNumericDraftTimer);
   });
 </script>
@@ -256,9 +241,8 @@
         color-mix(in srgb, var(--bg-100) 76%, transparent) 0%,
         color-mix(in srgb, var(--bg-200) 88%, #000 12%) 100%
       );
-    border: 1px solid color-mix(in srgb, var(--bg-300) 82%, #000 18%);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, #000 28%, transparent);
-    transition: all 0.2s;
+    border: 1px solid var(--bg-300);
+    transition: border-color 0.2s, background-color 0.2s;
   }
 
   .param-field[data-cad-tone='x'],
@@ -281,7 +265,7 @@
   }
 
   .param-field:hover {
-    border-color: color-mix(in srgb, var(--cad-tone-color) 35%, var(--bg-300));
+    border-color: color-mix(in srgb, var(--cad-tone-color) 24%, var(--bg-300));
     background:
       linear-gradient(
         180deg,
@@ -291,12 +275,12 @@
   }
 
   .param-field-focus {
-    border-color: color-mix(in srgb, var(--primary) 55%, var(--bg-300));
+    border-color: color-mix(in srgb, var(--primary) 32%, var(--bg-300));
     background:
       linear-gradient(
         180deg,
-        color-mix(in srgb, var(--cad-tone-color) 10%, var(--bg-100)) 0%,
-        color-mix(in srgb, var(--primary) 12%, var(--bg-200)) 100%
+        color-mix(in srgb, var(--cad-tone-color) 6%, var(--bg-100)) 0%,
+        color-mix(in srgb, var(--primary) 7%, var(--bg-200)) 100%
       );
   }
 

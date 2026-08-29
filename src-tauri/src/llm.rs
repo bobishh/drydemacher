@@ -374,6 +374,16 @@ fn select_classifier_model(engine: &Engine, has_images: bool) -> &str {
 /// Fetch models for an auto-agent CLI tool.
 /// Tries to read the relevant env var (GEMINI_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY)
 /// and hit the live API. Falls back to a curated static list when no key is available.
+fn parse_agy_models(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("Fetching "))
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_string)
+        .collect()
+}
+
 pub async fn list_agent_models(cmd: &str) -> Result<crate::contracts::AgentModelList, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -386,7 +396,44 @@ pub async fn list_agent_models(cmd: &str) -> Result<crate::contracts::AgentModel
         .unwrap_or(cmd)
         .to_lowercase();
 
-    if cmd_name.contains("gemini") {
+    if cmd_name == "agy" || cmd_name.contains("antigravity") {
+        let resolved = crate::services::provider_executable::resolve_provider_executable(
+            "agy",
+            "ECKY_AGY_BIN",
+            "Antigravity CLI",
+        )
+        .map_err(|error| error.details.unwrap_or(error.message))?;
+        let output = tokio::process::Command::new(&resolved.path)
+            .arg("models")
+            .env("PATH", &resolved.spawn_path)
+            .output()
+            .await
+            .map_err(|error| {
+                format!(
+                    "Failed to run Antigravity CLI '{} models': {error}",
+                    resolved.path.display()
+                )
+            })?;
+        if !output.status.success() {
+            let detail = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return Err(format!(
+                "Antigravity CLI model discovery failed: {}",
+                detail.trim()
+            ));
+        }
+        let models = parse_agy_models(&String::from_utf8_lossy(&output.stdout));
+        if models.is_empty() {
+            return Err("Antigravity CLI model discovery returned no models.".to_string());
+        }
+        Ok(crate::contracts::AgentModelList {
+            models,
+            is_live: true,
+        })
+    } else if cmd_name.contains("gemini") {
         let api_key = std::env::var("GEMINI_API_KEY")
             .or_else(|_| std::env::var("GOOGLE_API_KEY"))
             .or_else(|_| std::env::var("GOOGLE_GEMINI_API_KEY"))
@@ -1518,4 +1565,13 @@ mod tests {
         .expect("utf8");
         assert_eq!(decoded, "<svg viewBox=\"0 0 1 1\"></svg>");
     }
+}
+#[test]
+fn agy_model_listing_uses_cli_model_ids_and_ignores_status_copy() {
+    assert_eq!(
+            parse_agy_models(
+                "Fetching available models...\nclaude-sonnet-4-6\tClaude Sonnet 4.6\ngemini-3.7-pro\tGemini 3.7 Pro\n\n",
+            ),
+            vec!["claude-sonnet-4-6", "gemini-3.7-pro"]
+        );
 }

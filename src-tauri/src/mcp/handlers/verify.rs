@@ -40,6 +40,7 @@ pub async fn handle_verify_generated_model(
     .await?;
     if let Some(snapshot) = snapshot {
         persist_verification_record(state, message_id, &snapshot, &result).await?;
+        attach_verification_outcome(state, message_id, &result).await?;
     }
     Ok(VerifyGeneratedModelResponse {
         thread_id: thread_id.to_string(),
@@ -48,6 +49,49 @@ pub async fn handle_verify_generated_model(
         artifact_digest,
         result,
     })
+}
+
+async fn attach_verification_outcome(
+    state: &AppState,
+    preview_id: &str,
+    result: &crate::contracts::StructuralVerificationResult,
+) -> AppResult<()> {
+    let conn = state.db.lock().await;
+    let draft = crate::db::get_agent_draft_by_preview_id(&conn, preview_id)
+        .map_err(|error| AppError::persistence(error.to_string()))?
+        .ok_or_else(|| AppError::persistence("Verified preview draft disappeared."))?;
+    let version_id = draft
+        .base_message_id
+        .as_deref()
+        .ok_or_else(|| AppError::persistence("Verified preview has no durable version."))?;
+    let version = crate::db::get_thread_message_version(&conn, &draft.thread_id, version_id)
+        .map_err(|error| AppError::persistence(error.to_string()))?
+        .ok_or_else(|| AppError::persistence("Verified durable version disappeared."))?;
+    let status = if result.passed {
+        crate::contracts::MessageStatus::Success
+    } else {
+        crate::contracts::MessageStatus::Error
+    };
+    let content = if result.passed {
+        version.content
+    } else {
+        result.summary.clone()
+    };
+    crate::db::update_message_status_and_output(
+        &conn,
+        version_id,
+        crate::db::MessageStatusUpdate {
+            status: &status,
+            output: version.output.as_ref(),
+            usage: version.usage.as_ref(),
+            artifact_bundle: version.artifact_bundle.as_ref(),
+            model_manifest: version.model_manifest.as_ref(),
+            structural_verification: Some(result),
+            visual_kind: version.visual_kind.as_ref(),
+            content: Some(&content),
+        },
+    )
+    .map_err(|error| AppError::persistence(error.to_string()))
 }
 
 async fn load_draft_render_snapshot(

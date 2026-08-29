@@ -25,7 +25,7 @@ export function createModelIo(deps: {
         else { await deps.exportMultipartStlZip(parts, path, title); deps.setStatus('Exported multipart STL archive.'); }
         return;
       }
-      const source = mode === 'stl' ? bundle.previewStlPath : mode === 'step' ? getStepExportPath(bundle) : bundle.fcstdPath;
+      const source = mode === 'stl' ? bundle.modelStlPath : mode === 'step' ? getStepExportPath(bundle) : bundle.fcstdPath;
       if (!source) return;
       const type = mode === 'stl' ? ['STL 3D Model', ['stl'], names.stl] : mode === 'step' ? ['STEP CAD Model', ['step', 'stp'], names.step] : ['FreeCAD Document', ['FCStd'], names.fcstd];
       const path = await deps.save({ filters: [{ name: type[0] as string, extensions: type[1] as string[] }], defaultPath: type[2] as string });

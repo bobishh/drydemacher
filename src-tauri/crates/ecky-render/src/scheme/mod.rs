@@ -31,7 +31,8 @@ pub fn bootstrap_shape() -> &'static BootstrapShape {
 }
 
 pub use compiler::{
-    compile_to_core_program, compile_to_legacy_source, try_compile_to_core_program,
+    compile_to_core_program, compile_to_legacy_source, emit_component_interface_source,
+    inspect_component_placement_evidence, try_compile_to_core_program,
     try_compile_to_legacy_source,
 };
 

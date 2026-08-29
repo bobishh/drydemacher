@@ -5,8 +5,8 @@ type Mode = 'success' | 'pending' | 'error';
 const FOREIGN_SOURCE = 'cube([10, 20, 30]);\ncylinder(h = 6, r = 3, $fn = 6);';
 const ECKY_SOURCE = '(model\n  (part body (box 10 20 30))\n  (verify (check stl connected-component-count = 1)))';
 
-async function installMocks(page: Page, mode: Mode) {
-  await page.addInitScript(({ mode, eckySource }) => {
+async function installMocks(page: Page, mode: Mode, provider = false) {
+  await page.addInitScript(({ mode, eckySource, provider }) => {
     const mockWindow = window as any;
     localStorage.clear();
     mockWindow.__CAD_TRANSPILE_CALLS__ = [];
@@ -31,7 +31,8 @@ async function installMocks(page: Page, mode: Mode) {
           voice: { sttLanguageCode: 'en-US' },
           mcp: { mode: 'passive', primaryAgentId: null, promptTimeoutSecs: 1800, autoAgents: [] },
           hasSeenOnboarding: true,
-          connectionType: null,
+          connectionType: provider ? 'provider:agy' : null,
+          providerModels: { codex: '', agy: 'claude-sonnet-4-6' },
           defaultEngineKind: 'build123d',
           defaultSourceLanguage: 'ecky',
           defaultGeometryBackend: 'build123d',
@@ -51,8 +52,49 @@ async function installMocks(page: Page, mode: Mode) {
       if (cmd === 'get_history') return [];
       if (cmd === 'get_last_design') return null;
       if (cmd === 'get_default_macro') return '';
+      if (cmd === 'get_agent_activity') return { events: [], latestCursor: 0 };
       if (cmd === 'get_active_agent_sessions' || cmd === 'get_agent_terminal_snapshots') return [];
+      if (cmd === 'project_folder_render_activity') return [];
+      if (cmd === 'open_or_create_blank_design_thread') {
+        return {
+          threadId: 'transpile-thread',
+          slug: 'transpile-thread',
+          folder: '/mock/projects/transpile-thread',
+          file: '/mock/projects/transpile-thread/model.ecky',
+          source: '(model (part body (box 10 10 10)))',
+        };
+      }
+      if (cmd === 'get_project_source') {
+        return {
+          threadId: 'transpile-thread',
+          slug: 'transpile-thread',
+          folder: '/mock/projects/transpile-thread',
+          file: '/mock/projects/transpile-thread/model.ecky',
+          source: '(model (part body (box 10 10 10)))',
+        };
+      }
       if (cmd === 'get_thread_agent_state') return { threadId: args?.threadId ?? null, connectionState: 'disconnected', sessions: [], primaryAgentLabel: null, statusText: '' };
+      if (cmd === 'get_agy_provider') return null;
+      if (cmd === 'get_agy_provider_messages') return { messages: [], nextCursor: null, backwardsCursor: null };
+      if (cmd === 'send_agy_provider_prompt') {
+        if (mode === 'error') {
+          throw { code: 'provider', message: 'AGY request rejected', details: 'RAW_AGY_BODY: conversation unavailable' };
+        }
+        return {
+          binding: {
+            eckyThreadId: String((args?.input as any)?.eckyThreadId ?? 'transpile-thread'),
+            agyConversationId: 'agy-transpile',
+          },
+          capabilities: { steer: false, stop: true },
+          messages: [],
+          liveMessages: [],
+          turnTraces: [],
+          nextCursor: null,
+          backwardsCursor: null,
+          runtime: { phase: 'running', activeTurnId: 'agy-turn-1', error: null },
+          queue: [],
+        };
+      }
       if (cmd === 'init_generation_attempt') return 'transpile-message';
       if (cmd === 'classify_intent') return { intentMode: 'design', confidence: 1, response: 'Translating CAD source.', finalResponse: null, usage: null };
       if (cmd === 'generate_design') {
@@ -83,7 +125,7 @@ async function installMocks(page: Page, mode: Mode) {
       if (cmd === 'render_model') {
         return {
           modelId: 'transpiled-model', sourceKind: 'generated', sourceLanguage: 'ecky', geometryBackend: 'build123d', engineKind: 'ecky',
-          contentHash: 'hash', artifactVersion: 1, fcstdPath: '', manifestPath: '/mock/manifest.json', macroPath: '/mock/model.ecky', previewStlPath: '/mock/transpiled.stl',
+          contentHash: 'hash', artifactVersion: 1, fcstdPath: '', manifestPath: '/mock/manifest.json', macroPath: '/mock/model.ecky', modelStlPath: '/mock/transpiled.stl',
           viewerAssets: [], calloutAnchors: [], measurementGuides: [], edgeTargets: [], faceTargets: [],
         };
       }
@@ -99,7 +141,7 @@ async function installMocks(page: Page, mode: Mode) {
         return {
           passed: true, summary: 'Structural and authored verification passed.', issues: [],
           authoredVerifyChecks: [{ tag: 'connected', status: 'passed', message: 'component count = 1' }],
-          metrics: { partCount: 1, previewStlComponentCount: 1, previewStlNonManifoldEdgeCount: 0 },
+          metrics: { partCount: 1, modelStlComponentCount: 1, modelStlNonManifoldEdgeCount: 0 },
           verifierStatus: 'okRustOnly', verifierSource: 'rust_structural',
         };
       }
@@ -109,7 +151,7 @@ async function installMocks(page: Page, mode: Mode) {
       if (cmd === 'get_mess_stl_path') return '/mock/mess.stl';
       return null;
     };
-  }, { mode, eckySource: ECKY_SOURCE });
+  }, { mode, eckySource: ECKY_SOURCE, provider });
   await page.route(/\/mock\/(?:transpiled|mess)\.stl(?:\?.*)?$/, (route) => route.fulfill({
     status: 200,
     contentType: 'model/stl',
@@ -130,18 +172,52 @@ async function openForeignCode(page: Page) {
   return { modal, editor };
 }
 
-test('Given foreign CAD in Code When TRANSLATE TO ECKY succeeds Then source reaches authoring and verified Ecky replaces the buffer', async ({ page }) => {
+test('Given API config When foreign CAD translates Then normal configured send owns dispatch', async ({ page }) => {
   await installMocks(page, 'success');
-  const { modal, editor } = await openForeignCode(page);
+  const { modal } = await openForeignCode(page);
 
   await modal.getByRole('button', { name: 'TRANSLATE TO ECKY' }).click();
-  await expect(editor).toContainText('(verify');
-  await expect(editor).not.toContainText('cube([10, 20, 30])');
-  await expect(modal.getByRole('button', { name: 'TRANSLATE TO ECKY' })).toHaveCount(0);
+  await expect(modal).toBeHidden();
+  await expect(page.locator('[data-window-id="dialogue"]')).toBeVisible();
 
   const generateCall = await page.evaluate(() => (window as any).__CAD_TRANSPILE_CALLS__.find((call: any) => call.cmd === 'generate_design'));
   expect(generateCall.args.prompt).toContain(FOREIGN_SOURCE);
   expect(generateCall.args.prompt).toContain('Translate the foreign CAD source');
+});
+
+test('Given AGY provider When foreign FreeCAD translates Then normal provider dialogue owns dispatch', async ({ page }) => {
+  await installMocks(page, 'success', true);
+  const { modal } = await openForeignCode(page);
+
+  await modal.getByRole('button', { name: 'TRANSLATE TO ECKY' }).click();
+
+  const calls = await page.evaluate(() => (window as any).__CAD_TRANSPILE_CALLS__);
+  const providerCall = calls.find((call: any) => call.cmd === 'send_agy_provider_prompt');
+  expect(providerCall?.args?.input?.promptText).toContain('Translate the foreign CAD source');
+  expect(providerCall?.args?.input?.promptText).toContain(FOREIGN_SOURCE);
+  expect(calls.filter((call: any) => call.cmd === 'generate_design')).toHaveLength(0);
+  await expect(modal).toBeHidden();
+  await expect(page.locator('[data-window-id="dialogue"]')).toBeVisible();
+});
+
+test('Given Ecky helpers and components precede model When Code opens Then translation is not offered', async ({ page }) => {
+  await installMocks(page, 'success');
+  const { modal, editor } = await openForeignCode(page);
+  const componentModel = [
+    '(define (double value) (+ value value))',
+    '(define-component bracket ((number width)) (box width 10 4))',
+    '(model',
+    '  (verify (tag bracket-model) (metric model (manifest has-model-stl)) (expect model (= true)))',
+    '  (part body (bracket :width 20)))',
+  ].join('\n');
+
+  await editor.click();
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A');
+  await page.keyboard.insertText(componentModel);
+
+  await expect(editor).toContainText('(define-component bracket');
+  await expect(modal.getByRole('button', { name: 'TRANSLATE TO ECKY' })).toHaveCount(0);
+  await expect(modal.getByRole('button', { name: 'VERIFY EXISTS' })).toBeVisible();
 });
 
 test('Given translation is pending When Code remains open Then action shows pending and original source remains visible', async ({ page }) => {
@@ -151,17 +227,17 @@ test('Given translation is pending When Code remains open Then action shows pend
   await modal.getByRole('button', { name: 'TRANSLATE TO ECKY' }).click({ noWaitAfter: true });
   await expect(modal.getByRole('button', { name: 'TRANSLATING...' })).toBeVisible();
   await expect(editor).toContainText('cube([10, 20, 30])');
-  await expect(modal.getByRole('button', { name: 'APPLY' })).toBeDisabled();
-  await expect(editor).toContainText('(model', { timeout: 5_000 });
+  await expect(modal).toBeHidden({ timeout: 5_000 });
+  await expect(page.locator('[data-window-id="dialogue"]')).toBeVisible();
 });
 
-test('Given provider translation fails When raw error returns Then original buffer stays recoverable and raw body is visible', async ({ page }) => {
-  await installMocks(page, 'error');
+test('Given AGY translation fails When raw error returns Then original buffer stays recoverable and raw body is visible', async ({ page }) => {
+  await installMocks(page, 'error', true);
   const { modal, editor } = await openForeignCode(page);
 
   await modal.getByRole('button', { name: 'TRANSLATE TO ECKY' }).click();
   await expect(editor).toContainText('cube([10, 20, 30])');
-  await expect(modal.locator('.commit-error')).toContainText('NIM request rejected');
-  await expect(modal.locator('.commit-error')).toContainText('RAW_NIM_BODY: model unavailable in region eu-1');
+  await expect(modal.locator('.commit-error')).toContainText('AGY request rejected');
+  await expect(modal.locator('.commit-error')).toContainText('RAW_AGY_BODY: conversation unavailable');
   await expect(modal.locator('.commit-error')).not.toContainText(/check api key/i);
 });

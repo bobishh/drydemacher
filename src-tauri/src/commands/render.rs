@@ -211,6 +211,16 @@ fn export_entry_name(index: usize, part: &ExportPartInput) -> String {
     format!("{:02}-{}.stl", index + 1, suffix)
 }
 
+fn export_body_entry_name(index: usize, part: &ExportPartInput, body_index: usize) -> String {
+    let stem = sanitize_export_stem(&export_part_label(part));
+    let suffix = if stem.is_empty() {
+        "part"
+    } else {
+        stem.as_str()
+    };
+    format!("{:02}-{}-body-{:02}.stl", index + 1, suffix, body_index + 1)
+}
+
 fn normalize_display_color(color: Option<&str>) -> String {
     let Some(raw) = color.map(str::trim).filter(|value| !value.is_empty()) else {
         return "#D8D8D8FF".to_string();
@@ -305,31 +315,39 @@ pub(crate) fn export_multipart_stl_zip_impl(
     let options =
         zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    for (index, part) in parts.iter().enumerate() {
-        zip.start_file(export_entry_name(index, part), options)
-            .map_err(|err| {
+    let mut output_index = 0usize;
+    for part in parts {
+        let triangles = read_binary_stl_triangles(Path::new(&part.path))?;
+        let triangles = if let Some(frame) = part.placement_frame.as_ref() {
+            transform_stl_triangles(triangles, frame)
+        } else {
+            triangles
+        };
+        let bodies = split_stl_triangle_components(triangles);
+        let split = bodies.len() > 1;
+
+        for (body_index, body_triangles) in bodies.into_iter().enumerate() {
+            let entry_name = if split {
+                export_body_entry_name(output_index, part, body_index)
+            } else {
+                export_entry_name(output_index, part)
+            };
+            output_index += 1;
+            zip.start_file(entry_name, options).map_err(|err| {
                 AppError::persistence(format!(
                     "Failed to add '{}' to multipart STL archive: {}",
                     export_part_label(part),
                     err
                 ))
             })?;
-        if let Some(frame) = part.placement_frame.as_ref() {
-            let triangles =
-                transform_stl_triangles(read_binary_stl_triangles(Path::new(&part.path))?, frame);
-            write_binary_stl_triangles(&mut zip, &triangles).map_err(|err| {
+            let body_triangles = if part.placement_frame.is_some() {
+                body_triangles
+            } else {
+                localize_stl_triangles(body_triangles).0
+            };
+            write_binary_stl_triangles(&mut zip, &body_triangles).map_err(|err| {
                 AppError::persistence(format!(
-                    "Failed to write transformed '{}' into multipart STL archive: {}",
-                    export_part_label(part),
-                    err
-                ))
-            })?;
-        } else {
-            let triangles = read_binary_stl_triangles(Path::new(&part.path))?;
-            let (triangles, _) = localize_stl_triangles(triangles);
-            write_binary_stl_triangles(&mut zip, &triangles).map_err(|err| {
-                AppError::persistence(format!(
-                    "Failed to write localized '{}' into multipart STL archive: {}",
+                    "Failed to write '{}' into multipart STL archive: {}",
                     export_part_label(part),
                     err
                 ))
@@ -384,6 +402,76 @@ fn indexed_three_mf_mesh(triangles: Vec<[[f32; 3]; 3]>) -> (Vec<[f32; 3]>, Vec<[
     }
 
     (vertices, indexed_triangles)
+}
+
+fn split_stl_triangle_components(triangles: Vec<[[f32; 3]; 3]>) -> Vec<Vec<[[f32; 3]; 3]>> {
+    type VertexKey = [i64; 3];
+    type EdgeKey = (VertexKey, VertexKey);
+
+    if triangles.is_empty() {
+        return vec![triangles];
+    }
+
+    let vertex_key =
+        |vertex: [f32; 3]| vertex.map(|value| (value as f64 * 10_000.0).round() as i64);
+    let edge_key = |left: VertexKey, right: VertexKey| {
+        if left <= right {
+            (left, right)
+        } else {
+            (right, left)
+        }
+    };
+
+    let mut edge_triangles = std::collections::BTreeMap::<EdgeKey, Vec<usize>>::new();
+    for (triangle_index, triangle) in triangles.iter().enumerate() {
+        let vertices = triangle.map(vertex_key);
+        for edge in [
+            edge_key(vertices[0], vertices[1]),
+            edge_key(vertices[1], vertices[2]),
+            edge_key(vertices[2], vertices[0]),
+        ] {
+            edge_triangles.entry(edge).or_default().push(triangle_index);
+        }
+    }
+
+    let mut neighbors = vec![Vec::<usize>::new(); triangles.len()];
+    for triangle_ids in edge_triangles.values() {
+        for &left in triangle_ids {
+            for &right in triangle_ids {
+                if left != right {
+                    neighbors[left].push(right);
+                }
+            }
+        }
+    }
+
+    let mut visited = vec![false; triangles.len()];
+    let mut components = Vec::new();
+    for seed in 0..triangles.len() {
+        if visited[seed] {
+            continue;
+        }
+        visited[seed] = true;
+        let mut stack = vec![seed];
+        let mut triangle_ids = Vec::new();
+        while let Some(triangle_index) = stack.pop() {
+            triangle_ids.push(triangle_index);
+            for &neighbor in &neighbors[triangle_index] {
+                if !visited[neighbor] {
+                    visited[neighbor] = true;
+                    stack.push(neighbor);
+                }
+            }
+        }
+        triangle_ids.sort_unstable();
+        components.push(
+            triangle_ids
+                .into_iter()
+                .map(|triangle_index| triangles[triangle_index])
+                .collect(),
+        );
+    }
+    components
 }
 
 fn read_binary_stl_triangles(path: &Path) -> AppResult<Vec<[[f32; 3]; 3]>> {
@@ -1050,7 +1138,15 @@ pub async fn render_model(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<ArtifactBundle> {
-    render_service::render_model_with_previous_manifest(
+    eprintln!(
+        "[CAD_FLOW][backend.render_model.start] macro_len={} params={} dialect={:?} backend={:?} previous_model={:?}",
+        macro_code.len(),
+        parameters.len(),
+        macro_dialect,
+        geometry_backend,
+        previous_manifest.as_ref().map(|manifest| manifest.model_id.as_str()),
+    );
+    let result = render_service::render_model_with_previous_manifest(
         &macro_code,
         &parameters,
         macro_dialect,
@@ -1060,7 +1156,15 @@ pub async fn render_model(
         &state,
         &app,
     )
-    .await
+    .await;
+    match &result {
+        Ok(bundle) => eprintln!(
+            "[CAD_FLOW][backend.render_model.ok] model_id={} preview={} hash={}",
+            bundle.model_id, bundle.model_stl_path, bundle.content_hash
+        ),
+        Err(error) => eprintln!("[CAD_FLOW][backend.render_model.err] {error}"),
+    }
+    result
 }
 
 #[tauri::command]
@@ -1070,7 +1174,7 @@ pub async fn import_fcstd(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<ArtifactBundle> {
-    let _guard = state.render_lock.lock().await;
+    let _guard = state.acquire_geometry_render().await;
     let result = freecad::import_fcstd(
         &source_path,
         configured_freecad_cmd(&state).as_deref(),
@@ -1113,11 +1217,22 @@ pub async fn import_freecad_library_part(
         .map(|ext| ext.to_ascii_lowercase())
         .unwrap_or_default();
 
+    if !matches!(
+        extension.as_str(),
+        "fcstd" | "step" | "stp" | "stl" | "obj" | "3mf"
+    ) {
+        return Err(AppError::validation(format!(
+            "FreeCAD library format '{}' is not importable yet.",
+            extension
+        )));
+    }
+
+    let _guard = state.acquire_geometry_render().await;
+
     if matches!(extension.as_str(), "stl" | "obj" | "3mf") {
         return crate::freecad_library::import_mesh_from_request(&request, &app);
     }
 
-    let _guard = state.render_lock.lock().await;
     let result = match extension.as_str() {
         "fcstd" => {
             freecad::import_fcstd(source_path, configured_freecad_cmd(&state).as_deref(), &app)
@@ -1125,10 +1240,7 @@ pub async fn import_freecad_library_part(
         "step" | "stp" => {
             freecad::import_step(source_path, configured_freecad_cmd(&state).as_deref(), &app)
         }
-        other => Err(AppError::validation(format!(
-            "FreeCAD library format '{}' is not importable yet.",
-            other
-        ))),
+        _ => unreachable!("validated FreeCAD library extension"),
     };
     if result.is_ok() {
         let runtime_cache_dir = freecad::runtime_cache_dir(&app)?;
@@ -1147,7 +1259,7 @@ pub async fn apply_imported_model(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<ArtifactBundle> {
-    let _guard = state.render_lock.lock().await;
+    let _guard = state.acquire_geometry_render().await;
     let (next_bundle, next_manifest) = freecad::apply_imported_model(
         &artifact_bundle,
         &manifest,
@@ -1451,6 +1563,7 @@ mod tests {
         ModelManifest {
             geometry_provenance: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: "imported-fcstd-test".to_string(),
             source_kind: ModelSourceKind::ImportedFcstd,
@@ -1648,6 +1761,63 @@ mod tests {
             .map(|index| archive.by_index(index).unwrap().name().to_string())
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["01-shade-body.stl", "02-trim-ring.stl"]);
+    }
+
+    #[test]
+    fn export_multipart_stl_zip_splits_disconnected_print_bodies() {
+        let root = temp_export_dir("multipart-zip-split-bodies");
+        let body_path = root.join("body.stl");
+        let pins_path = root.join("pins.stl");
+        let zip_path = root.join("dryer-parts.zip");
+        let tetra = |x: f32| {
+            let a = [x, 0.0, 0.0];
+            let b = [x + 1.0, 0.0, 0.0];
+            let c = [x, 1.0, 0.0];
+            let d = [x, 0.0, 1.0];
+            vec![[a, b, c], [a, d, b], [a, c, d], [b, d, c]]
+        };
+        write_binary_stl_triangles_to_path(&body_path, &tetra(0.0));
+        let mut pins = tetra(0.0);
+        pins.extend(tetra(10.0));
+        write_binary_stl_triangles_to_path(&pins_path, &pins);
+
+        export_multipart_stl_zip_impl(
+            &[
+                ExportPartInput {
+                    label: "Enclosure".to_string(),
+                    path: body_path.to_string_lossy().to_string(),
+                    object_name: None,
+                    part_id: Some("enclosure".to_string()),
+                    display_color: None,
+                    placement_frame: None,
+                },
+                ExportPartInput {
+                    label: "Catch Pins".to_string(),
+                    path: pins_path.to_string_lossy().to_string(),
+                    object_name: None,
+                    part_id: Some("catch-pins".to_string()),
+                    display_color: None,
+                    placement_frame: None,
+                },
+            ],
+            zip_path.to_string_lossy().as_ref(),
+            "Filament Dryer".to_string(),
+        )
+        .unwrap();
+
+        let file = fs::File::open(&zip_path).unwrap();
+        let mut archive = ZipArchive::new(file).unwrap();
+        let names = (0..archive.len())
+            .map(|index| archive.by_index(index).unwrap().name().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "01-enclosure.stl",
+                "02-catch-pins-body-01.stl",
+                "03-catch-pins-body-02.stl",
+            ]
+        );
     }
 
     #[test]

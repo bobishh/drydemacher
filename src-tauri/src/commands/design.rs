@@ -1,6 +1,8 @@
 use rustpython_ast::Visitor;
 use rustpython_parser::ast::{self, Constant, Expr, Stmt};
 use rustpython_parser::{parse, Mode};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, State};
 use uuid::Uuid;
@@ -29,6 +31,10 @@ pub struct AddManualVersionInput {
     pub post_processing: Option<crate::contracts::PostProcessingSpec>,
     pub artifact_bundle: Option<ArtifactBundle>,
     pub model_manifest: Option<ModelManifest>,
+    #[serde(default)]
+    pub status: Option<MessageStatus>,
+    #[serde(default)]
+    pub error_message: Option<String>,
 }
 
 fn field_label(key: &str) -> String {
@@ -883,6 +889,8 @@ pub async fn add_manual_version(
             model_manifest: input.model_manifest,
             response_text: None,
             agent_origin: None,
+            status: input.status,
+            error_message: input.error_message,
         },
         &state,
         &app,
@@ -906,6 +914,7 @@ pub async fn add_imported_model_version(
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
+    let projects_root = state.config.lock().unwrap().projects_root.clone();
     let db = state.db.lock().await;
 
     let thread_traits = if db::get_thread_title(&db, &thread_id)
@@ -918,6 +927,26 @@ pub async fn add_imported_model_version(
     };
     db::create_or_update_thread(&db, &thread_id, &title, now, thread_traits.as_ref())
         .map_err(|err| AppError::persistence(err.to_string()))?;
+
+    if matches!(
+        model_manifest.source_kind,
+        crate::contracts::ModelSourceKind::ImportedFcstd
+            | crate::contracts::ModelSourceKind::ImportedStep
+    ) {
+        let binding = crate::thread_source_binding::bind_new_thread(
+            &app,
+            &db,
+            projects_root.as_deref(),
+            &thread_id,
+            &title,
+        )?;
+        let source_path = model_manifest
+            .document
+            .source_path
+            .as_deref()
+            .ok_or_else(|| AppError::validation("Imported CAD manifest has no source path."))?;
+        materialize_imported_cad_source(Path::new(&binding.folder_path), Path::new(source_path))?;
+    }
 
     let msg_id = Uuid::new_v4().to_string();
     let label = model_manifest.document.document_label.trim();
@@ -965,6 +994,37 @@ pub async fn add_imported_model_version(
     write_last_snapshot(&app, Some(&snapshot));
 
     Ok(msg_id)
+}
+
+fn materialize_imported_cad_source(folder: &Path, source: &Path) -> AppResult<PathBuf> {
+    let file_name = source.file_name().ok_or_else(|| {
+        AppError::validation(format!(
+            "Imported CAD source '{}' has no file name.",
+            source.display()
+        ))
+    })?;
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    if !matches!(extension.as_str(), "fcstd" | "step" | "stp") {
+        return Err(AppError::validation(format!(
+            "Imported CAD source '{}' is not FCStd or STEP.",
+            source.display()
+        )));
+    }
+    fs::create_dir_all(folder).map_err(|error| AppError::persistence(error.to_string()))?;
+    let destination = folder.join(file_name);
+    fs::copy(source, &destination).map_err(|error| {
+        AppError::persistence(format!(
+            "Failed to copy imported CAD source '{}' to '{}': {}",
+            source.display(),
+            destination.display(),
+            error
+        ))
+    })?;
+    Ok(destination)
 }
 
 #[tauri::command]
@@ -1138,7 +1198,7 @@ pub async fn update_post_processing(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn update_version_runtime(
+pub async fn repair_missing_version_runtime(
     message_id: String,
     artifact_bundle: ArtifactBundle,
     model_manifest: ModelManifest,
@@ -1149,6 +1209,18 @@ pub async fn update_version_runtime(
 
     let (current_output, current_thread_id) = {
         let db = state.db.lock().await;
+        let current_runtime = db::get_message_runtime_and_thread(&db, &message_id)
+            .map_err(|err| AppError::persistence(err.to_string()))?
+            .ok_or_else(|| AppError::not_found("Message runtime not found for repair."))?;
+        let current_thread_id = current_runtime.2;
+        let latest = db::get_thread_latest_version(&db, &current_thread_id)
+            .map_err(|err| AppError::persistence(err.to_string()))?
+            .ok_or_else(|| AppError::not_found("Thread has no latest version to repair."))?;
+        if latest.id != message_id {
+            return Err(AppError::conflict(
+                "Only the latest version in a thread may retain repaired STL runtime.",
+            ));
+        }
         db::update_message_artifact_bundle(&db, &message_id, &artifact_bundle)
             .map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))?;
         db::update_message_model_manifest(&db, &message_id, &model_manifest)
@@ -1159,9 +1231,6 @@ pub async fn update_version_runtime(
         let current_output = db::get_message_output_and_thread(&db, &message_id)
             .map_err(|err| AppError::persistence(err.to_string()))?
             .map(|(output, _)| output);
-        let (_, _, current_thread_id) = db::get_message_runtime_and_thread(&db, &message_id)
-            .map_err(|err| AppError::persistence(err.to_string()))?
-            .ok_or_else(|| AppError::not_found("Message runtime not found for update."))?;
         (current_output, current_thread_id)
     };
     state
@@ -1169,20 +1238,17 @@ pub async fn update_version_runtime(
         .invalidate_authoring_actors_for_thread(&current_thread_id)
         .await;
 
-    {
-        let snapshot = build_runtime_snapshot(
-            current_output,
-            Some(current_thread_id),
-            Some(message_id),
-            Some(artifact_bundle),
-            Some(model_manifest),
-            None,
-        );
-        let mut last = state.last_snapshot.lock().unwrap();
-        *last = Some(snapshot.clone());
-        write_last_snapshot(&app, Some(&snapshot));
-    }
-
+    let snapshot = build_runtime_snapshot(
+        current_output,
+        Some(current_thread_id),
+        Some(message_id),
+        Some(artifact_bundle),
+        Some(model_manifest),
+        None,
+    );
+    let mut last = state.last_snapshot.lock().unwrap();
+    *last = Some(snapshot.clone());
+    write_last_snapshot(&app, Some(&snapshot));
     Ok(())
 }
 
@@ -1246,6 +1312,7 @@ mod tests {
             component_dependency_lock: None,
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: 2,
             model_id: model_id.to_string(),
             source_kind: ModelSourceKind::Generated,
@@ -1257,7 +1324,7 @@ mod tests {
             fcstd_path: "/tmp/model.FCStd".to_string(),
             manifest_path: "/tmp/model.json".to_string(),
             macro_path: Some("/tmp/model.ecky".to_string()),
-            preview_stl_path: "/tmp/model.stl".to_string(),
+            model_stl_path: "/tmp/model.stl".to_string(),
             viewer_assets: Vec::new(),
             edge_targets: Vec::new(),
             face_targets: Vec::new(),
@@ -1279,7 +1346,7 @@ mod tests {
     fn same_artifact_version_accepts_rebuilt_preview_path() {
         let stored = sample_artifact_bundle("model-1");
         let mut expected = sample_artifact_bundle("model-1");
-        expected.preview_stl_path = "/tmp/rebuilt/model.stl".to_string();
+        expected.model_stl_path = "/tmp/rebuilt/model.stl".to_string();
 
         assert!(same_artifact_version(Some(&stored), &expected));
     }

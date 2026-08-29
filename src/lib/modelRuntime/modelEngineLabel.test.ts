@@ -49,7 +49,7 @@ test('modelEngineLabel prefers artifact metadata over stale output defaults', ()
           contentHash: 'hash',
           fcstdPath: '',
           manifestPath: '',
-          previewStlPath: '',
+          modelStlPath: '',
           viewerAssets: [],
           edgeTargets: [],
           exportArtifacts: [],

@@ -2,6 +2,7 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import {
     formatBackendError,
+    getAuthoringGraph,
     getAppErrorDiagnosticContext,
     macroAstSourceMap,
   } from './tauri/client';
@@ -17,6 +18,7 @@
   } from './macroAstMap';
   import { buildMacroAstSceneLayout, PART_COLLAPSE_THRESHOLD } from './macroAstSceneLayout';
   import type { DesignParams, ModelManifest, ParamValue, ResolvedUiField, UiSpec } from './types/domain';
+  import type { AuthoringGraph } from './authoringGraph';
 
   type MacroSourcePaneState = {
     label: string;
@@ -51,7 +53,6 @@
     fields = [],
     searchQuery = '',
     highlightedParamKey = null,
-    liveApply = false,
     focusNodeId = null,
     onFocusNodeHandled,
     onApplyMacroCode = undefined,
@@ -66,7 +67,6 @@
     fields?: ResolvedUiField[];
     searchQuery?: string;
     highlightedParamKey?: string | null;
-    liveApply?: boolean;
     focusNodeId?: string | null;
     onFocusNodeHandled?: () => void;
     onApplyMacroCode?: (code: string) => Promise<unknown>;
@@ -90,6 +90,8 @@
   let macroMinimapDragging = $state(false);
   let macroPan = $state<{ startX: number; startY: number; camX: number; camY: number } | null>(null);
   let macroSourceNodes = $state<Awaited<ReturnType<typeof macroAstSourceMap>> | null>(null);
+  let authoringGraph = $state<AuthoringGraph | null>(null);
+  let authoringGraphError = $state<string | null>(null);
   let macroSourcePane = $state<MacroSourcePaneState | null>(null);
   let macroSourcePaneDirty = $state(false);
   let searchSelectedNodeId = $state<string | null>(null);
@@ -116,6 +118,31 @@
     };
   });
 
+  $effect(() => {
+    const source = macroCode;
+    const modelId = modelManifest?.modelId ?? null;
+    if (!source || !source.trim()) {
+      authoringGraph = null;
+      authoringGraphError = null;
+      return;
+    }
+    let cancelled = false;
+    getAuthoringGraph({ source, modelId })
+      .then((graph) => {
+        if (cancelled) return;
+        authoringGraph = graph;
+        authoringGraphError = null;
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        authoringGraph = null;
+        authoringGraphError = formatBackendError(error);
+      });
+    return () => {
+      cancelled = true;
+    };
+  });
+
   const macroAstMap = $derived.by(() =>
     buildMacroAstMapProjection({
       macroCode,
@@ -123,6 +150,7 @@
       uiSpec,
       parameters,
       sourceNodes: macroSourceNodes,
+      authoringGraph,
     }),
   );
   const macroFieldByKey = $derived.by(() => new Map(fields.map((field) => [field.key, field])));
@@ -731,6 +759,12 @@
     </div>
   </div>
 
+  {#if authoringGraphError}
+    <div class="macro-ast-typed-status" role="status">
+      Typed structure unavailable: {authoringGraphError}
+    </div>
+  {/if}
+
   {#if hasMacroSearchQuery}
     {#if macroSearchResults.length > 0}
       <div class="macro-ast-search-results" role="listbox" aria-label="Map search results">
@@ -806,6 +840,7 @@
               data-syntax-variant={sceneNode.syntaxVariant}
               data-search-selected={sceneNode.id === searchSelectedNodeId ? 'true' : undefined}
               data-search-owner={sceneNode.id === searchOwnerNodeId ? 'true' : undefined}
+              title={sceneNode.title}
               role="button"
               tabindex="0"
               onclick={() => activateMacroNode(sceneNode)}
@@ -858,7 +893,6 @@
                       autoField={field._auto}
                       highlighted={highlightedParamKey === field.key}
                       cadTone={getCadHint(field).tone}
-                      liveApply={liveApply}
                       compact={true}
                       onDraftValue={(nextValue) => onDraftValue?.(field.key, nextValue)}
                       onUpdate={(nextValue) => onUpdate?.(field.key, nextValue)}
@@ -878,6 +912,20 @@
                   </div>
                   <span class="macro-ast-control-anchor" aria-hidden="true"></span>
                 {/if}
+              {/if}
+
+              {#if sceneNode.inputPorts?.length}
+                <div class="macro-ast-ports" aria-label="Operation inputs">
+                  {#each sceneNode.inputPorts as port (port.childPath)}
+                    <span
+                      class="macro-ast-port"
+                      data-port-role={port.role}
+                      title={`${port.role}: ${port.valueKind}${port.cardinality === 'many' ? '+' : ''}`}
+                    >
+                      <i aria-hidden="true"></i>{port.role}
+                    </span>
+                  {/each}
+                </div>
               {/if}
             </section>
           {/if}
@@ -1441,5 +1489,45 @@
   .macro-ast-node :global(.param-field) {
     position: relative;
     z-index: 1;
+  }
+
+  .macro-ast-typed-status {
+    overflow: hidden;
+    padding: 5px 10px;
+    border-bottom: 1px solid color-mix(in srgb, var(--secondary) 32%, var(--bg-400));
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 0.58rem;
+  }
+
+  .macro-ast-ports {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    gap: 7px;
+    margin-top: 8px;
+    overflow: hidden;
+  }
+
+  .macro-ast-port {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+    font-size: 0.55rem;
+    text-transform: uppercase;
+  }
+
+  .macro-ast-port i {
+    width: 7px;
+    height: 7px;
+    border: 1px solid var(--secondary);
+    background: var(--bg-400);
+  }
+
+  .macro-ast-node[data-node-kind='readonly'] {
+    opacity: 0.72;
+    --macro-variant-accent: var(--text-dim);
   }
 </style>

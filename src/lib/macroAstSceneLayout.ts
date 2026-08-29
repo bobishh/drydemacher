@@ -11,6 +11,8 @@ export type MacroAstSceneNodeLayout = {
   label: string;
   syntaxVariant?: string;
   syntaxLabel?: string;
+  title?: string;
+  inputPorts?: MacroAstMapNode['inputPorts'];
   fieldKey?: string;
   value?: MacroAstMapNode['value'];
   sourceRange?: MacroAstMapNode['sourceRange'];
@@ -206,6 +208,8 @@ export function buildMacroAstSceneLayout(
         sourceRange: part.sourceRange,
         syntaxVariant: part.syntaxVariant,
         syntaxLabel: part.syntaxLabel,
+        title: part.title,
+        inputPorts: part.inputPorts,
         x,
         y,
         w,
@@ -242,6 +246,8 @@ export function buildMacroAstSceneLayout(
             label: param.label,
             syntaxVariant: param.syntaxVariant,
             syntaxLabel: param.syntaxLabel,
+            title: param.title,
+            inputPorts: param.inputPorts,
             fieldKey: param.fieldKey,
             value: param.value,
             x: columnX,

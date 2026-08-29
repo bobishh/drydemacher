@@ -2,6 +2,7 @@
   import DialogueWindowContent from './lib/dialogue/DialogueWindowContent.svelte';
   import Viewer from './lib/Viewer.svelte';
   import VertexGenie from './lib/VertexGenie.svelte';
+  import AgentNotificationCenter from './lib/AgentNotificationCenter.svelte';
   import DrawingOverlay from './lib/DrawingOverlay.svelte';
   import ParamPanel from './lib/ParamPanel.svelte';
   import ConfigPanel from './lib/ConfigPanel.svelte';
@@ -27,7 +28,7 @@
   import CampaignWorkbench from './lib/CampaignWorkbench.svelte';
   import CapturePanel from './lib/CapturePanel.svelte';
   import AnalysisPanel from './lib/AnalysisPanel.svelte';
-  import { getProjectSource, type FemMeshPreviewResponse, type FemRunResponse } from './lib/tauri/client';
+  import { getAgentActivity, getProjectSource, type FemMeshPreviewResponse, type FemRunResponse } from './lib/tauri/client';
   import type { FemDisplayOptions } from './lib/femDisplay';
   import LibraryPanel from './lib/LibraryPanel.svelte';
   import { campaignDefinitionClient, type CampaignCurrentStepPayload, type CampaignDefinitionSummary } from './lib/projects/campaignDefinitionClient';
@@ -63,8 +64,13 @@
   import { onboarding, shouldAutoStartOnboarding } from './lib/stores/onboarding';
   import { session } from './lib/stores/sessionStore';
   import { startCookingPhraseLoop, stopPhraseLoop } from './lib/stores/phraseEngine';
+  import { agentActivityIngestionStore, connectAgentActivityIngestion } from './lib/stores/agentActivity';
+  import { agentNotificationsStore } from './lib/stores/agentNotifications';
+  import { isActiveLongTaskEvent, isLongTaskEvent, longTasksStore } from './lib/stores/longTasks';
+  import { localNotificationActionsStore } from './lib/stores/localNotificationActions';
+  import { shouldProjectAgentNotification } from './lib/notificationAggregation';
   import { handleGenerate, isQuestionIntent } from './lib/controllers/requestOrchestrator';
-  import { handleParamChange, commitManualVersion, stageParamChange, applyManualCodeDraft } from './lib/controllers/manualController';
+  import { handleParamChange, commitManualVersion, stageParamChange, applyManualCodeDraft, manualApplyQueueStateStore } from './lib/controllers/manualController';
   import {
     loadFromHistory,
     createNewThread,
@@ -73,8 +79,10 @@
     restoreVersion,
     loadVersion,
     refreshHistory,
+    refreshThreadHistoryProjection,
     loadOlderThreadMessages,
     activeThreadMessagesLoading,
+    activeThreadVersionLoading,
     threadMessagePageState,
   } from './lib/stores/history';
   import { workingCopy, isDirty } from './lib/stores/workingCopy';
@@ -97,7 +105,7 @@
   import { boot, saveConfig, fetchModels } from './lib/boot/restore';
   import { requestQueue, allRequests, activeRequests, activeRequestCount, currentActiveRequest, activeThreadBusy, activeThreadRequests } from './lib/stores/requestQueue';
   import { nowSeconds } from './lib/stores/timeEngine';
-  import { liveApply, paramPanelState } from './lib/stores/paramPanelState';
+  import { paramPanelState } from './lib/stores/paramPanelState';
   import { resolveEngineCapabilitySummary } from './lib/modelRuntime/modelCapabilities';
   import { persistLastSessionSnapshot } from './lib/modelRuntime/sessionSnapshot';
   import { getRenderableRuntimeBundle, inspectRuntimeBundle } from './lib/modelRuntime/runtimeBundle';
@@ -105,9 +113,12 @@
   import { resolveDraftPreviewDesign } from './lib/agents/draftPreviewParams';
   import { shouldApplyDraftPreviewToWorkspace } from './lib/agents/draftPreviewProjection';
   import {
+    activeRenderSnapshot,
     hydrateActiveRenderSnapshot,
     RenderSnapshotMismatch,
   } from './lib/stores/activeRenderSnapshot';
+  import { resolveCodeModalSource, type CodeModalSourceAuthority } from './lib/codeModalSource';
+  import { selectProjectFolderWatchEvent } from './lib/projectFolderWatchEvents';
   import {
     deriveThreadAttentionIds,
     deriveMascotStateForThreadAgent,
@@ -117,20 +128,22 @@
     shouldAutoFocusAgentWorkingVersion,
     usesAgentDialogueMode,
     usesMcpConnection,
-    usesActiveMcpMode,
-  } from './lib/agents/state';
+} from './lib/agents/state';
   import { resolveRelayPresence } from './lib/agents/relayPresence';
   import { deriveDialogueState, type DialogueState } from './lib/composables/dialogueState';
-  import {
+  import { projectProviderTurnMessages } from './lib/providerActivity';
+  import type { ProviderCodeReference } from './lib/providerMessagePresentation';
+import {
     buildOptimisticQueuedDialogueMessage,
     deriveOptimisticDialogueMessages,
     hasLiveApiEngineConnection,
+    mergeOptimisticCodexDialogueMessages,
     mergeOptimisticQueuedDialogueMessages,
     type OptimisticQueuedDialogueMessage,
   } from './lib/composables/apiDialogue';
+  import { projectThreadAgentStateFromSessionEvents } from './lib/agents/presentation';
   import {
     deriveViewerBusyState,
-    mapThreadAgentStateToViewerBusy,
     type ViewerBusyPhase,
   } from './lib/composables/viewerBusyState';
   import {
@@ -183,11 +196,20 @@
     buildImportedUiSpec,
     type ImportedPreviewTransform,
   } from './lib/modelRuntime/importedRuntime';
+  import { buildImportedEvidence, isForeignCadEvidence } from './lib/modelRuntime/importedEvidence';
+  import {
+    buildFreecadComponentSource,
+    parseFreecadComponentSource,
+  } from './lib/modelRuntime/freecadComponentSource';
   import {
     buildPreviewViewTransforms,
     mergePreviewTransforms,
     resolveActivePreviewView,
   } from './lib/modelRuntime/previewViews';
+  import {
+    provenanceOverlayControls,
+    provenanceOverlayPatch,
+  } from './lib/modelRuntime/ownershipSections';
   import {
     buildSemanticPatch,
     ensureSemanticManifest,
@@ -221,6 +243,7 @@
   } from './lib/sessionActivity';
   import {
     recordSessionActivityEvent,
+    ingestAgentActivitySessionEvents,
     sessionActivityEvents as sessionActivityEventStore,
   } from './lib/stores/sessionActivityStore';
   import {
@@ -249,24 +272,33 @@
   } from './lib/capture/captureGuideDraft';
   import {
     clearSketchPreviewDraft,
+    dispatchAgyPromptQueue,
+    dispatchCodexPromptQueue,
     saveSketchPreviewDraft,
     addImportedModelVersion,
     exportFile,
     exportMultipart3mf,
     exportMultipartStlZip,
     formatBackendError,
+    getAgyProvider,
+    getAgyProviderMessages,
+    getCodexTakeover,
+    getCodexTakeoverMessages,
+    getAgentDraftPreview,
     getActiveAgentSessions,
     getAgentTerminalSnapshots,
+    getWebContentRecoveryState,
+    acknowledgeWebContentRecovery,
     getMessageAttachments,
-    getThread,
     getThreadMessageVersion,
-    getThreadAgentState,
+    getVersionSource,
     getModelManifest,
     macroAstSourceMap,
     importFreecadLibraryPart,
     importFcstd,
     preparePromptAttachments,
     preparePromptWorkspaceCapture,
+    projectFolderRenderActivity,
     prepareCapturePreview,
     adoptLatestCaptureRun,
     listCaptureRuns,
@@ -292,21 +324,28 @@
     cancelCaptureSession as cancelCaptureSessionCommand,
     rejectAgentViewportScreenshot,
     renderModel,
-    restartPrimaryAutoAgent,
     resizeAgentTerminal,
     queueAgentPrompt,
+    removeAgyQueuedPrompt,
+    removeCodexQueuedPrompt,
+    retryAgyQueuedPrompt,
+    retryCodexQueuedPrompt,
     resolveAgentConfirm,
     resolveAgentPrompt,
     resolveAgentViewportScreenshot,
     saveConfig as persistBackendConfig,
     sendAgentTerminalInput,
-    stopPrimaryAutoAgent,
-    updateVersionRuntime,
+    sendAgyProviderPrompt,
+    sendCodexTakeoverPrompt,
+    steerCodexTakeover,
+    stopAgyProvider,
+    stopCodexTakeover,
+    repairMissingVersionRuntime,
     updateVersionPreview,
-    wakePrimaryAutoAgent,
     saveModelManifest,
     type PostProcessingSpec,
-    type ThreadAgentState,
+    type AgyProviderSnapshot,
+    type CodexTakeoverSnapshot,
   } from './lib/tauri/client';
   import { listen } from '@tauri-apps/api/event';
   import type {
@@ -346,6 +385,7 @@
     Request,
     RuntimeBackendCapability,
     SourceLanguage,
+    Thread,
     UiField,
     UiSpec,
     ViewerAsset,
@@ -426,10 +466,17 @@
       }>;
     } | null;
   };
-  type ThreadAgentStateWithAuthoringLints = ThreadAgentState & {
-    authoringLints?: AgentAuthoringLint[];
+  type AgentDraftPreviewChangedEvent = {
+    sessionId: string;
+    threadId: string;
+    previewId: string;
+    baseMessageId?: string | null;
+    modelId?: string | null;
+    revision: number;
+    feedbackStatus?: 'checking' | 'passed' | 'failed' | 'warning' | null;
+    feedbackSummary?: string | null;
   };
-
+  const latestDraftPreviewRevision = new Map<string, number>();
   type DrawingOverlayHandle = {
     hasDrawing: () => boolean;
     getCanvas: () => HTMLCanvasElement | null;
@@ -448,7 +495,7 @@
     threadId: string;
     messageId: string;
     modelId?: string | null;
-    previewStlPath: string;
+    modelStlPath: string;
     viewerAssets: ViewerAsset[];
     includeOverlays: boolean;
     camera?: ViewportCameraState | null;
@@ -469,6 +516,9 @@
     body: string;
     threadId: string;
     messageId: string | null;
+  };
+  type GeometryRenderActivityEvent = {
+    activeCount: number;
   };
   type HiddenViewerSpec = {
     requestId: string;
@@ -579,10 +629,18 @@
     messageId?: string | null;
     sourceLanguage?: SourceLanguage | null;
     geometryBackend?: GeometryBackend | null;
+    expectedSourcePath?: string | null;
+    highlightLine?: number | null;
+    throwSourceError?: boolean;
   }) {
+    codeModalHighlightLine = seed?.highlightLine ?? null;
     const shouldReopenDocs = $windowStore.docs.visible;
     if (!$activeThreadId) {
-      await createNewThread({ mode: 'blank' });
+      const createdThreadId = await createNewThread({ mode: 'blank' });
+      // The history effect loads the per-thread window layout asynchronously.
+      // Await that load here, otherwise it can overwrite the just-opened code
+      // window with the blank layout.
+      if (createdThreadId) await loadLayoutForThread(createdThreadId);
       await tick();
       if (shouldReopenDocs) {
         showWindow('docs');
@@ -591,21 +649,142 @@
     }
 
     const activeId = $activeThreadId;
-    const sourceThreadId = projectFolderNotice?.threadId ?? activeId;
-    if (!sourceThreadId) return;
+    const sourceThreadId = activeId;
+    if (!sourceThreadId) {
+      // Keep the inspector available even when backend thread creation is
+      // unavailable (for example during a fresh, offline boot). Docs snippets
+      // and manual editing still have useful draft content without a thread.
+      codeModalMode = 'version';
+      codeModalSourceAuthority = 'draft';
+      codeModalSourceThreadId = null;
+      codeModalSourceLanguage = seed?.sourceLanguage ?? $config.defaultSourceLanguage;
+      codeModalDraftSerial += 1;
+      codeModalDraftScopeKey = `draft:no-thread:${codeModalDraftSerial}`;
+      selectedCode.set(seed?.code ?? '');
+      selectedTitle.set(codeInspectorTitle(
+        seed?.title ?? 'Manual Edit',
+        codeModalSourceLanguage,
+        seed?.geometryBackend ?? $config.defaultGeometryBackend,
+      ));
+      mountedWindows.code = true;
+      showWindow('code');
+      return;
+    }
+    const current = get(workingCopy);
+    const versionManifest = activeVersionMessage?.modelManifest ?? activeModelManifest ?? null;
+    const foreignEvidenceMode = !seed?.expectedSourcePath && isForeignCadEvidence(versionManifest);
+    const nextTitle = seed?.title ?? (current.title || 'Manual Edit');
+    const currentHasSource = current.macroCode.trim().length > 0;
+    const nextSourceLanguage = seed?.sourceLanguage ?? (
+      currentHasSource ? current.sourceLanguage : $config.defaultSourceLanguage
+    );
+    const nextGeometryBackend = seed?.geometryBackend ?? (
+      currentHasSource ? current.geometryBackend : $config.defaultGeometryBackend
+    );
+
+    if (foreignEvidenceMode) {
+      const versionBundle = activeVersionMessage?.artifactBundle ?? activeArtifactBundle ?? null;
+      if (!versionBundle) {
+        session.setError('Source Error: imported component artifact bundle is not loaded.');
+        return;
+      }
+      const importedUiSpec = buildImportedUiSpec(versionManifest);
+      const importedParams = buildImportedParams(
+        versionManifest,
+        $paramPanelState.params ?? {},
+        importedUiSpec,
+      );
+      codeModalEvidence = buildImportedEvidence(versionManifest);
+      codeModalMode = 'foreign-evidence';
+      codeModalSourceAuthority = 'bound';
+      codeModalSourceThreadId = sourceThreadId;
+      codeModalSourceLanguage = nextSourceLanguage;
+      codeModalDraftSerial += 1;
+      codeModalDraftScopeKey = [
+        'version',
+        activeId,
+        seed?.messageId ?? $activeVersionId ?? current.sourceVersionId ?? 'draft',
+        codeModalDraftSerial,
+      ].join(':');
+      selectedCode.set(buildFreecadComponentSource({
+        artifactBundle: versionBundle,
+        manifest: versionManifest,
+        parameters: importedParams,
+        uiSpec: importedUiSpec,
+      }));
+      selectedTitle.set(`${nextTitle}.FREECAD-COMPONENT`);
+      mountedWindows.code = true;
+      showWindow('code');
+      return;
+    }
+
+    let initialCode = seed?.code ?? current.macroCode;
+    if (seed?.messageId && seed.code && !seed.expectedSourcePath) {
+      try {
+        initialCode = await getVersionSource(sourceThreadId, seed.messageId) ?? initialCode;
+      } catch (error) {
+        session.setError(`Source Error: ${formatBackendError(error)}`);
+        return;
+      }
+    }
+    codeModalEvidence = '';
+    codeModalMode = 'version';
+    codeModalSourceAuthority = 'draft';
+    codeModalSourceThreadId = sourceThreadId;
+    codeModalSourceLanguage = nextSourceLanguage;
+    codeModalDraftSerial += 1;
+    codeModalDraftScopeKey = [
+      'version',
+      $activeThreadId ?? 'no-thread',
+      seed?.messageId ?? $activeVersionId ?? current.sourceVersionId ?? 'draft',
+      codeModalDraftSerial,
+    ].join(':');
+    selectedCode.set(initialCode);
+    selectedTitle.set(codeInspectorTitle(nextTitle, nextSourceLanguage, nextGeometryBackend));
+    const openedFromSavedVersion = Boolean(seed?.code && !seed.expectedSourcePath);
+    if (openedFromSavedVersion) {
+      mountedWindows.code = true;
+      showWindow('code');
+    }
+
     let boundSource;
     try {
       boundSource = await getProjectSource(sourceThreadId);
     } catch (error) {
-      session.setError(`Source Error: ${formatBackendError(error)}`);
+      const message = `Source Error: ${formatBackendError(error)}`;
+      if (seed?.throwSourceError) throw new Error(message);
+      session.setError(message);
+      // A blank/manual thread may not have a mirrored source file yet. Keep
+      // the inspector usable with its draft (including docs-provided code).
+      mountedWindows.code = true;
+      showWindow('code');
       return;
     }
 
-    const current = get(workingCopy);
-    const nextCode = boundSource.source;
-    const nextTitle = seed?.title ?? (current.title || 'Manual Edit');
-    const nextSourceLanguage = seed?.sourceLanguage ?? current.sourceLanguage ?? 'legacyPython';
-    const nextGeometryBackend = seed?.geometryBackend ?? current.geometryBackend ?? 'freecad';
+    if (seed?.expectedSourcePath && boundSource.file !== seed.expectedSourcePath) {
+      const message = `Source Error: referenced model no longer matches current thread source. Referenced: ${seed.expectedSourcePath}. Current: ${boundSource.file}.`;
+      if (seed.throwSourceError) throw new Error(message);
+      session.setError(message);
+      return;
+    }
+
+    const renderSnapshot = get(activeRenderSnapshot);
+    const loadedModelId = get(session).artifactBundle?.modelId ?? null;
+    const isActiveRenderDraft = Boolean(
+      renderSnapshot &&
+        renderSnapshot.threadId === sourceThreadId &&
+        renderSnapshot.targetRef?.kind === 'draft' &&
+        renderSnapshot.artifactBundle.modelId === loadedModelId,
+    );
+    const codeSource = seed?.expectedSourcePath
+      ? { source: boundSource.source, authority: 'bound' as const }
+      : resolveCodeModalSource({
+          activeRenderSource: renderSnapshot?.design.macroCode ?? seed?.code,
+          boundSource: boundSource.source,
+          isActiveRenderDraft,
+        });
+    const nextCode = codeSource.source;
+    codeModalSourceAuthority = codeSource.authority;
 
     if (
       nextCode !== current.macroCode ||
@@ -630,28 +809,88 @@
     codeModalMode = 'version';
     codeModalSourceThreadId = boundSource.threadId;
     codeModalSourceLanguage = nextSourceLanguage;
-    codeModalDraftSerial += 1;
-    codeModalDraftScopeKey = [
-      'version',
-      $activeThreadId ?? 'no-thread',
-      seed?.messageId ?? $activeVersionId ?? current.sourceVersionId ?? 'draft',
-      codeModalDraftSerial,
-    ].join(':');
-    selectedCode.set(nextCode);
+    if (get(selectedCode) === initialCode) selectedCode.set(nextCode);
     selectedTitle.set(codeInspectorTitle(nextTitle, nextSourceLanguage, nextGeometryBackend));
+    // Layout loading for a newly-created blank thread can finish after the
+    // source lookup above and restore hidden window state. Re-assert visibility
+    // after all async work so dock and docs launches remain observable.
+    mountedWindows.code = true;
     showWindow('code');
+    // A concurrent layout refresh may complete one tick later.
+    setTimeout(() => {
+      mountedWindows.code = true;
+      showWindow('code');
+    }, 100);
+  }
+
+  async function refreshOpenCodeModalHead(threadId: string): Promise<void> {
+    if (!$windowStore.code.visible || codeModalMode !== 'version') return;
+    if (threadId !== get(activeThreadId)) return;
+
+    try {
+      const head = await getProjectSource(threadId);
+      if (threadId !== get(activeThreadId) || !$windowStore.code.visible) return;
+
+      const current = get(workingCopy);
+      const sourceLanguage: SourceLanguage = head.file.toLowerCase().endsWith('.ecky')
+        ? 'ecky'
+        : current.sourceLanguage;
+      const geometryBackend = sourceLanguage === 'ecky'
+        ? $config.defaultGeometryBackend
+        : current.geometryBackend;
+
+      codeModalSourceAuthority = 'bound';
+      codeModalSourceThreadId = head.threadId;
+      codeModalSourceLanguage = sourceLanguage;
+      selectedCode.set(head.source);
+      selectedTitle.set(codeInspectorTitle(current.title || 'Manual Edit', sourceLanguage, geometryBackend));
+      workingCopy.patch({
+        macroCode: head.source,
+        sourceLanguage,
+        geometryBackend,
+        dirty: false,
+      });
+    } catch (error) {
+      session.setError(`Source Error: ${formatBackendError(error)}`);
+    }
   }
 
   function closeCodeModal() {
     closeWindowStore('code');
   }
 
-  // Close the inspector once the core save lands; a failed commit throws
+  // Close the inspector once the version append lands; a failed apply throws
   // before this and keeps the modal open with the raw error.
-  async function commitManualVersionAndClose(
+  async function applyManualVersionAndClose(
     payload: Parameters<typeof commitManualVersion>[0],
   ) {
     await commitManualVersion(payload);
+    closeCodeModal();
+  }
+
+  async function applyCodeModalSource(
+    payload: Parameters<typeof commitManualVersion>[0],
+  ) {
+    if (codeModalMode !== 'foreign-evidence') {
+      return applyManualVersionAndClose(payload);
+    }
+    if (typeof payload === 'string') throw new Error('Imported component apply payload is invalid.');
+    const bundle = activeVersionMessage?.artifactBundle ?? activeArtifactBundle ?? null;
+    const manifest = activeVersionMessage?.modelManifest ?? activeModelManifest ?? null;
+    if (!bundle || !manifest || !isForeignCadEvidence(manifest)) {
+      throw new Error('Imported component runtime is not loaded.');
+    }
+    if (activeArtifactBundle?.modelId !== bundle.modelId) {
+      throw new Error('Imported component runtime is still loading.');
+    }
+    const uiSpec = buildImportedUiSpec(manifest);
+    const parameters = parseFreecadComponentSource(payload.code, bundle, uiSpec);
+    workingCopy.patch({
+      title: payload.title ?? undefined,
+      versionName: payload.versionName ?? undefined,
+    });
+    const committed = await handleParamChange(parameters, null, true);
+    if (!committed) throw new Error('Imported component Apply failed.');
     closeCodeModal();
   }
 
@@ -671,61 +910,10 @@
     showWindow(id);
   }
 
-  async function waitForRequestTerminal(requestId: string): Promise<Request> {
-    const existing = get(requestQueue).byId[requestId];
-    if (existing && ['success', 'error', 'canceled'].includes(existing.phase)) return existing;
-
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      let unsubscribe = () => {};
-      unsubscribe = requestQueue.subscribe((queue) => {
-        const request = queue.byId[requestId];
-        if (!request || !['success', 'error', 'canceled'].includes(request.phase)) return;
-        settled = true;
-        unsubscribe();
-        resolve(request);
-      });
-      if (settled) unsubscribe();
-      if (!get(requestQueue).byId[requestId]) {
-        unsubscribe();
-        reject(new Error(`CAD transpile request '${requestId}' was not queued.`));
-      }
-    });
-  }
-
-  async function handleTranslateCodeToEcky(source: string): Promise<string> {
-    if (generationUnavailableReason) {
-      throw new Error(generationUnavailableReason);
-    }
-    const requestId = await handleGenerate(
-      buildCodeWindowTranspilePrompt(source),
-      [],
-      {
-        uiDeps: {
-          ...requestOrchestratorUiDeps,
-          // Failed generated drafts must not replace the recoverable foreign source.
-          openCodeModalManual: null,
-        },
-      },
-    );
-    const request = await waitForRequestTerminal(requestId);
-    if (request.phase !== 'success') {
-      throw new Error(request.error || `CAD transpile ended in ${request.phase}.`);
-    }
-    const design = request.result?.design;
-    const translated = design?.macroCode?.trim() ?? '';
-    if (!translated) {
-      throw new Error('CAD transpile completed without Ecky source.');
-    }
-    codeModalSourceLanguage = 'ecky';
-    selectedTitle.set(
-      codeInspectorTitle(
-        design?.title || 'Transpiled model',
-        design?.sourceLanguage ?? 'ecky',
-        design?.geometryBackend ?? 'mesh',
-      ),
-    );
-    return translated;
+  async function handleTranslateCodeToEcky(source: string): Promise<void> {
+    await handlePromptPanelSubmit(buildCodeWindowTranspilePrompt(source), []);
+    closeCodeModal();
+    showWindow('dialogue');
   }
 
   // Local reactive aliases for templates
@@ -733,6 +921,9 @@
   const status = $derived($session.status);
   const error = $derived($session.error);
   const errorText = $derived(error ? formatBackendError(error) : null);
+  const globalErrorText = $derived(
+    $session.globalError ? formatBackendError($session.globalError) : null,
+  );
   const sessionAuthoringError = $derived(
     error && typeof error !== 'string' && (error.layer || error.fix)
       ? { layer: error.layer, fix: error.fix }
@@ -756,30 +947,99 @@
   let activeCampaignRun = $state<CampaignRun | null>(null);
   let campaignRunError = $state<string | null>(null);
   let projectFolderNotice = $state<ProjectFolderNotice | null>(null);
+  let geometryRenderActiveCount = $state(0);
+  let projectFolderWatchEventRevision = 0;
+  let projectFolderActivitySnapshotInFlight = false;
+  const observedProjectFolderRenderThreads = new Set<string>();
+
+  function applyProjectFolderWatchEvent(latest: ProjectFolderWatchEvent): void {
+    projectFolderWatchEventRevision += 1;
+    if (latest.kind === 'detected') {
+      projectFolderNotice = {
+        tone: 'pending',
+        title: 'SOURCE RENDERING',
+        body: `${latest.slug}/model.ecky changed externally. Rendering the settled source.`,
+        threadId: latest.threadId,
+        messageId: null,
+      };
+    } else if (latest.kind === 'applied') {
+      projectFolderNotice = {
+        tone: 'success',
+        title: 'SOURCE APPLIED',
+        body: `${latest.slug}/model.ecky validated and committed as a new version.`,
+        threadId: latest.threadId,
+        messageId: latest.messageId,
+      };
+    } else {
+      projectFolderNotice = {
+        tone: 'error',
+        title: 'SOURCE APPLY FAILED',
+        body: latest.error,
+        threadId: latest.threadId,
+        messageId: latest.messageId,
+      };
+    }
+  }
+
+  async function reconcileProjectFolderRenderActivity(): Promise<void> {
+    if (projectFolderActivitySnapshotInFlight) return;
+    projectFolderActivitySnapshotInFlight = true;
+    const revisionBeforeSnapshot = projectFolderWatchEventRevision;
+    try {
+      const activeRenders = await projectFolderRenderActivity();
+      if (projectFolderWatchEventRevision !== revisionBeforeSnapshot) return;
+
+      const activeThread = get(activeThreadId) ?? null;
+      const latest = activeThread
+        ? activeRenders.find((activity) => activity.threadId === activeThread)
+        : undefined;
+      if (latest) {
+        observedProjectFolderRenderThreads.add(latest.threadId);
+        if (
+          projectFolderNotice?.tone !== 'pending' ||
+          projectFolderNotice.threadId !== latest.threadId
+        ) {
+          applyProjectFolderWatchEvent({ kind: 'detected', ...latest });
+        }
+        return;
+      }
+
+      if (
+        projectFolderNotice?.tone === 'pending' &&
+        observedProjectFolderRenderThreads.delete(projectFolderNotice.threadId)
+      ) {
+        projectFolderWatchEventRevision += 1;
+        projectFolderNotice = null;
+      }
+    } catch {
+      // Recovery snapshot only. Live watcher events remain authoritative.
+    } finally {
+      projectFolderActivitySnapshotInFlight = false;
+    }
+  }
   let sketchPreview = $state<SketchPreviewState | null>(null);
   let sketchPreviewDraft = $state<SketchPreviewDraftState | null>(null);
   const sketchWorkspaceAvailable = false;
-  let codeModalMode = $state<'version' | 'sketch-preview' | 'docs-snippet'>('version');
+  let codeModalMode = $state<'version' | 'foreign-evidence' | 'sketch-preview' | 'docs-snippet'>('version');
   let codeModalSourceThreadId = $state<string | null>(null);
   let codeModalSourceLanguage = $state<SourceLanguage | null>(null);
+  let codeModalEvidence = $state('');
+  let codeModalSourceAuthority = $state<CodeModalSourceAuthority>('bound');
+  let codeModalHighlightLine = $state<number | null>(null);
   let codeModalDraftSerial = $state(0);
   let codeModalDraftScopeKey = $state('');
-  const enableViewportContextOverlay = false;
   let activeDraftFeedback = $state<AgentDraftFeedback | null>(null);
-  const LIVE_APPLY_DEBOUNCE_MS = 250;
-  let liveApplyTimer: ReturnType<typeof setTimeout> | null = null;
-  let pendingLiveApplyParams: DesignParams = {};
-  let pendingLiveApplySourceKey: string | null = null;
 
   const isBooting = $derived(phase === 'booting');
   const isQuestionFlow = $derived(phase === 'answering');
   const isMcpConnection = $derived(usesMcpConnection($config.connectionType));
-  const isActiveMcpMode = $derived(usesActiveMcpMode($config.connectionType, $config.mcp.mode));
+  const projectedThreadAgentState = $derived.by(() =>
+    projectThreadAgentStateFromSessionEvents($sessionActivityEventStore, $activeThreadId ?? null),
+  );
   const usesQueuedAgentDialogue = $derived.by<boolean>(() =>
-    usesAgentDialogueMode($config.connectionType, threadAgentState),
+    usesAgentDialogueMode($config.connectionType, projectedThreadAgentState),
   );
   let activeAgentSessions = $state<AgentSession[]>([]);
-  let threadAgentState = $state<ThreadAgentState | null>(null);
   const primaryAgentId = $derived.by<string | null>(() =>
     derivePrimaryAgentId($config.mcp.autoAgents ?? [], $config.mcp.primaryAgentId ?? null),
   );
@@ -789,14 +1049,416 @@
   const visibleAgentTerminal = $derived($visibleAgentTerminalStore);
   const activeAgentTerminalAttention = $derived($agentTerminalAttentionStore);
   const activeThread = $derived($history.find((t) => t.id === $activeThreadId));
+  let codexTakeoverSnapshot = $state<CodexTakeoverSnapshot | null>(null);
+  let agyProviderSnapshot = $state<AgyProviderSnapshot | null>(null);
+  let codexTakeoverLoading = $state(false);
+  let codexTakeoverError = $state<string | null>(null);
+  let codexTakeoverLoadToken = 0;
+  let codexTakeoverRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  let agyProviderLoadToken = 0;
+  let agyProviderRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   let optimisticQueuedAgentMessages = $state<Record<string, OptimisticQueuedDialogueMessage>>({});
-  const activeThreadDialogueMessages = $derived.by(() =>
-    mergeOptimisticQueuedDialogueMessages(
-      deriveOptimisticDialogueMessages(activeThread?.messages ?? [], $activeThreadRequests),
+  const activeProviderSnapshot = $derived.by<CodexTakeoverSnapshot | AgyProviderSnapshot | null>(() =>
+    $config.connectionType === 'provider:agy' ? agyProviderSnapshot : codexTakeoverSnapshot,
+  );
+  const codexDialogueMessages = $derived.by<Message[]>(() =>
+    (() => {
+      const persisted = activeProviderSnapshot?.messages ?? [];
+      const live = activeProviderSnapshot?.liveMessages ?? [];
+      const turnTraces = activeProviderSnapshot?.turnTraces ?? [];
+      const liveIds = new Set(live.map((message) => message.id));
+      const providerId = $config.connectionType === 'provider:agy' ? 'agy' : 'codex';
+      const providerLabel = providerId === 'agy' ? 'Agy' : 'Codex';
+      const externalConversationId = activeProviderSnapshot
+        ? 'agyConversationId' in activeProviderSnapshot.binding
+          ? activeProviderSnapshot.binding.agyConversationId
+          : activeProviderSnapshot.binding.codexThreadId
+        : 'unbound';
+      const mappedPersisted = persisted
+        .filter((message) => !liveIds.has(message.id))
+        .map((message, index): Message => ({
+          id: message.id,
+          role: message.role === 'assistant' ? 'assistant' : 'user',
+          content: message.content,
+          status: message.role === 'user'
+            ? 'success'
+            : ['pending', 'working', 'success', 'error', 'discarded'].includes(message.status)
+              ? message.status as Message['status']
+              : 'success',
+          timestamp: message.timestamp,
+          timelineOrder: index,
+        }));
+      const working = projectProviderTurnMessages({
+        providerId,
+        providerLabel,
+        externalConversationId,
+        activeTurnId: activeProviderSnapshot?.runtime.activeTurnId,
+        phase: 'active',
+        messages: live,
+      });
+      const traces = turnTraces.flatMap((trace) => {
+        return projectProviderTurnMessages({
+          providerId,
+          providerLabel,
+          externalConversationId,
+          activeTurnId: trace.turnId,
+          phase: trace.status === 'success'
+            ? 'completed'
+            : trace.status === 'interrupted'
+              ? 'interrupted'
+              : 'error',
+          messages: trace.messages,
+        });
+      });
+      return [...mappedPersisted, ...traces, ...working];
+    })(),
+  );
+  const activeThreadDialogueMessages = $derived.by(() => {
+    const eckyMessages = deriveOptimisticDialogueMessages(
+      activeThread?.messages ?? [],
+      $activeThreadRequests,
+    );
+    if (activeProviderSnapshot) {
+      return mergeOptimisticCodexDialogueMessages(
+        eckyMessages,
+        codexDialogueMessages,
+        [],
+        $activeThreadId ?? null,
+      );
+    }
+    return mergeOptimisticQueuedDialogueMessages(
+      eckyMessages,
       Object.values(optimisticQueuedAgentMessages),
       $activeThreadId ?? null,
-    ),
-  );
+    );
+  });
+
+  $effect(() => {
+    const threadId = $activeThreadId;
+    const usesCodexProvider = $config.connectionType === 'provider:codex';
+    const usesAgyProvider = $config.connectionType === 'provider:agy';
+    codexTakeoverSnapshot = null;
+    agyProviderSnapshot = null;
+    codexTakeoverError = null;
+    if (threadId && usesCodexProvider) void loadCodexTakeover(threadId, false);
+    if (threadId && usesAgyProvider) void loadAgyProvider(threadId, false);
+  });
+
+  function applyCodexTakeoverSnapshot(next: CodexTakeoverSnapshot, preserveLoadedPages: boolean) {
+    const current = codexTakeoverSnapshot;
+    if (
+      !preserveLoadedPages ||
+      !current ||
+      current.binding.eckyThreadId !== next.binding.eckyThreadId
+    ) {
+      codexTakeoverSnapshot = next;
+      return;
+    }
+    const latestIds = new Set(next.messages.map((message) => message.id));
+    const retainedEarlier = current.messages.filter((message) => !latestIds.has(message.id));
+    codexTakeoverSnapshot = {
+      ...next,
+      messages: [...retainedEarlier, ...next.messages],
+      nextCursor: retainedEarlier.length > 0 ? current.nextCursor : next.nextCursor,
+      backwardsCursor: next.backwardsCursor ?? current.backwardsCursor,
+    };
+  }
+
+  async function loadCodexTakeover(threadId: string, preserveLoadedPages: boolean) {
+    const token = ++codexTakeoverLoadToken;
+    codexTakeoverLoading = true;
+    try {
+      const snapshot = await getCodexTakeover(threadId);
+      if (token !== codexTakeoverLoadToken || get(activeThreadId) !== threadId) return;
+      if (snapshot) applyCodexTakeoverSnapshot(snapshot, preserveLoadedPages);
+      else codexTakeoverSnapshot = null;
+      codexTakeoverError = snapshot?.runtime.error ?? null;
+      if (
+        snapshot?.queue.length &&
+        !snapshot.runtime.activeTurnId &&
+        snapshot.queue[0]?.status === 'queued'
+      ) {
+        void dispatchCodexPromptQueue(threadId)
+          .then((dispatched) => applyCodexTakeoverSnapshot(dispatched, true))
+          .catch((error) => { codexTakeoverError = formatBackendError(error); });
+      }
+    } catch (error) {
+      if (token === codexTakeoverLoadToken && get(activeThreadId) === threadId) {
+        codexTakeoverError = formatBackendError(error);
+      }
+    } finally {
+      if (token === codexTakeoverLoadToken) codexTakeoverLoading = false;
+    }
+  }
+
+  function applyAgyProviderSnapshot(next: AgyProviderSnapshot, preserveLoadedPages: boolean) {
+    const current = agyProviderSnapshot;
+    if (
+      !preserveLoadedPages
+      || !current
+      || current.binding.eckyThreadId !== next.binding.eckyThreadId
+    ) {
+      agyProviderSnapshot = next;
+      return;
+    }
+    const latestIds = new Set(next.messages.map((message) => message.id));
+    const retainedEarlier = current.messages.filter((message) => !latestIds.has(message.id));
+    agyProviderSnapshot = {
+      ...next,
+      messages: [...retainedEarlier, ...next.messages],
+      nextCursor: retainedEarlier.length > 0 ? current.nextCursor : next.nextCursor,
+      backwardsCursor: next.backwardsCursor ?? current.backwardsCursor,
+    };
+  }
+
+  function agyProviderError(snapshot: AgyProviderSnapshot | null | undefined): string | null {
+    return snapshot?.runtime.error
+      ?? snapshot?.queue.find((item) => item.status === 'failed')?.error
+      ?? null;
+  }
+
+  async function loadAgyProvider(threadId: string, preserveLoadedPages: boolean) {
+    const token = ++agyProviderLoadToken;
+    codexTakeoverLoading = true;
+    try {
+      const snapshot = await getAgyProvider(threadId);
+      if (token !== agyProviderLoadToken || get(activeThreadId) !== threadId) return;
+      if (snapshot) applyAgyProviderSnapshot(snapshot, preserveLoadedPages);
+      else agyProviderSnapshot = null;
+      codexTakeoverError = agyProviderError(snapshot);
+      if (snapshot?.queue.length && !snapshot.runtime.activeTurnId && snapshot.queue[0]?.status === 'queued') {
+        void dispatchAgyPromptQueue(threadId)
+          .then((dispatched) => applyAgyProviderSnapshot(dispatched, true))
+          .catch((error) => { codexTakeoverError = formatBackendError(error); });
+      }
+    } catch (error) {
+      if (token === agyProviderLoadToken && get(activeThreadId) === threadId) {
+        codexTakeoverError = formatBackendError(error);
+      }
+    } finally {
+      if (token === agyProviderLoadToken) codexTakeoverLoading = false;
+    }
+  }
+
+  async function handleLoadEarlierCodexMessages() {
+    if ($config.connectionType === 'provider:agy') {
+      const snapshot = agyProviderSnapshot;
+      if (!snapshot?.nextCursor) return;
+      try {
+        const page = await getAgyProviderMessages({
+          eckyThreadId: snapshot.binding.eckyThreadId,
+          cursor: snapshot.nextCursor,
+          direction: 'older',
+        });
+        const currentIds = new Set(snapshot.messages.map((message) => message.id));
+        agyProviderSnapshot = {
+          ...snapshot,
+          messages: [...page.messages.filter((message) => !currentIds.has(message.id)), ...snapshot.messages],
+          nextCursor: page.nextCursor,
+        };
+        codexTakeoverError = null;
+      } catch (error) {
+        codexTakeoverError = formatBackendError(error);
+        throw error;
+      }
+      return;
+    }
+    const snapshot = codexTakeoverSnapshot;
+    if (!snapshot?.nextCursor) return;
+    try {
+      const page = await getCodexTakeoverMessages({
+        eckyThreadId: snapshot.binding.eckyThreadId,
+        cursor: snapshot.nextCursor,
+        direction: 'older',
+      });
+      const currentIds = new Set(snapshot.messages.map((message) => message.id));
+      const earlier = page.messages.filter((message) => !currentIds.has(message.id));
+      codexTakeoverSnapshot = {
+        ...snapshot,
+        messages: [...earlier, ...snapshot.messages],
+        nextCursor: page.nextCursor,
+      };
+      codexTakeoverError = null;
+    } catch (error) {
+      codexTakeoverError = formatBackendError(error);
+      throw error;
+    }
+  }
+
+  async function handleCodexSteer(prompt: string) {
+    const snapshot = codexTakeoverSnapshot;
+    const expectedTurnId = snapshot?.runtime.activeTurnId;
+    if (!snapshot || !expectedTurnId) throw new Error('No active Codex turn to steer.');
+    try {
+      const next = await steerCodexTakeover({
+        eckyThreadId: snapshot.binding.eckyThreadId,
+        promptText: prompt,
+        expectedTurnId,
+      });
+      applyCodexTakeoverSnapshot(next, true);
+      codexTakeoverError = null;
+    } catch (error) {
+      codexTakeoverError = formatBackendError(error);
+      throw error;
+    }
+  }
+
+  async function handleStopCodexTakeover() {
+    if ($config.connectionType === 'provider:agy') {
+      const snapshot = agyProviderSnapshot;
+      const turnId = snapshot?.runtime.activeTurnId;
+      if (!snapshot || !turnId) return;
+      try {
+        applyAgyProviderSnapshot(await stopAgyProvider({
+          eckyThreadId: snapshot.binding.eckyThreadId,
+          turnId,
+        }), true);
+        codexTakeoverError = null;
+      } catch (error) {
+        codexTakeoverError = formatBackendError(error);
+        throw error;
+      }
+      return;
+    }
+    const snapshot = codexTakeoverSnapshot;
+    const turnId = snapshot?.runtime.activeTurnId;
+    if (!snapshot || !turnId) return;
+    try {
+      const next = await stopCodexTakeover({
+        eckyThreadId: snapshot.binding.eckyThreadId,
+        turnId,
+      });
+      applyCodexTakeoverSnapshot(next, true);
+      codexTakeoverError = null;
+    } catch (error) {
+      codexTakeoverError = formatBackendError(error);
+      throw error;
+    }
+  }
+
+  async function handleRetryCodexQueue(queueId: string) {
+    if ($config.connectionType === 'provider:agy') {
+      const eckyThreadId = agyProviderSnapshot?.binding.eckyThreadId;
+      if (!eckyThreadId) return;
+      try {
+        applyAgyProviderSnapshot(await retryAgyQueuedPrompt(eckyThreadId, queueId), true);
+        codexTakeoverError = null;
+      } catch (error) {
+        codexTakeoverError = formatBackendError(error);
+        throw error;
+      }
+      return;
+    }
+    const eckyThreadId = codexTakeoverSnapshot?.binding.eckyThreadId;
+    if (!eckyThreadId) return;
+    try {
+      const next = await retryCodexQueuedPrompt(eckyThreadId, queueId);
+      applyCodexTakeoverSnapshot(next, true);
+      codexTakeoverError = null;
+    } catch (error) {
+      codexTakeoverError = formatBackendError(error);
+      throw error;
+    }
+  }
+
+  async function handleRemoveCodexQueue(queueId: string) {
+    if ($config.connectionType === 'provider:agy') {
+      const eckyThreadId = agyProviderSnapshot?.binding.eckyThreadId;
+      if (!eckyThreadId) return;
+      try {
+        applyAgyProviderSnapshot(await removeAgyQueuedPrompt(eckyThreadId, queueId), true);
+        codexTakeoverError = null;
+      } catch (error) {
+        codexTakeoverError = formatBackendError(error);
+        throw error;
+      }
+      return;
+    }
+    const eckyThreadId = codexTakeoverSnapshot?.binding.eckyThreadId;
+    if (!eckyThreadId) return;
+    try {
+      const next = await removeCodexQueuedPrompt(eckyThreadId, queueId);
+      applyCodexTakeoverSnapshot(next, true);
+      codexTakeoverError = null;
+    } catch (error) {
+      codexTakeoverError = formatBackendError(error);
+      throw error;
+    }
+  }
+
+  function scheduleCodexTakeoverRefresh(event: {
+    threadId: string;
+    method: string;
+    liveMessages?: CodexTakeoverSnapshot['liveMessages'];
+    turnTraces?: CodexTakeoverSnapshot['turnTraces'];
+    runtime?: CodexTakeoverSnapshot['runtime'];
+  }) {
+    const snapshot = codexTakeoverSnapshot;
+    if (!snapshot || snapshot.binding.codexThreadId !== event.threadId) return;
+    const terminalEvent = event.method === 'turn/completed'
+      || event.method === 'thread/status/changed' && !event.runtime?.activeTurnId;
+    if (event.liveMessages && event.runtime) {
+      codexTakeoverSnapshot = {
+        ...snapshot,
+        liveMessages: event.liveMessages,
+        turnTraces: event.turnTraces ?? snapshot.turnTraces,
+        runtime: event.runtime,
+      };
+      codexTakeoverError = event.runtime.error;
+      if (!terminalEvent) return;
+    }
+    if (codexTakeoverRefreshTimer) clearTimeout(codexTakeoverRefreshTimer);
+    codexTakeoverRefreshTimer = setTimeout(() => {
+      codexTakeoverRefreshTimer = null;
+      const eckyThreadId = snapshot.binding.eckyThreadId;
+      const canAdvanceQueue = terminalEvent;
+      const refresh = canAdvanceQueue
+        ? dispatchCodexPromptQueue(eckyThreadId)
+        : getCodexTakeover(eckyThreadId);
+      void refresh
+        .then((next) => {
+          if (next) applyCodexTakeoverSnapshot(next, true);
+          codexTakeoverError = next?.runtime.error ?? null;
+        })
+        .catch((error) => { codexTakeoverError = formatBackendError(error); });
+    }, terminalEvent ? 40 : 250);
+  }
+
+  function scheduleAgyProviderRefresh(event: {
+    conversationId?: string | null;
+    method: string;
+    liveMessages?: AgyProviderSnapshot['liveMessages'];
+    turnTraces?: AgyProviderSnapshot['turnTraces'];
+    runtime?: AgyProviderSnapshot['runtime'];
+  }) {
+    const snapshot = agyProviderSnapshot;
+    if (!snapshot || event.conversationId !== snapshot.binding.agyConversationId) return;
+    const terminalEvent = event.method === 'turn/result' || event.method === 'turn/terminal';
+    if (event.liveMessages && event.runtime) {
+      agyProviderSnapshot = {
+        ...snapshot,
+        liveMessages: event.liveMessages,
+        turnTraces: event.turnTraces ?? snapshot.turnTraces,
+        runtime: event.runtime,
+      };
+      codexTakeoverError = event.runtime.error;
+      if (!terminalEvent) return;
+    }
+    if (agyProviderRefreshTimer) clearTimeout(agyProviderRefreshTimer);
+    agyProviderRefreshTimer = setTimeout(() => {
+      agyProviderRefreshTimer = null;
+      const eckyThreadId = snapshot.binding.eckyThreadId;
+      const refresh = terminalEvent
+        ? dispatchAgyPromptQueue(eckyThreadId)
+        : getAgyProvider(eckyThreadId);
+      void refresh
+        .then((next) => {
+          if (next) applyAgyProviderSnapshot(next, true);
+          codexTakeoverError = agyProviderError(next);
+        })
+        .catch((error) => { codexTakeoverError = formatBackendError(error); });
+    }, terminalEvent ? 40 : 250);
+  }
 
   $effect(() => {
     const threadId = $activeThreadId;
@@ -858,7 +1520,7 @@
       paramValues: $paramPanelState.params || {},
       selectedContextTargetId,
       selectedPartId: $session.selectedPartId ?? null,
-      sessionModelManifest,
+      sessionModelManifest: sessionModelManifest ?? activeVersionMessage?.modelManifest ?? null,
     }),
   );
   const effectiveUiSpec = $derived.by<UiSpec>(() => contextState.effectiveUiSpec);
@@ -874,7 +1536,6 @@
   const importedPreviewTransforms = $derived.by<Record<string, ImportedPreviewTransform>>(
     () => contextState.importedPreviewTransforms,
   );
-  const availablePreviewViews = $derived.by(() => activeModelManifest?.previewViews ?? []);
   const activePreviewView = $derived.by(
     () => resolveActivePreviewView(activeModelManifest, activePreviewViewId),
   );
@@ -890,7 +1551,23 @@
     () => contextState.availableControlViews,
   );
   const activeControlView = $derived.by(() => contextState.activeControlView);
-  const overlayControls = $derived.by(() => contextState.overlayControls);
+  const exactProvenanceOverlayControls = $derived.by(() =>
+    provenanceOverlayControls({
+      manifest: activeModelManifest,
+      runtime: activeArtifactBundle,
+      fields: effectiveUiSpec.fields || [],
+      parameters: effectiveParameters,
+      target: selectedTarget,
+    }),
+  );
+  const overlayControls = $derived.by(() =>
+    exactProvenanceOverlayControls.length > 0
+      ? exactProvenanceOverlayControls
+      : contextState.overlayControls,
+  );
+  const enableViewportContextOverlay = $derived(
+    viewerMode === 'select' && exactProvenanceOverlayControls.length > 0,
+  );
   const overlayAdvisories = $derived.by(() => contextState.overlayAdvisories);
   const activeMeasurementCallout = $derived.by(() => contextState.activeMeasurementCallout);
   $effect(() => {
@@ -899,6 +1576,7 @@
   $effect(() => {
     activePreviewViewId = activePreviewView?.viewId ?? null;
   });
+  const geometryRenderActive = $derived(geometryRenderActiveCount > 0);
   const suppressViewportBusyUi = $derived(isBooting);
   let showEnrichmentModal = $state(false);
   let showExportChooser = $state(false);
@@ -911,25 +1589,29 @@
   });
   const viewerBusyState = $derived.by(() =>
     deriveViewerBusyState({
-      activeThreadId: $activeThreadId ?? null,
-      activeVersionId: $activeVersionId ?? null,
-      activeModelId: activeArtifactBundle?.modelId ?? null,
-      activeThreadRequests: $activeThreadRequests,
-      activeAgentSessions,
-      threadAgentState,
-      phase,
-      isManual: $session.isManual,
-      manualThreadId: $session.manualThreadId ?? null,
-      manualMessageId: $session.manualMessageId ?? null,
-      repairMessage: $session.repairMessage ?? null,
-      cookingPhrase: $session.cookingPhrase ?? null,
-      hasRenderableModel,
-      suppressViewportBusyUi,
+      geometryRenderActive,
     }),
   );
   const showViewerBusyMask = $derived(viewerBusyState.showViewerBusyMask);
   const viewerBusyPhase = $derived<ViewerBusyPhase>(viewerBusyState.viewerBusyPhase);
   const viewerBusyText = $derived<string | null>(viewerBusyState.viewerBusyText);
+  let lastViewerBusyTrace = '';
+  $effect(() => {
+    const trace = {
+      event: 'viewer.busy',
+      at: Date.now(),
+      showMask: showViewerBusyMask,
+      busyPhase: viewerBusyPhase,
+      busyText: viewerBusyText,
+      geometryRenderActiveCount,
+    };
+    const signature = JSON.stringify(trace, (key, value) => key === 'at' ? undefined : value);
+    if (signature === lastViewerBusyTrace) return;
+    lastViewerBusyTrace = signature;
+    console.warn('[CAD_FLOW][viewer.busy]', trace);
+    const flow = ((globalThis as any).__ECKY_CAD_FLOW__ ??= []);
+    flow.push(trace);
+  });
 
   const viewportState = $derived.by(() =>
     deriveViewportState({
@@ -939,6 +1621,7 @@
       activeVersionId: $activeVersionId ?? null,
       activeVersionMessage,
       cameraStateByTarget,
+      runtimeRevision: $session.runtimeRevision,
       stlUrl,
       toAssetUrl,
     }),
@@ -946,7 +1629,7 @@
   const viewerAssets = $derived.by<ViewerAsset[]>(() => viewportState.viewerAssets);
   const hasSketchPreview = $derived(sketchWorkspaceAvailable && Boolean(sketchPreview?.artifactBundle));
   const sketchPreviewStlUrl = $derived.by<string | null>(() =>
-    sketchPreview?.artifactBundle ? toAssetUrl(sketchPreview.artifactBundle.previewStlPath) : null,
+    sketchPreview?.artifactBundle ? toAssetUrl(sketchPreview.artifactBundle.modelStlPath) : null,
   );
   const sketchPreviewViewerAssets = $derived.by<ViewerAsset[]>(() =>
     sketchPreview?.artifactBundle
@@ -967,7 +1650,7 @@
       verdict: 'NOT ACCEPTED CAD',
       detail: 'Diagnostic mesh from sketch evidence. Accepted CAD needs exact BRep/STEP validation.',
       backend: (sketchPreview.artifactBundle.geometryBackend ?? 'unknown').toUpperCase(),
-      artifactName: fileBasename(sketchPreview.artifactBundle.previewStlPath) || 'preview.stl',
+      artifactName: fileBasename(sketchPreview.artifactBundle.modelStlPath) || 'model.stl',
     };
   });
   const sketchPreviewDraftLabel = $derived.by<string | null>(() => {
@@ -1019,7 +1702,7 @@
       primaryAgentId: $config.mcp.primaryAgentId ?? null,
       primaryAgentLabel,
       suppressViewportBusyUi,
-      threadAgentState,
+      threadAgentState: projectedThreadAgentState,
       visibleAgentTerminal,
     }),
   );
@@ -1040,14 +1723,29 @@
       : null;
     return composeAgentDraftFeedbackBubbleText({
       feedback: visibleFeedback,
-      fallbackAuthoringLints:
-        (threadAgentState as ThreadAgentStateWithAuthoringLints | null)?.authoringLints ?? [],
+      fallbackAuthoringLints: [],
     });
   });
   const hasLiveMcpSession = $derived.by(() => agentOpsState.hasLiveMcpSession);
+  const isActiveMcpMode = $derived(false);
   const isAudioMuted = $derived(Boolean($config?.microwave?.muted));
   const dialogueState = $derived.by<DialogueState>(() => {
-    return deriveDialogueState(activePendingAgentPrompt, usesQueuedAgentDialogue);
+    return deriveDialogueState(
+      activePendingAgentPrompt,
+      usesQueuedAgentDialogue,
+      $config.connectionType,
+      $config.connectionType === 'provider:agy'
+        ? agyProviderSnapshot
+          ? {
+              providerId: 'agy',
+              externalConversationId: agyProviderSnapshot.binding.agyConversationId,
+              label: 'Agy',
+              supportsSteer: agyProviderSnapshot.capabilities.steer,
+              supportsStop: agyProviderSnapshot.capabilities.stop,
+            }
+          : null
+        : codexTakeoverSnapshot?.binding ?? null,
+    );
   });
 
   const exportState = $derived.by(() =>
@@ -1136,7 +1834,6 @@
   let genieWakeUpCount = $state(0);
   let genieSeedOverrides = $state<Record<string, number>>(readGenieSeedOverrides());
   let lastAgentPresenceConnected = false;
-  let threadAgentPollInterval: ReturnType<typeof setInterval> | null = null;
   const terminalWindowState = $derived($windowStore.terminal);
   const codeWindowState = $derived($windowStore.code);
   const projectsWindowState = $derived($windowStore.projects);
@@ -1241,7 +1938,7 @@
     captureGuide ? mechanicalGuideReadiness(captureGuide) : { ready: false, reasons: ['Start guided CAD.'] },
   );
   const capturePreviewUrl = $derived(
-    capturePreviewBundle ? toAssetUrl(capturePreviewBundle.previewStlPath) : null,
+    capturePreviewBundle ? toAssetUrl(capturePreviewBundle.modelStlPath) : null,
   );
   const selectedExternalShape = $derived(
     externalShapeSources.find(source => source.nodeId === selectedExternalShapeNodeId) ?? null,
@@ -1275,7 +1972,7 @@
   });
   const captureGeneratedComparisonUrl = $derived(
     captureGeneratedComparisonBundle
-      ? toAssetUrl(captureGeneratedComparisonBundle.previewStlPath)
+      ? toAssetUrl(captureGeneratedComparisonBundle.modelStlPath)
       : null,
   );
   let capturePollTimer: ReturnType<typeof setInterval> | null = null;
@@ -2258,7 +2955,7 @@
       const nextSource = buildCaptureSolidifySource(
         currentSource,
         sourceNodes,
-        capturePreviewBundle!.previewStlPath,
+        capturePreviewBundle!.modelStlPath,
         captureSessionToken.slice(0, 8),
         capturePreviewScale,
       );
@@ -2394,12 +3091,13 @@
 
     try {
       if (pending.targetMessageId) {
-        const thread = await getThread(pending.targetThreadId);
-        upsertThreadInHistory(thread);
-        const targetMessage = thread.messages.find(
-          (message) => message.id === pending.targetMessageId && isRenderableVersionTimelineMessage(message),
-        );
+        const [thread, targetMessage] = await Promise.all([
+          resolveThreadSummary(pending.targetThreadId),
+          getThreadMessageVersion(pending.targetThreadId, pending.targetMessageId),
+        ]);
+        if (!thread) throw new Error(`Capture target thread ${pending.targetThreadId} is unavailable.`);
         if (!targetMessage) throw new Error(`Capture target version ${pending.targetMessageId} is unavailable.`);
+        upsertThreadVersionInHistory(thread.id, targetMessage);
         activeThreadId.set(thread.id);
         currentView.set('workbench');
         await loadVersion(targetMessage, thread.id);
@@ -2570,7 +3268,7 @@
   });
 
   $effect(() => {
-    const nextConnectionState = threadAgentState?.connectionState ?? 'none';
+    const nextConnectionState = projectedThreadAgentState.connectionState;
     const nextPresenceConnected =
       hasLiveAgentSession(activeAgentSessions) ||
       ['waking', 'waiting', 'active'].includes(nextConnectionState);
@@ -2668,6 +3366,7 @@
       workingCopy.loadVersion(seededDraft, null);
       paramPanelState.hydrateFromVersion(seededDraft, null);
       codeModalMode = 'version';
+      codeModalSourceAuthority = 'bound';
       codeModalSourceLanguage = seededDraft.sourceLanguage;
       codeModalDraftSerial += 1;
       codeModalDraftScopeKey = [
@@ -2732,7 +3431,7 @@
     const bundle = currentSession.artifactBundle;
     const recoveryKey =
       threadId && messageId && bundle
-        ? `${threadId}:${messageId}:${bundle.modelId}:${bundle.previewStlPath}`
+        ? `${threadId}:${messageId}:${bundle.modelId}:${bundle.modelStlPath}`
         : null;
 
     if (
@@ -2742,7 +3441,7 @@
     ) {
       visibleViewerRecoveryKey = recoveryKey;
       session.setError(null);
-      session.setStatus('Runtime artifact missing. Re-rendering cached model...');
+      session.setStatus('Runtime artifact missing. Rebuilding saved model...');
       try {
         const recoverySource =
           activeVersionMessage?.id === messageId
@@ -2754,19 +3453,22 @@
           activeVersionMessage?.id === messageId
             ? activeVersionMessage.output?.initialParams || {}
             : panel.params;
-        await handleParamChange(recoveryParams, recoverySource || null, false);
+        const rebuilt = await handleParamChange(recoveryParams, recoverySource || null, false);
         const repairedSession = get(session);
         const repairedBundle = repairedSession.artifactBundle;
         const repairedManifest = repairedSession.modelManifest;
         if (
+          rebuilt &&
+          messageId &&
           get(activeThreadId) === threadId &&
           get(activeVersionId) === messageId &&
           repairedBundle &&
           repairedManifest &&
           repairedBundle.modelId === repairedManifest.modelId
         ) {
-          await updateVersionRuntime(messageId!, repairedBundle, repairedManifest);
-          session.setStatus('Missing runtime rebuilt.');
+          await repairMissingVersionRuntime(messageId, repairedBundle, repairedManifest);
+          session.reloadStlUrl(toAssetUrl(repairedBundle.modelStlPath));
+          session.setStatus('Missing runtime rebuilt from saved source.');
           await refreshHistory();
           return;
         }
@@ -2777,6 +3479,11 @@
         if (visibleViewerRecoveryKey === recoveryKey) {
           visibleViewerRecoveryKey = null;
         }
+      }
+      const rebuildError = get(session).error;
+      if (rebuildError) {
+        session.setError(`Runtime Rebuild Error: ${formatBackendError(rebuildError)}`);
+        return;
       }
     }
 
@@ -3119,7 +3826,7 @@
     hiddenViewerSpec = {
       requestId: request.requestId,
       targetKey,
-      stlUrl: toAssetUrl(request.previewStlPath),
+      stlUrl: toAssetUrl(request.modelStlPath),
       viewerAssets: [],
     };
     await waitForViewerLoad('hidden', previousNonce, 60000);
@@ -3147,45 +3854,66 @@
 
   async function switchToViewportTarget(request: AgentViewportScreenshotEvent) {
     const previousNonce = visibleViewerLoadNonce;
-    const thread = await getThread(request.threadId);
-    upsertThreadInHistory(thread);
-    const targetMessage =
-      thread.messages.find(
-        (message) =>
-          message.id === request.messageId &&
-          isRenderableVersionTimelineMessage(message),
-      ) ?? null;
+    const [thread, targetMessage] = await Promise.all([
+      resolveThreadSummary(request.threadId),
+      getThreadMessageVersion(request.threadId, request.messageId),
+    ]);
+    if (!thread) {
+      throw new Error(`Target thread ${request.threadId} is unavailable for screenshot capture.`);
+    }
     if (!targetMessage) {
       throw new Error(`Target version ${request.messageId} is unavailable for screenshot capture.`);
     }
+    upsertThreadVersionInHistory(thread.id, targetMessage);
     activeThreadId.set(thread.id);
     currentView.set('workbench');
     await loadVersion(targetMessage);
     await waitForViewerLoad('visible', previousNonce);
   }
 
-  function upsertThreadInHistory(thread: Awaited<ReturnType<typeof getThread>>) {
+  function upsertThreadVersionInHistory(threadId: string, message: Message) {
     history.update((items) => {
-      const nextThread = { ...thread, messages: thread.messages };
-      return items.some((candidate) => candidate.id === thread.id)
-        ? items.map((candidate) => (candidate.id === thread.id ? nextThread : candidate))
-        : [nextThread, ...items];
+      return items.map((thread) => ({
+        ...thread,
+        messages: (thread.id === threadId
+          ? [
+              ...(thread.messages ?? []).filter((candidate) => candidate.id !== message.id),
+              message,
+            ]
+          : thread.messages ?? []).map((candidate) =>
+            thread.id === threadId && candidate.id === message.id
+              ? candidate
+              : {
+                  ...candidate,
+                  output: null,
+                  artifactBundle: null,
+                  modelManifest: null,
+                  structuralVerification: null,
+                  imageData: null,
+                  attachmentImages: [],
+                },
+          ),
+      }));
     });
+  }
+
+  async function resolveThreadSummary(threadId: string): Promise<Thread | null> {
+    const existing = get(history).find((thread) => thread.id === threadId) ?? null;
+    if (existing) return existing;
+    await refreshHistory();
+    return get(history).find((thread) => thread.id === threadId) ?? null;
   }
 
   async function focusAgentWorkingVersion(event: AgentWorkingVersionCreatedEvent) {
     const focusKey = `${event.sessionId}:${event.messageId}`;
     if (lastFocusedAgentWorkingVersionKey === focusKey) return;
 
-    const thread = await getThread(event.threadId);
-    upsertThreadInHistory(thread);
-    const targetMessage =
-      thread.messages.find(
-        (message) =>
-          message.id === event.messageId &&
-          isRenderableVersionTimelineMessage(message),
-      ) ?? null;
-    if (!targetMessage) return;
+    const [thread, targetMessage] = await Promise.all([
+      resolveThreadSummary(event.threadId),
+      getThreadMessageVersion(event.threadId, event.messageId),
+    ]);
+    if (!thread || !targetMessage) return;
+    upsertThreadVersionInHistory(thread.id, targetMessage);
 
     if (
       !shouldAutoFocusAgentWorkingVersion({
@@ -3201,7 +3929,6 @@
     activeThreadId.set(thread.id);
     currentView.set('workbench');
     await loadVersion(targetMessage);
-    void refreshThreadAgentState();
   }
 
   async function processViewportScreenshotChoice(
@@ -3378,8 +4105,8 @@
 
   $effect(() => {
     const nextMicrowaveKey =
-      activeMcpRenderBusy && threadAgentState?.sessionId
-        ? `__mcp__:${threadAgentState.sessionId}`
+      activeMcpRenderBusy && projectedThreadAgentState.sessionId
+        ? `__mcp__:${projectedThreadAgentState.sessionId}`
         : '';
     if (activeMcpMicrowaveKey && activeMcpMicrowaveKey !== nextMicrowaveKey) {
       stopMicrowaveHum(activeMcpMicrowaveKey);
@@ -3518,11 +4245,37 @@
         session.setError(`Agent Prompt Error: ${errorText}`);
       }
     }
-    void refreshThreadAgentState();
   }
 
   async function handleDialogueSubmit(prompt: string, attachments: Attachment[]) {
     switch (dialogueState.mode) {
+      case 'provider': {
+        const eckyThreadId = get(activeThreadId);
+        if (!eckyThreadId) throw new Error(`Open an Ecky thread before sending to ${dialogueState.label}.`);
+        if (attachments.length > 0) {
+          const error = new Error(`${dialogueState.label} provider currently accepts text only; remove attachments before sending.`);
+          codexTakeoverError = error.message;
+          throw error;
+        }
+        try {
+          if (dialogueState.providerId === 'agy') {
+            applyAgyProviderSnapshot(
+              await sendAgyProviderPrompt({ eckyThreadId, promptText: prompt }),
+              true,
+            );
+          } else {
+            applyCodexTakeoverSnapshot(
+              await sendCodexTakeoverPrompt({ eckyThreadId, promptText: prompt }),
+              true,
+            );
+          }
+          codexTakeoverError = null;
+        } catch (error) {
+          codexTakeoverError = formatBackendError(error);
+          throw error;
+        }
+        break;
+      }
       case 'agent-reply': await answerAgentPrompt(dialogueState.requestId, prompt, attachments); break;
       case 'generate':    await handleGenerate(prompt, attachments, { uiDeps: requestOrchestratorUiDeps }); break;
       case 'mcp-idle': {
@@ -3584,28 +4337,6 @@
         }
         await refreshHistory();
         session.setStatus('Message queued for the agent.');
-        if (isActiveMcpMode) {
-          try {
-            await persistBackendConfig(get(config));
-          } catch (e) {
-            session.setError(`Config Save Error: ${formatBackendError(e)}`);
-            break;
-          }
-          try {
-            const target = currentVisibleTargetRef();
-            await wakePrimaryAutoAgent(
-              queuedMessage.threadId,
-              target?.threadId === queuedMessage.threadId ? target.messageId ?? null : null,
-              target?.threadId === queuedMessage.threadId ? target.modelId ?? null : null,
-            );
-            await refreshThreadAgentState();
-          } catch (e) {
-            console.error('[MCP] Failed to wake the primary agent for a queued message:', e);
-            session.setStatus(`Message queued. Wake attempt failed: ${formatBackendError(e)}`);
-          }
-        } else {
-          void refreshThreadAgentState();
-        }
         break;
       }
     }
@@ -3757,11 +4488,38 @@
   }
 
   onMount(() => {
-    void (async () => {
-      await boot();
-      await loadCampaignDefinitions();
-      await loadCampaignRuns();
-    })();
+    let recoveryResetTimer: ReturnType<typeof setTimeout> | null = null;
+    void connectAgentActivityIngestion(
+      { listen, getAgentActivity },
+      agentActivityIngestionStore,
+      {
+        onRecoveryError: (recoveryError) => {
+          session.setError(`Agent activity recovery failed: ${formatBackendError(recoveryError)}`);
+        },
+      },
+    )
+      .then((connection) => {
+        agentActivityConnection = connection;
+      })
+      .catch((connectionError) => {
+        session.setError(`Agent activity subscription failed: ${formatBackendError(connectionError)}`);
+      });
+
+    agentNotificationProjectionDisconnect = agentActivityIngestionStore.subscribe((events) => {
+      const freshEvents = events.filter((event) => !seenAgentActivityEventIds.has(event.eventId));
+      if (!freshEvents.length) return;
+      for (const event of freshEvents) {
+        seenAgentActivityEventIds.add(event.eventId);
+      }
+      ingestAgentActivitySessionEvents(freshEvents);
+      longTasksStore.ingest(freshEvents);
+      const notificationEvents = freshEvents.filter((event) => (
+        !isActiveLongTaskEvent(event) && shouldProjectAgentNotification(event)
+      ));
+      agentNotificationsStore.ingest(notificationEvents.filter((event) => !isLongTaskEvent(event)));
+      agentNotificationsStore.ingestPriority(notificationEvents.filter(isLongTaskEvent));
+    });
+
     // Initial fetch of agent sessions (push events only fire on changes, not on load)
     void getActiveAgentSessions().then(sessions => { activeAgentSessions = sessions; }).catch(() => {});
     void getAgentTerminalSnapshots()
@@ -3769,10 +4527,15 @@
         replaceAgentTerminalSnapshots(snapshots);
       })
       .catch(() => {});
-    threadAgentPollInterval = setInterval(() => void refreshThreadAgentState(), 1000);
 
     const noopUnlisten = Promise.resolve(() => {});
     const canListenToTauri = hasTauriIpc();
+
+    const unlistenGeometryRender = canListenToTauri
+      ? listen<GeometryRenderActivityEvent>('geometry-render-activity', (event) => {
+          geometryRenderActiveCount = Math.max(0, Number(event.payload.activeCount) || 0);
+        })
+      : noopUnlisten;
 
     const unlisten = canListenToTauri ? listen<AgentConfirmItem>('agent-confirm-request', (event) => {
       const item = event.payload;
@@ -3786,7 +4549,6 @@
         ...pendingAgentPrompts.filter((prompt) => prompt.sessionId !== event.payload.sessionId),
         event.payload,
       ];
-      void refreshThreadAgentState();
     }) : noopUnlisten;
     const unlistenPromptClosed = canListenToTauri ? listen<ClosedAgentPrompt>('agent-prompt-closed', (event) => {
       const { requestId, sessionId, reason } = event.payload;
@@ -3801,7 +4563,6 @@
           'No pending prompt request. The last request_user_prompt timed out; queued thread messages can still be picked up later.',
         );
       }
-      void refreshThreadAgentState();
     }) : noopUnlisten;
     const unlistenViewportScreenshot = canListenToTauri ? listen<AgentViewportScreenshotEvent>(
       'agent-viewport-screenshot-request',
@@ -3809,51 +4570,41 @@
         void handleViewportScreenshotEvent(event.payload);
       },
     ) : noopUnlisten;
-    const unlistenHistory = canListenToTauri ? listen('history-updated', async () => {
-      await refreshHistory();
+    const unlistenHistory = canListenToTauri ? listen<{
+      threadId?: string | null;
+      messageId?: string | null;
+      revision?: number;
+      kind?: string;
+    }>('history-updated', async (event) => {
       const currentThreadId = get(activeThreadId);
-      if (currentThreadId) {
-        const thread = await getThread(currentThreadId);
-        upsertThreadInHistory(thread);
+      const changedThreadId = event.payload?.threadId ?? null;
+      if (currentThreadId && (!changedThreadId || changedThreadId === currentThreadId)) {
+        await refreshThreadHistoryProjection(currentThreadId, event.payload?.revision ?? null);
+      } else {
+        await refreshHistory();
       }
-      void refreshThreadAgentState();
     }) : noopUnlisten;
-    const unlistenProjectFolderSync = canListenToTauri ? listen<ProjectFolderWatchEvent[]>(
-      'project-folder-sync',
-      (event) => {
-        const latest = event.payload.at(-1);
-        if (!latest) return;
-        if (latest.kind === 'detected') {
-          projectFolderNotice = {
-            tone: 'pending',
-            title: 'SOURCE CHANGED',
-            body: `${latest.slug}/model.ecky changed externally. Waiting for validation.`,
-            threadId: latest.threadId,
-            messageId: null,
-          };
-        } else if (latest.kind === 'applied') {
-          projectFolderNotice = {
-            tone: 'success',
-            title: 'SOURCE APPLIED',
-            body: `${latest.slug}/model.ecky validated and committed as a new version.`,
-            threadId: latest.threadId,
-            messageId: latest.messageId,
-          };
-        } else {
-          projectFolderNotice = {
-            tone: 'error',
-            title: 'SOURCE APPLY FAILED',
-            body: latest.error,
-            threadId: latest.threadId,
-            messageId: latest.messageId,
-          };
-        }
-      },
-    ) : noopUnlisten;
-    const unlistenDraftPreview = canListenToTauri ? listen<AgentDraftPreviewUpdatedEvent>(
-      'agent-draft-preview-updated',
-      (event) => {
-        const preview = event.payload;
+    const unlistenProjectFolderSync = canListenToTauri ? (async () => {
+      const unlistenSync = await listen<ProjectFolderWatchEvent[]>(
+        'project-folder-sync',
+        (event) => {
+          const latest = selectProjectFolderWatchEvent(event.payload, get(activeThreadId) ?? null);
+          if (latest) {
+            applyProjectFolderWatchEvent(latest);
+            void refreshOpenCodeModalHead(latest.threadId);
+          }
+        },
+      );
+      await reconcileProjectFolderRenderActivity();
+      const activityPollTimer = window.setInterval(() => {
+        void reconcileProjectFolderRenderActivity();
+      }, 250);
+      return () => {
+        window.clearInterval(activityPollTimer);
+        unlistenSync();
+      };
+    })() : noopUnlisten;
+    const applyDraftPreview = (preview: AgentDraftPreviewUpdatedEvent) => {
         const isActivePreview = shouldApplyDraftPreviewToWorkspace({
           activeThreadId: get(activeThreadId),
           previewThreadId: preview.threadId,
@@ -3867,7 +4618,7 @@
             currentParams: get(paramPanelState).params,
           });
           try {
-            const snapshot = hydrateActiveRenderSnapshot({
+            hydrateActiveRenderSnapshot({
               threadId: preview.threadId,
               messageId: preview.previewId,
               eventModelId: preview.modelId ?? null,
@@ -3875,7 +4626,7 @@
               artifactBundle: preview.artifactBundle,
               modelManifest: preview.modelManifest,
               selectedPartId: null,
-              stlUrl: toAssetUrl(preview.artifactBundle.previewStlPath),
+              stlUrl: toAssetUrl(preview.artifactBundle.modelStlPath),
               status: preview.feedback?.summary || 'Preview rendered.',
               targetRef: {
                 kind: 'draft',
@@ -3898,15 +4649,6 @@
               sessionId: preview.sessionId,
                 }
               : null;
-            void persistLastSessionSnapshot({
-              design: snapshot.design,
-              threadId: snapshot.threadId,
-              messageId: snapshot.messageId,
-              artifactBundle: snapshot.artifactBundle,
-              modelManifest: snapshot.modelManifest,
-              selectedPartId: snapshot.selectedPartId,
-              targetRef: snapshot.targetRef,
-            });
           } catch (error) {
             const message = error instanceof RenderSnapshotMismatch
               ? error.message
@@ -3933,7 +4675,7 @@
           actor: {
             kind: 'agent',
             id: preview.sessionId ?? 'agent',
-            label: threadAgentState?.agentLabel ?? 'Agent',
+            label: projectedThreadAgentState.agentLabel ?? 'Agent',
           },
           kind: preview.feedback ? 'validation_reported' : 'preview_updated',
           title: preview.feedback ? 'Preview validation reported' : 'Draft preview updated',
@@ -3942,8 +4684,8 @@
           artifacts: [
             {
               kind: 'preview_file',
-              label: 'Draft preview STL',
-              value: preview.artifactBundle.previewStlPath ?? preview.artifactBundle.modelId,
+              label: 'Draft model STL',
+              value: preview.artifactBundle.modelStlPath ?? preview.artifactBundle.modelId,
               raw: {
                 modelId: preview.artifactBundle.modelId,
                 artifactVersion: preview.artifactBundle.artifactVersion,
@@ -3952,11 +4694,46 @@
           ],
           raw: preview.feedback ?? null,
         });
+    };
+    const unlistenDraftPreviewChanged = canListenToTauri ? listen<AgentDraftPreviewChangedEvent>(
+      'agent-draft-preview-changed',
+      (event) => {
+        const changed = event.payload;
+        const revisionKey = `${changed.sessionId}:${changed.threadId}`;
+        const previousRevision = latestDraftPreviewRevision.get(revisionKey) ?? 0;
+        if (changed.revision <= previousRevision) return;
+        latestDraftPreviewRevision.set(revisionKey, changed.revision);
+        if (!shouldApplyDraftPreviewToWorkspace({
+          activeThreadId: get(activeThreadId),
+          previewThreadId: changed.threadId,
+        })) return;
+        void getAgentDraftPreview(changed.threadId, changed.previewId)
+          .then((draft) => {
+            if (latestDraftPreviewRevision.get(revisionKey) !== changed.revision) return;
+            if (draft.previewId !== changed.previewId) return;
+            if (!shouldApplyDraftPreviewToWorkspace({
+              activeThreadId: get(activeThreadId),
+              previewThreadId: draft.threadId,
+            })) return;
+            applyDraftPreview({
+              sessionId: draft.sessionId,
+              threadId: draft.threadId,
+              previewId: draft.previewId,
+              baseMessageId: draft.baseMessageId ?? null,
+              modelId: draft.artifactBundle.modelId,
+              design: draft.designOutput,
+              artifactBundle: draft.artifactBundle,
+              modelManifest: draft.modelManifest,
+              feedback: draft.draftFeedback ?? null,
+            });
+          })
+          .catch((error) => {
+            session.setError(`Draft Preview Load Error: ${formatBackendError(error)}`);
+          });
       },
     ) : noopUnlisten;
     const unlistenSessions = canListenToTauri ? listen<AgentSession[]>('agent-sessions-changed', (event) => {
       activeAgentSessions = event.payload;
-      void refreshThreadAgentState();
     }) : noopUnlisten;
     const unlistenTerminal = canListenToTauri ? listen<AgentTerminalSnapshot>('agent-terminal-updated', (event) => {
       enqueueAgentTerminalSnapshot(event.payload);
@@ -3969,20 +4746,67 @@
         });
       },
     ) : noopUnlisten;
+    const unlistenCodexTakeover = canListenToTauri ? listen<{
+      threadId: string;
+      method: string;
+      liveMessages?: CodexTakeoverSnapshot['liveMessages'];
+      turnTraces?: CodexTakeoverSnapshot['turnTraces'];
+      runtime?: CodexTakeoverSnapshot['runtime'];
+    }>(
+      'codex-provider-updated',
+      (event) => scheduleCodexTakeoverRefresh(event.payload),
+    ) : noopUnlisten;
+    const unlistenAgyProvider = canListenToTauri ? listen<{
+      conversationId?: string | null;
+      method: string;
+      liveMessages?: AgyProviderSnapshot['liveMessages'];
+      turnTraces?: AgyProviderSnapshot['turnTraces'];
+      runtime?: AgyProviderSnapshot['runtime'];
+    }>(
+      'agy-provider-updated',
+      (event) => scheduleAgyProviderRefresh(event.payload),
+    ) : noopUnlisten;
+    void (async () => {
+      await boot();
+      await loadCampaignDefinitions();
+      await loadCampaignRuns();
+      if (canListenToTauri) {
+        const recovery = await getWebContentRecoveryState().catch(() => null);
+        if (recovery?.rawError) {
+          session.setError(
+            `WebContent ${recovery.blocked ? 'recovery stopped' : 'recovered'}: ${recovery.rawError}`,
+          );
+          if (!recovery.blocked) {
+            recoveryResetTimer = setTimeout(() => {
+              void acknowledgeWebContentRecovery();
+            }, 30_000);
+          }
+        }
+      }
+    })();
     return () => {
       teardownWindowStore();
-      if (threadAgentPollInterval) clearInterval(threadAgentPollInterval);
       resetAgentTerminalStore();
+      agentNotificationProjectionDisconnect?.();
+      agentNotificationProjectionDisconnect = null;
+      void agentActivityConnection?.disconnect();
+      agentActivityConnection = null;
       void unlisten.then(fn => fn());
       void unlistenPrompt.then(fn => fn());
       void unlistenPromptClosed.then(fn => fn());
       void unlistenViewportScreenshot.then(fn => fn());
       void unlistenHistory.then(fn => fn());
+      void unlistenGeometryRender.then(fn => fn());
       void unlistenProjectFolderSync.then(fn => fn());
-      void unlistenDraftPreview.then(fn => fn());
+      void unlistenDraftPreviewChanged.then(fn => fn());
       void unlistenSessions.then(fn => fn());
       void unlistenTerminal.then(fn => fn());
       void unlistenWorkingVersion.then(fn => fn());
+      void unlistenCodexTakeover.then(fn => fn());
+      void unlistenAgyProvider.then(fn => fn());
+      if (codexTakeoverRefreshTimer) clearTimeout(codexTakeoverRefreshTimer);
+      if (agyProviderRefreshTimer) clearTimeout(agyProviderRefreshTimer);
+      if (recoveryResetTimer) clearTimeout(recoveryResetTimer);
     };
   });
 
@@ -4068,27 +4892,13 @@
     return typeof (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ === 'object';
   }
 
-  const agentRuntime = createAgentRuntime<ThreadAgentState>({
+  const agentRuntime = createAgentRuntime({
     hasIpc: hasTauriIpc,
-    getState: getThreadAgentState,
-    setState: (next) => { threadAgentState = next; },
     setError: (message) => session.setError(message),
   });
 
-  async function refreshThreadAgentState() {
-    await agentRuntime.refresh($activeThreadId ?? null);
-  }
-
   $effect(() => {
-    if (!$activeThreadId) {
-      threadAgentState = null;
-      return;
-    }
-    void refreshThreadAgentState();
-  });
-
-  $effect(() => {
-    setAgentTerminalSelection(primaryAgentId, threadAgentState?.sessionId ?? null);
+    setAgentTerminalSelection(primaryAgentId, projectedThreadAgentState.sessionId);
   });
 
   const inFlightByThread = $derived.by(() => {
@@ -4119,16 +4929,16 @@
   const hasPreviewArtifact = $derived.by(() =>
     Boolean(
       hasSketchPreview
-        ? sketchPreview?.artifactBundle?.previewStlPath
-        : activeArtifactBundle?.previewStlPath,
+        ? sketchPreview?.artifactBundle?.modelStlPath
+        : activeArtifactBundle?.modelStlPath,
     ),
   );
   const previewArtifactName = $derived.by<string | null>(() =>
     sketchPreviewStatus?.artifactName ||
     fileBasename(
       hasSketchPreview
-        ? sketchPreview?.artifactBundle?.previewStlPath
-        : activeArtifactBundle?.previewStlPath,
+        ? sketchPreview?.artifactBundle?.modelStlPath
+        : activeArtifactBundle?.modelStlPath,
     ) ||
     null,
   );
@@ -4179,9 +4989,53 @@
     [...$activeThreadRequests].reverse().find((request) => request.phase === 'error' && request.error) ?? null,
   );
   const activeThreadErrorText = $derived(activeThreadLatestErrorRequest?.error ?? '');
+  let genieErrorReactionActive = $state(false);
+  let lastGenieErrorReactionKey = '';
+  let genieErrorReactionTimer: ReturnType<typeof setTimeout> | null = null;
+  const genieErrorReactionSignal = $derived.by(() => {
+    if (projectedThreadAgentState.connectionState === 'error') {
+      return [
+        'agent',
+        projectedThreadAgentState.sessionId ?? '',
+        projectedThreadAgentState.updatedAt ?? '',
+        projectedThreadAgentState.statusText ?? '',
+      ].join(':');
+    }
+    const request = activeThreadLatestErrorRequest;
+    return request ? `request:${request.id}:${request.error ?? ''}` : '';
+  });
+
+  $effect(() => {
+    const latestRequest = $activeThreadRequests.at(-1);
+    // A later prompt/success supersedes an older error reaction immediately.
+    // Keep the error card/history, but do not leave Ecky visually angry.
+    if (latestRequest && latestRequest.phase !== 'error' && latestRequest.phase !== 'canceled') {
+      lastGenieErrorReactionKey = '';
+      genieErrorReactionActive = false;
+      if (genieErrorReactionTimer) {
+        clearTimeout(genieErrorReactionTimer);
+        genieErrorReactionTimer = null;
+      }
+      return;
+    }
+    const reactionKey = genieErrorReactionSignal;
+    if (!reactionKey) {
+      lastGenieErrorReactionKey = '';
+      genieErrorReactionActive = false;
+      return;
+    }
+    if (reactionKey === lastGenieErrorReactionKey) return;
+    lastGenieErrorReactionKey = reactionKey;
+    genieErrorReactionActive = true;
+    if (genieErrorReactionTimer) clearTimeout(genieErrorReactionTimer);
+    genieErrorReactionTimer = setTimeout(() => {
+      genieErrorReactionTimer = null;
+      genieErrorReactionActive = false;
+    }, 2600);
+  });
 
   const activeConfirm = $derived(pendingConfirms[0] ?? null);
-  const threadAgentMascot = $derived.by(() => deriveMascotStateForThreadAgent(threadAgentState));
+  const threadAgentMascot = $derived.by(() => deriveMascotStateForThreadAgent(projectedThreadAgentState));
 
   const genieMode = $derived.by(() => {
     if ($onboarding.isActive) return 'speaking';
@@ -4191,23 +5045,25 @@
     if (isActiveMcpMode && activeAgentTerminalAttention) return 'speaking';
     if (activePendingAgentPrompt) return 'speaking';
     if (hasQueuedAgentMessageWithoutPrompt) return 'light';
-    if (threadAgentState?.connectionState === 'waking') return 'waking';
-    if (threadAgentState?.connectionState === 'waiting') return 'light';
-    if (threadAgentState?.connectionState === 'active') return threadAgentMascot.mode;
-    if (threadAgentState?.connectionState === 'error') return 'error';
-    if (threadAgentState?.connectionState === 'sleeping') return 'sleeping';
+    if (projectedThreadAgentState.connectionState === 'waking') return 'waking';
+    if (projectedThreadAgentState.connectionState === 'waiting') return 'light';
+    if (projectedThreadAgentState.connectionState === 'active') return threadAgentMascot.mode;
+    if (projectedThreadAgentState.connectionState === 'error') {
+      return genieErrorReactionActive ? 'error' : 'idle';
+    }
+    if (projectedThreadAgentState.connectionState === 'sleeping') return 'sleeping';
     if (activeMcpRenderBusy) return 'rendering';
     if (activeMcpBusy && activeMcpBubbleSummary) return 'speaking';
     if (activeMcpBusy) return 'thinking';
     if (hasLiveMcpSession) return 'light';
     const atPhase = activeThreadHighestPhase;
-    if (atPhase === 'error') return 'error';
+    if (atPhase === 'error') return genieErrorReactionActive ? 'error' : 'idle';
     if (atPhase === 'repairing') return 'repairing';
     if (atPhase === 'classifying') return 'light';
     if (atPhase === 'rendering') return 'rendering';
     if (atPhase === 'generating' || atPhase === 'answering') return 'thinking';
     if (assistantFresh && !dismissedBubbleText && lastAdvisorBubble) return 'speaking';
-    if (threadAgentState?.connectionState === 'disconnected') return 'idle';
+    if (projectedThreadAgentState.connectionState === 'disconnected') return 'idle';
     return 'idle';
   });
 
@@ -4234,7 +5090,7 @@
         : null,
       draftFeedbackSummary: activeDraftFeedbackSummary,
       hasQueuedAgentMessageWithoutPrompt,
-      threadAgentState,
+      threadAgentState: projectedThreadAgentState,
       activeMcpBubbleSummary,
       threadAgentMascotBubble: threadAgentMascot.bubble,
       threadError: activeThreadHighestPhase === 'error' ? activeThreadErrorText : null,
@@ -4255,10 +5111,14 @@
       connectionType: $config.connectionType,
       autoAgents: $config.mcp.autoAgents ?? [],
       primaryAgentId,
-      senderLabel: threadAgentState?.agentLabel ?? null,
+      senderLabel: projectedThreadAgentState.agentLabel ?? null,
     }),
   );
   let selectedSessionActivityEventId = $state<string | null>(null);
+  let dialogueFocusRequest = $state(0);
+  let agentActivityConnection: { disconnect: () => Promise<void> } | null = null;
+  let agentNotificationProjectionDisconnect: (() => void) | null = null;
+  let seenAgentActivityEventIds = new Set<string>();
   let lastBubbleActivityKey = $state('');
   let bubbleActivityTimestamp = $state(0);
   const bubbleActivityKey = $derived(
@@ -4271,61 +5131,7 @@
     bubbleActivityTimestamp = Date.now();
   });
 
-  const bubbleSessionEvent = $derived.by<SessionEvent | null>(() => {
-    if (!genieBubble) return null;
-    const severity: SessionEvent['severity'] =
-      activeThreadHighestPhase === 'error'
-        ? 'error'
-        : activeDraftFeedbackSummary || genieBubbleState.badge === 'PREVIEW CHECK'
-          ? 'warning'
-          : 'info';
-    const kind: SessionEvent['kind'] =
-      activeThreadHighestPhase === 'error'
-        ? 'render_failed'
-        : activeDraftFeedbackSummary
-          ? 'validation_reported'
-          : 'agent_action_finished';
-    const actor: SessionEvent['actor'] = threadAgentState?.agentLabel
-      ? {
-          kind: 'agent',
-          id: threadAgentState.sessionId ?? 'agent',
-          label: threadAgentState.agentLabel,
-        }
-      : { kind: 'system', id: 'ecky' };
-
-    return {
-      id: `bubble:${bubbleActivityKey}`,
-      sessionId: threadAgentState?.sessionId ?? 'local-session',
-      threadId: $activeThreadId ?? null,
-      versionId: $activeVersionId ?? null,
-      actor,
-      kind,
-      title: genieBubbleState.badge || genieBubbleState.contextLabel || 'Ecky update',
-      summary: genieBubble,
-      timestamp: bubbleActivityTimestamp || Date.now(),
-      severity,
-      artifacts: hasPreviewArtifact && previewArtifactName
-        ? [
-            {
-              kind: 'preview_file',
-              label: 'Preview artifact',
-              value: previewArtifactName,
-            },
-          ]
-        : undefined,
-      raw: {
-        contextLabel: genieBubbleState.contextLabel,
-        threadPhase: activeThreadHighestPhase,
-        error: activeThreadErrorText || null,
-      },
-    };
-  });
-  const sessionActivityEvents = $derived.by<SessionEvent[]>(() => {
-    const recordedEvents = $sessionActivityEventStore;
-    if (!bubbleSessionEvent) return recordedEvents;
-    if (recordedEvents.some((event) => event.id === bubbleSessionEvent.id)) return recordedEvents;
-    return [...recordedEvents, bubbleSessionEvent];
-  });
+  const sessionActivityEvents = $derived.by<SessionEvent[]>(() => $sessionActivityEventStore);
   const sessionActivity = $derived.by(() =>
     composeSessionActivity(sessionActivityEvents, $activeThreadId ?? null, $activeVersionId ?? null),
   );
@@ -4333,7 +5139,7 @@
   const sessionCodeDiffView = $derived.by(() => composeCodeDiffView(sessionActivity, $selectedCode));
 
   function openSessionActivityFromBubble() {
-    const event = sessionBubbleEvent.event ?? bubbleSessionEvent;
+    const event = sessionBubbleEvent.event;
     if (event) selectedSessionActivityEventId = event.id;
     mountedWindows.activity = true;
     showWindow('activity');
@@ -4341,6 +5147,46 @@
 
   function selectSessionActivityEvent(id: string) {
     selectedSessionActivityEventId = id;
+  }
+
+  async function openNotificationThreadDialogue(threadId: string | null) {
+    if (threadId && threadId !== $activeThreadId) {
+      let target = $history.find((thread) => thread.id === threadId) ?? null;
+      if (!target) {
+        try {
+          target = await resolveThreadSummary(threadId);
+        } catch (error) {
+          session.setError(`Project Open Error: ${formatBackendError(error)}`);
+          return;
+        }
+      }
+      if (!target) {
+        session.setError(`Project Open Error: Thread ${threadId} is unavailable.`);
+        return;
+      }
+      await loadFromHistory(target);
+    }
+    closeWindowStore('activity');
+    showWindow('dialogue');
+    await tick();
+    dialogueFocusRequest += 1;
+  }
+
+  function openNotificationActivityEvent(
+    eventId: string,
+    threadId: string | null,
+    local: boolean,
+  ) {
+    const exact = sessionActivityEvents.find((event) => event.id === eventId) ?? null;
+    const fallback = local
+      ? [...sessionActivityEvents].reverse().find((event) =>
+          event.threadId === threadId &&
+          (event.severity === 'error' || event.kind === 'validation_reported'),
+        ) ?? null
+      : null;
+    selectedSessionActivityEventId = (exact ?? fallback)?.id ?? eventId;
+    mountedWindows.activity = true;
+    showWindow('activity');
   }
 
   $effect(() => {
@@ -4399,7 +5245,7 @@
         onclick: () => answerConfirm(activeConfirm.requestId, btn),
       }));
     }
-    if (isActiveMcpMode && activeAgentTerminalAttention) {
+    if (activeAgentTerminalAttention) {
       return [
         {
           label: 'OPEN TERMINAL',
@@ -4409,8 +5255,8 @@
         },
       ];
     }
-    if (isActiveMcpMode && $activeThreadId && threadAgentState?.connectionState !== 'none') {
-      const connectionState = threadAgentState?.connectionState;
+    if ($activeThreadId && projectedThreadAgentState.connectionState !== 'none') {
+      const connectionState = projectedThreadAgentState.connectionState;
       if (!connectionState) return null;
       const actions: Array<{ label: string; onclick: () => void }> = [];
       if (visibleAgentTerminal) {
@@ -4425,14 +5271,15 @@
         actions.push({
           label: 'WAKE AGENT',
           onclick: () => {
-            void handleWakePrimaryAgent();
+            if (visibleAgentTerminal?.active) return;
+            if (!terminalWindowState.visible) toggleWindow('terminal');
           },
         });
       } else {
         if (
           visibleAgentTerminal?.active &&
           hasQueuedAgentMessageWithoutPrompt &&
-          threadAgentState?.connectionState === 'active'
+          projectedThreadAgentState.connectionState === 'active'
         ) {
           actions.push({
             label: 'NUDGE AGENT',
@@ -4441,71 +5288,85 @@
             },
           });
         }
-        actions.push({
-          label: 'RESTART AGENT',
-          onclick: () => {
-            void handleRestartPrimaryAgent();
-          },
-        });
-        actions.push({
-          label: 'STOP AGENT',
-          onclick: () => {
-            void handleStopPrimaryAgent();
-          },
-        });
       }
       return actions;
     }
     return null;
   });
 
-  async function handleWakePrimaryAgent() {
-    if (!$activeThreadId || agentControlBusy) return;
-    agentControlBusy = true;
-    try {
-      const target = currentVisibleTargetRef();
-      await agentRuntime.runControl(
-        'wake',
-        target?.threadId ?? $activeThreadId,
-        { messageId: target?.messageId ?? null, modelId: target?.modelId ?? null },
-        wakePrimaryAutoAgent,
-      );
-    } finally {
-      agentControlBusy = false;
-    }
-  }
+  const localNotificationSources = new Set([
+    'sessionError',
+    'onboarding',
+    'viewportScreenshot',
+    'confirm',
+    'terminalAttention',
+    'pendingPrompt',
+    'draftFeedback',
+    'queuedMessage',
+    'threadError',
+    'repair',
+    'cooking',
+    'assistant',
+  ]);
 
-  async function handleStopPrimaryAgent() {
-    if (!$activeThreadId || agentControlBusy) return;
-    agentControlBusy = true;
-    try {
-      const target = currentVisibleTargetRef();
-      await agentRuntime.runControl(
-        'stop',
-        target?.threadId ?? $activeThreadId,
-        { messageId: target?.messageId ?? null, modelId: target?.modelId ?? null },
-        stopPrimaryAutoAgent,
-      );
-    } finally {
-      agentControlBusy = false;
+  $effect(() => {
+    const appError = globalErrorText;
+    if (appError) {
+      localNotificationActionsStore.set({
+        eventId: `local-ui:globalError:${appError}`,
+        threadId: null,
+        actorLabel: 'ECKY',
+        summary: appError,
+        detail: null,
+        severity: 'error',
+        state: 'failed',
+        requiresAttention: true,
+        actions: [],
+      });
+      return;
     }
-  }
 
-  async function handleRestartPrimaryAgent() {
-    if (!$activeThreadId || agentControlBusy) return;
-    agentControlBusy = true;
-    try {
-      const target = currentVisibleTargetRef();
-      await agentRuntime.runControl(
-        'restart',
-        target?.threadId ?? $activeThreadId,
-        { messageId: target?.messageId ?? null, modelId: target?.modelId ?? null },
-        restartPrimaryAutoAgent,
-      );
-    } finally {
-      agentControlBusy = false;
+    const folderNotice = projectFolderNotice;
+    if (folderNotice) {
+      const isError = folderNotice.tone === 'error';
+      const isPending = folderNotice.tone === 'pending';
+      localNotificationActionsStore.set({
+        eventId: `local-ui:project-folder:${folderNotice.tone}:${folderNotice.threadId}:${folderNotice.messageId ?? folderNotice.body}`,
+        threadId: folderNotice.threadId,
+        actorLabel: 'ECKY',
+        summary: folderNotice.title,
+        detail: folderNotice.body,
+        severity: isError ? 'error' : 'info',
+        state: isError ? 'failed' : isPending ? 'active' : 'resolved',
+        requiresAttention: isError,
+        actions: [],
+      });
+      return;
     }
-  }
+
+    const source = genieBubbleState.source;
+    const text = genieBubbleState.text;
+    const actions = genieActions ?? [];
+    if (!text || !localNotificationSources.has(source)) {
+      localNotificationActionsStore.set(null);
+      return;
+    }
+
+    const eventId = `local-ui:${source}:${bubbleActivityTimestamp}`;
+    const isError = source === 'sessionError' || source === 'threadError';
+    const needsAnswer = actions.length > 0 || source === 'pendingPrompt' || source === 'terminalAttention';
+    localNotificationActionsStore.set({
+      eventId,
+      threadId: $activeThreadId ?? null,
+      actorLabel: 'ECKY',
+      summary: text,
+      detail: [genieBubbleState.badge, genieBubbleState.layer, genieBubbleState.fix].filter(Boolean).join(' · ') || null,
+      severity: isError ? 'error' : needsAnswer ? 'question' : 'info',
+      state: isError ? 'failed' : needsAnswer ? 'active' : 'resolved',
+      requiresAttention: isError || needsAnswer,
+      actions,
+    });
+  });
 
   async function applyCompletedRequest(req: Request) {
     if (!req?.result) return;
@@ -4513,7 +5374,6 @@
       req.result;
     const runtime = await inspectRuntimeBundle(
       artifactBundle ?? null,
-      undefined,
       undefined,
       design?.postProcessing ?? null,
       design?.initialParams ?? {},
@@ -4538,11 +5398,6 @@
     }
     if (renderableBundle || modelManifest) {
       session.setModelRuntime(renderableBundle ?? null, modelManifest ?? null);
-    }
-    if (runtime.skippedOversizedPreview) {
-      session.setStatus(
-        'Loaded completed request. Lithophane preview was skipped in the viewer; base part meshes are shown instead.',
-      );
     }
     void persistLastSessionSnapshot({
       design: design ?? null,
@@ -4592,7 +5447,7 @@
   }
 
   onDestroy(() => {
-    if (liveApplyTimer) clearTimeout(liveApplyTimer);
+    localNotificationActionsStore.set(null);
   });
 
   $effect(() => {
@@ -4659,46 +5514,7 @@
     handleTargetSelect(nextTarget);
   }
 
-  function liveParamSourceKey(): string {
-    const wc = get(workingCopy);
-    return [
-      get(activeThreadId) ?? '',
-      wc.sourceVersionId ?? get(activeVersionId) ?? '',
-      wc.macroCode,
-    ].join('\u0000');
-  }
-
-  function scheduleLiveParamChange(nextParams: DesignParams) {
-    const sourceKey = liveParamSourceKey();
-    if (pendingLiveApplySourceKey && pendingLiveApplySourceKey !== sourceKey) {
-      pendingLiveApplyParams = {};
-    }
-    pendingLiveApplySourceKey = sourceKey;
-    pendingLiveApplyParams = { ...pendingLiveApplyParams, ...nextParams };
-    if (liveApplyTimer) clearTimeout(liveApplyTimer);
-    liveApplyTimer = setTimeout(() => {
-      const params = pendingLiveApplyParams;
-      const expectedSourceKey = pendingLiveApplySourceKey;
-      pendingLiveApplyParams = {};
-      pendingLiveApplySourceKey = null;
-      liveApplyTimer = null;
-      const currentSourceKey = liveParamSourceKey();
-      if (expectedSourceKey !== currentSourceKey) {
-        console.warn('[App] Dropping stale live parameter apply', {
-          expectedSourceKey,
-          currentSourceKey,
-        });
-        return;
-      }
-      void handleParamChange(params, null, false);
-    }, LIVE_APPLY_DEBOUNCE_MS);
-  }
-
   function handleParamPanelChange(nextParams: DesignParams) {
-    if ($liveApply) {
-      scheduleLiveParamChange(nextParams);
-      return;
-    }
     return handleParamChange(nextParams, null, false);
   }
 
@@ -4707,12 +5523,11 @@
   }
 
   function handleSemanticControlChange(primitiveId: string, value: ParamValue) {
-    const nextParams = buildSemanticPatch(activeModelManifest, primitiveId, value, effectiveUiSpec);
+    const exactPatch = provenanceOverlayPatch(exactProvenanceOverlayControls, primitiveId, value);
+    const nextParams = Object.keys(exactPatch).length > 0
+      ? exactPatch
+      : buildSemanticPatch(activeModelManifest, primitiveId, value, effectiveUiSpec);
     if (Object.keys(nextParams).length === 0) return;
-    if ($liveApply) {
-      scheduleLiveParamChange(nextParams);
-      return;
-    }
     stageParamChange(nextParams);
   }
 
@@ -4750,7 +5565,7 @@
       activeVersionId.set(messageId);
       workingCopy.reset();
       paramPanelState.reset();
-      session.setStlUrl(toAssetUrl(bundle.previewStlPath));
+      session.setStlUrl(toAssetUrl(bundle.modelStlPath));
       session.setModelRuntime(bundle, manifest);
       await refreshHistory();
       await persistLastSessionSnapshot({
@@ -4802,7 +5617,7 @@
       activeVersionId.set(messageId);
       workingCopy.reset();
       paramPanelState.reset();
-      session.setStlUrl(toAssetUrl(bundle.previewStlPath));
+      session.setStlUrl(toAssetUrl(bundle.modelStlPath));
       session.setModelRuntime(bundle, manifest);
       await refreshHistory();
       await persistLastSessionSnapshot({
@@ -4887,25 +5702,12 @@
                 onModelLoaded={handleVisibleViewerLoaded}
                 onModelLoadError={handleVisibleViewerLoadError}
                 isGenerating={viewerBusyPhase === 'generating' || viewerBusyPhase === 'repairing'}
+                retainModelWhileLoading={$activeThreadVersionLoading}
                 hideModelWhileBusy={showViewerBusyMask}
                 busyPhase={viewerBusyPhase}
                 busyText={viewerBusyText}
                 topologyMode={viewerTopologyMode}
               />
-              {#if !hasSketchPreview && availablePreviewViews.length > 0}
-                <div class="preview-view-switcher" aria-label="Preview view switcher">
-                  {#each availablePreviewViews as previewView (previewView.viewId)}
-                    <button
-                      class="preview-view-switcher__button"
-                      class:preview-view-switcher__button--active={previewView.viewId === activePreviewViewId}
-                      onclick={() => activePreviewViewId = previewView.viewId}
-                      type="button"
-                    >
-                      {previewView.label}
-                    </button>
-                  {/each}
-                </div>
-              {/if}
               {#if sketchPreviewStatus}
                 <section class="sketch-preview-status" aria-label="Sketch preview status">
                   <div class="sketch-preview-status__head">
@@ -4972,27 +5774,24 @@
             >
               <VertexGenie 
                 mode={genieMode} 
-                bubble={genieBubble}
-                compact={genieBubbleState.compact}
-                badge={genieBubbleState.badge}
-                contextLabel={genieBubbleState.contextLabel}
-                errorLayer={genieBubbleState.layer}
-                errorFix={genieBubbleState.fix}
                 safeRightInset={genieSafeRightInset}
-                onBubbleClick={openSessionActivityFromBubble}
-                bubbleTestId="genie-session-bubble"
-                onDismiss={dismissGenie}
-                actions={genieActions}
                 relay={genieRelay}
                 traits={eckyTraits} 
                 intensity={eckyIntensity} 
                 wakeUp={genieWakeUpCount}
+                onOpenProjects={() => showWindow('projects')}
+                onOpenActivity={openSessionActivityFromBubble}
                 agentConnected={
                   threadAgentMascot.connected ||
                   hasLiveMcpSession ||
                   !!visibleAgentTerminal?.active ||
                   hasLiveApiConnection
                 }
+              />
+              <AgentNotificationCenter
+                activeThreadId={$activeThreadId ?? null}
+                onOpenThreadDialogue={openNotificationThreadDialogue}
+                onOpenActivityEvent={openNotificationActivityEvent}
               />
             </div>
 
@@ -5079,29 +5878,6 @@
     {/if}
   </div>
 
-  {#if projectFolderNotice}
-    <div
-      class="project-folder-notice"
-      class:project-folder-notice--pending={projectFolderNotice.tone === 'pending'}
-      class:project-folder-notice--success={projectFolderNotice.tone === 'success'}
-      class:project-folder-notice--error={projectFolderNotice.tone === 'error'}
-      data-testid="project-folder-notice"
-      role={projectFolderNotice.tone === 'error' ? 'alert' : 'status'}
-      aria-live={projectFolderNotice.tone === 'error' ? 'assertive' : 'polite'}
-    >
-      <div class="project-folder-notice__copy">
-        <strong>{projectFolderNotice.title}</strong>
-        <span>{projectFolderNotice.body}</span>
-      </div>
-      <button
-        class="project-folder-notice__dismiss"
-        onclick={() => projectFolderNotice = null}
-        aria-label="Dismiss source change notice"
-        title="Dismiss"
-      >×</button>
-    </div>
-  {/if}
-
   {#if showNewProjectChooser}
     <Modal title="Start New Project" onclose={() => showNewProjectChooser = false}>
       <div class="new-project-chooser">
@@ -5123,13 +5899,13 @@
     <ManualImportModal bind:show={showNewProjectImport} onImport={handleTopMacroImport} />
   {/if}
 
-  {#if isBooting}
+  {#if isBooting && !geometryRenderActive}
     <div class="boot-overlay">
       <div class="boot-overlay__glass"></div>
       <div class="boot-overlay__content">
         <div class="boot-overlay__title">ECKY CAD</div>
         <div class="boot-overlay__ecky">
-          <VertexGenie mode="thinking" bubble="" fitToCanvas={true} />
+          <VertexGenie mode="thinking" fitToCanvas={true} />
         </div>
         <div class="boot-overlay__status">{status || 'Restoring environment...'}</div>
       </div>
@@ -5323,6 +6099,8 @@
           onApplyMacroCode={(code) => applyManualCodeDraft(code)}
           onchange={handleParamPanelChange}
           oncommit={handleParamPanelCommit}
+          manualApplyBusy={$manualApplyQueueStateStore.running}
+          manualApplyQueued={$manualApplyQueueStateStore.pending}
           onspecchange={(spec, params) => {
             paramPanelState.setUiSpec(spec);
             workingCopy.patch({ uiSpec: spec });
@@ -5373,7 +6151,8 @@
 
     {#snippet activityContent()}
       <SessionActivityWindow
-        events={sessionActivity.visibleEvents}
+        events={sessionActivity.events}
+        activeThreadId={$activeThreadId ?? null}
         selectedEventId={selectedSessionActivityEventId}
         onSelectEvent={selectSessionActivityEvent}
       />
@@ -5391,6 +6170,13 @@
           generationUnavailableReason,
           imageAttachmentUnavailableReason: imageInputUnavailableReason,
           dialogueState,
+          codexTakeover: activeProviderSnapshot,
+          codexTakeoverError,
+          onLoadEarlierCodexMessages: handleLoadEarlierCodexMessages,
+          onSteerCodexTakeover: handleCodexSteer,
+          onStopCodexTakeover: handleStopCodexTakeover,
+          onRetryCodexQueue: handleRetryCodexQueue,
+          onRemoveCodexQueue: handleRemoveCodexQueue,
           messages: activeThreadDialogueMessages,
           captureRuns: captureHistoryRuns,
           messagesLoading: $activeThreadMessagesLoading,
@@ -5412,11 +6198,17 @@
               geometryBackend: m.artifactBundle?.geometryBackend ?? m.modelManifest?.geometryBackend ?? m.output.geometryBackend ?? null,
             });
           },
+          onOpenCodeReference: (reference: ProviderCodeReference) => openVersionCodeModal({
+            expectedSourcePath: reference.path,
+            highlightLine: reference.line,
+            throwSourceError: true,
+          }),
           onDeleteVersion: deleteVersion,
           onRestoreVersion: restoreVersion,
           onAuthoredVerifyFocus: handlePromptPanelAuthoredVerifyFocus,
           onVersionChange: loadVersion,
           onOpenCapture: openCaptureRunFromHistory,
+          focusRequest: dialogueFocusRequest,
         }}
       />
     {/snippet}
@@ -5441,14 +6233,14 @@
             <div class="agent-terminal-window__status">{visibleAgentTerminal.active ? 'LIVE PTY' : 'LAST SESSION'}</div>
             {#if activeAgentTerminalMetaSummary}<div class="agent-terminal-window__summary">{activeAgentTerminalMetaSummary}</div>{/if}
           </div>
-          {#if threadAgentState?.sessionId}
+          {#if projectedThreadAgentState.sessionId}
             <div class="agent-terminal-window__trace-meta">
-              <span>SESSION {shortSessionId(threadAgentState.sessionId)}</span>
+              <span>SESSION {shortSessionId(projectedThreadAgentState.sessionId)}</span>
               <span>THREAD {activeThread?.title ?? 'UNKNOWN'}</span>
-              {#if threadAgentState.providerKind}<span>PROVIDER {threadAgentState.providerKind.toUpperCase()}</span>{/if}
-              {#if threadAgentState.waitingOnPrompt}<span>WAITING ON PROMPT</span>
+              {#if projectedThreadAgentState.providerKind}<span>PROVIDER {projectedThreadAgentState.providerKind.toUpperCase()}</span>{/if}
+              {#if projectedThreadAgentState.waitingOnPrompt}<span>WAITING ON PROMPT</span>
               {:else if activeMcpBusy}<span>TURN ACTIVE</span>
-              {:else if threadAgentState.phase}<span>{formatAgentPhase(threadAgentState.phase)}</span>{/if}
+              {:else if projectedThreadAgentState.phase}<span>{formatAgentPhase(projectedThreadAgentState.phase)}</span>{/if}
             </div>
           {/if}
           <div class="agent-terminal-window__hint">{visibleAgentTerminal.active ? 'CLICK TERMINAL TO TYPE DIRECTLY. ARROWS, TAB, ESC, CTRL+C AND PASTE GO STRAIGHT TO THE PTY.' : 'LAST CAPTURED TERMINAL OUTPUT'}</div>
@@ -5508,9 +6300,9 @@
     </Modal>
   {/if}
 
-  {#if mountedWindows.code}
-    <CodeModal
+  <CodeModal
       bind:code={$selectedCode}
+      evidence={codeModalEvidence}
       mode={codeModalMode}
       sourceLanguage={codeModalSourceLanguage}
       macroDiffView={sessionCodeDiffView}
@@ -5520,15 +6312,15 @@
       defaultVersionName={$workingCopy.versionName || 'V-manual'}
       sourceThreadId={codeModalSourceThreadId}
       sourceMessageId={$activeVersionId}
-      onApply={codeModalMode === 'version' ? applyManualCodeDraft : undefined}
-      onCommit={codeModalMode === 'version' ? commitManualVersionAndClose : undefined}
+      sourceAuthority={codeModalSourceAuthority}
+      highlightLine={codeModalHighlightLine}
+      onApplyVersion={codeModalMode === 'version' || codeModalMode === 'foreign-evidence' ? applyCodeModalSource : undefined}
       onTranslateToEcky={codeModalMode === 'version' ? handleTranslateCodeToEcky : undefined}
       z={codeWindowState.z}
       hidden={!codeWindowState.visible}
       focused={codeWindowState.active}
       onclose={closeCodeModal}
-    />
-  {/if}
+  />
 
   {#if enrichmentManifest}
     <ImportEnrichmentModal
@@ -5557,34 +6349,6 @@
     z-index: 5;
     transition: opacity 180ms ease, filter 180ms ease;
     overflow: hidden;
-  }
-  .preview-view-switcher {
-    position: absolute;
-    left: 12px;
-    top: 12px;
-    z-index: 36;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    max-width: min(420px, calc(100% - 24px));
-    overflow: hidden;
-  }
-  .preview-view-switcher__button {
-    border: 1px solid color-mix(in srgb, var(--secondary) 36%, var(--bg-300));
-    background: color-mix(in srgb, var(--bg-100) 88%, transparent);
-    color: var(--text-dim);
-    font-family: var(--font-mono);
-    font-size: 0.58rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    padding: 6px 10px;
-    cursor: pointer;
-    overflow: hidden;
-  }
-  .preview-view-switcher__button--active {
-    color: var(--primary);
-    border-color: color-mix(in srgb, var(--primary) 52%, var(--bg-300));
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 24%, transparent);
   }
   .sketch-preview-status {
     position: absolute;
@@ -5659,62 +6423,6 @@
     cursor: pointer;
   }
   .new-project-chooser__btn:hover {
-    border-color: var(--primary);
-    color: var(--primary);
-  }
-  .project-folder-notice {
-    position: fixed;
-    top: 12px;
-    right: 12px;
-    z-index: 7000;
-    display: flex;
-    align-items: flex-start;
-    gap: 12px;
-    width: min(420px, calc(100vw - 24px));
-    padding: 10px 12px;
-    overflow: hidden;
-    border: 1px solid var(--secondary);
-    background: color-mix(in srgb, var(--bg-100) 96%, black);
-    color: var(--text);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-  }
-  .project-folder-notice--pending { border-color: var(--primary); }
-  .project-folder-notice--error { border-color: var(--red); }
-  .project-folder-notice__copy {
-    display: flex;
-    flex: 1;
-    min-width: 0;
-    flex-direction: column;
-    gap: 4px;
-    overflow: hidden;
-    font-family: var(--font-mono);
-  }
-  .project-folder-notice__copy strong {
-    color: var(--secondary);
-    font-size: 0.68rem;
-    letter-spacing: 0.08em;
-  }
-  .project-folder-notice--pending .project-folder-notice__copy strong { color: var(--primary); }
-  .project-folder-notice--error .project-folder-notice__copy strong { color: var(--red); }
-  .project-folder-notice__copy span {
-    overflow-wrap: anywhere;
-    color: var(--text-dim);
-    font-size: 0.7rem;
-    line-height: 1.4;
-  }
-  .project-folder-notice__dismiss {
-    flex: 0 0 28px;
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    border: 1px solid var(--bg-300);
-    background: var(--bg-200);
-    color: var(--text-dim);
-    cursor: pointer;
-    font-size: 1rem;
-    line-height: 1;
-  }
-  .project-folder-notice__dismiss:hover {
     border-color: var(--primary);
     color: var(--primary);
   }

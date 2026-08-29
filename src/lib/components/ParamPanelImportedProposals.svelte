@@ -23,7 +23,6 @@
           <div class="proposal-head">
             <div class="proposal-label-row">
               <span class="proposal-label">{proposal.label}</span>
-              <span class="proposal-confidence">{Math.round(proposal.confidence * 100)}%</span>
             </div>
             <span class="proposal-status proposal-status-{proposal.status}">
               {proposal.status.toUpperCase()}
@@ -120,7 +119,6 @@
     font-weight: 700;
   }
 
-  .proposal-confidence,
   .proposal-meta {
     color: var(--text-dim);
     font-size: 0.64rem;

@@ -28,7 +28,7 @@ endsolid speech-policy`,
       contentHash: 'speech-policy-hash',
       fcstdPath: '/mock/speech-policy.FCStd',
       manifestPath: '/mock/speech-policy-manifest.json',
-      previewStlPath: '/mock/speech-policy.stl',
+      modelStlPath: '/mock/speech-policy.stl',
       viewerAssets: [],
     };
     const isErrorMode = mockMode === 'error';

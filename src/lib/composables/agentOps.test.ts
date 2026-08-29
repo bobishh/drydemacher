@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { deriveAgentOpsState } from './agentOps';
 import type { AgentSession, Request } from '../types/domain';
-import type { ThreadAgentState } from '../tauri/client';
+import type { ThreadAgentPresentationState } from '../agents/presentation';
 import type { AgentTerminalSnapshot } from '../types/domain';
 
 function request(threadId: string, requestId: string): Request {
@@ -29,7 +29,7 @@ function request(threadId: string, requestId: string): Request {
   };
 }
 
-function threadAgentState(): ThreadAgentState {
+function threadAgentState(): ThreadAgentPresentationState {
   return {
     agentLabel: 'Codex',
     sessionId: 'session-1',
@@ -100,7 +100,7 @@ test('deriveAgentOpsState keeps attention off the current thread and resolves ag
         threadId: 'thread-2',
         messageId: 'msg-2',
         modelId: null,
-        previewStlPath: '/tmp/model.stl',
+        modelStlPath: '/tmp/model.stl',
         viewerAssets: [],
         includeOverlays: false,
         message: 'Choose',
@@ -109,7 +109,7 @@ test('deriveAgentOpsState keeps attention off the current thread and resolves ag
       },
     ],
     connectionType: 'mcp',
-    mcpMode: 'active',
+    mcpMode: 'passive',
     autoAgents: [{ id: 'codex', label: 'Codex', cmd: 'codex', args: [], enabled: true }],
     primaryAgentId: 'codex',
     primaryAgentLabel: 'Codex',

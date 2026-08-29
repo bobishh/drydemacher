@@ -1,35 +1,26 @@
 use super::{
     artifact_bundle_digest, clear_session_thread_render_preview_durable, now_secs,
-    persist_agent_session, push_mcp_profile, resolve_session_render_preview_for_request,
-    resolve_turn_working_target, try_record_agent_error, AgentContext,
+    persist_agent_session, resolve_session_render_preview_for_request, resolve_turn_working_target,
+    try_record_agent_error, AgentContext,
 };
 use crate::contracts::{AppError, AppErrorCode, AppResult, RenderSnapshot};
 use crate::db;
 use crate::mcp::contracts::{
-    FemVerifiedCommitRequest, ThreadForkRequest, ThreadForkResponse, VersionRestoreRequest,
-    VersionRestoreResponse, VersionSaveRequest, VersionSaveResponse,
+    FemVerifiedPublishRequest, ThreadForkRequest, ThreadForkResponse, VersionDeleteRequest,
+    VersionDeleteResponse, VersionRestoreRequest, VersionRestoreResponse, VersionSaveRequest,
+    VersionSaveResponse,
 };
 use crate::models::{AppState, PathResolver};
 use crate::services::agent_versions::{
     save_or_update_agent_version_for_session, SaveOrUpdateAgentVersionRequest,
 };
 use crate::services::history;
-use std::time::Instant;
 use uuid::Uuid;
 
-pub async fn handle_commit_preview_version(
+pub async fn handle_publish_fem_verified_result(
     state: &AppState,
     app: &dyn PathResolver,
-    req: VersionSaveRequest,
-    ctx: &AgentContext,
-) -> AppResult<VersionSaveResponse> {
-    handle_commit_preview_version_inner(state, app, req, ctx, true).await
-}
-
-pub async fn handle_commit_fem_verified_preview(
-    state: &AppState,
-    app: &dyn PathResolver,
-    req: FemVerifiedCommitRequest,
+    req: FemVerifiedPublishRequest,
     ctx: &AgentContext,
 ) -> AppResult<VersionSaveResponse> {
     let ctx = ctx.with_override(&req.identity);
@@ -42,7 +33,7 @@ pub async fn handle_commit_fem_verified_preview(
     .await?
     .ok_or_else(|| {
         AppError::validation(
-            "No preview draft is available for FEM verified commit. Render a preview first.",
+            "No preview draft is available for FEM evidence publication. Render a preview first.",
         )
     })?;
     let result = crate::commands::fem::read_fem_result_with_resolver(
@@ -55,12 +46,12 @@ pub async fn handle_commit_fem_verified_preview(
     )?;
     let current = crate::commands::fem::validate_fem_study_with_resolver(
         crate::contracts::FemStudyRequest {
-            job_id: format!("fem-commit-{}", Uuid::new_v4()),
+            job_id: format!("fem-publish-{}", Uuid::new_v4()),
             model_id: preview.artifact_bundle.model_id.clone(),
             source: preview.design_output.macro_code.clone(),
             analysis_name: req.analysis_name,
-            budgets: fem_commit_validation_budgets(),
-            control: fem_commit_validation_control(),
+            budgets: fem_publish_validation_budgets(),
+            control: fem_publish_validation_control(),
         },
         app,
     )?;
@@ -70,23 +61,31 @@ pub async fn handle_commit_fem_verified_preview(
         &current.boundary_digest,
         &req.result_digest,
     )?;
-    handle_commit_preview_version(
-        state,
-        app,
-        VersionSaveRequest {
-            identity: req.identity,
-            thread_id: Some(preview.thread_id),
-            message_id: Some(preview.preview_id),
-            title: req.title,
-            version_name: req.version_name,
-            capture_guided_result: req.capture_guided_result,
-        },
-        &ctx,
-    )
-    .await
+    let guided_request_id =
+        require_green_verification_for_preview(state, &preview, req.capture_guided_result.as_ref())
+            .await?;
+    let message_id = preview
+        .base_message_id
+        .clone()
+        .ok_or_else(|| AppError::persistence("FEM preview has no durable version."))?;
+    if let Some(request_id) = guided_request_id.as_deref() {
+        let conn = state.db.lock().await;
+        crate::capture_runs::complete_guided_reconstruction(
+            &conn,
+            request_id,
+            &message_id,
+            Some(&preview.artifact_bundle.model_id),
+        )?;
+    }
+    clear_session_thread_render_preview_durable(state, &ctx.session_id, &preview.thread_id).await?;
+    Ok(VersionSaveResponse {
+        thread_id: preview.thread_id,
+        message_id,
+        model_id: preview.artifact_bundle.model_id,
+    })
 }
 
-fn fem_commit_validation_budgets() -> crate::contracts::FemBudgetLimitsDto {
+fn fem_publish_validation_budgets() -> crate::contracts::FemBudgetLimitsDto {
     crate::contracts::FemBudgetLimitsDto {
         boundary_triangles: 250_000,
         tet4_cells: 500_000,
@@ -98,234 +97,14 @@ fn fem_commit_validation_budgets() -> crate::contracts::FemBudgetLimitsDto {
     }
 }
 
-fn fem_commit_validation_control() -> crate::contracts::FemPipelineControlDto {
+fn fem_publish_validation_control() -> crate::contracts::FemPipelineControlDto {
     crate::contracts::FemPipelineControlDto {
         envelope_mm: 0.1,
         minimum_scaled_jacobian: 1.0e-6,
         maximum_runtime_ms: 10 * 60 * 1000,
         relative_solver_tolerance: 1.0e-8,
+        thread_count: 0,
     }
-}
-
-pub(super) async fn handle_commit_preview_version_from_external_source(
-    state: &AppState,
-    app: &dyn PathResolver,
-    req: VersionSaveRequest,
-    ctx: &AgentContext,
-) -> AppResult<VersionSaveResponse> {
-    handle_commit_preview_version_inner(state, app, req, ctx, false).await
-}
-
-async fn handle_commit_preview_version_inner(
-    state: &AppState,
-    app: &dyn PathResolver,
-    req: VersionSaveRequest,
-    ctx: &AgentContext,
-    refresh_bound_source: bool,
-) -> AppResult<VersionSaveResponse> {
-    let total_started = Instant::now();
-    let ctx = ctx.with_override(&req.identity);
-    let ctx = &ctx;
-    let mut tracked_thread_id = req.thread_id.clone();
-    let mut tracked_message_id = req.message_id.clone();
-    let mut tracked_model_id = None;
-
-    let result = async {
-        let resolve_started = Instant::now();
-        let preview = resolve_session_render_preview_for_request(
-            state,
-            ctx,
-            req.thread_id.as_deref(),
-            req.message_id.as_deref(),
-        )
-        .await?
-        .ok_or_else(|| {
-            AppError::validation(
-                "No preview draft is available for this MCP session. Render a preview before commit_preview_version.",
-            )
-        })?;
-        push_mcp_profile(
-            state,
-            ctx,
-            "commit_preview_version",
-            "resolve_preview",
-            resolve_started,
-            Some(&preview.thread_id),
-            Some(&preview.preview_id),
-            Some(&preview.artifact_bundle.model_id),
-        );
-
-        tracked_thread_id = Some(preview.thread_id.clone());
-        tracked_message_id = Some(preview.preview_id.clone());
-        tracked_model_id = Some(preview.artifact_bundle.model_id.clone());
-
-        let guided_request_id = require_green_verification_for_preview(
-            state,
-            &preview,
-            req.capture_guided_result.as_ref(),
-        )
-        .await?;
-
-        {
-            let conn = state.db.lock().await;
-            persist_agent_session(
-                &conn,
-                ctx,
-                tracked_thread_id.clone(),
-                tracked_message_id.clone(),
-                tracked_model_id.clone(),
-                "saving_version",
-                "Committing preview draft.",
-            )?;
-        }
-
-        let mut design_output = preview.design_output.clone();
-        if let Some(title) = req.title.clone() {
-            design_output.title = title;
-        }
-        if let Some(version_name) = req.version_name.clone() {
-            design_output.version_name = version_name;
-        } else if design_output.version_name.trim().is_empty() {
-            design_output.version_name.clear();
-        }
-
-        // thread-source-binding guard: refuse to clobber a pending external
-        // edit BEFORE the version is written, so a refusal creates no version.
-        let committed_title = design_output.title.clone();
-        let committed_source = design_output.macro_code.clone();
-        let configured_root = state.config.lock().unwrap().projects_root.clone();
-        if refresh_bound_source {
-            let conn = state.db.lock().await;
-            crate::thread_source_binding::pre_commit_guard(
-                app,
-                &conn,
-                configured_root.as_deref(),
-                &preview.thread_id,
-                &committed_title,
-            )?;
-        }
-
-        let save_started = Instant::now();
-        let save_result = save_or_update_agent_version_for_session(
-            state,
-            app,
-            SaveOrUpdateAgentVersionRequest {
-                session_id: ctx.session_id.clone(),
-                thread_id: preview.thread_id.clone(),
-                base_message_id: preview.base_message_id.clone().unwrap_or_default(),
-                model_id: Some(preview.artifact_bundle.model_id.clone()),
-                design_output,
-                artifact_bundle: Some(preview.artifact_bundle.clone()),
-                model_manifest: Some(preview.model_manifest.clone()),
-                updated_at: now_secs(),
-                response_text_created: format!("{} committed the MCP preview.", ctx.agent_label),
-                response_text_updated: format!(
-                    "{} updated the MCP preview commit.",
-                    ctx.agent_label
-                ),
-                preserve_existing_title: req.title.is_none(),
-                preserve_existing_version_name: req.version_name.is_none(),
-                force_create_new_message: true,
-                announce_created_working_version: false,
-            },
-        )
-        .await?;
-        if let Some(request_id) = guided_request_id.as_deref() {
-            let conn = state.db.lock().await;
-            crate::capture_runs::complete_guided_reconstruction(
-                &conn,
-                request_id,
-                &save_result.message_id,
-                save_result.model_id.as_deref(),
-            )?;
-        }
-        push_mcp_profile(
-            state,
-            ctx,
-            "commit_preview_version",
-            "save_or_update_version",
-            save_started,
-            Some(&preview.thread_id),
-            Some(&save_result.message_id),
-            save_result.model_id.as_deref(),
-        );
-
-        let clear_started = Instant::now();
-        clear_session_thread_render_preview_durable(
-            state,
-            &ctx.session_id,
-            &preview.thread_id,
-        )
-        .await?;
-        push_mcp_profile(
-            state,
-            ctx,
-            "commit_preview_version",
-            "clear_preview_draft",
-            clear_started,
-            Some(&preview.thread_id),
-            Some(&save_result.message_id),
-            save_result.model_id.as_deref(),
-        );
-        tracked_message_id = Some(save_result.message_id.clone());
-        tracked_model_id = save_result.model_id.clone();
-
-        // thread-source-binding refresh: publish the committed Ecky source to
-        // the bound working copy + rebased manifest + binding row digest. The
-        // file was verified clean by `pre_commit_guard` above; this is the
-        // single-direction Ecky->file refresh (no version duplication).
-        if refresh_bound_source {
-            let conn = state.db.lock().await;
-            crate::thread_source_binding::refresh_on_commit(
-                app,
-                &conn,
-                configured_root.as_deref(),
-                &preview.thread_id,
-                &committed_title,
-                &committed_source,
-                &save_result.message_id,
-                save_result.model_id.as_deref(),
-                Some(&save_result.message_id),
-            )?;
-        }
-
-        Ok(VersionSaveResponse {
-            thread_id: preview.thread_id,
-            message_id: save_result.message_id,
-            model_id: save_result.model_id.unwrap_or_default(),
-        })
-    }
-    .await;
-
-    push_mcp_profile(
-        state,
-        ctx,
-        "commit_preview_version",
-        if result.is_ok() {
-            "total_ok"
-        } else {
-            "total_err"
-        },
-        total_started,
-        tracked_thread_id.as_deref(),
-        tracked_message_id.as_deref(),
-        tracked_model_id.as_deref(),
-    );
-
-    if let Err(err) = &result {
-        let conn = state.db.lock().await;
-        try_record_agent_error(
-            state,
-            &conn,
-            ctx,
-            tracked_thread_id,
-            tracked_message_id,
-            tracked_model_id,
-            err,
-        );
-    }
-
-    result
 }
 
 async fn require_green_verification_for_preview(
@@ -461,7 +240,7 @@ async fn require_green_verification_for_preview(
     );
     Err(AppError::with_details(
         AppErrorCode::Conflict,
-        "Preview requires an explicit green verification before commit.",
+        "FEM evidence requires an explicit green verification for the same preview.",
         format!(
             "previewId={} snapshotId={} artifactDigest={} {}",
             preview.preview_id,
@@ -470,7 +249,7 @@ async fn require_green_verification_for_preview(
             verification_evidence
         ),
     )
-    .with_operation("commit_preview_version"))
+    .with_operation("fem_publish_verified_result"))
 }
 
 fn capture_deviation_outlier_threshold(
@@ -720,12 +499,15 @@ pub async fn handle_version_restore(
         )?;
 
         history::restore_version(&conn, &req.message_id)?;
-        state.emit_history_updated();
-
         let tid = db::get_message_thread_id(&conn, &req.message_id)
             .map_err(|e| AppError::persistence(e.to_string()))?
             .ok_or_else(|| AppError::not_found("Restored message not found."))?;
         tracked_thread_id = Some(tid.clone());
+        state.emit_history_changed(
+            Some(tid.clone()),
+            Some(req.message_id.clone()),
+            "versionRestored",
+        );
         let artifact_digest = db::get_message_runtime_and_thread(&conn, &req.message_id)
             .map_err(|err| AppError::persistence(err.to_string()))?
             .and_then(|(artifact_bundle, _, _)| {
@@ -746,6 +528,66 @@ pub async fn handle_version_restore(
             thread_id: tid,
             message_id: req.message_id.clone(),
             artifact_digest,
+        })
+    }
+    .await;
+
+    if let Err(err) = &result {
+        let conn = state.db.lock().await;
+        try_record_agent_error(
+            state,
+            &conn,
+            ctx,
+            tracked_thread_id,
+            tracked_message_id,
+            None,
+            err,
+        );
+    }
+
+    result
+}
+
+pub async fn handle_version_delete(
+    state: &AppState,
+    req: VersionDeleteRequest,
+    ctx: &AgentContext,
+) -> AppResult<VersionDeleteResponse> {
+    let ctx = ctx.with_override(&req.identity);
+    let ctx = &ctx;
+    let mut tracked_thread_id = None;
+    let tracked_message_id = Some(req.message_id.clone());
+
+    let result = async {
+        let conn = state.db.lock().await;
+        let thread_id = db::get_message_thread_id(&conn, &req.message_id)
+            .map_err(|err| AppError::persistence(err.to_string()))?
+            .ok_or_else(|| AppError::not_found("Version message not found."))?;
+        tracked_thread_id = Some(thread_id.clone());
+
+        persist_agent_session(
+            &conn,
+            ctx,
+            Some(thread_id.clone()),
+            tracked_message_id.clone(),
+            None,
+            "deleting_version",
+            "",
+        )?;
+
+        history::delete_version(&conn, &req.message_id)?;
+        state.emit_history_changed(
+            Some(thread_id.clone()),
+            Some(req.message_id.clone()),
+            "versionDeleted",
+        );
+
+        persist_agent_session(&conn, ctx, Some(thread_id.clone()), None, None, "idle", "")?;
+
+        Ok(VersionDeleteResponse {
+            thread_id,
+            message_id: req.message_id.clone(),
+            deleted: true,
         })
     }
     .await;

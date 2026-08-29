@@ -133,7 +133,7 @@ test('buildModelGenieTraits uses model version and harness identity', () => {
       artifactVersion: 1,
       fcstdPath: '',
       manifestPath: '',
-      previewStlPath: '',
+      modelStlPath: '',
     },
     messageId: 'version-1',
     authoringContext: {
@@ -153,7 +153,7 @@ test('buildModelGenieTraits uses model version and harness identity', () => {
       artifactVersion: 1,
       fcstdPath: '',
       manifestPath: '',
-      previewStlPath: '',
+      modelStlPath: '',
     },
     messageId: 'version-1',
     authoringContext: {
@@ -173,7 +173,7 @@ test('buildModelGenieTraits uses model version and harness identity', () => {
       artifactVersion: 1,
       fcstdPath: '',
       manifestPath: '',
-      previewStlPath: '',
+      modelStlPath: '',
     },
     messageId: 'version-2',
     authoringContext: {

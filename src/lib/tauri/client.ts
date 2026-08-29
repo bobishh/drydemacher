@@ -1,6 +1,7 @@
 import {
   commands,
   type ActiveProjectNavigation,
+  type AgentDraftProjection,
   type AppError,
   type AppLogEntry,
   type CampaignRun,
@@ -42,10 +43,26 @@ import {
   type FemStudyValidationResponse,
   type FemVtuExportResponse,
   type DeletedThreadsPage,
+  type DenseTopologyItem,
+  type DenseTopologyKind,
+  type DenseTopologyPage,
   type MissionCoreIrEvaluation,
   type Result,
-  type ThreadAgentState,
+  type AgentActivityCatchUp,
   type ThreadWindowLayout,
+  type WebContentRecoveryState,
+  type AgyMessagePage,
+  type AgyMessagePageInput,
+  type AgyPromptInput,
+  type AgyProviderSnapshot,
+  type AgyStopInput,
+  type ProviderWriterActivationInput,
+  type CodexMessagePage,
+  type CodexMessagePageInput,
+  type CodexPromptInput,
+  type CodexSteerInput,
+  type CodexStopInput,
+  type CodexTakeoverSnapshot,
 } from './contracts';
 import {
   normalizeArtifactBundle,
@@ -78,6 +95,7 @@ import {
   type EngineKind,
   type FinalizeStatus,
   type GeometryBackend,
+  type MessageStatus,
   type GenerateOutput,
   type IntentDecision,
   type LastDesignSnapshot,
@@ -136,9 +154,9 @@ import type {
   SketchSuggestionRequest,
   SketchSuggestionResponse,
   TranscribePromptAudioInput,
+  VersionPreviewRuntime,
 } from './contracts';
 
-export type { ThreadAgentState };
 export type {
   FemResultReadRequest,
   FemResultReadResponse,
@@ -149,7 +167,111 @@ export type {
   FemStudyRequest,
   FemStudyValidationResponse,
   FemVtuExportResponse,
+  CodexMessagePage,
+  CodexTakeoverSnapshot,
+  AgyMessagePage,
+  AgyProviderSnapshot,
 };
+
+export async function activateProviderWriter(
+  input: ProviderWriterActivationInput,
+): Promise<void> {
+  await invokeCommand(commands.activateProviderWriter(input));
+}
+
+export async function getAgyProvider(
+  eckyThreadId: string,
+): Promise<AgyProviderSnapshot | null> {
+  return invokeCommand(commands.getAgyProvider(eckyThreadId));
+}
+
+export async function getAgyProviderMessages(
+  input: AgyMessagePageInput,
+): Promise<AgyMessagePage> {
+  return invokeCommand(commands.getAgyProviderMessages(input));
+}
+
+export async function sendAgyProviderPrompt(
+  input: AgyPromptInput,
+): Promise<AgyProviderSnapshot> {
+  return invokeCommand(commands.sendAgyProviderPrompt(input));
+}
+
+export async function dispatchAgyPromptQueue(
+  eckyThreadId: string,
+): Promise<AgyProviderSnapshot> {
+  return invokeCommand(commands.dispatchAgyPromptQueue(eckyThreadId));
+}
+
+export async function stopAgyProvider(
+  input: AgyStopInput,
+): Promise<AgyProviderSnapshot> {
+  return invokeCommand(commands.stopAgyProvider(input));
+}
+
+export async function retryAgyQueuedPrompt(
+  eckyThreadId: string,
+  queueId: string,
+): Promise<AgyProviderSnapshot> {
+  return invokeCommand(commands.retryAgyQueuedPrompt(eckyThreadId, queueId));
+}
+
+export async function removeAgyQueuedPrompt(
+  eckyThreadId: string,
+  queueId: string,
+): Promise<AgyProviderSnapshot> {
+  return invokeCommand(commands.removeAgyQueuedPrompt(eckyThreadId, queueId));
+}
+
+export async function getCodexTakeover(
+  eckyThreadId: string,
+): Promise<CodexTakeoverSnapshot | null> {
+  return invokeCommand(commands.getCodexTakeover(eckyThreadId));
+}
+
+export async function getCodexTakeoverMessages(
+  input: CodexMessagePageInput,
+): Promise<CodexMessagePage> {
+  return invokeCommand(commands.getCodexTakeoverMessages(input));
+}
+
+export async function sendCodexTakeoverPrompt(
+  input: CodexPromptInput,
+): Promise<CodexTakeoverSnapshot> {
+  return invokeCommand(commands.sendCodexTakeoverPrompt(input));
+}
+
+export async function dispatchCodexPromptQueue(
+  eckyThreadId: string,
+): Promise<CodexTakeoverSnapshot> {
+  return invokeCommand(commands.dispatchCodexPromptQueue(eckyThreadId));
+}
+
+export async function steerCodexTakeover(
+  input: CodexSteerInput,
+): Promise<CodexTakeoverSnapshot> {
+  return invokeCommand(commands.steerCodexTakeover(input));
+}
+
+export async function stopCodexTakeover(
+  input: CodexStopInput,
+): Promise<CodexTakeoverSnapshot> {
+  return invokeCommand(commands.stopCodexTakeover(input));
+}
+
+export async function retryCodexQueuedPrompt(
+  eckyThreadId: string,
+  queueId: string,
+): Promise<CodexTakeoverSnapshot> {
+  return invokeCommand(commands.retryCodexQueuedPrompt(eckyThreadId, queueId));
+}
+
+export async function removeCodexQueuedPrompt(
+  eckyThreadId: string,
+  queueId: string,
+): Promise<CodexTakeoverSnapshot> {
+  return invokeCommand(commands.removeCodexQueuedPrompt(eckyThreadId, queueId));
+}
 
 export type AppErrorDiagnosticField = {
   key: string;
@@ -332,6 +454,10 @@ export async function listAgentModels(cmd: string): Promise<{ models: string[]; 
   return invokeCommand(commands.listAgentModels(cmd));
 }
 
+export async function listProviderModels(provider: string): Promise<{ models: string[]; isLive: boolean }> {
+  return invokeCommand(commands.listProviderModels(provider));
+}
+
 export async function getHistory(): Promise<Thread[]> {
   return invokeCommand(commands.getHistory(), (threads) => threads.map(normalizeThread));
 }
@@ -341,21 +467,124 @@ export async function getThread(id: string): Promise<Thread> {
 }
 
 export async function getThreadLatestVersion(threadId: string): Promise<Message | null> {
-  const message = await invokeCommand(commands.getThreadLatestVersion(threadId));
-  return message ? normalizeMessage(message) : null;
+  const headId = await invokeCommand(commands.getThreadHeadVersionId(threadId));
+  if (headId) {
+    const detail = await invokeCommand(commands.getVersionDetail(threadId, headId));
+    return detail ? hydrateVersionDetail(threadId, headId, detail) : null;
+  }
+  const fallback = await invokeCommand(commands.getThreadLatestVersion(threadId));
+  if (!fallback) return null;
+  return getHydratedVersionDetail(threadId, fallback.id, fallback);
 }
 
 export async function getThreadMessageVersion(
   threadId: string,
   messageId: string,
 ): Promise<Message | null> {
-  const message = await invokeCommand(commands.getThreadMessageVersion(threadId, messageId));
-  return message ? normalizeMessage(message) : null;
+  const detail = await invokeCommand(commands.getVersionDetail(threadId, messageId));
+  if (!detail) {
+    const message = await invokeCommand(commands.getThreadMessageVersion(threadId, messageId));
+    return message ? normalizeMessage(message) : null;
+  }
+  return hydrateVersionDetail(threadId, messageId, detail);
+}
+
+async function getHydratedVersionDetail(
+  threadId: string,
+  messageId: string,
+  fallback: import('./contracts').Message,
+): Promise<Message> {
+  const detail = await invokeCommand(commands.getVersionDetail(threadId, messageId));
+  return detail
+    ? hydrateVersionDetail(threadId, messageId, detail)
+    : normalizeMessage(fallback);
+}
+
+async function hydrateVersionDetail(
+  threadId: string,
+  messageId: string,
+  detail: import('./contracts').VersionDetail,
+): Promise<Message> {
+  const message = structuredClone(detail.message);
+  await hydrateBoundedTopology(
+    detail.edgeCount,
+    detail.faceCount,
+    detail.selectionTargetCount,
+    async (kind, cursor) => invokeCommand(
+      commands.getDenseTopologyPage(threadId, messageId, kind, cursor, 500),
+    ),
+    message,
+  );
+  return normalizeMessage(message);
+}
+
+const MAX_INTERACTIVE_TOPOLOGY_TARGETS = 1_000;
+
+async function readTopologyKind(
+  kind: DenseTopologyKind,
+  loadPage: (kind: DenseTopologyKind, cursor: string | null) => Promise<DenseTopologyPage>,
+): Promise<DenseTopologyItem[]> {
+  const items: DenseTopologyItem[] = [];
+  let cursor: string | null = null;
+  do {
+    const page = await loadPage(kind, cursor);
+    items.push(...page.items);
+    cursor = page.nextCursor;
+  } while (cursor && items.length < MAX_INTERACTIVE_TOPOLOGY_TARGETS);
+  return items;
+}
+
+async function hydrateBoundedTopology(
+  edgeCount: number,
+  faceCount: number,
+  selectionTargetCount: number,
+  loadPage: (kind: DenseTopologyKind, cursor: string | null) => Promise<DenseTopologyPage>,
+  target: {
+    artifactBundle?: { edgeTargets?: unknown[]; faceTargets?: unknown[] } | null;
+    modelManifest?: { selectionTargets?: unknown[] } | null;
+  },
+): Promise<void> {
+  const total = edgeCount + faceCount + selectionTargetCount;
+  if (total === 0 || total > MAX_INTERACTIVE_TOPOLOGY_TARGETS) return;
+  const [edges, faces, selections] = await Promise.all([
+    edgeCount > 0 ? readTopologyKind('edge', loadPage) : [],
+    faceCount > 0 ? readTopologyKind('face', loadPage) : [],
+    selectionTargetCount > 0 ? readTopologyKind('selection', loadPage) : [],
+  ]);
+  if (target.artifactBundle) {
+    target.artifactBundle.edgeTargets = edges
+      .filter((item) => item.kind === 'edge')
+      .map((item) => item.value);
+    target.artifactBundle.faceTargets = faces
+      .filter((item) => item.kind === 'face')
+      .map((item) => item.value);
+  }
+  if (target.modelManifest) {
+    target.modelManifest.selectionTargets = selections
+      .filter((item) => item.kind === 'selection')
+      .map((item) => item.value);
+  }
+}
+
+export async function materializeVersionPreview(
+  threadId: string,
+  messageId: string,
+): Promise<VersionPreviewRuntime> {
+  const runtime = await invokeCommand(commands.materializeVersionPreview(threadId, messageId));
+  return {
+    ...runtime,
+    artifactBundle: normalizeArtifactBundle(runtime.artifactBundle),
+    modelManifest: normalizeModelManifest(runtime.modelManifest),
+  };
+}
+
+export async function releaseVersionPreview(leaseId: string): Promise<void> {
+  await invokeCommand(commands.releaseVersionPreview(leaseId));
 }
 
 export async function getThreadMessagesPage(
   threadId: string,
-  before: number | null = null,
+  before: string | null = null,
   limit = 50,
   includeVisualPayloads = false,
 ): Promise<ThreadMessagesPage> {
@@ -363,6 +592,31 @@ export async function getThreadMessagesPage(
     commands.getThreadMessagesPage(threadId, before, limit, includeVisualPayloads),
     normalizeThreadMessagesPage,
   );
+}
+
+export async function getVersionSource(threadId: string, messageId: string): Promise<string | null> {
+  const chunks: string[] = [];
+  let startByte = 0;
+  let expectedDigest: string | null = null;
+  while (true) {
+    const window = await invokeCommand(
+      commands.getVersionSourceWindow(threadId, messageId, startByte, 256 * 1024),
+    );
+    if (!window) return null;
+    if (expectedDigest && window.digest !== expectedDigest) {
+      throw new Error(
+        `Version source changed during windowed read: expected ${expectedDigest}, received ${window.digest}.`,
+      );
+    }
+    expectedDigest = window.digest;
+    chunks.push(window.content);
+    if (window.nextStartByte === null) break;
+    if (window.nextStartByte <= startByte) {
+      throw new Error(`Version source window did not advance beyond byte ${startByte}.`);
+    }
+    startByte = window.nextStartByte;
+  }
+  return chunks.join('');
 }
 
 export async function deleteThread(id: string): Promise<void> {
@@ -542,6 +796,13 @@ export async function openProjectInEditor(
   return invokeCommand(commands.openProjectInEditor(threadId, messageId));
 }
 
+export async function openImportedCadSource(
+  threadId: string | null,
+  messageId: string | null,
+): Promise<import('./contracts').ProjectEditorLink> {
+  return invokeCommand(commands.openImportedCadSource(threadId, messageId));
+}
+
 export async function getProjectSource(
   threadId: string,
 ): Promise<import('./contracts').ProjectSourceDocument> {
@@ -619,7 +880,8 @@ export async function revealProjectFolder(
 export type {
   ProjectFolderExportResult,
   ProjectFolderStatus,
-  ProjectFolderApplyResponse,
+  ProjectFolderApplyResult,
+  ProjectFolderRenderActivity,
   ProjectManifest,
   ProjectSyncState,
 } from './contracts';
@@ -638,12 +900,20 @@ export async function projectFolderStatus(
   return invokeCommand(commands.projectFolderStatus(threadId, messageId));
 }
 
+export async function projectFolderRenderActivity(): Promise<import('./contracts').ProjectFolderRenderActivity[]> {
+  return invokeCommand(commands.projectFolderRenderActivity());
+}
+
 export async function projectFolderApply(
   threadId: string | null,
   messageId: string | null,
   force = false,
-): Promise<import('./contracts').ProjectFolderApplyResponse> {
-  return invokeCommand(commands.projectFolderApply(threadId, messageId, force));
+  title: string | null = null,
+  versionName: string | null = null,
+): Promise<import('./contracts').ProjectFolderApplyResult> {
+  return invokeCommand(
+    commands.projectFolderApply(threadId, messageId, force, title, versionName),
+  );
 }
 
 export async function macroAstSourceMap(macroCode: string): Promise<import('./contracts').MacroAstSourceNode[]> {
@@ -658,7 +928,20 @@ export async function renderModel(
   postProcessing?: PostProcessingSpec | null,
   previousManifest?: ModelManifest | null,
 ): Promise<ArtifactBundle> {
-  return invokeCommand(
+  const trace = {
+    event: 'render.invoke',
+    at: Date.now(),
+    macroLength: macroCode.length,
+    macroDialect: macroDialect ?? null,
+    geometryBackend: geometryBackend ?? null,
+    parameterKeys: Object.keys(parameters),
+    previousModelId: previousManifest?.modelId ?? null,
+    stack: new Error().stack,
+  };
+  console.warn('[CAD_FLOW][render.invoke]', trace);
+  const flow = ((globalThis as any).__ECKY_CAD_FLOW__ ??= []);
+  flow.push(trace);
+  const bundle = await invokeCommand(
     commands.renderModel(
       macroCode,
       parameters,
@@ -669,6 +952,12 @@ export async function renderModel(
     ),
     normalizeArtifactBundle,
   );
+  console.warn('[CAD_FLOW][render.result]', {
+    modelId: bundle.modelId,
+    modelStlPath: bundle.modelStlPath,
+    contentHash: bundle.contentHash,
+  });
+  return bundle;
 }
 
 export type { PostProcessingSpec };
@@ -892,6 +1181,8 @@ export async function addManualVersion(input: {
   postProcessing?: PostProcessingSpec | null;
   artifactBundle?: ArtifactBundle | null;
   modelManifest?: ModelManifest | null;
+  status?: MessageStatus | null;
+  errorMessage?: string | null;
 }): Promise<string> {
   return invokeCommand(
     commands.addManualVersion({
@@ -906,6 +1197,8 @@ export async function addManualVersion(input: {
       postProcessing: input.postProcessing ?? null,
       artifactBundle: input.artifactBundle ?? null,
       modelManifest: input.modelManifest ?? null,
+      status: input.status ?? null,
+      errorMessage: input.errorMessage ?? null,
     }),
   );
 }
@@ -937,12 +1230,12 @@ export async function updateParameters(
   await invokeCommand(commands.updateParameters(messageId, parameters));
 }
 
-export async function updateVersionRuntime(
+export async function repairMissingVersionRuntime(
   messageId: string,
   artifactBundle: ArtifactBundle,
   modelManifest: ModelManifest,
 ): Promise<void> {
-  await invokeCommand(commands.updateVersionRuntime(messageId, artifactBundle, modelManifest));
+  await invokeCommand(commands.repairMissingVersionRuntime(messageId, artifactBundle, modelManifest));
 }
 
 export async function updateVersionPreview(
@@ -1036,6 +1329,46 @@ export async function transcribePromptAudio(input: TranscribePromptAudioInput): 
 
 export async function getLastDesign(): Promise<LastDesignSnapshot | null> {
   return invokeCommand(commands.getLastDesign(), normalizeLastDesignSnapshot);
+}
+
+export async function getWebContentRecoveryState(): Promise<WebContentRecoveryState> {
+  return invokeCommand(commands.getWebContentRecoveryState());
+}
+
+export async function acknowledgeWebContentRecovery(): Promise<void> {
+  await invokeCommand(commands.acknowledgeWebContentRecovery());
+}
+
+export type HydratedAgentDraft = Omit<
+  AgentDraftProjection,
+  'designOutput' | 'artifactBundle' | 'modelManifest'
+> & {
+  designOutput: DesignOutput;
+  artifactBundle: ArtifactBundle;
+  modelManifest: ModelManifest;
+};
+
+export async function getAgentDraftPreview(
+  threadId: string,
+  previewId: string,
+): Promise<HydratedAgentDraft> {
+  const draft = await invokeCommand(commands.getAgentDraftPreview(threadId, previewId));
+  const projected = structuredClone(draft);
+  await hydrateBoundedTopology(
+    draft.edgeCount,
+    draft.faceCount,
+    draft.selectionTargetCount,
+    async (kind, cursor) => invokeCommand(
+      commands.getAgentDraftTopologyPage(threadId, previewId, kind, cursor, 500),
+    ),
+    projected,
+  );
+  return {
+    ...projected,
+    designOutput: normalizeDesignOutput(projected.designOutput),
+    artifactBundle: normalizeArtifactBundle(projected.artifactBundle),
+    modelManifest: normalizeModelManifest(projected.modelManifest),
+  };
 }
 
 export async function saveLastDesign(snapshot: LastDesignSnapshot | null): Promise<void> {
@@ -1226,6 +1559,12 @@ export async function runFemConvergence(
   return invokeCommand(commands.runFemConvergence(request));
 }
 
+export async function getCachedFemConvergence(
+  request: FemConvergenceRequest,
+): Promise<FemConvergenceResponse | null> {
+  return invokeCommand(commands.getCachedFemConvergence(request));
+}
+
 export async function cancelFemStudy(jobId: string): Promise<FemCancelResponse> {
   return invokeCommand(commands.cancelFemStudy(jobId));
 }
@@ -1361,36 +1700,12 @@ export async function rejectAgentViewportScreenshot(requestId: string, error: st
   );
 }
 
-export async function getThreadAgentState(threadId: string): Promise<ThreadAgentState> {
-  return invokeCommand(commands.getThreadAgentState(threadId));
+export async function getAgentActivity(afterCursor: number | null): Promise<AgentActivityCatchUp> {
+  return invokeCommand(commands.getAgentActivity(afterCursor));
 }
 
 export async function getAppLogs(): Promise<AppLogEntry[]> {
   return invokeCommand(commands.getAppLogs());
-}
-
-export async function wakePrimaryAutoAgent(
-  threadId?: string | null,
-  messageId?: string | null,
-  modelId?: string | null,
-): Promise<void> {
-  await invokeCommand(commands.wakePrimaryAutoAgent(threadId ?? null, messageId ?? null, modelId ?? null));
-}
-
-export async function stopPrimaryAutoAgent(
-  threadId?: string | null,
-  messageId?: string | null,
-  modelId?: string | null,
-): Promise<void> {
-  await invokeCommand(commands.stopPrimaryAutoAgent(threadId ?? null, messageId ?? null, modelId ?? null));
-}
-
-export async function restartPrimaryAutoAgent(
-  threadId?: string | null,
-  messageId?: string | null,
-  modelId?: string | null,
-): Promise<void> {
-  await invokeCommand(commands.restartPrimaryAutoAgent(threadId ?? null, messageId ?? null, modelId ?? null));
 }
 
 export async function verifyRender(

@@ -8,6 +8,7 @@ declare global {
       saveProjectSourceCalls: Array<{ threadId: string; source: string }>;
       updateParametersCalls: Array<{ messageId: string; parameters: Record<string, unknown> }>;
       historyCallCount: number;
+      draftPreviewCalls: Array<{ threadId: string; previewId: string }>;
       latestThreadId: string | null;
     };
     __manualCodeApplyMockConfig?: {
@@ -16,6 +17,7 @@ declare global {
       renderModelError?: string | Record<string, unknown>;
       sourceLanguage?: 'legacyPython' | 'ecky';
       macroCode?: string;
+      reuseArtifactIdentity?: boolean;
     };
     __emitTauriEvent?: (event: string, payload: unknown) => void;
   }
@@ -23,7 +25,7 @@ declare global {
 
 function manualCodeApplyMockScript() {
   window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
-  const eventHandlers = new Map<string, number>();
+  const eventHandlers = new Map<string, number[]>();
   let nextCallbackId = 1;
   window.__TAURI_INTERNALS__.transformCallback = (callback: unknown) => {
     const callbackId = nextCallbackId++;
@@ -31,12 +33,11 @@ function manualCodeApplyMockScript() {
     return callbackId;
   };
   window.__emitTauriEvent = (event, payload) => {
-    const callbackId = eventHandlers.get(event);
-    const callback = callbackId
-      ? (window as unknown as Record<string, unknown>)[`_${callbackId}`]
-      : null;
-    if (typeof callback === 'function') {
-      callback({ event, id: callbackId, payload });
+    for (const callbackId of eventHandlers.get(event) ?? []) {
+      const callback = (window as unknown as Record<string, unknown>)[`_${callbackId}`];
+      if (typeof callback === 'function') {
+        callback({ event, id: callbackId, payload });
+      }
     }
   };
   window.__manualCodeApplyMock = {
@@ -45,6 +46,7 @@ function manualCodeApplyMockScript() {
     saveProjectSourceCalls: [],
     updateParametersCalls: [],
     historyCallCount: 0,
+    draftPreviewCalls: [],
     latestThreadId: null,
   };
 
@@ -64,7 +66,8 @@ function manualCodeApplyMockScript() {
 
   window.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: Record<string, unknown>) => {
     if (cmd === 'plugin:event|listen') {
-      eventHandlers.set(String(args?.event ?? ''), Number(args?.handler));
+      const event = String(args?.event ?? '');
+      eventHandlers.set(event, [...(eventHandlers.get(event) ?? []), Number(args?.handler)]);
       return Number(args?.handler);
     }
     if (cmd === 'plugin:event|unlisten') return null;
@@ -99,6 +102,53 @@ function manualCodeApplyMockScript() {
       return [historyThread];
     }
     if (cmd === 'get_last_design') return null;
+    if (cmd === 'get_agent_draft_preview') {
+      const threadId = String(args?.threadId ?? '');
+      const previewId = String(args?.previewId ?? '');
+      window.__manualCodeApplyMock!.draftPreviewCalls.push({ threadId, previewId });
+      if (previewId === 'mismatched-preview') {
+        throw new Error(
+          "modelId mismatch: artifactBundle.modelId 'artifact-model-a' conflicts with modelManifest.modelId 'manifest-model-b'.",
+        );
+      }
+      const warningPreview = previewId === 'agent-preview-25';
+      const width = warningPreview ? 25 : 33;
+      const modelId = warningPreview ? 'agent-preview-model' : 'compact-model';
+      return {
+        previewId,
+        sessionId: 'compact-session',
+        threadId,
+        baseMessageId: 'mock-msg-1',
+        designOutput: {
+          title: 'Compact preview', versionName: '', response: '', interactionMode: 'tune',
+          macroCode: warningPreview ? 'print("agent draft bracket")' : 'print("compact preview")', sourceLanguage: 'legacyPython',
+          geometryBackend: 'freecad', engineKind: 'freecad', uiSpec: { fields: [{ type: 'number', key: 'width', label: 'Width' }] },
+          initialParams: { width }, postProcessing: null,
+        },
+        artifactBundle: {
+          modelId, sourceKind: 'generated', sourceLanguage: 'legacyPython',
+          geometryBackend: 'freecad', engineKind: 'freecad', contentHash: `${modelId}-hash`,
+          artifactVersion: 1, fcstdPath: '', manifestPath: '', macroPath: '',
+          modelStlPath: `/mock-${width}.stl`, viewerAssets: [], edgeTargets: [], faceTargets: [],
+          calloutAnchors: [], measurementGuides: [], exportArtifacts: [],
+        },
+        modelManifest: {
+          modelId, sourceKind: 'generated', sourceLanguage: 'legacyPython',
+          geometryBackend: 'freecad', document: { documentName: 'Compact', documentLabel: 'Compact', objectCount: 0, warnings: [] },
+          parts: [], parameterGroups: [], controlPrimitives: [], controlRelations: [], controlViews: [],
+          previewViews: [], advisories: [], selectionTargets: [], measurementAnnotations: [], warnings: [],
+          enrichmentState: { status: 'none', proposals: [] },
+        },
+        draftFeedback: warningPreview ? {
+          status: 'warning',
+          summary: 'Preview requires inspection.',
+          items: [],
+          source: 'structuralVerification',
+        } : null,
+        updatedAt: 1, denseTopologyRef: null,
+        edgeCount: 0, faceCount: 0, selectionTargetCount: 0, observedBytes: 2048, truncatedFields: [],
+      };
+    }
     if (cmd === 'open_or_create_blank_design_thread') {
       return {
         threadId: 'mock-thread-1',
@@ -192,7 +242,9 @@ function manualCodeApplyMockScript() {
         const error = window.__manualCodeApplyMockConfig.renderModelError;
         throw typeof error === 'string' ? new Error(error) : error;
       }
-      const renderIndex = window.__manualCodeApplyMock?.renderModelCalls.length ?? 1;
+      const renderIndex = window.__manualCodeApplyMockConfig?.reuseArtifactIdentity
+        ? 1
+        : window.__manualCodeApplyMock?.renderModelCalls.length ?? 1;
       return {
         modelId: `mock-model-${renderIndex}`,
         sourceKind: 'generated',
@@ -202,7 +254,7 @@ function manualCodeApplyMockScript() {
         contentHash: `mock-hash-${renderIndex}`,
         fcstdPath: `/mock-${renderIndex}.FCStd`,
         manifestPath: `/mock-${renderIndex}/manifest.json`,
-        previewStlPath: `/mock-${renderIndex}.stl`,
+        modelStlPath: `/mock-${renderIndex}.stl`,
         viewerAssets: [],
         calloutAnchors: [],
         measurementGuides: [],
@@ -242,7 +294,7 @@ function manualCodeApplyMockScript() {
         issues: [],
         metrics: {
           partCount: 1,
-          previewStlSizeBytes: 1024,
+          modelStlSizeBytes: 1024,
           totalVolume: 1000,
           totalArea: 500,
           bbox: { xMin: 0, yMin: 0, zMin: 0, xMax: 10, yMax: 10, zMax: 10 },
@@ -295,6 +347,7 @@ function manualCodeApplyMockScript() {
     }
     if (cmd === 'get_active_agent_sessions') return [];
     if (cmd === 'get_agent_terminal_snapshots') return [];
+    if (cmd === 'get_agent_activity') return { events: [], latestCursor: 0 };
     if (cmd === 'get_thread_agent_state') {
       return {
         threadId: args?.threadId ?? null,
@@ -309,7 +362,9 @@ function manualCodeApplyMockScript() {
 }
 
 async function bootManualCodeFlow(page: Page) {
+  let stlRequestCount = 0;
   await page.route(/\/mock-\d+\.stl(?:\?.*)?$/, async (route) => {
+    stlRequestCount += 1;
     await route.fulfill({
       status: 200,
       contentType: 'model/stl',
@@ -338,12 +393,14 @@ endsolid mock
   const paramPanel = page.locator('.param-panel');
   await expect(paramPanel).toBeVisible({ timeout: 10000 });
   await page.locator('[data-window-id="params"] .window-header').click({ force: true });
-  await paramPanel.getByRole('button', { name: 'RAW' }).click({ force: true });
+  const rawButton = paramPanel.getByRole('button', { name: 'RAW' });
+  if (await rawButton.count()) await rawButton.click({ force: true });
   await expect(paramPanel.locator('[data-param-key="width"]')).toBeVisible();
+  return () => stlRequestCount;
 }
 
 test.describe('Manual code apply/version coverage', () => {
-  test('Given warning MCP preview params differ from the current panel When preview becomes active Then UI shows the rendered params', async ({
+  test('Given warning MCP preview becomes active When Code opens Then UI shows the rendered params and matching source', async ({
     page,
   }) => {
     await bootManualCodeFlow(page);
@@ -351,80 +408,83 @@ test.describe('Manual code apply/version coverage', () => {
     await page.evaluate(() => {
       const activeThreadId = window.__manualCodeApplyMock?.latestThreadId;
       if (!activeThreadId) throw new Error('Expected active generation thread');
-      const artifactBundle = {
-        modelId: 'agent-preview-model',
-        sourceKind: 'generated',
-        sourceLanguage: 'legacyPython',
-        geometryBackend: 'freecad',
-        engineKind: 'freecad',
-        contentHash: 'agent-preview-hash',
-        artifactVersion: 1,
-        fcstdPath: '/mock-preview.FCStd',
-        manifestPath: '/mock-preview/manifest.json',
-        macroPath: '/mock-preview.py',
-        previewStlPath: '/mock-25.stl',
-        viewerAssets: [],
-        calloutAnchors: [],
-        measurementGuides: [],
-        edgeTargets: [],
-        faceTargets: [],
-      };
-      const modelManifest = {
-        modelId: 'agent-preview-model',
-        sourceKind: 'generated',
-        sourceLanguage: 'legacyPython',
-        geometryBackend: 'freecad',
-        document: {
-          documentName: 'Bracket',
-          documentLabel: 'Bracket',
-          objectCount: 0,
-          warnings: [],
-        },
-        parts: [],
-        parameterGroups: [],
-        controlPrimitives: [],
-        controlRelations: [],
-        controlViews: [],
-        selectionTargets: [],
-        advisories: [],
-        measurementAnnotations: [],
-        warnings: [],
-        enrichmentState: { status: 'none', proposals: [] },
-      };
-      window.__emitTauriEvent?.('agent-draft-preview-updated', {
+      window.__emitTauriEvent?.('agent-draft-preview-changed', {
         sessionId: 'agent-session',
         threadId: activeThreadId,
         previewId: 'agent-preview-25',
         baseMessageId: 'mock-msg-1',
         modelId: 'agent-preview-model',
-        design: {
-          title: 'Bracket',
-          versionName: '',
-          interactionMode: 'tune',
-          macroCode: 'print("base bracket")',
-          sourceLanguage: 'legacyPython',
-          geometryBackend: 'freecad',
-          engineKind: 'freecad',
-          uiSpec: {
-            fields: [{ type: 'number', key: 'width', label: 'Width' }],
-          },
-          initialParams: { width: 25 },
-          postProcessing: null,
-        },
-        artifactBundle,
-        modelManifest,
-        feedback: {
-          status: 'warning',
-          summary: 'Preview requires inspection.',
-          items: [],
-          source: 'structuralVerification',
-        },
+        revision: 25,
+        feedbackStatus: 'warning',
+        feedbackSummary: 'Preview requires inspection.',
       });
     });
 
     const widthInput = page.locator('[data-param-key="width"] input[type="number"]').first();
     await expect(widthInput).toHaveValue('25');
-    await expect(page.getByTestId('genie-session-bubble')).toContainText('Preview requires inspection.');
+
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: /CODE/i }).click();
+    const modal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR:' });
+    await expect(modal.locator('.cm-content')).toContainText('print("agent draft bracket")');
+    await expect(modal.locator('.cm-content')).not.toContainText('print("base bracket")');
+    await expect(modal.getByTestId('code-draft-source-notice')).toContainText(
+      'ACTIVE VERSION SOURCE',
+    );
+    await expect(modal.getByRole('button', { name: 'OPEN BASE FILE' })).toBeVisible();
+  });
+
+  test('Given compact preview invalidations When active, background, and stale events arrive Then only newest active preview hydrates', async ({ page }) => {
+    await bootManualCodeFlow(page);
+    await page.evaluate(() => {
+      window.__emitTauriEvent?.('agent-draft-preview-changed', {
+        sessionId: 'compact-session', threadId: 'background-thread', previewId: 'background-preview',
+        baseMessageId: null, modelId: 'background-model', revision: 1,
+      });
+      window.__emitTauriEvent?.('agent-draft-preview-changed', {
+        sessionId: 'compact-session', threadId: 'mock-thread-1', previewId: 'active-preview',
+        baseMessageId: 'mock-msg-1', modelId: 'compact-model', revision: 2,
+      });
+      window.__emitTauriEvent?.('agent-draft-preview-changed', {
+        sessionId: 'compact-session', threadId: 'mock-thread-1', previewId: 'stale-preview',
+        baseMessageId: 'mock-msg-1', modelId: 'stale-model', revision: 1,
+      });
+    });
+
+    await expect(page.locator('[data-param-key="width"] input[type="number"]').first()).toHaveValue('33');
+    const calls = await page.evaluate(() => window.__manualCodeApplyMock?.draftPreviewCalls ?? []);
+    expect(calls).toEqual([{ threadId: 'mock-thread-1', previewId: 'active-preview' }]);
+  });
+
+  test('Given Code is open When bound Ecky source starts rendering Then editor shows that exact source', async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      window.__manualCodeApplyMockConfig = {
+        sourceLanguage: 'ecky',
+        macroCode: '(model (part old (box 1 1 1)))',
+      };
+    });
+    await bootManualCodeFlow(page);
+
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: /CODE/i }).click();
+    const modal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR:' });
+    await expect(modal.locator('.cm-content')).toContainText('(part old');
+
+    const renderedSource = '(model (part stamp (box 60 45 3)))';
+    await page.evaluate(async (source) => {
+      await window.__TAURI_INTERNALS__.invoke('save_project_source', {
+        threadId: 'mock-thread-1',
+        source,
+      });
+      window.__emitTauriEvent?.('project-folder-sync', [{
+        kind: 'detected',
+        threadId: 'mock-thread-1',
+        slug: 'bracket-thread-1',
+      }]);
+    }, renderedSource);
+
+    await expect(modal.locator('.cm-content')).toContainText(renderedSource);
+    await expect(modal.locator('.cm-content')).not.toContainText('(part old');
   });
 
   test('Given another thread publishes a preview When current thread stays active Then its workspace remains unchanged', async ({
@@ -433,80 +493,25 @@ test.describe('Manual code apply/version coverage', () => {
     await bootManualCodeFlow(page);
 
     await page.evaluate(() => {
-      window.__emitTauriEvent?.('agent-draft-preview-updated', {
+      window.__emitTauriEvent?.('agent-draft-preview-changed', {
         sessionId: 'background-agent-session',
         threadId: 'background-thread',
         previewId: 'background-preview-99',
         baseMessageId: null,
         modelId: 'background-preview-model',
-        design: {
-          title: 'Background model',
-          versionName: '',
-          interactionMode: 'tune',
-          macroCode: 'print("background")',
-          sourceLanguage: 'legacyPython',
-          geometryBackend: 'freecad',
-          engineKind: 'freecad',
-          uiSpec: {
-            fields: [{ type: 'number', key: 'width', label: 'Width' }],
-          },
-          initialParams: { width: 99 },
-          postProcessing: null,
-        },
-        artifactBundle: {
-          modelId: 'background-preview-model',
-          sourceKind: 'generated',
-          sourceLanguage: 'legacyPython',
-          geometryBackend: 'freecad',
-          engineKind: 'freecad',
-          contentHash: 'background-preview-hash',
-          artifactVersion: 1,
-          fcstdPath: '/background-preview.FCStd',
-          manifestPath: '/background-preview/manifest.json',
-          macroPath: '/background-preview.py',
-          previewStlPath: '/mock-99.stl',
-          viewerAssets: [],
-          calloutAnchors: [],
-          measurementGuides: [],
-          edgeTargets: [],
-          faceTargets: [],
-        },
-        modelManifest: {
-          modelId: 'background-preview-model',
-          sourceKind: 'generated',
-          sourceLanguage: 'legacyPython',
-          geometryBackend: 'freecad',
-          document: {
-            documentName: 'Background model',
-            documentLabel: 'Background model',
-            objectCount: 0,
-            warnings: [],
-          },
-          parts: [],
-          parameterGroups: [],
-          controlPrimitives: [],
-          controlRelations: [],
-          controlViews: [],
-          selectionTargets: [],
-          advisories: [],
-          measurementAnnotations: [],
-          warnings: [],
-          enrichmentState: { status: 'none', proposals: [] },
-        },
-        feedback: {
-          status: 'warning',
-          summary: 'Background preview finished.',
-          items: [],
-          source: 'structuralVerification',
-        },
+        revision: 99,
+        feedbackStatus: 'warning',
+        feedbackSummary: 'Background preview finished.',
       });
     });
 
     const widthInput = page.locator('[data-param-key="width"] input[type="number"]').first();
     await expect(widthInput).toHaveValue('10');
-    await expect(page.getByTestId('genie-session-bubble')).not.toContainText(
+    await expect(page.locator('.agent-notification-center')).not.toContainText(
       'Background preview finished.',
     );
+    const calls = await page.evaluate(() => window.__manualCodeApplyMock?.draftPreviewCalls ?? []);
+    expect(calls).not.toContainEqual({ threadId: 'background-thread', previewId: 'background-preview-99' });
   });
 
   test('Given an active preview mixes artifact and manifest identities When it arrives Then the last good workspace remains visible', async ({
@@ -517,72 +522,25 @@ test.describe('Manual code apply/version coverage', () => {
     await page.evaluate(() => {
       const activeThreadId = window.__manualCodeApplyMock?.latestThreadId;
       if (!activeThreadId) throw new Error('Expected active generation thread');
-      window.__emitTauriEvent?.('agent-draft-preview-updated', {
+      window.__emitTauriEvent?.('agent-draft-preview-changed', {
         sessionId: 'agent-session',
         threadId: activeThreadId,
         previewId: 'mismatched-preview',
         baseMessageId: 'mock-msg-1',
         modelId: 'artifact-model-a',
-        design: {
-          title: 'Mismatched preview',
-          versionName: '',
-          interactionMode: 'tune',
-          macroCode: 'print("mismatch")',
-          sourceLanguage: 'legacyPython',
-          geometryBackend: 'freecad',
-          engineKind: 'freecad',
-          uiSpec: { fields: [{ type: 'number', key: 'width', label: 'Width' }] },
-          initialParams: { width: 77 },
-          postProcessing: null,
-        },
-        artifactBundle: {
-          modelId: 'artifact-model-a',
-          sourceKind: 'generated',
-          sourceLanguage: 'legacyPython',
-          geometryBackend: 'freecad',
-          engineKind: 'freecad',
-          contentHash: 'mismatched-preview-hash',
-          artifactVersion: 1,
-          fcstdPath: '/mismatch.FCStd',
-          manifestPath: '/mismatch/manifest.json',
-          macroPath: '/mismatch.py',
-          previewStlPath: '/mock-77.stl',
-          viewerAssets: [],
-          calloutAnchors: [],
-          measurementGuides: [],
-          edgeTargets: [],
-          faceTargets: [],
-        },
-        modelManifest: {
-          modelId: 'manifest-model-b',
-          sourceKind: 'generated',
-          sourceLanguage: 'legacyPython',
-          geometryBackend: 'freecad',
-          document: {
-            documentName: 'Mismatched preview',
-            documentLabel: 'Mismatched preview',
-            objectCount: 0,
-            warnings: [],
-          },
-          parts: [],
-          parameterGroups: [],
-          controlPrimitives: [],
-          controlRelations: [],
-          controlViews: [],
-          selectionTargets: [],
-          advisories: [],
-          measurementAnnotations: [],
-          warnings: [],
-          enrichmentState: { status: 'none', proposals: [] },
-        },
-        feedback: null,
+        revision: 77,
       });
     });
 
     const widthInput = page.locator('[data-param-key="width"] input[type="number"]').first();
     await expect(widthInput).toHaveValue('10');
-    await expect(page.getByTestId('genie-session-bubble')).toContainText('artifact-model-a');
-    await expect(page.getByTestId('genie-session-bubble')).toContainText('manifest-model-b');
+    await expect(page.getByRole('alert')).toContainText('artifact-model-a');
+    await expect(page.getByRole('alert')).toContainText('manifest-model-b');
+
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: /CODE/i }).click();
+    const modal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR:' });
+    await expect(modal.locator('.cm-content')).toContainText('print("base bracket")');
+    await expect(modal.locator('.cm-content')).not.toContainText('print("mismatch")');
   });
 
   test('Given edited code draft When applying without commit Then render uses current params and add_manual_version stays untouched', async ({ page }) => {
@@ -624,7 +582,27 @@ test.describe('Manual code apply/version coverage', () => {
     await expect(page.locator('.cm-content').first()).toContainText('print("draft bracket")');
   });
 
-  test('Given canonical source write succeeds but render fails When inspector reopens Then failed source remains the one visible file', async ({ page }) => {
+  test('Given Apply reuses backend artifact identity When draft renders Then viewport reloads the STL', async ({ page }) => {
+    const stlRequestCount = await bootManualCodeFlow(page);
+    await expect.poll(stlRequestCount).toBeGreaterThan(0);
+    const requestsBeforeApply = stlRequestCount();
+    await page.evaluate(() => {
+      window.__manualCodeApplyMockConfig = { reuseArtifactIdentity: true };
+    });
+
+    await page.locator('.param-panel').getByRole('button', { name: 'CODE' }).click();
+    const modal = page.locator('[role="dialog"]').filter({ hasText: 'MACRO INSPECTOR:' });
+    const editor = modal.locator('.cm-content');
+    await editor.click();
+    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A');
+    await page.keyboard.type('print("same identity, new draft")');
+    await modal.getByRole('button', { name: 'APPLY', exact: true }).click();
+
+    await expect.poll(stlRequestCount).toBeGreaterThan(requestsBeforeApply);
+    await expect(modal.locator('.commit-error')).toHaveCount(0);
+  });
+
+  test('Given code render fails before source publication When inspector reopens Then last rendered source remains visible', async ({ page }) => {
     await bootManualCodeFlow(page);
     await page.evaluate(() => {
       window.__manualCodeApplyMockConfig = { renderModelError: 'mock apply render exploded' };
@@ -639,12 +617,13 @@ test.describe('Manual code apply/version coverage', () => {
     await modal.getByRole('button', { name: 'APPLY', exact: true }).click();
 
     await expect(modal.locator('.commit-error')).toContainText('mock apply render exploded');
-    await expect.poll(() => page.evaluate(() => window.__manualCodeApplyMock?.saveProjectSourceCalls.at(-1)?.source ?? null))
-      .toBe('print("failed but canonical")');
+    await expect.poll(() => page.evaluate(() => window.__manualCodeApplyMock?.saveProjectSourceCalls.length ?? -1))
+      .toBe(0);
 
     await modal.locator('.window-close').click();
     await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: /CODE/i }).click();
-    await expect(page.locator('.cm-content').first()).toContainText('print("failed but canonical")');
+    await expect(page.locator('.cm-content').first()).toContainText('print("base bracket")');
+    await expect(page.locator('.cm-content').first()).not.toContainText('print("failed but canonical")');
   });
 
   test('Given applied code draft When macro patch event exists Then code editor shows LAST MACRO DIFF with actor and changed lines', async ({
@@ -932,7 +911,7 @@ endsolid mock
     await expect(page.getByText(/MACRO INSPECTOR:/i)).toBeVisible();
     await expect(page.locator('.cm-content').first()).toContainText('print("base bracket")');
     await expect(page.locator('.error-banner')).toHaveCount(0);
-    await expect(page.getByTestId('genie-session-bubble')).toContainText('Render Error: mock render exploded');
+    await expect(page.locator('.agent-notification-center')).toContainText('mock render exploded');
 
     await page
       .locator('[role="dialog"]')
@@ -975,9 +954,8 @@ endsolid mock
     await page.fill('textarea.prompt-input', 'make a broken sphere');
     await page.locator('textarea.prompt-input').press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
-    const bubble = page.getByTestId('genie-session-bubble');
-    await expect(bubble).toContainText('Unknown operation `spher`.');
-    await expect(bubble.getByTestId('authoring-error-details')).toContainText('CORE IR');
-    await expect(bubble.getByTestId('authoring-error-details')).toContainText('Use a supported Core IR operation. Try: sphere');
+    const notification = page.locator('.agent-notification-center .agent-card').filter({ hasText: 'Unknown operation `spher`.' });
+    await expect(notification).toContainText('CORE IR');
+    await expect(notification).toContainText('Use a supported Core IR operation. Try: sphere');
   });
 });

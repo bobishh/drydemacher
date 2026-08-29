@@ -1,10 +1,10 @@
 <script lang="ts">
   import { phaseLabelForThreadAgentState } from './agents/state';
-  import type { ThreadAgentState } from './tauri/client';
+  import type { ThreadAgentPresentationState } from './agents/presentation';
 
-  let { state }: { state: ThreadAgentState | null } = $props();
+  let { state }: { state: ThreadAgentPresentationState | null } = $props();
 
-  function agentLabel(s: ThreadAgentState): string {
+  function agentLabel(s: ThreadAgentPresentationState): string {
     const base = s.agentLabel || 'Agent';
     return s.llmModelLabel ? `${base} · ${s.llmModelLabel}` : base;
   }

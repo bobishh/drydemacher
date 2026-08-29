@@ -1,8 +1,8 @@
 //! Durable, fail-closed configuration persistence. Diagnostics contain stages only.
 
 use crate::contracts::{
-    decode_config, encode_config, normalize_legacy_config_for_edn, AppError, AppResult, Config,
-    ConfigNormalizationWarning,
+    decode_config, encode_config, normalize_legacy_config_for_edn, AppError, AppErrorCode,
+    AppResult, Config, ConfigNormalizationWarning,
 };
 use crate::steel_data::{parse_steel_data, write_steel_data};
 use fs2::FileExt;
@@ -206,9 +206,20 @@ fn write_canonical<O: PersistenceOps>(
     _warnings: &mut Vec<String>,
     ops: &O,
 ) -> AppResult<()> {
-    let value = encode_config(config).map_err(|_| AppError::persistence("config.edn: encode"))?;
-    let bytes =
-        write_steel_data(&value).map_err(|_| AppError::persistence("config.edn: serialize"))?;
+    let value = encode_config(config).map_err(|error| {
+        AppError::with_details(
+            AppErrorCode::Persistence,
+            "config.edn: encode",
+            error.to_string(),
+        )
+    })?;
+    let bytes = write_steel_data(&value).map_err(|error| {
+        AppError::with_details(
+            AppErrorCode::Persistence,
+            "config.edn: serialize",
+            error.to_string(),
+        )
+    })?;
     atomic_write(dir, bytes.as_bytes(), ops)?;
     let reopened = read_edn(&dir.join(CONFIG_EDN_FILE))
         .map_err(|_| AppError::persistence("config.edn: verify"))?;
@@ -490,8 +501,10 @@ mod tests {
             microwave: None,
             voice: VoiceConfig::default(),
             mcp: McpConfig::default(),
+            fem_compute: crate::contracts::FemComputeConfig::default(),
             has_seen_onboarding: false,
             connection_type: None,
+            provider_models: crate::contracts::ProviderModels::default(),
             default_engine_kind: EngineKind::EckyIrV0,
             default_source_language: SourceLanguage::EckyIrV0,
             default_geometry_backend: GeometryBackend::EckyRust,

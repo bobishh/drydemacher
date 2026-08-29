@@ -1,11 +1,16 @@
 use super::{
     artifact_bundle_digest, carry_forward_semantic_manifest,
-    draft_feedback_from_structural_verification, mark_live_session_busy, persist_agent_session,
-    push_mcp_profile, push_trace_event_with_conn, session_render_preview_for_request,
-    session_target_ref, settle_live_render_phase, store_session_render_preview_at_revision,
-    try_record_agent_error, AgentContext, StoreSessionRenderPreviewRequest, TraceEvent,
+    draft_feedback_from_structural_verification, mark_live_session_busy, now_secs,
+    persist_agent_session, push_mcp_profile, push_trace_event_with_conn,
+    session_render_preview_for_request, session_target_ref, settle_live_render_phase,
+    store_session_render_preview_at_revision, try_record_agent_error, AgentContext,
+    StoreSessionRenderPreviewRequest, TraceEvent,
 };
-use crate::contracts::{AppError, AppResult, DesignOutput, InteractionMode, MacroDialect, UiSpec};
+use crate::contracts::{
+    AgentOrigin, AppError, AppResult, DesignOutput, InteractionMode, MacroDialect, Message,
+    MessageRole, MessageStatus, UiSpec,
+};
+use crate::db;
 use crate::mcp::contracts::{
     MacroReplaceRequest, MacroReplaceResponse, ParamsPatchRequest, ParamsPatchResponse,
 };
@@ -13,6 +18,114 @@ use crate::models::{AppState, PathResolver};
 use crate::services::design::{auto_heal_legacy_params, is_param_schema_mismatch};
 use crate::services::render;
 use std::time::Instant;
+
+fn append_draft_version(
+    conn: &rusqlite::Connection,
+    ctx: &AgentContext,
+    thread_id: &str,
+    draft: DesignOutput,
+) -> AppResult<(String, bool)> {
+    let latest = db::get_thread_latest_version(conn, thread_id)
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+    if let Some(message) = latest.as_ref().filter(|message| {
+        message
+            .output
+            .as_ref()
+            .is_some_and(|output| super::same_authored_payload(output, &draft))
+    }) {
+        return Ok((
+            message.id.clone(),
+            message.status == MessageStatus::Working || message.status == MessageStatus::Error,
+        ));
+    }
+    let timestamp = now_secs();
+    let thread_missing = db::get_thread_title(conn, thread_id)
+        .map_err(|error| AppError::persistence(error.to_string()))?
+        .is_none();
+    let thread_traits = thread_missing.then(crate::generate_genie_traits);
+    db::create_or_update_thread(
+        conn,
+        thread_id,
+        &draft.title,
+        timestamp,
+        thread_traits.as_ref(),
+    )
+    .map_err(|error| AppError::persistence(error.to_string()))?;
+
+    let message_id = uuid::Uuid::new_v4().to_string();
+    db::add_message(
+        conn,
+        thread_id,
+        &Message {
+            id: message_id.clone(),
+            role: MessageRole::Assistant,
+            content: "Draft update pending validation.".to_string(),
+            status: MessageStatus::Working,
+            output: Some(draft),
+            usage: None,
+            artifact_bundle: None,
+            model_manifest: None,
+            structural_verification: None,
+            agent_origin: Some(AgentOrigin {
+                host_label: ctx.host_label.clone(),
+                client_kind: ctx.client_kind.clone(),
+                agent_label: ctx.agent_label.clone(),
+                llm_model_id: ctx.llm_model_id.clone(),
+                llm_model_label: ctx.llm_model_label.clone(),
+                session_id: ctx.session_id.clone(),
+                created_at: timestamp,
+            }),
+            image_data: None,
+            visual_kind: None,
+            attachment_images: Vec::new(),
+            timestamp,
+        },
+    )
+    .map_err(|error| AppError::persistence(error.to_string()))?;
+    Ok((message_id, true))
+}
+
+fn mark_macro_draft_failed(
+    conn: &rusqlite::Connection,
+    message_id: &str,
+    error: &AppError,
+) -> AppResult<()> {
+    let (output, _) = db::get_message_output_and_thread(conn, message_id)
+        .map_err(|db_error| AppError::persistence(db_error.to_string()))?
+        .ok_or_else(|| AppError::persistence("Draft version disappeared before failure update."))?;
+    let error_text = error.to_string();
+    db::update_message_status_and_output(
+        conn,
+        message_id,
+        db::MessageStatusUpdate {
+            status: &MessageStatus::Error,
+            output: Some(&output),
+            usage: None,
+            artifact_bundle: None,
+            model_manifest: None,
+            structural_verification: None,
+            visual_kind: None,
+            content: Some(error_text.as_str()),
+        },
+    )
+    .map_err(|db_error| AppError::persistence(db_error.to_string()))
+}
+
+fn backfill_resolved_preview_params(
+    context: &mut crate::contracts::DiagnosticContext,
+    rendered_parameters: &crate::contracts::DesignParams,
+) {
+    if !context.resolved_params.is_empty() {
+        return;
+    }
+    context.resolved_params = rendered_parameters
+        .iter()
+        .map(|(key, value)| crate::contracts::DiagnosticParamValue {
+            key: key.clone(),
+            value: value.clone(),
+        })
+        .collect();
+}
 
 pub async fn handle_params_preview_render(
     state: &AppState,
@@ -36,6 +149,7 @@ pub async fn handle_params_preview_render(
     let mut tracked_thread_id = req.thread_id.clone();
     let mut tracked_message_id = req.message_id.clone();
     let mut tracked_model_id = None;
+    let mut durable_draft_message_id = None;
 
     let result = async {
         let conn = state.db.lock().await;
@@ -87,6 +201,28 @@ pub async fn handle_params_preview_render(
             _ => state.authoring_actor_registry.reserve_authoring_actor_revision(&ctx.session_id, &target_thread_id).await,
         };
 
+        let mut merged_params = base_design.initial_params.clone();
+        for (key, value) in req.parameter_patch.clone() {
+            merged_params.insert(key, value);
+        }
+        let mut draft = base_design.clone();
+        draft.version_name.clear();
+        draft.response = "Parameter draft pending validation.".to_string();
+        draft.initial_params = merged_params.clone();
+        draft.interaction_mode = InteractionMode::Tune;
+        if let Some(post_processing) = req.post_processing.clone() {
+            draft.post_processing = Some(post_processing);
+        }
+        if let Some(geometry_backend) = req.geometry_backend {
+            draft.geometry_backend = geometry_backend;
+        }
+        let (draft_message_id, owns_draft) =
+            append_draft_version(&conn, ctx, &target_thread_id, draft)?;
+        tracked_message_id = Some(draft_message_id.clone());
+        if owns_draft {
+            durable_draft_message_id = Some(draft_message_id);
+        }
+
         persist_agent_session(
             &conn,
             ctx,
@@ -124,11 +260,6 @@ pub async fn handle_params_preview_render(
                 details: None,
             },
         );
-
-        let mut merged_params = base_design.initial_params.clone();
-        for (key, value) in req.parameter_patch.clone() {
-            merged_params.insert(key, value);
-        }
 
         let mut healed_ui_spec = base_design.ui_spec.clone();
         let mut healed_params = merged_params.clone();
@@ -311,6 +442,9 @@ pub async fn handle_params_preview_render(
 
     if let Err(err) = &result {
         let conn = state.db.lock().await;
+        if let Some(message_id) = durable_draft_message_id.as_deref() {
+            mark_macro_draft_failed(&conn, message_id, err)?;
+        }
         try_record_agent_error(
             state,
             &conn,
@@ -517,6 +651,7 @@ pub async fn handle_macro_preview_render(
     let mut tracked_thread_id = req.thread_id.clone();
     let mut tracked_message_id = req.message_id.clone();
     let mut tracked_model_id = None;
+    let mut durable_draft_message_id = None;
 
     let result = async {
         let (working_thread_id, base_design, base_model_manifest) = if let Some(preview) =
@@ -595,6 +730,31 @@ pub async fn handle_macro_preview_render(
             "patching_macro",
             "",
         )?;
+        let mut draft = base_design.clone();
+        draft.version_name.clear();
+        draft.response = "Draft update pending validation.".to_string();
+        draft.macro_code = req.macro_code.clone();
+        if let Some(macro_dialect) = req.macro_dialect.clone() {
+            draft.macro_dialect = macro_dialect;
+        }
+        if let Some(ui_spec) = req.ui_spec.clone() {
+            draft.ui_spec = ui_spec;
+        }
+        if let Some(parameters) = req.parameters.clone() {
+            draft.initial_params = parameters;
+        }
+        if let Some(post_processing) = req.post_processing.clone() {
+            draft.post_processing = Some(post_processing);
+        }
+        if let Some(geometry_backend) = req.geometry_backend {
+            draft.geometry_backend = geometry_backend;
+        }
+        let (draft_message_id, owns_draft) =
+            append_draft_version(&conn, ctx, &working_thread_id, draft)?;
+        tracked_message_id = Some(draft_message_id.clone());
+        if owns_draft {
+            durable_draft_message_id = Some(draft_message_id);
+        }
         mark_live_session_busy(
             state,
             ctx,
@@ -833,24 +993,11 @@ pub async fn handle_macro_preview_render(
         )
         .await
         .map_err(|mut err| {
-            // Diagnostics must show the parameters the agent actually sent.
-            // Param reconciliation drops keys the model does not declare, so
-            // a failing render can otherwise report an empty param context
-            // even though the request carried explicit values.
-            if let Some(requested) = req.parameters.as_ref() {
-                if !requested.is_empty() {
-                    if let Some(context) = err.diagnostic_context.as_mut() {
-                        if context.resolved_params.is_empty() {
-                            context.resolved_params = requested
-                                .iter()
-                                .map(|(key, value)| crate::contracts::DiagnosticParamValue {
-                                    key: key.clone(),
-                                    value: value.clone(),
-                                })
-                                .collect();
-                        }
-                    }
-                }
+            // `resolvedParams` must describe the values sent to the renderer.
+            // Request parameters can be ignored for an existing target, so
+            // reporting them here would misidentify the failing render state.
+            if let Some(context) = err.diagnostic_context.as_mut() {
+                backfill_resolved_preview_params(context, &initial_params);
             }
             err
         })?;
@@ -954,15 +1101,22 @@ pub async fn handle_macro_preview_render(
     }
     .await;
 
-    settle_live_render_phase(
-        state,
-        ctx,
-        tracked_thread_id.as_deref(),
-        tracked_message_id.as_deref(),
-        tracked_model_id.clone(),
-        &result,
-    )
-    .await;
+    let source_changed_cancellation = result.as_ref().err().is_some_and(|error| {
+        error
+            .message
+            .contains(crate::ecky_cad_host::direct_occt_runner::SOURCE_CHANGED_CANCELLATION_MESSAGE)
+    });
+    if !source_changed_cancellation {
+        settle_live_render_phase(
+            state,
+            ctx,
+            tracked_thread_id.as_deref(),
+            tracked_message_id.as_deref(),
+            tracked_model_id.clone(),
+            &result,
+        )
+        .await;
+    }
 
     push_mcp_profile(
         state,
@@ -981,16 +1135,74 @@ pub async fn handle_macro_preview_render(
 
     if let Err(err) = &result {
         let conn = state.db.lock().await;
-        try_record_agent_error(
-            state,
-            &conn,
-            ctx,
-            tracked_thread_id,
-            tracked_message_id,
-            tracked_model_id,
-            err,
-        );
+        if source_changed_cancellation {
+            if let Some(message_id) = durable_draft_message_id.as_deref() {
+                db::delete_message(&conn, message_id)
+                    .map_err(|error| AppError::persistence(error.to_string()))?;
+            }
+        } else {
+            if let Some(message_id) = durable_draft_message_id.as_deref() {
+                mark_macro_draft_failed(&conn, message_id, err)?;
+            }
+            try_record_agent_error(
+                state,
+                &conn,
+                ctx,
+                tracked_thread_id,
+                tracked_message_id,
+                tracked_model_id,
+                err,
+            );
+        }
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::backfill_resolved_preview_params;
+    use crate::contracts::{DiagnosticContext, DiagnosticParamValue, ParamValue};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn failed_preview_diagnostics_backfill_rendered_values_not_request_values() {
+        let mut context = DiagnosticContext {
+            part_key: Some("leg".to_string()),
+            op_name: Some("cylinder".to_string()),
+            start_line: None,
+            end_line: None,
+            resolved_params: Vec::new(),
+        };
+        let rendered = BTreeMap::from([("legHeight".to_string(), ParamValue::Number(42.0))]);
+
+        backfill_resolved_preview_params(&mut context, &rendered);
+
+        assert_eq!(
+            context.resolved_params,
+            vec![DiagnosticParamValue {
+                key: "legHeight".to_string(),
+                value: ParamValue::Number(42.0),
+            }]
+        );
+    }
+
+    #[test]
+    fn failed_preview_diagnostics_preserve_backend_resolved_values() {
+        let mut context = DiagnosticContext {
+            part_key: Some("leg".to_string()),
+            op_name: Some("cylinder".to_string()),
+            start_line: None,
+            end_line: None,
+            resolved_params: vec![DiagnosticParamValue {
+                key: "legHeight".to_string(),
+                value: ParamValue::Number(55.0),
+            }],
+        };
+        let rendered = BTreeMap::from([("legHeight".to_string(), ParamValue::Number(42.0))]);
+
+        backfill_resolved_preview_params(&mut context, &rendered);
+
+        assert_eq!(context.resolved_params[0].value, ParamValue::Number(55.0));
+    }
 }

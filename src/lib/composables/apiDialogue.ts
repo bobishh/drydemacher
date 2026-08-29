@@ -146,6 +146,18 @@ export function mergeOptimisticQueuedDialogueMessages(
   return merged;
 }
 
+export function mergeOptimisticCodexDialogueMessages(
+  eckyMessages: Message[],
+  codexMessages: Message[],
+  _optimisticMessages: OptimisticQueuedDialogueMessage[],
+  _activeThreadId: string | null,
+): Message[] {
+  const merged = new Map<string, Message>();
+  for (const message of eckyMessages) merged.set(message.id, message);
+  for (const message of codexMessages) merged.set(message.id, message);
+  return [...merged.values()];
+}
+
 export function hasLiveApiEngineConnection(
   connectionType: string | null | undefined,
   selectedEngine: ApiEngineLike,

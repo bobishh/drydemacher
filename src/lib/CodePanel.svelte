@@ -11,11 +11,13 @@
   let {
     code = $bindable(''),
     sourceLanguage = null,
+    readOnly = false,
     onchange,
     highlightLine = null,
   }: {
     code?: string;
     sourceLanguage?: string | null;
+    readOnly?: boolean;
     onchange?: (code: string) => void;
     highlightLine?: number | null;
   } = $props();
@@ -23,6 +25,7 @@
   let editorContainer: HTMLDivElement;
   let view: EditorView | null = null;
   let activeSourceLanguage = $state<string | null>(null);
+  let activeReadOnly = $state(false);
 
   function editorExtensions(currentSourceLanguage: string | null) {
     return [
@@ -33,6 +36,8 @@
           ? [eckyLanguageSupport()]
           : []),
       oneDark,
+      EditorState.readOnly.of(readOnly),
+      EditorView.editable.of(!readOnly),
       EditorView.updateListener.of((update: ViewUpdate) => {
         if (update.docChanged) {
           const newCode = update.state.doc.toString();
@@ -65,6 +70,7 @@
 
   onMount(() => {
     activeSourceLanguage = sourceLanguage;
+    activeReadOnly = readOnly;
     let startState = EditorState.create({
       doc: code,
       extensions: editorExtensions(sourceLanguage),
@@ -103,8 +109,9 @@
   });
 
   $effect(() => {
-    if (!view || activeSourceLanguage === sourceLanguage) return;
+    if (!view || (activeSourceLanguage === sourceLanguage && activeReadOnly === readOnly)) return;
     activeSourceLanguage = sourceLanguage;
+    activeReadOnly = readOnly;
     view.setState(
       EditorState.create({
         doc: code,

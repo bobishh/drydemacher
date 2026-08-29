@@ -189,7 +189,7 @@ pub async fn handle_request_user_prompt(
             },
         )
         .await?;
-        state.emit_history_updated();
+        state.emit_history_changed(Some(target.thread_id.clone()), None, "messageCreated");
     }
 
     let prompt_target_ref = prompt_target.as_ref().and_then(|target| {
@@ -400,27 +400,18 @@ pub async fn handle_mark_as_read(
         )));
     }
     ensure_thread_claim(state, &ctx, &thread_id, false).await?;
-    let message = db::get_thread_messages(&conn, &thread_id)
+    let message_role = db::get_visible_message_role(&conn, &thread_id, &req.message_id)
         .map_err(|err| AppError::persistence(err.to_string()))?
-        .into_iter()
-        .find(|message| message.id == req.message_id)
         .ok_or_else(|| AppError::not_found(format!("Message {} not found.", req.message_id)))?;
-    if message.role != crate::contracts::MessageRole::User {
+    if message_role != crate::contracts::MessageRole::User {
         return Err(AppError::validation(format!(
             "Only user thread messages can be marked as read. {} is {:?}.",
-            req.message_id, message.role
+            req.message_id, message_role
         )));
     }
     let claimed_message_ids = {
-        let pending_ids = db::get_thread_messages(&conn, &thread_id)
-            .map_err(|err| AppError::persistence(err.to_string()))?
-            .into_iter()
-            .filter(|candidate| {
-                candidate.role == crate::contracts::MessageRole::User
-                    && candidate.status == crate::contracts::MessageStatus::Pending
-            })
-            .map(|candidate| candidate.id)
-            .collect::<Vec<_>>();
+        let pending_ids = db::get_pending_user_message_ids(&conn, &thread_id)
+            .map_err(|err| AppError::persistence(err.to_string()))?;
         if pending_ids.is_empty() {
             vec![req.message_id.clone()]
         } else {
@@ -480,7 +471,11 @@ pub async fn handle_mark_as_read(
             Some("Working through the queued thread batch.".to_string()),
         );
     }
-    state.emit_history_updated();
+    state.emit_history_changed(
+        Some(thread_id.clone()),
+        Some(primary_message_id.clone()),
+        "messagesClaimed",
+    );
     push_trace_event(
         state,
         &ctx,
@@ -592,7 +587,14 @@ pub async fn handle_session_reply_save(
         clear_turn_working_state(state, &ctx.session_id, &target.thread_id).await;
     }
 
-    state.emit_history_updated();
+    state.emit_history_changed(
+        Some(target.thread_id.clone()),
+        target
+            .message_id
+            .clone()
+            .or_else(|| Some(message_id.clone())),
+        "turnFinished",
+    );
 
     let conn = state.db.lock().await;
     persist_agent_session(
@@ -750,7 +752,11 @@ pub async fn handle_concept_preview_save(
         },
     )
     .await?;
-    state.emit_history_updated();
+    state.emit_history_changed(
+        Some(target.thread_id.clone()),
+        Some(message_id.clone()),
+        "conceptPreviewSaved",
+    );
 
     Ok(ConceptPreviewSaveResponse {
         thread_id: target.thread_id,
@@ -1054,8 +1060,15 @@ pub async fn handle_thread_create(
 
     {
         let conn = state.db.lock().await;
-        db::create_or_update_thread(&conn, &thread_id, &title, now, None)
-            .map_err(|err| AppError::persistence(err.to_string()))?;
+        db::create_or_update_thread_with_timestamps(
+            &conn,
+            &thread_id,
+            &title,
+            now,
+            now.saturating_add(1),
+            None,
+        )
+        .map_err(|err| AppError::persistence(err.to_string()))?;
         persist_agent_session(
             &conn,
             &ctx,
@@ -1087,7 +1100,7 @@ pub async fn handle_thread_create(
     // Same rationale as thread_borrow: clear any stale draft from a previous
     // thread so no-arg tools resolve against the freshly created thread.
     super::clear_session_render_preview_durable(state, &ctx.session_id).await?;
-    state.emit_history_updated();
+    state.emit_history_changed(Some(thread_id.clone()), None, "threadCreated");
 
     Ok(ThreadCreateResponse { thread_id, title })
 }
@@ -1181,7 +1194,7 @@ pub async fn handle_thread_meta_get(
     req: ThreadMetaRequest,
 ) -> AppResult<ThreadMetaResponse> {
     let conn = state.db.lock().await;
-    let t = history::get_thread(&conn, &req.thread_id)?;
+    let t = history::get_thread_summary(&conn, &req.thread_id)?;
     let latest_pending_message_id = db::get_latest_pending_user_message_id(&conn, &req.thread_id)
         .map_err(|err| AppError::persistence(err.to_string()))?;
     drop(conn);

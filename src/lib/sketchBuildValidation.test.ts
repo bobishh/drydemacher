@@ -20,7 +20,7 @@ test('buildSketchBuildValidationSummary passes closed contract, preview artifact
       source: 'from build123d import *\nwith BuildPart() as part:\n    pass',
     },
     artifactBundle: {
-      previewStlPath: '/tmp/ecky/sketch-preview.stl',
+      modelStlPath: '/tmp/ecky/sketch-model.stl',
       viewerAssets: [{ path: '/tmp/ecky/sketch-preview.glb' }, { path: '/tmp/ecky/sketch-preview.png' }],
     },
     projectionsCount: 3,
@@ -39,7 +39,7 @@ test('buildSketchBuildValidationSummary passes closed contract, preview artifact
         id: 'previewArtifact',
         label: 'Preview artifact',
         status: 'pass',
-        evidence: 'sketch-preview.stl; 2 viewer assets.',
+        evidence: 'sketch-model.stl; 2 viewer assets.',
       },
       {
         id: 'projectionCount',

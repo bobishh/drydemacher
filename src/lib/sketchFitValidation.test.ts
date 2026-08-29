@@ -22,7 +22,7 @@ function baseInput(overrides: Partial<SketchFitValidationInput> = {}): SketchFit
 test('returns source-backed rows with pass status for contained profile and preview artifact evidence', () => {
   const result = buildSketchFitValidationSeed(baseInput({
     artifactEvidence: {
-      previewArtifactPath: '/tmp/model-preview.stl',
+      previewArtifactPath: '/tmp/model.stl',
       source: 'build123d',
     },
   }));
@@ -38,7 +38,7 @@ test('returns source-backed rows with pass status for contained profile and prev
   assert.equal(result.rows[2]?.status, 'pass');
   assert.equal(result.evidence.containment.centroidInsideProfile, true);
   assert.equal(result.evidence.containment.edgeSafeSamplesInsideProfile, true);
-  assert.equal(result.evidence.previewArtifact.previewArtifactPath, '/tmp/model-preview.stl');
+  assert.equal(result.evidence.previewArtifact.previewArtifactPath, '/tmp/model.stl');
 });
 
 test('fails containment when centroid or edge-safe samples are outside closed profile', () => {

@@ -13,6 +13,15 @@ pub struct AuthoringGraphRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct AuthoringGraphInputPort {
+    pub role: String,
+    pub value_kind: String,
+    pub cardinality: String,
+    pub child_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct AuthoringGraphAstNode {
     pub path: String,
     pub stable_node_key: String,
@@ -22,6 +31,15 @@ pub struct AuthoringGraphAstNode {
     pub operation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub part_id: Option<String>,
+    pub source_addressable: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub editable_ops: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub non_editable_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub child_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_ports: Vec<AuthoringGraphInputPort>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]

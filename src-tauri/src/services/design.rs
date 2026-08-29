@@ -99,6 +99,8 @@ pub struct AddManualVersionRequest {
     pub model_manifest: Option<ModelManifest>,
     pub response_text: Option<String>,
     pub agent_origin: Option<AgentOrigin>,
+    pub status: Option<MessageStatus>,
+    pub error_message: Option<String>,
 }
 
 fn resolve_macro_contracts(
@@ -160,6 +162,19 @@ fn resolve_manual_authoring_context(
     (engine_kind, resolved_source, resolved_backend)
 }
 
+fn same_manual_version_payload(left: &DesignOutput, right: &DesignOutput) -> bool {
+    left.title == right.title
+        && left.interaction_mode == right.interaction_mode
+        && left.macro_code == right.macro_code
+        && left.macro_dialect == right.macro_dialect
+        && left.engine_kind == right.engine_kind
+        && left.source_language == right.source_language
+        && left.geometry_backend == right.geometry_backend
+        && left.ui_spec == right.ui_spec
+        && left.initial_params == right.initial_params
+        && left.post_processing == right.post_processing
+}
+
 pub async fn add_manual_version(
     request: AddManualVersionRequest,
     state: &AppState,
@@ -179,18 +194,31 @@ pub async fn add_manual_version(
         model_manifest,
         response_text,
         agent_origin,
+        status,
+        error_message,
     } = request;
 
+    let requested_status = status.unwrap_or(MessageStatus::Success);
     let (ui_spec, parameters, macro_dialect) =
-        resolve_macro_contracts(&macro_code, &parameters, &ui_spec)?;
+        match resolve_macro_contracts(&macro_code, &parameters, &ui_spec) {
+            Ok(resolved) => resolved,
+            Err(_) if requested_status == MessageStatus::Error => (
+                ui_spec,
+                parameters,
+                infer_macro_dialect_from_code(&macro_code),
+            ),
+            Err(error) => return Err(error),
+        };
     let (ui_spec, parameters) = crate::contracts::reconcile_post_processing_controls(
         &ui_spec,
         &parameters,
         post_processing.as_ref(),
     );
 
-    validate_ui_spec(&ui_spec)?;
-    validate_design_params(&parameters, &ui_spec)?;
+    if requested_status != MessageStatus::Error {
+        validate_ui_spec(&ui_spec)?;
+        validate_design_params(&parameters, &ui_spec)?;
+    }
     if let Some(manifest) = model_manifest.as_ref() {
         if let Some(bundle) = artifact_bundle.as_ref() {
             validate_model_runtime_bundle(manifest, bundle)?;
@@ -213,7 +241,7 @@ pub async fn add_manual_version(
         version_name,
         response: response_text
             .clone()
-            .unwrap_or_else(|| "Manual edit committed as new version.".to_string()),
+            .unwrap_or_else(|| "Manual edit appended as new version.".to_string()),
         interaction_mode: InteractionMode::Design,
         macro_code,
         macro_dialect,
@@ -224,15 +252,9 @@ pub async fn add_manual_version(
         initial_params: parameters,
         post_processing,
     };
-    validate_design_output(&output)?;
-    crate::thread_source_binding::pre_commit_guard(
-        app,
-        &db,
-        configured_root.as_deref(),
-        &thread_id,
-        &title,
-    )?;
-
+    if requested_status != MessageStatus::Error {
+        validate_design_output(&output)?;
+    }
     let thread_traits = if db::get_thread_title(&db, &thread_id)
         .map_err(|err| AppError::persistence(err.to_string()))?
         .is_none()
@@ -244,13 +266,72 @@ pub async fn add_manual_version(
     db::create_or_update_thread(&db, &thread_id, &title, now, thread_traits.as_ref())
         .map_err(|err| AppError::persistence(err.to_string()))?;
 
+    let status = requested_status;
+    let content = error_message
+        .or(response_text)
+        .unwrap_or_else(|| match status {
+            MessageStatus::Error => "Manual edit failed.".to_string(),
+            MessageStatus::Working | MessageStatus::Pending => {
+                "Manual edit pending validation.".to_string()
+            }
+            _ => "Manual edit appended as new version.".to_string(),
+        });
+    let model_id = artifact_bundle
+        .as_ref()
+        .map(|bundle| bundle.model_id.as_str())
+        .or_else(|| {
+            model_manifest
+                .as_ref()
+                .map(|manifest| manifest.model_id.as_str())
+        });
+    if let Some(existing) = db::get_thread_latest_version(&db, &thread_id)
+        .map_err(|error| AppError::persistence(error.to_string()))?
+        .filter(|message| {
+            message.output.as_ref().is_some_and(|existing_output| {
+                same_manual_version_payload(existing_output, &output)
+            })
+        })
+    {
+        db::update_message_status_and_output(
+            &db,
+            &existing.id,
+            db::MessageStatusUpdate {
+                status: &status,
+                output: Some(&output),
+                usage: existing.usage.as_ref(),
+                artifact_bundle: artifact_bundle.as_ref(),
+                model_manifest: model_manifest.as_ref(),
+                structural_verification: existing.structural_verification.as_ref(),
+                visual_kind: existing.visual_kind.as_ref(),
+                content: Some(&content),
+            },
+        )
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+        crate::thread_source_binding::refresh_on_version_append(
+            app,
+            &db,
+            configured_root.as_deref(),
+            &thread_id,
+            &title,
+            &output.macro_code,
+            &existing.id,
+            model_id,
+            Some(&existing.id),
+        )?;
+        drop(db);
+        state
+            .authoring_actor_registry
+            .invalidate_authoring_actors_for_thread(&thread_id)
+            .await;
+        return Ok(existing.id);
+    }
+
     let msg_id = Uuid::new_v4().to_string();
     let msg = Message {
         id: msg_id.clone(),
         role: MessageRole::Assistant,
-        content: response_text
-            .unwrap_or_else(|| "Manual edit committed as new version.".to_string()),
-        status: MessageStatus::Success,
+        content,
+        status,
         output: Some(output),
         usage: None,
         artifact_bundle: artifact_bundle.clone(),
@@ -264,15 +345,7 @@ pub async fn add_manual_version(
     };
 
     db::add_message(&db, &thread_id, &msg).map_err(|err| AppError::persistence(err.to_string()))?;
-    let model_id = artifact_bundle
-        .as_ref()
-        .map(|bundle| bundle.model_id.as_str())
-        .or_else(|| {
-            model_manifest
-                .as_ref()
-                .map(|manifest| manifest.model_id.as_str())
-        });
-    crate::thread_source_binding::refresh_on_commit(
+    crate::thread_source_binding::refresh_on_version_append(
         app,
         &db,
         configured_root.as_deref(),
@@ -468,6 +541,8 @@ params = {
             model_manifest: None,
             response_text: None,
             agent_origin: None,
+            status: None,
+            error_message: None,
         }
     }
 
@@ -482,8 +557,10 @@ params = {
             microwave: None,
             voice: crate::contracts::VoiceConfig::default(),
             mcp: crate::contracts::McpConfig::default(),
+            fem_compute: crate::contracts::FemComputeConfig::default(),
             has_seen_onboarding: true,
             connection_type: None,
+            provider_models: crate::contracts::ProviderModels::default(),
             default_engine_kind: crate::contracts::EngineKind::Freecad,
             default_source_language: crate::contracts::SourceLanguage::LegacyPython,
             default_geometry_backend: crate::contracts::GeometryBackend::Freecad,
@@ -494,7 +571,7 @@ params = {
     }
 
     #[tokio::test]
-    async fn manual_version_binds_source_then_refuses_pending_external_edit() {
+    async fn manual_version_appends_while_preserving_pending_external_edit() {
         let root =
             std::env::temp_dir().join(format!("ecky-manual-binding-{}", uuid::Uuid::new_v4()));
         let db_path = root.join("history.sqlite");
@@ -528,14 +605,13 @@ params = {
                 .unwrap()
                 .len()
         };
-        let error = add_manual_version(
+        add_manual_version(
             manual_request("thread-1", "Bracket", "(model (part body (box 5 5 5)))"),
             &state,
             &resolver,
         )
         .await
-        .expect_err("pending edit blocks manual commit");
-        assert!(error.message.contains("refusing to overwrite"));
+        .expect("pending external bytes do not block append");
         assert_eq!(std::fs::read_to_string(source_path).unwrap(), pending);
         let after = {
             let conn = state.db.lock().await;
@@ -543,6 +619,69 @@ params = {
                 .unwrap()
                 .len()
         };
-        assert_eq!(after, before, "refused source write creates no version");
+        assert_eq!(after, before + 1, "manual edit remains a new version");
+    }
+
+    #[tokio::test]
+    async fn failed_manual_edit_is_retained_as_error_head() {
+        let root = std::env::temp_dir().join(format!("ecky-manual-error-{}", uuid::Uuid::new_v4()));
+        let db_path = root.join("history.sqlite");
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = crate::db::init_db(&db_path).expect("db");
+        let state = AppState::new(test_config(), None, conn);
+        let resolver = TestPathResolver { root };
+        let invalid = "(model (part body (box 3 3";
+        let mut request = manual_request("thread-1", "Broken", invalid);
+        request.status = Some(MessageStatus::Error);
+        request.error_message = Some("line 1: unexpected end".to_string());
+
+        let message_id = add_manual_version(request, &state, &resolver)
+            .await
+            .expect("failed source must append");
+
+        let conn = state.db.lock().await;
+        let head = crate::db::get_thread_latest_version(&conn, "thread-1")
+            .expect("latest")
+            .expect("error head");
+        assert_eq!(head.id, message_id);
+        assert_eq!(head.status, MessageStatus::Error);
+        assert_eq!(head.content, "line 1: unexpected end");
+        assert_eq!(head.output.unwrap().macro_code, invalid);
+        assert!(head.artifact_bundle.is_none());
+    }
+
+    #[tokio::test]
+    async fn unchanged_manual_retry_updates_same_version_instead_of_appending_duplicate() {
+        let root = std::env::temp_dir().join(format!("ecky-manual-retry-{}", uuid::Uuid::new_v4()));
+        let db_path = root.join("history.sqlite");
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = crate::db::init_db(&db_path).expect("db");
+        let state = AppState::new(test_config(), None, conn);
+        let resolver = TestPathResolver { root };
+        let source = "(model (part body (box 3 3 3)))";
+        let mut failed = manual_request("thread-1", "Retry", source);
+        failed.status = Some(MessageStatus::Error);
+        failed.error_message = Some("backend unavailable".to_string());
+
+        let first_id = add_manual_version(failed, &state, &resolver)
+            .await
+            .expect("failed attempt");
+        let retry_id = add_manual_version(
+            manual_request("thread-1", "Retry", source),
+            &state,
+            &resolver,
+        )
+        .await
+        .expect("successful retry");
+
+        assert_eq!(retry_id, first_id);
+        let conn = state.db.lock().await;
+        let versions = crate::db::get_thread_messages(&conn, "thread-1")
+            .expect("messages")
+            .into_iter()
+            .filter(|message| message.output.is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].status, MessageStatus::Success);
     }
 }

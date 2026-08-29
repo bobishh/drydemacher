@@ -1,13 +1,12 @@
 import { hasLiveAgentSession, deriveThreadAttentionIds, resolveActivePendingPrompt, type PendingThreadPrompt, type PendingThreadScreenshot } from '../agents/state';
 import { isThreadAgentBusy, resolveActiveMcpBubble, resolveTerminalActivityMeta } from '../agents/activity';
-import { mapThreadAgentStateToViewerBusy } from './viewerBusyState';
 import type { AgentSession, AutoAgent, Request, ViewerAsset, AgentTerminalSnapshot, ViewportCameraState } from '../types/domain';
-import type { ThreadAgentState } from '../tauri/client';
+import type { ThreadAgentPresentationState } from '../agents/presentation';
 
 export type PendingViewportScreenshotChoice = PendingThreadScreenshot & {
   messageId: string;
   modelId?: string | null;
-  previewStlPath: string;
+  modelStlPath: string;
   viewerAssets: ViewerAsset[];
   includeOverlays: boolean;
   message: string;
@@ -37,7 +36,7 @@ export type AgentOpsInput = {
   primaryAgentId: string | null | undefined;
   primaryAgentLabel: string | null;
   suppressViewportBusyUi: boolean;
-  threadAgentState: ThreadAgentState | null;
+  threadAgentState: ThreadAgentPresentationState | null;
   visibleAgentTerminal: AgentTerminalSnapshot | null;
   activeVersionId: string | null;
 };
@@ -73,6 +72,11 @@ export function shouldSuppressOnboardingForAutomation(): boolean {
   return Boolean(navigator.webdriver);
 }
 
+function isThreadAgentRenderPhase(state: ThreadAgentPresentationState | null): boolean {
+  if (!state || state.connectionState !== 'active' || state.waitingOnPrompt || !state.busy) return false;
+  return state.phase === 'rendering' || state.phase === 'restoring_version' || state.phase === 'saving_version';
+}
+
 export function deriveAgentOpsState(input: AgentOpsInput): AgentOpsState {
   const activePendingAgentPrompt = resolveActivePendingPrompt({
     prompts: input.pendingAgentPrompts as PendingThreadPrompt[],
@@ -99,7 +103,7 @@ export function deriveAgentOpsState(input: AgentOpsInput): AgentOpsState {
 
   const activeMcpBusy = Boolean(input.connectionType === 'mcp' && isThreadAgentBusy(input.threadAgentState));
   const activeMcpRenderBusy = Boolean(
-    input.connectionType === 'mcp' && mapThreadAgentStateToViewerBusy(input.threadAgentState) !== null,
+    input.connectionType === 'mcp' && isThreadAgentRenderPhase(input.threadAgentState),
   );
   const activeMcpBubbleSummary = resolveActiveMcpBubble({
     threadAgentState: input.threadAgentState,

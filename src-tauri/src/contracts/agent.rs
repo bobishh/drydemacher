@@ -36,6 +36,116 @@ pub struct AgentSession {
     pub updated_at: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentActivityActorKind {
+    Agent,
+    System,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentActivityActor {
+    pub kind: AgentActivityActorKind,
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentActivityKind {
+    Trace,
+    Runtime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentActivitySeverity {
+    Info,
+    Success,
+    Warning,
+    Error,
+    Question,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentActivityState {
+    Active,
+    Resolved,
+    Failed,
+    Canceled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentActivityEventInput {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_id: Option<String>,
+    pub actor_kind: AgentActivityActorKind,
+    pub actor_id: String,
+    pub actor_label: String,
+    pub kind: AgentActivityKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub severity: AgentActivitySeverity,
+    pub state: AgentActivityState,
+    pub requires_attention: bool,
+    pub occurred_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentActivityEvent {
+    pub event_id: String,
+    pub cursor: u64,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_id: Option<String>,
+    pub actor: AgentActivityActor,
+    pub kind: AgentActivityKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub severity: AgentActivitySeverity,
+    pub state: AgentActivityState,
+    pub requires_attention: bool,
+    pub occurred_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentActivityCatchUp {
+    pub events: Vec<AgentActivityEvent>,
+    pub latest_cursor: u64,
+    pub oldest_cursor: u64,
+    pub has_more: bool,
+    pub dropped_count: u64,
+    pub retained_bytes: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentDraft {
@@ -50,6 +160,26 @@ pub struct AgentDraft {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft_feedback: Option<AgentDraftFeedback>,
     pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDraftProjection {
+    pub preview_id: String,
+    pub session_id: String,
+    pub thread_id: String,
+    pub base_message_id: Option<String>,
+    pub design_output: DesignOutput,
+    pub artifact_bundle: ArtifactBundle,
+    pub model_manifest: ModelManifest,
+    pub draft_feedback: Option<AgentDraftFeedback>,
+    pub updated_at: u64,
+    pub dense_topology_ref: Option<String>,
+    pub edge_count: usize,
+    pub face_count: usize,
+    pub selection_target_count: usize,
+    pub observed_bytes: usize,
+    pub truncated_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -170,4 +300,21 @@ pub struct AgentDraftPreviewUpdatedEvent {
     pub model_manifest: ModelManifest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feedback: Option<AgentDraftFeedback>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDraftPreviewChangedEvent {
+    pub session_id: String,
+    pub thread_id: String,
+    pub preview_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_status: Option<AgentDraftFeedbackStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_summary: Option<String>,
 }

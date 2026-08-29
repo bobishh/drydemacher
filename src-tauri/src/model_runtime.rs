@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -16,7 +17,59 @@ const IMPORTED_MESH_ARTIFACT_DIR: &str = "imported-mesh";
 const BUNDLE_FILE_NAME: &str = "bundle.json";
 const MANIFEST_FILE_NAME: &str = "manifest.json";
 const FCSTD_FILE_NAME: &str = "model.FCStd";
-const PREVIEW_STL_FILE_NAME: &str = "preview.stl";
+const MODEL_STL_FILE_NAME: &str = "model.stl";
+
+#[cfg(test)]
+fn migrate_model_stl_runtime_tree(root: &Path) -> AppResult<usize> {
+    fn visit(path: &Path, migrated: &mut usize) -> AppResult<()> {
+        for entry in fs::read_dir(path).map_err(|error| AppError::persistence(error.to_string()))? {
+            let entry = entry.map_err(|error| AppError::persistence(error.to_string()))?;
+            let path = entry.path();
+            if path.is_dir() {
+                visit(&path, migrated)?;
+                continue;
+            }
+            if path.file_name().and_then(|name| name.to_str()) == Some("preview.stl") {
+                let target = path.with_file_name(MODEL_STL_FILE_NAME);
+                if target.exists() {
+                    let old = fs::read(&path)
+                        .map_err(|error| AppError::persistence(error.to_string()))?;
+                    let new = fs::read(&target)
+                        .map_err(|error| AppError::persistence(error.to_string()))?;
+                    if old != new {
+                        return Err(AppError::validation(format!(
+                            "Cannot migrate {}: preview.stl and model.stl contain different geometry.",
+                            path.parent().unwrap_or(path.as_path()).display()
+                        )));
+                    }
+                    fs::remove_file(&path)
+                        .map_err(|error| AppError::persistence(error.to_string()))?;
+                } else {
+                    fs::rename(&path, &target)
+                        .map_err(|error| AppError::persistence(error.to_string()))?;
+                }
+                *migrated += 1;
+                continue;
+            }
+            if path.extension().and_then(|extension| extension.to_str()) == Some("json") {
+                let raw = fs::read_to_string(&path)
+                    .map_err(|error| AppError::persistence(error.to_string()))?;
+                let updated = raw
+                    .replace("previewStlPath", "modelStlPath")
+                    .replace("preview.stl", MODEL_STL_FILE_NAME);
+                if updated != raw {
+                    fs::write(&path, updated)
+                        .map_err(|error| AppError::persistence(error.to_string()))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    let mut migrated = 0;
+    visit(root, &mut migrated)?;
+    Ok(migrated)
+}
 
 pub fn runtime_root(app: &dyn PathResolver) -> AppResult<PathBuf> {
     let root = app.app_data_dir().join(MODEL_RUNTIME_ROOT);
@@ -96,6 +149,7 @@ pub fn write_model_manifest(
     }
     validate_model_id_source_kind(model_id, manifest.source_kind.clone())?;
     let mut stored_manifest = manifest.clone();
+    remove_ecky_control_views(&mut stored_manifest);
     backfill_feature_graph_from_parts(&mut stored_manifest);
     validate_model_manifest(&stored_manifest)?;
 
@@ -105,6 +159,29 @@ pub fn write_model_manifest(
     write_manifest_file(&manifest_path, &stored_manifest)?;
     refresh_stored_bundle_for_manifest(&bundle_dir, &stored_manifest)?;
     Ok(stored_manifest)
+}
+
+pub(crate) fn remove_ecky_control_views(manifest: &mut ModelManifest) {
+    if manifest.source_language != crate::contracts::SourceLanguage::EckyIrV0 {
+        return;
+    }
+
+    let removed_view_ids = manifest
+        .control_views
+        .iter()
+        .map(|view| view.view_id.clone())
+        .collect::<HashSet<_>>();
+    manifest.control_views.clear();
+    for target in &mut manifest.selection_targets {
+        target
+            .view_ids
+            .retain(|view_id| !removed_view_ids.contains(view_id));
+    }
+    for advisory in &mut manifest.advisories {
+        advisory
+            .view_ids
+            .retain(|view_id| !removed_view_ids.contains(view_id));
+    }
 }
 
 pub fn read_runtime_bundle(
@@ -132,6 +209,7 @@ pub fn write_runtime_bundle(
     }
     validate_model_id_source_kind(model_id, manifest.source_kind.clone())?;
     let mut stored_manifest = manifest.clone();
+    remove_ecky_control_views(&mut stored_manifest);
     backfill_feature_graph_from_parts(&mut stored_manifest);
     validate_model_manifest(&stored_manifest)?;
     validate_artifact_bundle(bundle)?;
@@ -297,7 +375,7 @@ fn bundle_from_manifest(
     bundle.source_language = manifest.source_language;
     bundle.geometry_backend = manifest.geometry_backend;
     bundle.manifest_path = path_to_string(&canonical_manifest_path(bundle_dir, &bundle))?;
-    bundle.preview_stl_path = path_to_string(&canonical_preview_path(bundle_dir, &bundle))?;
+    bundle.model_stl_path = path_to_string(&canonical_model_path(bundle_dir, &bundle))?;
     if !bundle.fcstd_path.trim().is_empty()
         || matches!(
             bundle.source_kind,
@@ -329,12 +407,12 @@ fn canonical_manifest_path(bundle_dir: &Path, bundle: &ArtifactBundle) -> PathBu
     }
 }
 
-fn canonical_preview_path(bundle_dir: &Path, bundle: &ArtifactBundle) -> PathBuf {
-    let canonical = bundle_dir.join(PREVIEW_STL_FILE_NAME);
+fn canonical_model_path(bundle_dir: &Path, bundle: &ArtifactBundle) -> PathBuf {
+    let canonical = bundle_dir.join(MODEL_STL_FILE_NAME);
     if canonical.exists() {
         canonical
     } else {
-        normalize_bundle_relative_path(bundle_dir, Path::new(&bundle.preview_stl_path))
+        normalize_bundle_relative_path(bundle_dir, Path::new(&bundle.model_stl_path))
     }
 }
 
@@ -434,9 +512,9 @@ fn path_to_string(path: &Path) -> AppResult<String> {
 mod tests {
     use super::*;
     use crate::contracts::{
-        DocumentMetadata, EngineKind, EnrichmentStatus, GeometryBackend, ManifestEnrichmentState,
-        PartBinding, SelectionTarget, SelectionTargetKind, SourceLanguage,
-        MODEL_RUNTIME_SCHEMA_VERSION,
+        ControlView, ControlViewScope, ControlViewSource, DocumentMetadata, EngineKind,
+        EnrichmentStatus, GeometryBackend, ManifestEnrichmentState, PartBinding, SelectionTarget,
+        SelectionTargetKind, SourceLanguage, MODEL_RUNTIME_SCHEMA_VERSION,
     };
 
     struct TestResolver {
@@ -469,6 +547,7 @@ mod tests {
         ModelManifest {
             geometry_provenance: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind,
@@ -525,6 +604,7 @@ mod tests {
             component_dependency_lock: None,
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind,
@@ -536,7 +616,7 @@ mod tests {
             fcstd_path: String::new(),
             manifest_path: "manifest.json".to_string(),
             macro_path: None,
-            preview_stl_path: "preview.stl".to_string(),
+            model_stl_path: "model.stl".to_string(),
             viewer_assets: Vec::new(),
             edge_targets: Vec::new(),
             face_targets: Vec::new(),
@@ -547,13 +627,117 @@ mod tests {
     }
 
     #[test]
+    fn model_stl_data_migration_renames_files_and_runtime_json() {
+        let root = test_root("model-stl-migration");
+        let bundle_dir = root.join("generated").join("generated-test");
+        fs::create_dir_all(&bundle_dir).expect("bundle dir");
+        fs::write(bundle_dir.join("preview.stl"), b"solid migrated").expect("preview stl");
+        fs::write(
+            bundle_dir.join("bundle.json"),
+            r#"{"previewStlPath":"/runtime/preview.stl"}"#,
+        )
+        .expect("bundle json");
+
+        let count = migrate_model_stl_runtime_tree(&root).expect("migration");
+
+        assert_eq!(count, 1);
+        assert!(!bundle_dir.join("preview.stl").exists());
+        assert_eq!(
+            fs::read(bundle_dir.join("model.stl")).expect("model stl"),
+            b"solid migrated"
+        );
+        let bundle_json =
+            fs::read_to_string(bundle_dir.join("bundle.json")).expect("migrated bundle json");
+        assert_eq!(bundle_json, r#"{"modelStlPath":"/runtime/model.stl"}"#);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn model_stl_data_migration_rejects_conflicting_geometry() {
+        let root = test_root("model-stl-conflict");
+        fs::create_dir_all(&root).expect("runtime root");
+        fs::write(root.join("preview.stl"), b"old").expect("preview stl");
+        fs::write(root.join("model.stl"), b"new").expect("model stl");
+
+        let error = migrate_model_stl_runtime_tree(&root).expect_err("conflict must fail");
+
+        assert!(error.to_string().contains("different geometry"));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn write_model_manifest_drops_control_views_for_ecky() {
+        let root = test_root("ecky-control-views");
+        let resolver = TestResolver { root: root.clone() };
+        let model_id = "generated-ecky-control-views";
+        let mut input = manifest(model_id, ModelSourceKind::Generated);
+        input.engine_kind = EngineKind::EckyIrV0;
+        input.source_language = SourceLanguage::EckyIrV0;
+        input.geometry_backend = GeometryBackend::EckyRust;
+        input.control_views.push(ControlView {
+            view_id: "legacy-view".to_string(),
+            label: "Legacy View".to_string(),
+            scope: ControlViewScope::Global,
+            part_ids: Vec::new(),
+            primitive_ids: Vec::new(),
+            sections: Vec::new(),
+            is_default: true,
+            source: ControlViewSource::Manual,
+            status: EnrichmentStatus::Accepted,
+            order: 0,
+        });
+
+        let stored = write_model_manifest(&resolver, model_id, &input).expect("manifest");
+
+        assert!(stored.control_views.is_empty());
+        assert!(read_model_manifest(&resolver, model_id)
+            .expect("stored manifest")
+            .control_views
+            .is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn write_runtime_bundle_drops_control_views_for_ecky() {
+        let root = test_root("ecky-runtime-control-views");
+        let resolver = TestResolver { root: root.clone() };
+        let model_id = "generated-ecky-runtime-control-views";
+        let mut input = manifest(model_id, ModelSourceKind::Generated);
+        input.engine_kind = EngineKind::EckyIrV0;
+        input.source_language = SourceLanguage::EckyIrV0;
+        input.geometry_backend = GeometryBackend::EckyRust;
+        input.control_views.push(ControlView {
+            view_id: "legacy-view".to_string(),
+            label: "Legacy View".to_string(),
+            scope: ControlViewScope::Global,
+            part_ids: Vec::new(),
+            primitive_ids: Vec::new(),
+            sections: Vec::new(),
+            is_default: true,
+            source: ControlViewSource::Manual,
+            status: EnrichmentStatus::Accepted,
+            order: 0,
+        });
+        let mut artifact_bundle = bundle(model_id, ModelSourceKind::Generated);
+        artifact_bundle.engine_kind = EngineKind::EckyIrV0;
+        artifact_bundle.source_language = SourceLanguage::EckyIrV0;
+        artifact_bundle.geometry_backend = GeometryBackend::EckyRust;
+
+        let (_, stored) = write_runtime_bundle(&resolver, model_id, &artifact_bundle, &input)
+            .expect("runtime bundle");
+
+        assert!(stored.control_views.is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn write_manifest_refreshes_non_freecad_bundle_assets() {
         let root = test_root("refresh");
         let resolver = TestResolver { root: root.clone() };
         let model_id = "generated-b123d-test";
         let dir = runtime_bundle_dir(&resolver, model_id).expect("dir");
         fs::create_dir_all(dir.join("parts")).expect("parts");
-        fs::write(dir.join("preview.stl"), b"solid preview").expect("preview");
+        fs::write(dir.join("model.stl"), b"solid preview").expect("preview");
         fs::write(dir.join("parts/body.stl"), b"solid body").expect("part");
 
         let initial_bundle = bundle(model_id, ModelSourceKind::Generated);

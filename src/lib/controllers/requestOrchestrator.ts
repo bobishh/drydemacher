@@ -40,7 +40,7 @@ import {
   finalizeGenerationAttempt,
   formatBackendError,
   generateDesign,
-  getThread,
+  getThreadMessagesPage,
   getModelManifest,
   getMessStlPath,
   initGenerationAttempt,
@@ -51,7 +51,7 @@ import {
   verifyRender,
   verifyGeneratedModel,
 } from '../tauri/client';
-import { pendingHeightfieldImages, pendingHeightfieldStatus } from '../heightfieldPending';
+import { pendingImageGeometry, pendingImageGeometryStatus } from '../imageGeometryPending';
 import { hydrateActiveRenderSnapshot } from '../stores/activeRenderSnapshot';
 import type { AppError } from '../tauri/contracts';
 
@@ -193,11 +193,11 @@ export function canPublishGenerationProjection({
 
 function formatStructuralSummary(metrics: StructuralMetrics): string {
   const lines = [`Structural checks passed.`, `Parts: ${metrics.partCount}`];
-  if (metrics.previewStlTriangleCount != null) lines.push(`Triangles: ${metrics.previewStlTriangleCount}`);
-  if (metrics.previewStlComponentCount != null) lines.push(`Components: ${metrics.previewStlComponentCount}`);
-  if (metrics.previewStlNonManifoldEdgeCount != null) lines.push(`Non-manifold edges: ${metrics.previewStlNonManifoldEdgeCount}`);
-  if (metrics.previewStlOverhangTriangleCount != null) lines.push(`Overhang triangles: ${metrics.previewStlOverhangTriangleCount}`);
-  if (metrics.previewStlOverhangRatio != null) lines.push(`Overhang ratio: ${metrics.previewStlOverhangRatio.toFixed(3)}`);
+  if (metrics.modelStlTriangleCount != null) lines.push(`Triangles: ${metrics.modelStlTriangleCount}`);
+  if (metrics.modelStlComponentCount != null) lines.push(`Components: ${metrics.modelStlComponentCount}`);
+  if (metrics.modelStlNonManifoldEdgeCount != null) lines.push(`Non-manifold edges: ${metrics.modelStlNonManifoldEdgeCount}`);
+  if (metrics.modelStlOverhangTriangleCount != null) lines.push(`Overhang triangles: ${metrics.modelStlOverhangTriangleCount}`);
+  if (metrics.modelStlOverhangRatio != null) lines.push(`Overhang ratio: ${metrics.modelStlOverhangRatio.toFixed(3)}`);
   if (metrics.totalVolume != null) lines.push(`Volume: ${metrics.totalVolume.toFixed(2)}mm³`);
   if (metrics.totalArea != null) lines.push(`Area: ${metrics.totalArea.toFixed(2)}mm²`);
   if (metrics.bbox) {
@@ -784,13 +784,13 @@ class GenerationPipeline {
         }
 
         // --- Render Step ---
-        const pendingHeightfields = pendingHeightfieldImages(
+        const pendingImages = pendingImageGeometry(
           data.macroCode,
           data.uiSpec,
           data.initialParams || {},
         );
-        if (pendingHeightfields.length > 0) {
-          await this.commitPendingHeightfield(data, pendingHeightfieldStatus(pendingHeightfields));
+        if (pendingImages.length > 0) {
+          await this.commitPendingImageGeometry(data, pendingImageGeometryStatus(pendingImages));
           return;
         }
         requestQueue.patch(this.requestId, { phase: 'rendering' });
@@ -1062,19 +1062,23 @@ class GenerationPipeline {
     const hasCachedMessages = Boolean(cachedThread?.messages?.length);
 
     try {
-      const fullThread = await getThread(this.snapshotThreadId);
-      history.update((items) => {
-        const hasExisting = items.some((thread) => thread.id === this.snapshotThreadId);
-        if (!hasExisting) {
-          return [...items, fullThread];
-        }
-        return items.map((thread) =>
-          thread.id === this.snapshotThreadId ? { ...thread, messages: fullThread.messages } : thread,
-        );
-      });
-      return { thread: fullThread, source: 'fetched' };
+      const page = await getThreadMessagesPage(this.snapshotThreadId, null, 8, false);
+      const projectedThread = cachedThread
+        ? { ...cachedThread, messages: page.messages }
+        : {
+            id: this.snapshotThreadId,
+            title: '',
+            summary: '',
+            messages: page.messages,
+            updatedAt: 0,
+            versionCount: 0,
+            pendingCount: 0,
+            queuedCount: 0,
+            errorCount: 0,
+          };
+      return { thread: projectedThread, source: 'fetched' };
     } catch (error) {
-      console.warn('[Pipeline] follow-up guard failed to load full thread', {
+      console.warn('[Pipeline] follow-up guard failed to load recent dialogue', {
         requestId: this.requestId,
         threadId: this.snapshotThreadId,
         error: toErrorMessage(error),
@@ -1137,7 +1141,6 @@ class GenerationPipeline {
     const runtime = await inspectRuntimeBundle(
       bundle,
       undefined,
-      undefined,
       data.postProcessing ?? null,
       data.initialParams ?? {},
     );
@@ -1145,7 +1148,7 @@ class GenerationPipeline {
       runtime.bundle ??
       getRenderableRuntimeBundle(bundle, data.postProcessing ?? null, data.initialParams ?? {}) ??
       bundle;
-    const stlUrlValue = toAssetUrl(renderableBundle.previewStlPath);
+    const stlUrlValue = toAssetUrl(renderableBundle.modelStlPath);
     requestQueue.patch(this.requestId, { phase: 'committing' });
     syncSessionPhaseFromQueue();
 
@@ -1166,9 +1169,7 @@ class GenerationPipeline {
         modelManifest: manifest,
         selectedPartId: null,
         stlUrl: stlUrlValue,
-        status: runtime.skippedOversizedPreview
-          ? 'Design synthesized successfully. Lithophane preview was skipped in the viewer; base part meshes are shown instead.'
-          : 'Design synthesized successfully.',
+        status: 'Design synthesized successfully.',
         targetRef: this.assistantMessageId ? {
           kind: 'savedVersion',
           threadId: this.snapshotThreadId,
@@ -1210,7 +1211,7 @@ class GenerationPipeline {
     syncSessionPhaseFromQueue();
   }
 
-  private async commitPendingHeightfield(data: DesignOutput, statusText: string) {
+  private async commitPendingImageGeometry(data: DesignOutput, statusText: string) {
     await this.finalizeAttempt('success', data, undefined, statusText);
     this.checkCanceled();
     const currentSession = get(session);

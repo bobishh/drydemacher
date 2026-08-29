@@ -15,6 +15,7 @@ type MockOptions = {
   messagesPageDelayMs?: number;
   messagesPageFails?: boolean;
   latestVersionDelayMs?: number;
+  projectSourceDelayMs?: number;
 };
 
 async function installPassiveThreadAgentMock(page: Page, options: MockOptions = {}) {
@@ -23,17 +24,17 @@ async function installPassiveThreadAgentMock(page: Page, options: MockOptions = 
     const calls = { queue: 0, generate: 0 };
     const invokeCalls: Array<{ cmd: string; args: unknown }> = [];
     let mockMessages = [...(mockOptions.messages ?? [])];
-    const latestRenderableVersion = () =>
+    const latestAuthoredVersion = () =>
       [...mockMessages]
         .reverse()
-        .find((message: any) => message?.role === 'assistant' && message?.status === 'success' && message?.artifactBundle) ?? null;
-    const latestVersion: any = latestRenderableVersion();
+        .find((message: any) => message?.role === 'assistant' && message?.status !== 'discarded' && (message?.output || message?.artifactBundle)) ?? null;
+    const latestVersion: any = latestAuthoredVersion();
     const rebuiltArtifactBundle = latestVersion?.artifactBundle
       ? {
           ...latestVersion.artifactBundle,
           modelId: `${latestVersion.artifactBundle.modelId}-rebuilt`,
           contentHash: `${latestVersion.artifactBundle.contentHash}-rebuilt`,
-          previewStlPath: '/mock/rebuilt-preview.stl',
+          modelStlPath: '/mock/rebuilt-model.stl',
         }
       : null;
     const rebuiltModelManifest = latestVersion?.modelManifest
@@ -80,8 +81,16 @@ async function installPassiveThreadAgentMock(page: Page, options: MockOptions = 
     });
 
     window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
+    let nextCallbackId = 1;
+    window.__TAURI_INTERNALS__.transformCallback = (callback: unknown) => {
+      const callbackId = nextCallbackId++;
+      (window as unknown as Record<string, unknown>)[`_${callbackId}`] = callback;
+      return callbackId;
+    };
     window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
       invokeCalls.push({ cmd, args });
+      if (cmd === 'plugin:event|listen') return args?.handler ?? 1;
+      if (cmd === 'plugin:event|unlisten') return null;
       if (cmd === 'get_config') {
         return {
           engines: [],
@@ -128,11 +137,30 @@ async function installPassiveThreadAgentMock(page: Page, options: MockOptions = 
         if (mockOptions.latestVersionDelayMs) {
           await new Promise((resolve) => setTimeout(resolve, mockOptions.latestVersionDelayMs));
         }
-        return latestRenderableVersion();
+        return latestAuthoredVersion();
       }
       if (cmd === 'get_thread_message_version') {
         return mockMessages.find((message: any) => message?.id === args?.messageId) ?? null;
       }
+      if (cmd === 'materialize_version_preview') {
+        const target: any = mockMessages.find((message: any) => message?.id === args?.messageId);
+        if (!target?.artifactBundle || !target?.modelManifest) {
+          throw new Error('Version runtime unavailable');
+        }
+        const isLatest = (latestAuthoredVersion() as any)?.id === target.id;
+        return {
+          artifactBundle: {
+            ...target.artifactBundle,
+            modelStlPath: isLatest
+              ? target.artifactBundle.modelStlPath
+              : `/mock/history-preview/${target.id}/model.stl`,
+          },
+          modelManifest: target.modelManifest,
+          leaseId: isLatest ? null : `00000000-0000-4000-8000-${target.id.padEnd(12, '0').slice(0, 12)}`,
+          ephemeral: !isLatest,
+        };
+      }
+      if (cmd === 'release_version_preview') return null;
       if (cmd === 'get_thread_messages_page') {
         if (mockOptions.messagesPageDelayMs) {
           await new Promise((resolve) => setTimeout(resolve, mockOptions.messagesPageDelayMs));
@@ -141,6 +169,17 @@ async function installPassiveThreadAgentMock(page: Page, options: MockOptions = 
           throw new Error('Thread messages load timed out');
         }
         return { messages: mockMessages, nextBefore: null, hasMore: false };
+      }
+      if (cmd === 'get_project_source') {
+        if (mockOptions.projectSourceDelayMs) {
+          await new Promise((resolve) => setTimeout(resolve, mockOptions.projectSourceDelayMs));
+        }
+        return {
+          threadId: 'thread-1',
+          file: '/mock/thread-1/model.ecky',
+          source: (latestAuthoredVersion() as any)?.output?.macroCode ?? '(model)',
+          digest: 'mock-source-digest',
+        };
       }
       if (cmd === 'delete_version') {
         mockMessages = mockMessages.filter((message: any) => message?.id !== args?.messageId);
@@ -165,6 +204,32 @@ async function installPassiveThreadAgentMock(page: Page, options: MockOptions = 
         ];
       }
       if (cmd === 'get_agent_terminal_snapshots') return [];
+      if (cmd === 'get_agent_activity') {
+        return {
+          latestCursor: 1,
+          events: [
+            {
+              eventId: 'runtime-waiting-sess-1',
+              cursor: 1,
+              sessionId: 'sess-1',
+              threadId: 'thread-1',
+              messageId: null,
+              versionId: null,
+              actor: { kind: 'agent', id: 'gemini', label: 'Gemini' },
+              kind: 'runtime',
+              lifecycleKey: 'runtime:gemini:thread-1:sess-1',
+              phase: 'waiting_for_user',
+              summary: 'Waiting for your next message...',
+              detail: null,
+              severity: 'question',
+              state: 'active',
+              requiresAttention: true,
+              occurredAt: now,
+              raw: null,
+            },
+          ],
+        };
+      }
       if (cmd === 'get_thread_agent_state') {
         return {
           threadId: args?.threadId ?? null,
@@ -209,7 +274,7 @@ async function installPassiveThreadAgentMock(page: Page, options: MockOptions = 
         throw new Error('generate path should stay unused');
       }
       if (cmd === 'plugin:fs|exists') {
-        if ((args as any)?.path === '/mock/rebuilt-preview.stl') return true;
+        if ((args as any)?.path === '/mock/rebuilt-model.stl') return true;
         return mockOptions.runtimeFilesExist ?? true;
       }
       if (cmd === 'plugin:fs|size') return 1024;
@@ -337,6 +402,115 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await expect(loupe).toContainText('Side trap sketch');
   });
 
+  test('Given newest authored version failed without runtime When project opens Then stale geometry stays cleared and raw render error is visible', async ({ page }) => {
+    const now = Math.floor(Date.now() / 1000);
+    const rawError = "Direct OCCT runner completed without '/mock/generated/model.stl'.";
+    await installPassiveThreadAgentMock(page, {
+      errorCount: 1,
+      messages: [
+        {
+          id: 'old-success',
+          role: 'assistant',
+          content: 'Old model ready.',
+          status: 'success',
+          output: {
+            title: 'Wrong Old Model',
+            versionName: 'V-old',
+            interactionMode: 'design',
+            macroCode: '(model (part old (box 10 10 10)))',
+            sourceLanguage: 'ecky',
+            geometryBackend: 'eckyRust',
+            uiSpec: { fields: [] },
+            initialParams: {},
+            postProcessing: null,
+          },
+          artifactBundle: {
+            modelId: 'old-model',
+            sourceKind: 'generated',
+            engineKind: 'ecky',
+            sourceLanguage: 'ecky',
+            geometryBackend: 'eckyRust',
+            contentHash: 'old-hash',
+            artifactVersion: 1,
+            fcstdPath: '',
+            manifestPath: '/mock/old.json',
+            macroPath: '/mock/old.ecky',
+            modelStlPath: '/mock/old-model.stl',
+            viewerAssets: [],
+          },
+          modelManifest: null,
+          timestamp: now - 2,
+        },
+        {
+          id: 'failed-head',
+          role: 'assistant',
+          content: rawError,
+          status: 'error',
+          output: {
+            title: 'Rocksteady Reflector Rail Mount',
+            versionName: 'folder-sync',
+            interactionMode: 'design',
+            macroCode: '(model (part rocksteady (box 20 20 20)))',
+            sourceLanguage: 'ecky',
+            geometryBackend: 'eckyRust',
+            uiSpec: { fields: [] },
+            initialParams: {},
+            postProcessing: null,
+          },
+          artifactBundle: null,
+          modelManifest: null,
+          timestamp: now - 1,
+        },
+      ],
+    });
+
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    await page.getByRole('button', { name: 'OPEN', exact: true }).click();
+
+    await expect(page.locator('.viewer-shell')).toHaveAttribute('data-stl-url', '');
+    await expect(page.locator('.agent-card__summary').filter({ hasText: rawError })).toBeVisible();
+  });
+
+  test('Given saved source exists in version When CODE opens Then inspector appears before project-source refresh finishes', async ({ page }) => {
+    const now = Math.floor(Date.now() / 1000);
+    await installPassiveThreadAgentMock(page, {
+      projectSourceDelayMs: 1500,
+      messages: [
+        {
+          id: 'code-version',
+          role: 'assistant',
+          content: 'Code ready.',
+          status: 'success',
+          output: {
+            title: 'Immediate Code',
+            versionName: 'V-code',
+            interactionMode: 'design',
+            macroCode: '(model (part immediate (box 10 10 10)))',
+            sourceLanguage: 'ecky',
+            geometryBackend: 'eckyRust',
+            uiSpec: { fields: [] },
+            initialParams: {},
+            postProcessing: null,
+          },
+          artifactBundle: null,
+          modelManifest: null,
+          timestamp: now - 1,
+        },
+      ],
+    });
+
+    await page.goto('/');
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    await page.getByRole('button', { name: 'OPEN', exact: true }).click();
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Dialogue' }).click();
+    await page.getByRole('button', { name: 'CODE', exact: true }).click();
+
+    await expect(page.locator('[data-window-id="code"]')).toBeVisible({ timeout: 500 });
+  });
+
   test('Given version history item When dialogue opens Then actions are set-current, view, code, delete without copy', async ({ page }) => {
     const now = Math.floor(Date.now() / 1000);
     const versionStlPath = await writeMockStlFile('version-preview');
@@ -370,7 +544,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
             fcstdPath: '',
             manifestPath: '/mock/version-manifest.json',
             macroPath: '/mock/version.ecky',
-            previewStlPath: versionStlPath,
+            modelStlPath: versionStlPath,
             viewerAssets: [],
           },
           modelManifest: {
@@ -471,7 +645,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
         fcstdPath: '',
         manifestPath: `/mock/${id}-manifest.json`,
         macroPath: `/mock/${id}.ecky`,
-        previewStlPath: `/mock/${id}.stl`,
+        modelStlPath: `/mock/${id}.stl`,
         viewerAssets: [],
       },
       modelManifest: {
@@ -516,8 +690,8 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await page.waitForSelector('.workbench');
 
     await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'OPEN' }).click();
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.getByRole('button', { name: 'OPEN', exact: true }).click();
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Dialogue' }).click();
 
     const versionOne = page.locator('.trail-item').filter({ hasText: 'V-1' });
     await versionOne.getByRole('button', { name: 'SET CURRENT' }).click();
@@ -563,7 +737,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
         fcstdPath: '',
         manifestPath: `/mock/${id}-manifest.json`,
         macroPath: `/mock/${id}.ecky`,
-        previewStlPath: `/mock/${id}.stl`,
+        modelStlPath: `/mock/${id}.stl`,
         viewerAssets: [],
       },
       modelManifest: {
@@ -607,8 +781,8 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await page.waitForSelector('.workbench');
 
     await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'OPEN' }).click();
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.getByRole('button', { name: 'OPEN', exact: true }).click();
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Dialogue' }).click();
     await expect(page.locator('.viewer-shell canvas')).toBeVisible();
 
     const versionOne = page.locator('.trail-item').filter({ hasText: 'V-1' });
@@ -656,7 +830,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     expect(invokeCallCountsAfterUpdate).toEqual(invokeCallCounts);
   });
 
-  test('Given live apply is pending When version switches Then stale params do not render on new source', async ({ page }) => {
+  test('Given staged parameter input When version switches Then stale params do not render on new source', async ({ page }) => {
     const now = Math.floor(Date.now() / 1000);
     const versionMessage = (id: string, versionName: string, width: number, timestamp: number) => ({
       id,
@@ -686,7 +860,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
         fcstdPath: '',
         manifestPath: `/mock/${id}-manifest.json`,
         macroPath: `/mock/${id}.ecky`,
-        previewStlPath: `/mock/live-${id}.stl`,
+        modelStlPath: `/mock/live-${id}.stl`,
         viewerAssets: [],
       },
       modelManifest: {
@@ -731,8 +905,8 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await expect(page.locator('.boot-overlay')).toHaveCount(0);
     await page.waitForSelector('.workbench');
     await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'OPEN' }).click();
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.getByRole('button', { name: 'OPEN', exact: true }).click();
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Dialogue' }).click();
 
     const versionOne = page.locator('.trail-item').filter({ hasText: 'V-1' });
     const versionTwo = page.locator('.trail-item').filter({ hasText: 'V-2' });
@@ -744,8 +918,6 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
 
     await page.getByRole('button', { name: 'PARAMS' }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
-    await page.locator('.live-toggle').click();
-
     const width = page.locator('[data-param-key="width"] input[type="number"]').first();
     await expect(width).toHaveValue('10');
     await width.fill('42');
@@ -804,7 +976,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
         fcstdPath: '',
         manifestPath: `/mock/${id}-manifest.json`,
         macroPath: `/mock/${id}.ecky`,
-        previewStlPath: `/mock/delete-switch-${id}.stl`,
+        modelStlPath: `/mock/delete-switch-${id}.stl`,
         viewerAssets: [],
       },
       modelManifest: {
@@ -848,8 +1020,8 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await page.waitForSelector('.workbench');
 
     await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'OPEN' }).click();
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.getByRole('button', { name: 'OPEN', exact: true }).click();
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Dialogue' }).click();
     const visibleViewer = page.locator('.viewer-shell').first();
     await expect(page.locator('.viewer-shell canvas')).toBeVisible();
     await expect.poll(() => stlRequests.some((url) => url.includes('delete-switch-version-2.stl'))).toBe(true);
@@ -868,7 +1040,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await expect(visibleViewer).toHaveAttribute('data-stl-url', /delete-switch-version-1\.stl/);
   });
 
-  test('Given version runtime is missing When view opens preview Then loupe rebuilds runtime instead of showing empty artifact state', async ({ page }) => {
+  test('Given an old version model is missing When its loupe opens Then preview is materialized and released on close', async ({ page }) => {
     const now = Math.floor(Date.now() / 1000);
     await installPassiveThreadAgentMock(page, {
       runtimeFilesExist: false,
@@ -903,7 +1075,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
             fcstdPath: '',
             manifestPath: '/mock/missing.json',
             macroPath: '/mock/missing.ecky',
-            previewStlPath: '/mock/missing-preview.stl',
+            modelStlPath: '/mock/missing-model.stl',
             viewerAssets: [],
           },
           modelManifest: {
@@ -963,7 +1135,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
             fcstdPath: '',
             manifestPath: '/mock/current.json',
             macroPath: '/mock/current.ecky',
-            previewStlPath: '/mock/rebuilt-preview.stl',
+            modelStlPath: '/mock/rebuilt-model.stl',
             viewerAssets: [],
           },
           modelManifest: {
@@ -1023,7 +1195,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
             fcstdPath: '',
             manifestPath: '/mock/current-loupe.json',
             macroPath: '/mock/current-loupe.ecky',
-            previewStlPath: '/mock/rebuilt-preview.stl',
+            modelStlPath: '/mock/rebuilt-model.stl',
             viewerAssets: [],
           },
           modelManifest: {
@@ -1062,23 +1234,25 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await page.waitForSelector('.workbench');
 
     await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'OPEN' }).click();
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.getByRole('button', { name: 'OPEN', exact: true }).click();
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Dialogue' }).click();
 
     const versionItem = page.locator('.trail-item').filter({ hasText: 'Thomas Modular Ramp Ecky IR' });
     await versionItem.getByRole('button', { name: 'VIEW' }).click();
 
     const modal = page.getByRole('dialog', { name: /VERSION PREVIEW/i });
     await expect(modal.locator('.version-loupe__viewer')).toBeVisible();
-    await expect(modal).not.toContainText('NO RUNTIME ARTIFACT');
+    await modal.locator('.modal-close').click();
+    await expect(modal).toHaveCount(0);
 
     const calls = await page.evaluate(() =>
       ((window as Window & typeof globalThis & {
         __MOCK_AGENT_INVOKE_CALLS__?: Array<{ cmd: string; args: unknown }>;
       }).__MOCK_AGENT_INVOKE_CALLS__ ?? []).map((call) => call.cmd),
     );
-    expect(calls).toContain('render_model');
-    expect(calls).toContain('update_version_runtime');
+    expect(calls).toContain('materialize_version_preview');
+    expect(calls).toContain('release_version_preview');
+    expect(calls).not.toContain('repair_missing_version_runtime');
   });
 
   test('Given thread messages are still backfilling When project opens Then current version and viewport appear before history finishes', async ({ page }) => {
@@ -1115,7 +1289,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
             fcstdPath: '',
             manifestPath: '/mock/current-fast-open.json',
             macroPath: '/mock/current-fast-open.ecky',
-            previewStlPath: '/mock/current-fast-open-preview.stl',
+            modelStlPath: '/mock/current-fast-open-model.stl',
             viewerAssets: [],
           },
           modelManifest: {
@@ -1154,8 +1328,8 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await page.waitForSelector('.workbench');
 
     await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'OPEN' }).click();
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.getByRole('button', { name: 'OPEN', exact: true }).click();
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Dialogue' }).click();
     await expect(page.locator('.thread-loading')).toContainText('LOADING THREAD MESSAGES');
 
     const versionItem = page.locator('.trail-item').filter({ hasText: 'Fast Open Thread' });
@@ -1198,7 +1372,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
             fcstdPath: '',
             manifestPath: '/mock/cached-timeout.json',
             macroPath: '/mock/cached-timeout.ecky',
-            previewStlPath: '/mock/cached-timeout.stl',
+            modelStlPath: '/mock/cached-timeout.stl',
             viewerAssets: [],
           },
           modelManifest: {
@@ -1237,8 +1411,8 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await page.waitForSelector('.workbench');
 
     await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'OPEN' }).click();
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.getByRole('button', { name: 'OPEN', exact: true }).click();
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Dialogue' }).click();
 
     await expect(page.locator('.viewer-shell canvas')).toBeVisible();
     await expect(page.getByText(/Thread Messages Error:/i)).toHaveCount(0);
@@ -1286,7 +1460,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
             fcstdPath: '',
             manifestPath: '/mock/prefetched-open.json',
             macroPath: '/mock/prefetched-open.ecky',
-            previewStlPath: '/mock/prefetched-open-preview.stl',
+            modelStlPath: '/mock/prefetched-open-model.stl',
             viewerAssets: [],
           },
           modelManifest: {
@@ -1326,15 +1500,15 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
 
     await page.getByRole('button', { name: 'PROJECTS' }).click();
     await page.waitForTimeout(1300);
-    await page.getByRole('button', { name: 'OPEN' }).click();
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.getByRole('button', { name: 'OPEN', exact: true }).click();
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Dialogue' }).click();
 
     const versionItem = page.locator('.trail-item').filter({ hasText: 'Prefetched Open Thread' });
     await expect(versionItem.getByRole('button', { name: 'CURRENT' })).toBeVisible();
     await expect(page.locator('.viewer-shell canvas')).toBeVisible();
   });
 
-  test('Given current version runtime is missing When project opens Then current model rebuilds instead of staying empty', async ({ page }) => {
+  test('Given frontend file probe reports a stored model missing When project opens Then navigation still never renders source', async ({ page }) => {
     const now = Math.floor(Date.now() / 1000);
     await installPassiveThreadAgentMock(page, {
       runtimeFilesExist: false,
@@ -1369,7 +1543,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
             fcstdPath: '',
             manifestPath: '/mock/missing-current.json',
             macroPath: '/mock/missing-current.ecky',
-            previewStlPath: '/mock/missing-current-preview.stl',
+            modelStlPath: '/mock/missing-current-model.stl',
             viewerAssets: [],
           },
           modelManifest: {
@@ -1408,7 +1582,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await page.waitForSelector('.workbench');
 
     await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'OPEN' }).click();
+    await page.getByRole('button', { name: 'OPEN', exact: true }).click();
 
     await expect(page.locator('.viewer-shell canvas')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Dismiss error' })).toHaveCount(0);
@@ -1418,8 +1592,8 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
         __MOCK_AGENT_INVOKE_CALLS__?: Array<{ cmd: string; args: unknown }>;
       }).__MOCK_AGENT_INVOKE_CALLS__ ?? []).map((call) => call.cmd),
     );
-    expect(calls).toContain('render_model');
-    expect(calls).toContain('update_version_runtime');
+    expect(calls).not.toContain('render_model');
+    expect(calls).not.toContain('update_version_runtime');
   });
 
   test('Given recoverable project delete When confirm opens Then copy says trash and actions use themed buttons', async ({ page }) => {
@@ -1520,8 +1694,8 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await page.waitForSelector('.workbench');
 
     await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'OPEN' }).click();
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.getByRole('button', { name: 'OPEN', exact: true }).click();
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Dialogue' }).click();
 
     await expect(page.locator('.trail-user')).toContainText('make roof pins');
     await expect(page.locator('.trail-error')).toHaveCount(0);
@@ -1539,7 +1713,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
 
     await page.getByRole('button', { name: 'PROJECTS' }).click();
     await page.getByRole('button', { name: 'OPEN', exact: true }).click();
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Dialogue' }).click();
     await page.locator('.prompt-input').fill('Message for external agent');
 
     await expect(page.getByRole('button', { name: 'QUEUE' })).toBeVisible();
@@ -1564,7 +1738,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
 
     await page.getByRole('button', { name: 'PROJECTS' }).click();
     await page.getByRole('button', { name: 'OPEN', exact: true }).click();
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Dialogue' }).click();
 
     const prompt = 'Message should paint immediately';
     await page.locator('.prompt-input').fill(prompt);
@@ -1591,8 +1765,8 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await page.waitForSelector('.workbench');
 
     await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'OPEN' }).click();
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.getByRole('button', { name: 'OPEN', exact: true }).click();
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Dialogue' }).click();
 
     await page.locator('.prompt-input').fill('planner: run printability analyze + recipes preview only; no commit');
     await page.locator('.prompt-input').press('Meta+Enter');
@@ -1629,8 +1803,8 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await page.waitForSelector('.workbench');
 
     await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'OPEN' }).click();
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.getByRole('button', { name: 'OPEN', exact: true }).click();
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Dialogue' }).click();
     await expect(page.locator('.thread-loading')).toContainText('LOADING THREAD MESSAGES');
 
     await page.getByRole('button', { name: 'PROJECTS' }).click();
@@ -1638,7 +1812,7 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await page.getByRole('button', { name: 'Blank Project' }).click();
 
     await expect(page.locator('.thread-loading')).toHaveCount(0);
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Dialogue' }).click();
     await expect(page.locator('.prompt-input')).toBeVisible();
   });
 
@@ -1651,15 +1825,16 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
 
     await page.getByRole('button', { name: 'PROJECTS' }).click();
     await page.getByRole('button', { name: 'OPEN', exact: true }).click();
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Dialogue' }).click();
     await page.locator('.prompt-input').fill('Message for external agent');
 
     await expect(page.getByRole('button', { name: 'QUEUE' })).toBeVisible();
     await page.locator('.prompt-input').press('Meta+Enter');
 
     await expect(page.locator('[data-testid="error-banner"]')).toHaveCount(0);
-    await expect(page.getByTestId('genie-session-bubble')).toContainText('Agent Queue Error');
-    await expect(page.getByTestId('genie-session-bubble')).not.toContainText('Generation Failed');
+    const queueError = page.locator('.agent-notification-center .agent-card').filter({ hasText: 'Agent Queue Error' });
+    await expect(queueError).toBeVisible();
+    await expect(queueError).not.toContainText('Generation Failed');
   });
 
   test('Given drawn annotations and unchecked workspace toggle When queueing message Then annotation capture stays one-shot and checkbox stays unchecked', async ({ page }) => {
@@ -1670,8 +1845,8 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
     await page.waitForSelector('.workbench');
 
     await page.getByRole('button', { name: 'PROJECTS' }).click();
-    await page.getByRole('button', { name: 'OPEN' }).click();
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.getByRole('button', { name: 'OPEN', exact: true }).click();
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Dialogue' }).click();
 
     const captureToggle = page.locator('.workspace-capture-toggle input');
     await expect(captureToggle).not.toBeChecked();

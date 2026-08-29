@@ -215,7 +215,7 @@
           {#if artifact}
             {#if isStale}<p class="campaign-workbench__stale" data-testid="campaign-preview-stale">Preview is from last rendered source.</p>{/if}
             {#if renderState === 'rendering'}<p class="campaign-workbench__pending">Rendering edited source…</p>{/if}
-            <Viewer modelKey={artifact.modelId} stlUrl={toPreviewSrc(artifact.previewStlPath)} viewerAssets={[]} manifestParts={[]} edgeTargets={[]} faceTargets={[]} selectionTargets={[]} selectedTarget={null} searchQuery="" selectedPartId={null} overlayPartLabel={null} overlayPartEditable={false} overlayPreviewOnly={false} showContextOverlay={false} overlayControls={[]} overlayAdvisories={[]} previewTransforms={{}} viewerMode="orbit" onControlFocusChange={() => {}} onSearchQueryChange={() => {}} onCameraStateChange={() => {}} isGenerating={false} hideModelWhileBusy={false} busyPhase={null} busyText={null} />
+            <Viewer modelKey={artifact.modelId} stlUrl={toPreviewSrc(artifact.modelStlPath)} viewerAssets={[]} manifestParts={[]} edgeTargets={[]} faceTargets={[]} selectionTargets={[]} selectedTarget={null} searchQuery="" selectedPartId={null} overlayPartLabel={null} overlayPartEditable={false} overlayPreviewOnly={false} showContextOverlay={false} overlayControls={[]} overlayAdvisories={[]} previewTransforms={{}} viewerMode="orbit" onControlFocusChange={() => {}} onSearchQueryChange={() => {}} onCameraStateChange={() => {}} isGenerating={false} hideModelWhileBusy={false} busyPhase={null} busyText={null} />
           {:else if renderState === 'rendering'}<p>Rendering edited source…</p>
           {:else}<p>Bundled preview unavailable.</p>{/if}
         </aside>

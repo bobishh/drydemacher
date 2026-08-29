@@ -8,14 +8,19 @@
   let {
     threadId,
     messageId = null,
+    importedCad = false,
+    baseSource = false,
   }: {
     threadId: string;
     messageId?: string | null;
+    importedCad?: boolean;
+    baseSource?: boolean;
   } = $props();
 
   const actions = createSourceActions();
 
   let openBusy = $state(false);
+  let cadBusy = $state(false);
   let revealBusy = $state(false);
   let link = $state<SourceLink | null>(null);
   let error = $state<string | null>(null);
@@ -27,6 +32,17 @@
       return;
     }
     error = result.error;
+  }
+
+  async function handleOpenCad(): Promise<void> {
+    if (cadBusy) return;
+    error = null;
+    cadBusy = true;
+    try {
+      accept(await actions.openCadFile(threadId, messageId));
+    } finally {
+      cadBusy = false;
+    }
   }
 
   async function handleOpen(): Promise<void> {
@@ -54,21 +70,34 @@
 
 <div class="code-source-actions" data-testid="source-actions">
   <div class="code-source-buttons">
-    <button
-      class="btn btn-secondary"
-      type="button"
-      data-testid="source-open-file"
-      title="Open model.ecky in the system editor"
-      disabled={openBusy}
-      onclick={handleOpen}
-    >
-      {openBusy ? 'OPENING…' : 'OPEN FILE'}
-    </button>
+    {#if importedCad}
+      <button
+        class="btn btn-secondary"
+        type="button"
+        data-testid="source-open-cad"
+        title="Open the copied imported CAD source"
+        disabled={cadBusy}
+        onclick={handleOpenCad}
+      >
+        {cadBusy ? 'OPENING…' : 'OPEN CAD'}
+      </button>
+    {:else}
+      <button
+        class="btn btn-secondary"
+        type="button"
+        data-testid="source-open-file"
+        title={baseSource ? 'Open the committed base model.ecky in the system editor' : 'Open model.ecky in the system editor'}
+        disabled={openBusy}
+        onclick={handleOpen}
+      >
+        {openBusy ? 'OPENING…' : baseSource ? 'OPEN BASE FILE' : 'OPEN FILE'}
+      </button>
+    {/if}
     <button
       class="btn btn-secondary"
       type="button"
       data-testid="source-reveal-folder"
-      title="Reveal the source folder in the system file manager"
+      title={baseSource ? 'Reveal the committed base source folder' : 'Reveal the source folder in the system file manager'}
       disabled={revealBusy}
       onclick={handleReveal}
     >

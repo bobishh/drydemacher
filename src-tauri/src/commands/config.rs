@@ -58,6 +58,26 @@ fn open_path_in_system_editor(path: &Path) -> std::io::Result<()> {
     }
 }
 
+fn open_path_in_default_app(path: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        command_status(Command::new("open").arg(path).status()?)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        command_status(
+            Command::new("cmd")
+                .args(["/C", "start", ""])
+                .arg(path)
+                .status()?,
+        )
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        command_status(Command::new("xdg-open").arg(path).status()?)
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn macos_editor_command(path: &Path) -> Command {
     let mut command = Command::new("open");
@@ -137,6 +157,26 @@ pub async fn list_agent_models(cmd: String) -> AppResult<crate::contracts::Agent
     crate::llm::list_agent_models(&cmd)
         .await
         .map_err(crate::contracts::AppError::provider)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn list_provider_models(
+    provider: String,
+    state: State<'_, AppState>,
+) -> AppResult<crate::contracts::AgentModelList> {
+    match provider.as_str() {
+        "codex" => Ok(crate::contracts::AgentModelList {
+            models: state.codex_app_server.list_models().await?,
+            is_live: true,
+        }),
+        "agy" => crate::llm::list_agent_models("agy")
+            .await
+            .map_err(crate::contracts::AppError::provider),
+        _ => Err(AppError::validation(format!(
+            "Unsupported provider model catalog '{provider}'."
+        ))),
+    }
 }
 
 #[tauri::command]
@@ -388,8 +428,10 @@ mod tests {
             microwave: None,
             voice: VoiceConfig::default(),
             mcp: McpConfig::default(),
+            fem_compute: crate::contracts::FemComputeConfig::default(),
             has_seen_onboarding: false,
             connection_type: None,
+            provider_models: crate::contracts::ProviderModels::default(),
             default_engine_kind: EngineKind::EckyIrV0,
             default_source_language: SourceLanguage::EckyIrV0,
             default_geometry_backend: GeometryBackend::Build123d,
@@ -697,6 +739,41 @@ pub struct ProjectSourceDocument {
     pub folder: String,
     pub file: String,
     pub source: String,
+}
+
+fn imported_cad_file_for_message(
+    conn: &rusqlite::Connection,
+    document: &ProjectSourceDocument,
+    message_id: Option<&str>,
+) -> AppResult<Option<PathBuf>> {
+    let Some(message_id) = message_id else {
+        return Ok(None);
+    };
+    let Some((_, Some(manifest), owner_thread_id)) =
+        crate::db::get_message_runtime_and_thread(conn, message_id)
+            .map_err(|error| AppError::persistence(error.to_string()))?
+    else {
+        return Ok(None);
+    };
+    if owner_thread_id != document.thread_id
+        || !matches!(
+            manifest.source_kind,
+            crate::contracts::ModelSourceKind::ImportedFcstd
+                | crate::contracts::ModelSourceKind::ImportedStep
+        )
+    {
+        return Ok(None);
+    }
+    let Some(file_name) = manifest
+        .document
+        .source_path
+        .as_deref()
+        .and_then(|path| Path::new(path).file_name())
+    else {
+        return Ok(None);
+    };
+    let candidate = Path::new(&document.folder).join(file_name);
+    Ok(candidate.is_file().then_some(candidate))
 }
 
 fn latest_empty_bound_thread_id(conn: &rusqlite::Connection) -> rusqlite::Result<Option<String>> {
@@ -1090,8 +1167,8 @@ fn validate_surface_trim_target_message(
 }
 
 /// Atomically replace the one bound source used by editor, renderer, and diff.
-/// This deliberately does not create a history version; COMMIT VERSION owns
-/// that separate action.
+/// The project watcher observes the changed bytes and appends their version;
+/// no second commit/finalize action exists.
 #[tauri::command]
 #[specta::specta]
 pub async fn save_project_source(
@@ -1191,7 +1268,7 @@ pub async fn open_project_in_editor(
         file: document.file,
     };
     let file = Path::new(&link.file);
-    open_path_in_system_editor(&file).map_err(|err| {
+    open_path_in_system_editor(file).map_err(|err| {
         crate::contracts::AppError::internal(format!(
             "Failed to open '{}' in the system editor: {}",
             file.display(),
@@ -1233,4 +1310,47 @@ pub async fn reveal_project_folder(
         ))
     })?;
     Ok(link)
+}
+
+/// Open the copied FCStd/STEP source associated with one imported message.
+#[tauri::command]
+#[specta::specta]
+pub async fn open_imported_cad_source(
+    thread_id: Option<String>,
+    message_id: Option<String>,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<ProjectEditorLink> {
+    let thread_id = thread_id.ok_or_else(|| {
+        crate::contracts::AppError::validation("CAD source requires a design thread.")
+    })?;
+    let message_id = message_id.ok_or_else(|| {
+        crate::contracts::AppError::validation("CAD source requires an imported message.")
+    })?;
+    let projects_root = state.config.lock().unwrap().projects_root.clone();
+    let (document, cad_file) = {
+        let conn = state.db.lock().await;
+        let document =
+            ensure_project_source_document(&app, &conn, projects_root.as_deref(), &thread_id)?;
+        let cad_file = imported_cad_file_for_message(&conn, &document, Some(&message_id))?
+            .ok_or_else(|| {
+                crate::contracts::AppError::not_found(format!(
+                    "Imported CAD source for message '{}' was not found.",
+                    message_id
+                ))
+            })?;
+        (document, cad_file)
+    };
+    open_path_in_default_app(&cad_file).map_err(|err| {
+        crate::contracts::AppError::internal(format!(
+            "Failed to open imported CAD source '{}': {}",
+            cad_file.display(),
+            err
+        ))
+    })?;
+    Ok(ProjectEditorLink {
+        slug: document.slug,
+        folder: document.folder,
+        file: cad_file.to_string_lossy().to_string(),
+    })
 }

@@ -132,7 +132,10 @@ fn ecky_backend_guide_text(
     };
     let supported_ops = crate::ecky_language_surface::join_backticked(&surface.cad_ops);
     let model_clauses = crate::ecky_language_surface::join_backticked(surface.model_clauses);
+    let core_constants = crate::ecky_language_surface::join_backticked(surface.core_constants);
     let expression_forms = crate::ecky_language_surface::join_backticked(surface.expression_forms);
+    let component_placement_forms =
+        crate::ecky_language_surface::join_backticked(surface.component_placement_forms);
     let numeric_helpers = crate::ecky_language_surface::join_backticked(surface.numeric_helpers);
     let point_helpers = crate::ecky_language_surface::join_backticked(surface.point_list_helpers);
 
@@ -150,17 +153,19 @@ API MODE ONE-PROMPT WORKFLOW\n\
 - Return JSON only per the outer contract, with complete Ecky source in `macro_code`.\n\n\
 AUTHORING RULES\n\
 - Output finished renderable geometry unless user explicitly asks for a placeholder. {typed_hole_policy}\n\
-- Top-level model clauses: {model_clauses}. Use `params`, `part`, and `meta` directly under `model`.\n\
+- Direct model clauses: {model_clauses}. Put them directly under `model` or inside a supported model wrapper.\n\
 - Supported expression forms: {expression_forms}. Use `let*` when later bindings depend on earlier ones.
+\
+- Component placement forms: {component_placement_forms}. Author reusable bodies in local coordinates; mate them with `place-component` and named ports instead of deriving Euler angles.
 \
 - Never use `(define ...)` inside `(model ...)`. Steel evaluates it eagerly before params have values, producing a misleading TypeMismatch. Use `let*` inside `(part ...)` for computed values from params: `(part body (let* ((half (/ width 2))) (box half 10 10)))`. Top-level `(define (fn args) ...)` helper functions outside `(model ...)` are allowed for reusable pure functions.\n\
 - Use `map`, `range`, `repeat-union`, and `repeat-compound` inside geometry, not to generate top-level clauses.\n\
 - Static tuple destructuring is supported only for `zip` and `enumerate` static sources: `(map (lambda ((x y)) ...) (zip xs ys))`. Zip destructuring of a dynamic source rejects with a clear error.\n\
 - Supported CAD ops for this backend: {supported_ops}.\n\
-- Numeric helpers: {numeric_helpers}. Point/list helpers: {point_helpers}. Bounded literal counts/steps only. Seeded helpers are deterministic for a given seed.\n\
+- Core constants: {core_constants}. Numeric helpers: {numeric_helpers}. Point/list helpers: {point_helpers}. Bounded literal counts/steps only. Seeded helpers are deterministic for a given seed.\n\
 - Keywords are not callable nodes: write `(box 10 10 2 :align '(center center min))`, never `(align ...)`.\n\
 - Name fit-critical bindings before use: `wall`, `clearance`, `bore-r`, `top-z`. No anonymous offsets for fit-critical geometry.\n\
-- For generated Ecky models, write top-level `(verify ...)` clauses in the same `(model ...)` from the user's measurable requirements before trusting geometry; a red first render is expected repair input.\n\
+- For generated Ecky models, write direct `(verify ...)` clauses under the top-level `(model ...)` from the user's measurable requirements before trusting geometry; a red first render is expected repair input.\n\
 - Verify with typed/static errors and structural verification first, screenshots last.\n\
 {backend_note}{wall_patterns}\n\
 PARAMS\n\
@@ -170,19 +175,19 @@ PARAMS\n\
 - `(image key \"\" :label \"...\")`\n\n\
 VERIFY CLAUSES\n\
 - Purpose: make source carry machine-checkable intent. The model writes `(verify ...)`; app verification evaluates it later.\n\
-- Put `verify` directly under `model`, before or after `part` clauses. Never nest `verify` inside geometry, params, `build`, `let`, or components.\n\
+- Put model verification directly under `model`, before or after `part` clauses. Never nest it inside geometry, params, `build`, or `let`. A `define-component` may carry its own verification clauses before its single geometry body; they travel with each instance.\n\
 - Clause grammar: `(verify (tag stable-name optional.selector ...) (metric alias (namespace key optional.args ...)) (expect alias (operator literal)))`.\n\
 - Required section order: `tag`, then `metric`, then `expect`. Empty `(verify)` is invalid.\n\
 - `tag` carries authored labels or selectors for diagnostics; use stable names like `mesh_clean`, `lid_gap`, `preview_exists`.\n\
 - `metric` first item is a local alias; second item is a metric expression. `expect` alias must match the metric alias exactly.\n\
 - Metric namespaces: `manifest`, `stl`, `clearance`, `selector`, `relation`.\n\
-- Manifest metrics: `(manifest has-step)`, `(manifest has-preview-stl)`, `(manifest edge-target-count)`, `(manifest face-target-count)`, `(manifest export-format-count)`, `(manifest part-count)`.\n\
+- Manifest metrics: `(manifest has-step)`, `(manifest has-model-stl)`, `(manifest edge-target-count)`, `(manifest face-target-count)`, `(manifest export-format-count)`, `(manifest part-count)`.\n\
 - STL metrics: `(stl triangle-count)`, `(stl connected-component-count)`, `(stl non-manifold-edge-count)`, `(stl overhang-face-count)`.\n\
 - Clearance metric: `(clearance min-distance selector-a selector-b)`. Selectors may be part names such as `body` and `lid`, or stable target ids when known.\n\
 - Selector metrics: `(selector axis selector)`, `(selector extent-x selector)`, `(selector extent-y selector)`, `(selector extent-z selector)`, `(selector center-x selector)`, `(selector center-y selector)`, `(selector center-z selector)`. Axis returns text: `x`, `y`, or `z`; extents and centers are millimeters.\n\
 - Relation metrics: `(relation axis-angle selector-a selector-b)`, `(relation center-delta-x selector-a selector-b)`, `(relation center-delta-y selector-a selector-b)`, `(relation center-delta-z selector-a selector-b)`. Axis angle is unsigned degrees; center deltas are signed millimeters: selector-a center minus selector-b center.\n\
 - Operators: `=`, `!=`, `>`, `>=`, `<`, `<=`. Literals may be boolean, number, or text; do not use params or computed expressions in `expect` literals.\n\
-- Good default checks for generated `.ecky`: preview STL exists, part count is positive, STL triangle count is positive, non-manifold edge count is zero.\n\
+- Good default checks for generated `.ecky`: model STL exists, part count is positive, STL triangle count is positive, non-manifold edge count is zero.\n\
 - Use clearance verification when the request names a fit/gap/clearance. Use numeric literals matching the promised clearance.\n\
 - Use selector/relation verification when the request names orientation, fit axis, length, width, thickness, center offset, or perpendicular/parallel relation.\n\
 - Do not remove or weaken existing `(verify ...)` clauses during repair; change geometry or params until they pass.\n\
@@ -190,7 +195,7 @@ VERIFY CLAUSES\n\
 (model\n\
   (verify\n\
     (tag preview_exists)\n\
-    (metric check (manifest has-preview-stl))\n\
+    (metric check (manifest has-model-stl))\n\
     (expect check (= true)))\n\
   (verify\n\
     (tag mesh_clean)\n\
@@ -997,17 +1002,6 @@ pub async fn finalize_generation_attempt(
     let db = state.db.lock().await;
     let thread_id = db::get_message_thread_id(&db, &message_id)
         .map_err(|err| AppError::persistence(err.to_string()))?;
-    if status == FinalizeStatus::Success {
-        if let (Some(thread_id), Some(design)) = (thread_id.as_deref(), design.as_ref()) {
-            crate::thread_source_binding::pre_commit_guard(
-                &app,
-                &db,
-                configured_root.as_deref(),
-                thread_id,
-                &design.title,
-            )?;
-        }
-    }
     let content = match status {
         FinalizeStatus::Success => {
             if let Some(design) = &design {
@@ -1059,7 +1053,7 @@ pub async fn finalize_generation_attempt(
                 })
                 .unwrap_or_else(|| "Question Session".to_string());
             let _ = persist_thread_summary(&db, &thread_id, &title);
-            let committed_model_id = artifact_bundle
+            let appended_model_id = artifact_bundle
                 .as_ref()
                 .map(|bundle| bundle.model_id.clone())
                 .or_else(|| {
@@ -1067,7 +1061,7 @@ pub async fn finalize_generation_attempt(
                         .as_ref()
                         .map(|manifest| manifest.model_id.clone())
                 });
-            let committed_source = design
+            let appended_source = design
                 .as_ref()
                 .map(|design| (design.title.clone(), design.macro_code.clone()));
 
@@ -1086,8 +1080,8 @@ pub async fn finalize_generation_attempt(
                 }
                 write_last_snapshot(&app, Some(&snapshot));
             }
-            if let Some((design_title, macro_code)) = committed_source {
-                crate::thread_source_binding::refresh_on_commit(
+            if let Some((design_title, macro_code)) = appended_source {
+                crate::thread_source_binding::refresh_on_version_append(
                     &app,
                     &db,
                     configured_root.as_deref(),
@@ -1095,7 +1089,7 @@ pub async fn finalize_generation_attempt(
                     &design_title,
                     &macro_code,
                     &message_id,
-                    committed_model_id.as_deref(),
+                    appended_model_id.as_deref(),
                     Some(&message_id),
                 )?;
             }
@@ -1288,8 +1282,10 @@ mod tests {
             microwave: None,
             voice: crate::contracts::VoiceConfig::default(),
             mcp: McpConfig::default(),
+            fem_compute: crate::contracts::FemComputeConfig::default(),
             has_seen_onboarding: true,
             connection_type: None,
+            provider_models: crate::contracts::ProviderModels::default(),
             default_engine_kind: EngineKind::Freecad,
             default_source_language: SourceLanguage::LegacyPython,
             default_geometry_backend: GeometryBackend::Freecad,
@@ -1481,7 +1477,7 @@ mod tests {
         assert!(build123d.contains("Clause grammar"));
         assert!(build123d
             .contains("Metric namespaces: `manifest`, `stl`, `clearance`, `selector`, `relation`"));
-        assert!(build123d.contains("(manifest has-preview-stl)"));
+        assert!(build123d.contains("(manifest has-model-stl)"));
         assert!(build123d.contains("(manifest part-count)"));
         assert!(build123d.contains("(stl non-manifold-edge-count)"));
         assert!(build123d.contains("(stl triangle-count)"));
@@ -1496,7 +1492,7 @@ mod tests {
         assert!(build123d.contains("Axis returns text: `x`, `y`, or `z`"));
         assert!(build123d.contains("Axis angle is unsigned degrees"));
         assert!(build123d.contains("Operators: `=`, `!=`, `>`, `>=`, `<`, `<=`"));
-        assert!(build123d.contains("(metric check (manifest has-preview-stl))"));
+        assert!(build123d.contains("(metric check (manifest has-model-stl))"));
         assert!(build123d.contains("(expect check (= true))"));
         assert!(build123d.contains("(metric bad_edges (stl non-manifold-edge-count))"));
         assert!(build123d.contains("(expect bad_edges (= 0))"));
@@ -1532,7 +1528,9 @@ mod tests {
         assert!(ecky.contains("Do not promise STEP"));
         assert!(ecky.contains("ArtifactBundle.exportArtifacts"));
         assert!(ecky.contains("PROGRESSIVE ECKY EXAMPLES"));
-        assert!(ecky.contains("write top-level `(verify ...)` clauses"));
+        assert!(
+            ecky.contains("write direct `(verify ...)` clauses under the top-level `(model ...)`")
+        );
         assert!(ecky.contains("red first render is expected repair input"));
         assert!(ecky.contains("(sphere 10)"));
         assert!(ecky.contains("(extrude (rounded-rect 70 42 5) 4)"));

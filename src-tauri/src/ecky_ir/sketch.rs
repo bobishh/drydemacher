@@ -31,8 +31,8 @@ pub(super) struct ContourSet2d {
 
 #[derive(Clone, Debug)]
 pub(super) struct SketchContours {
-    outer_loops: Vec<LoopPoints>,
-    hole_loops: Vec<LoopPoints>,
+    pub(super) outer_loops: Vec<LoopPoints>,
+    pub(super) hole_loops: Vec<LoopPoints>,
 }
 
 pub(super) fn cubic_bezier(

@@ -2,8 +2,9 @@
 
 use super::config::VisionCapability;
 use super::{
-    AppError, AppResult, Asset, AutoAgent, Config, Engine, EngineKind, GeometryBackend, McpConfig,
-    McpMode, MicrowaveConfig, SourceLanguage, VoiceConfig,
+    AppError, AppResult, Asset, AutoAgent, Config, Engine, EngineKind, FemComputeConfig,
+    FemComputeQuality, GeometryBackend, McpConfig, McpMode, MicrowaveConfig, ProviderModels,
+    SourceLanguage, VoiceConfig,
 };
 use crate::steel_data::{validate_steel_data, SteelDataValue};
 use std::collections::{HashMap, HashSet};
@@ -120,6 +121,7 @@ pub fn encode_config(config: &Config) -> AppResult<SteelDataValue> {
             )]),
         ),
         ("mcp", encode_mcp(&config.mcp)?),
+        ("fem-compute", encode_fem_compute(&config.fem_compute)),
         (
             "has-seen-onboarding",
             SteelDataValue::Bool(config.has_seen_onboarding),
@@ -132,6 +134,19 @@ pub fn encode_config(config: &Config) -> AppResult<SteelDataValue> {
                 .map(connection)
                 .transpose()?
                 .unwrap_or(SteelDataValue::Nil),
+        ),
+        (
+            "provider-models",
+            map(vec![
+                (
+                    "codex",
+                    SteelDataValue::String(config.provider_models.codex.clone()),
+                ),
+                (
+                    "agy",
+                    SteelDataValue::String(config.provider_models.agy.clone()),
+                ),
+            ]),
         ),
         (
             "default-engine-kind",
@@ -272,6 +287,90 @@ fn encode_mcp(x: &McpConfig) -> AppResult<SteelDataValue> {
     ]))
 }
 
+fn encode_fem_compute(x: &FemComputeConfig) -> SteelDataValue {
+    map(vec![
+        (
+            "quality",
+            key(match x.quality {
+                FemComputeQuality::Draft => "draft",
+                FemComputeQuality::Balanced => "balanced",
+                FemComputeQuality::Fine => "fine",
+            }),
+        ),
+        (
+            "maximum-wall-time-minutes",
+            SteelDataValue::Integer(i64::from(x.maximum_wall_time_minutes)),
+        ),
+        (
+            "maximum-memory-mib",
+            SteelDataValue::Integer(i64::from(x.maximum_memory_mib)),
+        ),
+        (
+            "thread-count",
+            SteelDataValue::Integer(i64::from(x.thread_count)),
+        ),
+    ])
+}
+
+fn decode_fem_compute(value: &SteelDataValue) -> AppResult<FemComputeConfig> {
+    let fields = Fields::new(
+        value,
+        "fem-compute",
+        &[
+            "quality",
+            "maximum-wall-time-minutes",
+            "maximum-memory-mib",
+            "thread-count",
+        ],
+    )?;
+    let defaults = FemComputeConfig::default();
+    let quality = match fields.optional("quality") {
+        None => defaults.quality,
+        Some(value) => match keyword(value, "fem-compute.quality")? {
+            "draft" => FemComputeQuality::Draft,
+            "balanced" => FemComputeQuality::Balanced,
+            "fine" => FemComputeQuality::Fine,
+            _ => return Err(err("fem-compute.quality", "unsupported keyword")),
+        },
+    };
+    let maximum_wall_time_minutes = fields
+        .optional("maximum-wall-time-minutes")
+        .map(|value| unsigned(value, "fem-compute.maximum-wall-time-minutes", 24 * 60))
+        .transpose()?
+        .map(|value| value as u32)
+        .unwrap_or(defaults.maximum_wall_time_minutes);
+    let maximum_memory_mib = fields
+        .optional("maximum-memory-mib")
+        .map(|value| unsigned(value, "fem-compute.maximum-memory-mib", 1_048_576))
+        .transpose()?
+        .map(|value| value as u32)
+        .unwrap_or(defaults.maximum_memory_mib);
+    let thread_count = fields
+        .optional("thread-count")
+        .map(|value| unsigned(value, "fem-compute.thread-count", 256))
+        .transpose()?
+        .map(|value| value as u16)
+        .unwrap_or(defaults.thread_count);
+    if maximum_wall_time_minutes == 0 {
+        return Err(err(
+            "fem-compute.maximum-wall-time-minutes",
+            "expected positive integer",
+        ));
+    }
+    if maximum_memory_mib < 256 {
+        return Err(err(
+            "fem-compute.maximum-memory-mib",
+            "expected at least 256 MiB",
+        ));
+    }
+    Ok(FemComputeConfig {
+        quality,
+        maximum_wall_time_minutes,
+        maximum_memory_mib,
+        thread_count,
+    })
+}
+
 pub fn decode_config(value: &SteelDataValue) -> AppResult<Config> {
     validate_steel_data(value).map_err(|_| err("root", "invalid Steel data value"))?;
     let root = Fields::new(
@@ -289,8 +388,10 @@ pub fn decode_config(value: &SteelDataValue) -> AppResult<Config> {
             "microwave",
             "voice",
             "mcp",
+            "fem-compute",
             "has-seen-onboarding",
             "connection-type",
+            "provider-models",
             "default-engine-kind",
             "default-source-language",
             "default-geometry-backend",
@@ -341,6 +442,11 @@ pub fn decode_config(value: &SteelDataValue) -> AppResult<Config> {
             .map(decode_mcp)
             .transpose()?
             .unwrap_or_default(),
+        fem_compute: root
+            .optional("fem-compute")
+            .map(decode_fem_compute)
+            .transpose()?
+            .unwrap_or_default(),
         has_seen_onboarding: root
             .optional("has-seen-onboarding")
             .map(|v| boolean(v, "has-seen-onboarding"))
@@ -351,6 +457,25 @@ pub fn decode_config(value: &SteelDataValue) -> AppResult<Config> {
             .map(decode_connection)
             .transpose()?
             .flatten(),
+        provider_models: root
+            .optional("provider-models")
+            .map(|value| -> AppResult<ProviderModels> {
+                let fields = Fields::new(value, "provider-models", &["codex", "agy"])?;
+                Ok(ProviderModels {
+                    codex: fields
+                        .optional("codex")
+                        .map(|value| string(value, "provider-models.codex"))
+                        .transpose()?
+                        .unwrap_or_default(),
+                    agy: fields
+                        .optional("agy")
+                        .map(|value| string(value, "provider-models.agy"))
+                        .transpose()?
+                        .unwrap_or_default(),
+                })
+            })
+            .transpose()?
+            .unwrap_or_default(),
         default_engine_kind: root
             .optional("default-engine-kind")
             .map(decode_engine_kind)
@@ -688,17 +813,38 @@ fn connection(s: &str) -> AppResult<SteelDataValue> {
     match s {
         "api_key" => Ok(key("api-key")),
         "mcp" => Ok(key("mcp")),
-        _ => Err(err("connection-type", "unsupported value")),
+        _ => {
+            let provider = s
+                .strip_prefix("provider:")
+                .filter(|provider| {
+                    !provider.is_empty()
+                        && provider
+                            .chars()
+                            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+                })
+                .ok_or_else(|| err("connection-type", "unsupported value"))?;
+            Ok(key(&format!("provider/{provider}")))
+        }
     }
 }
 fn decode_connection(v: &SteelDataValue) -> AppResult<Option<String>> {
     if matches!(v, SteelDataValue::Nil) {
         return Ok(None);
     }
-    match keyword(v, "connection-type")? {
+    let value = keyword(v, "connection-type")?;
+    match value {
         "api-key" => Ok(Some("api_key".into())),
         "mcp" => Ok(Some("mcp".into())),
-        _ => Err(err("connection-type", "unsupported keyword")),
+        _ => value
+            .strip_prefix("provider/")
+            .filter(|provider| {
+                !provider.is_empty()
+                    && provider
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+            })
+            .map(|provider| Some(format!("provider:{provider}")))
+            .ok_or_else(|| err("connection-type", "unsupported keyword")),
     }
 }
 fn engine_kind(v: EngineKind) -> &'static str {
@@ -768,8 +914,10 @@ mod tests {
             microwave: None,
             voice: VoiceConfig::default(),
             mcp: McpConfig::default(),
+            fem_compute: FemComputeConfig::default(),
             has_seen_onboarding: false,
             connection_type: None,
+            provider_models: ProviderModels::default(),
             default_engine_kind: EngineKind::EckyIrV0,
             default_source_language: SourceLanguage::EckyIrV0,
             default_geometry_backend: GeometryBackend::Freecad,
@@ -782,6 +930,36 @@ mod tests {
     fn bdd_canonical_round_trip_and_redacts_secrets() {
         let mut config = minimum();
         config.has_seen_onboarding = true;
+        config.provider_models = ProviderModels {
+            codex: "gpt-5.6".into(),
+            agy: "claude-sonnet-4-6".into(),
+        };
+        let edn = encode_config(&config).unwrap();
+        let rendered = crate::steel_data::write_steel_data(&edn).unwrap();
+        assert!(rendered.contains(":provider-models"));
+        assert!(rendered.contains("gpt-5.6"));
+        assert_eq!(decode_config(&edn).unwrap(), config);
+    }
+    #[test]
+    fn bdd_fem_compute_policy_round_trips_without_internal_solve_budget() {
+        let mut config = minimum();
+        config.fem_compute = FemComputeConfig {
+            quality: FemComputeQuality::Fine,
+            maximum_wall_time_minutes: 45,
+            maximum_memory_mib: 12_288,
+            thread_count: 8,
+        };
+        let encoded = encode_config(&config).unwrap();
+        let rendered = crate::steel_data::write_steel_data(&encoded).unwrap();
+
+        assert!(rendered.contains(":fem-compute"));
+        assert!(!rendered.contains("solve-count"));
+        assert_eq!(decode_config(&encoded).unwrap(), config);
+    }
+    #[test]
+    fn provider_adapter_round_trips_as_namespaced_connection_keyword() {
+        let mut config = minimum();
+        config.connection_type = Some("provider:codex".into());
         let edn = encode_config(&config).unwrap();
         assert_eq!(decode_config(&edn).unwrap(), config);
     }

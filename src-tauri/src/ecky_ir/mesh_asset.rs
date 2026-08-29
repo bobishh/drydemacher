@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -71,6 +71,105 @@ pub struct IndexedMeshTopology {
     pub winding_mismatch_count: usize,
     pub component_count: usize,
     pub closed: bool,
+}
+
+/// Imported STL preparation policy. No legacy path changes without explicit
+/// bounds; no prep unless the caller passes targets.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexedMeshPreparationPolicy {
+    pub target_triangles: Option<usize>,
+    pub max_error_mm: f64,
+    pub preserve_boundaries: bool,
+    pub protected_vertices: BTreeSet<u32>,
+}
+
+impl IndexedMeshPreparationPolicy {
+    pub fn new(
+        target_triangles: Option<usize>,
+        max_error_mm: f64,
+        preserve_boundaries: bool,
+    ) -> AppResult<Self> {
+        if let Some(target_triangles) = target_triangles {
+            if target_triangles < 4 {
+                return Err(AppError::validation(
+                    "Imported mesh preparation targetTriangles must be at least four.",
+                ));
+            }
+        }
+        if !max_error_mm.is_finite() || max_error_mm <= 0.0 {
+            return Err(AppError::validation(
+                "Imported mesh preparation maxErrorMm must be finite and greater than zero.",
+            ));
+        }
+        Ok(Self {
+            target_triangles,
+            max_error_mm,
+            preserve_boundaries,
+            protected_vertices: BTreeSet::new(),
+        })
+    }
+
+    pub fn with_protected_vertices(
+        mut self,
+        protected_vertices: impl IntoIterator<Item = u32>,
+    ) -> Self {
+        self.protected_vertices = protected_vertices.into_iter().collect();
+        self
+    }
+}
+
+/// Typed import-preparation warning. One path: target not reached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexedMeshPreparationWarning {
+    TargetNotReached {
+        requested_triangle_count: usize,
+        achieved_triangle_count: usize,
+        hard_error_block_count: usize,
+        topology_block_count: usize,
+    },
+}
+
+/// Deterministic provenance for an import-preparation pass.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexedMeshPreparationProvenance {
+    pub raw_source_digest: String,
+    pub raw_source_byte_count: usize,
+    pub raw_triangle_count: usize,
+    pub duplicate_triangle_count_removed: usize,
+    pub prepared_vertex_count: usize,
+    pub prepared_triangle_count: usize,
+    pub prepared_content_digest: String,
+    pub max_error_mm: f64,
+    pub rms_error_mm: f64,
+    pub hard_error_block_count: usize,
+    pub topology_block_count: usize,
+    pub target_triangle_count: Option<usize>,
+    pub preserve_boundaries: bool,
+    pub protected_vertex_count: usize,
+    pub algorithm_version: String,
+}
+
+/// Imported STL preparation result. Carries the canonical indexed mesh and the
+/// typed provenance/warning payload. No derivative STL is written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexedMeshPreparationResult {
+    asset: IndexedMeshAsset,
+    warnings: Vec<IndexedMeshPreparationWarning>,
+    provenance: IndexedMeshPreparationProvenance,
+}
+
+impl IndexedMeshPreparationResult {
+    pub fn asset(&self) -> &IndexedMeshAsset {
+        &self.asset
+    }
+
+    pub fn warnings(&self) -> &[IndexedMeshPreparationWarning] {
+        &self.warnings
+    }
+
+    pub fn provenance(&self) -> &IndexedMeshPreparationProvenance {
+        &self.provenance
+    }
 }
 
 /// Serialized mirror of [`MeshAssetSource`] stored in the indexed-mesh
@@ -191,6 +290,10 @@ impl IndexedMeshAsset {
         let bytes = std::fs::read(path).map_err(|err| {
             AppError::validation(format!("Failed to read STL '{}': {err}", path.display()))
         })?;
+        Self::from_stl_bytes(source, &bytes, path)
+    }
+
+    fn from_stl_bytes(source: MeshAssetSource, bytes: &[u8], path: &Path) -> AppResult<Self> {
         let raw_triangles = import_decode::decode_stl_triangles(&bytes, path)?;
         if raw_triangles
             .iter()
@@ -212,6 +315,69 @@ impl IndexedMeshAsset {
             )));
         }
         Self::new(source, vertices, triangles)
+    }
+
+    pub(crate) fn prepare_imported_file(
+        source: MeshAssetSource,
+        path: &Path,
+        policy: &IndexedMeshPreparationPolicy,
+    ) -> AppResult<IndexedMeshPreparationResult> {
+        let bytes = std::fs::read(path).map_err(|err| {
+            AppError::validation(format!("Failed to read STL '{}': {err}", path.display()))
+        })?;
+        let raw_source_digest = digest_bytes(&bytes);
+        let raw_triangles = import_decode::decode_stl_triangles(&bytes, path)?;
+        let raw_triangle_count = raw_triangles.len();
+        if raw_triangles
+            .iter()
+            .flatten()
+            .flatten()
+            .any(|coordinate| !coordinate.is_finite())
+        {
+            return Err(AppError::validation(format!(
+                "STL '{}' contains a non-finite vertex coordinate.",
+                path.display()
+            )));
+        }
+        let (vertices, triangles) =
+            import_decode::index_stl_triangles_preserving_authored_coordinates(&raw_triangles)?;
+        let (triangles, duplicate_triangle_count_removed) = deduplicate_triangle_indices(triangles);
+        if triangles.is_empty() {
+            return Err(AppError::validation(format!(
+                "STL '{}' contains no triangles.",
+                path.display()
+            )));
+        }
+        let mesh = Self::new(source, vertices, triangles)?;
+        let (
+            asset,
+            warnings,
+            max_error_mm,
+            rms_error_mm,
+            hard_error_block_count,
+            topology_block_count,
+        ) = prepare_indexed_mesh(mesh, policy)?;
+        Ok(IndexedMeshPreparationResult {
+            provenance: IndexedMeshPreparationProvenance {
+                raw_source_digest,
+                raw_source_byte_count: bytes.len(),
+                raw_triangle_count,
+                duplicate_triangle_count_removed,
+                prepared_vertex_count: asset.vertices().len(),
+                prepared_triangle_count: asset.triangles().len(),
+                prepared_content_digest: asset.content_digest().to_string(),
+                max_error_mm,
+                rms_error_mm,
+                hard_error_block_count,
+                topology_block_count,
+                target_triangle_count: policy.target_triangles,
+                preserve_boundaries: policy.preserve_boundaries,
+                protected_vertex_count: policy.protected_vertices.len(),
+                algorithm_version: preparation_algorithm_version(policy),
+            },
+            asset,
+            warnings,
+        })
     }
 
     /// Decode a standalone imported 3MF core asset into the canonical indexed
@@ -502,6 +668,267 @@ fn compact_indexed_geometry(
         }
     }
     (compact_vertices, triangles)
+}
+
+fn deduplicate_triangle_indices(triangles: Vec<[u32; 3]>) -> (Vec<[u32; 3]>, usize) {
+    let original_len = triangles.len();
+    let mut retained = Vec::<Option<[u32; 3]>>::new();
+    let mut seen = BTreeMap::<[u32; 3], (usize, bool)>::new();
+    for triangle in triangles {
+        let mut canonical = triangle;
+        canonical.sort_unstable();
+        let orientation = triangle_orientation_matches_sorted(triangle, canonical);
+        if let Some((retained_index, retained_orientation)) = seen.get(&canonical).copied() {
+            if orientation != retained_orientation {
+                retained[retained_index] = None;
+                seen.remove(&canonical);
+            }
+            continue;
+        }
+        let retained_index = retained.len();
+        retained.push(Some(triangle));
+        seen.insert(canonical, (retained_index, orientation));
+    }
+    let retained = retained.into_iter().flatten().collect::<Vec<_>>();
+    let removed = original_len - retained.len();
+    (retained, removed)
+}
+
+fn triangle_orientation_matches_sorted(triangle: [u32; 3], sorted: [u32; 3]) -> bool {
+    matches!(
+        triangle,
+        [a, b, c]
+            if [a, b, c] == sorted
+                || [b, c, a] == sorted
+                || [c, a, b] == sorted
+    )
+}
+
+fn prepare_indexed_mesh(
+    mesh: IndexedMeshAsset,
+    policy: &IndexedMeshPreparationPolicy,
+) -> AppResult<(
+    IndexedMeshAsset,
+    Vec<IndexedMeshPreparationWarning>,
+    f64,
+    f64,
+    usize,
+    usize,
+)> {
+    let original_topology = mesh.topology().clone();
+    let original_vertices = mesh.vertices().to_vec();
+    let original_triangles = mesh.triangles().to_vec();
+    let target_triangles = policy.target_triangles.unwrap_or(mesh.triangles().len());
+    if target_triangles >= original_triangles.len() {
+        return Ok((mesh, Vec::new(), 0.0, 0.0, 0, 0));
+    }
+
+    let packed_positions = original_vertices
+        .iter()
+        .flat_map(|vertex| vertex.iter().map(|value| *value as f32))
+        .flat_map(f32::to_ne_bytes)
+        .collect::<Vec<_>>();
+    let vertex_adapter =
+        meshopt::VertexDataAdapter::new(&packed_positions, std::mem::size_of::<f32>() * 3, 0)
+            .map_err(|err| {
+                AppError::validation(format!(
+                    "Imported mesh preparation could not adapt indexed positions: {err}"
+                ))
+            })?;
+    for &index in &policy.protected_vertices {
+        if index as usize >= original_vertices.len() {
+            return Err(AppError::validation(format!(
+                "Imported mesh preparation protected vertex {index} is out of bounds for {} vertices.",
+                original_vertices.len()
+            )));
+        }
+    }
+    let mut vertex_locks = vec![false; original_vertices.len()];
+    for &index in &policy.protected_vertices {
+        vertex_locks[index as usize] = true;
+    }
+    let original_indices = original_triangles
+        .iter()
+        .flat_map(|triangle| triangle.iter().copied())
+        .collect::<Vec<_>>();
+    let mut options = meshopt::SimplifyOptions::ErrorAbsolute;
+    if policy.preserve_boundaries {
+        options |= meshopt::SimplifyOptions::LockBorder;
+    }
+    let mut certified_error_mm = 0.0_f32;
+    let prepared_indices = if policy.protected_vertices.is_empty() {
+        meshopt::simplify(
+            &original_indices,
+            &vertex_adapter,
+            target_triangles.saturating_mul(3),
+            policy.max_error_mm as f32,
+            options,
+            Some(&mut certified_error_mm),
+        )
+    } else {
+        meshopt::simplify_with_locks(
+            &original_indices,
+            &vertex_adapter,
+            &vertex_locks,
+            target_triangles.saturating_mul(3),
+            policy.max_error_mm as f32,
+            options,
+            Some(&mut certified_error_mm),
+        )
+    };
+    let prepared_triangles = prepared_indices
+        .chunks_exact(3)
+        .map(|triangle| [triangle[0], triangle[1], triangle[2]])
+        .collect::<Vec<_>>();
+    let (prepared_triangles, _) = deduplicate_triangle_indices(prepared_triangles);
+    let (prepared_vertices, prepared_triangles) =
+        compact_indexed_geometry(original_vertices.clone(), prepared_triangles);
+    let candidate =
+        IndexedMeshAsset::new(mesh.source().clone(), prepared_vertices, prepared_triangles)?;
+    let topology_matches = candidate.topology().boundary_edge_count
+        == original_topology.boundary_edge_count
+        && candidate.topology().non_manifold_edge_count
+            == original_topology.non_manifold_edge_count
+        && candidate.topology().winding_mismatch_count == original_topology.winding_mismatch_count
+        && candidate.topology().component_count == original_topology.component_count
+        && candidate.topology().closed == original_topology.closed;
+    let candidate_max_error_mm = certified_error_mm as f64;
+    let candidate_rms_error_mm = mesh_rms_deviation_sample(
+        &original_vertices,
+        &original_triangles,
+        candidate.vertices(),
+        candidate.triangles(),
+    )?;
+    let error_matches =
+        certified_error_mm.is_finite() && candidate_max_error_mm <= policy.max_error_mm;
+    let (current, max_error_mm, rms_error_mm, hard_error_block_count, topology_block_count) =
+        if topology_matches && error_matches {
+            (
+                candidate,
+                candidate_max_error_mm,
+                candidate_rms_error_mm,
+                0,
+                0,
+            )
+        } else {
+            (
+                mesh,
+                0.0,
+                0.0,
+                usize::from(!error_matches),
+                usize::from(!topology_matches),
+            )
+        };
+
+    let mut warnings = Vec::new();
+    if current.triangles().len() > target_triangles {
+        warnings.push(IndexedMeshPreparationWarning::TargetNotReached {
+            requested_triangle_count: target_triangles,
+            achieved_triangle_count: current.triangles().len(),
+            hard_error_block_count,
+            topology_block_count,
+        });
+    }
+    Ok((
+        current,
+        warnings,
+        max_error_mm,
+        rms_error_mm,
+        hard_error_block_count,
+        topology_block_count,
+    ))
+}
+
+fn preparation_algorithm_version(policy: &IndexedMeshPreparationPolicy) -> String {
+    format!(
+        "meshopt-0.6.2:error-absolute:{}",
+        if policy.preserve_boundaries {
+            "lock-border"
+        } else {
+            "free-border"
+        }
+    )
+}
+
+fn mesh_rms_deviation_sample(
+    reference_vertices: &[[f64; 3]],
+    reference_triangles: &[[u32; 3]],
+    candidate_vertices: &[[f64; 3]],
+    candidate_triangles: &[[u32; 3]],
+) -> AppResult<f64> {
+    use csgrs::float_types::parry3d::math::Point;
+    use csgrs::float_types::parry3d::shape::{TriMesh, TriMeshFlags};
+
+    let reference = TriMesh::with_flags(
+        reference_vertices
+            .iter()
+            .map(|vertex| Point::new(vertex[0], vertex[1], vertex[2]))
+            .collect(),
+        reference_triangles.to_vec(),
+        TriMeshFlags::ORIENTED | TriMeshFlags::CONNECTED_COMPONENTS,
+    )
+    .map_err(|err| {
+        AppError::validation(format!(
+            "Imported mesh preparation could not project reference mesh: {err:?}"
+        ))
+    })?;
+    let candidate = TriMesh::with_flags(
+        candidate_vertices
+            .iter()
+            .map(|vertex| Point::new(vertex[0], vertex[1], vertex[2]))
+            .collect(),
+        candidate_triangles.to_vec(),
+        TriMeshFlags::ORIENTED | TriMeshFlags::CONNECTED_COMPONENTS,
+    )
+    .map_err(|err| {
+        AppError::validation(format!(
+            "Imported mesh preparation could not project candidate mesh: {err:?}"
+        ))
+    })?;
+    const SAMPLE_LIMIT_PER_DIRECTION: usize = 4096;
+    let reference_step = reference_vertices
+        .len()
+        .div_ceil(SAMPLE_LIMIT_PER_DIRECTION)
+        .max(1);
+    let candidate_step = candidate_vertices
+        .len()
+        .div_ceil(SAMPLE_LIMIT_PER_DIRECTION)
+        .max(1);
+    let mut residuals = Vec::with_capacity(SAMPLE_LIMIT_PER_DIRECTION * 2);
+    residuals.extend(
+        reference_vertices
+            .iter()
+            .step_by(reference_step)
+            .map(|point| point_mesh_distance(&candidate, *point)),
+    );
+    residuals.extend(
+        candidate_vertices
+            .iter()
+            .step_by(candidate_step)
+            .map(|point| point_mesh_distance(&reference, *point)),
+    );
+    if residuals.is_empty() {
+        return Ok(0.0);
+    }
+    let rms_error_mm =
+        (residuals.iter().map(|value| value * value).sum::<f64>() / residuals.len() as f64).sqrt();
+    Ok(rms_error_mm)
+}
+
+fn point_mesh_distance(mesh: &csgrs::float_types::parry3d::shape::TriMesh, point: [f64; 3]) -> f64 {
+    use csgrs::float_types::parry3d::math::Point;
+    use csgrs::float_types::parry3d::query::PointQuery;
+    let point = Point::new(point[0], point[1], point[2]);
+    let projection = mesh.project_local_point(&point, false);
+    (projection.point - point).norm()
+}
+
+fn digest_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"ecky-imported-stl-bytes-v1\0");
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 // --- Standalone STL/3MF indexed decoders (task 6) ----------------------------
@@ -1442,6 +1869,42 @@ mod tests {
             .collect()
     }
 
+    fn golden_cube_triangles() -> Vec<[[f64; 3]; 3]> {
+        let vertices = [
+            [-1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0],
+            [1.0, 1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+            [1.0, -1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [-1.0, 1.0, 1.0],
+        ];
+        [
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [3, 7, 6],
+            [3, 6, 2],
+            [0, 4, 7],
+            [0, 7, 3],
+            [1, 2, 6],
+            [1, 6, 5],
+        ]
+        .into_iter()
+        .map(|triangle| {
+            [
+                vertices[triangle[0]],
+                vertices[triangle[1]],
+                vertices[triangle[2]],
+            ]
+        })
+        .collect()
+    }
+
     fn mesh_temp_dir(label: &str) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!(
             "ecky-mesh-decoder-{label}-{}",
@@ -1679,6 +2142,111 @@ mod tests {
         restored
             .validate_for_boolean()
             .expect("still Boolean-ready");
+    }
+
+    #[test]
+    fn indexed_mesh_import_preparation_reports_target_not_reached_with_provenance() {
+        let root = mesh_temp_dir("stl-preparation-target-blocked");
+        let path = root.join("cube.stl");
+        write_binary_stl(&path, &golden_cube_triangles());
+        let raw_before = std::fs::read(&path).expect("raw source before preparation");
+
+        let policy = IndexedMeshPreparationPolicy::new(Some(4), 1.0e-6, true).expect("prep policy");
+        let result =
+            IndexedMeshAsset::prepare_imported_file(MeshAssetSource::Imported, &path, &policy)
+                .expect("prep result");
+
+        assert!(result.asset().triangles().len() > 4);
+        assert!(matches!(
+            result.warnings(),
+            [IndexedMeshPreparationWarning::TargetNotReached {
+                requested_triangle_count: 4,
+                ..
+            }]
+        ));
+        assert_eq!(result.provenance().raw_triangle_count, 12);
+        assert_eq!(
+            result.provenance().prepared_triangle_count,
+            result.asset().triangles().len()
+        );
+        assert!(result.provenance().raw_source_digest.starts_with("sha256:"));
+        assert!(result
+            .provenance()
+            .prepared_content_digest
+            .starts_with("sha256:"));
+        assert_eq!(
+            result.provenance().algorithm_version,
+            "meshopt-0.6.2:error-absolute:lock-border"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("raw source after preparation"),
+            raw_before
+        );
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn indexed_mesh_import_preparation_is_deterministic_and_error_bounded() {
+        let root = mesh_temp_dir("stl-preparation-deterministic");
+        let path = root.join("cube.stl");
+        write_binary_stl(&path, &golden_cube_triangles());
+        let policy = IndexedMeshPreparationPolicy::new(Some(4), 4.0, true).expect("prep policy");
+
+        let first =
+            IndexedMeshAsset::prepare_imported_file(MeshAssetSource::Imported, &path, &policy)
+                .expect("first preparation");
+        let second =
+            IndexedMeshAsset::prepare_imported_file(MeshAssetSource::Imported, &path, &policy)
+                .expect("second preparation");
+
+        assert_eq!(
+            first.asset().content_digest(),
+            second.asset().content_digest()
+        );
+        assert_eq!(first.asset().triangles(), second.asset().triangles());
+        assert!(first.provenance().max_error_mm <= policy.max_error_mm);
+        assert_eq!(first.asset().topology().component_count, 1);
+        assert!(first.asset().topology().closed);
+        assert_eq!(first.asset().topology().non_manifold_edge_count, 0);
+        assert_eq!(first.asset().topology().winding_mismatch_count, 0);
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn preparation_canonicalizes_exact_duplicate_stl_faces_without_repairing_legacy_import() {
+        let root = mesh_temp_dir("stl-preparation-duplicate-face");
+        let path = root.join("cube-with-duplicate.stl");
+        let mut triangles = golden_cube_triangles();
+        triangles.push(triangles[0]);
+        write_binary_stl(&path, &triangles);
+
+        let legacy = IndexedMeshAsset::from_stl(MeshAssetSource::Imported, &path)
+            .expect_err("legacy exact import must retain strict duplicate validation");
+        assert!(legacy.to_string().contains("duplicates triangle"));
+
+        let policy = IndexedMeshPreparationPolicy::new(Some(12), 0.05, true).unwrap();
+        let prepared =
+            IndexedMeshAsset::prepare_imported_file(MeshAssetSource::Imported, &path, &policy)
+                .expect("prepared import may remove only exact duplicate faces");
+
+        assert_eq!(prepared.asset().triangles().len(), 12);
+        assert_eq!(prepared.provenance().raw_triangle_count, 13);
+        assert_eq!(prepared.provenance().duplicate_triangle_count_removed, 1);
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn duplicate_face_canonicalization_keeps_same_winding_and_cancels_opposites() {
+        let (same_winding, removed) = deduplicate_triangle_indices(vec![[0, 1, 2], [1, 2, 0]]);
+        assert_eq!(same_winding, vec![[0, 1, 2]]);
+        assert_eq!(removed, 1);
+
+        let (opposite_winding, removed) = deduplicate_triangle_indices(vec![[0, 1, 2], [0, 2, 1]]);
+        assert!(opposite_winding.is_empty());
+        assert_eq!(removed, 2);
     }
 
     #[test]

@@ -94,8 +94,8 @@ pub async fn handle_target_detail_get(
                     if let Some(mp) = &b.macro_path {
                         p.insert(0, mp.clone());
                     }
-                    if !b.preview_stl_path.is_empty() {
-                        p.push(b.preview_stl_path.clone());
+                    if !b.model_stl_path.is_empty() {
+                        p.push(b.model_stl_path.clone());
                     }
                     p
                 });

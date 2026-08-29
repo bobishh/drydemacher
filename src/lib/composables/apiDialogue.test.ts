@@ -5,6 +5,7 @@ import {
   buildOptimisticQueuedDialogueMessage,
   deriveOptimisticDialogueMessages,
   hasLiveApiEngineConnection,
+  mergeOptimisticCodexDialogueMessages,
   mergeOptimisticQueuedDialogueMessages,
 } from './apiDialogue';
 import type { Message, Request } from '../types/domain';
@@ -142,6 +143,55 @@ test('mergeOptimisticQueuedDialogueMessages drops MCP optimistic message after p
   );
 
   assert.deepEqual(messages, [persisted]);
+});
+
+test('mergeOptimisticCodexDialogueMessages keeps queued provider prompts out of durable timeline', () => {
+  const version = message({
+    id: 'version-1',
+    role: 'assistant',
+    content: 'Housing V1 generated.',
+    status: 'success',
+  });
+  const optimistic = buildOptimisticQueuedDialogueMessage({
+    id: 'codex-local-1',
+    prompt: 'Check dovetail.',
+    attachments: [],
+    timestampMs: 1_710_000_000_000,
+  });
+
+  const merged = mergeOptimisticCodexDialogueMessages(
+    [version],
+    [],
+    [{ threadId: 'thread-1', message: optimistic }],
+    'thread-1',
+  );
+
+  assert.deepEqual(merged.map((entry) => entry.id), ['version-1']);
+});
+
+test('mergeOptimisticCodexDialogueMessages replaces local queued copy with accepted provider user item', () => {
+  const optimistic = buildOptimisticQueuedDialogueMessage({
+    id: 'codex-local-1',
+    prompt: 'Check dovetail.',
+    attachments: [],
+    timestampMs: 1_710_000_000_000,
+  });
+  const accepted = message({
+    id: 'codex-user-1',
+    role: 'user',
+    content: 'Check dovetail.',
+    status: 'success',
+    timestamp: 1_710_000_000,
+  });
+
+  const merged = mergeOptimisticCodexDialogueMessages(
+    [],
+    [accepted],
+    [{ threadId: 'thread-1', message: optimistic }],
+    'thread-1',
+  );
+
+  assert.deepEqual(merged, [accepted]);
 });
 
 test('hasLiveApiEngineConnection requires api mode plus selected engine with key', () => {

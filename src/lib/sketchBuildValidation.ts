@@ -11,7 +11,7 @@ export type SketchBuildValidationDraft = {
 } | null;
 
 export type SketchBuildValidationArtifactBundle = {
-  previewStlPath?: string | null;
+  modelStlPath?: string | null;
   previewGlbPath?: string | null;
   viewerAssets?: unknown[] | null;
 } | null;
@@ -126,7 +126,7 @@ function previewArtifactRow(
     };
   }
 
-  const previewPath = artifactBundle?.previewStlPath ?? artifactBundle?.previewGlbPath ?? '';
+  const previewPath = artifactBundle?.modelStlPath ?? artifactBundle?.previewGlbPath ?? '';
   if (previewPath.length === 0) {
     return {
       id: 'previewArtifact',

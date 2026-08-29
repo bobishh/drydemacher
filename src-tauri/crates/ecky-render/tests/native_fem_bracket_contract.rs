@@ -142,6 +142,44 @@ fn parameterized_bracket_study_compiles_as_non_geometry_metadata() {
 }
 
 #[test]
+fn topology_controls_retain_typed_model_expressions() {
+    let source = r#"
+      (model
+        (params
+          (number target-volume 0.35 :min 0.1 :max 0.8 :step 0.01)
+          (number filter-radius 3mm :min 0.5mm :max 10mm :step 0.5mm :unit length))
+        (part body (box 10 10 10))
+        (analysis topology
+          (linear-static :part body)
+          (topology-controls
+            :volume-fraction target-volume
+            :penalty 3
+            :minimum-density 0.001
+            :filter-radius filter-radius
+            :move-limit 0.2
+            :convergence-tolerance 0.01)))
+    "#;
+
+    let program = compile_to_core_program(source).expect("compile topology controls");
+    assert!(program.analyses[0].clauses.iter().any(|clause| matches!(
+        &clause.kind,
+        ecky_render::core_ir::CoreAnalysisClauseKind::TopologyControls {
+            volume_fraction,
+            penalty,
+            minimum_density,
+            filter_radius,
+            move_limit,
+            convergence_tolerance,
+        } if volume_fraction.parameter_key() == Some("target-volume")
+            && penalty.literal_value("") == Some(3.0)
+            && minimum_density.literal_value("") == Some(0.001)
+            && filter_radius.parameter_key() == Some("filter-radius")
+            && move_limit.literal_value("") == Some(0.2)
+            && convergence_tolerance.literal_value("") == Some(0.01)
+    )));
+}
+
+#[test]
 fn analysis_stays_out_of_geometry_expressions() {
     let source = r#"
         (model

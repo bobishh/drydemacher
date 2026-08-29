@@ -152,6 +152,103 @@ impl Default for McpConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum FemComputeQuality {
+    Draft,
+    #[default]
+    Balanced,
+    Fine,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FemComputeConfig {
+    #[serde(default)]
+    pub quality: FemComputeQuality,
+    #[serde(default = "default_fem_wall_time_minutes")]
+    pub maximum_wall_time_minutes: u32,
+    #[serde(default = "default_fem_memory_mib")]
+    pub maximum_memory_mib: u32,
+    /// Zero selects all available performance cores at runtime.
+    #[serde(default)]
+    pub thread_count: u16,
+}
+
+impl Default for FemComputeConfig {
+    fn default() -> Self {
+        Self {
+            quality: FemComputeQuality::Balanced,
+            maximum_wall_time_minutes: default_fem_wall_time_minutes(),
+            maximum_memory_mib: default_fem_memory_mib(),
+            thread_count: 0,
+        }
+    }
+}
+
+impl FemComputeConfig {
+    pub fn topology_iteration_limit(&self) -> u64 {
+        match self.quality {
+            FemComputeQuality::Draft => 60,
+            FemComputeQuality::Balanced => 120,
+            FemComputeQuality::Fine => 240,
+        }
+    }
+
+    pub fn maximum_wall_time_ms(&self) -> u64 {
+        u64::from(self.maximum_wall_time_minutes).saturating_mul(60_000)
+    }
+
+    pub fn maximum_working_memory_bytes(&self) -> u64 {
+        u64::from(self.maximum_memory_mib).saturating_mul(1024 * 1024)
+    }
+
+    pub fn maximum_fem_elements(&self) -> u64 {
+        match self.quality {
+            FemComputeQuality::Draft => 250_000,
+            FemComputeQuality::Balanced => 500_000,
+            FemComputeQuality::Fine => 1_000_000,
+        }
+    }
+
+    pub fn maximum_fem_nodes(&self) -> u64 {
+        self.maximum_fem_elements()
+    }
+
+    pub fn maximum_fem_dofs(&self) -> u64 {
+        self.maximum_fem_nodes().saturating_mul(3)
+    }
+
+    pub fn maximum_fem_sparse_nonzeros(&self) -> u64 {
+        self.maximum_fem_dofs().saturating_mul(64)
+    }
+
+    pub fn maximum_fem_result_bytes(&self) -> u64 {
+        match self.quality {
+            FemComputeQuality::Draft => 128 * 1024 * 1024,
+            FemComputeQuality::Balanced => 256 * 1024 * 1024,
+            FemComputeQuality::Fine => 512 * 1024 * 1024,
+        }
+    }
+}
+
+fn default_fem_wall_time_minutes() -> u32 {
+    30
+}
+
+fn default_fem_memory_mib() -> u32 {
+    8_192
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderModels {
+    #[serde(default)]
+    pub codex: String,
+    #[serde(default)]
+    pub agy: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -173,9 +270,13 @@ pub struct Config {
     #[serde(default)]
     pub mcp: McpConfig,
     #[serde(default)]
+    pub fem_compute: FemComputeConfig,
+    #[serde(default)]
     pub has_seen_onboarding: bool,
     #[serde(default)]
     pub connection_type: Option<String>,
+    #[serde(default)]
+    pub provider_models: ProviderModels,
     #[serde(default = "default_engine_kind")]
     pub default_engine_kind: EngineKind,
     #[serde(default = "default_source_language")]
@@ -200,6 +301,8 @@ pub struct FreecadLibrarySearchRequest {
     pub roots: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    #[serde(default)]
+    pub offset: u32,
     #[serde(default)]
     pub include_architecture: bool,
 }

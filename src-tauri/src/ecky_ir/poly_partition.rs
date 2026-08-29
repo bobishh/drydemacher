@@ -94,6 +94,37 @@ pub fn analyze_program(program: &CoreProgram) -> Vec<PartPartition> {
         .collect()
 }
 
+/// True when one OCCT render must include geometry produced by the mesh
+/// renderer. Hybrid parts always need the bridge. Separate PureMesh and
+/// PureOcct parts also need it so the whole program can finish in OCCT.
+pub fn requires_poly_brep_bridge(partitions: &[PartPartition]) -> bool {
+    let has_hybrid = partitions.iter().any(PartPartition::is_hybrid);
+    let has_pure_mesh = partitions
+        .iter()
+        .any(|partition| partition.strategy == PartRenderStrategy::PureMesh);
+    let has_non_mesh = partitions
+        .iter()
+        .any(|partition| partition.strategy != PartRenderStrategy::PureMesh);
+    has_hybrid || (has_pure_mesh && has_non_mesh)
+}
+
+/// Mesh-renderer outputs imported by the OCCT phase for one part.
+pub fn mesh_bridge_output_node_ids(
+    program: &CoreProgram,
+    part_index: usize,
+    partition: &PartPartition,
+) -> Vec<NodeId> {
+    match partition.strategy {
+        PartRenderStrategy::PureOcct => Vec::new(),
+        PartRenderStrategy::PureMesh => program
+            .parts
+            .get(part_index)
+            .map(|part| vec![part.root.id])
+            .unwrap_or_default(),
+        PartRenderStrategy::Hybrid => partition.mesh_output_node_ids.clone(),
+    }
+}
+
 /// Classify a single part by walking its root node tree.
 pub fn analyze_part(root: &CoreNode) -> PartPartition {
     let analysis = analyze_node(root);
@@ -323,7 +354,7 @@ fn apply_op_post_boundary(
         return;
     };
 
-    let is_mesh_only = operation_is_mesh_only(op);
+    let is_mesh_only = operation_is_mesh_only(op) || node_is_raster_extrude(node);
     let is_brep_required = operation_requires_brep(op);
 
     if is_mesh_only {
@@ -337,6 +368,20 @@ fn apply_op_post_boundary(
     if is_brep_required && combined.post_boundary {
         combined.has_post_boundary_brep_op = true;
     }
+}
+
+fn node_is_raster_extrude(node: &CoreNode) -> bool {
+    matches!(
+        &node.kind,
+        CoreNodeKind::Call {
+            op: CoreOperation::Surface(CoreSurfaceOp::Extrude),
+            args,
+            keywords,
+        } if args.first().is_some_and(|arg| arg.value_kind == CoreValueKind::Text)
+            || keywords.iter().any(|keyword| {
+                matches!(keyword.name.as_str(), "width" | "depth" | "threshold" | "foreground")
+            })
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -449,7 +494,7 @@ fn mesh_phase_flow(
             extend_mesh_phase_node(
                 node,
                 merge_mesh_phase_flows(children),
-                operation_is_mesh_only(op),
+                operation_is_mesh_only(op) || node_is_raster_extrude(node),
                 operation_stops_mesh_phase(op),
             )
         }
@@ -812,8 +857,10 @@ pub fn clone_program_for_mesh_output(
 ) -> Option<CoreProgram> {
     let mut clone = program.clone();
     let mut part = clone.parts.get(part_index)?.clone();
-    let output_ids = std::collections::HashSet::from([output_node_id]);
-    part.root = slice_mesh_phase_root(&part.root, &output_ids)?;
+    if part.root.id != output_node_id {
+        let output_ids = std::collections::HashSet::from([output_node_id]);
+        part.root = slice_mesh_phase_root(&part.root, &output_ids)?;
+    }
     clone.parts = vec![part];
     Some(clone)
 }
@@ -1161,12 +1208,9 @@ fn slice_mesh_phase_root(
     }
 }
 
-/// Clone a program for the **OCCT phase**: for each Hybrid part, replace every
-/// boundary node with `solidify(import-stl(mesh_stl_path))`. The post-boundary
-/// boolean ops (difference, chamfer, etc.) stay in place and now operate on
-/// the solidified poly BRep.
-///
-/// Non-Hybrid parts are passed through unchanged.
+/// Clone a program for the **OCCT phase**. Hybrid mesh islands and complete
+/// PureMesh parts become `solidify(import-stl(mesh_stl_path))`. PureOcct parts
+/// pass through unchanged.
 pub fn clone_program_for_occt_phase(
     program: &CoreProgram,
     partitions: &[PartPartition],
@@ -1175,7 +1219,10 @@ pub fn clone_program_for_occt_phase(
 ) -> CoreProgram {
     let mesh_paths = partitions
         .iter()
-        .flat_map(|partition| partition.mesh_output_node_ids.iter().copied())
+        .enumerate()
+        .flat_map(|(part_index, partition)| {
+            mesh_bridge_output_node_ids(program, part_index, partition)
+        })
         .map(|node_id| (node_id, mesh_stl_path.to_string()))
         .collect();
     clone_program_for_occt_phase_with_paths(program, partitions, &mesh_paths, next_node_id)
@@ -1188,16 +1235,16 @@ pub fn clone_program_for_occt_phase_with_mesh_assets(
     next_node_id: NodeId,
 ) -> crate::contracts::AppResult<CoreProgram> {
     let mut mesh_paths = std::collections::HashMap::new();
-    for partition in partitions.iter().filter(|partition| partition.is_hybrid()) {
-        for output_node_id in &partition.mesh_output_node_ids {
-            let asset = mesh_assets.get(output_node_id).ok_or_else(|| {
+    for (part_index, partition) in partitions.iter().enumerate() {
+        for output_node_id in mesh_bridge_output_node_ids(program, part_index, partition) {
+            let asset = mesh_assets.get(&output_node_id).ok_or_else(|| {
                 crate::contracts::AppError::internal(format!(
-                    "Hybrid mesh asset missing for Core node {}.",
+                    "Poly BRep bridge mesh asset missing for Core node {}.",
                     output_node_id.raw()
                 ))
             })?;
             mesh_paths.insert(
-                *output_node_id,
+                output_node_id,
                 asset.stl_path().to_string_lossy().to_string(),
             );
         }
@@ -1217,14 +1264,12 @@ fn clone_program_for_occt_phase_with_paths(
     next_node_id: NodeId,
 ) -> CoreProgram {
     let mut clone = program.clone();
-    for (part, partition) in clone.parts.iter_mut().zip(partitions.iter()) {
-        if partition.strategy != PartRenderStrategy::Hybrid {
-            continue;
-        }
+    for (part_index, (part, partition)) in clone.parts.iter_mut().zip(partitions.iter()).enumerate()
+    {
         let mut id_counter = next_node_id;
-        for &boundary_id in &partition.mesh_output_node_ids {
-            if let Some(path) = mesh_paths.get(&boundary_id) {
-                replace_node(&mut part.root, boundary_id, &mut id_counter, path);
+        for output_node_id in mesh_bridge_output_node_ids(program, part_index, partition) {
+            if let Some(path) = mesh_paths.get(&output_node_id) {
+                replace_node(&mut part.root, output_node_id, &mut id_counter, path);
             }
         }
         prune_unused_local_bindings(&mut part.root);
@@ -1241,10 +1286,14 @@ fn prune_unused_local_bindings(node: &mut CoreNode) {
             }
             prune_unused_local_bindings(result);
             let mut required = local_references(result);
+            let mut required_nodes = node_references(result);
             let mut kept = Vec::with_capacity(bindings.len());
             for binding in bindings.drain(..).rev() {
-                if required.remove(binding.name.as_str()) {
+                if required.remove(binding.name.as_str())
+                    || required_nodes.remove(&binding.value.id)
+                {
                     required.extend(local_references(&binding.value));
+                    required_nodes.extend(node_references(&binding.value));
                     kept.push(binding);
                 }
             }
@@ -1257,10 +1306,14 @@ fn prune_unused_local_bindings(node: &mut CoreNode) {
             }
             prune_unused_local_bindings(body);
             let mut required = local_references(body);
+            let mut required_nodes = node_references(body);
             let mut kept = Vec::with_capacity(bindings.len());
             for binding in bindings.drain(..).rev() {
-                if required.remove(binding.name.as_str()) {
+                if required.remove(binding.name.as_str())
+                    || required_nodes.remove(&binding.value.id)
+                {
                     required.extend(local_references(&binding.value));
+                    required_nodes.extend(node_references(&binding.value));
                     kept.push(binding);
                 }
             }
@@ -1308,6 +1361,71 @@ fn local_references(node: &CoreNode) -> std::collections::HashSet<String> {
     let mut names = std::collections::HashSet::new();
     collect_local_references(node, &mut names);
     names
+}
+
+fn node_references(node: &CoreNode) -> std::collections::HashSet<NodeId> {
+    let mut ids = std::collections::HashSet::new();
+    collect_node_references(node, &mut ids);
+    ids
+}
+
+fn collect_node_references(node: &CoreNode, ids: &mut std::collections::HashSet<NodeId>) {
+    if let CoreNodeKind::Reference(CoreReference::Node(id)) = &node.kind {
+        ids.insert(*id);
+    }
+    match &node.kind {
+        CoreNodeKind::Literal(_) | CoreNodeKind::Reference(_) => {}
+        CoreNodeKind::Range { start, end } => {
+            collect_node_references(start, ids);
+            collect_node_references(end, ids);
+        }
+        CoreNodeKind::Build { bindings, result } => {
+            for binding in bindings {
+                collect_node_references(&binding.value, ids);
+            }
+            collect_node_references(result, ids);
+        }
+        CoreNodeKind::Let { bindings, body } => {
+            for binding in bindings {
+                collect_node_references(&binding.value, ids);
+            }
+            collect_node_references(body, ids);
+        }
+        CoreNodeKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_node_references(condition, ids);
+            collect_node_references(then_branch, ids);
+            collect_node_references(else_branch, ids);
+        }
+        CoreNodeKind::Call { args, keywords, .. } => {
+            for arg in args {
+                collect_node_references(arg, ids);
+            }
+            for keyword in keywords {
+                collect_node_references(keyword.source_node(), ids);
+            }
+        }
+        CoreNodeKind::Map { sources, body, .. } => {
+            for source in sources {
+                collect_node_references(source, ids);
+            }
+            collect_node_references(body, ids);
+        }
+        CoreNodeKind::Apply { args, list, .. } => {
+            for arg in args {
+                collect_node_references(arg, ids);
+            }
+            collect_node_references(list, ids);
+        }
+        CoreNodeKind::List(items) | CoreNodeKind::Group(items) => {
+            for item in items {
+                collect_node_references(item, ids);
+            }
+        }
+    }
 }
 
 fn collect_local_references(node: &CoreNode, names: &mut std::collections::HashSet<String>) {
@@ -1794,6 +1912,39 @@ mod tests {
     }
 
     #[test]
+    fn multipart_pure_mesh_and_pure_occt_require_poly_brep_bridge() {
+        let program = try_compile_to_core_program(
+            r#"(model
+                (part relief
+                  (heightfield "/tmp/relief.png"
+                    :width 12
+                    :depth 8
+                    :relief-height 2
+                    :base-thickness 1))
+                (part handle
+                  (helical-ridge
+                    :radius 4
+                    :pitch 2
+                    :height 8
+                    :depth 0.8
+                    :base-width 1.6
+                    :crest-width 0.4)))"#,
+        )
+        .expect("compiled")
+        .expect("program");
+        let partitions = analyze_program(&program);
+
+        assert_eq!(
+            partitions
+                .iter()
+                .map(|partition| partition.strategy)
+                .collect::<Vec<_>>(),
+            vec![PartRenderStrategy::PureMesh, PartRenderStrategy::PureOcct]
+        );
+        assert!(requires_poly_brep_bridge(&partitions));
+    }
+
+    #[test]
     fn imported_stl_consumed_by_difference_is_hybrid() {
         let strategy = partition_of(
             r#"(model
@@ -1975,6 +2126,51 @@ mod tests {
         );
 
         assert_eq!(count_solidify(&occt_program.parts[0].root), 1);
+    }
+
+    #[test]
+    fn occt_phase_preserves_build_dependencies_for_solidified_stl_difference() {
+        let program = try_compile_to_core_program(
+            r#"(model
+                (params
+                  (number bore-x 1mm :min -4mm :max 4mm :step 0.1mm)
+                  (number bore-z 4.9mm :min 3mm :max 7mm :step 0.1mm))
+                (part dog-cap
+                  (let* ((scale-factor 0.30)
+                         (floor-z 14.67918mm)
+                         (bore-r 3.24mm)
+                         (lead-r (+ bore-r 0.15mm)))
+                    (build
+                      (shape dog
+                        (translate 0 0 floor-z
+                          (scale scale-factor scale-factor scale-factor
+                            (solidify (import-stl "/tmp/dog.stl")))))
+                      (shape lead
+                        (cone lead-r bore-r 1mm 96))
+                      (shape shaft
+                        (translate 0 0 0.8mm
+                          (cylinder bore-r 6mm 96)))
+                      (shape cutter
+                        (union lead shaft))
+                      (shape placed-cutter
+                        (translate bore-x 1.5mm bore-z cutter))
+                      (result
+                        (difference dog placed-cutter))))))"#,
+        )
+        .expect("compiled")
+        .expect("program");
+        let partitions = analyze_program(&program);
+        assert_eq!(partitions[0].strategy, PartRenderStrategy::Hybrid);
+
+        let occt_program = clone_program_for_occt_phase(
+            &program,
+            &partitions,
+            "/tmp/dog-mesh-phase.stl",
+            NodeId::new(1_000_000),
+        );
+
+        crate::ecky_cad_host::direct_occt::plan_core_program(&occt_program)
+            .expect("solidified dog build dependencies should remain resolvable");
     }
 
     #[test]

@@ -60,7 +60,7 @@ const artifactBundle = {
   fcstdPath: '/mock/context/model.FCStd',
   manifestPath: '/mock/context/manifest.json',
   macroPath: '/mock/context/source.FCMacro',
-  previewStlPath: '/mock/context/preview.stl',
+  modelStlPath: '/mock/context/model.stl',
   viewerAssets: [],
   edgeTargets: [],
   faceTargets: [
@@ -165,6 +165,55 @@ const design = {
   postProcessing: null,
 };
 
+function dryerContextFixture(exactKeys: string[] = ['dryer_param_2']) {
+  const fields = Array.from({ length: 49 }, (_, index) => ({
+    type: 'number',
+    key: `dryer_param_${index}`,
+    label: `Dryer Param ${index}`,
+  }));
+  const parts = [
+    { partId: 'low', freecadObjectName: 'Low', label: 'Drum', kind: 'solid', semanticRole: 'drum', viewerNodeIds: ['low-node'], parameterKeys: fields.slice(0, 12).map((field) => field.key), editable: true },
+    { partId: 'shell', freecadObjectName: 'Shell', label: 'Shell', kind: 'solid', semanticRole: 'enclosure', viewerNodeIds: ['shell-node'], parameterKeys: [fields[0]!.key, ...fields.slice(12, 30).map((field) => field.key)], editable: true },
+    { partId: 'air-path', freecadObjectName: 'AirPath', label: 'Air Path', kind: 'solid', semanticRole: 'duct', viewerNodeIds: ['air-node'], parameterKeys: fields.slice(30).map((field) => field.key), editable: true },
+  ];
+  const manifest = {
+    ...modelManifest,
+    modelId: 'dryer-context-model',
+    engineKind: 'ecky',
+    sourceLanguage: 'ecky',
+    geometryBackend: 'mesh',
+    parts,
+    parameterGroups: [],
+    controlPrimitives: [],
+    controlViews: [],
+    selectionTargets: [{
+      ...modelManifest.selectionTargets[0],
+      label: exactKeys.length ? 'Drum Bore' : 'Ambiguous Drum Face',
+      parameterKeys: exactKeys,
+    }],
+  };
+  return {
+    artifactBundle: {
+      ...artifactBundle,
+      modelId: 'dryer-context-model',
+      engineKind: 'ecky',
+      sourceLanguage: 'ecky',
+      geometryBackend: 'mesh',
+    },
+    modelManifest: manifest,
+    design: {
+      ...design,
+      title: 'Filament Dryer',
+      macroCode: '(model (params) (part low (box 1 1 1)))',
+      engineKind: 'ecky',
+      sourceLanguage: 'ecky',
+      geometryBackend: 'mesh',
+      uiSpec: { fields },
+      initialParams: Object.fromEntries(fields.map((field, index) => [field.key, index + 1])),
+    },
+  };
+}
+
 const authoringGraph = {
   sourceDigest: 'sha256:context-source',
   coreDigest: 'sha256:context-core',
@@ -177,6 +226,10 @@ const authoringGraph = {
       valueKind: 'form',
       operation: 'box',
       partId: 'low',
+      sourceAddressable: true,
+      editableOps: ['replace'],
+      childPaths: [],
+      inputPorts: [],
     },
     {
       path: 'parameters.low_width',
@@ -184,6 +237,10 @@ const authoringGraph = {
       kind: 'parameter',
       valueKind: 'number',
       partId: 'low',
+      sourceAddressable: true,
+      editableOps: ['replace'],
+      childPaths: [],
+      inputPorts: [],
     },
   ],
   features: [
@@ -252,9 +309,28 @@ async function installContextMocks(
   });
 
   await page.addInitScript(({ config, runtimeCapabilities, artifactBundle, modelManifest, design, authoringGraph, authoringGraphDelayMs }) => {
+    (window as any).__CONTEXT_CALLS__ = [];
     window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
+    let nextCallbackId = 1;
+    window.__TAURI_INTERNALS__.transformCallback = (callback) => {
+      const callbackId = nextCallbackId++;
+      (window as any)[`_${callbackId}`] = callback;
+      return callbackId;
+    };
     window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+      (window as any).__CONTEXT_CALLS__.push({ cmd, args });
+      if (cmd === 'plugin:event|listen') return Number(args?.handler ?? 0);
+      if (cmd === 'plugin:event|unlisten') return null;
       if (cmd === 'get_config') return config;
+      if (cmd === 'open_or_create_blank_design_thread') {
+        return {
+          threadId: 'thread-context',
+          slug: 'context-controls',
+          folder: '/mock/context-controls',
+          file: '/mock/context-controls/model.ecky',
+          source: '(model)',
+        };
+      }
       if (cmd === 'get_runtime_capabilities') return runtimeCapabilities;
       if (cmd === 'get_history') return [];
       if (cmd === 'get_last_design') return null;
@@ -329,7 +405,7 @@ async function installContextMocks(
           issues: [],
           metrics: {
             partCount: 2,
-            previewStlSizeBytes: 1024,
+            modelStlSizeBytes: 1024,
             totalVolume: 1000,
             totalArea: 500,
             bbox: { xMin: 0, yMin: 0, zMin: 0, xMax: 10, yMax: 10, zMax: 10 },
@@ -350,6 +426,7 @@ async function installContextMocks(
       if (cmd === 'save_last_design') return null;
       if (cmd === 'save_config') return null;
       if (cmd === 'get_active_agent_sessions') return [];
+      if (cmd === 'get_agent_activity') return { events: [], latestCursor: 0, hasMore: false };
       if (cmd === 'get_agent_terminal_snapshots') return [];
       if (cmd === 'get_thread_agent_state') {
         return {
@@ -378,6 +455,19 @@ async function selectViewerTarget(page: Page, expectedPanelText: string) {
       const panelText = (await page.locator('.param-panel').allTextContents())[0] ?? '';
       if (panelText.includes(expectedPanelText)) return;
     }
+  }
+}
+
+async function waitForContextRender(page: Page) {
+  try {
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__CONTEXT_CALLS__.some((entry: { cmd: string }) => entry.cmd === 'get_model_manifest'),
+    ), { timeout: 15000 }).toBe(true);
+  } catch {
+    const commands = await page.evaluate(() =>
+      (window as any).__CONTEXT_CALLS__.map((entry: { cmd: string }) => entry.cmd),
+    );
+    throw new Error(`Context render did not finish. Commands: ${commands.join(', ')}`);
   }
 }
 
@@ -505,7 +595,7 @@ test('Given mapped film gate context When selected Then Params shows gap-related
     .locator('textarea.prompt-input')
     .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
-  await page.getByRole('button', { name: 'PARAMS' }).click();
+  await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
   await expect(page.locator('.param-panel')).toBeVisible();
   await page.getByRole('button', { name: 'Film Gate' }).click();
 
@@ -617,7 +707,7 @@ test('Given Params select mode on mapped film gate target When target selected T
     .locator('textarea.prompt-input')
     .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
 
-  await page.getByRole('button', { name: 'PARAMS' }).click();
+  await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
   await page.getByRole('button', { name: 'SELECT' }).click();
   await selectViewerTarget(page, 'Film Gap');
 
@@ -766,14 +856,87 @@ test('Given workbench idle When Params opens Then prewarmed panel is reused', as
   await page.waitForFunction(() => Boolean(document.querySelector('[data-window-id="params"] .param-panel')));
   await expect(page.locator('[data-window-id="params"].window--hidden .param-panel')).toHaveCount(1);
 
-  await page.getByRole('button', { name: 'PARAMS' }).click();
+  await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
   await expect(page.locator('[data-window-id="params"] .param-panel')).toBeVisible();
 
   await page.locator('[data-window-id="params"] .window-close').click();
   await expect(page.locator('[data-window-id="params"].window--hidden .param-panel')).toHaveCount(1);
 
-  await page.getByRole('button', { name: 'PARAMS' }).click();
+  await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
   await expect(page.locator('[data-window-id="params"] .param-panel')).toBeVisible();
+});
+
+test('Given a large Ecky manifest When Params opens Then deterministic ownership sections replace the flat dump', async ({ page }) => {
+  const fixture = dryerContextFixture();
+  await installContextMocks(page, fixture as any);
+  await page.goto('/');
+  await expect(page.locator('.boot-overlay')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'DIALOGUE' }).click();
+  await page.fill('textarea.prompt-input', 'make grouped dryer controls');
+  await page.locator('textarea.prompt-input').press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+  await waitForContextRender(page);
+  await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
+
+  const sections = page.getByTestId('parameter-ownership-section');
+  await expect(sections).toHaveCount(4);
+  await expect(sections.nth(0)).toContainText(/Model Params/i);
+  await expect(sections.nth(1)).toContainText(/Drum/i);
+  await expect(sections.nth(1)).toContainText('11 PARAMS');
+  await expect(sections.nth(1)).toHaveAttribute('data-collapsed', 'true');
+  await expect(page.locator('.param-panel > .param-list')).toHaveCount(0);
+});
+
+test('Given exact generated Ecky provenance When target is selected Then viewport shows only linked control', async ({ page }) => {
+  const fixture = dryerContextFixture(['dryer_param_2']);
+  await installContextMocks(page, fixture as any);
+  await page.goto('/');
+  await expect(page.locator('.boot-overlay')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'DIALOGUE' }).click();
+  await page.fill('textarea.prompt-input', 'make selectable dryer controls');
+  await page.locator('textarea.prompt-input').press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+  await waitForContextRender(page);
+  await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
+  await page.getByRole('button', { name: 'MESH', exact: true }).click();
+  await page.getByRole('button', { name: 'SELECT', exact: true }).click();
+  await selectViewerTarget(page, 'Dryer Param 2');
+
+  const overlay = page.locator('.viewer-part-overlay');
+  await expect(overlay).toBeVisible();
+  await expect(overlay.locator('.viewer-part-overlay__controls .viewer-overlay-control')).toHaveCount(1);
+  await expect(overlay).toContainText('Dryer Param 2');
+  await expect(overlay).not.toContainText('Dryer Param 3');
+
+  await overlay.locator('.viewer-overlay-input[type="number"]').fill('77');
+  await page.getByRole('button', { name: 'PARAMETERS', exact: true }).click();
+  const selectedSection = page.getByTestId('parameter-ownership-section').first();
+  await expect(selectedSection).toHaveAttribute('data-selected', 'true');
+  await expect(selectedSection).toHaveAttribute('data-collapsed', 'false');
+  await expect(selectedSection.locator('.param-field')).toHaveCount(1);
+  await expect(selectedSection.locator('input[type="number"]')).toHaveValue('77');
+  await expect(page.getByRole('button', { name: 'APPLY', exact: true })).toBeEnabled();
+});
+
+test('Given ambiguous generated Ecky provenance When target is selected Then viewport keeps editable overlay absent', async ({ page }) => {
+  const fixture = dryerContextFixture([]);
+  await installContextMocks(page, fixture as any);
+  await page.goto('/');
+  await expect(page.locator('.boot-overlay')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'DIALOGUE' }).click();
+  await page.fill('textarea.prompt-input', 'make ambiguous dryer controls');
+  await page.locator('textarea.prompt-input').press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+  await waitForContextRender(page);
+  await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
+  await page.getByRole('button', { name: 'MESH', exact: true }).click();
+  await page.getByRole('button', { name: 'SELECT', exact: true }).click();
+  await selectViewerTarget(page, '__ambiguous_target_has_no_panel_control__');
+
+  await expect(page.locator('.viewer-part-overlay')).toHaveCount(0);
+  await page.getByRole('button', { name: 'PARAMETERS', exact: true }).click();
+  await expect(page.locator('[data-testid="parameter-ownership-section"][data-selected="true"]')).toHaveCount(0);
+  await expect(page.getByTestId('parameter-ownership-section').first()).toHaveAttribute('data-collapsed', 'true');
 });
 
 test('Given Params select mode When viewer face is clicked Then Params focuses exact face control', async ({ page }) => {

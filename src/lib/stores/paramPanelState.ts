@@ -78,8 +78,6 @@ function createParamPanelState() {
 }
 
 export const paramPanelState = createParamPanelState();
-export const liveApply = writable(false);
-
 function getParamPanelSnapshot() {
   return get(paramPanelState);
 }

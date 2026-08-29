@@ -147,13 +147,39 @@ export interface Message {
   visualKind?: MessageVisualKind | null;
   attachmentImages?: string[];
   timestamp: number;
+  timelineOrder?: number;
+  versionSummary?: ThreadTimelineVersionSummary | null;
+  contentTruncated?: boolean;
+  contentObservedBytes?: number;
+  contentAllowedBytes?: number;
+  hasVisual?: boolean;
+  attachmentCount?: number;
   deletedAt?: number | null;
+  providerActivity?: ProviderActivity | null;
+}
+
+export interface ThreadTimelineVersionSummary {
+  title?: string | null;
+  versionName?: string | null;
+  modelId?: string | null;
+  hasOutput: boolean;
+  hasRuntime: boolean;
+  hasManifest: boolean;
+}
+
+export interface ProviderActivity {
+  providerLabel: string;
+  summary: string;
+  phase: 'active' | 'completed' | 'interrupted' | 'error';
+  items: string[];
 }
 
 export interface ThreadMessagesPage {
   messages: Message[];
-  nextBefore: number | null;
+  nextBefore: string | null;
   hasMore: boolean;
+  observedBytes?: number;
+  truncatedFields?: string[];
 }
 
 export interface GenieTraits {
@@ -269,6 +295,16 @@ export interface VoiceConfig {
   sttLanguageCode: string;
 }
 
+export type FemComputeQuality = "draft" | "balanced" | "fine";
+
+export interface FemComputeConfig {
+  quality: FemComputeQuality;
+  maximumWallTimeMinutes: number;
+  maximumMemoryMiB: number;
+  /** Zero selects available performance cores. */
+  threadCount: number;
+}
+
 export interface AppConfig {
   engines: EngineConfig[];
   selectedEngineId: string;
@@ -281,8 +317,13 @@ export interface AppConfig {
   microwave: MicrowaveConfig | null;
   voice: VoiceConfig;
   mcp: McpConfig;
+  femCompute: FemComputeConfig;
   hasSeenOnboarding: boolean;
   connectionType?: string | null;
+  providerModels: {
+    codex: string;
+    agy: string;
+  };
   defaultEngineKind: EngineKind;
   defaultSourceLanguage: SourceLanguage;
   defaultGeometryBackend: GeometryBackend;
@@ -964,37 +1005,47 @@ function healIrGeometryBackend(
   return output;
 }
 
-export function normalizeMessage(message: Contract.Message | Message): Message {
-  const artifactBundle = message.artifactBundle
-    ? normalizeArtifactBundle(message.artifactBundle as ArtifactBundle)
+export function normalizeMessage(
+  message: Contract.Message | Contract.ThreadTimelineRow | Message,
+): Message {
+  const raw = message as Partial<Contract.Message & Contract.ThreadTimelineRow & Message>;
+  const artifactBundle = raw.artifactBundle
+    ? normalizeArtifactBundle(raw.artifactBundle as ArtifactBundle)
     : null;
-  const modelManifest = message.modelManifest
-    ? normalizeModelManifest(message.modelManifest as ModelManifest)
+  const modelManifest = raw.modelManifest
+    ? normalizeModelManifest(raw.modelManifest as ModelManifest)
     : null;
   const output = healIrGeometryBackend(
-    message.output ? normalizeDesignOutput(message.output) : null,
+    raw.output ? normalizeDesignOutput(raw.output) : null,
     artifactBundle,
     modelManifest,
   );
   return {
-    id: message.id,
-    role: message.role,
-    content: message.content,
-    status: message.status,
+    id: raw.id ?? '',
+    role: raw.role ?? 'assistant',
+    content: raw.content ?? '',
+    status: raw.status ?? 'success',
     output,
-    usage: normalizeUsageSummary(message.usage),
+    usage: normalizeUsageSummary(raw.usage),
     structuralVerification: normalizeStructuralVerificationResult(
-      (message as Message).structuralVerification ?? null,
+      raw.structuralVerification ?? null,
     ),
     artifactBundle,
     modelManifest,
-    agentOrigin: message.agentOrigin ?? null,
-    imageData: message.imageData ?? null,
-    visualKind: message.visualKind ?? null,
-    attachmentImages: Array.isArray(message.attachmentImages)
-      ? [...message.attachmentImages]
+    agentOrigin: raw.agentOrigin ?? null,
+    imageData: raw.imageData ?? null,
+    visualKind: raw.visualKind ?? null,
+    attachmentImages: Array.isArray(raw.attachmentImages)
+      ? [...raw.attachmentImages]
       : [],
-    timestamp: message.timestamp,
+    timestamp: raw.timestamp ?? 0,
+    timelineOrder: raw.timelineOrder,
+    versionSummary: raw.versionSummary ?? null,
+    contentTruncated: raw.contentTruncated ?? false,
+    contentObservedBytes: raw.contentObservedBytes,
+    contentAllowedBytes: raw.contentAllowedBytes,
+    hasVisual: raw.hasImage ?? Boolean(raw.imageData || raw.attachmentImages?.length),
+    attachmentCount: raw.attachmentCount ?? raw.attachmentImages?.length ?? 0,
   };
 }
 
@@ -1007,6 +1058,8 @@ export function normalizeThreadMessagesPage(
       : [],
     nextBefore: page.nextBefore ?? null,
     hasMore: Boolean(page.hasMore),
+    observedBytes: page.observedBytes,
+    truncatedFields: page.truncatedFields ? [...page.truncatedFields] : [],
   };
 }
 
@@ -1218,8 +1271,37 @@ export function normalizeConfig(
           eckyAstAuthoring: false,
           autoAgents: [],
         },
+    femCompute: {
+      quality: (["draft", "balanced", "fine"] as const).includes(
+        (config as AppConfig).femCompute?.quality,
+      )
+        ? (config as AppConfig).femCompute.quality
+        : "balanced",
+      maximumWallTimeMinutes: Math.min(
+        1440,
+        Math.max(
+          1,
+          Number((config as AppConfig).femCompute?.maximumWallTimeMinutes ?? 30) || 30,
+        ),
+      ),
+      maximumMemoryMiB: Math.min(
+        1_048_576,
+        Math.max(
+          256,
+          Number((config as AppConfig).femCompute?.maximumMemoryMiB ?? 8192) || 8192,
+        ),
+      ),
+      threadCount: Math.min(
+        256,
+        Math.max(0, Number((config as AppConfig).femCompute?.threadCount ?? 0) || 0),
+      ),
+    },
     hasSeenOnboarding: Boolean(config.hasSeenOnboarding),
     connectionType: (config as AppConfig).connectionType ?? null,
+    providerModels: {
+      codex: `${(config as AppConfig).providerModels?.codex ?? ""}`.trim(),
+      agy: `${(config as AppConfig).providerModels?.agy ?? ""}`.trim(),
+    },
     defaultEngineKind:
       normalizeEngineKindValue((config as AppConfig).defaultEngineKind) ??
       "freecad",
@@ -1317,8 +1399,10 @@ export function normalizeParsedParamsResult(
 export function normalizeArtifactBundle(
   bundle: Contract.ArtifactBundle | ArtifactBundle,
 ): ArtifactBundle {
+  const canonicalModelPath = bundle.modelStlPath.replace(/[^\\/]+$/, "model.stl");
   return {
     ...bundle,
+    modelStlPath: canonicalModelPath,
     engineKind: normalizeEngineKindValue(bundle.engineKind) ?? "freecad",
     sourceLanguage:
       normalizeSourceLanguageValue(bundle.sourceLanguage, bundle.engineKind) ?? "legacyPython",

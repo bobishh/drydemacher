@@ -16,7 +16,7 @@ export type SketchValidationRow = {
 };
 
 export type SketchValidationArtifactBundle = {
-  previewStlPath?: string | null;
+  modelStlPath?: string | null;
   viewerAssets?: unknown[] | null;
 };
 
@@ -34,7 +34,7 @@ export function buildSketchValidationRows(input: SketchValidationLedgerInput): S
   const closedStrokeCount = input.strokes.filter((stroke) => stroke.closed).length;
   const hasClosedProfile = closedStrokeCount > 0;
   const hasSourceDraft = Boolean(input.draft?.source);
-  const hasMeshPreview = Boolean(input.artifactBundle?.previewStlPath);
+  const hasMeshPreview = Boolean(input.artifactBundle?.modelStlPath);
   const hasBackendError = input.errorText.length > 0;
 
   const buildValidationRows = buildSketchBuildValidationSummary({
@@ -108,7 +108,7 @@ function sourceFitCheckRow(input: SketchValidationLedgerInput): SketchValidation
     view: { width: 100, height: 100 },
     extrudeDepth: input.extrudeDepth ?? 12,
     artifactEvidence: {
-      ...(input.artifactBundle?.previewStlPath ? { previewArtifactPath: input.artifactBundle.previewStlPath } : {}),
+      ...(input.artifactBundle?.modelStlPath ? { previewArtifactPath: input.artifactBundle.modelStlPath } : {}),
       ...(input.draft?.source ? { source: input.draft.source } : {}),
     },
     ...(input.errorText ? { backendError: input.errorText } : {}),
@@ -315,7 +315,7 @@ function meshRow(
     id: 'mesh',
     label: 'Mesh preview',
     status: 'pass',
-    detail: `${basename(input.artifactBundle?.previewStlPath ?? '')} with ${formatCount(input.artifactBundle?.viewerAssets?.length ?? 0, 'viewer asset')}.`,
+    detail: `${basename(input.artifactBundle?.modelStlPath ?? '')} with ${formatCount(input.artifactBundle?.viewerAssets?.length ?? 0, 'viewer asset')}.`,
   };
 }
 

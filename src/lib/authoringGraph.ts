@@ -1,5 +1,26 @@
 export type AuthoringGraphTargetKind = 'part' | 'object' | 'group' | 'edge' | 'face';
 
+export type AuthoringGraphInputPort = {
+  role: string;
+  valueKind: string;
+  cardinality: 'one' | 'many';
+  childPath: string;
+};
+
+export type AuthoringGraphAstNode = {
+  path: string;
+  stableNodeKey: string;
+  kind: string;
+  valueKind: string;
+  operation?: string | null;
+  partId?: string | null;
+  sourceAddressable: boolean;
+  editableOps: string[];
+  nonEditableReason?: string | null;
+  childPaths: string[];
+  inputPorts: AuthoringGraphInputPort[];
+};
+
 export type AuthoringGraphTarget = {
   targetId: string;
   durableTargetId?: string | null;
@@ -21,7 +42,7 @@ export type AuthoringGraph = {
   sourceDigest: string;
   coreDigest: string;
   artifactDigest?: string | null;
-  astNodes: unknown[];
+  astNodes: AuthoringGraphAstNode[];
   features: unknown[];
   dependencies: unknown[];
   constraints: unknown[];
@@ -95,6 +116,46 @@ function decodeTarget(value: unknown, index: number): AuthoringGraphTarget {
   return value as AuthoringGraphTarget;
 }
 
+function decodeInputPort(value: unknown, owner: string, index: number): AuthoringGraphInputPort {
+  if (!isRecord(value)) throw new Error(`${owner} input port ${index} must be an object.`);
+  const role = requireString(value, 'role', `${owner} input port ${index}`);
+  requireString(value, 'valueKind', `${owner} input port '${role}'`);
+  requireString(value, 'childPath', `${owner} input port '${role}'`);
+  if (value.cardinality !== 'one' && value.cardinality !== 'many') {
+    throw new Error(`${owner} input port '${role}' requires 'one' or 'many' cardinality.`);
+  }
+  return value as AuthoringGraphInputPort;
+}
+
+function decodeAstNode(value: unknown, index: number): AuthoringGraphAstNode {
+  if (!isRecord(value)) throw new Error(`Authoring graph AST node ${index} must be an object.`);
+  const path = requireString(value, 'path', `Authoring graph AST node ${index}`);
+  const owner = `Authoring graph AST node '${path}'`;
+  requireString(value, 'stableNodeKey', owner);
+  requireString(value, 'kind', owner);
+  requireString(value, 'valueKind', owner);
+  if (typeof value.sourceAddressable !== 'boolean') {
+    throw new Error(`${owner} requires backend-owned boolean 'sourceAddressable'.`);
+  }
+  const editableOps = optionalStringArray(value, 'editableOps', owner);
+  const childPaths = optionalStringArray(value, 'childPaths', owner);
+  const rawPorts = value.inputPorts ?? [];
+  if (!Array.isArray(rawPorts)) throw new Error(`${owner} requires camelCase 'inputPorts' array.`);
+  const nonEditableReason = value.nonEditableReason;
+  if (!value.sourceAddressable && (typeof nonEditableReason !== 'string' || !nonEditableReason.trim())) {
+    throw new Error(`${owner} requires raw 'nonEditableReason' when non-addressable.`);
+  }
+  if (value.sourceAddressable && nonEditableReason != null) {
+    throw new Error(`${owner} cannot include 'nonEditableReason' when source-addressable.`);
+  }
+  return {
+    ...(value as Omit<AuthoringGraphAstNode, 'editableOps' | 'childPaths' | 'inputPorts'>),
+    editableOps,
+    childPaths,
+    inputPorts: rawPorts.map((port, portIndex) => decodeInputPort(port, owner, portIndex)),
+  };
+}
+
 export function decodeAuthoringGraph(value: unknown): AuthoringGraph {
   if (!isRecord(value)) {
     throw new Error('Authoring graph must be an object.');
@@ -106,6 +167,7 @@ export function decodeAuthoringGraph(value: unknown): AuthoringGraph {
       throw new Error(`Authoring graph requires camelCase '${key}' array.`);
     }
   }
+  const astNodes = (value.astNodes as unknown[]).map(decodeAstNode);
   const targets = (value.targets as unknown[]).map(decodeTarget);
-  return { ...value, targets } as AuthoringGraph;
+  return { ...value, astNodes, targets } as AuthoringGraph;
 }

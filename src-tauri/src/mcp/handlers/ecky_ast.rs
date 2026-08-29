@@ -186,11 +186,11 @@ pub(crate) fn core_node_digest(node: &crate::ecky_core_ir::CoreNode) -> String {
 }
 
 #[derive(Debug, Clone)]
-struct EckyAstNodeAddressability {
-    stable_node_key: String,
-    source_addressable: bool,
-    editable_ops: Vec<EckyAstEditOperation>,
-    non_editable_reason: Option<String>,
+pub(crate) struct EckyAstNodeAddressability {
+    pub(crate) stable_node_key: String,
+    pub(crate) source_addressable: bool,
+    pub(crate) editable_ops: Vec<EckyAstEditOperation>,
+    pub(crate) non_editable_reason: Option<String>,
 }
 
 pub(super) fn bounded_ecky_ast_source_slice(
@@ -280,7 +280,7 @@ fn editable_ops_for_source_target_kind(kind: &SourcePathTargetKind) -> Vec<EckyA
     }
 }
 
-fn ecky_ast_node_addressability(
+pub(crate) fn ecky_ast_node_addressability(
     source: &str,
     path: &str,
     kind: &str,

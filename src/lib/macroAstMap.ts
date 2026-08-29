@@ -1,6 +1,16 @@
 import type { DesignParams, ModelManifest, UiField, UiSpec } from './types/domain';
+import { buildOwnershipSections } from './modelRuntime/ownershipSections';
+import type { AuthoringGraph, AuthoringGraphInputPort } from './authoringGraph';
 
-export type MacroAstMapNodeKind = 'model' | 'part' | 'port' | 'param' | 'verify';
+export type MacroAstMapNodeKind =
+  | 'model'
+  | 'part'
+  | 'port'
+  | 'param'
+  | 'verify'
+  | 'expression'
+  | 'operation'
+  | 'readonly';
 
 export type MacroAstSourceRange = { startByte: number; endByte: number };
 
@@ -12,6 +22,8 @@ export type MacroAstMapNode = {
   fieldKey?: string;
   syntaxVariant?: string;
   syntaxLabel?: string;
+  title?: string;
+  inputPorts?: AuthoringGraphInputPort[];
   /** Exact byte range of this node in the macro source, when known. */
   sourceRange?: MacroAstSourceRange;
   children: MacroAstMapNode[];
@@ -46,6 +58,7 @@ type MacroAstMapInput = {
   uiSpec?: UiSpec | null;
   parameters?: DesignParams;
   sourceNodes?: MacroAstSourceMapEntry[] | null;
+  authoringGraph?: AuthoringGraph | null;
 };
 
 type MacroAstPart = {
@@ -90,6 +103,41 @@ function normalizeSearchText(value: string): string {
     .replace(/[^a-z0-9]+/g, ' ')
     .trim()
     .replace(/\s+/g, ' ');
+}
+
+const GEOMETRY_VALUE_KINDS = new Set(['Sketch', 'Path', 'Frame', 'Mesh', 'Compound', 'Shape', 'Solid']);
+
+function typedNodeLabel(path: string, operation: string | null | undefined): string {
+  const segments = path.split('/').filter(Boolean);
+  const bindingIndex = Math.max(segments.lastIndexOf('bindings'), segments.lastIndexOf('shapes'));
+  if (bindingIndex >= 0 && segments[bindingIndex + 1]) {
+    return segments[bindingIndex + 1]!.replace(/~1/g, '/').replace(/~0/g, '~');
+  }
+  return operation || segments.at(-1)?.replace(/~1/g, '/').replace(/~0/g, '~') || 'expression';
+}
+
+function projectTypedNode(node: AuthoringGraph['astNodes'][number]): MacroAstMapNode | null {
+  if (!node.partId || node.kind === 'Part' || node.kind === 'Param' || node.kind === 'Reference') {
+    return null;
+  }
+  const sourceAddressable = node.sourceAddressable;
+  const geometryValue = GEOMETRY_VALUE_KINDS.has(node.valueKind);
+  const kind: MacroAstMapNodeKind = !sourceAddressable
+    ? 'readonly'
+    : geometryValue || node.operation
+      ? 'operation'
+      : 'expression';
+  return {
+    id: node.stableNodeKey,
+    kind,
+    label: typedNodeLabel(node.path, node.operation),
+    value: node.valueKind,
+    syntaxVariant: normalizeSyntaxVariant(node.operation || node.valueKind),
+    syntaxLabel: kind === 'readonly' ? 'READ ONLY' : (node.operation || node.valueKind).toUpperCase(),
+    title: node.nonEditableReason ?? undefined,
+    inputPorts: node.inputPorts,
+    children: [],
+  };
 }
 
 export function buildMacroAstSearchIndex(
@@ -231,24 +279,30 @@ export function buildMacroAstMapProjection(input: MacroAstMapInput): MacroAstMap
     }),
   );
 
-  // A field belongs to a part only when exactly one part claims it. Fields
-  // claimed by several parts (or by none) are model-level knobs: rendered
-  // once in a shared group instead of duplicated under every part.
-  const claimCounts = new Map<string, number>();
-  for (const part of parts) {
-    for (const key of part.parameterKeys) {
-      if (!fieldByKey.has(key)) continue;
-      claimCounts.set(key, (claimCounts.get(key) ?? 0) + 1);
-    }
-  }
+  const ownershipSections = input.modelManifest
+    ? buildOwnershipSections({
+        manifest: input.modelManifest,
+        fields,
+        selectedTarget: null,
+        searchQuery: '',
+      })
+    : [];
+  const ownershipById = new Map(ownershipSections.map((section) => [section.sectionId, section]));
   const valueOf = (field: UiField) =>
     (input.parameters?.[field.key] ?? null) as string | number | boolean | null;
 
   const partNodes: MacroAstMapNode[] = parts.map((part, partIndex) => {
-    const ownFields = part.parameterKeys
-      .filter((key) => claimCounts.get(key) === 1)
-      .map((key) => fieldByKey.get(key))
-      .filter((field): field is UiField => Boolean(field));
+    const ownFields = input.modelManifest
+      ? ownershipSections
+          .filter((section) => section.partIds.includes(part.partId))
+          .flatMap((section) => section.fields)
+      : part.parameterKeys
+          .map((key) => fieldByKey.get(key))
+          .filter((field): field is UiField => Boolean(field));
+    const typedChildren = (input.authoringGraph?.astNodes ?? [])
+      .filter((node) => node.partId === part.partId)
+      .map(projectTypedNode)
+      .filter((node): node is MacroAstMapNode => Boolean(node));
     return {
       id: `part:${part.partId}`,
       kind: 'part',
@@ -261,11 +315,16 @@ export function buildMacroAstMapProjection(input: MacroAstMapInput): MacroAstMap
       ),
       syntaxVariant: normalizeSyntaxVariant(partById.get(part.partId)?.kind ?? 'part'),
       syntaxLabel: normalizeSyntaxVariant(partById.get(part.partId)?.kind ?? 'part').toUpperCase(),
-      children: ownFields.map((field) => paramNode(`part:${part.partId}`, field, valueOf(field))),
+      children: [
+        ...ownFields.map((field) => paramNode(`part:${part.partId}`, field, valueOf(field))),
+        ...typedChildren,
+      ],
     };
   });
 
-  const sharedFields = fields.filter((field) => (claimCounts.get(field.key) ?? 0) !== 1);
+  const sharedFields = input.modelManifest
+    ? (ownershipById.get('model:parameters')?.fields ?? [])
+    : [];
   const sharedGroup: MacroAstMapNode[] = sharedFields.length
     ? [
         {

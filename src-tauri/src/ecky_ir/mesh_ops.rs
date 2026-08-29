@@ -7,10 +7,14 @@ use csgrs::mesh::polygon::Polygon as IrPolygon;
 use csgrs::mesh::vertex::Vertex as IrVertex;
 use csgrs::traits::CSG;
 
-use crate::contracts::{AppResult, ParamValue};
+use crate::contracts::{
+    AppResult, ParamValue, RasterTraceCalibration, RasterTraceRequest, SketchView,
+};
 use crate::ecky_ir_patterns::{
     apply_wall_pattern, WallPatternMode, WallPatternSpec, WallPatternTarget,
 };
+use crate::image_sampling::{resolve_raster_layout, RasterFitMode, RasterForeground};
+use crate::raster_trace::extract_raster_contours;
 use crate::surface_trim_cap::SurfaceTrimCapMode;
 use crate::surface_trim_external_shapes::SurfaceTrimPathMode;
 use crate::surface_trim_runtime::{
@@ -21,7 +25,7 @@ use super::edge_ops::{chamfer_mesh, fillet_mesh, parse_edge_selector};
 use super::eval_scalar::{
     eval_bool, eval_number, eval_points, eval_points_3d, eval_stringish, parse_count,
 };
-use super::heightfield::build_heightfield;
+use super::heightfield::{build_heightfield, build_protrusion};
 use super::mesh_literal::{
     build_mesh_literal, MAX_MESH_LITERAL_TRIANGLES, MAX_MESH_LITERAL_VERTICES,
 };
@@ -32,9 +36,10 @@ use super::model::{
 use super::shared::{unsupported, validation, IrMesh, IrSketch};
 use super::sketch::{
     bspline_points, circle_points, contour_all_loops, contour_hole_loops, contour_outer_loops,
-    contour_sweep_slice_from_contours, contours_from_sketch, loft_between_sketches, loft_segments,
-    loft_segments_transformed, offset_sketch, parse_profile_sketch, rounded_polygon_points,
-    rounded_rectangle_points, sample_bezier_path, shell_from_contour_slices,
+    contour_set_to_sketch, contour_sweep_slice_from_contours, contours_from_sketch,
+    loft_between_sketches, loft_segments, loft_segments_transformed, offset_sketch,
+    parse_profile_sketch, rounded_polygon_points, rounded_rectangle_points, sample_bezier_path,
+    shell_from_contour_slices, sketch_contours_from_loops, SketchContours,
 };
 
 #[derive(Clone, Debug)]
@@ -587,6 +592,96 @@ fn extrude_sketch(sketch: &IrSketch, height: f64, symmetric: bool) -> IrMesh {
     } else {
         mesh
     }
+}
+
+fn raster_foreground(
+    value: Option<&&IrExpr>,
+    env: &BTreeMap<String, ParamValue>,
+    operation: &str,
+) -> AppResult<RasterForeground> {
+    let Some(value) = value else {
+        return Ok(RasterForeground::Dark);
+    };
+    match eval_stringish(value, env)?.as_str() {
+        "dark" => Ok(RasterForeground::Dark),
+        "light" => Ok(RasterForeground::Light),
+        other => Err(validation(format!(
+            "`{operation}` does not recognize `:foreground {other}`. Use `dark` or `light`."
+        ))),
+    }
+}
+
+fn raster_fit(
+    value: Option<&&IrExpr>,
+    env: &BTreeMap<String, ParamValue>,
+    operation: &str,
+) -> AppResult<RasterFitMode> {
+    let Some(value) = value else {
+        return Ok(RasterFitMode::Contain);
+    };
+    match eval_stringish(value, env)?.as_str() {
+        "contain" => Ok(RasterFitMode::Contain),
+        "stretch" => Ok(RasterFitMode::Stretch),
+        other => Err(validation(format!(
+            "`{operation}` does not recognize `:fit {other}`. Use `contain` or `stretch`."
+        ))),
+    }
+}
+
+fn is_raster_source(value: &IrExpr, env: &BTreeMap<String, ParamValue>) -> bool {
+    value.as_str().is_some()
+        || value
+            .as_symbol()
+            .and_then(|symbol| env.get(symbol))
+            .is_some_and(|value| matches!(value, ParamValue::String(_)))
+}
+
+fn raster_sketch(
+    image_path: String,
+    width: Option<f64>,
+    depth: Option<f64>,
+    threshold: f64,
+    foreground: RasterForeground,
+    fit: RasterFitMode,
+) -> AppResult<IrSketch> {
+    if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+        return Err(validation(
+            "`extrude` raster `:threshold` must be within 0..=1.",
+        ));
+    }
+    let path = Path::new(&image_path);
+    let (source_width, source_height) = image::image_dimensions(path).map_err(|error| {
+        validation(format!(
+            "`extrude` failed to inspect raster '{}': {error}",
+            path.display()
+        ))
+    })?;
+    let layout = resolve_raster_layout(source_width, source_height, width, depth, fit)
+        .map_err(|details| validation(format!("raster `extrude` {details}.")))?;
+    let response = extract_raster_contours(RasterTraceRequest {
+        image_path,
+        view: SketchView::Top,
+        calibration: RasterTraceCalibration {
+            physical_width: layout.width,
+            physical_height: layout.depth,
+        },
+        threshold: (threshold * 255.0).round() as u8,
+        invert: foreground == RasterForeground::Light,
+        max_contours: None,
+    })?;
+    let mut contours = SketchContours {
+        outer_loops: Vec::new(),
+        hole_loops: Vec::new(),
+    };
+    for contour in response.contours {
+        if contour.signed_area < 0.0 {
+            contours.outer_loops.push(contour.points);
+        } else {
+            contours.hole_loops.push(contour.points);
+        }
+    }
+    let contours = sketch_contours_from_loops(contours, "raster extrude")?;
+    Ok(contour_set_to_sketch(&contours).translate(layout.offset_x, layout.offset_y, 0.0))
 }
 
 fn pick_path_sample(
@@ -1781,19 +1876,81 @@ pub(super) fn eval_geometry_with_bindings(
             )?))
         }
         "extrude" => {
-            let (positional, keywords) = split_call_args("extrude", args, &["symmetric"])?;
+            let (positional, keywords) = split_call_args(
+                "extrude",
+                args,
+                &[
+                    "symmetric",
+                    "width",
+                    "depth",
+                    "threshold",
+                    "foreground",
+                    "fit",
+                ],
+            )?;
             if positional.len() != 2 {
-                return Err(validation("`extrude` expects a sketch and height."));
+                return Err(validation("`extrude` expects a sketch or image path and height."));
             }
-            let sketch =
-                eval_geometry_with_bindings(positional[0], env, bindings)?.into_sketch("extrude")?;
             let height = eval_number(positional[1], env)?;
             let symmetric = keywords
                 .get("symmetric")
                 .map(|value| eval_bool(value, env))
                 .transpose()?
                 .unwrap_or(false);
+            let sketch = if is_raster_source(positional[0], env) {
+                let dimension = |name: &str| -> AppResult<Option<f64>> {
+                    keywords
+                        .get(name)
+                        .copied()
+                        .map(|value| eval_number(value, env))
+                        .transpose()
+                };
+                raster_sketch(
+                    eval_stringish(positional[0], env)?,
+                    dimension("width")?,
+                    dimension("depth")?,
+                    keywords
+                        .get("threshold")
+                        .map(|value| eval_number(value, env))
+                        .transpose()?
+                        .unwrap_or(0.5),
+                    raster_foreground(keywords.get("foreground"), env, "extrude")?,
+                    raster_fit(keywords.get("fit"), env, "extrude")?,
+                )?
+            } else {
+                for keyword in ["width", "depth", "threshold", "foreground", "fit"] {
+                    if keywords.contains_key(keyword) {
+                        return Err(validation(format!(
+                            "`extrude` accepts `:{keyword}` only when its first operand is an image path."
+                        )));
+                    }
+                }
+                eval_geometry_with_bindings(positional[0], env, bindings)?
+                    .into_sketch("extrude")?
+            };
             Ok(Geometry::Mesh(extrude_sketch(&sketch, height, symmetric)))
+        }
+        "protrude" => {
+            let (positional, keywords) =
+                split_call_args("protrude", args, &["width", "depth", "foreground", "fit"])?;
+            if positional.len() != 2 {
+                return Err(validation("`protrude` expects an image path and height."));
+            }
+            let dimension = |name: &str| -> AppResult<Option<f64>> {
+                keywords
+                    .get(name)
+                    .copied()
+                    .map(|value| eval_number(value, env))
+                    .transpose()
+            };
+            Ok(Geometry::Mesh(build_protrusion(
+                &eval_stringish(positional[0], env)?,
+                dimension("width")?,
+                dimension("depth")?,
+                eval_number(positional[1], env)?,
+                raster_foreground(keywords.get("foreground"), env, "protrude")?,
+                raster_fit(keywords.get("fit"), env, "protrude")?,
+            )?))
         }
         "revolve" => {
             if args.len() < 2 || args.len() > 3 {
@@ -2393,7 +2550,14 @@ fn parse_surface_trim_call(
     let (positional, keywords) = split_call_args(
         "surface-trim",
         args,
-        &["schema-version", "source-digest", "loop", "keep-seed", "path-mode", "cap"],
+        &[
+            "schema-version",
+            "source-digest",
+            "loop",
+            "keep-seed",
+            "path-mode",
+            "cap",
+        ],
     )?;
     if positional.len() != 1 {
         return Err(validation(
@@ -2407,8 +2571,7 @@ fn parse_surface_trim_call(
     )?;
     if !schema_version.is_finite()
         || schema_version.fract().abs() > f64::EPSILON
-        || schema_version
-            != crate::surface_trim_external_shapes::SURFACE_TRIM_SCHEMA_VERSION as f64
+        || schema_version != crate::surface_trim_external_shapes::SURFACE_TRIM_SCHEMA_VERSION as f64
     {
         return Err(validation(format!(
             "Unsupported `surface-trim` schema version {}; expected {}.",
@@ -2433,41 +2596,32 @@ fn parse_surface_trim_call(
         .iter()
         .map(|value| parse_surface_trim_anchor(value, env))
         .collect::<AppResult<Vec<_>>>()?;
-    let keep_seed = parse_surface_trim_anchor(
-        required_surface_trim_keyword(&keywords, "keep-seed")?,
-        env,
-    )?;
-    let path_mode = match eval_stringish(
-        required_surface_trim_keyword(&keywords, "path-mode")?,
-        env,
-    )?
-    .as_str()
-    {
-        "shortest" => SurfaceTrimPathMode::Shortest,
-        "feature" => SurfaceTrimPathMode::Feature,
-        other => {
-            return Err(validation(format!(
-                "`surface-trim` path mode '{}' is invalid; expected shortest or feature.",
-                other
-            )))
-        }
-    };
-    let cap_mode = match eval_stringish(
-        required_surface_trim_keyword(&keywords, "cap")?,
-        env,
-    )?
-    .as_str()
-    {
-        "open" => SurfaceTrimCapMode::Open,
-        "flat" => SurfaceTrimCapMode::Flat,
-        "surface-fill" => SurfaceTrimCapMode::SurfaceFill,
-        other => {
-            return Err(validation(format!(
+    let keep_seed =
+        parse_surface_trim_anchor(required_surface_trim_keyword(&keywords, "keep-seed")?, env)?;
+    let path_mode =
+        match eval_stringish(required_surface_trim_keyword(&keywords, "path-mode")?, env)?.as_str()
+        {
+            "shortest" => SurfaceTrimPathMode::Shortest,
+            "feature" => SurfaceTrimPathMode::Feature,
+            other => {
+                return Err(validation(format!(
+                    "`surface-trim` path mode '{}' is invalid; expected shortest or feature.",
+                    other
+                )))
+            }
+        };
+    let cap_mode =
+        match eval_stringish(required_surface_trim_keyword(&keywords, "cap")?, env)?.as_str() {
+            "open" => SurfaceTrimCapMode::Open,
+            "flat" => SurfaceTrimCapMode::Flat,
+            "surface-fill" => SurfaceTrimCapMode::SurfaceFill,
+            other => {
+                return Err(validation(format!(
                 "`surface-trim` cap mode '{}' is invalid; expected open, flat, or surface-fill.",
                 other
             )))
-        }
-    };
+            }
+        };
     Ok((
         source_path,
         source_digest,
@@ -2506,8 +2660,7 @@ fn parse_surface_trim_anchor(
     env: &BTreeMap<String, ParamValue>,
 ) -> AppResult<CanonicalSurfaceTrimAnchor> {
     let items = expr_list_items(value, "surface-trim mesh anchor")?;
-    if expr_head_symbol(items, "surface-trim mesh anchor")? != "mesh-anchor" || items.len() != 5
-    {
+    if expr_head_symbol(items, "surface-trim mesh anchor")? != "mesh-anchor" || items.len() != 5 {
         return Err(validation(
             "A `surface-trim` anchor must be `(mesh-anchor triangle-index b0 b1 b2)`.",
         ));

@@ -32,7 +32,7 @@ function input(): ActiveRenderSnapshotInput {
       artifactVersion: 1,
       fcstdPath: '',
       manifestPath: '/model-1.json',
-      previewStlPath: '/model-1.stl',
+      modelStlPath: '/model-1.stl',
       viewerAssets: [],
       calloutAnchors: [],
       measurementGuides: [],

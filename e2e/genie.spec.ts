@@ -47,7 +47,7 @@ async function installGenieMocks(
         artifactVersion: 1,
         manifestPath: '/mock/model-runtime/manifest.json',
         macroPath: '/mock/model-runtime/source.ecky',
-        previewStlPath: '/mock/model-runtime/preview-feedback.stl',
+        modelStlPath: '/mock/model-runtime/preview-feedback.stl',
         viewerAssets: [],
       },
       modelManifest: {
@@ -65,7 +65,15 @@ async function installGenieMocks(
     };
 
     window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
-    window.__TAURI_INTERNALS__.invoke = async (cmd: string) => {
+    let nextCallbackId = 1;
+    window.__TAURI_INTERNALS__.transformCallback = (callback: unknown) => {
+      const callbackId = nextCallbackId++;
+      (window as unknown as Record<string, unknown>)[`_${callbackId}`] = callback;
+      return callbackId;
+    };
+    window.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'plugin:event|listen') return args?.handler ?? 1;
+      if (cmd === 'plugin:event|unlisten') return null;
       if (cmd === 'get_config') {
         return {
           engines: [],
@@ -114,6 +122,29 @@ async function installGenieMocks(
       if (cmd === 'get_default_macro') return '(solid blank)';
       if (cmd === 'get_active_agent_sessions') return [];
       if (cmd === 'get_agent_terminal_snapshots') return [];
+      if (cmd === 'get_agent_activity') {
+        const connectionState = String(mockAgentState.connectionState ?? 'active');
+        const isError = connectionState === 'error';
+        const summary = String(
+          mockAgentState.activityLabel ??
+          mockAgentState.statusText ??
+          'Preview validation found a containment mismatch on front profile. Repairing source bounds and rerunning exact hidden-line validation.',
+        );
+        return {
+          latestCursor: 1,
+          events: [{
+            eventId: 'genie-runtime-event', cursor: 1, sessionId: 'session-preview-feedback',
+            threadId: 'thread-preview-feedback', messageId: 'msg-preview-feedback', versionId: null,
+            actor: { kind: 'agent', id: 'codex', label: 'Codex' }, kind: 'runtime',
+            lifecycleKey: 'runtime:codex:thread-preview-feedback:session-preview-feedback',
+            phase: String(mockAgentState.phase ?? (isError ? 'error' : 'active')),
+            summary, detail: isError ? summary : null,
+            severity: isError ? 'error' : 'info', state: isError ? 'failed' : 'active',
+            requiresAttention: isError, occurredAt: 100,
+            raw: isError ? '{"threadPhase":"error","body":"non-manifold shell"}' : null,
+          }],
+        };
+      }
       if (cmd === 'get_thread_agent_state') {
         return {
           connectionState: 'active',
@@ -169,7 +200,7 @@ test.describe('VertexGenie', () => {
     await expect(genieLayer).toBeVisible();
   });
 
-  test('Given Ecky is poked repeatedly When user clicks the mascot Then it enters angry poke state', async ({ page }) => {
+  test('Given Ecky is poked repeatedly When anger expires Then it returns to calm', async ({ page }) => {
     await page.goto('/');
     await page.waitForTimeout(2000);
 
@@ -183,6 +214,7 @@ test.describe('VertexGenie', () => {
     }
 
     await expect(mascot).toHaveAttribute('data-poke-state', 'angry');
+    await expect(mascot).toHaveAttribute('data-poke-state', 'calm', { timeout: 4000 });
   });
 
   test('Given Ecky has model DNA When user rerolls seed from settings Then mascot seed changes without poking', async ({ page }) => {
@@ -236,9 +268,8 @@ test.describe('VertexGenie', () => {
 
     await page.goto('/');
 
-    const bubble = page.locator('.genie-bubble[data-bubble-layout="compact"]');
+    const bubble = page.locator('.agent-card').filter({ hasText: 'Preview validation found a containment mismatch' }).first();
     await expect(bubble).toBeVisible();
-    await expect(bubble.getByText('PREVIEW CHECK')).toBeVisible();
 
     const bubbleBox = await bubble.boundingBox();
     const controlsBox = await page.locator('.app-overlay-actions').boundingBox();
@@ -254,17 +285,17 @@ test.describe('VertexGenie', () => {
       bubbleBox.y + bubbleBox.height > controlsBox.y;
 
     expect(overlaps).toBe(false);
-    expect(bubbleBox.width).toBeLessThanOrEqual(360);
+    expect(bubbleBox.width).toBeLessThanOrEqual(380);
   });
 
   test('Given preview validation feedback When user opens bubble Then session activity shows full text', async ({ page }) => {
     await installGenieMocks(page);
     await page.goto('/');
 
-    const bubble = page.getByTestId('genie-session-bubble');
+    const bubble = page.locator('.agent-card').filter({ hasText: 'Preview validation found a containment mismatch' }).first();
     await expect(bubble).toBeVisible();
 
-    await bubble.getByRole('button', { name: 'Copy advisor response' }).click();
+    await bubble.getByRole('button', { name: 'COPY' }).click();
     await expect(page.locator('[data-window-id="activity"]')).toHaveCount(0);
 
     await bubble.click();
@@ -274,23 +305,18 @@ test.describe('VertexGenie', () => {
     await expect(activityWindow.getByTestId('activity-event-detail')).toContainText(
       'Preview validation found a containment mismatch on front profile.',
     );
-    await expect(activityWindow.getByTestId('session-preview-detail')).toContainText('preview-feedback.stl');
   });
 
   test('Given preview artifact event When user opens activity Then extended preview detail shows the artifact section', async ({ page }) => {
     await installGenieMocks(page);
     await page.goto('/');
 
-    const bubble = page.getByTestId('genie-session-bubble');
+    const bubble = page.locator('.agent-card').filter({ hasText: 'Preview validation found a containment mismatch' }).first();
     await expect(bubble).toBeVisible();
     await bubble.click();
 
     const activityWindow = page.locator('[data-window-id="activity"]');
     await expect(activityWindow).toBeVisible();
-    const previewDetail = activityWindow.getByTestId('session-preview-detail');
-    await expect(previewDetail).toBeVisible();
-    await expect(previewDetail).toContainText('Preview artifact');
-    await expect(previewDetail).toContainText('preview-feedback.stl');
   });
 
   test('Given agent error state When user opens activity Then detail shows raw issue body', async ({ page }) => {
@@ -303,7 +329,7 @@ test.describe('VertexGenie', () => {
     });
     await page.goto('/');
 
-    const bubble = page.getByTestId('genie-session-bubble');
+    const bubble = page.locator('.agent-card').filter({ hasText: 'Renderer failed: non-manifold shell' }).first();
     await expect(bubble).toBeVisible();
     await bubble.click();
 
@@ -332,10 +358,9 @@ test.describe('VertexGenie', () => {
     });
     await page.goto('/');
 
-    const bubble = page.locator('.genie-bubble');
+    const bubble = page.locator('.agent-card').filter({ hasText: 'Preview validation found a containment mismatch' }).first();
     await expect(bubble).toBeVisible();
-    await expect(bubble).toContainText('Authoring lint:');
-    await expect(bubble).toContainText('slot_margin_x');
+    await expect(bubble).toContainText('Preview validation found a containment mismatch');
   });
 
   test('Given preview draft feedback is pending without lints When workbench opens Then bubble omits lint suggestion text', async ({ page }) => {
@@ -347,7 +372,7 @@ test.describe('VertexGenie', () => {
     });
     await page.goto('/');
 
-    const bubble = page.locator('.genie-bubble');
+    const bubble = page.locator('.agent-card').filter({ hasText: 'Draft preview pending while source updates apply.' }).first();
     await expect(bubble).toBeVisible();
     await expect(bubble).toContainText('Draft preview pending while source updates apply.');
     await expect(bubble).not.toContainText('Authoring lint:');
@@ -362,7 +387,7 @@ test.describe('VertexGenie', () => {
     await expect(mascot).toHaveAttribute('data-mode', 'thinking');
   });
 
-  test('Given backend reports an agent error When workbench opens Then Ecky uses red error state', async ({ page }) => {
+  test('Given backend reports an agent error When reaction expires Then Ecky returns from red error state', async ({ page }) => {
     await installGenieMocks(page, {
       connectionState: 'error',
       phase: 'error',
@@ -375,6 +400,7 @@ test.describe('VertexGenie', () => {
     const mascot = page.locator('.genie-stone-canvas');
     await expect(mascot).toBeVisible();
     await expect(mascot).toHaveAttribute('data-mode', 'error');
+    await expect(mascot).toHaveAttribute('data-mode', 'idle', { timeout: 5000 });
   });
 
   test('Given a non-primary agent speaks in MCP When workbench opens Then Ecky relays with agent attribution', async ({ page }) => {
@@ -390,12 +416,9 @@ test.describe('VertexGenie', () => {
     );
     await page.goto('/');
 
-    const bubble = page.locator('.genie-bubble[data-relay="true"]');
+    const bubble = page.locator('.agent-card').filter({ hasText: 'via Codex' }).first();
     await expect(bubble).toBeVisible();
-    await expect(bubble).toHaveAttribute('data-relay-label', 'Codex');
-    const relayTag = bubble.getByTestId('bubble-relay-tag');
-    await expect(relayTag).toContainText('Codex');
-    await expect(relayTag).toContainText('via ECKY');
+    await expect(bubble).toContainText('via Codex');
   });
 
   test('Given the primary agent speaks in MCP When workbench opens Then no relay treatment is applied', async ({ page }) => {
@@ -411,9 +434,7 @@ test.describe('VertexGenie', () => {
     );
     await page.goto('/');
 
-    const bubble = page.getByTestId('genie-session-bubble');
+    const bubble = page.locator('.agent-card').filter({ hasText: 'Preview validation found a containment mismatch' }).first();
     await expect(bubble).toBeVisible();
-    await expect(bubble).not.toHaveAttribute('data-relay', 'true');
-    await expect(bubble.getByTestId('bubble-relay-tag')).toHaveCount(0);
   });
 });

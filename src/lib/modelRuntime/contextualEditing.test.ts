@@ -195,7 +195,7 @@ function bundle(overrides: Partial<ArtifactBundle> = {}): ArtifactBundle {
     fcstdPath: '/tmp/model.FCStd',
     manifestPath: '/tmp/model.json',
     macroPath: '/tmp/model.py',
-    previewStlPath: '/tmp/model.stl',
+    modelStlPath: '/tmp/model.stl',
     viewerAssets: [],
     edgeTargets: [],
     calloutAnchors: [],

@@ -22,6 +22,7 @@ use crate::contracts::{
 use crate::db;
 use crate::mcp::authoring::authoring_card_text;
 use crate::models::{AppState, McpSessionState, McpTargetRef};
+use crate::services::agent_activity::record_runtime_agent_activity;
 
 const MCP_READY_ATTEMPTS: usize = 75;
 const MCP_READY_SLEEP_MS: u64 = 200;
@@ -686,12 +687,8 @@ fn enabled_auto_agents(config: &Config) -> Vec<AutoAgent> {
         .collect()
 }
 
-pub fn default_mcp_mode(config: &Config) -> McpMode {
-    if config.mcp.auto_agents.is_empty() {
-        McpMode::Passive
-    } else {
-        McpMode::Active
-    }
+pub fn default_mcp_mode(_config: &Config) -> McpMode {
+    McpMode::Passive
 }
 
 pub fn ensure_primary_agent_id(config: &mut Config) -> bool {
@@ -950,8 +947,8 @@ fn write_agent_instructions(
               means in the manifest.\n\
            i. If a step will take more than a few seconds, call `session_activity_set`, and call \
               `session_activity_clear` when that step finishes.\n\
-           j. For a bound `sourcePath`, edit the file and call `project_folder_apply` with its folder slug; do not export first. Only for an unbound legacy target, use `macro_buffer_replace_and_preview`, `macro_preview_render`, or `params_preview_render`.\n\
-           k. After every preview/render-tool draft that may become a user-visible version, call `verify_generated_model`. `project_folder_apply` already validates, previews, and commits its source result. If verification is red and the request is still repairable, patch source/params and preview again before commit. Commit only green verification; if the repair cap is exhausted, do not commit and report capped red honestly with exact issue codes/messages.\n\
+           j. For a bound `sourcePath`, edit the file directly and let the project-folder watcher sync settled edits; do not export first. Only for an unbound legacy target, use `macro_buffer_replace_and_preview`, `macro_preview_render`, or `params_preview_render`.\n\
+           k. After every preview/render-tool draft that creates a user-visible version, call `verify_generated_model`; it attaches evidence to that version. Watcher-synced file edits append, validate, and preview automatically. If verification is red and repairable, patch source/params and preview again; each changed draft remains in history. If the repair cap is exhausted, report capped red honestly with exact issue codes/messages.\n\
         5. When you finish a user-facing turn, call `session_reply_save` for the final reply \
            (or fatal error) if the user should see text in the thread history.\n\
         6. Immediately after the turn completes, call `request_user_prompt` again so Ecky can \
@@ -1045,7 +1042,7 @@ fn build_initial_prompt(agent: &AutoAgent, endpoint_url: &str) -> String {
         After that, treat `bootstrap_ecky`, `workspace_overview`, `agentBrief.primaryGuideUri`, and `agentBrief.mustRead` as the normal modeling policy source of truth. If the source language is `ecky`, write `.ecky`; do not switch to Python because the backend is `freecad`. Read `agentBrief.compatibilityManifestUri` only for concrete op/support questions, and prose backend guides only after lowerer/render errors or artifact/export claims. If `workspace_overview` says the thread has no saved versions yet, \
         use agentBrief config/session defaults plus queued user context to create the first version instead of assuming `target_meta_get` exists. Otherwise prefer `target_meta_get`, `target_macro_get`, `macro_buffer_get`, `artifact_manifest_get`, and `target_detail_get(section=...)` \
         before falling back to `target_get`. Use `session_activity_set` / `session_activity_clear` for \
-        long steps instead of relying on terminal text. After preview/render, call `verify_generated_model`; patch and preview again on red before commit. Commit only green verification; if the repair cap is exhausted, do not commit and report capped red honestly with exact issue codes/messages. At the end of each turn, save any final user-facing \
+        long steps instead of relying on terminal text. After preview/render, call `verify_generated_model`; it attaches evidence to the already-created version. Patch and preview again on red; every changed draft remains in history. If the repair cap is exhausted, report capped red honestly with exact issue codes/messages. At the end of each turn, save any final user-facing \
         reply with `session_reply_save` and then immediately call `request_user_prompt` again.",
         endpoint_url = endpoint_url,
         agent_label = agent.label,
@@ -1642,6 +1639,9 @@ fn mark_agent_stopped(
         entry.last_error = None;
         entry.llm_model_label = None;
     });
+    if let Some(snapshot) = runtime.snapshot_by_id(&agent.id) {
+        sync_terminal_snapshot_from_runtime(state, &snapshot);
+    }
 }
 
 #[cfg(unix)]
@@ -1849,6 +1849,7 @@ fn sync_terminal_snapshot_from_runtime(state: &AppState, runtime: &AutoAgentRunt
         snapshot.activity_started_at = runtime.activity_started_at;
         snapshot.attention_kind = runtime.attention_kind.clone();
     });
+    let _ = record_runtime_agent_activity(state, runtime);
 }
 
 fn append_agent_terminal_output(
@@ -1897,7 +1898,7 @@ fn append_agent_terminal_output(
     let provider_kind = runtime_snapshot.provider_kind.clone();
     let attention_required = observation.attention.is_some();
     let summary = observation.summary();
-    let (snapshot, should_emit, _activity_changed, _attention_changed) = {
+    let (snapshot, should_emit, activity_changed, attention_changed) = {
         let mut terminals = state.agent_terminals.lock().unwrap();
         let Some(runtime) = terminals.get_mut(agent_id) else {
             return;
@@ -1962,6 +1963,9 @@ fn append_agent_terminal_output(
 
     if should_emit {
         state.emit_agent_terminal_update(&snapshot);
+    }
+    if activity_changed || attention_changed {
+        let _ = record_runtime_agent_activity(state, &runtime_snapshot);
     }
 }
 
@@ -2565,7 +2569,7 @@ fn wake_auto_agent_by_id(
     model_id: Option<String>,
 ) -> AppResult<()> {
     sync_auto_agent_supervisors(state.clone());
-    let (notify, agent_label) = {
+    let (notify, agent_label, runtime_snapshot) = {
         let mut runtime = runtime_registry(state);
         let snapshot = runtime
             .snapshot_by_id(agent_id)
@@ -2616,9 +2620,13 @@ fn wake_auto_agent_by_id(
             entry.status_text = Some(format!("Waking {}...", entry.agent.label));
             entry.last_error = None;
         });
-        (notify, agent_label)
+        let runtime_snapshot = runtime
+            .snapshot_by_id(agent_id)
+            .ok_or_else(|| AppError::not_found("Auto-agent runtime not initialized."))?;
+        (notify, agent_label, runtime_snapshot)
     };
 
+    sync_terminal_snapshot_from_runtime(state, &runtime_snapshot);
     state.push_log(format!("[SUPERVISOR] Wake requested for {}", agent_label));
     notify.notify_one();
     Ok(())
@@ -2858,6 +2866,9 @@ pub fn mark_agent_disconnected_for_session(
     status_text: Option<String>,
 ) {
     let mut runtime = runtime_registry(state);
+    let agent_id = runtime
+        .find_by_session_id(session_id)
+        .map(|snapshot| snapshot.agent_id);
     runtime.update_by_session_id(session_id, |entry| {
         entry.phase = AutoAgentRuntimePhase::Disconnected;
         entry.session_id = None;
@@ -2868,7 +2879,7 @@ pub fn mark_agent_disconnected_for_session(
         entry.waiting_on_prompt = false;
         entry.status_text = status_text.clone();
     });
-    if let Some(snapshot) = runtime.find_by_session_id(session_id) {
+    if let Some(snapshot) = agent_id.and_then(|agent_id| runtime.snapshot_by_id(&agent_id)) {
         sync_terminal_snapshot_from_runtime(state, &snapshot);
     }
 }
@@ -3248,8 +3259,10 @@ mod tests {
                 ecky_ast_authoring: false,
                 auto_agents: vec![],
             },
+            fem_compute: crate::contracts::FemComputeConfig::default(),
             has_seen_onboarding: false,
             connection_type: Some("mcp".to_string()),
+            provider_models: crate::contracts::ProviderModels::default(),
             default_engine_kind: crate::contracts::EngineKind::Freecad,
             default_source_language: crate::contracts::SourceLanguage::LegacyPython,
             default_geometry_backend: crate::contracts::GeometryBackend::Freecad,
@@ -3686,6 +3699,17 @@ mod tests {
         assert!(snapshot.busy);
         assert!(snapshot.activity_started_at.is_some());
         assert_eq!(snapshot.activity_label, None);
+
+        let activity = state.get_agent_activity(None);
+        let event = activity.events.last().expect("runtime activity event");
+        assert_eq!(event.kind, crate::contracts::AgentActivityKind::Runtime);
+        assert_eq!(event.thread_id.as_deref(), Some("thread-a"));
+        assert_eq!(event.phase.as_deref(), Some("active"));
+        assert_eq!(event.state, crate::contracts::AgentActivityState::Active);
+        assert!(event
+            .raw
+            .as_deref()
+            .is_some_and(|raw| raw.contains("\"busy\":true")));
     }
 
     #[test]
@@ -3709,9 +3733,9 @@ mod tests {
         assert!(prompt.contains("let*"));
         assert!(prompt.contains("macro_preview_render"));
         assert!(prompt.contains("call `verify_generated_model`"));
-        assert!(prompt.contains("patch and preview again on red before commit"));
-        assert!(prompt.contains("Commit only green verification"));
-        assert!(prompt.contains("do not commit and report capped red honestly"));
+        assert!(prompt.contains("Patch and preview again on red"));
+        assert!(prompt.contains("every changed draft remains in history"));
+        assert!(prompt.contains("report capped red honestly"));
         assert!(prompt.contains("config/session defaults"));
 
         assert!(instructions.contains("call `target_meta_get`"));
@@ -3724,8 +3748,8 @@ mod tests {
         assert!(instructions.contains("ecky://guides/ecky-source"));
         assert!(instructions.contains("macro_preview_render"));
         assert!(instructions.contains("call `verify_generated_model`"));
-        assert!(instructions.contains("Commit only green verification"));
-        assert!(instructions.contains("do not commit and report capped red honestly"));
+        assert!(instructions.contains("each changed draft remains in history"));
+        assert!(instructions.contains("report capped red honestly"));
         assert!(instructions.contains("config/session defaults"));
     }
 

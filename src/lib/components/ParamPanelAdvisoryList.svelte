@@ -1,20 +1,30 @@
 <script lang="ts">
   import type { Advisory } from '../types/domain';
+  import { summarizeAdvisories, type AdvisoryControlLabel } from '../modelRuntime/advisoryPresentation';
 
   let {
     advisories = [],
+    controls = [],
     onDeleteManualAdvisory,
   }: {
     advisories?: Advisory[];
+    controls?: AdvisoryControlLabel[];
     onDeleteManualAdvisory?: (advisoryId: string) => void;
   } = $props();
+
+  const summaries = $derived(summarizeAdvisories(advisories, controls));
 </script>
 
-{#if advisories.length > 0}
+{#if summaries.length > 0}
   <div class="warning-stack">
-    {#each advisories as advisory}
+    {#each summaries as advisory}
       <div class="warning-chip" data-severity={advisory.severity}>
-        <span>{advisory.label}: {advisory.message}</span>
+        <span>
+          {advisory.label}{advisory.count > 1 ? ` (${advisory.count})` : ''}: {advisory.message}
+          {#if advisory.affectedLabels.length > 0}
+            <span class="warning-chip-context">AFFECTED: {advisory.affectedLabels.join(', ')}</span>
+          {/if}
+        </span>
         {#if advisory.advisoryId.startsWith('advisory-manual-')}
           <button
             class="btn btn-xs btn-ghost warning-chip-action"
@@ -60,5 +70,14 @@
 
   .warning-chip-action {
     flex-shrink: 0;
+  }
+
+  .warning-chip-context {
+    display: block;
+    margin-top: 2px;
+    color: var(--text-dim);
+    font-size: 0.54rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
   }
 </style>

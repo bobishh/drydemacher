@@ -14,7 +14,7 @@ function bundle(): ArtifactBundle {
     fcstdPath: '/tmp/model.FCStd',
     manifestPath: '/tmp/model.json',
     macroPath: '/tmp/model.py',
-    previewStlPath: '/tmp/model.stl',
+    modelStlPath: '/tmp/model.stl',
     viewerAssets: [
       {
         partId: 'body',
@@ -71,6 +71,7 @@ test('deriveViewportState resolves preview mode, URLs, and active viewport keys'
     activeArtifactBundle: bundle(),
     activeVersionMessage: conceptMessage('msg-1'),
     activeThreadMessages: [conceptMessage('msg-1')],
+    runtimeRevision: 1,
     stlUrl: 'file:///tmp/model.stl',
     cameraStateByTarget: {
       'thread-1:msg-1:model-1:3:hash-1': cameraState,
@@ -82,7 +83,7 @@ test('deriveViewportState resolves preview mode, URLs, and active viewport keys'
   assert.equal(state.hasRenderableModel, true);
   assert.equal(state.effectiveConceptPreviewMessage?.id, 'msg-1');
   assert.equal(state.currentViewportTargetKey, 'thread-1:msg-1:model-1:3:hash-1');
-  assert.equal(state.currentViewerModelKey, 'thread-1:model-1:3:hash-1:file:///tmp/model.stl');
+  assert.equal(state.currentViewerModelKey, 'thread-1:model-1:3:hash-1:file:///tmp/model.stl:1');
   assert.deepEqual(state.persistedViewportCameraState, cameraState);
   assert.equal(state.activeVersionAgentLabel, 'Ecky · Gemini');
 });
@@ -98,6 +99,7 @@ test('deriveViewportState drops persisted camera when same version points at a n
     },
     activeVersionMessage: conceptMessage('msg-1'),
     activeThreadMessages: [conceptMessage('msg-1')],
+    runtimeRevision: 1,
     stlUrl: 'file:///tmp/model.stl',
     cameraStateByTarget: {
       'thread-1:msg-1:model-1:3:hash-1': {
@@ -121,6 +123,7 @@ test('deriveViewportState keeps viewer model key stable across version ids for s
     activeArtifactBundle: bundle(),
     activeVersionMessage: conceptMessage('msg-1'),
     activeThreadMessages: [conceptMessage('msg-1')],
+    runtimeRevision: 1,
     stlUrl: 'file:///tmp/model.stl',
     cameraStateByTarget: {},
     toAssetUrl: (path) => `asset:${path ?? ''}`,
@@ -131,6 +134,7 @@ test('deriveViewportState keeps viewer model key stable across version ids for s
     activeArtifactBundle: bundle(),
     activeVersionMessage: conceptMessage('msg-2'),
     activeThreadMessages: [conceptMessage('msg-2')],
+    runtimeRevision: 1,
     stlUrl: 'file:///tmp/model.stl',
     cameraStateByTarget: {},
     toAssetUrl: (path) => `asset:${path ?? ''}`,
@@ -147,6 +151,7 @@ test('deriveViewportState changes viewer model key across projects for the same 
     activeArtifactBundle: bundle(),
     activeVersionMessage: conceptMessage('msg-1'),
     activeThreadMessages: [conceptMessage('msg-1')],
+    runtimeRevision: 1,
     stlUrl: 'file:///tmp/model.stl',
     cameraStateByTarget: {},
     toAssetUrl: (path) => `asset:${path ?? ''}`,
@@ -157,6 +162,7 @@ test('deriveViewportState changes viewer model key across projects for the same 
     activeArtifactBundle: bundle(),
     activeVersionMessage: conceptMessage('msg-1'),
     activeThreadMessages: [conceptMessage('msg-1')],
+    runtimeRevision: 1,
     stlUrl: 'file:///tmp/model.stl',
     cameraStateByTarget: {},
     toAssetUrl: (path) => `asset:${path ?? ''}`,
@@ -173,6 +179,7 @@ test('deriveViewportState keeps viewer model key stable when identical artifact 
     activeArtifactBundle: bundle(),
     activeVersionMessage: conceptMessage('msg-1'),
     activeThreadMessages: [conceptMessage('msg-1')],
+    runtimeRevision: 1,
     stlUrl: 'file:///tmp/model.stl',
     cameraStateByTarget: {},
     toAssetUrl: (path) => `asset:${path ?? ''}`,
@@ -183,10 +190,29 @@ test('deriveViewportState keeps viewer model key stable when identical artifact 
     activeArtifactBundle: bundle(),
     activeVersionMessage: conceptMessage('msg-1'),
     activeThreadMessages: [conceptMessage('msg-1')],
+    runtimeRevision: 1,
     stlUrl: 'file:///tmp/model.stl',
     cameraStateByTarget: {},
     toAssetUrl: (path) => `asset:${path ?? ''}`,
   });
 
   assert.equal(first.currentViewerModelKey, second.currentViewerModelKey);
+});
+
+test('deriveViewportState reloads identical artifact after runtime replacement', () => {
+  const input = {
+    activeThreadId: 'thread-1',
+    activeVersionId: 'msg-1',
+    activeArtifactBundle: bundle(),
+    activeVersionMessage: conceptMessage('msg-1'),
+    activeThreadMessages: [conceptMessage('msg-1')],
+    stlUrl: 'file:///tmp/model.stl',
+    cameraStateByTarget: {},
+    toAssetUrl: (path: string | null | undefined) => `asset:${path ?? ''}`,
+  };
+
+  const stale = deriveViewportState({ ...input, runtimeRevision: 1 });
+  const rebuilt = deriveViewportState({ ...input, runtimeRevision: 2 });
+
+  assert.notEqual(stale.currentViewerModelKey, rebuilt.currentViewerModelKey);
 });

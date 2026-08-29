@@ -26,11 +26,11 @@
   } from './tauri/client';
   import type { DeletedThreadSummary } from './tauri/contracts';
   import type { Thread } from './types/domain';
-  import { selectThreadPreviewImage } from './projectPreview';
   import PreviewFrame from './PreviewFrame.svelte';
   import { toPreviewSrc } from './previewSource';
   import ManualImportModal from './ManualImportModal.svelte';
   import Modal from './Modal.svelte';
+  import AsyncActionButton from './components/AsyncActionButton.svelte';
   import type { CampaignRun } from './projects/campaignRunClient';
   import { campaignRunPreviewSrc } from './projects/campaignCardPreview';
   import { campaignRunProjectDriver } from './projects/projectDriverRegistry';
@@ -52,7 +52,7 @@
     activeCampaignRunId?: string | null;
     onStartCampaign?: () => void;
     onOpenCampaignRun?: (run: CampaignRun) => void;
-    onDeleteCampaignRun?: (run: CampaignRun) => void;
+    onDeleteCampaignRun?: (run: CampaignRun) => Promise<void> | void;
   } = $props();
 
   type ProjectTypeTab = 'designs' | 'campaigns';
@@ -88,6 +88,8 @@
   let pendingActionId = $state<string | null>(null);
 
   onMount(() => {
+    void refreshHistory();
+
     const onPreviewUpdated = (event: Event) => {
       const detail = (event as CustomEvent<{
         threadId?: string;
@@ -107,16 +109,7 @@
   });
 
   function threadPreviewImage(thread: Thread): string | null {
-    const previewImage = previewImages[thread.id];
-    return toPreviewSrc(
-      selectThreadPreviewImage(
-        thread,
-        null,
-        previewImage === undefined
-          ? undefined
-          : { messageId: thread.id, imageData: previewImage },
-      ),
-    );
+    return toPreviewSrc(previewImages[thread.id]);
   }
 
   function projectPreviewCard(node: HTMLElement, project: Thread) {
@@ -124,7 +117,7 @@
 
     const fetch = async () => {
       const threadId = currentProject.id;
-      if (previewImages[threadId] !== undefined || threadPreviewImage(currentProject)) return;
+      if (previewImages[threadId] !== undefined) return;
 
       previewImages = { ...previewImages, [threadId]: null };
       try {
@@ -361,8 +354,11 @@
     try {
       await deleteThread(id);
       trashLoaded = false;
-    } finally {
       projectToDelete = null;
+    } catch (error) {
+      loadError = formatBackendError(error);
+      throw error;
+    } finally {
       pendingActionId = null;
     }
   }
@@ -373,8 +369,11 @@
     pendingActionId = run.id;
     try {
       await onDeleteCampaignRun(run);
-    } finally {
       campaignRunToDelete = null;
+    } catch (error) {
+      loadError = formatBackendError(error);
+      throw error;
+    } finally {
       pendingActionId = null;
     }
   }
@@ -674,13 +673,13 @@
         <p>You can recover the complete project and its versions from <strong>TRASH</strong>.</p>
         <div class="confirm-actions">
           <button onclick={() => projectToDelete = null}>CANCEL</button>
-          <button
-            class="danger"
-            onclick={confirmDeleteProject}
+          <AsyncActionButton
+            className="danger"
+            label="MOVE TO TRASH"
+            pendingLabel="MOVING…"
             disabled={pendingActionId === projectToDelete.id}
-          >
-            MOVE TO TRASH
-          </button>
+            action={confirmDeleteProject}
+          />
         </div>
       </div>
     </Modal>
@@ -692,7 +691,13 @@
         <p>Delete <strong>{campaignRunToDelete.title}</strong> and its saved progress?</p>
         <div class="confirm-actions">
           <button onclick={() => campaignRunToDelete = null}>CANCEL</button>
-          <button class="danger" onclick={() => void confirmDeleteCampaignRun()} disabled={pendingActionId === campaignRunToDelete.id}>DELETE</button>
+          <AsyncActionButton
+            className="danger"
+            label="DELETE"
+            pendingLabel="DELETING…"
+            disabled={pendingActionId === campaignRunToDelete.id}
+            action={confirmDeleteCampaignRun}
+          />
         </div>
       </div>
     </Modal>

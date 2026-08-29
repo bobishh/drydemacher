@@ -16,7 +16,9 @@ use crate::mcp::handlers::{
     ProjectFolderStatusRequest,
 };
 use crate::models::AppState;
-use crate::project_mirror::{self, ProjectFolderStatus, ProjectManifest};
+use crate::project_mirror::{
+    self, ProjectFolderRenderActivity, ProjectFolderStatus, ProjectManifest, ProjectSyncState,
+};
 use crate::services::target::resolve_editable_target;
 
 /// Context label for user-driven project-folder actions (as opposed to agent
@@ -65,8 +67,8 @@ async fn resolve_target_and_slug(
 }
 
 /// Export the active version's macro source to its project folder, writing
-/// `model.ecky` and refreshing the `ecky-project.json` manifest. Re-export
-/// preserves the existing `projectId`.
+/// `model.ecky` and refreshing the `ecky-project.edn` manifest. Re-export
+/// preserves the existing project id.
 #[tauri::command]
 #[specta::specta]
 pub async fn project_folder_export(
@@ -118,35 +120,64 @@ pub async fn project_folder_status(
     handle_project_folder_status(state.inner(), &app, ProjectFolderStatusRequest { slug }).await
 }
 
-/// Apply an externally edited `model.ecky` for the active thread's folder by
-/// compile-checking, rendering a preview, and committing it as a new version
-/// through the existing preview/commit pipeline, then rebasing the manifest.
-/// Refuses on `threadAdvanced`; refuses on `conflict` unless `force` is set.
-/// Raw compiler/render errors surface untouched and leave folder + thread
-/// unchanged.
+/// Snapshot active watcher-owned renders. Independent from the database and
+/// render lock, so startup can show truthful progress while rendering blocks.
+#[tauri::command]
+#[specta::specta]
+pub async fn project_folder_render_activity(
+    state: State<'_, AppState>,
+) -> AppResult<Vec<ProjectFolderRenderActivity>> {
+    Ok(state
+        .project_folder_render_activity
+        .lock()
+        .await
+        .values()
+        .cloned()
+        .collect())
+}
+
+/// Apply the folder's source file onto the active thread head.
+/// `force=true` allows apply when both file and thread diverged.
 #[tauri::command]
 #[specta::specta]
 pub async fn project_folder_apply(
     thread_id: Option<String>,
     message_id: Option<String>,
-    #[allow(unused_variables)] force: Option<bool>,
+    force: Option<bool>,
+    title: Option<String>,
+    version_name: Option<String>,
     app: AppHandle,
     state: State<'_, AppState>,
-) -> AppResult<crate::mcp::handlers::ProjectFolderApplyResponse> {
-    // Resolve the slug from the active thread so the UI never has to know it.
+) -> AppResult<ProjectFolderApplyResult> {
     let (_target, slug) = resolve_target_and_slug(&state, &app, thread_id, message_id).await?;
-    let ctx = ui_agent_context();
-    handle_project_folder_apply(
+    let response = handle_project_folder_apply(
         state.inner(),
         &app,
         ProjectFolderApplyRequest {
             identity: AgentIdentityOverride::default(),
             slug,
             force: force.unwrap_or(false),
-            title: None,
-            version_name: Some("folder-apply".to_string()),
+            title,
+            version_name,
         },
-        &ctx,
+        &ui_agent_context(),
     )
-    .await
+    .await?;
+    Ok(ProjectFolderApplyResult {
+        state_before: response.state_before,
+        no_op: response.no_op,
+        thread_id: response.thread_id,
+        message_id: response.message_id,
+        manifest: response.manifest,
+    })
+}
+
+#[derive(serde::Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFolderApplyResult {
+    pub state_before: ProjectSyncState,
+    pub no_op: bool,
+    pub thread_id: String,
+    pub message_id: String,
+    pub manifest: ProjectManifest,
 }

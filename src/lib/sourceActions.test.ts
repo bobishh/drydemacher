@@ -18,9 +18,11 @@ type OpenCall = { threadId: string | null; messageId: string | null };
 function makeDeps(overrides: Partial<SourceActionDeps> = {}): {
   deps: SourceActionDeps;
   openCalls: OpenCall[];
+  cadCalls: OpenCall[];
   revealCalls: OpenCall[];
 } {
   const openCalls: OpenCall[] = [];
+  const cadCalls: OpenCall[] = [];
   const revealCalls: OpenCall[] = [];
   const link = {
     slug: 'pug-cap',
@@ -32,13 +34,17 @@ function makeDeps(overrides: Partial<SourceActionDeps> = {}): {
       openCalls.push({ threadId, messageId });
       return link;
     },
+    openImportedCad: async (threadId, messageId) => {
+      cadCalls.push({ threadId, messageId });
+      return { ...link, file: '/tmp/projects/pug-cap/source.step' };
+    },
     revealInFileManager: async (threadId, messageId) => {
       revealCalls.push({ threadId, messageId });
       return link;
     },
     ...overrides,
   };
-  return { deps, openCalls, revealCalls };
+  return { deps, openCalls, cadCalls, revealCalls };
 }
 
 const knownLink: SourceLink = {
@@ -61,6 +67,19 @@ test('openSourceFile resolves the bound file/folder link via open_project_in_edi
     file: '/tmp/projects/pug-cap/model.ecky',
   });
   assert.deepEqual(openCalls, [{ threadId: 'thread-1', messageId: 'msg-1' }]);
+});
+
+test('openCadFile resolves imported CAD without replacing model.ecky OPEN FILE', async () => {
+  const { deps, openCalls, cadCalls } = makeDeps();
+  const actions = createSourceActions(deps);
+
+  const outcome = await actions.openCadFile('thread-1', 'msg-1');
+
+  assert.equal(outcome.kind, 'openCad');
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.link.file, '/tmp/projects/pug-cap/source.step');
+  assert.deepEqual(cadCalls, [{ threadId: 'thread-1', messageId: 'msg-1' }]);
+  assert.deepEqual(openCalls, []);
 });
 
 test('openSourceFile surfaces the RAW backend error instead of a generic message', async () => {

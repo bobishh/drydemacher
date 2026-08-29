@@ -28,19 +28,23 @@
     MaterializedSemanticControl,
     MaterializedSemanticView,
   } from './modelRuntime/semanticControls';
+  import { usesPersistedControlViews } from './modelRuntime/semanticControls';
   import { persistLastSessionSnapshot } from './modelRuntime/sessionSnapshot';
   import { activeThreadIdStore as activeThreadId, historyStore as history } from './stores/domainState';
   import { refreshHistory } from './stores/history';
-  import { liveApply } from './stores/paramPanelState';
   import ParamPanelToolbar from './components/ParamPanelToolbar.svelte';
+  import ParamPanelSearch from './components/ParamPanelSearch.svelte';
   import ParamPanelModeTabs from './components/ParamPanelModeTabs.svelte';
+  import ParamPanelMeshTab from './components/ParamPanelMeshTab.svelte';
   import ProjectFolderStatusChip from './ProjectFolderStatusChip.svelte';
   import ParamPanelEditFields from './components/ParamPanelEditFields.svelte';
   import ParamPanelImportedProposals from './components/ParamPanelImportedProposals.svelte';
   import ParamPanelLithophaneTab from './components/ParamPanelLithophaneTab.svelte';
   import ParamPanelRawTab from './components/ParamPanelRawTab.svelte';
+  import ParamPanelOwnershipSections from './components/ParamPanelOwnershipSections.svelte';
+  import { buildOwnershipSections } from './modelRuntime/ownershipSections';
   import ParamPanelViewsTab from './components/ParamPanelViewsTab.svelte';
-  import { pendingHeightfieldImages, pendingHeightfieldStatus } from './heightfieldPending';
+  import { pendingImageGeometry, pendingImageGeometryStatus } from './imageGeometryPending';
   import { session } from './stores/sessionStore';
   import type {
     CheckboxField,
@@ -146,6 +150,8 @@
     postProcessing = null,
     artifactBundle = null,
     onApplyMacroCode = undefined,
+    manualApplyBusy = false,
+    manualApplyQueued = 0,
   }: {
     uiSpec?: UiSpec | null;
     parameters?: DesignParams;
@@ -177,6 +183,8 @@
     messageId?: string | null;
     macroCode?: string;
     onApplyMacroCode?: (code: string) => Promise<unknown>;
+    manualApplyBusy?: boolean;
+    manualApplyQueued?: number;
   } = $props();
 
   let editing = $state(false);
@@ -186,11 +194,11 @@
   let paramUndoStack = $state<DesignParams[]>([]);
   let paramUndoDepth = $derived(paramUndoStack.length);
   const effectiveLocalParams = $derived.by(() => ({ ...localParams, ...pendingParamDrafts }));
-  const pendingHeightfields = $derived(
-    pendingHeightfieldImages(macroCode, uiSpec, effectiveLocalParams),
+  const pendingImages = $derived(
+    pendingImageGeometry(macroCode, uiSpec, effectiveLocalParams),
   );
-  const heightfieldPendingText = $derived(
-    pendingHeightfields.length > 0 ? pendingHeightfieldStatus(pendingHeightfields) : '',
+  const imageGeometryPendingText = $derived(
+    pendingImages.length > 0 ? pendingImageGeometryStatus(pendingImages) : '',
   );
   let hasPendingChanges = $derived(JSON.stringify(effectiveLocalParams) !== JSON.stringify(parameters));
   let saveValuesState = $state<'idle' | 'saving' | 'saved'>('idle');
@@ -198,7 +206,12 @@
   let macroParseSeq = 0;
   let localSelectedPartId = $state<string | null>(null);
   let proposalMutationId = $state<string | null>(null);
-  let activeTab = $state<'views' | 'raw' | 'litho' | 'newParams'>('views');
+  let activeTab = $state<'params' | 'mesh' | 'edit' | 'litho' | 'newParams' | 'views'>('params');
+  const controlViewsEnabled = $derived(
+    usesPersistedControlViews(modelManifest) &&
+      artifactBundle?.sourceLanguage !== 'ecky' &&
+      !/^\s*\(model\b/.test(macroCode),
+  );
   /** Alternate AstMap layout: spatial scene ('map') or nested document
    *  ('doc'). Session-only view state, not source/config — same projection
    *  and patch intents either way (filesystem-project-mirror 6.1). */
@@ -231,7 +244,6 @@
   });
   let pendingMacroFocusNodeId = $state<string | null>(null);
   let sectionOverrides = $state<Record<string, boolean>>({});
-  let hadSemanticViews = $state(false);
   let composerOpen = $state(false);
   let composerMode = $state<'create' | 'edit'>('create');
   let composerViewId = $state<string | null>(null);
@@ -318,9 +330,7 @@
   function commitPostProcessing(next: PostProcessingSpec | null, statusText = 'Lithophane staged. Apply to rerender.') {
     localPostProcessing = clonePostProcessing(next);
     onpostprocessingchange?.(localPostProcessing);
-    if (!$liveApply) {
-      session.setStatus(statusText);
-    }
+    session.setStatus(statusText);
   }
 
   function parseOptionalNumber(raw: EditableNumber): number | undefined {
@@ -607,11 +617,25 @@
   function startEditing() {
     editFields = mergedFields.map(toEditableField);
     editing = true;
+    activeTab = 'edit';
   }
 
   function cancelEditing() {
     editing = false;
     editFields = [];
+    activeTab = 'params';
+  }
+
+  function selectPanelTab(tab: 'params' | 'mesh' | 'edit' | 'litho' | 'newParams' | 'views') {
+    if (tab === 'edit') {
+      startEditing();
+      return;
+    }
+    if (editing) {
+      editing = false;
+      editFields = [];
+    }
+    activeTab = tab;
   }
 
   function addField() {
@@ -694,6 +718,26 @@
     return filterFieldsBySearch(mergedFields, searchQuery);
   });
 
+  const usesAstOwnershipSections = $derived(
+    modelManifest?.sourceKind === 'generated' &&
+      (
+        modelManifest?.sourceLanguage === 'ecky' ||
+        modelManifest?.engineKind === 'ecky' ||
+        artifactBundle?.sourceLanguage === 'ecky' ||
+        artifactBundle?.engineKind === 'ecky' ||
+        /^\s*\(model\b/.test(macroCode)
+      ),
+  );
+
+  const ownershipSections = $derived.by(() =>
+    buildOwnershipSections({
+      manifest: modelManifest,
+      fields: mergedFields,
+      selectedTarget,
+      searchQuery,
+    }),
+  );
+
   const filteredEditFields = $derived.by(() => {
     return filterFieldsBySearch(editFields, searchQuery);
   });
@@ -706,18 +750,6 @@
   );
 
   const isSelectMode = $derived(selectionMode === 'select');
-
-  $effect(() => {
-    if (editing) return;
-    if (controlViews.length === 0) {
-      hadSemanticViews = false;
-      return;
-    }
-    if (!hadSemanticViews) {
-      hadSemanticViews = true;
-      activeTab = 'views';
-    }
-  });
 
   $effect(() => {
     localSelectedPartId = selectedTarget?.partId ?? selectedPartId;
@@ -765,17 +797,6 @@
     const exports = artifactBundle?.exportArtifacts ?? [];
     if (!attachment) return exports;
     return exports.filter((item) => item.label.includes(attachment.id));
-  });
-
-  const manifestWarnings = $derived.by(() => {
-    const warnings = new Set<string>();
-    for (const warning of modelManifest?.warnings || []) {
-      if (warning?.trim() && !warning.startsWith('Hybrid poly BRep bridge:')) warnings.add(warning);
-    }
-    for (const warning of modelManifest?.document?.warnings || []) {
-      if (warning?.trim() && !warning.startsWith('Hybrid poly BRep bridge:')) warnings.add(warning);
-    }
-    return [...warnings];
   });
 
   const enrichmentProposals = $derived<EnrichmentProposal[]>(
@@ -1088,6 +1109,7 @@
 
     editing = false;
     editFields = [];
+    activeTab = 'params';
   }
 
   function paramsEqual(left: DesignParams, right: DesignParams): boolean {
@@ -1165,11 +1187,7 @@
     }
     localParams = nextParams;
     clearPendingParamDraft(key);
-    if ($liveApply && onchange) {
-      onchange(localParams);
-    } else {
-      session.setStatus('Parameters staged. Apply to rerender.');
-    }
+    session.setStatus('Parameters staged. Apply to rerender.');
   }
 
   function updateSemanticControl(control: MaterializedSemanticControl, value: ParamValue) {
@@ -1212,9 +1230,8 @@
   }
 
   async function applyChanges() {
-    if (applying) return;
     const paramsToApply = cloneParams(effectiveLocalParams);
-    console.log('ParamPanel: applyChanges clicked', { localParams: paramsToApply, hasPendingChanges, live: $liveApply });
+    console.log('ParamPanel: applyChanges clicked', { localParams: paramsToApply, hasPendingChanges });
     if (onchange) {
       applying = true;
       session.setError(null);
@@ -1236,6 +1253,28 @@
     } else {
       console.warn('ParamPanel: onchange prop is missing!');
       session.setError('Apply Failed: parameter change handler is missing.');
+    }
+  }
+
+  async function commitChanges() {
+    if (committing) return;
+    const paramsToCommit = cloneParams(effectiveLocalParams);
+    if (!oncommit) {
+      session.setError('Commit Failed: parameter commit handler is missing.');
+      return;
+    }
+    committing = true;
+    session.setError(null);
+    try {
+      const committed = await oncommit(paramsToCommit);
+      if (committed === false) return;
+      localParams = paramsToCommit;
+      pendingParamDrafts = {};
+    } catch (error: unknown) {
+      session.setError(`Commit Failed: ${formatBackendError(error)}`);
+      focusDiagnosticMacroNode(error);
+    } finally {
+      committing = false;
     }
   }
 
@@ -1264,30 +1303,6 @@
       focusDiagnosticMacroNode(e);
     } finally {
       applying = false;
-    }
-  }
-
-  async function commitChanges() {
-    if (committing) return;
-    const paramsToCommit = cloneParams(effectiveLocalParams);
-    if (oncommit) {
-      committing = true;
-      session.setError(null);
-      try {
-        const committed = await oncommit(paramsToCommit);
-        if (committed === false) return;
-        localParams = paramsToCommit;
-        pendingParamDrafts = {};
-      } catch (e: unknown) {
-        console.error('ParamPanel: oncommit failed', e);
-        session.setError(`Commit Failed: ${formatBackendError(e)}`);
-        focusDiagnosticMacroNode(e);
-      } finally {
-        committing = false;
-      }
-    } else {
-      console.warn('ParamPanel: oncommit prop is missing!');
-      session.setError('Commit Failed: parameter commit handler is missing.');
     }
   }
 
@@ -1872,13 +1887,16 @@
   }
 
   async function persistManifest(nextManifest: ModelManifest, nextViewId: string | null = null) {
+    const persistedManifest = usesPersistedControlViews(nextManifest)
+      ? nextManifest
+      : { ...nextManifest, controlViews: [] };
     const versionMessageId = messageId ?? activeVersionId;
-    await saveModelManifest(nextManifest.modelId, nextManifest, versionMessageId);
-    updateCachedManifest(nextManifest, versionMessageId);
+    await saveModelManifest(persistedManifest.modelId, persistedManifest, versionMessageId);
+    updateCachedManifest(persistedManifest, versionMessageId);
     const currentSession = get(session);
-    session.setModelRuntime(currentSession.artifactBundle, nextManifest);
+    session.setModelRuntime(currentSession.artifactBundle, persistedManifest);
     await persistLastSessionSnapshot({
-      modelManifest: nextManifest,
+      modelManifest: persistedManifest,
       messageId: versionMessageId ?? null,
     });
     if (nextViewId) {
@@ -2320,30 +2338,85 @@
 </script>
 
 <div class="param-panel">
-  <ParamPanelToolbar
-    searchQuery={searchQuery}
-    editing={editing}
-    applying={applying}
-    committing={committing}
-    reading={reading}
-    undoDepth={paramUndoDepth}
-    saveValuesState={saveValuesState}
-    liveApply={$liveApply}
-    activeVersionId={activeVersionId}
-    onSearchQueryChange={(value) => searchQuery = value}
-    onApplyChanges={applyChanges}
-    onUndoParams={undoParams}
-    onCommitChanges={commitChanges}
-    onSaveValues={saveValues}
-    onStartEditing={startEditing}
-    onSaveFields={saveFields}
-    onCancelEditing={cancelEditing}
-    onReadFromMacro={readFromMacro}
-    onLiveApplyChange={(checked) => liveApply.set(checked)}
+  <ParamPanelModeTabs
+    activeTab={activeTab}
+    macroCode={macroCode}
+    viewsEnabled={controlViewsEnabled}
+    onActiveTabChange={selectPanelTab}
+    onShowCode={onShowCode}
+    onOpenInEditor={onOpenInEditor}
   />
 
   <div class="param-panel-body">
-    {#if editing}
+    {#if activeTab === 'params' || activeTab === 'newParams'}
+      <ParamPanelSearch
+        searchQuery={searchQuery}
+        onSearchQueryChange={(value) => searchQuery = value}
+      />
+    {/if}
+
+    {#if activeTab === 'params' && modelManifest?.parts?.length && (partCount > 1 || modelManifest?.sourceKind === 'importedFcstd')}
+      <div class="part-strip" aria-label="Part parameters">
+        <div class="section-label">PART PARAMETERS</div>
+        <div class="part-strip-list">
+          {#each modelManifest.parts as part}
+            <button
+              class="part-chip"
+              class:part-chip-active={part.partId === localSelectedPartId}
+              class:part-chip-readonly={!part.editable}
+              aria-label={part.label}
+              onclick={() => selectPart(part.partId)}
+              title={part.editable ? 'Show this part parameters' : 'Inspect-only part'}
+            >
+              {part.label.toLowerCase()}
+            </button>
+          {/each}
+        </div>
+      </div>
+    {/if}
+
+    {#if activeTab === 'params'}
+      {#if usesAstOwnershipSections}
+        <ParamPanelOwnershipSections
+          sections={ownershipSections}
+          parameters={effectiveLocalParams}
+          {highlightedParamKey}
+          searchActive={Boolean(searchQuery.trim())}
+          getRangeProps={getRangeProps}
+          getCadTone={(field) => getCadHint(field).tone}
+          onDraftValue={stageParamDraft}
+          onUpdate={update}
+          onPickImage={pickRawImage}
+          onSetFocusedControl={setFocusedControl}
+          onClearFocusedControl={clearFocusedControl}
+        />
+      {:else}
+        <ParamPanelRawTab
+          {filteredFields}
+          {focusedFields}
+          {remainingFields}
+          {selectedPart}
+          parameters={effectiveLocalParams}
+          {highlightedParamKey}
+          getRangeProps={getRangeProps}
+          getCadTone={(field) => getCadHint(field).tone}
+          onDraftValue={stageParamDraft}
+          onUpdate={update}
+          onPickImage={pickRawImage}
+          onSetFocusedControl={setFocusedControl}
+          onClearFocusedControl={clearFocusedControl}
+        />
+      {/if}
+    {/if}
+
+    {#if activeTab === 'edit'}
+      <ParamPanelToolbar
+        editing={true}
+        reading={reading}
+        onSaveFields={saveFields}
+        onCancelEditing={cancelEditing}
+        onReadFromMacro={readFromMacro}
+      />
       <ParamPanelEditFields
         fieldEntries={filteredEditFieldEntries}
         {getAvailableTypes}
@@ -2354,69 +2427,15 @@
         onRemoveField={removeField}
         onAddField={addField}
       />
-    {:else}
-      {#if heightfieldPendingText}
-        <div class="heightfield-pending" role="status">{heightfieldPendingText}</div>
-      {/if}
-      {#if modelManifest}
-        {#if manifestWarnings.length > 0}
-          <div class="warning-stack">
-            {#each manifestWarnings as warning}
-              <div class="warning-chip">{warning}</div>
-            {/each}
-          </div>
-        {/if}
-      {/if}
-
-    {#if modelManifest?.parts?.length && (partCount > 1 || modelManifest?.sourceKind === 'importedFcstd')}
-      <div class="part-strip">
-        <div class="section-label">PARTS</div>
-        <div class="part-strip-list">
-          {#each modelManifest.parts as part}
-            <button
-              class="part-chip"
-              class:part-chip-active={part.partId === localSelectedPartId}
-              class:part-chip-readonly={!part.editable}
-              aria-label={part.label}
-              onclick={() => selectPart(part.partId)}
-              title={part.editable ? 'Select part controls' : 'Inspect-only part'}
-            >
-              {part.label.toLowerCase()}
-            </button>
-          {/each}
-        </div>
-      </div>
-    {/if}
-
-    <ProjectFolderStatusChip
-      threadId={threadId}
-      messageId={messageId}
-      {macroCode}
-    />
-
-    <ParamPanelModeTabs
-      activeTab={activeTab}
-      outlineEnabled={outlineEnabled}
-      topologyMode={topologyMode}
-      selectionMode={selectionMode}
-      macroCode={macroCode}
-      onActiveTabChange={(tab) => activeTab = tab}
-      onShowCode={onShowCode}
-      onOpenInEditor={onOpenInEditor}
-      onViewerDisplayChange={updateViewerDisplay}
-      onViewerSelectionModeChange={onViewerSelectionModeChange}
-    />
-
-    {#if enrichmentProposals.length > 0 && modelManifest?.sourceKind === 'importedFcstd'}
-      <ParamPanelImportedProposals
-        proposals={enrichmentProposals}
-        mutationId={proposalMutationId}
-        {labelPartIds}
-        onUpdateProposalStatus={updateProposalStatus}
+    {:else if activeTab === 'mesh'}
+      <ParamPanelMeshTab
+        {outlineEnabled}
+        {topologyMode}
+        {selectionMode}
+        onViewerDisplayChange={updateViewerDisplay}
+        onViewerSelectionModeChange={onViewerSelectionModeChange}
       />
-    {/if}
-
-    {#if activeTab === 'newParams'}
+    {:else if activeTab === 'newParams'}
       <div class="ast-view-toggle" role="group" aria-label="AstMap layout">
         <button
           class="ast-view-toggle__btn"
@@ -2443,7 +2462,6 @@
           parameters={effectiveLocalParams}
           fields={mergedFields}
           {highlightedParamKey}
-          liveApply={$liveApply}
           focusNodeId={pendingMacroFocusNodeId}
           onFocusNodeHandled={() => (pendingMacroFocusNodeId = null)}
           {onApplyMacroCode}
@@ -2460,7 +2478,6 @@
           fields={mergedFields}
           {searchQuery}
           {highlightedParamKey}
-          liveApply={$liveApply}
           focusNodeId={pendingMacroFocusNodeId}
           onFocusNodeHandled={() => (pendingMacroFocusNodeId = null)}
           {onApplyMacroCode}
@@ -2487,8 +2504,31 @@
         onSetProjection={setLithophaneProjection}
         onSetColorMode={setLithophaneColorMode}
       />
-    {:else if activeTab === 'views'}
-      <ParamPanelViewsTab
+    {/if}
+
+    <div class="auxiliary-panel">
+      {#if imageGeometryPendingText}
+        <div class="image-geometry-pending" role="status">{imageGeometryPendingText}</div>
+      {/if}
+      <ProjectFolderStatusChip
+        threadId={threadId}
+        messageId={messageId}
+        {macroCode}
+      />
+
+      {#if enrichmentProposals.length > 0 && modelManifest?.sourceKind === 'importedFcstd'}
+        <ParamPanelImportedProposals
+          proposals={enrichmentProposals}
+          mutationId={proposalMutationId}
+          {labelPartIds}
+          onUpdateProposalStatus={updateProposalStatus}
+        />
+      {/if}
+    </div>
+
+    {#if activeTab === 'views' && controlViewsEnabled}
+      <div class="views-panel" id="param-panel-views">
+        <ParamPanelViewsTab
         {controlViews}
         {activeControlViewId}
         {activeSemanticView}
@@ -2537,7 +2577,6 @@
         {isSelectMode}
         selectionTargetCount={modelManifest?.selectionTargets?.length ?? 0}
         {highlightedParamKey}
-        liveApply={$liveApply}
         onSelectControlView={onSelectControlView}
         onOpenCreateViewComposer={openCreateViewComposer}
         onOpenPrimitiveComposer={openPrimitiveComposer}
@@ -2602,27 +2641,29 @@
         onPickSemanticControlImage={pickSemanticControlImage}
         onSetFocusedControl={setFocusedControl}
         onClearFocusedControl={clearFocusedControl}
-      />
-      {:else}
-      <ParamPanelRawTab
-        {filteredFields}
-        {focusedFields}
-        {remainingFields}
-        {selectedPart}
-        parameters={effectiveLocalParams}
-        {highlightedParamKey}
-        liveApply={$liveApply}
-        getRangeProps={getRangeProps}
-        getCadTone={(field) => getCadHint(field).tone}
-        onDraftValue={stageParamDraft}
-        onUpdate={update}
-        onPickImage={pickRawImage}
-        onSetFocusedControl={setFocusedControl}
-        onClearFocusedControl={clearFocusedControl}
-      />
-      {/if}
+        />
+      </div>
     {/if}
   </div>
+
+  {#if activeTab === 'params' || activeTab === 'newParams'}
+    <div class="param-panel-footer">
+      <ParamPanelToolbar
+        editing={false}
+        applying={applying}
+        committing={committing}
+        manualApplyBusy={manualApplyBusy}
+        manualApplyQueued={manualApplyQueued}
+        undoDepth={paramUndoDepth}
+        saveValuesState={saveValuesState}
+        activeVersionId={activeVersionId}
+        onApplyChanges={applyChanges}
+        onUndoParams={undoParams}
+        onCommitChanges={commitChanges}
+        onSaveValues={saveValues}
+      />
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -2660,10 +2701,14 @@
     --cad-axis-z: var(--cad-accent);
     --cad-axis-angle: var(--cad-accent);
     padding: 10px;
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
     gap: 10px;
-    min-height: 100%;
+    flex: 1 1 0;
+    height: 100%;
+    min-height: 0;
+    position: relative;
+    padding-bottom: 76px;
     box-sizing: border-box;
     overflow: hidden;
   }
@@ -2680,13 +2725,41 @@
     scrollbar-gutter: stable;
   }
 
-  .warning-stack {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
+  .param-panel-body > :global(*) {
+    flex-shrink: 0;
   }
 
-  .heightfield-pending {
+  .param-panel-footer {
+    position: absolute;
+    right: 10px;
+    bottom: 10px;
+    left: 10px;
+    z-index: 2;
+    padding: 8px;
+    border: 1px solid var(--bg-300);
+    background: color-mix(in srgb, var(--bg-200) 88%, var(--bg-100));
+    overflow: hidden;
+  }
+
+  .auxiliary-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow: hidden;
+    margin-top: auto;
+  }
+
+  .views-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px;
+    border: 1px solid var(--bg-300);
+    background: color-mix(in srgb, var(--bg-100) 80%, var(--bg-200));
+    overflow: hidden;
+  }
+
+  .image-geometry-pending {
     border: 1px solid var(--primary);
     background: color-mix(in srgb, var(--primary) 12%, var(--bg-200));
     color: var(--text);
@@ -2696,19 +2769,14 @@
     line-height: 1.4;
   }
 
-  .warning-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    text-transform: none;
-    letter-spacing: normal;
-    font-weight: 500;
-  }
-
   .part-strip {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 6px;
+    padding: 8px;
+    border: 1px solid var(--bg-300);
+    background: color-mix(in srgb, var(--bg-200) 88%, var(--bg-100));
+    overflow: hidden;
   }
 
   .part-strip-list {

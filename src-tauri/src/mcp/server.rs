@@ -27,9 +27,16 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 const SESSION_HEADER: &str = "Mcp-Session-Id";
+const PROVIDER_THREAD_QUERY: &str = "providerThreadId";
 const LEASE_TTL_SECS: u64 = 45;
-const MCP_PROTOCOL_LATEST: &str = "2025-06-18";
+const MCP_PROTOCOL_MODERN: &str = "2026-07-28";
+const MCP_PROTOCOL_LEGACY_LATEST: &str = "2025-06-18";
 const MCP_PROTOCOL_LEGACY: &str = "2024-11-05";
+const MCP_META_PROTOCOL_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
+const MCP_META_CLIENT_INFO: &str = "io.modelcontextprotocol/clientInfo";
+const MCP_META_CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
+const ECKY_CONTEXT_ID: &str = "eckyContextId";
+const MODERN_LIST_TTL_MS: u64 = 300_000;
 const MCP_TOOL_DISPATCH_STACK_BYTES: usize = 8 * 1024 * 1024;
 const MCP_TOOL_DISPATCH_THREAD_NAME: &str = "mcp-tool-dispatch";
 
@@ -249,7 +256,7 @@ struct ResolvedTargetRef {
     model_id: Option<String>,
     source_language: crate::contracts::SourceLanguage,
     geometry_backend: crate::contracts::GeometryBackend,
-    preview_stl_path: Option<String>,
+    model_stl_path: Option<String>,
     viewer_assets: Vec<crate::contracts::ViewerAsset>,
     title: String,
     version_name: String,
@@ -286,7 +293,8 @@ fn require_server_handle<'a>(
 
 fn emit_history_updated(server: &HttpServerState) {
     if let Some(handle) = server.handle.as_ref() {
-        let _ = handle.emit("history-updated", ());
+        let event = crate::models::next_history_changed_event(None, None, "mcp");
+        let _ = handle.emit("history-updated", event);
     }
 }
 
@@ -316,6 +324,47 @@ fn json_rpc_error(id: Option<Value>, code: i32, message: impl Into<String>) -> J
             data: None,
         }),
         id,
+    }
+}
+
+fn json_rpc_error_data(
+    id: Option<Value>,
+    code: i32,
+    message: impl Into<String>,
+    data: Value,
+) -> JsonRpcResponse {
+    JsonRpcResponse {
+        jsonrpc: "2.0".to_string(),
+        result: None,
+        error: Some(JsonRpcError {
+            code,
+            message: message.into(),
+            data: Some(data),
+        }),
+        id,
+    }
+}
+
+fn modern_server_info() -> Value {
+    json!({
+        "name": "ecky-mcp",
+        "version": env!("CARGO_PKG_VERSION")
+    })
+}
+
+fn modernize_result(response: &mut JsonRpcResponse) {
+    let Some(result) = response.result.as_mut().and_then(Value::as_object_mut) else {
+        return;
+    };
+    result
+        .entry("resultType".to_string())
+        .or_insert_with(|| json!("complete"));
+    let meta = result
+        .entry("_meta".to_string())
+        .or_insert_with(|| json!({}));
+    if let Some(meta) = meta.as_object_mut() {
+        meta.entry("io.modelcontextprotocol/serverInfo".to_string())
+            .or_insert_with(modern_server_info);
     }
 }
 
@@ -614,9 +663,9 @@ fn empty_response(status: StatusCode) -> Response {
 
 fn negotiated_protocol_version(requested: Option<&str>) -> &'static str {
     match requested.map(str::trim) {
-        Some(MCP_PROTOCOL_LATEST) => MCP_PROTOCOL_LATEST,
+        Some(MCP_PROTOCOL_LEGACY_LATEST) => MCP_PROTOCOL_LEGACY_LATEST,
         Some(MCP_PROTOCOL_LEGACY) => MCP_PROTOCOL_LEGACY,
-        _ => MCP_PROTOCOL_LATEST,
+        _ => MCP_PROTOCOL_LEGACY_LATEST,
     }
 }
 
@@ -663,6 +712,143 @@ fn session_header(headers: &HeaderMap) -> Option<String> {
         .map(str::to_string)
 }
 
+#[derive(Debug, Clone)]
+struct ModernRequestMetadata {
+    client_name: String,
+}
+
+fn request_meta(req: &JsonRpcRequest) -> Option<&serde_json::Map<String, Value>> {
+    req.params
+        .as_ref()
+        .and_then(|params| params.get("_meta"))
+        .and_then(Value::as_object)
+}
+
+fn request_uses_modern_mcp(headers: &HeaderMap, req: &JsonRpcRequest) -> bool {
+    request_meta(req)
+        .and_then(|meta| meta.get(MCP_META_PROTOCOL_VERSION))
+        .is_some()
+        || headers
+            .get("mcp-protocol-version")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.trim() == MCP_PROTOCOL_MODERN)
+        || req.method == "server/discover"
+}
+
+fn decoded_mcp_header_value(value: &str) -> Option<String> {
+    let value = value.trim();
+    let Some(encoded) = value
+        .strip_prefix("=?base64?")
+        .and_then(|value| value.strip_suffix("?="))
+    else {
+        return Some(value.to_string());
+    };
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded.as_bytes())
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+}
+
+fn mirrored_request_name(req: &JsonRpcRequest) -> Option<&str> {
+    let params = req.params.as_ref()?;
+    match req.method.as_str() {
+        "tools/call" | "prompts/get" => params.get("name").and_then(Value::as_str),
+        "resources/read" => params.get("uri").and_then(Value::as_str),
+        _ => None,
+    }
+}
+
+fn header_mismatch(id: Option<Value>, message: impl Into<String>) -> JsonRpcResponse {
+    json_rpc_error(id, -32020, format!("Header mismatch: {}", message.into()))
+}
+
+fn validate_modern_request(
+    headers: &HeaderMap,
+    req: &JsonRpcRequest,
+) -> Result<ModernRequestMetadata, JsonRpcResponse> {
+    let meta = request_meta(req).ok_or_else(|| {
+        json_rpc_error(
+            req.id.clone(),
+            -32602,
+            "Modern MCP requests require params._meta.",
+        )
+    })?;
+    let protocol_version = meta
+        .get(MCP_META_PROTOCOL_VERSION)
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            json_rpc_error(
+                req.id.clone(),
+                -32602,
+                format!("Missing required _meta field {MCP_META_PROTOCOL_VERSION}."),
+            )
+        })?;
+    if protocol_version != MCP_PROTOCOL_MODERN {
+        return Err(json_rpc_error_data(
+            req.id.clone(),
+            -32022,
+            "Unsupported protocol version",
+            json!({
+                "supported": [MCP_PROTOCOL_MODERN],
+                "requested": protocol_version
+            }),
+        ));
+    }
+    if !meta
+        .get(MCP_META_CLIENT_CAPABILITIES)
+        .is_some_and(Value::is_object)
+    {
+        return Err(json_rpc_error(
+            req.id.clone(),
+            -32602,
+            format!("Missing required _meta field {MCP_META_CLIENT_CAPABILITIES}."),
+        ));
+    }
+
+    let header_protocol = headers
+        .get("mcp-protocol-version")
+        .and_then(|value| value.to_str().ok());
+    if header_protocol != Some(protocol_version) {
+        return Err(header_mismatch(
+            req.id.clone(),
+            "MCP-Protocol-Version is missing or differs from params._meta.",
+        ));
+    }
+    let header_method = headers
+        .get("mcp-method")
+        .and_then(|value| value.to_str().ok());
+    if header_method != Some(req.method.as_str()) {
+        return Err(header_mismatch(
+            req.id.clone(),
+            "Mcp-Method is missing or differs from the JSON-RPC method.",
+        ));
+    }
+    if let Some(expected_name) = mirrored_request_name(req) {
+        let actual_name = headers
+            .get("mcp-name")
+            .and_then(|value| value.to_str().ok())
+            .and_then(decoded_mcp_header_value);
+        if actual_name.as_deref() != Some(expected_name) {
+            return Err(header_mismatch(
+                req.id.clone(),
+                "Mcp-Name is missing or differs from params.name/params.uri.",
+            ));
+        }
+    }
+
+    let client_name = meta
+        .get(MCP_META_CLIENT_INFO)
+        .and_then(Value::as_object)
+        .and_then(|info| info.get("name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Modern MCP Client")
+        .to_string();
+    Ok(ModernRequestMetadata { client_name })
+}
+
 async fn create_session(state: &AppState, host_label: String, client_kind: String) -> String {
     let session_id = format!("mcp-http-{}", Uuid::new_v4());
     let mut sessions = state.mcp_sessions.lock().await;
@@ -671,6 +857,155 @@ async fn create_session(state: &AppState, host_label: String, client_kind: Strin
         McpSessionState::new(client_kind, host_label),
     );
     session_id
+}
+
+fn encode_query_value(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+fn decode_query_value(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' if index + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok()?;
+                decoded.push(u8::from_str_radix(hex, 16).ok()?);
+                index += 3;
+            }
+            b'+' => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+pub fn provider_bound_endpoint(endpoint_url: &str, thread_id: &str) -> String {
+    let separator = if endpoint_url.contains('?') { '&' } else { '?' };
+    format!(
+        "{endpoint_url}{separator}{PROVIDER_THREAD_QUERY}={}",
+        encode_query_value(thread_id)
+    )
+}
+
+fn provider_thread_id_from_uri(uri: &axum::http::Uri) -> Option<String> {
+    uri.query().and_then(|query| {
+        query
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .find_map(|(key, value)| {
+                (key == PROVIDER_THREAD_QUERY)
+                    .then(|| decode_query_value(value))
+                    .flatten()
+                    .filter(|value| !value.trim().is_empty())
+            })
+    })
+}
+
+async fn prebind_provider_session(
+    state: &AppState,
+    session_id: &str,
+    thread_id: Option<String>,
+) -> AppResult<()> {
+    let Some(thread_id) = thread_id else {
+        return Ok(());
+    };
+    {
+        let conn = state.db.lock().await;
+        if db::get_visible_thread_title(&conn, &thread_id)
+            .map_err(|error| AppError::persistence(error.to_string()))?
+            .is_none()
+        {
+            return Err(AppError::not_found(format!(
+                "Provider MCP target thread {thread_id} was not found."
+            )));
+        }
+    }
+    let session = get_session(state, session_id)
+        .await
+        .ok_or_else(|| AppError::not_found("MCP session not found."))?;
+    let context = current_context(session_id, &session);
+    handlers::ensure_thread_claim(state, &context, &thread_id, true).await?;
+    update_session_state(state, session_id, |session| {
+        session.bound_thread_id = Some(thread_id);
+        session.client_kind = "provider-mcp-http".to_string();
+    })
+    .await
+}
+
+fn requested_ecky_context_id(req: &JsonRpcRequest) -> Option<String> {
+    req.params
+        .as_ref()
+        .and_then(|params| params.get("arguments"))
+        .and_then(|arguments| arguments.get(ECKY_CONTEXT_ID))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+async fn resolve_modern_context(
+    state: &AppState,
+    metadata: &ModernRequestMetadata,
+    requested: Option<String>,
+    managed: bool,
+) -> AppResult<String> {
+    if let Some(context_id) = requested {
+        if !context_id.starts_with("ecky-context-") {
+            return Err(AppError::validation(
+                "eckyContextId is malformed. Start a new context by omitting it.",
+            ));
+        }
+        if get_session(state, &context_id).await.is_none() {
+            return Err(AppError::not_found(
+                "Ecky MCP context expired or is unknown. Omit eckyContextId to create a new context.",
+            ));
+        }
+        return Ok(context_id);
+    }
+
+    let context_id = format!("ecky-context-{}", Uuid::new_v4());
+    state.mcp_sessions.lock().await.insert(
+        context_id.clone(),
+        McpSessionState::new(
+            if managed {
+                "managed-mcp-http".to_string()
+            } else {
+                "mcp-http".to_string()
+            },
+            metadata.client_name.clone(),
+        ),
+    );
+    Ok(context_id)
+}
+
+fn attach_ecky_context_id(value: &mut Value, context_id: &str) {
+    if let Some(structured) = value
+        .get_mut("structuredContent")
+        .and_then(Value::as_object_mut)
+    {
+        structured.insert(ECKY_CONTEXT_ID.to_string(), json!(context_id));
+        return;
+    }
+    if let Some(object) = value.as_object_mut() {
+        object.insert(ECKY_CONTEXT_ID.to_string(), json!(context_id));
+    }
 }
 
 fn managed_agent_id_from_uri(uri: &axum::http::Uri) -> Option<String> {
@@ -950,7 +1285,7 @@ async fn resolve_authoring_target_for_session(
                 model_id: Some(preview.artifact_bundle.model_id.clone()),
                 source_language: design.source_language,
                 geometry_backend: design.geometry_backend,
-                preview_stl_path: Some(preview.artifact_bundle.preview_stl_path),
+                model_stl_path: Some(preview.artifact_bundle.model_stl_path),
                 viewer_assets: preview.artifact_bundle.viewer_assets,
                 title: design.title,
                 version_name: design.version_name,
@@ -988,13 +1323,13 @@ async fn resolve_authoring_target_for_session(
         ));
     }
 
-    let cached_target = {
-        state
-            .mcp_sessions
-            .lock()
-            .await
-            .get(session_id)
-            .and_then(|session| session.last_target.clone())
+    let (cached_target, live_bound_thread_id) = {
+        let sessions = state.mcp_sessions.lock().await;
+        let session = sessions.get(session_id);
+        (
+            session.and_then(|session| session.last_target.clone()),
+            session.and_then(|session| session.bound_thread_id.clone()),
+        )
     };
     let runtime_thread_id = crate::mcp::runtime::runtime_snapshot_by_session_id(state, session_id)
         .and_then(|snapshot| snapshot.pending_thread_id);
@@ -1084,11 +1419,13 @@ async fn resolve_authoring_target_for_session(
                         "Cached MCP session target is no longer valid. Re-bind the session to an explicit thread/version.",
                     ));
                 }
-            } else if let Some(thread_id) = runtime_thread_id.or_else(|| {
-                stored_session
-                    .as_ref()
-                    .and_then(|session| session.thread_id.clone())
-            }) {
+            } else if let Some(thread_id) =
+                live_bound_thread_id.or(runtime_thread_id).or_else(|| {
+                    stored_session
+                        .as_ref()
+                        .and_then(|session| session.thread_id.clone())
+                })
+            {
                 crate::services::target::resolve_editable_target(&conn, app, Some(thread_id), None)?
             } else {
                 return Err(AppError::validation(
@@ -1119,9 +1456,9 @@ async fn resolve_authoring_target_for_session(
         model_id,
         source_language: design.source_language,
         geometry_backend: design.geometry_backend,
-        preview_stl_path: runtime_bundle
+        model_stl_path: runtime_bundle
             .as_ref()
-            .map(|bundle| bundle.preview_stl_path.clone()),
+            .map(|bundle| bundle.model_stl_path.clone()),
         viewer_assets: runtime_bundle
             .map(|bundle| bundle.viewer_assets)
             .unwrap_or_default(),
@@ -1194,8 +1531,8 @@ async fn request_model_screenshot(
         req.message_id.clone(),
     )
     .await?;
-    let preview_stl_path = target.preview_stl_path.clone().ok_or_else(|| {
-        AppError::validation("Target does not have a preview STL available for screenshots.")
+    let model_stl_path = target.model_stl_path.clone().ok_or_else(|| {
+        AppError::validation("Target does not have a model STL available for screenshots.")
     })?;
     let timeout_secs = req.timeout_secs.unwrap_or(90).clamp(5, 600);
     let request_id = Uuid::new_v4().to_string();
@@ -1216,7 +1553,7 @@ async fn request_model_screenshot(
                 thread_id: target.thread_id.clone(),
                 message_id: target.message_id.clone(),
                 model_id: target.model_id.clone(),
-                preview_stl_path,
+                model_stl_path,
                 viewer_assets: target.viewer_assets.clone(),
                 include_overlays,
                 camera: req.camera.clone(),
@@ -1258,12 +1595,23 @@ async fn acquire_lease(
     .map_err(|e| AppError::persistence(e.to_string()))?
     {
         if active.session_id != ctx.session_id {
-            let details = serde_json::to_string_pretty(&active).unwrap_or_default();
-            return Err(AppError::with_details(
-                AppErrorCode::Conflict,
-                "Target is currently leased by another agent.",
-                details,
-            ));
+            if ctx.client_kind == "provider-mcp-http" {
+                db::delete_target_lease(
+                    &conn,
+                    &active.session_id,
+                    &active.thread_id,
+                    &active.message_id,
+                    active.model_id.as_deref(),
+                )
+                .map_err(|error| AppError::persistence(error.to_string()))?;
+            } else {
+                let details = serde_json::to_string_pretty(&active).unwrap_or_default();
+                return Err(AppError::with_details(
+                    AppErrorCode::Conflict,
+                    "Target is currently leased by another agent.",
+                    details,
+                ));
+            }
         }
     }
 
@@ -1686,20 +2034,20 @@ fn workflow_guide_text(state: &AppState) -> String {
             "- Reuse existing semantic views before inventing new control groupings.\n",
             "- Stay in the app loop. Use `mcp_request_user_prompt` for human replies.\n",
             "- Prefer typed/static errors and `verify_generated_model` first; screenshot verification second.\n",
-            "- After every preview/render that may become a user-visible version, call `verify_generated_model` before commit.\n",
-            "- If verification is red and repairable, patch source/params and preview again. Commit only green verification; if the repair cap is exhausted, do not commit and report capped red honestly with exact issue codes/messages.\n",
+            "- After every preview/render that creates a user-visible version, call `verify_generated_model`; it attaches evidence to that same version.\n",
+            "- If verification is red and repairable, patch source/params and preview again. Each changed draft is retained. If the repair cap is exhausted, report capped red honestly with exact issue codes/messages.\n",
             "- Use get_model_screenshot to visually verify geometric edits after `verify_generated_model` passes.\n\n",
             "Recommended startup sequence:\n",
             "1. Call workspace_overview. It resolves sourceLanguage, geometryBackend, primaryGuideUri, and compatibilityManifestUri. (Managed sessions: the compact `tools/list` already covers workspace_overview; use capability_search/capability_enable to load specialist groups on demand.)\n",
             "2. Read only `agentBrief.primaryGuideUri` / `agentBrief.mustRead` for normal authoring.\n",
             "3. Read `agentBrief.compatibilityManifestUri` only when checking whether a concrete `.ecky` form/op is supported by the resolved backend. Read prose backend guides only after lowerer/render errors or artifact/export claims.\n",
-            "4. Call workspace_overview, then target_meta_get. If choosing an existing thread, call thread_borrow; if this is a brand-new design with no target, call thread_create first.\n",
+            "4. Call workspace_overview, then target_meta_get. If a targetless session is choosing an existing thread, call thread_borrow; if this is a brand-new design with no target, call thread_create first. Ecky provider sessions are already pre-bound and must not borrow their assigned thread again.\n",
             "5. Inspect sourcePath/sourceState from target metadata. When sourcePath is present, read and edit that file with normal file tools. Only when sourcePath is absent, use target_macro_get/macro_buffer_get for source edits. Use artifact_manifest_get for full artifact JSON and target_detail_get(section=...) for exact chunks.\n",
             "6. Use target_get only when you truly need the full payload.\n",
             "7. If semantic bindings matter, call semantic_manifest_get before changing views or annotations.\n",
-            "8. For a bound sourcePath, edit the file and call project_folder_apply with its folder slug; this validates, previews, and commits the edit. Do not export first. Only for an unbound legacy target, mutate with params_preview_render, macro_buffer_replace_and_preview, macro_preview_render, or semantic tools.\n",
+            "8. For a bound sourcePath, edit the file directly; the project-folder watcher appends, validates, and previews settled edits automatically. Do not export first. Only for an unbound legacy target, mutate with params_preview_render, macro_buffer_replace_and_preview, macro_preview_render, or semantic tools.\n",
             "9. For preview/render tools: Call verify_generated_model on the preview/render draft. If red, repair source/params and preview again until green or repair cap exhausted.\n",
-            "10. Commit green verified preview drafts with commit_preview_version. For a FEM-verified claim, use fem_validate -> fem_mesh_preview -> fem_run -> fem_result_get -> fem_commit_verified_preview; stale/red/corrupt FEM evidence cannot use that commit path. project_folder_apply already commits its validated source result. Capture returned threadId/messageId/modelId in output evidence. If capped red remains, do not commit; report exact red issues.\n",
+            "10. Edits append versions before validation. Preview/render and verify attach their outcomes to that same version automatically; there is no commit or finalize step. For a FEM-verified claim, use fem_validate -> fem_mesh_preview -> fem_run -> fem_result_get -> fem_publish_verified_result. Capture returned threadId/messageId/modelId in output evidence. If capped red remains, report exact red issues.\n",
             "11. Never update history.sqlite directly. State mutations must go through MCP tools.\n",
             "12. Use measurement_annotation tools for dimension meaning, and long_action_notice/long_action_clear for slow work.\n"
         ),
@@ -1991,6 +2339,8 @@ fn surface_manifest_json(backend: crate::contracts::GeometryBackend) -> Value {
         "referenceUri": surface_reference_uri_for_backend(backend),
         "modelClauses": manifest.model_clauses,
         "modelWrappers": manifest.model_wrappers,
+        "componentPlacementForms": manifest.component_placement_forms,
+        "coreConstants": manifest.core_constants,
         "expressionForms": manifest.expression_forms,
         "numericHelpers": manifest.numeric_helpers,
         "pointListHelpers": manifest.point_list_helpers,
@@ -2321,7 +2671,7 @@ impl CapabilityGroup {
                 "Read targets, threads, messages, artifacts, and model comparisons."
             }
             CapabilityGroup::SourceEdits => {
-                "Macro/buffer/params source edits, preview render, version commit \
+                "Macro/buffer/params source edits, preview render, version lifecycle \
                  and restore. Macro buffer tools are absent when AST authoring \
                  is enabled."
             }
@@ -2418,7 +2768,7 @@ pub(crate) fn tool_capability_group(name: &str) -> Option<CapabilityGroup> {
         | "macro_preview_render"
         | "params_preview_render"
         | "concept_preview_save"
-        | "commit_preview_version"
+        | "version_delete"
         | "version_restore"
         | "thread_fork_from_target" => CapabilityGroup::SourceEdits,
         // ── AST edits (ecky) ───────────────────────────────────────────────
@@ -2428,7 +2778,6 @@ pub(crate) fn tool_capability_group(name: &str) -> Option<CapabilityGroup> {
         | "ecky_ast_patch_validate"
         | "ecky_ast_replace_and_render"
         | "ecky_ast_patch_preview"
-        | "ecky_ast_patch_commit"
         | "ecky_ast_set_number"
         | "ecky_ast_set_string"
         | "ecky_ast_set_select"
@@ -2462,7 +2811,9 @@ pub(crate) fn tool_capability_group(name: &str) -> Option<CapabilityGroup> {
         | "fem_cancel"
         | "fem_result_get"
         | "fem_convergence"
-        | "fem_commit_verified_preview" => CapabilityGroup::FemAnalysis,
+        | "fem_topology_run"
+        | "fem_topology_reconstruct"
+        | "fem_publish_verified_result" => CapabilityGroup::FemAnalysis,
         // ── Components & library ───────────────────────────────────────────
         "component_extract"
         | "component_search"
@@ -2471,9 +2822,7 @@ pub(crate) fn tool_capability_group(name: &str) -> Option<CapabilityGroup> {
         | "freecad_library_search"
         | "freecad_library_import" => CapabilityGroup::ComponentsLibrary,
         // ── Project files ──────────────────────────────────────────────────
-        "project_folder_export" | "project_folder_status" | "project_folder_apply" => {
-            CapabilityGroup::ProjectFiles
-        }
+        "project_folder_export" | "project_folder_status" => CapabilityGroup::ProjectFiles,
         // ── Session activity & notices ─────────────────────────────────────
         "session_reply_save"
         | "session_activity_set"
@@ -2707,7 +3056,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "project_folder_export",
-            "description": "Compatibility/recovery export. Bound targets already expose sourcePath/sourceFolder; edit sourcePath and call project_folder_apply instead. Use export only to seed/reseed a missing unbound folder. Existing bindings retain their exact stored folder.",
+            "description": "Compatibility/recovery export. Bound targets already expose sourcePath/sourceFolder; edit sourcePath directly and let the watcher sync settled edits. Use export only to seed/reseed a missing unbound folder. Existing bindings retain their exact stored folder.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2729,22 +3078,8 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
             }
         }),
         json!({
-            "name": "project_folder_apply",
-            "description": "Apply an externally edited model.ecky back onto its bound thread: compile check, preview render, commit as a new version, rebase the folder manifest. Refuses stale (threadAdvanced) folders; conflict needs force=true.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "slug": { "type": "string" },
-                    "force": { "type": "boolean", "description": "Apply the file on top of the current head even when both sides changed since export." },
-                    "title": { "type": "string" },
-                    "versionName": { "type": "string" }
-                },
-                "required": ["slug"]
-            }
-        }),
-        json!({
             "name": "component_extract",
-            "description": "Lift an existing part subtree into a closed, copy-inline `define-component` snippet. Referenced model params become the signature (metadata preserved); scalar outer let bindings become plain defaults; other free references are reported as blockers. Optionally saves the component into the component library.",
+            "description": "Lift an existing part subtree into a closed, copy-inline `define-component` snippet. Local port ids/types/frames/fit metadata are preserved; ports that depend on unresolved parent/world bindings block extraction. Referenced model params become the signature. Optionally saves the component into the component library.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2762,7 +3097,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "component_search",
-            "description": "Search the component library by compact header (name, one-liner, param keys, tags). Header-only: never returns component bodies; use component_get for source.",
+            "description": "Search the component library by compact header (name, one-liner, param keys, tags, port ids and compatibility types). Header-only: never returns component bodies; use component_get for source.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2869,7 +3204,8 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
             "name": "thread_borrow",
             "description": concat!(
                 "Borrow an existing thread as this MCP session's current target without logging out/in. ",
-                "Use this after thread_list/thread_get when choosing or switching existing work. ",
+                "Use this after thread_list/thread_get only when choosing or intentionally switching existing work. ",
+                "Provider connections created by Ecky are already pre-bound and MUST NOT call thread_borrow for their assigned thread. ",
                 "Pass messageId to target a specific version; otherwise pass threadId for the latest/default target."
             ),
             "inputSchema": with_identity(
@@ -2979,7 +3315,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "macro_buffer_get",
-            "description": "Compatibility-only for targets without sourcePath: open source into this session's buffer. Bound targets must edit sourcePath then project_folder_apply. Returns digest, artifactDigest, lineCount, and a 1-based line window.",
+            "description": "Compatibility-only for targets without sourcePath: open source into this session's buffer. Bound targets edit sourcePath directly and let the watcher sync settled edits. Returns digest, artifactDigest, lineCount, and a 1-based line window.",
             "inputSchema": with_identity(
                 &[
                     ("threadId", json!({ "type": "string" })),
@@ -3025,7 +3361,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "macro_buffer_preview_render",
-            "description": "Compatibility-only for targets without sourcePath: validate/render the session macro buffer. Bound targets use project_folder_apply. Returns artifactDigest; check hasStepExport before promising STEP.",
+            "description": "Compatibility-only for targets without sourcePath: validate/render the session macro buffer. Bound targets edit sourcePath directly and let the watcher sync settled edits. Returns artifactDigest; check hasStepExport before promising STEP.",
             "inputSchema": with_identity(
                 &[
                     ("expectedDigest", json!({ "type": "string" })),
@@ -3037,7 +3373,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "macro_buffer_replace_and_preview",
-            "description": "Deprecated for bound targets; edit sourcePath then project_folder_apply. Compatibility-only replace-and-preview for targets without sourcePath. Returns artifactDigest with hasStepExport artifact truth.",
+            "description": "Deprecated for bound targets; edit sourcePath directly and let the watcher sync settled edits. Compatibility-only replace-and-preview for targets without sourcePath. Returns artifactDigest with hasStepExport artifact truth.",
             "inputSchema": with_identity(
                 &[
                     ("threadId", json!({ "type": "string" })),
@@ -3180,7 +3516,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "fem_run",
-            "description": "Run the validated authored study through pinned native fTetWild, Tet4 assembly, Faer sparse solve, postprocess, engineering gates, and atomic immutable publication. Returns compact summaries and artifact paths only; bulk arrays stay outside message JSON. Never edits source or commits history.",
+            "description": "Run the validated authored study through automatic external Gmsh HXT exact-BRep meshing, Tet4 assembly, Faer sparse solve, postprocess, engineering gates, and atomic immutable publication. Returns compact summaries and artifact paths only; bulk arrays stay outside message EDN. Never edits source or commits history.",
             "inputSchema": with_identity(
                 &[
                     ("threadId", json!({ "type": "string" })),
@@ -3247,14 +3583,45 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
             )
         }),
         json!({
-            "name": "fem_commit_verified_preview",
-            "description": "Commit a structurally green preview only when an immutable native FEM result remains decision-ready and exactly matches the preview source and OCCT analysis boundary. Reloads and verifies the result server-side; stale, red, corrupt, or caller-mismatched evidence cannot commit.",
+            "name": "fem_topology_run",
+            "description": "Resolve the watcher-synchronized authored FEM study, build or reuse its immutable Tet4 mesh internally, then run or resume bounded native SIMP topology optimization. fem_mesh_preview is optional diagnostics, never a prerequisite. Publishes a binary checkpoint, binary density arrays, and a VTU density preview; no topology JSON artifact manifest. Output is analysis evidence: no exact BRep, production STEP, stress acceptance, fatigue, nonlinear contact, or print certification.",
             "inputSchema": with_identity(
                 &[
                     ("threadId", json!({ "type": "string" })),
                     ("messageId", json!({ "type": "string" })),
-                    ("title", json!({ "type": "string" })),
-                    ("versionName", json!({ "type": "string" })),
+                    ("jobId", json!({ "type": "string", "description": "Caller-selected id enables fem_cancel." })),
+                    ("analysisName", json!({ "type": "string" })),
+                    ("budgets", json!({ "type": "object", "description": "Optional bounded FEM mesh budgets." })),
+                    ("control", json!({ "type": "object", "description": "Optional deterministic mesh controls." })),
+                    ("resumeStateDigest", json!({ "type": ["string", "null"] }))
+                ],
+                &["analysisName"],
+            )
+        }),
+        json!({
+            "name": "fem_topology_reconstruct",
+            "description": "Consume one converged generic Tet4 topology density artifact, retain the component connecting every authored support/load anchor, reject islands, and emit one closed manifold polyhedron expression admitted for the faceted BRep bridge. Never infers product semantics or mutates model state. The candidate still requires preview plus independent FEM before publication.",
+            "inputSchema": with_identity(
+                &[
+                    ("threadId", json!({ "type": "string" })),
+                    ("messageId", json!({ "type": "string" })),
+                    ("analysisName", json!({ "type": "string" })),
+                    ("analysisIdentityDigest", json!({ "type": "string" })),
+                    ("meshContentDigest", json!({ "type": "string" })),
+                    ("inputDigest", json!({ "type": "string" })),
+                    ("stateDigest", json!({ "type": "string" })),
+                    ("densityThreshold", json!({ "type": "number", "minimum": 0, "maximum": 1, "default": 0.5 }))
+                ],
+                &["analysisName", "analysisIdentityDigest", "meshContentDigest", "inputDigest", "stateDigest"],
+            )
+        }),
+        json!({
+            "name": "fem_publish_verified_result",
+            "description": "Publish FEM evidence for an already-created structurally green preview only when an immutable native FEM result remains decision-ready and exactly matches the preview source and OCCT analysis boundary. Reloads and verifies the result server-side; stale, red, corrupt, or caller-mismatched evidence cannot publish.",
+            "inputSchema": with_identity(
+                &[
+                    ("threadId", json!({ "type": "string" })),
+                    ("messageId", json!({ "type": "string" })),
                     ("analysisName", json!({ "type": "string" })),
                     ("analysisIdentityDigest", json!({ "type": "string" })),
                     ("solutionDigest", json!({ "type": "string" })),
@@ -3319,7 +3686,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         json!({
             "name": "macro_preview_render",
             "description": concat!(
-                "Compatibility-only when sourcePath is absent. Bound targets edit sourcePath then call project_folder_apply. Replace macro code and rerender a draft. Returns artifactDigest; check hasStepExport before promising STEP. ",
+                "Compatibility-only when sourcePath is absent. Bound targets edit sourcePath directly and let the watcher sync settled edits. Replace macro code and rerender a draft. Returns artifactDigest; check hasStepExport before promising STEP. ",
                 "IMPORTANT: check workspace_overview.agentBrief.summary and rules — if sourceLanguage is `ecky`, macroCode MUST be current `.ecky` source (starting with `(model ...)`). geometryBackend chooses FreeCAD interop or native Ecky lowering; source extension does not. ",
                 "Authoring uses pure lispy Ecky source compiled to internal Core IR or the selected backend. `define`, `lambda`, `let`, `let*`, `if`, and generic helpers like `range`, `map`, `filter`, `reduce`, `zip`, `enumerate`, `linspace`, and `flat-map` are allowed; `set!`, assignment, rebinding, and mutation are not. Current `let` bindings are parallel, so same-frame bindings cannot depend on earlier siblings; use `let*` or nested `let` for sequential dependencies. `(define ...)` is NOT valid inside `(model ...)`; use `let*` inside `(part ...)` for computed values from params, and reserve top-level `(define (fn args) ...)` for reusable helper functions outside `(model ...)`. ",
                 "When workspace_overview.agentBrief.summary reports sourceLanguage `ecky`, uiSpec and parameters are auto-derived from the params block. For existing targets, omit parameters: macro_preview_render preserves current target params. Use params_preview_render for numeric changes. parameters only seeds first versions. ",
@@ -3490,20 +3857,6 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
             )
         }),
         json!({
-            "name": "commit_preview_version",
-            "description": "Persist the latest green verified preview draft as a new saved version after structural verification. Call verify_generated_model first; if verification is red, repair and preview again. This path makes no FEM-verified claim; use fem_commit_verified_preview when attaching a current native FEM decision. Pending capture-guided reconstruction requires captureGuidedResult with exact request/guide identity and no unresolved assumptions. Do not commit capped red results. Do not commit ambiguous guided reconstruction.",
-            "inputSchema": with_identity(
-                &[
-                    ("threadId", json!({ "type": "string" })),
-                    ("messageId", json!({ "type": "string" })),
-                    ("title", json!({ "type": "string" })),
-                    ("versionName", json!({ "type": "string" })),
-                    ("captureGuidedResult", capture_guided_result_input_schema())
-                ],
-                &[],
-            )
-        }),
-        json!({
             "name": "thread_fork_from_target",
             "description": "Save the latest draft or saved target into a new thread.",
             "inputSchema": with_identity(
@@ -3527,6 +3880,14 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                 },
                 "required": ["refPath", "genPath"]
             }
+        }),
+        json!({
+            "name": "version_delete",
+            "description": "Move one saved version to trash by exact message id. Uses the same recoverable history deletion path as the Ecky UI.",
+            "inputSchema": with_identity(
+                &[("messageId", json!({ "type": "string" }))],
+                &["messageId"],
+            )
         }),
         json!({
             "name": "version_restore",
@@ -3649,7 +4010,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "verify_generated_model",
-            "description": "Run deterministic structural verification plus authored `(verify ...)` clauses on the generated model for the currently bound target/thread. Call after preview/render and before commit_preview_version. Returns artifactDigest plus the full structured result including pass/fail, issue codes, metrics, and verifier source. If red, repair source/params and preview again; commit only green verification, or report capped red honestly without commit. Screenshot/VLM verification is secondary.",
+            "description": "Run deterministic structural verification plus authored `(verify ...)` clauses on the generated model for the currently bound target/thread. Call after preview/render. Verification automatically attaches pass/fail evidence to the already-appended version; there is no commit or finalize step. Returns artifactDigest plus the full structured result including issue codes, metrics, and verifier source. If red, repair source/params and preview again, or report capped red honestly. Screenshot/VLM verification is secondary.",
             "inputSchema": with_identity(
                 &[
                     ("threadId", json!({ "type": "string" })),
@@ -3674,7 +4035,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "printability_analyze",
-            "description": "Read-only printability analysis for the active target/model preview STL. Resolves the current editable target, reads the artifact bundle preview STL path, and returns artifactDigest plus compact mesh/overhang/topology facts. Does not edit source or render.",
+            "description": "Read-only printability analysis for the active target/model model STL. Resolves the current editable target, reads the artifact bundle model STL path, and returns artifactDigest plus compact mesh/overhang/topology facts. Does not edit source or render.",
             "inputSchema": with_identity(
                 &[
                     ("threadId", json!({ "type": "string" })),
@@ -3686,7 +4047,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "printability_transform_recipes_get",
-            "description": "Read-only supportless-FDM transform recipe slice for the active target/model preview STL. Returns artifactDigest-guarded candidate recipes with action kind, rationale, estimated effect, target/sourceAnchor when known, and preview/apply support status. Does not edit source or render.",
+            "description": "Read-only supportless-FDM transform recipe slice for the active target/model model STL. Returns artifactDigest-guarded candidate recipes with action kind, rationale, estimated effect, target/sourceAnchor when known, and preview/apply support status. Does not edit source or render.",
             "inputSchema": with_identity(
                 &[
                     ("threadId", json!({ "type": "string" })),
@@ -3698,7 +4059,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "semantic_transform_preview",
-            "description": "Create a source-consistent preview draft for supportless-FDM semantic recipes. Narrow v1 supports actionKind=reorient for sourceLanguage=ecky .ecky sources only, validates expectedArtifact {modelId, previewStlPath, contentHash}, and rejects chamfer/split as unsupported.",
+            "description": "Create a source-consistent preview draft for supportless-FDM semantic recipes. Narrow v1 supports actionKind=reorient for sourceLanguage=ecky .ecky sources only, validates expectedArtifact {modelId, modelStlPath, contentHash}, and rejects chamfer/split as unsupported.",
             "inputSchema": with_identity(
                 &[
                     ("threadId", json!({ "type": "string" })),
@@ -3710,10 +4071,10 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                         "type": "object",
                         "properties": {
                             "modelId": { "type": "string" },
-                            "previewStlPath": { "type": "string" },
+                            "modelStlPath": { "type": "string" },
                             "contentHash": { "type": "string" }
                         },
-                        "required": ["modelId", "previewStlPath", "contentHash"]
+                        "required": ["modelId", "modelStlPath", "contentHash"]
                     })),
                 ],
                 &["recipeId", "actionKind", "expectedArtifact"],
@@ -3852,7 +4213,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }));
         tools.push(json!({
             "name": "ecky_ast_patch_preview",
-            "description": "Alias for ecky_ast_replace_and_render. Apply one guarded AST patch and render preview artifact without committing history.",
+            "description": "Alias for ecky_ast_replace_and_render. Apply one guarded AST patch, append its changed source version, and render preview artifacts.",
             "inputSchema": with_identity(
                 &[
                     ("threadId", json!({ "type": "string" })),
@@ -3883,20 +4244,6 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
                     }))
                 ],
                 &["sourceDigest", "expectedNodeDigest"],
-            )
-        }));
-        tools.push(json!({
-            "name": "ecky_ast_patch_commit",
-            "description": "Alias for commit_preview_version. Commit the latest successful preview draft into thread history.",
-            "inputSchema": with_identity(
-                &[
-                    ("threadId", json!({ "type": "string" })),
-                    ("messageId", json!({ "type": "string" })),
-                    ("title", json!({ "type": "string" })),
-                    ("versionName", json!({ "type": "string" })),
-                    ("captureGuidedResult", capture_guided_result_input_schema())
-                ],
-                &[],
             )
         }));
         tools.push(json!({
@@ -4051,6 +4398,38 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
     tools
 }
 
+fn modern_tool_definitions(ecky_ast_authoring: bool) -> Vec<Value> {
+    let mut tools: Vec<Value> = tool_definitions_with_ast_enabled(ecky_ast_authoring)
+        .into_iter()
+        .filter(|tool| tool.get("name").and_then(Value::as_str) != Some("capability_enable"))
+        .collect();
+    for tool in &mut tools {
+        if tool.get("name").and_then(Value::as_str) == Some("capability_search") {
+            tool["description"] = json!("Summarize and search Ecky tool capability groups. Modern MCP returns a stable full catalog; this tool helps select relevant tools without changing tools/list.");
+        }
+        let Some(schema) = tool.get_mut("inputSchema").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        let properties = schema
+            .entry("properties".to_string())
+            .or_insert_with(|| json!({}));
+        if let Some(properties) = properties.as_object_mut() {
+            properties.entry(ECKY_CONTEXT_ID.to_string()).or_insert_with(|| {
+                json!({
+                    "type": "string",
+                    "description": "Opaque Ecky application-state handle returned by a prior tool call. Pass it on related calls; omit it to create a new context. Contexts last until session_log_out or app restart."
+                })
+            });
+        }
+    }
+    tools.sort_by(|left, right| {
+        left.get("name")
+            .and_then(Value::as_str)
+            .cmp(&right.get("name").and_then(Value::as_str))
+    });
+    tools
+}
+
 /// Default port range tried (in random order) when no port is configured.
 const MCP_PORT_RANGE_START: u16 = 39249;
 const MCP_PORT_RANGE_END: u16 = 39258; // 10 candidates
@@ -4179,6 +4558,191 @@ async fn handle_http_delete(State(server): State<HttpServerState>, headers: Head
     }
 }
 
+async fn dispatch_modern_request(
+    server: &HttpServerState,
+    uri: &axum::http::Uri,
+    metadata: &ModernRequestMetadata,
+    req: JsonRpcRequest,
+) -> (StatusCode, JsonRpcResponse) {
+    let id = req.id.clone();
+    let ecky_ast_authoring = server.state.config.lock().unwrap().mcp.ecky_ast_authoring;
+    let mut response = match req.method.as_str() {
+        "server/discover" => json_rpc_result(
+            id,
+            json!({
+                "supportedVersions": [MCP_PROTOCOL_MODERN],
+                "capabilities": {
+                    "tools": { "listChanged": false },
+                    "resources": {},
+                    "prompts": {}
+                },
+                "instructions": "Use explicit threadId/messageId targets and carry eckyContextId between related stateful Ecky tool calls.",
+                "ttlMs": MODERN_LIST_TTL_MS,
+                "cacheScope": "private"
+            }),
+        ),
+        "resources/list" => json_rpc_result(
+            id,
+            json!({
+                "resources": resource_definitions(),
+                "ttlMs": MODERN_LIST_TTL_MS,
+                "cacheScope": "private"
+            }),
+        ),
+        "resources/read" => {
+            match serde_json::from_value::<ReadResourceParams>(req.params.unwrap_or_default()) {
+                Ok(params) => match read_resource_content(&server.state, &params.uri) {
+                    Some(content) => json_rpc_result(
+                        id,
+                        json!({
+                            "contents": [{
+                                "uri": params.uri,
+                                "mimeType": content.mime_type,
+                                "text": content.text
+                            }],
+                            "ttlMs": MODERN_LIST_TTL_MS,
+                            "cacheScope": "private"
+                        }),
+                    ),
+                    None => json_rpc_error(id, -32602, format!("Unknown resource: {}", params.uri)),
+                },
+                Err(err) => json_rpc_error(id, -32602, format!("Invalid params: {err}")),
+            }
+        }
+        "prompts/list" => json_rpc_result(
+            id,
+            json!({
+                "prompts": prompt_definitions(),
+                "ttlMs": MODERN_LIST_TTL_MS,
+                "cacheScope": "private"
+            }),
+        ),
+        "prompts/get" => {
+            match serde_json::from_value::<GetPromptParams>(req.params.unwrap_or_default()) {
+                Ok(params) => {
+                    let _ = params.arguments;
+                    match prompt_payload(&server.state, &params.name) {
+                        Some(prompt) => json_rpc_result(id, prompt),
+                        None => {
+                            json_rpc_error(id, -32602, format!("Unknown prompt: {}", params.name))
+                        }
+                    }
+                }
+                Err(err) => json_rpc_error(id, -32602, format!("Invalid params: {err}")),
+            }
+        }
+        "tools/list" => {
+            let params: ToolsListParams =
+                serde_json::from_value(req.params.unwrap_or_default()).unwrap_or_default();
+            let tools = modern_tool_definitions(ecky_ast_authoring);
+            let (tools, next_cursor) =
+                paginate_tools(&tools, params.cursor.as_deref(), params.page_size);
+            let mut result = json!({
+                "tools": tools,
+                "ttlMs": MODERN_LIST_TTL_MS,
+                "cacheScope": "private"
+            });
+            if let Some(cursor) = next_cursor {
+                result["nextCursor"] = json!(cursor);
+            }
+            json_rpc_result(id, result)
+        }
+        "tools/call" => {
+            let mut params = match serde_json::from_value::<CallToolParams>(
+                req.params.clone().unwrap_or_default(),
+            ) {
+                Ok(params) => params,
+                Err(err) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        json_rpc_error(id, -32602, format!("Invalid params: {err}")),
+                    );
+                }
+            };
+            if let Some(arguments) = params.arguments.as_mut().and_then(Value::as_object_mut) {
+                arguments.remove(ECKY_CONTEXT_ID);
+            }
+            let known_tool = modern_tool_definitions(ecky_ast_authoring)
+                .iter()
+                .any(|tool| tool.get("name").and_then(Value::as_str) == Some(&params.name));
+            if !known_tool {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    json_rpc_error(id, -32602, format!("Unknown tool: {}", params.name)),
+                );
+            }
+            let tool_name = params.name.clone();
+            let managed_agent_id = managed_agent_id_from_uri(uri).filter(|agent_id| {
+                crate::mcp::runtime::runtime_snapshot_by_id(&server.state, agent_id).is_some()
+            });
+            let context_id = match resolve_modern_context(
+                &server.state,
+                metadata,
+                requested_ecky_context_id(&req),
+                managed_agent_id.is_some(),
+            )
+            .await
+            {
+                Ok(context_id) => context_id,
+                Err(err) => {
+                    let mut response = mcp_tool_error(id, &err);
+                    modernize_result(&mut response);
+                    return (StatusCode::OK, response);
+                }
+            };
+            if let Err(error) = prebind_provider_session(
+                &server.state,
+                &context_id,
+                provider_thread_id_from_uri(uri),
+            )
+            .await
+            {
+                let mut response = mcp_tool_error(id, &error);
+                modernize_result(&mut response);
+                return (StatusCode::OK, response);
+            }
+            if let Some(agent_id) = managed_agent_id {
+                crate::mcp::runtime::bind_managed_http_session(
+                    &server.state,
+                    &agent_id,
+                    &context_id,
+                    Some("Connected to Ecky MCP.".to_string()),
+                );
+            }
+            let dispatch_server = server.clone();
+            let dispatch_context_id = context_id.clone();
+            let dispatch_result = run_on_mcp_tool_dispatch_stack(move || async move {
+                dispatch_tool_call(&dispatch_server, &dispatch_context_id, params).await
+            })
+            .await;
+            match dispatch_result {
+                Ok((mut value, next_target)) => {
+                    if next_target.is_some() {
+                        set_session_target(&server.state, &context_id, next_target).await;
+                    }
+                    if tool_name == "capability_search" {
+                        value["profile"] = json!(MCP_PROFILE_FULL);
+                        value["hint"] = json!("Modern tools/list is stable and already contains every available schema; use these groups only to choose relevant tools.");
+                    }
+                    if get_session(&server.state, &context_id).await.is_some() {
+                        attach_ecky_context_id(&mut value, &context_id);
+                    }
+                    mcp_tool_success(id, &value)
+                }
+                Err(err) => mcp_tool_error(id, &err),
+            }
+        }
+        _ => {
+            return (
+                StatusCode::NOT_FOUND,
+                json_rpc_error(id, -32601, format!("Method not found: {}", req.method)),
+            );
+        }
+    };
+    modernize_result(&mut response);
+    (StatusCode::OK, response)
+}
+
 async fn handle_http_post(
     State(server): State<HttpServerState>,
     uri: axum::http::Uri,
@@ -4200,6 +4764,20 @@ async fn handle_http_post(
     if req.jsonrpc != "2.0" {
         let payload = json_rpc_error(req.id, -32600, "Only JSON-RPC 2.0 is supported.");
         return json_http_response(StatusCode::BAD_REQUEST, &payload, None);
+    }
+
+    if request_uses_modern_mcp(&headers, &req) {
+        let metadata = match validate_modern_request(&headers, &req) {
+            Ok(metadata) => metadata,
+            Err(payload) => {
+                return json_http_response(StatusCode::BAD_REQUEST, &payload, None);
+            }
+        };
+        let (status, payload) = dispatch_modern_request(&server, &uri, &metadata, req).await;
+        if let Some(handle) = server.handle.as_ref() {
+            emit_sessions_changed(&server.state, handle).await;
+        }
+        return json_http_response(status, &payload, None);
     }
 
     if req.method == "initialize" {
@@ -4225,6 +4803,17 @@ async fn handle_http_post(
             "mcp-http".to_string()
         };
         let session_id = create_session(&server.state, host_label, client_kind).await;
+        if let Err(error) = prebind_provider_session(
+            &server.state,
+            &session_id,
+            provider_thread_id_from_uri(&uri),
+        )
+        .await
+        {
+            server.state.mcp_sessions.lock().await.remove(&session_id);
+            let payload = json_rpc_error(req.id, -32002, error.message);
+            return json_http_response(StatusCode::NOT_FOUND, &payload, None);
+        }
         if let Some(agent_id) = managed_agent_id {
             crate::mcp::runtime::bind_managed_http_session(
                 &server.state,
@@ -4269,6 +4858,18 @@ async fn handle_http_post(
             session_id.clone(),
             McpSessionState::new("mcp-http".to_string(), String::new()),
         );
+        drop(sessions);
+        if let Err(error) = prebind_provider_session(
+            &server.state,
+            &session_id,
+            provider_thread_id_from_uri(&uri),
+        )
+        .await
+        {
+            server.state.mcp_sessions.lock().await.remove(&session_id);
+            let payload = json_rpc_error(req.id, -32002, error.message);
+            return json_http_response(StatusCode::NOT_FOUND, &payload, None);
+        }
     }
 
     if req.id.is_none() && req.method.starts_with("notifications/") {
@@ -4578,14 +5179,19 @@ async fn dispatch_workspace_overview(
                 next_target,
             )
         }
-        Err(err) if err.message.contains("has no successful versions") => {
+        Err(err)
+            if err.code == crate::contracts::AppErrorCode::Validation
+                && crate::mcp::empty_thread_target::is_empty_thread_target_message(
+                    &err.message,
+                ) =>
+        {
             let stored_thread_id = db::get_sessions_by_ids(&conn, &[session_id.to_string()])
                 .map_err(|e| AppError::persistence(e.to_string()))?
                 .into_iter()
                 .next()
                 .and_then(|session| session.thread_id);
             let thread_id = live_bound_thread_id.or(stored_thread_id).ok_or(err)?;
-            let thread = crate::services::history::get_thread(&conn, &thread_id)?;
+            let thread = crate::services::history::get_thread_summary(&conn, &thread_id)?;
             // openspec thread-source-binding 4.1: even a thread with no
             // successful versions may already be bound (threads bind on
             // creation), so expose the bound source view when present.
@@ -4624,24 +5230,6 @@ async fn dispatch_workspace_overview(
     };
     drop(conn);
     Ok((serde_json::to_value(response).unwrap(), next_target))
-}
-
-async fn dispatch_project_folder_apply(
-    server: &HttpServerState,
-    args: Value,
-    current_ctx: &AgentContext,
-) -> AppResult<(Value, Option<McpTargetRef>)> {
-    let req_args: handlers::ProjectFolderApplyRequest =
-        serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
-    let response = handlers::handle_project_folder_apply(
-        &server.state,
-        server.app.as_ref(),
-        req_args,
-        current_ctx,
-    )
-    .await?;
-    emit_history_updated(server);
-    Ok((serde_json::to_value(response).unwrap(), None))
 }
 
 // OpenSpec `agent-context-budgeting` §5.2/§5.3: capability discovery/enable
@@ -4846,6 +5434,7 @@ fn default_fem_control() -> crate::contracts::FemPipelineControlDto {
         minimum_scaled_jacobian: 1.0e-6,
         maximum_runtime_ms: 10 * 60 * 1000,
         relative_solver_tolerance: 1.0e-8,
+        thread_count: 0,
     }
 }
 
@@ -4978,9 +5567,6 @@ async fn dispatch_tool_call(
             .await?;
             Ok((serde_json::to_value(response).unwrap(), None))
         }
-        "project_folder_apply" => {
-            Box::pin(dispatch_project_folder_apply(server, args, &current_ctx)).await
-        }
         "component_extract" => {
             let req_args: handlers::ComponentExtractToolRequest =
                 serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
@@ -5026,6 +5612,16 @@ async fn dispatch_tool_call(
                 .and_then(|ext| ext.to_str())
                 .map(|ext| ext.to_ascii_lowercase())
                 .unwrap_or_default();
+            if !matches!(
+                extension.as_str(),
+                "fcstd" | "step" | "stp" | "stl" | "obj" | "3mf"
+            ) {
+                return Err(AppError::validation(format!(
+                    "FreeCAD library format '{}' is not importable yet.",
+                    extension
+                )));
+            }
+            let _guard = server.state.acquire_geometry_render().await;
             if matches!(extension.as_str(), "stl" | "obj" | "3mf") {
                 let bundle = crate::freecad_library::import_mesh_from_request(
                     &req_args,
@@ -5053,7 +5649,6 @@ async fn dispatch_tool_call(
                 emit_history_updated(server);
                 return Ok((response, Some(target)));
             }
-            let _guard = server.state.render_lock.lock().await;
             let bundle = match extension.as_str() {
                 "fcstd" => crate::freecad::import_fcstd(
                     source_path,
@@ -5065,12 +5660,7 @@ async fn dispatch_tool_call(
                     crate::services::render::configured_freecad_cmd(&server.state).as_deref(),
                     server.app.as_ref(),
                 )?,
-                other => {
-                    return Err(AppError::validation(format!(
-                        "FreeCAD library format '{}' is not importable yet.",
-                        other
-                    )));
-                }
+                _ => unreachable!("validated FreeCAD library extension"),
             };
             let manifest =
                 crate::model_runtime::read_model_manifest(server.app.as_ref(), &bundle.model_id)?;
@@ -5571,6 +6161,46 @@ async fn dispatch_tool_call(
             })??;
             Ok((serde_json::to_value(response).unwrap(), Some(target)))
         }
+        "fem_topology_run" => {
+            let req_args: FemTopologyToolRequest = serde_json::from_value(args)
+                .map_err(|error| AppError::validation(error.to_string()))?;
+            let (mut study, target) =
+                resolve_mcp_fem_request(server, session_id, req_args.target, "fem_topology_run")
+                    .await?;
+            crate::commands::fem::apply_fem_compute_policy(&config.fem_compute, &mut study);
+            let runtime_policy =
+                crate::commands::fem::FemTopologyRuntimePolicy::from_compute(&config.fem_compute);
+            let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let job_id = study.job_id.clone();
+            {
+                let mut jobs = server.state.fem_cancellations.lock().await;
+                if jobs.contains_key(&job_id) {
+                    return Err(AppError::conflict(format!(
+                        "FEM job '{job_id}' is already running."
+                    )));
+                }
+                jobs.insert(job_id.clone(), cancellation.clone());
+            }
+            let resolver = server.app.clone();
+            let request = crate::contracts::FemTopologyRunRequest {
+                study,
+                resume_state_digest: req_args.resume_state_digest,
+            };
+            let joined = tauri::async_runtime::spawn_blocking(move || {
+                crate::commands::fem::run_fem_topology_with_resolver(
+                    request,
+                    &runtime_policy,
+                    resolver.as_ref(),
+                    cancellation.as_ref(),
+                )
+            })
+            .await;
+            server.state.fem_cancellations.lock().await.remove(&job_id);
+            let response = joined.map_err(|error| {
+                AppError::internal(format!("FEM topology MCP worker failed: {error}"))
+            })??;
+            Ok((serde_json::to_value(response).unwrap(), Some(target)))
+        }
         "fem_result_get" => {
             let req_args: FemResultGetToolRequest =
                 serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
@@ -5586,8 +6216,8 @@ async fn dispatch_tool_call(
             )?;
             Ok((serde_json::to_value(response).unwrap(), None))
         }
-        "fem_commit_verified_preview" => {
-            let mut req_args: FemVerifiedCommitRequest = serde_json::from_value(args)
+        "fem_publish_verified_result" => {
+            let mut req_args: FemVerifiedPublishRequest = serde_json::from_value(args)
                 .map_err(|error| AppError::validation(error.to_string()))?;
             let action_ctx = current_ctx.with_override(&req_args.identity);
             let target = resolve_target_for_session(
@@ -5606,7 +6236,7 @@ async fn dispatch_tool_call(
             acquire_lease(&server.state, &action_ctx, &lease_target).await?;
             req_args.thread_id = Some(target.thread_id.clone());
             req_args.message_id = Some(target.message_id.clone());
-            match handlers::handle_commit_fem_verified_preview(
+            match handlers::handle_publish_fem_verified_result(
                 &server.state,
                 server.app.as_ref(),
                 req_args,
@@ -5818,46 +6448,6 @@ async fn dispatch_tool_call(
                 geometry_backend: req.geometry_backend,
             };
             execute_ecky_ast_replace_preview_call(server, session_id, &current_ctx, req_args).await
-        }
-        "ecky_ast_patch_commit" => {
-            let req_args: VersionSaveRequest =
-                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
-            let action_ctx = current_ctx.with_override(&req_args.identity);
-            let target = resolve_target_for_session(
-                &server.state,
-                server.app.as_ref(),
-                session_id,
-                req_args.thread_id.clone(),
-                req_args.message_id.clone(),
-            )
-            .await?;
-            let lease_target = McpTargetRef {
-                thread_id: target.thread_id.clone(),
-                message_id: target.message_id.clone(),
-                model_id: target.model_id.clone(),
-            };
-            acquire_lease(&server.state, &action_ctx, &lease_target).await?;
-            match handlers::handle_commit_preview_version(
-                &server.state,
-                server.app.as_ref(),
-                req_args,
-                &action_ctx,
-            )
-            .await
-            {
-                Ok(response) => {
-                    let value = serde_json::to_value(&response).unwrap();
-                    let next_target = target_ref_from_value(&value).unwrap_or(lease_target.clone());
-                    move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target)
-                        .await?;
-                    Ok((value, Some(next_target)))
-                }
-                Err(err) => {
-                    let _ =
-                        release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
-                    Err(err)
-                }
-            }
         }
         "macro_buffer_get" => {
             if server.state.config.lock().unwrap().mcp.ecky_ast_authoring {
@@ -6264,7 +6854,9 @@ async fn dispatch_tool_call(
                 }
                 Err(ref e)
                     if e.code == crate::contracts::AppErrorCode::Validation
-                        && e.message.contains("has no successful versions") =>
+                        && crate::mcp::empty_thread_target::is_empty_thread_target_message(
+                            &e.message,
+                        ) =>
                 {
                     // Bootstrap path: thread exists but has no versions yet.
                     // Skip lease acquisition — there is nothing to compete for.
@@ -6718,56 +7310,6 @@ async fn dispatch_tool_call(
                 }
             }
         }
-        "commit_preview_version" => {
-            let mut req_args =
-                serde_json::from_value::<VersionSaveRequest>(args).unwrap_or(VersionSaveRequest {
-                    identity: AgentIdentityOverride::default(),
-                    thread_id: None,
-                    message_id: None,
-                    title: None,
-                    version_name: None,
-                    capture_guided_result: None,
-                });
-            let action_ctx = current_ctx.with_override(&req_args.identity);
-            let target = resolve_target_for_session(
-                &server.state,
-                server.app.as_ref(),
-                session_id,
-                req_args.thread_id.clone(),
-                req_args.message_id.clone(),
-            )
-            .await?;
-            let lease_target = McpTargetRef {
-                thread_id: target.thread_id.clone(),
-                message_id: target.message_id.clone(),
-                model_id: target.model_id.clone(),
-            };
-            acquire_lease(&server.state, &action_ctx, &lease_target).await?;
-            req_args.thread_id = Some(target.thread_id.clone());
-            req_args.message_id = Some(target.message_id.clone());
-            match handlers::handle_commit_preview_version(
-                &server.state,
-                server.app.as_ref(),
-                req_args,
-                &current_ctx,
-            )
-            .await
-            {
-                Ok(response) => {
-                    let value = serde_json::to_value(&response).unwrap();
-                    let next_target = target_ref_from_value(&value).unwrap_or(lease_target.clone());
-                    move_or_refresh_lease(&server.state, &action_ctx, &lease_target, &next_target)
-                        .await?;
-                    emit_history_updated(server);
-                    Ok((value, Some(next_target)))
-                }
-                Err(err) => {
-                    let _ =
-                        release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
-                    Err(err)
-                }
-            }
-        }
         "thread_fork_from_target" => {
             let mut req_args =
                 serde_json::from_value::<ThreadForkRequest>(args).unwrap_or(ThreadForkRequest {
@@ -6822,6 +7364,37 @@ async fn dispatch_tool_call(
                 serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
             let response = handlers::handle_compare_models(server.app.as_ref(), req_args).await?;
             Ok((serde_json::to_value(&response).unwrap(), None))
+        }
+        "version_delete" => {
+            let req_args: VersionDeleteRequest =
+                serde_json::from_value(args).map_err(|e| AppError::validation(e.to_string()))?;
+            let action_ctx = current_ctx.with_override(&req_args.identity);
+            let target = resolve_target_for_session(
+                &server.state,
+                server.app.as_ref(),
+                session_id,
+                None,
+                Some(req_args.message_id.clone()),
+            )
+            .await?;
+            let lease_target = McpTargetRef {
+                thread_id: target.thread_id.clone(),
+                message_id: target.message_id.clone(),
+                model_id: target.model_id.clone(),
+            };
+            acquire_lease(&server.state, &action_ctx, &lease_target).await?;
+            match handlers::handle_version_delete(&server.state, req_args, &current_ctx).await {
+                Ok(response) => {
+                    release_lease(&server.state, &action_ctx.session_id, &lease_target).await?;
+                    emit_history_updated(server);
+                    Ok((serde_json::to_value(&response).unwrap(), None))
+                }
+                Err(err) => {
+                    let _ =
+                        release_lease(&server.state, &action_ctx.session_id, &lease_target).await;
+                    Err(err)
+                }
+            }
         }
         "version_restore" => {
             let req_args: VersionRestoreRequest =
@@ -7193,8 +7766,13 @@ async fn persist_freecad_library_import_version(
     ))
 }
 
+pub fn connection_uses_embedded_mcp(connection_type: Option<&str>) -> bool {
+    connection_type == Some("mcp")
+        || connection_type.is_some_and(|value| value.starts_with("provider:"))
+}
+
 fn app_mode_blocks_external_mcp_tools(config: &Config) -> Option<&'static str> {
-    if config.connection_type.as_deref() == Some("mcp") {
+    if connection_uses_embedded_mcp(config.connection_type.as_deref()) {
         return None;
     }
 
@@ -7265,8 +7843,10 @@ mod tests {
             microwave: None,
             voice: crate::contracts::VoiceConfig::default(),
             mcp: McpConfig::default(),
+            fem_compute: crate::contracts::FemComputeConfig::default(),
             has_seen_onboarding: true,
             connection_type: None,
+            provider_models: crate::contracts::ProviderModels::default(),
             default_engine_kind: crate::contracts::EngineKind::Freecad,
             default_source_language: crate::contracts::SourceLanguage::LegacyPython,
             default_geometry_backend: crate::contracts::GeometryBackend::Freecad,
@@ -7342,8 +7922,10 @@ mod tests {
             microwave: None,
             voice: crate::contracts::VoiceConfig::default(),
             mcp: McpConfig::default(),
+            fem_compute: crate::contracts::FemComputeConfig::default(),
             has_seen_onboarding: true,
             connection_type: Some("api_key".to_string()),
+            provider_models: crate::contracts::ProviderModels::default(),
             default_engine_kind: crate::contracts::EngineKind::Freecad,
             default_source_language: crate::contracts::SourceLanguage::LegacyPython,
             default_geometry_backend: crate::contracts::GeometryBackend::Freecad,
@@ -7375,8 +7957,10 @@ mod tests {
                 microwave: None,
                 voice: crate::contracts::VoiceConfig::default(),
                 mcp: McpConfig::default(),
+                fem_compute: crate::contracts::FemComputeConfig::default(),
                 has_seen_onboarding: true,
                 connection_type: Some("mcp".to_string()),
+                provider_models: crate::contracts::ProviderModels::default(),
                 default_engine_kind: crate::contracts::EngineKind::EckyIrV0,
                 default_source_language: crate::contracts::SourceLanguage::EckyIrV0,
                 default_geometry_backend: crate::contracts::GeometryBackend::EckyRust,
@@ -7412,6 +7996,7 @@ mod tests {
             component_dependency_lock: None,
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -7423,7 +8008,7 @@ mod tests {
             fcstd_path: format!("/tmp/{model_id}.FCStd"),
             manifest_path: format!("/tmp/{model_id}.json"),
             macro_path: Some(format!("/tmp/{model_id}.ecky")),
-            preview_stl_path: format!("/tmp/{model_id}.stl"),
+            model_stl_path: format!("/tmp/{model_id}.stl"),
             viewer_assets: Vec::new(),
             edge_targets: Vec::new(),
             face_targets: Vec::new(),
@@ -7437,6 +8022,7 @@ mod tests {
         ModelManifest {
             geometry_provenance: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -7559,6 +8145,57 @@ mod tests {
         }
     }
 
+    async fn test_blank_dispatch_server(session_id: &str) -> HttpServerState {
+        let config = test_mcp_engine_state("openai", "gpt-5.4")
+            .config
+            .lock()
+            .unwrap()
+            .clone();
+        let conn = crate::db::init_db(&test_db_path("dispatch-empty-thread")).expect("db");
+        let state = AppState::new(config, None, conn);
+        let root = std::env::temp_dir().join(format!("ecky-mcp-server-root-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create test root");
+        let resolver = Arc::new(TestPathResolver { root });
+        let now = now_secs();
+
+        {
+            let conn = state.db.lock().await;
+            db::create_or_update_thread(&conn, "thread-empty", "Empty Thread", now, None)
+                .expect("create empty thread");
+        }
+
+        state.mcp_sessions.lock().await.insert(
+            session_id.to_string(),
+            McpSessionState {
+                client_kind: "mcp-http".to_string(),
+                host_label: "Codex".to_string(),
+                agent_label: "codex".to_string(),
+                llm_model_id: None,
+                llm_model_label: Some("gpt-5.4".to_string()),
+                bound_thread_id: Some("thread-empty".to_string()),
+                last_target: None,
+                phase: Some("idle".to_string()),
+                status_text: Some("ready".to_string()),
+                busy: false,
+                activity_label: None,
+                activity_started_at: None,
+                attention_kind: None,
+                waiting_on_prompt: false,
+                current_turn_id: None,
+                current_turn_thread_id: None,
+                current_turn_working_message_ids: Vec::new(),
+                current_turn_working_version_message_id: None,
+                updated_at: now,
+            },
+        );
+
+        HttpServerState {
+            state,
+            app: resolver,
+            handle: None,
+        }
+    }
+
     async fn dispatch_tool_call_jsonrpc(
         server: &HttpServerState,
         session_id: &str,
@@ -7579,6 +8216,148 @@ mod tests {
             },
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn workspace_overview_returns_bound_thread_before_its_first_version() {
+        let session_id = "session-empty-thread-overview";
+        let server = test_blank_dispatch_server(session_id).await;
+
+        let response =
+            dispatch_tool_call_jsonrpc(&server, session_id, "workspace_overview", json!({})).await;
+        let payload = parse_mcp_tool_payload(&response);
+
+        assert_ne!(payload["code"], "validation", "{payload:#}");
+        assert_eq!(payload["defaultTarget"]["threadId"], "thread-empty");
+        assert_eq!(payload["defaultTarget"]["hasVersion"], false);
+        assert!(payload["defaultTarget"]["messageId"].is_null());
+    }
+
+    #[tokio::test]
+    async fn provider_prebind_resolves_workspace_without_thread_borrow() {
+        let (state, resolver) = seed_dispatch_ecky_target("(model)").await;
+        let session_id = "provider-prebound-session";
+        {
+            let mut sessions = state.mcp_sessions.lock().await;
+            let mut old = McpSessionState::new("mcp-http".to_string(), "Old Agy".to_string());
+            old.bound_thread_id = Some("thread-1".to_string());
+            sessions.insert("old-provider-session".to_string(), old);
+            sessions.insert(
+                session_id.to_string(),
+                McpSessionState::new("mcp-http".to_string(), "Agy".to_string()),
+            );
+        }
+        prebind_provider_session(&state, session_id, Some("thread-1".to_string()))
+            .await
+            .expect("prebind provider thread");
+        let server = HttpServerState {
+            state,
+            app: resolver,
+            handle: None,
+        };
+
+        let response =
+            dispatch_tool_call_jsonrpc(&server, session_id, "workspace_overview", json!({})).await;
+        let payload = parse_mcp_tool_payload(&response);
+        assert_eq!(
+            payload["defaultTarget"]["threadId"], "thread-1",
+            "{payload:#}"
+        );
+        let session = server
+            .state
+            .mcp_sessions
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .expect("provider session");
+        assert_eq!(session.client_kind, "provider-mcp-http");
+        assert_eq!(session.bound_thread_id.as_deref(), Some("thread-1"));
+        assert!(server
+            .state
+            .mcp_sessions
+            .lock()
+            .await
+            .get("old-provider-session")
+            .is_some_and(|session| session.bound_thread_id.is_none()));
+    }
+
+    #[test]
+    fn provider_thread_query_round_trips_encoded_ids() {
+        let endpoint = provider_bound_endpoint("http://127.0.0.1:39249/mcp", "thread 1/ä");
+        let uri: axum::http::Uri = endpoint.parse().expect("provider endpoint URI");
+        assert_eq!(
+            provider_thread_id_from_uri(&uri).as_deref(),
+            Some("thread 1/ä")
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_writer_replaces_stale_target_lease_without_agent_side_borrow() {
+        let (state, _) = seed_dispatch_ecky_target("(model)").await;
+        let now = now_secs();
+        {
+            let conn = state.db.lock().await;
+            db::upsert_target_lease(
+                &conn,
+                &TargetLeaseInfo {
+                    session_id: "old-session".to_string(),
+                    thread_id: "thread-1".to_string(),
+                    message_id: "msg-1".to_string(),
+                    model_id: Some("model-base".to_string()),
+                    host_label: "Old Host".to_string(),
+                    agent_label: "Old Agent".to_string(),
+                    acquired_at: now,
+                    expires_at: now + LEASE_TTL_SECS,
+                },
+            )
+            .unwrap();
+        }
+        let target = McpTargetRef {
+            thread_id: "thread-1".to_string(),
+            message_id: "msg-1".to_string(),
+            model_id: Some("model-base".to_string()),
+        };
+        let context = handlers::AgentContext {
+            session_id: "provider-session".to_string(),
+            client_kind: "provider-mcp-http".to_string(),
+            host_label: "Ecky".to_string(),
+            agent_label: "Agy".to_string(),
+            llm_model_id: None,
+            llm_model_label: None,
+        };
+
+        acquire_lease(&state, &context, &target)
+            .await
+            .expect("provider replaces stale external lease");
+        let conn = state.db.lock().await;
+        let active = db::get_active_target_lease(&conn, "thread-1", "msg-1", Some("model-base"))
+            .unwrap()
+            .expect("active provider lease");
+        assert_eq!(active.session_id, "provider-session");
+    }
+
+    #[tokio::test]
+    async fn version_delete_jsonrpc_moves_exact_saved_version_to_trash() {
+        let server =
+            test_dispatch_server("(model (part body (box 1 2 3)))", "session-version-delete").await;
+
+        let response = dispatch_tool_call_jsonrpc(
+            &server,
+            "session-version-delete",
+            "version_delete",
+            json!({ "messageId": "msg-1" }),
+        )
+        .await;
+        let payload = parse_mcp_tool_payload(&response);
+
+        assert_eq!(payload["threadId"], "thread-1");
+        assert_eq!(payload["messageId"], "msg-1");
+        assert_eq!(payload["deleted"], true);
+
+        let conn = server.state.db.lock().await;
+        let deleted = db::get_deleted_messages(&conn).expect("deleted messages");
+        assert!(deleted.iter().any(|message| message.id == "msg-1"));
     }
 
     #[tokio::test]
@@ -7751,7 +8530,7 @@ mod tests {
             // for a thread that already has a committed version).
             let binding = {
                 let conn = server.state.db.lock().await;
-                crate::thread_source_binding::refresh_on_commit(
+                crate::thread_source_binding::refresh_on_version_append(
                     server.app.as_ref(),
                     &conn,
                     server.state.config.lock().unwrap().projects_root.as_deref(),
@@ -7786,63 +8565,6 @@ mod tests {
             assert_eq!(source_folder, binding.folder_path);
             assert!(source_path.ends_with("model.ecky"));
             assert_eq!(source_state, "clean");
-        });
-    }
-
-    #[test]
-    fn project_folder_apply_fits_bounded_worker_stack() {
-        run_async_test_with_large_stack(|| async {
-            let session_id = "session-project-folder-worker-stack";
-            let server = test_dispatch_server("(model (part body (box 8 8 4)))", session_id).await;
-            let ctx = current_context(
-                session_id,
-                &get_session(&server.state, session_id)
-                    .await
-                    .expect("MCP session"),
-            );
-            let export = handlers::handle_project_folder_export(
-                &server.state,
-                server.app.as_ref(),
-                handlers::ProjectFolderExportRequest {
-                    identity: AgentIdentityOverride::default(),
-                    thread_id: Some("thread-1".to_string()),
-                    message_id: Some("msg-1".to_string()),
-                    slug: Some("worker-stack".to_string()),
-                },
-                &ctx,
-            )
-            .await
-            .expect("export project folder");
-            std::fs::write(
-                std::path::Path::new(&export.folder)
-                    .join(crate::project_mirror::PROJECT_SOURCE_FILE_NAME),
-                "(model (part body (box 9 8 4)))",
-            )
-            .expect("edit project source");
-
-            std::thread::Builder::new()
-                .name("mcp-project-folder-worker-stack".to_string())
-                .stack_size(2 * 1024 * 1024)
-                .spawn(move || {
-                    let runtime = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .expect("test runtime");
-                    runtime.block_on(async move {
-                        let response = dispatch_tool_call_jsonrpc(
-                            &server,
-                            session_id,
-                            "project_folder_apply",
-                            json!({ "slug": "worker-stack" }),
-                        )
-                        .await;
-                        let result = response.result.expect("JSON-RPC result");
-                        assert_ne!(result["isError"], true, "{result}");
-                    });
-                })
-                .expect("spawn worker-stack test")
-                .join()
-                .expect("join worker-stack test");
         });
     }
 
@@ -8245,6 +8967,16 @@ mod tests {
     }
 
     #[test]
+    fn provider_integration_mode_keeps_embedded_mcp_tools_enabled() {
+        let mut config = test_api_key_config();
+        config.connection_type = Some("provider:codex".to_string());
+
+        assert_eq!(app_mode_blocks_external_mcp_tools(&config), None);
+        ensure_mcp_tool_allowed_for_app_mode(&config, "session_log_in")
+            .expect("provider adapter must reach Ecky MCP tools");
+    }
+
+    #[test]
     fn legacy_local_config_without_connection_type_is_treated_as_api_key_mode() {
         let mut config = test_api_key_config();
         config.connection_type = None;
@@ -8285,7 +9017,6 @@ mod tests {
             "component_import",
             "project_folder_export",
             "project_folder_status",
-            "project_folder_apply",
         ] {
             assert!(
                 tool_names.iter().any(|name| name == expected),
@@ -8390,6 +9121,25 @@ mod tests {
     }
 
     #[test]
+    fn topology_tool_starts_from_authored_study_without_caller_model_controls_or_mesh_digests() {
+        let tool = tool_definitions()
+            .into_iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("fem_topology_run"))
+            .expect("topology tool");
+        let properties = tool["inputSchema"]["properties"]
+            .as_object()
+            .expect("topology properties");
+        assert!(properties.contains_key("analysisName"));
+        assert!(!properties.contains_key("controls"));
+        assert!(!properties.contains_key("analysisIdentityDigest"));
+        assert!(!properties.contains_key("meshContentDigest"));
+        assert!(!tool["description"]
+            .as_str()
+            .expect("description")
+            .contains("from an immutable fem_mesh_preview artifact"));
+    }
+
+    #[test]
     fn ast_authoring_tool_definitions_swap_buffer_tools_for_ast_tool() {
         let tool_names = tool_definitions_with_ast_enabled(true)
             .into_iter()
@@ -8408,7 +9158,7 @@ mod tests {
         assert!(tool_names
             .iter()
             .any(|name| name == "ecky_ast_patch_preview"));
-        assert!(tool_names
+        assert!(!tool_names
             .iter()
             .any(|name| name == "ecky_ast_patch_commit"));
         assert!(tool_names.iter().any(|name| name == "ecky_ast_set_number"));
@@ -8832,6 +9582,7 @@ mod tests {
             query: "30mm button".to_string(),
             roots: vec![source_root.to_string_lossy().to_string()],
             limit: Some(5),
+            offset: 0,
             include_architecture: false,
         };
         let item = crate::freecad_library::search_freecad_library(&search, &[])
@@ -8952,7 +9703,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(required.contains(&"modelId"));
-        assert!(required.contains(&"previewStlPath"));
+        assert!(required.contains(&"modelStlPath"));
         assert!(required.contains(&"contentHash"));
     }
 
@@ -9246,16 +9997,18 @@ mod tests {
     }
 
     #[test]
-    fn fem_mcp_surface_exposes_guarded_inspect_to_verified_commit_flow() {
+    fn fem_mcp_surface_exposes_guarded_inspect_to_verified_publish_flow() {
         let tools = tool_definitions_with_ast_enabled(true);
         for name in [
             "ecky_ast_get",
             "fem_validate",
             "fem_mesh_preview",
             "fem_run",
+            "fem_topology_run",
+            "fem_topology_reconstruct",
             "fem_result_get",
             "verify_generated_model",
-            "fem_commit_verified_preview",
+            "fem_publish_verified_result",
         ] {
             assert!(
                 tools
@@ -9265,16 +10018,50 @@ mod tests {
             );
         }
         assert_eq!(
-            tool_capability_group("fem_commit_verified_preview"),
+            tool_capability_group("fem_publish_verified_result"),
             Some(CapabilityGroup::FemAnalysis)
         );
-        let commit = tools
+        let topology = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("fem_topology_run"))
+            .expect("FEM topology tool");
+        let topology_description = topology["description"].as_str().unwrap();
+        for invariant in [
+            "binary density",
+            "no exact BRep",
+            "production STEP",
+            "stress acceptance",
+        ] {
+            assert!(
+                topology_description.contains(invariant),
+                "missing topology boundary {invariant}"
+            );
+        }
+        let reconstruction = tools
             .iter()
             .find(|tool| {
-                tool.get("name").and_then(Value::as_str) == Some("fem_commit_verified_preview")
+                tool.get("name").and_then(Value::as_str) == Some("fem_topology_reconstruct")
             })
-            .expect("FEM verified commit tool");
-        let description = commit["description"].as_str().unwrap();
+            .expect("generic FEM topology reconstruction tool");
+        let reconstruction_description = reconstruction["description"].as_str().unwrap();
+        for invariant in [
+            "generic",
+            "closed manifold",
+            "faceted BRep",
+            "independent FEM",
+        ] {
+            assert!(
+                reconstruction_description.contains(invariant),
+                "missing reconstruction invariant {invariant}"
+            );
+        }
+        let publish = tools
+            .iter()
+            .find(|tool| {
+                tool.get("name").and_then(Value::as_str) == Some("fem_publish_verified_result")
+            })
+            .expect("FEM verified publish tool");
+        let description = publish["description"].as_str().unwrap();
         for invariant in [
             "decision-ready",
             "source",
@@ -9288,7 +10075,7 @@ mod tests {
                 "missing invariant {invariant}"
             );
         }
-        let required = commit["inputSchema"]["required"]
+        let required = publish["inputSchema"]["required"]
             .as_array()
             .expect("required fields");
         for name in [
@@ -9409,27 +10196,11 @@ mod tests {
             .expect("verify_generated_model description");
         assert!(description.contains("artifactDigest"));
         assert!(description.contains("authored `(verify ...)` clauses"));
-        assert!(description.contains("Call after preview/render and before commit_preview_version"));
-        assert!(description.contains("commit only green verification"));
-        assert!(description.contains("report capped red honestly without commit"));
-
-        let commit = tools
-            .iter()
-            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("commit_preview_version"))
-            .expect("commit_preview_version tool");
-        let description = commit
-            .get("description")
-            .and_then(Value::as_str)
-            .expect("commit_preview_version description");
-        assert!(description.contains("green verified preview draft"));
-        assert!(description.contains("Call verify_generated_model first"));
-        assert!(description.contains("Do not commit capped red results"));
-        assert!(description.contains("no unresolved assumptions"));
-        assert!(
-            commit["inputSchema"]["properties"]["captureGuidedResult"]["properties"]
-                ["unresolvedAssumptions"]["maxItems"]
-                == 64
-        );
+        assert!(description.contains("automatically attaches pass/fail evidence"));
+        assert!(description.contains("no commit or finalize step"));
+        assert!(!tools.iter().any(|tool| {
+            tool.get("name").and_then(Value::as_str) == Some("commit_preview_version")
+        }));
 
         let printability = tools
             .iter()
@@ -9440,7 +10211,7 @@ mod tests {
             .and_then(Value::as_str)
             .expect("printability_analyze description");
         assert!(description.contains("Read-only"));
-        assert!(description.contains("preview STL"));
+        assert!(description.contains("model STL"));
         assert!(description.contains("artifactDigest"));
     }
 
@@ -9453,12 +10224,7 @@ mod tests {
             .filter_map(|tool| tool.get("name").and_then(Value::as_str))
             .map(|name| name.to_string())
             .collect();
-        for expected in [
-            "health_check",
-            "workspace_overview",
-            "macro_preview_render",
-            "commit_preview_version",
-        ] {
+        for expected in ["health_check", "workspace_overview", "macro_preview_render"] {
             assert!(names.contains(expected), "missing tool: {expected}");
         }
     }
@@ -9535,9 +10301,9 @@ mod tests {
         assert!(text.contains("compatibilityManifestUri"));
         assert!(text.contains("concrete"));
         assert!(text.contains("only after lowerer/render errors"));
-        assert!(text.contains("call `verify_generated_model` before commit"));
-        assert!(text.contains("Commit only green verification"));
-        assert!(text.contains("do not commit and report capped red honestly"));
+        assert!(text.contains("call `verify_generated_model`; it attaches evidence"));
+        assert!(text.contains("Each changed draft is retained"));
+        assert!(text.contains("report capped red honestly"));
         for uri in [
             "ecky://guides/surface-manifest/freecad",
             "ecky://guides/surface-manifest/ecky-rust",
@@ -9585,7 +10351,7 @@ mod tests {
             "Current fileExtension: `.ecky`.",
             "Current sourceLanguage: `ecky`.",
             "`mesh` and `polyhedron`",
-            "`heightfield`",
+            "`protrude`",
             "single perspective image",
             "faceted poly-BRep",
         ] {
@@ -9658,6 +10424,7 @@ mod tests {
             for key in [
                 "modelClauses",
                 "modelWrappers",
+                "coreConstants",
                 "expressionForms",
                 "numericHelpers",
                 "pointListHelpers",
@@ -9837,6 +10604,7 @@ mod tests {
             component_dependency_lock: None,
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -9848,7 +10616,7 @@ mod tests {
             fcstd_path: format!("/tmp/{model_id}.FCStd"),
             manifest_path: format!("/tmp/{model_id}.json"),
             macro_path: Some(format!("/tmp/{model_id}.py")),
-            preview_stl_path: format!("/tmp/{model_id}.stl"),
+            model_stl_path: format!("/tmp/{model_id}.stl"),
             viewer_assets: Vec::new(),
             edge_targets: Vec::new(),
             face_targets: Vec::new(),
@@ -9868,6 +10636,7 @@ mod tests {
         crate::contracts::ModelManifest {
             geometry_provenance: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: crate::contracts::MODEL_RUNTIME_SCHEMA_VERSION,
             model_id: model_id.to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -9913,7 +10682,7 @@ mod tests {
             content_hash: "hash-model-render".to_string(),
             source_language: "legacyPython".to_string(),
             geometry_backend: "freecad".to_string(),
-            has_preview_stl: true,
+            has_model_stl: true,
             viewer_asset_count: 0,
             edge_target_count: 0,
             face_target_count: 0,
@@ -9926,6 +10695,7 @@ mod tests {
             faceted_step: false,
             analytic_step: false,
             source_mesh_digests: Vec::new(),
+            component_placement_count: 0,
         };
         let manifest = compact_test_manifest("model-render");
         let design = compact_test_design("render_macro()");
@@ -9988,7 +10758,7 @@ mod tests {
             content_hash: "hash-model-render".to_string(),
             source_language: "ecky".to_string(),
             geometry_backend: "build123d".to_string(),
-            has_preview_stl: true,
+            has_model_stl: true,
             viewer_asset_count: 0,
             edge_target_count: 0,
             face_target_count: 0,
@@ -10001,6 +10771,7 @@ mod tests {
             faceted_step: false,
             analytic_step: false,
             source_mesh_digests: Vec::new(),
+            component_placement_count: 0,
         };
         let manifest = compact_test_manifest("model-render");
         let mut design = compact_test_design("(model\n  (box 10 20 30))");
@@ -10052,7 +10823,7 @@ mod tests {
             model_id: Some("model-1".to_string()),
             source_language: crate::contracts::SourceLanguage::LegacyPython,
             geometry_backend: crate::contracts::GeometryBackend::EckyRust,
-            preview_stl_path: Some("/tmp/model.stl".to_string()),
+            model_stl_path: Some("/tmp/model.stl".to_string()),
             viewer_assets: vec![],
             title: "Widget".to_string(),
             version_name: "V1".to_string(),
@@ -10236,6 +11007,181 @@ mod tests {
                 .is_some(),
             "full-compatibility tools/list must honor standard cursor pagination and \
              return nextCursor when the catalogue spans pages; today it returns one page"
+        );
+    }
+
+    fn modern_request_headers(method: &str, name: Option<&str>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "accept",
+            HeaderValue::from_static("application/json, text/event-stream"),
+        );
+        headers.insert(
+            "mcp-protocol-version",
+            HeaderValue::from_static("2026-07-28"),
+        );
+        headers.insert(
+            "mcp-method",
+            HeaderValue::from_str(method).expect("method header"),
+        );
+        if let Some(name) = name {
+            headers.insert(
+                "mcp-name",
+                HeaderValue::from_str(name).expect("name header"),
+            );
+        }
+        headers
+    }
+
+    fn modern_request_body(id: u64, method: &str, params: Value) -> String {
+        let mut params = params.as_object().cloned().unwrap_or_default();
+        params.insert(
+            "_meta".to_string(),
+            json!({
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "modern-contract-test",
+                    "version": "1.0.0"
+                },
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }),
+        );
+        serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params
+        }))
+        .expect("modern request body")
+    }
+
+    #[tokio::test]
+    async fn modern_mcp_discovery_is_stateless_and_self_describing() {
+        let server =
+            test_dispatch_server("(model (part body (box 1 2 3)))", "legacy-session").await;
+        let response = handle_http_post(
+            axum::extract::State(server.clone()),
+            "/mcp".parse::<axum::http::Uri>().expect("uri"),
+            modern_request_headers("server/discover", None),
+            modern_request_body(1, "server/discover", json!({})),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers().get(SESSION_HEADER).is_none(),
+            "modern MCP must not emit protocol-level session ids"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("discovery body");
+        let payload: Value = serde_json::from_slice(&bytes).expect("discovery json");
+        assert_eq!(payload["result"]["resultType"], "complete");
+        assert_eq!(payload["result"]["supportedVersions"][0], "2026-07-28");
+        assert_eq!(
+            payload["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            "ecky-mcp"
+        );
+        assert!(payload["result"]["capabilities"]["tools"].is_object());
+    }
+
+    #[tokio::test]
+    async fn modern_mcp_rejects_mirrored_header_mismatch() {
+        let server =
+            test_dispatch_server("(model (part body (box 1 2 3)))", "legacy-session").await;
+        let response = handle_http_post(
+            axum::extract::State(server),
+            "/mcp".parse::<axum::http::Uri>().expect("uri"),
+            modern_request_headers("tools/list", None),
+            modern_request_body(1, "resources/list", json!({})),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("mismatch body");
+        let payload: Value = serde_json::from_slice(&bytes).expect("mismatch json");
+        assert_eq!(payload["error"]["code"], -32020);
+    }
+
+    #[tokio::test]
+    async fn modern_mcp_returns_explicit_context_handle_and_cacheable_full_catalogue() {
+        let server =
+            test_dispatch_server("(model (part body (box 1 2 3)))", "legacy-session").await;
+        let response = handle_http_post(
+            axum::extract::State(server.clone()),
+            "/mcp".parse::<axum::http::Uri>().expect("uri"),
+            modern_request_headers("tools/list", None),
+            modern_request_body(
+                1,
+                "tools/list",
+                json!({ "profile": "compact-managed", "pageSize": 200 }),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(SESSION_HEADER).is_none());
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("tools body");
+        let payload: Value = serde_json::from_slice(&bytes).expect("tools json");
+        assert_eq!(payload["result"]["resultType"], "complete");
+        assert_eq!(payload["result"]["cacheScope"], "private");
+        assert!(payload["result"]["ttlMs"].as_u64().unwrap_or_default() > 0);
+        let tools = payload["result"]["tools"].as_array().expect("tools array");
+        assert!(
+            tools.len() > 15,
+            "modern catalogue cannot depend on session state"
+        );
+        assert!(tools
+            .iter()
+            .all(|tool| { tool["inputSchema"]["properties"]["eckyContextId"].is_object() }));
+
+        let call_response = handle_http_post(
+            axum::extract::State(server.clone()),
+            "/mcp".parse::<axum::http::Uri>().expect("uri"),
+            modern_request_headers("tools/call", Some("health_check")),
+            modern_request_body(
+                2,
+                "tools/call",
+                json!({ "name": "health_check", "arguments": {} }),
+            ),
+        )
+        .await;
+        assert_eq!(call_response.status(), StatusCode::OK);
+        assert!(call_response.headers().get(SESSION_HEADER).is_none());
+        let bytes = axum::body::to_bytes(call_response.into_body(), usize::MAX)
+            .await
+            .expect("tool body");
+        let payload: Value = serde_json::from_slice(&bytes).expect("tool json");
+        let context_id = payload["result"]["structuredContent"]["eckyContextId"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(context_id.starts_with("ecky-context-"));
+
+        let reused_response = handle_http_post(
+            axum::extract::State(server),
+            "/mcp".parse::<axum::http::Uri>().expect("uri"),
+            modern_request_headers("tools/call", Some("health_check")),
+            modern_request_body(
+                3,
+                "tools/call",
+                json!({
+                    "name": "health_check",
+                    "arguments": { "eckyContextId": context_id }
+                }),
+            ),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(reused_response.into_body(), usize::MAX)
+            .await
+            .expect("reused tool body");
+        let reused_payload: Value = serde_json::from_slice(&bytes).expect("reused tool json");
+        assert_eq!(
+            reused_payload["result"]["structuredContent"]["eckyContextId"],
+            context_id
         );
     }
 
@@ -10490,7 +11436,7 @@ mod tests {
             model_id: Some("model-1".to_string()),
             source_language: crate::contracts::SourceLanguage::LegacyPython,
             geometry_backend: crate::contracts::GeometryBackend::EckyRust,
-            preview_stl_path: Some("/tmp/model.stl".to_string()),
+            model_stl_path: Some("/tmp/model.stl".to_string()),
             viewer_assets: vec![],
             title: "Widget".to_string(),
             version_name: "V1".to_string(),

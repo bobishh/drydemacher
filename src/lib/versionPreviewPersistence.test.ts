@@ -14,7 +14,7 @@ function bundle(): ArtifactBundle {
     fcstdPath: '/tmp/model.FCStd',
     manifestPath: '/tmp/model.json',
     macroPath: '/tmp/model.ecky',
-    previewStlPath: '/tmp/model.stl',
+    modelStlPath: '/tmp/model.stl',
     viewerAssets: [],
     edgeTargets: [],
     calloutAnchors: [],
@@ -72,14 +72,14 @@ test('shouldPersistVersionPreview backfills missing preview for the matching art
   );
 });
 
-test('shouldPersistVersionPreview tolerates rebuilt preview paths for the same artifact', () => {
+test('shouldPersistVersionPreview rejects a different model path for the same version identity', () => {
   assert.equal(
     shouldPersistVersionPreview(
       versionMessage(null),
-      { ...bundle(), previewStlPath: '/tmp/rebuilt/model.stl' },
+      { ...bundle(), modelStlPath: '/tmp/rebuilt/model.stl' },
       'asset:/tmp/rebuilt/model.stl',
     ),
-    true,
+    false,
   );
 });
 
@@ -87,7 +87,7 @@ test('shouldPersistVersionPreview rejects screenshots from a different runtime a
   assert.equal(
     shouldPersistVersionPreview(
       versionMessage(null),
-      { ...bundle(), modelId: 'other-model', previewStlPath: '/tmp/other.stl' },
+      { ...bundle(), modelId: 'other-model', modelStlPath: '/tmp/other.stl' },
       'asset:/tmp/other.stl',
     ),
     false,

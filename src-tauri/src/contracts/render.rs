@@ -175,7 +175,8 @@ pub struct ArtifactBundle {
     pub manifest_path: String,
     #[serde(default)]
     pub macro_path: Option<String>,
-    pub preview_stl_path: String,
+    #[serde(alias = "previewStlPath")]
+    pub model_stl_path: String,
     #[serde(default)]
     pub viewer_assets: Vec<ViewerAsset>,
     #[serde(default)]
@@ -198,6 +199,20 @@ pub struct ArtifactBundle {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[specta(optional)]
     pub component_import_origins: Vec<ComponentImportOrigin>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[specta(optional)]
+    pub component_placement_evidence: Vec<super::ComponentPlacementEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionPreviewRuntime {
+    pub artifact_bundle: ArtifactBundle,
+    pub model_manifest: ModelManifest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_id: Option<String>,
+    pub ephemeral: bool,
 }
 
 /// Immutable render input/output authority. Construct only through

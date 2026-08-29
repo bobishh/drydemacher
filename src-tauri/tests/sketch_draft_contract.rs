@@ -455,8 +455,8 @@ fn sketch_draft_embeds_source_map_comment_and_preview_renders_through_it() {
         generate_sketch_draft_preview(request, &resolver).expect("preview render");
 
     assert_eq!(preview_draft.source, draft.source);
-    assert!(bundle.preview_stl_path.ends_with(".stl"));
-    assert!(std::path::Path::new(&bundle.preview_stl_path).exists());
+    assert!(bundle.model_stl_path.ends_with(".stl"));
+    assert!(std::path::Path::new(&bundle.model_stl_path).exists());
     assert!(!bundle.viewer_assets.is_empty());
 
     std::fs::remove_dir_all(temp_root).ok();
@@ -572,7 +572,7 @@ fn sketch_draft_preview_renders_generated_ecky_mesh_bundle() {
     assert!(draft.source.contains("(model"));
     assert_eq!(bundle.source_language, SourceLanguage::EckyIrV0);
     assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
-    assert!(std::path::Path::new(&bundle.preview_stl_path).exists());
+    assert!(std::path::Path::new(&bundle.model_stl_path).exists());
     assert!(!bundle.viewer_assets.is_empty());
 
     std::fs::remove_dir_all(temp_root).ok();
@@ -665,7 +665,7 @@ fn sketch_preview_hull_preview_renders_candidate_cell_mesh_bundle() {
     assert!(draft.source.contains("(box 50 30 22)"));
     assert_eq!(bundle.source_language, SourceLanguage::EckyIrV0);
     assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
-    assert!(std::path::Path::new(&bundle.preview_stl_path).exists());
+    assert!(std::path::Path::new(&bundle.model_stl_path).exists());
     assert!(!bundle.viewer_assets.is_empty());
 
     std::fs::remove_dir_all(temp_root).ok();
@@ -866,6 +866,7 @@ fn accepted_brep_step_gate_rejects_mesh_only_bundle() {
         component_dependency_lock: None,
         component_dependency_lock_digest: None,
         component_import_origins: Vec::new(),
+        component_placement_evidence: Vec::new(),
         schema_version: 1,
         model_id: "mesh-only".to_string(),
         source_kind: ecky_cad_lib::contracts::ModelSourceKind::Generated,
@@ -877,7 +878,7 @@ fn accepted_brep_step_gate_rejects_mesh_only_bundle() {
         fcstd_path: String::new(),
         manifest_path: "/tmp/manifest.json".to_string(),
         macro_path: None,
-        preview_stl_path: "/tmp/preview.stl".to_string(),
+        model_stl_path: "/tmp/model.stl".to_string(),
         viewer_assets: vec![],
         edge_targets: vec![],
         face_targets: vec![],
@@ -903,6 +904,7 @@ fn accepted_step_bundle_with_edge_target(target_id: &str) -> ArtifactBundle {
         component_dependency_lock: None,
         component_dependency_lock_digest: None,
         component_import_origins: Vec::new(),
+        component_placement_evidence: Vec::new(),
         schema_version: 1,
         model_id: "accepted-step".to_string(),
         source_kind: ModelSourceKind::Generated,
@@ -914,7 +916,7 @@ fn accepted_step_bundle_with_edge_target(target_id: &str) -> ArtifactBundle {
         fcstd_path: String::new(),
         manifest_path,
         macro_path: None,
-        preview_stl_path: "/tmp/preview.stl".to_string(),
+        model_stl_path: "/tmp/model.stl".to_string(),
         viewer_assets: vec![],
         edge_targets: vec![ViewerEdgeTarget {
             target_id: public_target_id,
@@ -958,6 +960,7 @@ fn accepted_step_bundle_with_face_target(target_id: &str) -> ArtifactBundle {
         component_dependency_lock: None,
         component_dependency_lock_digest: None,
         component_import_origins: Vec::new(),
+        component_placement_evidence: Vec::new(),
         schema_version: 1,
         model_id: "accepted-step".to_string(),
         source_kind: ModelSourceKind::Generated,
@@ -969,7 +972,7 @@ fn accepted_step_bundle_with_face_target(target_id: &str) -> ArtifactBundle {
         fcstd_path: String::new(),
         manifest_path,
         macro_path: None,
-        preview_stl_path: "/tmp/preview.stl".to_string(),
+        model_stl_path: "/tmp/model.stl".to_string(),
         viewer_assets: vec![],
         edge_targets: vec![],
         face_targets: vec![ViewerFaceTarget {

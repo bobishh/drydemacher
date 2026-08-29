@@ -30,8 +30,49 @@ export function hasVerifyClause(code: string): boolean {
   return /\(\s*verify\b/.test(code);
 }
 
+function hasTopLevelForm(code: string, formName: string): boolean {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let inLineComment = false;
+
+  for (let index = 0; index < code.length; index += 1) {
+    const char = code[index];
+    if (inLineComment) {
+      if (char === '\n') inLineComment = false;
+      continue;
+    }
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === ';') {
+      inLineComment = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === '(') {
+      if (depth === 0) {
+        const tail = code.slice(index + 1);
+        const match = tail.match(/^\s*([^\s()]+)/);
+        if (match?.[1] === formName) return true;
+      }
+      depth += 1;
+      continue;
+    }
+    if (char === ')') depth = Math.max(0, depth - 1);
+  }
+
+  return false;
+}
+
 export function looksLikeEckyModelSource(code: string): boolean {
-  return code.trimStart().startsWith('(model');
+  return hasTopLevelForm(code, 'model');
 }
 
 export function canInsertVerifyTemplate(code: string): boolean {

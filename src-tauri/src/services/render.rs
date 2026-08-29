@@ -1,12 +1,16 @@
 use crate::contracts::{
-    AppError, AppResult, ArtifactBundle, DesignParams, DiagnosticContext, DiagnosticParamValue,
-    GeometryBackend, GeometryProvenance, GeometryRepresentation, MacroDialect, ModelManifest,
+    AppError, AppResult, ArtifactBundle, ComponentInterfaceValue, ComponentMateNormalMode,
+    ComponentMateStatus, ComponentMirrorAxis, ComponentPlacementEvidence, DesignParams,
+    DiagnosticContext, DiagnosticParamValue, GeometryBackend, GeometryProvenance,
+    GeometryRepresentation, MacroDialect, ModelManifest, ParamValue, PortFrame, PortReference,
 };
 use crate::freecad;
 use crate::models::{AppState, PathResolver};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 const ECKY_LOWERING_STACK_SIZE: usize = 32 * 1024 * 1024;
 const ECKY_DIRECT_OCCT_DEFAULT_STACK_SIZE: usize = 64 * 1024 * 1024;
@@ -16,6 +20,55 @@ const DIRECT_OCCT_RESOURCE_SNAPSHOT_PATHS: &[&str] = &[
     "runtime/occt/bin/direct-occt-runner",
     "bin/direct-occt-runner",
 ];
+
+fn source_render_cancellations() -> &'static Mutex<HashMap<String, Weak<AtomicBool>>> {
+    static CANCELLATIONS: OnceLock<Mutex<HashMap<String, Weak<AtomicBool>>>> = OnceLock::new();
+    CANCELLATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(crate) struct SourceRenderCancellationGuard {
+    digest: String,
+    cancellation: Arc<AtomicBool>,
+}
+
+impl Drop for SourceRenderCancellationGuard {
+    fn drop(&mut self) {
+        let mut cancellations = source_render_cancellations()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let matches_guard = cancellations
+            .get(&self.digest)
+            .and_then(Weak::upgrade)
+            .is_some_and(|active| Arc::ptr_eq(&active, &self.cancellation));
+        if matches_guard {
+            cancellations.remove(&self.digest);
+        }
+    }
+}
+
+pub(crate) fn register_source_render_cancellation(
+    source: &str,
+    cancellation: Arc<AtomicBool>,
+) -> SourceRenderCancellationGuard {
+    let digest = crate::project_mirror::source_digest(source);
+    source_render_cancellations()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(digest.clone(), Arc::downgrade(&cancellation));
+    SourceRenderCancellationGuard {
+        digest,
+        cancellation,
+    }
+}
+
+fn source_render_cancellation(source: &str) -> Option<Arc<AtomicBool>> {
+    let digest = crate::project_mirror::source_digest(source);
+    source_render_cancellations()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&digest)
+        .and_then(Weak::upgrade)
+}
 
 struct RenderFlight {
     result: std::sync::Mutex<Option<AppResult<ArtifactBundle>>>,
@@ -228,6 +281,31 @@ fn render_dependency_identities(
     identities
 }
 
+fn post_processing_asset_identities(
+    parameters: &DesignParams,
+    post_processing: Option<&crate::contracts::PostProcessingSpec>,
+) -> Vec<(String, String)> {
+    use sha2::{Digest, Sha256};
+
+    if crate::contracts::normalize_post_processing_spec(post_processing.cloned()).is_none() {
+        return Vec::new();
+    }
+    let mut identities = parameters
+        .iter()
+        .filter_map(|(key, value)| match value {
+            crate::contracts::ParamValue::String(path) if Path::new(path).is_file() => {
+                let digest = fs::read(path)
+                    .map(|bytes| format!("sha256:{:x}", Sha256::digest(bytes)))
+                    .unwrap_or_else(|error| format!("unreadable:{error}"));
+                Some((format!("parameter-file:{key}:{path}"), digest))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    identities.sort();
+    identities
+}
+
 fn render_flight_key(
     macro_code: &str,
     parameters: &DesignParams,
@@ -265,6 +343,7 @@ fn render_flight_key(
         freecad_cmd: &'a str,
         cad_text_font_path: &'a str,
         dependency_identities: Vec<(String, String)>,
+        post_processing_asset_identities: Vec<(String, String)>,
         app_config_dir: PathBuf,
         app_data_dir: PathBuf,
     }
@@ -278,6 +357,8 @@ fn render_flight_key(
         tagged_anchors: &manifest.tagged_anchors,
     });
     let dependency_identities = render_dependency_identities(macro_code, parameters, app);
+    let post_processing_asset_identities =
+        post_processing_asset_identities(parameters, post_processing);
     let identity = RenderFlightIdentity {
         schema_version: 1,
         macro_code,
@@ -291,6 +372,7 @@ fn render_flight_key(
         freecad_cmd: &config.freecad_cmd,
         cad_text_font_path: &config.cad_text_font_path,
         dependency_identities,
+        post_processing_asset_identities,
         app_config_dir: app.app_config_dir(),
         app_data_dir: app.app_data_dir(),
     };
@@ -301,6 +383,23 @@ fn render_flight_key(
     })?;
     use sha2::{Digest, Sha256};
     Ok(format!("sha256:{:x}", Sha256::digest(encoded)))
+}
+
+fn cache_salted_render_source(
+    source: &str,
+    dialect: &MacroDialect,
+    render_input_digest: &str,
+) -> String {
+    let comment = match dialect {
+        MacroDialect::EckyIrV0 | MacroDialect::Build123d => ";",
+        MacroDialect::CadFrameworkV1 | MacroDialect::Legacy => "#",
+    };
+    format!(
+        "{}\n{} eckyRenderCacheIdentity {}\n",
+        source.trim_end(),
+        comment,
+        render_input_digest
+    )
 }
 
 fn source_line_for_offset(source: &str, offset: usize) -> Option<usize> {
@@ -738,10 +837,10 @@ fn load_manifest_for_bundle(bundle: &ArtifactBundle) -> AppResult<Option<ModelMa
 }
 
 fn update_content_hash_and_exports(
-    preview_stl_path: &str,
+    model_stl_path: &str,
     bundle: &mut ArtifactBundle,
 ) -> AppResult<()> {
-    let stl_path = Path::new(preview_stl_path);
+    let stl_path = Path::new(model_stl_path);
     if let Ok(bytes) = std::fs::read(stl_path) {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -765,7 +864,7 @@ fn apply_requested_post_processing(
         .map(|post| !post.lithophane_attachments.is_empty())
         .unwrap_or(false);
 
-    let stl_path = Path::new(&bundle.preview_stl_path);
+    let stl_path = Path::new(&bundle.model_stl_path);
 
     if has_explicit_attachment_path && !post_proc.lithophane_attachments.is_empty() {
         let resolved_attachments =
@@ -780,7 +879,7 @@ fn apply_requested_post_processing(
                 stl_path,
                 &export_dir,
             )?;
-            let preview_path = bundle.preview_stl_path.clone();
+            let preview_path = bundle.model_stl_path.clone();
             update_content_hash_and_exports(&preview_path, bundle)?;
             return Ok(());
         }
@@ -797,7 +896,7 @@ fn apply_requested_post_processing(
         }
         crate::displacement::apply(stl_path, image_path, disp, stl_path)?;
         bundle.export_artifacts.clear();
-        let preview_path = bundle.preview_stl_path.clone();
+        let preview_path = bundle.model_stl_path.clone();
         update_content_hash_and_exports(&preview_path, bundle)?;
     }
 
@@ -889,12 +988,219 @@ fn finalize_render_bundle(
     post_processing: Option<&crate::contracts::PostProcessingSpec>,
     app: &dyn PathResolver,
 ) -> AppResult<ArtifactBundle> {
+    let Some(input_digest) = post_processing_input_digest(parameters, post_processing)? else {
+        evict_cache_preserving_bundle(app, &bundle)?;
+        return Ok(bundle);
+    };
+    if post_processing_marker_matches(&bundle, &input_digest) {
+        evict_cache_preserving_bundle(app, &bundle)?;
+        return Ok(bundle);
+    }
     apply_requested_post_processing(&mut bundle, parameters, post_processing).map_err(|err| {
         attach_diagnostic_context(err, None, parameters, Some("export:post-processing"))
     })?;
-    let runtime_cache_dir = freecad::runtime_cache_dir(app)?;
-    freecad::evict_cache_if_needed(&runtime_cache_dir);
+    write_post_processing_marker(&bundle, &input_digest)?;
+    evict_cache_preserving_bundle(app, &bundle)?;
     Ok(bundle)
+}
+
+fn evict_cache_preserving_bundle(app: &dyn PathResolver, bundle: &ArtifactBundle) -> AppResult<()> {
+    let runtime_cache_dir = freecad::runtime_cache_dir(app)?;
+    if let Some(bundle_dir) = Path::new(&bundle.model_stl_path).parent() {
+        freecad::evict_cache_if_needed_except(&runtime_cache_dir, bundle_dir);
+    } else {
+        freecad::evict_cache_if_needed(&runtime_cache_dir);
+    }
+    Ok(())
+}
+
+const POST_PROCESSING_MARKER_FILE: &str = "post-processing-cache.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PostProcessingCacheMarker {
+    schema_version: u32,
+    input_digest: String,
+    preview_digest: String,
+}
+
+fn post_processing_input_digest(
+    parameters: &DesignParams,
+    post_processing: Option<&crate::contracts::PostProcessingSpec>,
+) -> AppResult<Option<String>> {
+    let Some(normalized) =
+        crate::contracts::normalize_post_processing_spec(post_processing.cloned())
+    else {
+        return Ok(None);
+    };
+    let encoded = serde_json::to_vec(&(
+        "post-processing-v1",
+        parameters,
+        normalized,
+        post_processing_asset_identities(parameters, post_processing),
+    ))
+    .map_err(|error| {
+        AppError::validation(format!("Cannot digest post-processing inputs: {error}"))
+    })?;
+    use sha2::{Digest, Sha256};
+    Ok(Some(format!("sha256:{:x}", Sha256::digest(encoded))))
+}
+
+fn preview_file_digest(bundle: &ArtifactBundle) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    fs::read(&bundle.model_stl_path)
+        .ok()
+        .map(|bytes| format!("sha256:{:x}", Sha256::digest(bytes)))
+}
+
+fn post_processing_marker_path(bundle: &ArtifactBundle) -> Option<PathBuf> {
+    Path::new(&bundle.model_stl_path)
+        .parent()
+        .map(|directory| directory.join(POST_PROCESSING_MARKER_FILE))
+}
+
+fn post_processing_marker_matches(bundle: &ArtifactBundle, input_digest: &str) -> bool {
+    let Some(path) = post_processing_marker_path(bundle) else {
+        return false;
+    };
+    let Ok(raw) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(marker) = serde_json::from_str::<PostProcessingCacheMarker>(&raw) else {
+        return false;
+    };
+    marker.schema_version == 1
+        && marker.input_digest == input_digest
+        && preview_file_digest(bundle).as_deref() == Some(marker.preview_digest.as_str())
+}
+
+fn write_post_processing_marker(bundle: &ArtifactBundle, input_digest: &str) -> AppResult<()> {
+    let path = post_processing_marker_path(bundle).ok_or_else(|| {
+        AppError::persistence("Cannot locate runtime directory for post-processing cache marker.")
+    })?;
+    let preview_digest = preview_file_digest(bundle).ok_or_else(|| {
+        AppError::persistence(format!(
+            "Cannot digest post-processed preview '{}'.",
+            bundle.model_stl_path
+        ))
+    })?;
+    let marker = PostProcessingCacheMarker {
+        schema_version: 1,
+        input_digest: input_digest.to_string(),
+        preview_digest,
+    };
+    let encoded = serde_json::to_vec_pretty(&marker)
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, encoded).map_err(|error| {
+        AppError::persistence(format!(
+            "Failed to write post-processing cache marker '{}': {}",
+            temporary.display(),
+            error
+        ))
+    })?;
+    fs::rename(&temporary, &path).map_err(|error| {
+        let _ = fs::remove_file(&temporary);
+        AppError::persistence(format!(
+            "Failed to publish post-processing cache marker '{}': {}",
+            path.display(),
+            error
+        ))
+    })?;
+    Ok(())
+}
+
+fn persist_authored_source_digest(
+    mut bundle: ArtifactBundle,
+    authored_source: &str,
+    parameters: &DesignParams,
+    app: &dyn PathResolver,
+) -> AppResult<ArtifactBundle> {
+    if let Some(path) = bundle.macro_path.as_deref() {
+        fs::write(path, authored_source).map_err(|error| {
+            AppError::persistence(format!(
+                "Failed to persist exact authored source '{}': {}",
+                path, error
+            ))
+        })?;
+    }
+    let mut manifest = crate::model_runtime::read_model_manifest(app, &bundle.model_id)?;
+    manifest.source_digest = Some(crate::services::render_snapshot::canonical_source_digest(
+        authored_source,
+    ));
+    let placement_evidence = if bundle.source_language == crate::contracts::SourceLanguage::EckyIrV0
+    {
+        component_placement_evidence_from_source(authored_source, parameters)?
+    } else {
+        Vec::new()
+    };
+    bundle.component_placement_evidence = placement_evidence.clone();
+    manifest.component_placement_evidence = placement_evidence;
+    crate::model_runtime::write_runtime_bundle(app, &bundle.model_id, &bundle, &manifest)
+        .map(|(stored_bundle, _)| stored_bundle)
+}
+
+fn component_placement_evidence_from_source(
+    authored_source: &str,
+    parameters: &DesignParams,
+) -> AppResult<Vec<ComponentPlacementEvidence>> {
+    let numeric_parameters = parameters
+        .iter()
+        .filter_map(|(key, value)| match value {
+            ParamValue::Number(value) => Some((key.clone(), *value)),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    Ok(
+        crate::ecky_scheme::compiler::inspect_component_placement_evidence(
+            authored_source,
+            &numeric_parameters,
+        )
+        .map_err(crate::ecky_scheme::core_err_to_app)?
+        .into_iter()
+        .map(|evidence| ComponentPlacementEvidence {
+            instance_id: evidence.instance_id,
+            component_id: evidence.component_id,
+            source_port_ref: PortReference {
+                instance_id: evidence.source_instance_id,
+                port_id: evidence.source_port_id,
+            },
+            target_port_ref: PortReference {
+                instance_id: evidence.target_instance_id,
+                port_id: evidence.target_port_id,
+            },
+            placement_frame: PortFrame {
+                origin: evidence.placement_frame.origin,
+                x_axis: evidence.placement_frame.x_axis,
+                y_axis: evidence.placement_frame.y_axis,
+                z_axis: evidence.placement_frame.z_axis,
+            },
+            normal_mode: match evidence.normal_mode {
+                ecky_render::component_placement::MateNormalMode::Aligned => {
+                    ComponentMateNormalMode::Aligned
+                }
+                ecky_render::component_placement::MateNormalMode::Opposed => {
+                    ComponentMateNormalMode::Opposed
+                }
+            },
+            roll_degrees: evidence.roll_degrees,
+            offset: evidence.offset,
+            mirror_axis: evidence.mirror_axis.map(|axis| match axis {
+                ecky_render::component_placement::MirrorAxis::X => ComponentMirrorAxis::X,
+                ecky_render::component_placement::MirrorAxis::Y => ComponentMirrorAxis::Y,
+            }),
+            mate_status: ComponentMateStatus::Solved,
+            resolved_fit_values: evidence
+                .resolved_fit_values
+                .into_iter()
+                .map(|(key, value)| (key, ComponentInterfaceValue::Number(value)))
+                .collect(),
+            diagnostics: Vec::new(),
+            source_start: evidence.source_start,
+            source_end: evidence.source_end,
+        })
+        .collect::<Vec<_>>(),
+    )
 }
 
 fn resolve_geometry_backend(
@@ -939,6 +1245,7 @@ fn try_render_direct_occt_ecky_ir(
     previous_manifest: Option<&ModelManifest>,
     config: &RenderConfigSnapshot,
     app: &dyn PathResolver,
+    cancellation: Option<Arc<AtomicBool>>,
 ) -> AppResult<Option<ArtifactBundle>> {
     if *effective_dialect != MacroDialect::EckyIrV0 {
         return Ok(None);
@@ -949,41 +1256,41 @@ fn try_render_direct_occt_ecky_ir(
     let app = DirectOcctThreadResolver::from_resolver(app);
     let cad_text_font_path = config.cad_text_font_path().map(str::to_string);
     run_direct_occt_with_large_stack("render", move || {
-        let program = match crate::ecky_scheme::compile_to_core_program(&macro_code) {
-            Ok(program) => program,
-            Err(_) => return Ok(None),
-        };
-        let program = crate::topology_target_ids::rebind_program_tagged_selectors(
-            &program,
-            previous_manifest.as_ref(),
-        )?;
-        let runtime_root = match crate::runtime_capabilities::resolve_direct_occt_runtime_root(&app)
-        {
-            Ok(runtime_root) => runtime_root,
-            Err(_) => return Ok(None),
-        };
-        let layout = crate::ecky_cad_host::direct_occt_sdk::inspect_occt_runtime(&runtime_root);
-        let (bundle, _manifest) =
-            crate::ecky_cad_host::direct_occt_runtime::render_core_program_runtime_bundle_with_font_path(
+        crate::ecky_cad_host::direct_occt_runner::with_runner_cancellation(cancellation, || {
+            let program = match crate::ecky_scheme::compile_to_core_program(&macro_code) {
+                Ok(program) => program,
+                Err(_) => return Ok(None),
+            };
+            let program = crate::topology_target_ids::rebind_program_tagged_selectors(
                 &program,
-                &macro_code,
-                &parameters,
-                &layout,
-                &app,
-                cad_text_font_path.as_deref(),
+                previous_manifest.as_ref(),
             )?;
-        Ok(Some(bundle))
+            let runtime_root =
+                match crate::runtime_capabilities::resolve_direct_occt_runtime_root(&app) {
+                    Ok(runtime_root) => runtime_root,
+                    Err(_) => return Ok(None),
+                };
+            let layout = crate::ecky_cad_host::direct_occt_sdk::inspect_occt_runtime(&runtime_root);
+            let (bundle, _manifest) =
+                crate::ecky_cad_host::direct_occt_runtime::render_core_program_runtime_bundle_with_font_path(
+                    &program,
+                    &macro_code,
+                    &parameters,
+                    &layout,
+                    &app,
+                    cad_text_font_path.as_deref(),
+                )?;
+            Ok(Some(bundle))
+        })
     })
 }
 
-/// Attempt hybrid poly BRep rendering: if the source uses mesh-only ops
-/// (wall-pattern) consumed by BRep-required ops (difference/chamfer/fillet),
-/// split the part at the mesh boundary. Phase 1 renders the wall-pattern
-/// subtree through the mesh renderer. Phase 2 feeds the displaced STL into
-/// OCCT as `solidify(import-stl(...))` and runs the post-boundary booleans.
+/// Attempt poly BRep bridge rendering when one OCCT program contains mesh
+/// geometry. Phase 1 renders Hybrid mesh islands and complete PureMesh parts.
+/// Phase 2 feeds their STL into OCCT as `solidify(import-stl(...))`, alongside
+/// unchanged PureOcct geometry and Hybrid post-boundary operations.
 ///
-/// Returns `Ok(None)` if the source is not Hybrid (no mesh boundary or no
-/// post-boundary BRep op).
+/// Returns `Ok(None)` when no mesh geometry must cross into OCCT.
 fn try_render_hybrid_poly_brep(
     macro_code: &str,
     parameters: &DesignParams,
@@ -1003,8 +1310,7 @@ fn try_render_hybrid_poly_brep(
         };
 
         let partitions = crate::ecky_ir::poly_partition::analyze_program(&program);
-        let has_hybrid = partitions.iter().any(|p| p.is_hybrid());
-        if !has_hybrid {
+        if !crate::ecky_ir::poly_partition::requires_poly_brep_bridge(&partitions) {
             return Ok(None);
         }
         let surface_op_admission_issues =
@@ -1031,20 +1337,20 @@ fn try_render_hybrid_poly_brep(
         let mut source_mesh_boundary_or_non_manifold_edges = 0_u64;
         let mut manifold_route_notes = Vec::new();
         for (part_index, partition) in partitions.iter().enumerate() {
-            if !partition.is_hybrid() {
-                continue;
-            }
             let part = &program.parts[part_index];
-            for output_node_id in &partition.mesh_output_node_ids {
+            let output_node_ids = crate::ecky_ir::poly_partition::mesh_bridge_output_node_ids(
+                &program, part_index, partition,
+            );
+            for output_node_id in output_node_ids {
                 let mut mesh_program =
                     crate::ecky_ir::poly_partition::clone_program_for_mesh_output(
                         &program,
                         part_index,
-                        *output_node_id,
+                        output_node_id,
                     )
                     .ok_or_else(|| {
                         AppError::internal(format!(
-                            "Hybrid mesh slice missing for part '{}' node {}.",
+                            "Poly BRep bridge mesh slice missing for part '{}' node {}.",
                             part.key,
                             output_node_id.raw()
                         ))
@@ -1089,7 +1395,7 @@ fn try_render_hybrid_poly_brep(
                     crate::ecky_ir::poly_partition::replace_node_with_mesh_asset(
                         &mut mesh_program,
                         prelude_node_id,
-                        &prelude_bundle.preview_stl_path,
+                        &prelude_bundle.model_stl_path,
                     );
                 }
                 let mesh_bundle = crate::ecky_ir::render_core_program(
@@ -1134,7 +1440,7 @@ fn try_render_hybrid_poly_brep(
                 }
                 let asset = crate::ecky_ir::mesh_asset::MeshAsset::ecky_mesh_phase(
                     part.key.clone(),
-                    *output_node_id,
+                    output_node_id,
                     &mesh_part_path,
                 )?;
                 let topology = indexed_asset.topology();
@@ -1144,7 +1450,7 @@ fn try_render_hybrid_poly_brep(
                 if crate::ecky_ir::poly_partition::mesh_output_contains_open_mesh(
                     &program,
                     part_index,
-                    *output_node_id,
+                    output_node_id,
                 ) && mesh_non_manifold > 0
                 {
                     let consumer =
@@ -1159,7 +1465,7 @@ fn try_render_hybrid_poly_brep(
                 }
                 source_mesh_digests.push(indexed_asset.content_digest().to_string());
                 source_mesh_boundary_or_non_manifold_edges += mesh_non_manifold as u64;
-                mesh_assets.insert(*output_node_id, asset);
+                mesh_assets.insert(output_node_id, asset);
             }
         }
 
@@ -1192,7 +1498,7 @@ fn try_render_hybrid_poly_brep(
 
         for asset in &bundle.viewer_assets {
             let non_manifold =
-                crate::services::structural_verification::preview_stl_non_manifold_edge_count(
+                crate::services::structural_verification::model_stl_non_manifold_edge_count(
                     std::path::Path::new(&asset.path),
                 )?;
             if non_manifold >= 100 {
@@ -1203,8 +1509,8 @@ fn try_render_hybrid_poly_brep(
             }
         }
         let non_manifold =
-            crate::services::structural_verification::preview_stl_non_manifold_edge_count(
-                std::path::Path::new(&bundle.preview_stl_path),
+            crate::services::structural_verification::model_stl_non_manifold_edge_count(
+                std::path::Path::new(&bundle.model_stl_path),
             )?;
         if non_manifold >= 100 {
             return Err(AppError::render(format!(
@@ -1234,16 +1540,21 @@ fn try_render_hybrid_poly_brep(
         }
         manifest.geometry_provenance = Some(geometry_provenance);
 
-        // Tag stored artifact truth so UI/MCP consumers know the hybrid poly
-        // BRep bridge produced faceted STEP rather than analytic source CAD.
-        let hybrid_count = partitions.iter().filter(|p| p.is_hybrid()).count();
+        // Tag stored artifact truth so UI/MCP consumers know the bridge
+        // produced faceted STEP rather than analytic source CAD.
+        let bridged_count = partitions
+            .iter()
+            .filter(|partition| {
+                partition.strategy != crate::ecky_ir::poly_partition::PartRenderStrategy::PureOcct
+            })
+            .count();
         let warning = if used_manifold_route {
             format!(
-                "Hybrid mesh Boolean route: {hybrid_count} part(s) rendered from validated indexed mesh + in-memory OCCT tessellation through Manifold; STL retained as mesh-native output and no STEP fallback was fabricated."
+                "Mesh Boolean route: {bridged_count} part(s) rendered from validated indexed mesh + in-memory OCCT tessellation through Manifold; STL retained as mesh-native output and no STEP fallback was fabricated."
             )
         } else {
             format!(
-                "Hybrid poly BRep bridge: {hybrid_count} part(s) rendered through mesh displacement + OCCT solidify + boolean (wall-pattern → import-stl → solidify); STEP representation is faceted poly-BRep, not analytic source CAD."
+                "Poly BRep bridge: {bridged_count} part(s) rendered through mesh generation + OCCT solidify (mesh → import-stl → solidify); STEP representation is faceted poly-BRep, not analytic source CAD."
             )
         };
         if !manifest.warnings.iter().any(|w| w == &warning) {
@@ -1254,9 +1565,9 @@ fn try_render_hybrid_poly_brep(
                 manifest.warnings.push(note);
             }
         }
-        manifest.source_digest = Some(
-            crate::services::render_snapshot::canonical_source_digest(&macro_code_owned),
-        );
+        manifest.source_digest = Some(crate::services::render_snapshot::canonical_source_digest(
+            &macro_code_owned,
+        ));
         let model_id = bundle.model_id.clone();
         let (bundle, _) =
             crate::model_runtime::write_runtime_bundle(&app_clone, &model_id, &bundle, &manifest)?;
@@ -1343,6 +1654,7 @@ pub fn render_cli_ecky(
         None,
         &config,
         app,
+        None,
     )
 }
 
@@ -1352,7 +1664,7 @@ pub async fn render_stl(
     state: &AppState,
     app: &dyn PathResolver,
 ) -> AppResult<String> {
-    let _guard = state.render_lock.lock().await;
+    let _guard = state.acquire_geometry_render().await;
     let result = freecad::render(
         macro_code,
         parameters,
@@ -1558,9 +1870,19 @@ async fn render_model_with_previous_manifest_resolved(
         RenderFlightRole::Owner(owner) => owner,
     };
 
-    let _guard = state.render_lock.lock().await;
+    let effective_dialect = macro_dialect
+        .clone()
+        .unwrap_or(match config.default_source_language {
+            crate::contracts::SourceLanguage::EckyIrV0 => MacroDialect::EckyIrV0,
+            crate::contracts::SourceLanguage::Build123d => MacroDialect::Build123d,
+            crate::contracts::SourceLanguage::LegacyPython => MacroDialect::Legacy,
+        });
+    let cache_source = cache_salted_render_source(macro_code, &effective_dialect, &flight_key);
+    let source_cancellation = source_render_cancellation(macro_code);
+
+    let _guard = state.acquire_geometry_render().await;
     let first_attempt = render_model_unlocked(
-        macro_code,
+        &cache_source,
         parameters,
         macro_dialect.clone(),
         geometry_backend,
@@ -1568,6 +1890,7 @@ async fn render_model_with_previous_manifest_resolved(
         previous_manifest,
         &config,
         app,
+        source_cancellation.clone(),
     );
     let result = match first_attempt {
         Ok(bundle) => Ok(bundle),
@@ -1577,7 +1900,7 @@ async fn render_model_with_previous_manifest_resolved(
                 && is_tagged_selector_mismatch_error(&err) =>
         {
             let bundle = render_model_unlocked(
-                macro_code,
+                &cache_source,
                 parameters,
                 macro_dialect,
                 geometry_backend,
@@ -1585,13 +1908,17 @@ async fn render_model_with_previous_manifest_resolved(
                 None,
                 &config,
                 app,
+                source_cancellation,
             )?;
             append_tagged_selector_rebind_warning(app, &bundle);
             Ok(bundle)
         }
         Err(err) => Err(err),
     };
-    owner.complete(result)
+    owner.complete(
+        result
+            .and_then(|bundle| persist_authored_source_digest(bundle, macro_code, parameters, app)),
+    )
 }
 
 fn render_model_unlocked(
@@ -1603,6 +1930,7 @@ fn render_model_unlocked(
     previous_manifest: Option<&ModelManifest>,
     config: &RenderConfigSnapshot,
     app: &dyn PathResolver,
+    source_cancellation: Option<Arc<AtomicBool>>,
 ) -> AppResult<ArtifactBundle> {
     let configured_dialect = match config.default_source_language {
         crate::contracts::SourceLanguage::EckyIrV0 => MacroDialect::EckyIrV0,
@@ -1718,6 +2046,7 @@ fn render_model_unlocked(
                     previous_manifest,
                     config,
                     app,
+                    source_cancellation.clone(),
                 )
             } else {
                 Ok(None)
@@ -1838,6 +2167,7 @@ fn render_model_unlocked(
     };
     result
         .map_err(|err| attach_diagnostic_context(err, Some(macro_code), parameters, Some("render")))
+        .and_then(|bundle| persist_authored_source_digest(bundle, macro_code, parameters, app))
         .and_then(|bundle| finalize_render_bundle(bundle, parameters, post_processing, app))
 }
 
@@ -1915,7 +2245,7 @@ pub async fn render_model_source(
     state: &AppState,
     app: &dyn PathResolver,
 ) -> AppResult<ArtifactBundle> {
-    let _guard = state.render_lock.lock().await;
+    let _guard = state.acquire_geometry_render().await;
     render_model_source_unlocked(
         source_path,
         source_language,
@@ -1980,6 +2310,7 @@ fn render_model_source_unlocked(
                 None,
                 &config,
                 app,
+                None,
             );
         }
         Some(other) => {
@@ -2013,11 +2344,14 @@ fn resolve_source_macro_dialect(
 mod tests {
     use super::{
         acquire_render_flight, annotate_lowering_error, apply_requested_post_processing,
-        is_tagged_selector_mismatch_error, load_manifest_for_bundle, render_flight_key,
+        cache_salted_render_source, component_placement_evidence_from_source,
+        is_tagged_selector_mismatch_error, load_manifest_for_bundle,
+        persist_authored_source_digest, post_processing_marker_matches, render_flight_key,
         render_flight_keys, render_flight_strong_count, render_model,
         render_model_with_dependency_upgrade, render_model_with_previous_manifest,
         resolve_dispatch_backend, resolve_geometry_backend, resolve_source_macro_dialect,
-        wait_for_render_flight, RenderConfigSnapshot, RenderFlightRole,
+        wait_for_render_flight, write_post_processing_marker, RenderConfigSnapshot,
+        RenderFlightRole,
     };
     use crate::contracts::{
         AppError, ComponentDefinition, ComponentPackage, DesignParams, GeometryBackend,
@@ -2035,6 +2369,144 @@ mod tests {
     #[derive(Clone)]
     struct TestResolver {
         root: PathBuf,
+    }
+
+    #[test]
+    fn cache_salt_is_semantically_comment_only_and_changes_backend_identity() {
+        let source = "(model (part body (box 1 2 3)))";
+        let first = cache_salted_render_source(source, &MacroDialect::EckyIrV0, "sha256:first");
+        let second = cache_salted_render_source(source, &MacroDialect::EckyIrV0, "sha256:second");
+
+        assert!(first.starts_with(source));
+        assert!(first.ends_with("; eckyRenderCacheIdentity sha256:first\n"));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn placement_evidence_maps_named_fit_and_orthogonal_frame_for_runtime_contracts() {
+        let source = r#"
+            (define-component latch ((number clearance 0.3))
+              (ports (port mount :type "mount.v1" :params ((clearance clearance))
+                :frame (frame :origin '(0 0 0) :x-axis '(1 0 0) :z-axis '(0 0 1))))
+              (box 20 4 2))
+            (model
+              (part enclosure
+                (ports (port side :type "mount.v1"
+                  :frame (frame :origin '(50 0 15) :x-axis '(0 1 0) :z-axis '(1 0 0))))
+                (box 100 50 30))
+              (part side-latch
+                (place-component (latch :clearance 0.45) :from mount
+                  :to (port-ref enclosure side) :normal opposed)))
+        "#;
+
+        let evidence = component_placement_evidence_from_source(source, &DesignParams::new())
+            .expect("runtime evidence");
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].instance_id, "side-latch");
+        assert_eq!(evidence[0].target_port_ref.port_id, "side");
+        assert_eq!(evidence[0].placement_frame.z_axis, [-1.0, 0.0, 0.0]);
+        assert_eq!(
+            evidence[0].resolved_fit_values.get("clearance"),
+            Some(&crate::contracts::ComponentInterfaceValue::Number(0.45))
+        );
+    }
+
+    #[test]
+    fn normal_app_mesh_runtime_persists_component_placement_evidence() {
+        let source =
+            include_str!("../../tests/fixtures/component-placement/dryer-latch-front-side.ecky");
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("program");
+        let root = std::env::temp_dir().join(format!(
+            "ecky-placement-app-runtime-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("root");
+        let resolver = TestResolver { root: root.clone() };
+        let bundle =
+            crate::ecky_ir::render_core_program(&program, source, &DesignParams::new(), &resolver)
+                .expect("normal mesh runtime");
+        let bundle =
+            persist_authored_source_digest(bundle, source, &DesignParams::new(), &resolver)
+                .expect("persist authored evidence");
+        let manifest = crate::model_runtime::read_model_manifest(&resolver, &bundle.model_id)
+            .expect("manifest");
+
+        assert_eq!(bundle.component_placement_evidence.len(), 3);
+        assert_eq!(
+            manifest.component_placement_evidence,
+            bundle.component_placement_evidence
+        );
+        assert_eq!(
+            bundle.component_placement_evidence[1]
+                .target_port_ref
+                .port_id,
+            "side-left"
+        );
+        assert_eq!(
+            bundle.component_placement_evidence[1]
+                .placement_frame
+                .z_axis,
+            [-1.0, 0.0, 0.0]
+        );
+        for asset in &bundle.viewer_assets {
+            let indexed = crate::ecky_ir::mesh_asset::IndexedMeshAsset::read_cache(
+                &std::path::Path::new(&asset.path).with_extension("indexed-mesh.json"),
+            )
+            .expect("indexed mesh");
+            assert!(indexed.topology().closed, "{}", asset.part_id);
+            assert_eq!(indexed.topology().non_manifold_edge_count, 0);
+        }
+
+        let invalid = source.replace(
+            "(port-ref enclosure side-left)",
+            "(port-ref enclosure missing-side)",
+        );
+        let error = crate::ecky_scheme::compile_to_core_program(&invalid)
+            .expect_err("invalid mate fails before render");
+        assert!(error.message.contains("side-latch"), "{error}");
+        assert!(error.message.contains("enclosure.missing-side"), "{error}");
+        assert!(error.primary_span.is_some(), "{error:?}");
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn post_processing_marker_rejects_mutated_preview_bytes() {
+        let root = temp_root("post-processing-marker");
+        let preview = root.join("model.stl");
+        std::fs::write(&preview, b"processed-a").expect("preview");
+        let bundle = crate::contracts::ArtifactBundle {
+            geometry_provenance: None,
+            component_dependency_lock: None,
+            component_dependency_lock_digest: None,
+            component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
+            schema_version: 1,
+            model_id: "generated-marker".to_string(),
+            source_kind: crate::contracts::ModelSourceKind::Generated,
+            engine_kind: crate::contracts::EngineKind::EckyIrV0,
+            source_language: crate::contracts::SourceLanguage::EckyIrV0,
+            geometry_backend: crate::contracts::GeometryBackend::EckyRust,
+            content_hash: "sha256:preview".to_string(),
+            artifact_version: 1,
+            fcstd_path: String::new(),
+            manifest_path: root.join("manifest.json").to_string_lossy().to_string(),
+            macro_path: None,
+            model_stl_path: preview.to_string_lossy().to_string(),
+            viewer_assets: vec![],
+            edge_targets: vec![],
+            face_targets: vec![],
+            callout_anchors: vec![],
+            measurement_guides: vec![],
+            export_artifacts: vec![],
+        };
+
+        write_post_processing_marker(&bundle, "sha256:input").expect("marker");
+        assert!(post_processing_marker_matches(&bundle, "sha256:input"));
+
+        std::fs::write(&preview, b"unprocessed-b").expect("mutate preview");
+        assert!(!post_processing_marker_matches(&bundle, "sha256:input"));
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     impl PathResolver for TestResolver {
@@ -2196,8 +2668,10 @@ endsolid sample
             microwave: None,
             voice: crate::contracts::VoiceConfig::default(),
             mcp: McpConfig::default(),
+            fem_compute: crate::contracts::FemComputeConfig::default(),
             has_seen_onboarding: true,
             connection_type: None,
+            provider_models: crate::contracts::ProviderModels::default(),
             default_engine_kind: crate::contracts::EngineKind::Freecad,
             default_source_language: crate::contracts::SourceLanguage::LegacyPython,
             default_geometry_backend: GeometryBackend::Freecad,
@@ -2565,6 +3039,49 @@ endsolid sample
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 
+    #[test]
+    fn render_cache_identity_changes_with_post_processing_inputs() {
+        let root = temp_root("singleflight-post-processing");
+        let state = test_state(&root);
+        let resolver = TestResolver { root: root.clone() };
+        let source = "(model (part body (box 1 2 3)))";
+        let post_processing = |depth_mm| PostProcessingSpec {
+            displacement: Some(DisplacementSpec {
+                image_param: "image".to_string(),
+                projection: ProjectionType::Planar,
+                depth_mm,
+                invert: false,
+            }),
+            lithophane_attachments: vec![],
+        };
+
+        let first = render_flight_key(
+            source,
+            &DesignParams::new(),
+            Some(&MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            Some(&post_processing(1.0)),
+            None,
+            &RenderConfigSnapshot::from_state(&state),
+            &resolver,
+        )
+        .expect("first identity");
+        let second = render_flight_key(
+            source,
+            &DesignParams::new(),
+            Some(&MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            Some(&post_processing(2.0)),
+            None,
+            &RenderConfigSnapshot::from_state(&state),
+            &resolver,
+        )
+        .expect("second identity");
+
+        assert_ne!(first, second);
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn overlapping_public_render_requests_join_before_kernel_lock() {
         let root = temp_root("singleflight-public");
@@ -2760,6 +3277,7 @@ endsolid sample
             component_dependency_lock: None,
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: 1,
             model_id: "model".to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -2771,7 +3289,7 @@ endsolid sample
             fcstd_path: "/tmp/model.FCStd".to_string(),
             manifest_path: "/tmp/missing-manifest.json".to_string(),
             macro_path: None,
-            preview_stl_path: "/tmp/nonexistent-preview.stl".to_string(),
+            model_stl_path: "/tmp/nonexistent-model.stl".to_string(),
             viewer_assets: vec![],
             edge_targets: vec![],
             face_targets: vec![],
@@ -2915,6 +3433,7 @@ endsolid sample
             component_dependency_lock: None,
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: 1,
             model_id: "model".to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -2926,7 +3445,7 @@ endsolid sample
             fcstd_path: String::new(),
             manifest_path: "/tmp/missing-manifest.json".to_string(),
             macro_path: None,
-            preview_stl_path: "/tmp/nonexistent-preview.stl".to_string(),
+            model_stl_path: "/tmp/nonexistent-model.stl".to_string(),
             viewer_assets: vec![],
             edge_targets: vec![],
             face_targets: vec![],
@@ -2965,9 +3484,9 @@ endsolid sample
     fn planar_cmyk_requires_attachment_render_path_not_legacy_displacement() {
         let root = std::env::temp_dir().join(format!("ecky-litho-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let preview_stl_path = root.join("preview.stl");
+        let model_stl_path = root.join("model.stl");
         std::fs::write(
-            &preview_stl_path,
+            &model_stl_path,
             [&[0u8; 80][..], &0u32.to_le_bytes()[..]].concat(),
         )
         .unwrap();
@@ -2978,6 +3497,7 @@ endsolid sample
             component_dependency_lock: None,
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: 1,
             model_id: "model".to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -2989,7 +3509,7 @@ endsolid sample
             fcstd_path: "/tmp/model.FCStd".to_string(),
             manifest_path: "/tmp/missing-manifest.json".to_string(),
             macro_path: None,
-            preview_stl_path: preview_stl_path.to_string_lossy().to_string(),
+            model_stl_path: model_stl_path.to_string_lossy().to_string(),
             viewer_assets: vec![],
             edge_targets: vec![],
             face_targets: vec![],
@@ -3046,9 +3566,9 @@ endsolid sample
         let root =
             std::env::temp_dir().join(format!("ecky-litho-target-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let preview_stl_path = root.join("preview.stl");
+        let model_stl_path = root.join("model.stl");
         std::fs::write(
-            &preview_stl_path,
+            &model_stl_path,
             [&[0u8; 80][..], &0u32.to_le_bytes()[..]].concat(),
         )
         .unwrap();
@@ -3058,6 +3578,7 @@ endsolid sample
             serde_json::to_vec_pretty(&crate::contracts::ModelManifest {
                 geometry_provenance: None,
                 component_import_origins: Vec::new(),
+                component_placement_evidence: Vec::new(),
                 schema_version: 1,
                 model_id: "model".to_string(),
                 source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -3127,6 +3648,7 @@ endsolid sample
             component_dependency_lock: None,
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: 1,
             model_id: "model".to_string(),
             source_kind: crate::contracts::ModelSourceKind::Generated,
@@ -3138,7 +3660,7 @@ endsolid sample
             fcstd_path: String::new(),
             manifest_path: manifest_path.to_string_lossy().to_string(),
             macro_path: None,
-            preview_stl_path: preview_stl_path.to_string_lossy().to_string(),
+            model_stl_path: model_stl_path.to_string_lossy().to_string(),
             viewer_assets: vec![],
             edge_targets: vec![],
             face_targets: vec![],
@@ -3278,7 +3800,7 @@ endsolid sample
         )
         .expect("post processing");
 
-        assert!(std::path::Path::new(&bundle.preview_stl_path).exists());
+        assert!(std::path::Path::new(&bundle.model_stl_path).exists());
         assert!(bundle
             .export_artifacts
             .iter()
@@ -3413,8 +3935,8 @@ endsolid sample
         .expect("native backend should route wall-pattern to mesh renderer");
 
         assert!(
-            !bundle.preview_stl_path.is_empty(),
-            "mesh renderer must produce a preview STL: {bundle:?}"
+            !bundle.model_stl_path.is_empty(),
+            "mesh renderer must produce a model STL: {bundle:?}"
         );
         assert!(
             !bundle.viewer_assets.is_empty(),
@@ -3586,7 +4108,7 @@ exit 5
 
         assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
         assert!(bundle.model_id.starts_with("generated-direct-occt-"));
-        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(std::path::Path::new(&bundle.model_stl_path).is_file());
         assert!(bundle
             .export_artifacts
             .iter()
@@ -3790,7 +4312,7 @@ exit 5
 
         assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
         assert!(bundle.model_id.starts_with("generated-ir-"));
-        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(std::path::Path::new(&bundle.model_stl_path).is_file());
         assert_eq!(
             bundle
                 .geometry_provenance
@@ -3841,7 +4363,7 @@ exit 5
 
         assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
         assert!(bundle.model_id.starts_with("generated-direct-occt-"));
-        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(std::path::Path::new(&bundle.model_stl_path).is_file());
         assert!(bundle
             .export_artifacts
             .iter()
@@ -3885,7 +4407,7 @@ exit 5
 
         assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
         assert!(bundle.model_id.starts_with("generated-direct-occt-"));
-        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(std::path::Path::new(&bundle.model_stl_path).is_file());
         assert!(bundle
             .export_artifacts
             .iter()
@@ -3918,7 +4440,7 @@ exit 5
 
         assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
         assert!(bundle.model_id.starts_with("generated-ir-"));
-        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(std::path::Path::new(&bundle.model_stl_path).is_file());
         assert!(!bundle
             .export_artifacts
             .iter()
@@ -3950,7 +4472,7 @@ exit 5
 
         assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
         assert!(bundle.model_id.starts_with("generated-ir-"));
-        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(std::path::Path::new(&bundle.model_stl_path).is_file());
         assert!(!bundle
             .export_artifacts
             .iter()
@@ -4080,7 +4602,7 @@ exit 5
 
         assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
         assert!(bundle.model_id.starts_with("generated-direct-occt-"));
-        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(std::path::Path::new(&bundle.model_stl_path).is_file());
         assert!(bundle
             .export_artifacts
             .iter()
@@ -4138,7 +4660,7 @@ exit 5
 
         assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
         assert!(bundle.model_id.starts_with("generated-direct-occt-"));
-        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(std::path::Path::new(&bundle.model_stl_path).is_file());
         assert!(bundle
             .export_artifacts
             .iter()
@@ -4182,7 +4704,7 @@ exit 5
 
         assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
         assert!(bundle.model_id.starts_with("generated-direct-occt-"));
-        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(std::path::Path::new(&bundle.model_stl_path).is_file());
         assert!(bundle
             .export_artifacts
             .iter()
@@ -4257,7 +4779,7 @@ exit 5
 
         assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
         assert!(bundle.model_id.starts_with("generated-direct-occt-"));
-        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(std::path::Path::new(&bundle.model_stl_path).is_file());
         assert!(bundle
             .export_artifacts
             .iter()
@@ -4336,7 +4858,7 @@ exit 5
 
         assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
         assert!(bundle.model_id.starts_with("generated-direct-occt-"));
-        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(std::path::Path::new(&bundle.model_stl_path).is_file());
         assert!(bundle
             .export_artifacts
             .iter()
@@ -4401,7 +4923,7 @@ exit 5
 
         assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
         assert!(bundle.model_id.starts_with("generated-direct-occt-"));
-        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(std::path::Path::new(&bundle.model_stl_path).is_file());
         assert!(bundle
             .export_artifacts
             .iter()
@@ -4480,7 +5002,7 @@ exit 5
 
         assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
         assert!(bundle.model_id.starts_with("generated-direct-occt-"));
-        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(std::path::Path::new(&bundle.model_stl_path).is_file());
         assert!(bundle
             .export_artifacts
             .iter()
@@ -4532,7 +5054,7 @@ exit 5
 
         assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
         assert!(bundle.model_id.starts_with("generated-direct-occt-"));
-        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(std::path::Path::new(&bundle.model_stl_path).is_file());
         assert!(bundle
             .export_artifacts
             .iter()
@@ -4584,7 +5106,7 @@ exit 5
         .expect("direct OCCT render");
 
         assert!(bundle.model_id.starts_with("generated-direct-occt-"));
-        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(std::path::Path::new(&bundle.model_stl_path).is_file());
         assert!(bundle
             .export_artifacts
             .iter()
@@ -4622,7 +5144,7 @@ exit 5
         .expect("advanced direct OCCT render");
 
         assert!(bundle.model_id.starts_with("generated-direct-occt-"));
-        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(std::path::Path::new(&bundle.model_stl_path).is_file());
         assert!(bundle
             .export_artifacts
             .iter()
@@ -4822,9 +5344,9 @@ exit 5
 
         // STL must exist.
         assert!(
-            std::path::Path::new(&bundle.preview_stl_path).is_file(),
+            std::path::Path::new(&bundle.model_stl_path).is_file(),
             "STL must exist: {}",
-            bundle.preview_stl_path
+            bundle.model_stl_path
         );
 
         // STEP must exist — this is the key benefit of the hybrid bridge over
@@ -4843,6 +5365,154 @@ exit 5
                 .collect::<Vec<_>>()
         );
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn multipart_heightfield_and_thread_bridge_mesh_part_into_occt() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root =
+            crate::ecky_cad_host::direct_occt_sdk::bundled_occt_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let root = temp_root("multipart-heightfield-thread");
+        let resolver = TestResolver { root: root.clone() };
+        let image_path = root.join("heightmap.png");
+        image::GrayImage::from_fn(12, 8, |x, y| {
+            if (x / 3 + y / 2) % 2 == 0 {
+                image::Luma([0])
+            } else {
+                image::Luma([255])
+            }
+        })
+        .save(&image_path)
+        .expect("heightmap fixture");
+        let source = format!(
+            r#"(model
+  (part relief
+    (heightfield "{}"
+      :width 12
+      :depth 8
+      :relief-height 2
+      :base-thickness 1
+      :invert #t))
+  (part handle
+    (translate 24 0 0
+      (union
+        (cylinder 4 6)
+        (helical-ridge
+          :radius 3.8
+          :pitch 2
+          :height 6
+          :depth 0.8
+          :base-width 1.6
+          :crest-width 0.4)))))"#,
+            image_path.display()
+        );
+
+        let bundle = render_model(
+            &source,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &test_state(&root),
+            &resolver,
+        )
+        .await
+        .expect("multipart mesh + OCCT render");
+
+        assert_eq!(
+            bundle
+                .viewer_assets
+                .iter()
+                .map(|asset| asset.part_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["relief", "handle"]
+        );
+        assert!(
+            bundle
+                .export_artifacts
+                .iter()
+                .any(|artifact| artifact.format.eq_ignore_ascii_case("step")),
+            "mixed multipart render must preserve STEP export"
+        );
+        assert_eq!(
+            bundle
+                .geometry_provenance
+                .as_ref()
+                .map(|provenance| &provenance.representation),
+            Some(&crate::contracts::GeometryRepresentation::FacetedPolyBrep)
+        );
+        assert_eq!(
+            crate::services::structural_verification::model_stl_non_manifold_edge_count(
+                std::path::Path::new(&bundle.model_stl_path),
+            )
+            .expect("preview topology"),
+            0
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fem_density_surface_solid_exports_faceted_step() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root =
+            crate::ecky_cad_host::direct_occt_sdk::bundled_occt_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let root = temp_root("fem-density-surface-solid");
+        let resolver = TestResolver { root: root.clone() };
+        let surface = ecky_fem::FemDensitySurfaceMesh {
+            vertices: vec![
+                [0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [0.0, 10.0, 0.0],
+                [0.0, 0.0, 10.0],
+            ],
+            triangles: vec![[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]],
+            connected_anchor_ids: vec!["mount".into()],
+            discarded_cell_indices: vec![],
+            discarded_active_volume_fraction: 0.0,
+            boundary_edge_count: 0,
+            non_manifold_edge_count: 0,
+            connected_component_count: 1,
+            signed_volume_mm3: 1000.0 / 6.0,
+        };
+        let expression =
+            crate::fem_topology_reconstruction::density_surface_solid_expression(&surface)
+                .expect("solid expression");
+        let source = format!("(model (part optimized {expression}))");
+
+        let bundle = render_model(
+            &source,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &test_state(&root),
+            &resolver,
+        )
+        .await
+        .expect("density surface hybrid render");
+
+        assert!(bundle.export_artifacts.iter().any(|artifact| {
+            artifact.format.eq_ignore_ascii_case("step")
+                && std::path::Path::new(&artifact.path).is_file()
+        }));
+        assert_eq!(
+            bundle
+                .geometry_provenance
+                .as_ref()
+                .map(|provenance| &provenance.representation),
+            Some(&crate::contracts::GeometryRepresentation::FacetedPolyBrep)
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -4903,10 +5573,10 @@ exit 5
         .await
         .expect("closed trim must feed later difference");
 
-        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(std::path::Path::new(&bundle.model_stl_path).is_file());
         assert_eq!(
-            crate::services::structural_verification::preview_stl_non_manifold_edge_count(
-                std::path::Path::new(&bundle.preview_stl_path),
+            crate::services::structural_verification::model_stl_non_manifold_edge_count(
+                std::path::Path::new(&bundle.model_stl_path),
             )
             .expect("trimmed Boolean STL topology"),
             0
@@ -4946,7 +5616,7 @@ exit 5
         .expect("mesh literal must redirect to Rust mesh runtime");
 
         assert_eq!(bundle.geometry_backend, GeometryBackend::EckyRust);
-        assert!(std::path::Path::new(&bundle.preview_stl_path).is_file());
+        assert!(std::path::Path::new(&bundle.model_stl_path).is_file());
         assert!(bundle
             .export_artifacts
             .iter()
@@ -5088,8 +5758,8 @@ exit 5
             .iter()
             .any(|artifact| artifact.format.eq_ignore_ascii_case("step")));
         assert_eq!(
-            crate::services::structural_verification::preview_stl_non_manifold_edge_count(
-                std::path::Path::new(&bundle.preview_stl_path),
+            crate::services::structural_verification::model_stl_non_manifold_edge_count(
+                std::path::Path::new(&bundle.model_stl_path),
             )
             .expect("hybrid STL topology"),
             0
@@ -5109,9 +5779,7 @@ exit 5
         assert_eq!(manifest.geometry_provenance.as_ref(), Some(provenance));
         assert_eq!(
             manifest.source_digest.as_deref(),
-            Some(
-                crate::services::render_snapshot::canonical_source_digest(source).as_str()
-            )
+            Some(crate::services::render_snapshot::canonical_source_digest(source).as_str())
         );
         assert!(manifest
             .warnings
@@ -5145,6 +5813,13 @@ exit 5
         )
         .await
         .expect("pure OCCT render");
+
+        let manifest = crate::model_runtime::read_model_manifest(&resolver, &bundle.model_id)
+            .expect("stored manifest");
+        assert_eq!(
+            manifest.source_digest.as_deref(),
+            Some(crate::services::render_snapshot::canonical_source_digest(source).as_str())
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -5234,7 +5909,7 @@ exit 5
         .expect("pure mesh render");
 
         assert!(
-            std::path::Path::new(&bundle.preview_stl_path).is_file(),
+            std::path::Path::new(&bundle.model_stl_path).is_file(),
             "STL must exist"
         );
         // Pure mesh: no STEP (mesh renderer can't produce STEP).

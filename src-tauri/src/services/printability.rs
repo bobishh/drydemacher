@@ -1811,7 +1811,7 @@ mod tests {
     #[test]
     fn binary_stl_path_reads_tiny_synthetic_mesh() {
         let dir = temp_dir("binary_path");
-        let path = dir.join("preview.stl");
+        let path = dir.join("model.stl");
         write_binary_stl(&path, &closed_tetra_triangles(0.0));
 
         let result = analyze_stl_path(&path).expect("printability analysis");

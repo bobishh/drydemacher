@@ -10,6 +10,8 @@ mod model;
 pub mod op_suggest;
 pub mod poly_partition;
 mod runtime;
+#[cfg(test)]
+pub(crate) use runtime::derive_controls_from_core_program;
 mod shared;
 mod sketch;
 mod syntax;
@@ -297,7 +299,8 @@ fn value_uses_direct_occt_required_cad_ops(value: &lexpr::Value) -> bool {
 }
 
 pub(crate) fn is_ecky_rust_only_cad_head(head: &str) -> bool {
-    crate::ecky_language_surface::ECKY_RUST_ONLY_CAD_OPS.contains(&head) || head == "pattern"
+    crate::ecky_language_surface::ECKY_RUST_ONLY_CAD_OPS.contains(&head)
+        || matches!(head, "pattern" | "heightfield")
 }
 
 fn is_direct_occt_required_cad_head(head: &str) -> bool {

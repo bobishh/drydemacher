@@ -166,13 +166,13 @@ pub fn handle_printability_analyze(
     let bundle = crate::model_runtime::read_artifact_bundle(app, model_id)?;
     let manifest = crate::model_runtime::read_model_manifest(app, model_id)?;
     let artifact_digest = artifact_bundle_digest(&bundle);
-    if bundle.preview_stl_path.trim().is_empty() {
+    if bundle.model_stl_path.trim().is_empty() {
         return Err(AppError::validation(
-            "Artifact bundle has no preview STL path.",
+            "Artifact bundle has no model STL path.",
         ));
     }
     let mut analysis = crate::services::printability::analyze_stl_path(std::path::Path::new(
-        &bundle.preview_stl_path,
+        &bundle.model_stl_path,
     ))
     .map_err(|err| AppError::parse(err.to_string()))?;
     crate::services::printability::enrich_transform_suggestions_with_source_anchor(
@@ -189,7 +189,7 @@ pub fn handle_printability_analyze(
         message_id: message_id.to_string(),
         model_id: model_id.to_string(),
         artifact_digest,
-        preview_stl_path: bundle.preview_stl_path,
+        model_stl_path: bundle.model_stl_path,
         analysis,
     })
 }
@@ -204,13 +204,13 @@ pub fn handle_printability_transform_recipes_get(
     let bundle = crate::model_runtime::read_artifact_bundle(app, model_id)?;
     let manifest = crate::model_runtime::read_model_manifest(app, model_id)?;
     let artifact_digest = artifact_bundle_digest(&bundle);
-    if bundle.preview_stl_path.trim().is_empty() {
+    if bundle.model_stl_path.trim().is_empty() {
         return Err(AppError::validation(
-            "Artifact bundle has no preview STL path.",
+            "Artifact bundle has no model STL path.",
         ));
     }
     let mut analysis = crate::services::printability::analyze_stl_path(std::path::Path::new(
-        &bundle.preview_stl_path,
+        &bundle.model_stl_path,
     ))
     .map_err(|err| AppError::parse(err.to_string()))?;
     crate::services::printability::enrich_transform_suggestions_with_source_anchor(
@@ -228,7 +228,7 @@ pub fn handle_printability_transform_recipes_get(
         message_id: message_id.to_string(),
         model_id: model_id.to_string(),
         artifact_digest,
-        preview_stl_path: bundle.preview_stl_path,
+        model_stl_path: bundle.model_stl_path,
         recipes,
     })
 }
@@ -328,13 +328,13 @@ pub async fn handle_semantic_transform_preview(
             }
         }
 
-        if bundle.preview_stl_path.trim().is_empty() {
+        if bundle.model_stl_path.trim().is_empty() {
             return Err(AppError::validation(
-                "Artifact bundle has no preview STL path.",
+                "Artifact bundle has no model STL path.",
             ));
         }
         let mut analysis = crate::services::printability::analyze_stl_path(std::path::Path::new(
-            &bundle.preview_stl_path,
+            &bundle.model_stl_path,
         ))
         .map_err(|err| AppError::parse(err.to_string()))?;
         crate::services::printability::enrich_transform_suggestions_with_source_anchor(
@@ -487,11 +487,11 @@ fn validate_semantic_transform_artifact_guard(
     bundle: &ArtifactBundle,
 ) -> AppResult<()> {
     if expected.model_id != bundle.model_id
-        || expected.preview_stl_path != bundle.preview_stl_path
+        || expected.model_stl_path != bundle.model_stl_path
         || expected.content_hash != bundle.content_hash
     {
         return Err(AppError::validation(
-            "semantic_transform_preview artifact guard mismatch: expected modelId, previewStlPath, and contentHash must match current runtime bundle.",
+            "semantic_transform_preview artifact guard mismatch: expected modelId, modelStlPath, and contentHash must match current runtime bundle.",
         ));
     }
     Ok(())

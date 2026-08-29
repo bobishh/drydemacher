@@ -1,6 +1,11 @@
 use std::path::Path;
 
+use csgrs::traits::CSG;
+
 use crate::contracts::{AppError, AppErrorCode, AppResult};
+use crate::image_sampling::{
+    raster_coverage_image, resolve_raster_layout, RasterFitMode, RasterForeground,
+};
 
 use super::mesh_literal::{
     build_mesh_literal, MAX_MESH_LITERAL_TRIANGLES, MAX_MESH_LITERAL_VERTICES,
@@ -53,11 +58,85 @@ pub(super) fn build_heightfield(
         )));
     }
 
-    let image = image::open(path)
+    let decoded = image::open(path).map_err(|error| {
+        heightfield_error(format!("failed to decode '{}': {error}", path.display()))
+    })?;
+    let image = composite_alpha_on_white(decoded);
+    build_sampled_surface(
+        "heightfield",
+        image,
+        width,
+        depth,
+        relief_height,
+        0.0,
+        base_thickness,
+        invert,
+    )
+}
+
+pub(super) fn build_protrusion(
+    image_path: &str,
+    width: Option<f64>,
+    depth: Option<f64>,
+    height: f64,
+    foreground: RasterForeground,
+    fit: RasterFitMode,
+) -> AppResult<IrMesh> {
+    if !height.is_finite() || height <= 0.0 {
+        return Err(protrude_error(format!(
+            "`:height` must be finite and greater than zero, got {height}"
+        )));
+    }
+    if image_path.trim().is_empty() {
+        return Err(protrude_error(
+            "image path is empty; image selection remains pending",
+        ));
+    }
+    let path = Path::new(image_path);
+    let reader = image::ImageReader::open(path)
+        .map_err(|error| protrude_error(format!("failed to open '{}': {error}", path.display())))?
+        .with_guessed_format()
         .map_err(|error| {
-            heightfield_error(format!("failed to decode '{}': {error}", path.display()))
-        })?
-        .to_luma8();
+            protrude_error(format!("failed to identify '{}': {error}", path.display()))
+        })?;
+    let (source_width, source_height) = reader.into_dimensions().map_err(|error| {
+        protrude_error(format!("failed to inspect '{}': {error}", path.display()))
+    })?;
+    let source_pixels = u64::from(source_width) * u64::from(source_height);
+    if source_pixels > MAX_SOURCE_PIXELS {
+        return Err(protrude_error(format!(
+            "source pixel count {source_pixels} exceeds allowed count {MAX_SOURCE_PIXELS}"
+        )));
+    }
+    let layout = resolve_raster_layout(source_width, source_height, width, depth, fit)
+        .map_err(protrude_error)?;
+    let decoded = image::open(path).map_err(|error| {
+        protrude_error(format!("failed to decode '{}': {error}", path.display()))
+    })?;
+    Ok(build_sampled_surface(
+        "protrude",
+        raster_coverage_image(decoded, foreground),
+        layout.width,
+        layout.depth,
+        height,
+        -0.001,
+        0.0,
+        false,
+    )?
+    .translate(layout.offset_x, layout.offset_y, 0.0))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_sampled_surface(
+    operation: &str,
+    image: image::GrayImage,
+    width: f64,
+    depth: f64,
+    relief_height: f64,
+    bottom_z: f64,
+    top_base_z: f64,
+    invert: bool,
+) -> AppResult<IrMesh> {
     let max_grid_points = (MAX_MESH_LITERAL_VERTICES / 2).max(4);
     let (grid_width, grid_height) =
         bounded_grid_dimensions(image.width(), image.height(), max_grid_points);
@@ -72,7 +151,7 @@ pub(super) fn build_heightfield(
             vertices.push([
                 width * f64::from(x) / f64::from(grid_width - 1),
                 depth * f64::from(y) / f64::from(grid_height - 1),
-                base_thickness + relief_height * relief,
+                top_base_z + relief_height * relief,
             ]);
         }
     }
@@ -81,7 +160,7 @@ pub(super) fn build_heightfield(
             vertices.push([
                 width * f64::from(x) / f64::from(grid_width - 1),
                 depth * f64::from(y) / f64::from(grid_height - 1),
-                0.0,
+                bottom_z,
             ]);
         }
     }
@@ -136,13 +215,30 @@ pub(super) fn build_heightfield(
     }
 
     if triangles.len() > MAX_MESH_LITERAL_TRIANGLES {
-        return Err(heightfield_error(format!(
-            "triangle count {} exceeds allowed count {}",
-            triangles.len(),
-            MAX_MESH_LITERAL_TRIANGLES
-        )));
+        return Err(operation_error(
+            operation,
+            format!(
+                "triangle count {} exceeds allowed count {}",
+                triangles.len(),
+                MAX_MESH_LITERAL_TRIANGLES
+            ),
+        ));
     }
-    build_mesh_literal("heightfield", vertices, triangles, true)
+    build_mesh_literal(operation, vertices, triangles, true)
+}
+
+fn composite_alpha_on_white(image: image::DynamicImage) -> image::GrayImage {
+    let mut rgba = image.to_rgba8();
+    for pixel in rgba.pixels_mut() {
+        let alpha = u16::from(pixel[3]);
+        let inverse_alpha = 255 - alpha;
+        for channel in &mut pixel.0[..3] {
+            let source = u16::from(*channel);
+            *channel = ((source * alpha + 255 * inverse_alpha + 127) / 255) as u8;
+        }
+        pixel[3] = 255;
+    }
+    image::DynamicImage::ImageRgba8(rgba).to_luma8()
 }
 
 fn bounded_grid_dimensions(width: u32, height: u32, max_points: usize) -> (u32, u32) {
@@ -168,12 +264,20 @@ fn bounded_grid_dimensions(width: u32, height: u32, max_points: usize) -> (u32, 
 }
 
 fn heightfield_error(details: impl Into<String>) -> AppError {
+    operation_error("heightfield", details)
+}
+
+fn protrude_error(details: impl Into<String>) -> AppError {
+    operation_error("protrude", details)
+}
+
+fn operation_error(operation: &str, details: impl Into<String>) -> AppError {
     AppError::with_details(
         AppErrorCode::Validation,
-        "Invalid `heightfield` geometry.",
+        format!("Invalid `{operation}` geometry."),
         details,
     )
-    .with_operation("heightfield")
+    .with_operation(operation)
 }
 
 #[cfg(test)]

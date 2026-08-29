@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<XAO version="1.0" author="Gmsh">
+  <geometry name="simple">
+    <shape format="BREP"><![CDATA[
+CASCADE Topology V1, (c) Matra-Datavision
+Locations 0
+Curve2ds 0
+Curves 0
+Polygon3D 0
+PolygonOnTriangulations 0
+Surfaces 0
+Triangulations 0
+
+TShapes 1
+Co
+
+1100000
+*
+
++1 0 ]]></shape>
+    <topology>
+      <vertices count="0">
+      </vertices>
+      <edges count="0">
+      </edges>
+      <faces count="0">
+      </faces>
+      <solids count="0">
+      </solids>
+    </topology>
+  </geometry>
+  <groups count="0">
+  </groups>
+  <fields count="0"/>
+</XAO>

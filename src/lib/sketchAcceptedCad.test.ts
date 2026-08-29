@@ -16,7 +16,7 @@ const artifactBundle: ArtifactBundle = {
   fcstdPath: '/tmp/model.FCStd',
   manifestPath: '/tmp/manifest.json',
   macroPath: '/tmp/source.ecky',
-  previewStlPath: '/tmp/preview.stl',
+  modelStlPath: '/tmp/model.stl',
   viewerAssets: [],
 };
 

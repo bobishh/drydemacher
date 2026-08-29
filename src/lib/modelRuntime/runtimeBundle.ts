@@ -1,4 +1,4 @@
-import { exists, size } from '@tauri-apps/plugin-fs';
+import { exists } from '@tauri-apps/plugin-fs';
 
 import {
   type ArtifactBundle,
@@ -9,22 +9,14 @@ import {
 
 export type RuntimeBundleAvailability = {
   bundle: ArtifactBundle | null;
-  previewAvailable: boolean;
-  degradedToPreview: boolean;
-  skippedOversizedPreview: boolean;
+  modelAvailable: boolean;
+  degradedToModel: boolean;
 };
 
 type PathExists = (path: string) => Promise<boolean>;
-type PathSize = (path: string) => Promise<number>;
-
-const MAX_SAFE_VIEWER_PREVIEW_BYTES = 64 * 1024 * 1024;
 
 async function defaultPathExists(path: string): Promise<boolean> {
   return exists(path);
-}
-
-async function defaultPathSize(path: string): Promise<number> {
-  return size(path);
 }
 
 async function safePathExists(path: string, pathExists: PathExists): Promise<boolean> {
@@ -32,18 +24,6 @@ async function safePathExists(path: string, pathExists: PathExists): Promise<boo
     return await pathExists(path);
   } catch {
     return false;
-  }
-}
-
-async function safePathSize(
-  path: string,
-  pathSize: PathSize,
-): Promise<number | null> {
-  try {
-    const bytes = await pathSize(path);
-    return Number.isFinite(bytes) && bytes >= 0 ? bytes : null;
-  } catch {
-    return null;
   }
 }
 
@@ -83,54 +63,29 @@ export function getRenderableRuntimeBundle(
 export async function inspectRuntimeBundle(
   bundle: ArtifactBundle | null | undefined,
   pathExists: PathExists = defaultPathExists,
-  pathSize: PathSize = defaultPathSize,
   postProcessing: PostProcessingSpec | null | undefined = null,
   params: DesignParams | null | undefined = null,
 ): Promise<RuntimeBundleAvailability> {
-  if (!bundle?.previewStlPath) {
+  if (!bundle?.modelStlPath) {
     return {
       bundle: null,
-      previewAvailable: false,
-      degradedToPreview: false,
-      skippedOversizedPreview: false,
+      modelAvailable: false,
+      degradedToModel: false,
     };
   }
 
-  const previewAvailable = await safePathExists(bundle.previewStlPath, pathExists);
-  if (!previewAvailable) {
+  const modelAvailable = await safePathExists(bundle.modelStlPath, pathExists);
+  if (!modelAvailable) {
     return {
       bundle: null,
-      previewAvailable: false,
-      degradedToPreview: false,
-      skippedOversizedPreview: false,
-    };
-  }
-
-  const previewBytes = await safePathSize(bundle.previewStlPath, pathSize);
-  const oversizedLithophanePreview =
-    hasDisplacementPostProcessing(postProcessing, params) &&
-    typeof previewBytes === 'number' &&
-    previewBytes > MAX_SAFE_VIEWER_PREVIEW_BYTES;
-  if (oversizedLithophanePreview) {
-    if ((bundle.viewerAssets?.length ?? 0) > 0) {
-      return {
-        bundle,
-        previewAvailable: true,
-        degradedToPreview: false,
-        skippedOversizedPreview: true,
-      };
-    }
-    return {
-      bundle: null,
-      previewAvailable: true,
-      degradedToPreview: false,
-      skippedOversizedPreview: true,
+      modelAvailable: false,
+      degradedToModel: false,
     };
   }
 
   const renderableBundle = getRenderableRuntimeBundle(bundle, postProcessing, params);
   const viewerAssets = renderableBundle?.viewerAssets ?? [];
-  const degradedToPreview = Boolean(
+  const degradedToModel = Boolean(
     renderableBundle &&
       (bundle.viewerAssets?.length ?? 0) > 0 &&
       (renderableBundle.viewerAssets?.length ?? 0) === 0,
@@ -139,9 +94,8 @@ export async function inspectRuntimeBundle(
   if (!viewerAssets.length) {
     return {
       bundle: renderableBundle,
-      previewAvailable: true,
-      degradedToPreview,
-      skippedOversizedPreview: false,
+      modelAvailable: true,
+      degradedToModel,
     };
   }
 
@@ -152,13 +106,12 @@ export async function inspectRuntimeBundle(
   if (viewerAssetChecks.every(Boolean)) {
     return {
       bundle: renderableBundle,
-      previewAvailable: true,
-      degradedToPreview,
-      skippedOversizedPreview: false,
+      modelAvailable: true,
+      degradedToModel,
     };
   }
 
-  const previewOnlyBundle = renderableBundle
+  const modelOnlyBundle = renderableBundle
     ? {
         ...renderableBundle,
         viewerAssets: [],
@@ -166,9 +119,8 @@ export async function inspectRuntimeBundle(
     : null;
 
   return {
-    bundle: previewOnlyBundle,
-    previewAvailable: true,
-    degradedToPreview: true,
-    skippedOversizedPreview: false,
+    bundle: modelOnlyBundle,
+    modelAvailable: true,
+    degradedToModel: true,
   };
 }

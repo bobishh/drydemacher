@@ -8,6 +8,7 @@ import {
   isVersionTimelineMessage,
   threadTimelineMessages,
   timelineVisuals,
+  renderableVersionTimelineMessages,
   versionTimelineMessages,
   versionTimelineTitle,
 } from './threadTimeline';
@@ -39,7 +40,7 @@ function sampleArtifactBundle(modelId: string = 'model-1'): NonNullable<Message[
     contentHash: `hash-${modelId}`,
     fcstdPath: `/tmp/${modelId}.FCStd`,
     manifestPath: `/tmp/${modelId}.json`,
-    previewStlPath: `/tmp/${modelId}.stl`,
+    modelStlPath: `/tmp/${modelId}.stl`,
     viewerAssets: [],
     exportArtifacts: [],
   };
@@ -103,6 +104,41 @@ test('threadTimelineMessages hides agent tool error noise but keeps user-facing 
   );
 });
 
+test('failed artifactless authored output from an agent remains a version', () => {
+  const failedDraft = sampleMessage({
+    id: 'agent-failed-draft',
+    role: 'assistant',
+    status: 'error',
+    content: 'raw provider failure',
+    output: {
+      title: 'Failed Draft',
+      versionName: 'V-failed',
+      response: 'raw provider failure',
+      interactionMode: 'design',
+      macroCode: 'box()',
+      sourceLanguage: 'ecky',
+      geometryBackend: 'build123d',
+      uiSpec: { fields: [] },
+      initialParams: {},
+    },
+    agentOrigin: {
+      hostLabel: 'MCP Agent',
+      clientKind: 'mcp-http',
+      agentLabel: 'Authoring Agent',
+      llmModelId: 'model-1',
+      llmModelLabel: 'Model 1',
+      sessionId: 'session-1',
+      createdAt: 1,
+    },
+  });
+
+  assert.equal(isVersionTimelineMessage(failedDraft), true);
+  assert.deepEqual(
+    versionTimelineMessages([failedDraft]).map((message) => message.id),
+    ['agent-failed-draft'],
+  );
+});
+
 test('timelineVisuals converts attachment image paths through the provided asset helper', () => {
   const visuals = timelineVisuals(
     sampleMessage({
@@ -140,7 +176,7 @@ test('versionTimeline helpers identify and label assistant version messages', ()
   assert.equal(versionTimelineTitle(versionMessage), 'model-1');
 });
 
-test('versionTimelineMessages ignores output-only drafts and failed artifacts', () => {
+test('versionTimelineMessages keeps output-only drafts and failed/artifactless authored attempts', () => {
   const outputOnly = sampleMessage({
     id: 'output-only',
     role: 'assistant',
@@ -162,17 +198,37 @@ test('versionTimelineMessages ignores output-only drafts and failed artifacts', 
     status: 'error',
     artifactBundle: sampleArtifactBundle('failed-model'),
   });
+  const failedArtifactless = sampleMessage({
+    id: 'failed-artifactless',
+    role: 'assistant',
+    status: 'error',
+    content: 'Provider returned raw failure body.',
+    output: outputOnly.output,
+  });
+  const pendingArtifactless = sampleMessage({
+    id: 'pending-artifactless',
+    role: 'assistant',
+    status: 'pending',
+    content: 'Draft is being evaluated.',
+  });
   const rendered = sampleMessage({
     id: 'rendered',
     role: 'assistant',
     artifactBundle: sampleArtifactBundle('rendered-model'),
   });
 
-  assert.equal(isVersionTimelineMessage(outputOnly), false);
+  assert.equal(isVersionTimelineMessage(outputOnly), true);
   assert.equal(isVersionTimelineMessage(failedArtifact), true);
+  assert.equal(isVersionTimelineMessage(failedArtifactless), true);
+  assert.equal(isVersionTimelineMessage(pendingArtifactless), false);
   assert.equal(isRenderableVersionTimelineMessage(failedArtifact), false);
+  assert.equal(isRenderableVersionTimelineMessage(failedArtifactless), false);
   assert.deepEqual(
-    versionTimelineMessages([outputOnly, failedArtifact, rendered]).map((message) => message.id),
+    versionTimelineMessages([outputOnly, failedArtifact, failedArtifactless, rendered]).map((message) => message.id),
+    ['output-only', 'failed-artifact', 'failed-artifactless', 'rendered'],
+  );
+  assert.deepEqual(
+    renderableVersionTimelineMessages([outputOnly, failedArtifact, failedArtifactless, rendered]).map((message) => message.id),
     ['rendered'],
   );
 });
@@ -262,6 +318,7 @@ test('discarded version messages stay in the timeline but drop out of the carous
 
   const timeline = threadTimelineMessages([liveVersion, discardedVersion]);
   const versions = versionTimelineMessages([liveVersion, discardedVersion]);
+  const renderableVersions = renderableVersionTimelineMessages([liveVersion, discardedVersion]);
 
   assert.deepEqual(
     timeline.map((message) => message.id),
@@ -269,6 +326,10 @@ test('discarded version messages stay in the timeline but drop out of the carous
   );
   assert.deepEqual(
     versions.map((message) => message.id),
+    ['version-live', 'version-discarded'],
+  );
+  assert.deepEqual(
+    renderableVersions.map((message) => message.id),
     ['version-live'],
   );
 });

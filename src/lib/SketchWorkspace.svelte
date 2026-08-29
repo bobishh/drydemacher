@@ -446,7 +446,7 @@
           view: { width: 100, height: 100 },
           extrudeDepth: draftDepth,
           artifactEvidence: {
-            ...(artifactBundle?.previewStlPath ? { previewArtifactPath: artifactBundle.previewStlPath } : {}),
+            ...(artifactBundle?.modelStlPath ? { previewArtifactPath: artifactBundle.modelStlPath } : {}),
             ...(draft?.source ? { source: draft.source } : {}),
           },
           ...(errorText ? { backendError: errorText } : {}),
@@ -3654,7 +3654,7 @@
 
         {#if artifactBundle}
           <div class="sketch-preview-summary" aria-label="Preview artifact summary">
-            <div class="sketch-token">{basename(artifactBundle.previewStlPath)}</div>
+            <div class="sketch-token">{basename(artifactBundle.modelStlPath)}</div>
             <div class="sketch-token">{artifactBundle.viewerAssets?.length ?? 0} assets</div>
             {#if draft.warnings?.length}
               {#each draft.warnings as warning}
@@ -3688,7 +3688,7 @@
             <div class="sketch-preview">
               <div class="sketch-workspace__section-title">MESH PREVIEW</div>
               <div class="sketch-token">model {artifactBundle.modelId}</div>
-              <div class="sketch-token">{basename(artifactBundle.previewStlPath)}</div>
+              <div class="sketch-token">{basename(artifactBundle.modelStlPath)}</div>
               <div class="sketch-token">{artifactBundle.viewerAssets?.length ?? 0} assets</div>
             </div>
           {/if}

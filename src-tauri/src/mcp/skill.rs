@@ -51,7 +51,7 @@ pub fn render_tools_markdown(tools: &[Value]) -> String {
     let mut out = String::new();
     out.push_str("# Ecky MCP Tools\n\n");
     out.push_str(
-        "_Generated from the live MCP tool catalog by `cargo run --bin export_mcp_skill` \
+        "_Generated from the live MCP tool catalog by `cargo run --features tooling --bin export_mcp_skill` \
          (`npm run generate:skill`). Do not edit by hand._\n",
     );
 

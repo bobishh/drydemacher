@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 
 const SHAPE_GRAPH_SECTION_MAX_ITEMS: usize = 64;
 
@@ -160,11 +161,27 @@ pub(in crate::mcp::handlers) fn build_shape_graph_packet(
     let instances =
         shape_graph_section_enabled(filters, ShapeGraphFilterSection::Instances).then(|| {
             let mut section_items = Vec::new();
+            let mut seen_instances = BTreeSet::new();
+            if let Some(manifest) = model_manifest {
+                for placement in &manifest.component_placement_evidence {
+                    seen_instances.insert(placement.instance_id.clone());
+                    section_items.push(ShapeGraphInstance {
+                        instance_id: placement.instance_id.clone(),
+                        prototype_feature_id: Some(placement.component_id.clone()),
+                        dependency_ids: vec![placement.target_port_ref.instance_id.clone()],
+                        target_ids: Vec::new(),
+                        placement: Some(placement.clone()),
+                    });
+                }
+            }
             if let Some(graph) = model_manifest.and_then(|manifest| manifest.feature_graph.as_ref())
             {
                 for node in &graph.nodes {
                     let node_kind = node.kind.to_ascii_lowercase();
                     if !(node_kind.contains("repeat") || node_kind.contains("instance")) {
+                        continue;
+                    }
+                    if !seen_instances.insert(node.feature_id.clone()) {
                         continue;
                     }
                     let target_ids = node
@@ -177,6 +194,7 @@ pub(in crate::mcp::handlers) fn build_shape_graph_packet(
                         prototype_feature_id: node.dependency_ids.first().cloned(),
                         dependency_ids: node.dependency_ids.clone(),
                         target_ids,
+                        placement: None,
                     });
                 }
             }

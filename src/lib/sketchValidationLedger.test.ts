@@ -52,7 +52,7 @@ test('buildSketchValidationRows passes closed profile, source draft, mesh previe
     strokes: [closedProfile],
     draft,
     artifactBundle: {
-      previewStlPath: '/tmp/ecky/sketch-preview.stl',
+      modelStlPath: '/tmp/ecky/sketch-model.stl',
       viewerAssets: [{ path: '/tmp/ecky/sketch-preview.glb' }, { path: '/tmp/ecky/sketch-preview.png' }],
     },
     projectionsCount: 3,
@@ -83,7 +83,7 @@ test('buildSketchValidationRows passes closed profile, source draft, mesh previe
       id: 'previewArtifact',
       label: 'Preview artifact',
       status: 'pass',
-      detail: 'sketch-preview.stl; 2 viewer assets.',
+      detail: 'sketch-model.stl; 2 viewer assets.',
     },
     {
       id: 'sourceFitCheck',
@@ -95,7 +95,7 @@ test('buildSketchValidationRows passes closed profile, source draft, mesh previe
       id: 'mesh',
       label: 'Mesh preview',
       status: 'pass',
-      detail: 'sketch-preview.stl with 2 viewer assets.',
+      detail: 'sketch-model.stl with 2 viewer assets.',
     },
     {
       id: 'projections',
@@ -111,7 +111,7 @@ test('buildSketchValidationRows shows constraint solver evidence for locked dime
     strokes: [lockedClosedProfile],
     draft,
     artifactBundle: {
-      previewStlPath: '/tmp/ecky/sketch-preview.stl',
+      modelStlPath: '/tmp/ecky/sketch-model.stl',
       viewerAssets: [{ path: '/tmp/ecky/sketch-preview.glb' }],
     },
     projectionsCount: 3,
@@ -132,7 +132,7 @@ test('buildSketchValidationRows shows source constraint value evidence for locke
     strokes: [lockedClosedProfile],
     draft,
     artifactBundle: {
-      previewStlPath: '/tmp/ecky/sketch-preview.stl',
+      modelStlPath: '/tmp/ecky/sketch-model.stl',
       viewerAssets: [{ path: '/tmp/ecky/sketch-preview.glb' }],
     },
     projectionsCount: 3,
@@ -153,7 +153,7 @@ test('buildSketchValidationRows includes auto snap source patch evidence in vali
     strokes: [closedProfile],
     draft,
     artifactBundle: {
-      previewStlPath: '/tmp/ecky/sketch-preview.stl',
+      modelStlPath: '/tmp/ecky/sketch-model.stl',
       viewerAssets: [{ path: '/tmp/ecky/sketch-preview.glb' }],
     },
     projectionsCount: 3,

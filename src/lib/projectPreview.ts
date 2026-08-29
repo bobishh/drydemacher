@@ -23,11 +23,11 @@ export function selectThreadPreviewImage(
   const latestId = latest?.id ?? null;
   const fresh = cleanPreviewImage(freshPreview?.imageData);
   const latestPreview = cleanPreviewImage(latest?.imageData);
-  if (freshPreview && latestId && freshPreview.messageId === latestId) {
-    if (fresh) return fresh;
+  if (latestId) {
+    if (freshPreview?.messageId === latestId && fresh) return fresh;
+    return latestPreview;
   }
-  if (fresh && (!latestId || !latestPreview)) return fresh;
-  if (latestPreview) return latestPreview;
+  if (fresh) return fresh;
   const fallback = [...(thread.messages || [])]
     .reverse()
     .find(

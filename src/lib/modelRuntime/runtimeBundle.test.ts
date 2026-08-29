@@ -14,7 +14,7 @@ function sampleBundle(): ArtifactBundle {
     fcstdPath: '/tmp/model.FCStd',
     manifestPath: '/tmp/manifest.json',
     macroPath: '/tmp/source.FCMacro',
-    previewStlPath: '/tmp/preview.stl',
+    modelStlPath: '/tmp/model.stl',
     viewerAssets: [
       {
         partId: 'part-a',
@@ -30,11 +30,10 @@ function sampleBundle(): ArtifactBundle {
 
 test('inspectRuntimeBundle preserves multipart runtime when all files exist', async () => {
   const bundle = sampleBundle();
-  const result = await inspectRuntimeBundle(bundle, async () => true, async () => 1024);
+  const result = await inspectRuntimeBundle(bundle, async () => true);
 
-  assert.equal(result.previewAvailable, true);
-  assert.equal(result.degradedToPreview, false);
-  assert.equal(result.skippedOversizedPreview, false);
+  assert.equal(result.modelAvailable, true);
+  assert.equal(result.degradedToModel, false);
   assert.deepEqual(result.bundle, bundle);
 });
 
@@ -43,31 +42,27 @@ test('inspectRuntimeBundle degrades to preview-only when any viewer asset is mis
   const result = await inspectRuntimeBundle(
     bundle,
     async (path) => path !== '/tmp/parts/body.stl',
-    async () => 1024,
   );
 
-  assert.equal(result.previewAvailable, true);
-  assert.equal(result.degradedToPreview, true);
-  assert.equal(result.skippedOversizedPreview, false);
+  assert.equal(result.modelAvailable, true);
+  assert.equal(result.degradedToModel, true);
   assert.deepEqual(result.bundle?.viewerAssets, []);
-  assert.equal(result.bundle?.previewStlPath, '/tmp/preview.stl');
+  assert.equal(result.bundle?.modelStlPath, '/tmp/model.stl');
 });
 
-test('inspectRuntimeBundle invalidates the runtime bundle when preview STL is missing', async () => {
+test('inspectRuntimeBundle invalidates the runtime bundle when model STL is missing', async () => {
   const bundle = sampleBundle();
   const result = await inspectRuntimeBundle(
     bundle,
-    async (path) => path !== '/tmp/preview.stl',
-    async () => 1024,
+    async (path) => path !== '/tmp/model.stl',
   );
 
-  assert.equal(result.previewAvailable, false);
-  assert.equal(result.degradedToPreview, false);
-  assert.equal(result.skippedOversizedPreview, false);
+  assert.equal(result.modelAvailable, false);
+  assert.equal(result.degradedToModel, false);
   assert.equal(result.bundle, null);
 });
 
-test('getRenderableRuntimeBundle forces preview STL when displacement post-processing is active', () => {
+test('getRenderableRuntimeBundle forces model STL when displacement post-processing is active', () => {
   const bundle = sampleBundle();
   const result = getRenderableRuntimeBundle(bundle, {
     displacement: {
@@ -79,7 +74,7 @@ test('getRenderableRuntimeBundle forces preview STL when displacement post-proce
   }, { __litho_image: '/tmp/panel.png' });
 
   assert.deepEqual(result?.viewerAssets, []);
-  assert.equal(result?.previewStlPath, '/tmp/preview.stl');
+  assert.equal(result?.modelStlPath, '/tmp/model.stl');
 });
 
 test('inspectRuntimeBundle degrades to preview-only when displacement post-processing is active', async () => {
@@ -87,7 +82,6 @@ test('inspectRuntimeBundle degrades to preview-only when displacement post-proce
   const result = await inspectRuntimeBundle(
     bundle,
     async () => true,
-    async () => 1024,
     {
       displacement: {
         imageParam: '__litho_image',
@@ -99,19 +93,17 @@ test('inspectRuntimeBundle degrades to preview-only when displacement post-proce
     { __litho_image: '/tmp/panel.png' },
   );
 
-  assert.equal(result.previewAvailable, true);
-  assert.equal(result.degradedToPreview, true);
-  assert.equal(result.skippedOversizedPreview, false);
+  assert.equal(result.modelAvailable, true);
+  assert.equal(result.degradedToModel, true);
   assert.deepEqual(result.bundle?.viewerAssets, []);
-  assert.equal(result.bundle?.previewStlPath, '/tmp/preview.stl');
+  assert.equal(result.bundle?.modelStlPath, '/tmp/model.stl');
 });
 
-test('inspectRuntimeBundle falls back to multipart assets when lithophane preview is oversized', async () => {
+test('inspectRuntimeBundle uses the model artifact without a frontend size gate', async () => {
   const bundle = sampleBundle();
   const result = await inspectRuntimeBundle(
     bundle,
     async () => true,
-    async () => 96 * 1024 * 1024,
     {
       displacement: {
         imageParam: '__litho_image',
@@ -123,13 +115,12 @@ test('inspectRuntimeBundle falls back to multipart assets when lithophane previe
     { __litho_image: '/tmp/panel.png' },
   );
 
-  assert.equal(result.previewAvailable, true);
-  assert.equal(result.degradedToPreview, false);
-  assert.equal(result.skippedOversizedPreview, true);
-  assert.deepEqual(result.bundle?.viewerAssets, bundle.viewerAssets);
+  assert.equal(result.modelAvailable, true);
+  assert.equal(result.degradedToModel, true);
+  assert.equal(result.bundle?.modelStlPath, '/tmp/model.stl');
 });
 
-test('getRenderableRuntimeBundle forces preview STL when lithophane attachments are active', () => {
+test('getRenderableRuntimeBundle forces model STL when lithophane attachments are active', () => {
   const bundle = sampleBundle();
   const result = getRenderableRuntimeBundle(bundle, {
     displacement: null,
@@ -157,7 +148,7 @@ test('getRenderableRuntimeBundle forces preview STL when lithophane attachments 
   }, {});
 
   assert.deepEqual(result?.viewerAssets, []);
-  assert.equal(result?.previewStlPath, '/tmp/preview.stl');
+  assert.equal(result?.modelStlPath, '/tmp/model.stl');
 });
 
 test('getRenderableRuntimeBundle preserves multipart assets when lithophane image param is empty', () => {
@@ -183,7 +174,6 @@ test('inspectRuntimeBundle preserves multipart runtime when lithophane image par
   const result = await inspectRuntimeBundle(
     bundle,
     async () => true,
-    async () => 1024,
     {
       displacement: {
         imageParam: '__litho_image',
@@ -195,8 +185,7 @@ test('inspectRuntimeBundle preserves multipart runtime when lithophane image par
     { __litho_image: '' },
   );
 
-  assert.equal(result.previewAvailable, true);
-  assert.equal(result.degradedToPreview, false);
-  assert.equal(result.skippedOversizedPreview, false);
+  assert.equal(result.modelAvailable, true);
+  assert.equal(result.degradedToModel, false);
   assert.deepEqual(result.bundle, bundle);
 });

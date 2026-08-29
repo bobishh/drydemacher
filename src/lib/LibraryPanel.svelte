@@ -10,6 +10,7 @@
     searchFreecadLibrary,
   } from './tauri/client';
   import type { ComponentHeader, ComponentPackageHeader, FreecadLibraryItem } from './tauri/contracts';
+  import { config as sharedConfig } from './stores/domainState';
 
   let {
     onImportFreecadLibraryPart,
@@ -22,6 +23,7 @@
   } = $props();
 
   type LibraryTab = 'components' | 'freecad';
+  const FREECAD_PAGE_SIZE = 100;
 
   let activeTab = $state<LibraryTab>('components');
   let searchQuery = $state('');
@@ -40,6 +42,8 @@
   let freecadLibrarySearchBusy = $state(false);
   let freecadLibraryFolderBusy = $state(false);
   let importingFreecadLibraryItemId = $state<string | null>(null);
+  let freecadHasMore = $state(false);
+  let freecadPage = $state(0);
 
   async function loadActiveTab() {
     if (
@@ -58,6 +62,17 @@
       } else if (activeTab === 'freecad') {
         const config = await getConfig();
         freecadLibraryRoots = config.freecadLibraryRoots ?? [];
+        if (freecadLibraryRoots.length > 0) {
+          const firstPage = await searchFreecadLibrary({
+            query: searchQuery,
+            roots: freecadLibraryRoots,
+            limit: FREECAD_PAGE_SIZE + 1,
+            offset: 0,
+          });
+          freecadLibraryResults = firstPage.slice(0, FREECAD_PAGE_SIZE);
+          freecadHasMore = firstPage.length > FREECAD_PAGE_SIZE;
+          freecadPage = 0;
+        }
         freecadLoaded = true;
       }
     } catch (error) {
@@ -147,16 +162,24 @@
   async function handleSetFreecadLibraryFolder() {
     if (freecadLibraryFolderBusy) return;
     loadError = null;
-    const selected = await open({ directory: true, multiple: false });
-    if (typeof selected !== 'string' || !selected.trim()) return;
-
     freecadLibraryFolderBusy = true;
     try {
+      const selected = await open({ directory: true, multiple: false });
+      if (typeof selected !== 'string' || !selected.trim()) return;
       const config = await getConfig();
       const roots = [selected.trim()];
       await saveConfig({ ...config, freecadLibraryRoots: roots });
+      sharedConfig.set({ ...config, freecadLibraryRoots: roots });
       freecadLibraryRoots = roots;
-      freecadLibraryResults = [];
+      const firstPage = await searchFreecadLibrary({
+        query: searchQuery,
+        roots,
+        limit: FREECAD_PAGE_SIZE + 1,
+        offset: 0,
+      });
+      freecadLibraryResults = firstPage.slice(0, FREECAD_PAGE_SIZE);
+      freecadHasMore = firstPage.length > FREECAD_PAGE_SIZE;
+      freecadPage = 0;
     } catch (error) {
       loadError = formatBackendError(error);
     } finally {
@@ -172,11 +195,36 @@
       freecadLibraryResults = await searchFreecadLibrary({
         query: searchQuery,
         roots: freecadLibraryRoots,
-        limit: 60,
+        limit: FREECAD_PAGE_SIZE + 1,
+        offset: 0,
       });
+      freecadHasMore = freecadLibraryResults.length > FREECAD_PAGE_SIZE;
+      freecadLibraryResults = freecadLibraryResults.slice(0, FREECAD_PAGE_SIZE);
+      freecadPage = 0;
     } catch (error) {
       loadError = formatBackendError(error);
       freecadLibraryResults = [];
+    } finally {
+      freecadLibrarySearchBusy = false;
+    }
+  }
+
+  async function loadFreecadLibraryPage(nextPage: number) {
+    if (freecadLibrarySearchBusy || nextPage < 0 || (nextPage > freecadPage && !freecadHasMore)) return;
+    loadError = null;
+    freecadLibrarySearchBusy = true;
+    try {
+      const pageItems = await searchFreecadLibrary({
+        query: searchQuery,
+        roots: freecadLibraryRoots,
+        limit: FREECAD_PAGE_SIZE + 1,
+        offset: nextPage * FREECAD_PAGE_SIZE,
+      });
+      freecadLibraryResults = pageItems.slice(0, FREECAD_PAGE_SIZE);
+      freecadHasMore = pageItems.length > FREECAD_PAGE_SIZE;
+      freecadPage = nextPage;
+    } catch (error) {
+      loadError = formatBackendError(error);
     } finally {
       freecadLibrarySearchBusy = false;
     }
@@ -312,6 +360,19 @@
               </button>
             </article>
           {/each}
+          {#if freecadPage > 0 || freecadHasMore}
+            <nav class="catalog-pagination" aria-label="FreeCAD catalog pages">
+              <button
+                onclick={() => loadFreecadLibraryPage(freecadPage - 1)}
+                disabled={freecadLibrarySearchBusy || freecadPage === 0}
+              >PREVIOUS</button>
+              <span>PAGE {freecadPage + 1}</span>
+              <button
+                onclick={() => loadFreecadLibraryPage(freecadPage + 1)}
+                disabled={freecadLibrarySearchBusy || !freecadHasMore}
+              >{freecadLibrarySearchBusy ? 'LOADING...' : 'NEXT'}</button>
+            </nav>
+          {/if}
         </div>
       {/if}
     {/if}
@@ -496,6 +557,20 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+    overflow: hidden;
+  }
+
+  .catalog-pagination {
+    align-self: center;
+    flex: 0 0 auto;
+    margin: 8px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--primary);
+    font-family: var(--font-mono);
+    font-size: 0.64rem;
+    font-weight: 700;
     overflow: hidden;
   }
 

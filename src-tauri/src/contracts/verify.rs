@@ -97,18 +97,18 @@ pub struct StructuralIssue {
 #[serde(rename_all = "camelCase")]
 pub struct StructuralMetrics {
     pub part_count: u32,
-    #[serde(default)]
-    pub preview_stl_size_bytes: Option<u64>,
-    #[serde(default)]
-    pub preview_stl_triangle_count: Option<u32>,
-    #[serde(default)]
-    pub preview_stl_component_count: Option<u32>,
-    #[serde(default)]
-    pub preview_stl_non_manifold_edge_count: Option<u32>,
-    #[serde(default)]
-    pub preview_stl_overhang_triangle_count: Option<u32>,
-    #[serde(default)]
-    pub preview_stl_overhang_ratio: Option<f64>,
+    #[serde(default, alias = "previewStlSizeBytes")]
+    pub model_stl_size_bytes: Option<u64>,
+    #[serde(default, alias = "previewStlTriangleCount")]
+    pub model_stl_triangle_count: Option<u32>,
+    #[serde(default, alias = "previewStlComponentCount")]
+    pub model_stl_component_count: Option<u32>,
+    #[serde(default, alias = "previewStlNonManifoldEdgeCount")]
+    pub model_stl_non_manifold_edge_count: Option<u32>,
+    #[serde(default, alias = "previewStlOverhangTriangleCount")]
+    pub model_stl_overhang_triangle_count: Option<u32>,
+    #[serde(default, alias = "previewStlOverhangRatio")]
+    pub model_stl_overhang_ratio: Option<f64>,
     #[serde(default)]
     pub total_volume: Option<f64>,
     #[serde(default)]

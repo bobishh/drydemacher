@@ -6,6 +6,17 @@ async function openSeededMacroMap(page: Page) {
   await page
     .locator('textarea.prompt-input')
     .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+  await expect
+    .poll(
+      () => page.evaluate(() =>
+        (window as any).__PARAM_CALLS__.some(
+          (entry: { cmd: string; args?: { status?: string } }) =>
+            entry.cmd === 'finalize_generation_attempt' && entry.args?.status === 'success',
+        ),
+      ),
+      { timeout: 15000 },
+    )
+    .toBe(true);
   await page.getByRole('button', { name: /(PARAMS|Parameters)/i, exact: true }).click();
   await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
   await page.getByRole('button', { name: 'new params', exact: true }).click();
@@ -46,9 +57,140 @@ endsolid mock
         return nativeFind.apply(this, findArgs as [never, unknown]);
       };
       window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
+      let nextCallbackId = 1;
+      window.__TAURI_INTERNALS__.transformCallback = (callback: unknown) => {
+        const callbackId = nextCallbackId++;
+        (window as unknown as Record<string, unknown>)[`_${callbackId}`] = callback;
+        return callbackId;
+      };
+      const storedParamThread = () => {
+        const storedSnapshot = JSON.parse(sessionStorage.getItem('param-last-design') || 'null');
+        if (!storedSnapshot) return null;
+        return {
+          id: storedSnapshot.threadId ?? 'mock-thread-1',
+          title: storedSnapshot.design?.title ?? 'Stored Param Design',
+          summary: '',
+          messages: [{
+            id: storedSnapshot.messageId ?? 'mock-msg-1',
+            role: 'assistant',
+            content: '',
+            status: 'success',
+            output: storedSnapshot.design,
+            artifactBundle: storedSnapshot.artifactBundle,
+            modelManifest: storedSnapshot.modelManifest,
+            timestamp: Date.now() / 1000,
+            deletedAt: null,
+          }],
+          updatedAt: Date.now() / 1000,
+          versionCount: 1,
+          pendingCount: 0,
+          queuedCount: 0,
+          errorCount: 0,
+          status: 'active',
+          engineKind: storedSnapshot.modelManifest?.engineKind ?? 'freecad',
+          sourceLanguage: storedSnapshot.modelManifest?.sourceLanguage ?? 'legacyPython',
+          geometryBackend: storedSnapshot.modelManifest?.geometryBackend ?? 'freecad',
+        };
+      };
 
       window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
         (window as any).__PARAM_CALLS__.push({ cmd, args });
+        if (cmd === 'plugin:event|listen') return Number(args?.handler ?? 0);
+        if (cmd === 'plugin:event|unlisten') return null;
+        if (cmd === 'get_agent_activity') return { events: [], latestCursor: 0 };
+        if (cmd === 'get_authoring_graph') {
+          return {
+            sourceDigest: 'sha256:typed-source',
+            coreDigest: 'sha256:typed-core',
+            astNodes: [
+              {
+                path: '/parts/input-port/root/let/bindings/wall',
+                stableNodeKey: 'stable:wall',
+                kind: 'Literal',
+                valueKind: 'Number',
+                partId: 'input-port',
+                sourceAddressable: true,
+                editableOps: ['replace'],
+                childPaths: [],
+                inputPorts: [],
+              },
+              {
+                path: '/parts/input-port/root/let/bindings/holes',
+                stableNodeKey: 'stable:holes',
+                kind: 'Call',
+                valueKind: 'Solid',
+                operation: 'repeat-union',
+                partId: 'input-port',
+                sourceAddressable: true,
+                editableOps: ['replace'],
+                childPaths: ['/parts/input-port/root/let/bindings/holes/args/0'],
+                inputPorts: [
+                  {
+                    role: 'tools',
+                    valueKind: 'Solid',
+                    cardinality: 'many',
+                    childPath: '/parts/input-port/root/let/bindings/holes/args/0',
+                  },
+                ],
+              },
+              {
+                path: '/parts/input-port/root',
+                stableNodeKey: 'stable:difference',
+                kind: 'Call',
+                valueKind: 'Solid',
+                operation: 'difference',
+                partId: 'input-port',
+                sourceAddressable: true,
+                editableOps: ['replace'],
+                childPaths: [
+                  '/parts/input-port/root/args/0',
+                  '/parts/input-port/root/args/1',
+                ],
+                inputPorts: [
+                  {
+                    role: 'base',
+                    valueKind: 'Solid',
+                    cardinality: 'one',
+                    childPath: '/parts/input-port/root/args/0',
+                  },
+                  {
+                    role: 'tools',
+                    valueKind: 'Solid',
+                    cardinality: 'many',
+                    childPath: '/parts/input-port/root/args/1',
+                  },
+                ],
+              },
+              {
+                path: '/parts/input-port/root/expanded/0',
+                stableNodeKey: 'stable:expanded',
+                kind: 'Call',
+                valueKind: 'Solid',
+                operation: 'union',
+                partId: 'input-port',
+                sourceAddressable: false,
+                editableOps: [],
+                nonEditableReason: 'Macro-expanded node has no exact authored source target.',
+                childPaths: [],
+                inputPorts: [],
+              },
+            ],
+            features: [],
+            dependencies: [],
+            constraints: [],
+            targets: [],
+            handles: [],
+          };
+        }
+        if (cmd === 'open_or_create_blank_design_thread') {
+          return {
+            threadId: 'mock-thread-1',
+            slug: 'param-thread-1',
+            folder: '/mock/param-thread-1',
+            file: '/mock/param-thread-1/model.ecky',
+            source: '(model)',
+          };
+        }
         if (cmd === 'get_config') {
           return {
             engines: [{ id: 'mock', name: 'Mock' }],
@@ -69,8 +211,14 @@ endsolid mock
           };
         }
         if (cmd === 'check_freecad') return true;
-        if (cmd === 'get_history') return [];
-        if (cmd === 'get_last_design') return null;
+        if (cmd === 'get_history') {
+          const thread = storedParamThread();
+          return thread ? [thread] : [];
+        }
+        if (cmd === 'get_last_design') {
+          const storedSnapshot = sessionStorage.getItem('param-last-design');
+          return storedSnapshot ? JSON.parse(storedSnapshot) : null;
+        }
         if (cmd === 'get_default_macro') return '# macro';
         if (cmd === 'init_generation_attempt') return 'mock-msg-1';
         if (cmd === 'classify_intent') {
@@ -85,7 +233,7 @@ endsolid mock
         if (cmd === 'generate_design') {
           if (`${args?.prompt ?? ''}`.includes('seeded macro')) {
             (window as any).__PARAM_SCENARIO__ = 'seeded-macro';
-            return {
+            const response = {
               threadId: args.threadId || 'mock-thread-1',
               messageId: 'mock-msg-1',
               usage: null,
@@ -93,6 +241,10 @@ endsolid mock
                 title: 'Seeded Macro',
                 versionName: 'V1',
                 interactionMode: 'design',
+                macroDialect: 'ecky',
+                engineKind: 'ecky',
+                sourceLanguage: 'ecky',
+                geometryBackend: 'mesh',
                 macroCode:
                   '(model\n' +
                   '  (part/region shell\n' +
@@ -132,6 +284,8 @@ endsolid mock
                 postProcessing: null,
               },
             };
+            (window as any).__PARAM_SEEDED_DESIGN__ = response.design;
+            return response;
           }
           if (`${args?.prompt ?? ''}`.includes('macro with two editable parts')) {
             (window as any).__PARAM_SCENARIO__ = 'editable-macro-pair';
@@ -297,9 +451,18 @@ endsolid mock
                       key: 'width',
                       label: 'Width',
                     },
+                    {
+                      type: 'select',
+                      key: 'font',
+                      label: 'Font',
+                      options: [
+                        { label: 'Arial', value: 'Arial' },
+                        { label: 'Impact', value: 'Impact' },
+                      ],
+                    },
                   ],
                 },
-                initialParams: { width: 10 },
+                initialParams: { width: 10, font: 'Arial' },
                 postProcessing: null,
               },
             };
@@ -391,19 +554,26 @@ endsolid mock
             'editable-macro': 'editable-macro-model',
             'narrow-layout-box': 'narrow-layout-box',
           };
-          const modelId = scenarioModelIds[(window as any).__PARAM_SCENARIO__] ?? 'litho-model';
-          return {
+          const scenario = (window as any).__PARAM_SCENARIO__;
+          const modelId = scenarioModelIds[scenario] ?? 'litho-model';
+          const isEcky = scenario === 'seeded-macro';
+          const bundle = {
             modelId,
             sourceKind: 'generated',
+            engineKind: isEcky ? 'ecky' : 'freecad',
+            sourceLanguage: isEcky ? 'ecky' : 'legacyPython',
+            geometryBackend: isEcky ? 'mesh' : 'freecad',
             contentHash: 'mock-hash',
             fcstdPath: '/mock.FCStd',
             manifestPath: '/mock/manifest.json',
-            previewStlPath: '/mock.stl',
+            modelStlPath: '/mock.stl',
             viewerAssets: [],
             calloutAnchors: [],
             measurementGuides: [],
             edgeTargets: [],
           };
+          (window as any).__PARAM_LAST_BUNDLE__ = bundle;
+          return bundle;
         }
         if (cmd === 'get_model_manifest') {
           if ((window as any).__PARAM_SCENARIO__ === 'editable-macro-pair') {
@@ -485,6 +655,9 @@ endsolid mock
             return {
               modelId: 'seeded-macro-model',
               sourceKind: 'generated',
+              engineKind: 'ecky',
+              sourceLanguage: 'ecky',
+              geometryBackend: 'mesh',
               document: {
                 documentName: 'Seeded Macro',
                 documentLabel: 'Seeded Macro',
@@ -689,7 +862,10 @@ endsolid mock
               selectionTargets: [],
               advisories: [],
               measurementAnnotations: [],
-              warnings: [],
+              warnings: [
+                'Feature graph was not carried forward because rendered topology no longer validates old feature bindings.',
+                'Manufacturing clearance could not be verified.',
+              ],
               enrichmentState: { status: 'none', proposals: [] },
             };
           }
@@ -721,7 +897,7 @@ endsolid mock
             issues: [],
             metrics: {
               partCount: 1,
-              previewStlSizeBytes: 1024,
+              modelStlSizeBytes: 1024,
               totalVolume: 1000,
               totalArea: 500,
               bbox: { xMin: 0, yMin: 0, zMin: 0, xMax: 10, yMax: 10, zMax: 10 },
@@ -739,6 +915,8 @@ endsolid mock
           };
         }
         if (cmd === 'get_thread') {
+          const storedThread = storedParamThread();
+          if (storedThread) return storedThread;
           return {
             id: args.id,
             title: 'New Session',
@@ -750,13 +928,57 @@ endsolid mock
             messages: [],
           };
         }
-        if (cmd === 'save_model_manifest') return null;
+        if (cmd === 'save_model_manifest') {
+          if (args?.manifest?.sourceLanguage === 'ecky') {
+            sessionStorage.setItem('param-last-design', JSON.stringify({
+              design: (window as any).__PARAM_SEEDED_DESIGN__,
+              threadId: 'mock-thread-1',
+              messageId: 'mock-msg-1',
+              artifactBundle: (window as any).__PARAM_LAST_BUNDLE__,
+              modelManifest: args.manifest,
+              selectedPartId: null,
+            }));
+          }
+          return null;
+        }
         if (cmd === 'add_manual_version') return 'mock-param-version-1';
         if (cmd === 'update_version_runtime') return null;
         if (cmd === 'update_parameters') return null;
         if (cmd === 'update_post_processing') return null;
-        if (cmd === 'finalize_generation_attempt') return null;
-        if (cmd === 'save_last_design') return null;
+        if (cmd === 'finalize_generation_attempt') {
+          if (args?.status === 'success' && args?.design && args?.artifactBundle && args?.modelManifest) {
+            const storedSnapshot = JSON.parse(sessionStorage.getItem('param-last-design') || 'null');
+            const protectsEckySnapshot =
+              storedSnapshot?.modelManifest?.sourceLanguage === 'ecky' &&
+              (args.modelManifest.sourceLanguage !== 'ecky' || args.design.sourceLanguage !== 'ecky');
+            if (!protectsEckySnapshot) {
+              sessionStorage.setItem('param-last-design', JSON.stringify({
+                design: args.design,
+                threadId: 'mock-thread-1',
+                messageId: args.messageId ?? 'mock-msg-1',
+                artifactBundle: args.artifactBundle,
+                modelManifest: args.modelManifest,
+                selectedPartId: null,
+              }));
+            }
+          }
+          return null;
+        }
+        if (cmd === 'save_last_design') {
+          if (args?.snapshot) {
+            const storedSnapshot = JSON.parse(sessionStorage.getItem('param-last-design') || 'null');
+            const protectsEckySnapshot =
+              storedSnapshot?.modelManifest?.sourceLanguage === 'ecky' &&
+              (args.snapshot.modelManifest?.sourceLanguage !== 'ecky' ||
+                args.snapshot.design?.sourceLanguage !== 'ecky');
+            if (!protectsEckySnapshot) {
+              sessionStorage.setItem('param-last-design', JSON.stringify(args.snapshot));
+            }
+          } else {
+            sessionStorage.removeItem('param-last-design');
+          }
+          return null;
+        }
         if (cmd === 'save_config') return null;
         if (cmd === 'get_active_agent_sessions') return [];
         if (cmd === 'get_agent_terminal_snapshots') return [];
@@ -794,9 +1016,95 @@ endsolid mock
     await expect(page.getByRole('button', { name: /CANCEL/i })).toBeVisible();
 
     await page.getByRole('button', { name: /CANCEL/i }).click();
-    await page.getByRole('button', { name: 'RAW', exact: true }).click();
+    await page.getByRole('button', { name: 'PARAMETERS', exact: true }).click();
     await expect(page.locator('.panel-code-btn')).toBeVisible();
     await expect(page.getByRole('button', { name: 'OPEN FILE', exact: true })).toHaveCount(0);
+  });
+
+  test('Given parameters open When switching work surfaces Then Views is a separate tab', async ({ page }) => {
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.fill('textarea.prompt-input', 'make a narrow layout box');
+    await page.getByRole('button', { name: 'PROCESS', exact: true }).click();
+    await expect
+      .poll(() => page.evaluate(() => (window as any).__PARAM_SCENARIO__), { timeout: 15000 })
+      .toBe('narrow-layout-box');
+
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
+    const panel = page.locator('.param-panel');
+    await expect(panel).toBeVisible({ timeout: 10000 });
+
+    const parametersTab = page.getByRole('button', { name: 'PARAMETERS', exact: true });
+    const meshTab = page.getByRole('button', { name: 'MESH', exact: true });
+    const viewsTab = page.getByRole('button', { name: 'VIEWS', exact: true });
+    const firstParameter = panel.locator('.param-field').first();
+    await expect(parametersTab).toHaveAttribute('aria-pressed', 'true');
+    await expect(firstParameter).toBeVisible();
+    const parameterLayout = await panel.evaluate((element) => {
+      const body = element.querySelector('.param-panel-body') as HTMLElement;
+      const field = element.querySelector('.param-field') as HTMLElement;
+      return {
+        scrollable: body.scrollHeight > body.clientHeight,
+        fieldHeight: field.getBoundingClientRect().height,
+      };
+    });
+    expect(parameterLayout.scrollable).toBe(true);
+    expect(parameterLayout.fieldHeight).toBeGreaterThan(48);
+    await expect(viewsTab).toHaveAttribute('aria-pressed', 'false');
+    await expect(page.getByRole('button', { name: '+ VIEW' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'OUTLINE', exact: true })).toHaveCount(0);
+
+    const positions = await Promise.all([
+      page.getByPlaceholder('Search controls...').boundingBox(),
+      firstParameter.boundingBox(),
+      viewsTab.boundingBox(),
+    ]);
+    expect(positions.every(Boolean)).toBe(true);
+    expect(positions[0]!.y).toBeLessThan(positions[1]!.y);
+    expect(positions[2]!.y).toBeLessThan(positions[0]!.y);
+
+    await meshTab.click();
+    await expect(meshTab).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByRole('button', { name: 'OUTLINE', exact: true })).toBeVisible();
+    await expect(firstParameter).toHaveCount(0);
+
+    await viewsTab.click();
+    await expect(viewsTab).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByRole('button', { name: '+ VIEW' })).toBeVisible();
+
+    await page.getByRole('button', { name: /EDIT CONTROLS/i }).click();
+    await expect(page.getByRole('button', { name: /READ FROM MACRO/i })).toBeVisible();
+    await expect(panel.locator('.edit-list')).toBeVisible();
+  });
+
+  test('Given empty session When parameters open Then default surface remains usable with inactive workspace tabs', async ({ page }) => {
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
+    const panel = page.locator('.param-panel');
+
+    await expect(panel).toBeVisible();
+    await expect(page.getByRole('button', { name: 'PARAMETERS', exact: true })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    await expect(panel.getByText('No raw controls match your search.')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'VIEWS', exact: true })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+  });
+
+  test('Given manifest diagnostics When parameters open Then diagnostic warning block is hidden', async ({ page }) => {
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.fill('textarea.prompt-input', 'make a narrow layout box');
+    await page.getByRole('button', { name: 'PROCESS', exact: true }).click();
+    await expect
+      .poll(() => page.evaluate(() => (window as any).__PARAM_SCENARIO__), { timeout: 15000 })
+      .toBe('narrow-layout-box');
+
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
+    const panel = page.locator('.param-panel');
+    await expect(panel.locator('.warning-stack')).toHaveCount(0);
+    await expect(panel.getByText('Manufacturing clearance could not be verified.')).toHaveCount(0);
+    await expect(panel.getByText(/Feature graph was not carried forward/i)).toHaveCount(0);
   });
 
   test('Given seeded macro When New Params opens Then syntax markers reflect block types', async ({
@@ -833,27 +1141,28 @@ endsolid mock
     await expect(page.locator('.macro-ast-node-param input.param-input').first()).toBeFocused();
   });
 
-  test('Given seeded macro When New Params opens Then the old PARAMS entrypoint remains and semantic views stay named', async ({
+  test('Given Ecky macro with legacy control views When Parameters opens Then the views persistence surface is absent', async ({
     page,
   }) => {
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
-    await page.fill('textarea.prompt-input', 'make a seeded macro');
-    await page
-      .locator('textarea.prompt-input')
-      .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+    await openSeededMacroMap(page);
+    await expect
+      .poll(() => page.evaluate(() => sessionStorage.getItem('param-last-design') !== null))
+      .toBe(true);
+    await page.reload();
+    await expect(page.locator('.boot-overlay')).toHaveCount(0);
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Parameters', exact: true }).click();
 
-    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
-    await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
-    await page.getByRole('button', { name: 'VIEWS' }).click();
-
-    await expect.soft(page.getByRole('button', { name: /^(?:PARAMS|Parameters)$/i })).toBeVisible();
+    await expect.soft(
+      page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Parameters', exact: true }),
+    ).toBeVisible();
     await expect.soft(page.getByRole('button', { name: 'new params', exact: true })).toBeVisible();
-    await expect.soft(page.locator('.param-panel .context-strip-head + .part-strip-list .view-chip')).toContainText([
-      'model',
-      'part/region',
-      'input port',
-      'inline param anchor',
-    ]);
+    await expect.soft(page.getByRole('button', { name: 'VIEWS', exact: true })).toHaveCount(0);
+
+    const persistedControlViews = await page.evaluate(() =>
+      JSON.parse(sessionStorage.getItem('param-last-design') || 'null')
+        ?.modelManifest?.controlViews ?? null,
+    );
+    expect(persistedControlViews).toEqual([]);
   });
 
   test('Given seeded macro When New Params edits a value Then Apply rerenders the draft', async ({
@@ -959,6 +1268,32 @@ endsolid mock
     await expect(target).toHaveAttribute('data-search-selected', 'true');
   });
 
+  test('Given typed Core projection When New Params opens Then scalar, geometry ports, and read-only nodes stay distinct', async ({
+    page,
+  }) => {
+    await openSeededMacroMap(page);
+
+    const scalar = page.locator('.macro-ast-node[data-node-id="stable:wall"]');
+    await expect(scalar).toBeVisible();
+    await expect(scalar).toHaveAttribute('data-node-kind', 'expression');
+
+    const holes = page.locator('.macro-ast-node[data-node-id="stable:holes"]');
+    await expect(holes).toBeVisible();
+    await expect(holes).toHaveAttribute('data-node-kind', 'operation');
+    await expect(holes.locator('.macro-ast-port[data-port-role="tools"]')).toBeVisible();
+
+    const difference = page.locator('.macro-ast-node[data-node-id="stable:difference"]');
+    await expect(difference.locator('.macro-ast-port[data-port-role="base"]')).toBeVisible();
+    await expect(difference.locator('.macro-ast-port[data-port-role="tools"]')).toBeVisible();
+
+    const expanded = page.locator('.macro-ast-node[data-node-id="stable:expanded"]');
+    await expect(expanded).toHaveAttribute('data-node-kind', 'readonly');
+    await expect(expanded).toHaveAttribute(
+      'title',
+      'Macro-expanded node has no exact authored source target.',
+    );
+  });
+
   test('Given a selected map param When search has no match Then source and selection stay unchanged', async ({
     page,
   }) => {
@@ -1032,13 +1367,14 @@ endsolid mock
     });
     expect(tabsFitPanel).toBe(true);
 
+    await page.getByRole('button', { name: 'VIEWS', exact: true }).click();
     await expect(page.getByRole('button', { name: '+ VIEW' })).toBeVisible();
     await expect(page.getByRole('button', { name: '+ KNOB' })).toBeVisible();
     await expect(page.getByRole('button', { name: '+ RULE' })).toBeVisible();
     await expect(page.getByRole('button', { name: '+ LINK' })).toBeVisible();
 
-    await page.getByRole('button', { name: 'RAW', exact: true }).click();
-    const longLabel = page.locator('[data-param-key=\"top_lid_side_shutter_clearance\"] .param-label');
+    await page.getByRole('button', { name: 'PARAMETERS', exact: true }).click();
+    const longLabel = page.locator('[data-param-key=\"top_lid_side_shutter_clearance\"] .param-label').first();
     await expect(longLabel).toContainText('Top Lid Side Shutter Clearance');
 
     const labelLayout = await longLabel.evaluate((node) => {
@@ -1058,7 +1394,7 @@ endsolid mock
     expect(labelLayout.clientHeight).toBeGreaterThan(0);
   });
 
-  test('Given live apply When number changes rapidly Then only latest value renders after idle', async ({ page }) => {
+  test('Given parameter workspace When opened Then tabs lead, staged controls follow, and live apply is absent', async ({ page }) => {
     await page.getByRole('button', { name: 'DIALOGUE' }).click();
     await page.fill('textarea.prompt-input', 'make a param box');
     await page
@@ -1067,7 +1403,32 @@ endsolid mock
 
     await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
-    await page.locator('.live-toggle').click();
+    await expect(page.locator('.live-toggle')).toHaveCount(0);
+
+    const panelOrder = await page.locator('.param-panel').evaluate((panel) =>
+      [...panel.children].map((child) => child.className),
+    );
+    expect(panelOrder[0]).toContain('panel-mode-tabs');
+    expect(panelOrder[1]).toContain('param-panel-body');
+
+    const footerPosition = await page.locator('.param-panel').evaluate((panel) => {
+      const body = panel.querySelector('.param-panel-body') as HTMLElement;
+      const footer = panel.querySelector('.param-panel-footer') as HTMLElement;
+      const before = footer.getBoundingClientRect().top;
+      body.scrollTop = body.scrollHeight;
+      const panelBounds = panel.getBoundingClientRect();
+      const footerBounds = footer.getBoundingClientRect();
+      return {
+        moved: footerBounds.top - before,
+        withinPanel: footerBounds.bottom <= panelBounds.bottom + 1,
+        bodyHeight: body.clientHeight,
+        scrollMode: window.getComputedStyle(body).overflowY,
+      };
+    });
+    expect(footerPosition.moved).toBe(0);
+    expect(footerPosition.withinPanel).toBe(true);
+    expect(footerPosition.bodyHeight).toBeGreaterThan(0);
+    expect(footerPosition.scrollMode).toBe('auto');
 
     const beforeRenderCount = await page.evaluate(
       () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
@@ -1082,19 +1443,16 @@ endsolid mock
       }
     });
 
-    await page.waitForTimeout(100);
-    const immediateRenderCount = await page.evaluate(
+    await page.waitForTimeout(250);
+    const renderCountBeforeApply = await page.evaluate(
       () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
     );
-    expect(immediateRenderCount).toBe(beforeRenderCount);
+    expect(renderCountBeforeApply).toBe(beforeRenderCount);
 
-    await expect
-      .poll(async () =>
-        page.evaluate(
-          () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
-        ),
-      )
-      .toBe(beforeRenderCount + 1);
+    await page.getByRole('button', { name: 'APPLY', exact: true }).click();
+    await expect.poll(() => page.evaluate(
+      () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+    )).toBe(beforeRenderCount + 1);
 
     const lastRenderCall = await page.evaluate(() => {
       const calls = (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model');
@@ -1112,7 +1470,7 @@ endsolid mock
 
     await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
-    await page.getByRole('button', { name: 'RAW', exact: true }).click();
+    await page.getByRole('button', { name: 'PARAMETERS', exact: true }).click();
     await expect(page.locator('#p600')).toBeVisible();
 
     const beforeRenderCount = await page.evaluate(
@@ -1147,7 +1505,7 @@ endsolid mock
 
     await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
-    await page.getByRole('button', { name: 'RAW', exact: true }).click();
+    await page.getByRole('button', { name: 'PARAMETERS', exact: true }).click();
     await expect(page.locator('#p600')).toBeVisible();
 
     const parentFindsBeforeDebounce = await page.locator('#p600').evaluate(async (input) => {
@@ -1174,7 +1532,7 @@ endsolid mock
 
     await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
-    await page.getByRole('button', { name: 'RAW', exact: true }).click();
+    await page.getByRole('button', { name: 'PARAMETERS', exact: true }).click();
     await expect(page.locator('#p600')).toBeVisible();
 
     const beforeRenderCount = await page.evaluate(
@@ -1222,6 +1580,44 @@ endsolid mock
     expect(renderCall?.args?.parameters?.width).toBe(42);
     expect(calls.map((entry: { cmd: string }) => entry.cmd)).not.toContain('add_manual_version');
     expect(calls.map((entry: { cmd: string }) => entry.cmd)).not.toContain('update_parameters');
+  });
+
+  test('Given text font select When font changes Then UI stages it and Apply rerenders with the family', async ({ page }) => {
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.fill('textarea.prompt-input', 'make a param box');
+    await page
+      .locator('textarea.prompt-input')
+      .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
+    await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
+    const fontField = page.locator('.param-field[data-param-key="font"]');
+    await expect(fontField).toContainText('Font');
+    await expect(fontField.locator('.select-label')).toHaveText('Arial');
+
+    const renderCountBeforeChoice = await page.evaluate(
+      () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+    );
+    await fontField.locator('button.select-trigger').click();
+    await fontField.getByRole('button', { name: 'Impact', exact: true }).click();
+    await expect(fontField.locator('.select-label')).toHaveText('Impact');
+    await expect
+      .poll(() => page.evaluate(
+        () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+      ))
+      .toBe(renderCountBeforeChoice);
+
+    await page.getByRole('button', { name: 'APPLY' }).click();
+    await expect
+      .poll(() => page.evaluate(
+        () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+      ))
+      .toBe(renderCountBeforeChoice + 1);
+    const lastRenderCall = await page.evaluate(() => {
+      const calls = (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model');
+      return calls.at(-1);
+    });
+    expect(lastRenderCall?.args?.parameters?.font).toBe('Impact');
   });
 
   test('Given applied params When Undo is clicked Then previous params rerender', async ({ page }) => {
@@ -1301,7 +1697,7 @@ endsolid mock
     const addVersionCall = calls.find((entry: { cmd: string }) => entry.cmd === 'add_manual_version');
     expect(addVersionCall?.args?.input?.macroCode).toBe('print("box")');
     expect(addVersionCall?.args?.input?.parameters?.width).toBe(42);
-    expect(addVersionCall?.args?.input?.artifactBundle?.previewStlPath).toBe('/mock.stl');
+    expect(addVersionCall?.args?.input?.artifactBundle?.modelStlPath).toBe('/model.stl');
   });
 
   test('Given params were applied When Commit is clicked Then saved version reuses rendered draft', async ({ page }) => {
@@ -1343,7 +1739,7 @@ endsolid mock
     );
     const addVersionCall = calls.find((entry: { cmd: string }) => entry.cmd === 'add_manual_version');
     expect(addVersionCall?.args?.input?.parameters?.width).toBe(42);
-    expect(addVersionCall?.args?.input?.artifactBundle?.previewStlPath).toBe('/mock.stl');
+    expect(addVersionCall?.args?.input?.artifactBundle?.modelStlPath).toBe('/model.stl');
   });
 
   test('Given editable macro When part node source is edited in place Then the edit renders', async ({

@@ -1,4 +1,9 @@
-import { openProjectInEditor, revealProjectFolder, formatBackendError } from './tauri/client';
+import {
+  openImportedCadSource,
+  openProjectInEditor,
+  revealProjectFolder,
+  formatBackendError,
+} from './tauri/client';
 
 // thread-source-binding §3 — frontend source-action seam.
 //
@@ -8,7 +13,7 @@ import { openProjectInEditor, revealProjectFolder, formatBackendError } from './
 // backend. Both commands return the exact persisted binding paths. The seam
 // never invents a generic error — it surfaces the raw backend reason verbatim.
 
-export type SourceActionKind = 'open' | 'reveal';
+export type SourceActionKind = 'open' | 'openCad' | 'reveal';
 
 export interface SourceLink {
   slug: string;
@@ -34,6 +39,8 @@ export interface SourceActionDeps {
    * exact absolute folder + file paths. Backed by open_project_in_editor.
    */
   openInEditor?: (threadId: string | null, messageId: string | null) => Promise<SourceLink>;
+  /** Opens the copied FCStd/STEP source for the selected imported message. */
+  openImportedCad?: (threadId: string | null, messageId: string | null) => Promise<SourceLink>;
   /**
    * Resolves and reveals the bound folder through the native backend.
    */
@@ -45,6 +52,7 @@ export interface SourceActionDeps {
 
 export function createSourceActions(deps: SourceActionDeps = {}) {
   const openInEditor = deps.openInEditor ?? defaultOpenInEditor;
+  const openImportedCad = deps.openImportedCad ?? defaultOpenImportedCad;
   const revealInFileManager = deps.revealInFileManager ?? defaultRevealInFileManager;
 
   async function openSourceFile(
@@ -72,7 +80,26 @@ export function createSourceActions(deps: SourceActionDeps = {}) {
     }
   }
 
-  return { openSourceFile, revealSourceFolder };
+  async function openCadFile(
+    threadId: string | null,
+    messageId: string | null,
+  ): Promise<SourceActionOutcome> {
+    try {
+      const link = await openImportedCad(threadId, messageId);
+      return { kind: 'openCad', ok: true, link };
+    } catch (error) {
+      return { kind: 'openCad', ok: false, error: formatBackendError(error) };
+    }
+  }
+
+  return { openSourceFile, openCadFile, revealSourceFolder };
+}
+
+async function defaultOpenImportedCad(
+  threadId: string | null,
+  messageId: string | null,
+): Promise<SourceLink> {
+  return openImportedCadSource(threadId, messageId);
 }
 
 async function defaultOpenInEditor(

@@ -1,11 +1,12 @@
 use crate::contracts::{
     AppError, AppResult, ArtifactBundle, AuthoringGraph, AuthoringGraphAstNode,
     AuthoringGraphConstraint, AuthoringGraphDependency, AuthoringGraphFeature,
-    AuthoringGraphTarget, FeatureNode, ModelManifest, SelectionTarget,
+    AuthoringGraphInputPort, AuthoringGraphTarget, FeatureNode, ModelManifest, SelectionTarget,
 };
 use crate::ecky_core_ir::{
     CoreNode, CoreNodeKind, CoreProgram, CoreReference, CoreRelationConstraint, CoreRelationOperand,
 };
+use crate::mcp::contracts::EckyAstEditOperation;
 use std::collections::{BTreeSet, HashMap};
 
 pub(crate) fn path_segment(value: &str) -> String {
@@ -228,23 +229,84 @@ fn collect_ast_node(
     part_id: &str,
     output: &mut Vec<AuthoringGraphAstNode>,
 ) {
+    let children = core_node_child_paths(node, path);
+    let child_paths = children
+        .iter()
+        .map(|(child_path, _)| child_path.clone())
+        .collect::<Vec<_>>();
+    let operation = node_operation(node);
+    let addressability = crate::mcp::handlers::ecky_ast::ecky_ast_node_addressability(
+        source,
+        path,
+        node_kind(node),
+        &format!("{:?}", node.value_kind),
+        operation.as_deref(),
+        node.span
+            .map(|span| (span.start as usize, span.end as usize)),
+    );
     output.push(AuthoringGraphAstNode {
         path: path.to_string(),
-        stable_node_key: stable_node_key_from_parts(
-            source,
-            path,
-            node_kind(node),
-            &format!("{:?}", node.value_kind),
-            node_operation(node).as_deref(),
-        ),
+        stable_node_key: addressability.stable_node_key,
         kind: node_kind(node).to_string(),
         value_kind: format!("{:?}", node.value_kind),
-        operation: node_operation(node),
+        operation: operation.clone(),
         part_id: Some(part_id.to_string()),
+        source_addressable: addressability.source_addressable,
+        editable_ops: addressability
+            .editable_ops
+            .into_iter()
+            .map(authoring_edit_operation_name)
+            .collect(),
+        non_editable_reason: addressability.non_editable_reason,
+        input_ports: operation
+            .as_deref()
+            .map(|operation| authoring_input_ports(operation, &children))
+            .unwrap_or_default(),
+        child_paths,
     });
-    for (child_path, child) in core_node_child_paths(node, path) {
+    for (child_path, child) in children {
         collect_ast_node(source, child, &child_path, part_id, output);
     }
+}
+
+fn authoring_edit_operation_name(operation: EckyAstEditOperation) -> String {
+    match operation {
+        EckyAstEditOperation::Replace => "replace",
+        EckyAstEditOperation::InsertBefore => "insertBefore",
+        EckyAstEditOperation::InsertAfter => "insertAfter",
+        EckyAstEditOperation::Delete => "delete",
+        EckyAstEditOperation::Rename => "rename",
+    }
+    .to_string()
+}
+
+fn authoring_input_ports(
+    operation: &str,
+    children: &[(String, &CoreNode)],
+) -> Vec<AuthoringGraphInputPort> {
+    children
+        .iter()
+        .enumerate()
+        .map(|(index, (child_path, child))| {
+            let (role, cardinality) = match operation {
+                "difference" if index == 0 => ("base".to_string(), "one"),
+                "difference" => ("tools".to_string(), "many"),
+                "union" | "intersection" | "xor" | "compound" => ("solids".to_string(), "many"),
+                "extrude" if index == 0 => ("profile".to_string(), "one"),
+                "extrude" if index == 1 => ("height".to_string(), "one"),
+                "repeat-union" if index == 0 => ("index".to_string(), "one"),
+                "repeat-union" if index == 1 => ("count".to_string(), "one"),
+                "repeat-union" if index == 2 => ("body".to_string(), "one"),
+                _ => (format!("arg{}", index + 1), "one"),
+            };
+            AuthoringGraphInputPort {
+                role,
+                value_kind: format!("{:?}", child.value_kind),
+                cardinality: cardinality.to_string(),
+                child_path: child_path.clone(),
+            }
+        })
+        .collect()
 }
 
 fn collect_reference_paths(
@@ -417,6 +479,11 @@ pub fn build_authoring_graph(
             value_kind: format!("{:?}", parameter.kind),
             operation: None,
             part_id: None,
+            source_addressable: true,
+            editable_ops: vec!["replace".to_string(), "rename".to_string()],
+            non_editable_reason: None,
+            child_paths: Vec::new(),
+            input_ports: Vec::new(),
         });
     }
     for part in &program.parts {
@@ -429,6 +496,11 @@ pub fn build_authoring_graph(
             value_kind: "Part".to_string(),
             operation: None,
             part_id: Some(part.key.clone()),
+            source_addressable: true,
+            editable_ops: vec!["replace".to_string(), "rename".to_string()],
+            non_editable_reason: None,
+            child_paths: vec![format!("{part_path}/root")],
+            input_ports: Vec::new(),
         });
         collect_ast_node(
             source,
@@ -737,5 +809,39 @@ mod tests {
             "No feature output or port references target IDs: face:derived:17."
         );
         assert!(boundary.get("non_editable_reason").is_none());
+    }
+
+    #[test]
+    fn projects_typed_operation_and_addressable_child_paths() {
+        let source = "(model (part body (difference (box 20 10 5) (cylinder 2 8))))";
+        let graph = super::build_authoring_graph(source, None, None).expect("authoring graph");
+        let difference = graph
+            .ast_nodes
+            .iter()
+            .find(|node| node.operation.as_deref() == Some("difference"))
+            .expect("difference node");
+
+        assert_eq!(difference.value_kind, "Solid");
+        assert!(difference.source_addressable);
+        assert_eq!(
+            difference
+                .input_ports
+                .iter()
+                .map(|port| (port.role.as_str(), port.cardinality.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("base", "one"), ("tools", "many")]
+        );
+        let child_paths = graph
+            .ast_nodes
+            .iter()
+            .filter(|node| {
+                node.path
+                    .starts_with(&format!("{}/call/args/", difference.path))
+            })
+            .map(|node| node.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(child_paths.len(), 2);
+        assert!(child_paths[0].ends_with("/call/args/0"));
+        assert!(child_paths[1].ends_with("/call/args/1"));
     }
 }
