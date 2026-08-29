@@ -1,5 +1,19 @@
 #![forbid(unsafe_code)]
 
+mod topology;
+pub use topology::{
+    advance_simp_state, advance_simp_state_traced, advance_simp_state_traced_checkpointed,
+    extract_density_support_component, extract_density_support_graph, finalize_simp_state,
+    fit_symmetric_density_centerlines, format_gcmma_attempt_trace, initialize_simp_state,
+    optimize_simp, reconstruct_density_surface, topology_required_solve_capacity,
+    topology_result_digest, topology_state_digest, FemDensityAnchor, FemDensityCenterlineBranch,
+    FemDensityCenterlineControls, FemDensityCenterlinePoint, FemDensitySupportComponent,
+    FemDensitySupportGraph, FemDensitySupportGraphEdge, FemDensitySupportGraphNode,
+    FemDensitySurfaceControls, FemDensitySurfaceMesh, FemMma87State,
+    FemSymmetricDensityCenterlines, FemTopologyControls, FemTopologyIteration, FemTopologyLoadCase,
+    FemTopologyResult, FemTopologyState, FemTopologyTermination, GcmmaAttemptTrace,
+};
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -1999,6 +2013,12 @@ pub struct FemMeshingEvidence {
     pub inserted_source_triangle_count: u64,
     pub tagged_boundary_triangle_count: u64,
     pub maximum_boundary_deviation_mm: f64,
+    #[serde(default)]
+    pub discarded_tet4_component_count: u32,
+    #[serde(default)]
+    pub discarded_tet4_cell_count: u64,
+    #[serde(default)]
+    pub discarded_low_quality_tet4_cell_count: u64,
     pub deterministic_thread_count: u32,
 }
 
@@ -2024,10 +2044,18 @@ impl FemMeshingEvidence {
                 message: "must be finite and non-negative".to_string(),
             });
         }
-        if self.deterministic_thread_count != 1 {
+        if (self.discarded_tet4_component_count == 0) != (self.discarded_tet4_cell_count == 0)
+            || self.discarded_tet4_cell_count < self.discarded_tet4_component_count as u64
+        {
+            return Err(FemValidationError {
+                field: "meshingEvidence.discardedTet4Components".to_string(),
+                message: "component/cell cleanup counts are inconsistent".to_string(),
+            });
+        }
+        if !(1..=64).contains(&self.deterministic_thread_count) {
             return Err(FemValidationError {
                 field: "meshingEvidence.deterministicThreadCount".to_string(),
-                message: "must be exactly 1".to_string(),
+                message: "must be between 1 and 64".to_string(),
             });
         }
         Ok(())
@@ -3133,10 +3161,10 @@ fn equilibrium_evidence(
         });
     }
     let mut applied_resultant_n = [0.0; 3];
-        for (dof_index, force) in rhs_n.iter().copied().enumerate() {
-            finite("rhsN.value", force)?;
-            applied_resultant_n[dof_index % 3] += force;
-        }
+    for (dof_index, force) in rhs_n.iter().copied().enumerate() {
+        finite("rhsN.value", force)?;
+        applied_resultant_n[dof_index % 3] += force;
+    }
     let mut reaction_resultant_n = [0.0; 3];
     for reaction in reactions {
         finite("reactionN", reaction.reaction_n)?;
@@ -3741,6 +3769,9 @@ pub struct FemLinearSolverIdentity {
     pub ordering: String,
     pub scalar_type: String,
     pub parallelism: String,
+    pub thread_count: usize,
+    pub factor_time_ms: Option<f64>,
+    pub solve_time_ms: Option<f64>,
     pub relative_tolerance: f64,
 }
 
@@ -3752,10 +3783,306 @@ pub trait LinearSolver {
         relative_tolerance: f64,
         maximum_dimension: usize,
     ) -> Result<FemLinearSolveResult, FemValidationError>;
+
+    fn solve_many(
+        &self,
+        matrix: &FemSparseMatrix,
+        right_hand_sides: &[Vec<f64>],
+        relative_tolerance: f64,
+        maximum_dimension: usize,
+    ) -> Result<Vec<FemLinearSolveResult>, FemValidationError> {
+        right_hand_sides
+            .iter()
+            .map(|rhs| self.solve(matrix, rhs, relative_tolerance, maximum_dimension))
+            .collect()
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct FaerSparseCholeskySolver;
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AccelerateSparseCholeskySolver;
+
+#[cfg(target_os = "macos")]
+fn accelerate_solver_entries(
+    matrix: &FemSparseMatrix,
+) -> Result<std::borrow::Cow<'_, [FemSparseEntry]>, FemValidationError> {
+    let canonical = matrix
+        .entries
+        .windows(2)
+        .all(|pair| (pair[0].row, pair[0].col) < (pair[1].row, pair[1].col));
+    if canonical {
+        Ok(std::borrow::Cow::Borrowed(&matrix.entries))
+    } else {
+        Ok(std::borrow::Cow::Owned(
+            matrix
+                .validated_entries()?
+                .into_iter()
+                .map(|((row, col), value)| FemSparseEntry { row, col, value })
+                .collect(),
+        ))
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod accelerate_entry_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_solver_entries_borrow_while_noncanonical_compatibility_owns() {
+        let mut matrix = FemSparseMatrix::from_dense(vec![vec![4.0, 1.0], vec![1.0, 3.0]]).unwrap();
+        assert!(matches!(
+            accelerate_solver_entries(&matrix).unwrap(),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        matrix.entries.reverse();
+        assert!(matches!(
+            accelerate_solver_entries(&matrix).unwrap(),
+            std::borrow::Cow::Owned(_)
+        ));
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl LinearSolver for AccelerateSparseCholeskySolver {
+    fn solve(
+        &self,
+        matrix: &FemSparseMatrix,
+        rhs: &[f64],
+        relative_tolerance: f64,
+        maximum_dimension: usize,
+    ) -> Result<FemLinearSolveResult, FemValidationError> {
+        self.solve_many(
+            matrix,
+            &[rhs.to_vec()],
+            relative_tolerance,
+            maximum_dimension,
+        )?
+        .into_iter()
+        .next()
+        .ok_or_else(|| FemValidationError {
+            field: "rhs".into(),
+            message: "batch solve returned no result".into(),
+        })
+    }
+
+    fn solve_many(
+        &self,
+        matrix: &FemSparseMatrix,
+        right_hand_sides: &[Vec<f64>],
+        relative_tolerance: f64,
+        maximum_dimension: usize,
+    ) -> Result<Vec<FemLinearSolveResult>, FemValidationError> {
+        positive_finite("relativeTolerance", relative_tolerance)?;
+        if matrix.dimension == 0
+            || matrix.dimension > maximum_dimension
+            || matrix.dimension > i32::MAX as usize
+        {
+            return Err(FemValidationError {
+                field: "matrix.dimension".into(),
+                message: format!(
+                    "solve dimension {} exceeds budget or Accelerate index range",
+                    matrix.dimension
+                ),
+            });
+        }
+        if right_hand_sides.is_empty() || right_hand_sides.len() > i32::MAX as usize {
+            return Err(FemValidationError {
+                field: "rhs".into(),
+                message: "batch must contain an Accelerate-sized right-hand side count".into(),
+            });
+        }
+        if right_hand_sides
+            .iter()
+            .any(|rhs| rhs.len() != matrix.dimension)
+        {
+            return Err(FemValidationError {
+                field: "rhs".into(),
+                message: "length differs from matrix dimension".into(),
+            });
+        }
+        for value in right_hand_sides.iter().flatten() {
+            finite("rhs.value", *value)?;
+        }
+        for entry in &matrix.entries {
+            if entry.row >= matrix.dimension || entry.col >= matrix.dimension {
+                return Err(FemValidationError {
+                    field: "matrix.entries".into(),
+                    message: "contains out-of-range index".into(),
+                });
+            }
+            finite("matrix.entries.value", entry.value)?;
+        }
+        let solver_entries = accelerate_solver_entries(matrix)?;
+        let entries = solver_entries.as_ref();
+        let scale = entries
+            .iter()
+            .map(|entry| entry.value.abs())
+            .fold(1.0_f64, f64::max);
+        let symmetry_tolerance = 64.0 * f64::EPSILON * scale;
+        let mut row_offsets = vec![0usize; matrix.dimension + 1];
+        for entry in entries {
+            row_offsets[entry.row + 1] += 1;
+        }
+        for row in 0..matrix.dimension {
+            row_offsets[row + 1] += row_offsets[row];
+        }
+        for entry in entries {
+            let transpose_row = &entries[row_offsets[entry.col]..row_offsets[entry.col + 1]];
+            let transpose = transpose_row
+                .binary_search_by_key(&entry.row, |candidate| candidate.col)
+                .ok()
+                .map(|index| transpose_row[index].value)
+                .unwrap_or(0.0);
+            if (entry.value - transpose).abs() > symmetry_tolerance {
+                let row = entry.row;
+                let column = entry.col;
+                return Err(FemValidationError {
+                    field: "matrix".into(),
+                    message: format!(
+                        "must be symmetric; entries ({row},{column}) and ({column},{row}) differ"
+                    ),
+                });
+            }
+        }
+        let upper = entries
+            .iter()
+            .filter(|entry| entry.row <= entry.col)
+            .collect::<Vec<_>>();
+        let rows = upper
+            .iter()
+            .map(|entry| entry.row as i32)
+            .collect::<Vec<_>>();
+        let columns = upper
+            .iter()
+            .map(|entry| entry.col as i32)
+            .collect::<Vec<_>>();
+        let values = upper.iter().map(|entry| entry.value).collect::<Vec<_>>();
+        let rhs = right_hand_sides
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        let evidence = ecky_accelerate_sparse::solve_symmetric_upper(
+            matrix.dimension,
+            &rows,
+            &columns,
+            &values,
+            &rhs,
+            right_hand_sides.len(),
+        )
+        .map_err(|message| FemValidationError {
+            field: "matrix".into(),
+            message,
+        })?;
+        let solution = evidence.solution;
+        right_hand_sides.iter().enumerate().map(|(column, expected)| {
+            let solved = solution[column * matrix.dimension..(column + 1) * matrix.dimension].to_vec();
+            let mut residual = expected.iter().map(|value| -*value).collect::<Vec<_>>();
+            for entry in entries { residual[entry.row] += entry.value * solved[entry.col]; }
+            let residual_l2 = residual.iter().map(|value| value * value).sum::<f64>().sqrt();
+            let rhs_l2 = expected.iter().map(|value| value * value).sum::<f64>().sqrt();
+            let relative_residual = residual_l2 / rhs_l2.max(1.0);
+            if !relative_residual.is_finite() || relative_residual > relative_tolerance {
+                return Err(FemValidationError { field: "solution.relativeResidual".into(), message: format!("Accelerate relative residual {relative_residual} exceeds tolerance {relative_tolerance}") });
+            }
+            Ok(FemLinearSolveResult {
+                solution: solved,
+                residual_l2,
+                relative_residual,
+                solver_identity: FemLinearSolverIdentity {
+                    backend: "accelerate-sparse".into(),
+                    backend_version: "system".into(),
+                    factorization: "sparse-llt".into(),
+                    ordering: "accelerate-default".into(),
+                    scalar_type: "f64".into(),
+                    parallelism: "accelerate-managed".into(),
+                    thread_count: 0,
+                    factor_time_ms: Some(evidence.factor_time_ms),
+                    solve_time_ms: Some(evidence.solve_time_ms),
+                    relative_tolerance,
+                },
+            })
+        }).collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfiguredFaerSparseCholeskySolver {
+    thread_count: usize,
+}
+
+impl FaerSparseCholeskySolver {
+    pub fn with_thread_count(thread_count: usize) -> ConfiguredFaerSparseCholeskySolver {
+        ConfiguredFaerSparseCholeskySolver { thread_count }
+    }
+}
+
+impl LinearSolver for ConfiguredFaerSparseCholeskySolver {
+    fn solve(
+        &self,
+        matrix: &FemSparseMatrix,
+        rhs: &[f64],
+        relative_tolerance: f64,
+        maximum_dimension: usize,
+    ) -> Result<FemLinearSolveResult, FemValidationError> {
+        self.solve_many(
+            matrix,
+            &[rhs.to_vec()],
+            relative_tolerance,
+            maximum_dimension,
+        )?
+        .into_iter()
+        .next()
+        .ok_or_else(|| FemValidationError {
+            field: "rhs".to_string(),
+            message: "batch solve returned no result".to_string(),
+        })
+    }
+
+    fn solve_many(
+        &self,
+        matrix: &FemSparseMatrix,
+        right_hand_sides: &[Vec<f64>],
+        relative_tolerance: f64,
+        maximum_dimension: usize,
+    ) -> Result<Vec<FemLinearSolveResult>, FemValidationError> {
+        use std::sync::{Mutex, OnceLock};
+
+        if self.thread_count <= 1 {
+            return Err(FemValidationError {
+                field: "solver.threadCount".to_string(),
+                message: "parallel sparse solve requires threadCount greater than one".to_string(),
+            });
+        }
+        static FAER_PARALLELISM_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _lock = FAER_PARALLELISM_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| FemValidationError {
+                field: "solver.parallelism".to_string(),
+                message: "Faer parallelism lock is poisoned".to_string(),
+            })?;
+        let previous = faer::get_global_parallelism();
+        faer::set_global_parallelism(faer::Par::rayon(self.thread_count));
+        let result = FaerSparseCholeskySolver.solve_many(
+            matrix,
+            right_hand_sides,
+            relative_tolerance,
+            maximum_dimension,
+        );
+        faer::set_global_parallelism(previous);
+        result.map(|mut solved| {
+            for item in &mut solved {
+                item.solver_identity.parallelism = "rayon".to_string();
+                item.solver_identity.thread_count = self.thread_count;
+            }
+            solved
+        })
+    }
+}
 
 impl LinearSolver for FaerSparseCholeskySolver {
     fn solve(
@@ -3765,6 +4092,27 @@ impl LinearSolver for FaerSparseCholeskySolver {
         relative_tolerance: f64,
         maximum_dimension: usize,
     ) -> Result<FemLinearSolveResult, FemValidationError> {
+        self.solve_many(
+            matrix,
+            &[rhs.to_vec()],
+            relative_tolerance,
+            maximum_dimension,
+        )?
+        .into_iter()
+        .next()
+        .ok_or_else(|| FemValidationError {
+            field: "rhs".to_string(),
+            message: "batch solve returned no result".to_string(),
+        })
+    }
+
+    fn solve_many(
+        &self,
+        matrix: &FemSparseMatrix,
+        right_hand_sides: &[Vec<f64>],
+        relative_tolerance: f64,
+        maximum_dimension: usize,
+    ) -> Result<Vec<FemLinearSolveResult>, FemValidationError> {
         use faer::prelude::Solve;
         use faer::sparse::{SparseColMat, Triplet};
 
@@ -3779,13 +4127,22 @@ impl LinearSolver for FaerSparseCholeskySolver {
             });
         }
         let entries = matrix.validated_entries()?;
-        if rhs.len() != matrix.dimension {
+        if right_hand_sides.is_empty() {
+            return Err(FemValidationError {
+                field: "rhs".to_string(),
+                message: "batch must contain at least one right-hand side".to_string(),
+            });
+        }
+        if right_hand_sides
+            .iter()
+            .any(|rhs| rhs.len() != matrix.dimension)
+        {
             return Err(FemValidationError {
                 field: "rhs".to_string(),
                 message: "length differs from matrix dimension".to_string(),
             });
         }
-        for value in rhs {
+        for value in right_hand_sides.iter().flatten() {
             finite("rhs.value", *value)?;
         }
         let scale = entries
@@ -3826,50 +4183,62 @@ impl LinearSolver for FaerSparseCholeskySolver {
                     "Faer sparse Cholesky rejected a non-positive-definite or singular matrix: {error:?}"
                 ),
             })?;
-        let rhs_column = faer::Col::from_fn(matrix.dimension, |row| rhs[row]);
-        let solved = factor.solve(&rhs_column);
-        let solution = (0..matrix.dimension)
-            .map(|row| solved[row])
-            .collect::<Vec<f64>>();
-        if solution.iter().any(|value| !value.is_finite()) {
-            return Err(FemValidationError {
-                field: "solution".to_string(),
-                message: "Faer returned a non-finite value".to_string(),
+        let rhs_matrix =
+            faer::Mat::from_fn(matrix.dimension, right_hand_sides.len(), |row, column| {
+                right_hand_sides[column][row]
             });
-        }
-        let mut residual = rhs.iter().map(|value| -*value).collect::<Vec<_>>();
-        for (&(row, col), coefficient) in &entries {
-            residual[row] += coefficient * solution[col];
-        }
-        let residual_l2 = residual
+        let solved = factor.solve(&rhs_matrix);
+        right_hand_sides
             .iter()
-            .map(|value| value * value)
-            .sum::<f64>()
-            .sqrt();
-        let rhs_l2 = rhs.iter().map(|value| value * value).sum::<f64>().sqrt();
-        let relative_residual = residual_l2 / rhs_l2.max(1.0);
-        if !relative_residual.is_finite() || relative_residual > relative_tolerance {
-            return Err(FemValidationError {
-                field: "solution.relativeResidual".to_string(),
-                message: format!(
-                    "Faer relative residual {relative_residual} exceeds tolerance {relative_tolerance}"
-                ),
-            });
-        }
-        Ok(FemLinearSolveResult {
-            solution,
-            residual_l2,
-            relative_residual,
-            solver_identity: FemLinearSolverIdentity {
-                backend: "faer".to_string(),
-                backend_version: "0.24.4".to_string(),
-                factorization: "sparse-llt".to_string(),
-                ordering: "faer-default-amd".to_string(),
-                scalar_type: "f64".to_string(),
-                parallelism: "sequential".to_string(),
-                relative_tolerance,
-            },
-        })
+            .enumerate()
+            .map(|(column, rhs)| {
+                let solution = (0..matrix.dimension)
+                    .map(|row| solved[(row, column)])
+                    .collect::<Vec<f64>>();
+                if solution.iter().any(|value| !value.is_finite()) {
+                    return Err(FemValidationError {
+                        field: "solution".to_string(),
+                        message: "Faer returned a non-finite value".to_string(),
+                    });
+                }
+                let mut residual = rhs.iter().map(|value| -*value).collect::<Vec<_>>();
+                for (&(row, col), coefficient) in &entries {
+                    residual[row] += coefficient * solution[col];
+                }
+                let residual_l2 = residual
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f64>()
+                    .sqrt();
+                let rhs_l2 = rhs.iter().map(|value| value * value).sum::<f64>().sqrt();
+                let relative_residual = residual_l2 / rhs_l2.max(1.0);
+                if !relative_residual.is_finite() || relative_residual > relative_tolerance {
+                    return Err(FemValidationError {
+                        field: "solution.relativeResidual".to_string(),
+                        message: format!(
+                            "Faer relative residual {relative_residual} exceeds tolerance {relative_tolerance}"
+                        ),
+                    });
+                }
+                Ok(FemLinearSolveResult {
+                    solution,
+                    residual_l2,
+                    relative_residual,
+                    solver_identity: FemLinearSolverIdentity {
+                        backend: "faer".to_string(),
+                        backend_version: "0.24.4".to_string(),
+                        factorization: "sparse-llt".to_string(),
+                        ordering: "faer-default-amd".to_string(),
+                        scalar_type: "f64".to_string(),
+                        parallelism: "sequential".to_string(),
+                        thread_count: 1,
+                        factor_time_ms: None,
+                        solve_time_ms: None,
+                        relative_tolerance,
+                    },
+                })
+            })
+            .collect()
     }
 }
 
@@ -3932,7 +4301,12 @@ impl LinearSolver for ReferenceCholeskySolver {
             for col in 0..=row {
                 let mut value = dense[row][col];
                 for (inner, &lower_value) in current_row.iter().take(col).enumerate() {
-                    value -= lower_value * previous_rows[col][inner];
+                    let column_row = if col == row {
+                        lower_value
+                    } else {
+                        previous_rows[col][inner]
+                    };
+                    value -= lower_value * column_row;
                 }
                 if row == col {
                     if !value.is_finite() || value <= pivot_tolerance {
@@ -4005,6 +4379,9 @@ impl LinearSolver for ReferenceCholeskySolver {
                 ordering: "natural".to_string(),
                 scalar_type: "f64".to_string(),
                 parallelism: "sequential".to_string(),
+                thread_count: 1,
+                factor_time_ms: None,
+                solve_time_ms: None,
                 relative_tolerance,
             },
         })
@@ -4064,26 +4441,35 @@ impl FemDirichletReduction {
         reduced_solution: &[f64],
     ) -> Result<Vec<FemDofReaction>, FemValidationError> {
         let solution = self.recover_full_solution(reduced_solution)?;
+        if self.original_rhs.len() != self.original_dimension {
+            return Err(FemValidationError {
+                field: "originalRhs".to_string(),
+                message: "length differs from original matrix dimension".to_string(),
+            });
+        }
         let entries = self.original_matrix.validated_entries()?;
-        Ok(self
+        let mut reactions = self
             .constrained_dofs
             .iter()
-            .map(|constraint| {
-                let internal = (0..self.original_dimension)
-                    .map(|col| {
-                        entries
-                            .get(&(constraint.dof_index, col))
-                            .copied()
-                            .unwrap_or(0.0)
-                            * solution[col]
-                    })
-                    .sum::<f64>();
-                FemDofReaction {
-                    dof_index: constraint.dof_index,
-                    reaction_n: internal - self.original_rhs[constraint.dof_index],
-                }
+            .map(|constraint| FemDofReaction {
+                dof_index: constraint.dof_index,
+                reaction_n: -self.original_rhs[constraint.dof_index],
             })
-            .collect())
+            .collect::<Vec<_>>();
+        let constrained_rows = reactions
+            .iter()
+            .enumerate()
+            .map(|(index, reaction)| (reaction.dof_index, index))
+            .collect::<BTreeMap<_, _>>();
+        for (&(row, col), coefficient) in &entries {
+            if let Some(reaction_index) = constrained_rows.get(&row).copied() {
+                reactions[reaction_index].reaction_n += coefficient * solution[col];
+            }
+        }
+        for reaction in &reactions {
+            finite("supportReaction.reactionN", reaction.reaction_n)?;
+        }
+        Ok(reactions)
     }
 }
 
@@ -4190,33 +4576,37 @@ impl FemSparseMatrix {
                 message: "constrain every DOF; reduced system is empty".to_string(),
             });
         }
-        let reduced_index = free_dof_indices
+        let mut reduced_index = vec![usize::MAX; self.dimension];
+        for (reduced, original) in free_dof_indices.iter().copied().enumerate() {
+            reduced_index[original] = reduced;
+        }
+        let mut constrained_values = vec![None; self.dimension];
+        for (dof_index, value_mm) in &constrained {
+            constrained_values[*dof_index] = Some(*value_mm);
+        }
+        let mut reduced_rhs = free_dof_indices
             .iter()
-            .enumerate()
-            .map(|(reduced, original)| (*original, reduced))
-            .collect::<BTreeMap<_, _>>();
-        let reduced_rhs = free_dof_indices
-            .iter()
-            .map(|row| {
-                rhs[*row]
-                    - constrained
-                        .iter()
-                        .map(|(col, value)| {
-                            entries.get(&(*row, *col)).copied().unwrap_or(0.0) * value
-                        })
-                        .sum::<f64>()
-            })
+            .map(|row| rhs[*row])
             .collect::<Vec<_>>();
-        let reduced_entries = entries
-            .into_iter()
-            .filter_map(|((row, col), value)| {
-                Some(FemSparseEntry {
-                    row: *reduced_index.get(&row)?,
-                    col: *reduced_index.get(&col)?,
+        let mut reduced_entries = Vec::with_capacity(entries.len());
+        for ((row, col), value) in entries {
+            let reduced_row = reduced_index[row];
+            if reduced_row == usize::MAX {
+                continue;
+            }
+            if let Some(constrained_value) = constrained_values[col] {
+                reduced_rhs[reduced_row] -= value * constrained_value;
+            }
+            let reduced_col = reduced_index[col];
+            if reduced_col != usize::MAX {
+                reduced_entries.push(FemSparseEntry {
+                    row: reduced_row,
+                    col: reduced_col,
                     value,
-                })
-            })
-            .collect();
+                });
+            }
+        }
+        let reduced_dimension = free_dof_indices.len();
         Ok(FemDirichletReduction {
             original_dimension: self.dimension,
             original_matrix: self.clone(),
@@ -4230,7 +4620,7 @@ impl FemSparseMatrix {
                 })
                 .collect(),
             matrix: FemSparseMatrix {
-                dimension: reduced_index.len(),
+                dimension: reduced_dimension,
                 entries: reduced_entries,
             },
             rhs: reduced_rhs,

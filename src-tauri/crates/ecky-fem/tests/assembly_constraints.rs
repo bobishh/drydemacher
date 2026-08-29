@@ -1,7 +1,8 @@
 use ecky_fem::{
-    ElementAssembler, FemDirichletConstraint, FemIndexedTet4Mesh, FemMaterial, FemPoint3,
-    FemSparseMatrix, FEM_SCHEMA_VERSION,
+    ElementAssembler, FemDirichletConstraint, FemDirichletReduction, FemIndexedTet4Mesh,
+    FemMaterial, FemPoint3, FemSparseEntry, FemSparseMatrix, FEM_SCHEMA_VERSION,
 };
+use std::time::{Duration, Instant};
 
 fn material() -> FemMaterial {
     FemMaterial {
@@ -82,4 +83,82 @@ fn dirichlet_elimination_applies_nonzero_values_without_penalty_stiffness() {
         .expect("support reactions");
     assert!((reactions[0].reaction_n - 0.5).abs() <= 1.0e-12);
     assert!((reactions[1].reaction_n + 5.5).abs() <= 1.0e-12);
+}
+
+#[test]
+fn support_reaction_recovery_scales_with_sparse_entries() {
+    let dimension = 5_000;
+    let constrained_count = 400;
+    let reduction = FemDirichletReduction {
+        original_dimension: dimension,
+        original_matrix: FemSparseMatrix {
+            dimension,
+            entries: (0..dimension)
+                .map(|index| FemSparseEntry {
+                    row: index,
+                    col: index,
+                    value: 1.0,
+                })
+                .collect(),
+        },
+        original_rhs: vec![0.0; dimension],
+        free_dof_indices: (constrained_count..dimension).collect(),
+        constrained_dofs: (0..constrained_count)
+            .map(|dof_index| FemDirichletConstraint {
+                dof_index,
+                value_mm: 0.0,
+            })
+            .collect(),
+        matrix: FemSparseMatrix {
+            dimension: dimension - constrained_count,
+            entries: vec![],
+        },
+        rhs: vec![0.0; dimension - constrained_count],
+    };
+
+    let started = Instant::now();
+    let reactions = reduction
+        .recover_support_reactions(&vec![1.0; dimension - constrained_count])
+        .expect("sparse support reactions");
+    assert_eq!(reactions.len(), constrained_count);
+    assert!(reactions.iter().all(|reaction| reaction.reaction_n == 0.0));
+    assert!(
+        started.elapsed() < Duration::from_millis(50),
+        "reaction recovery must scale with sparse entries, not constrained DOFs × matrix dimension"
+    );
+}
+
+#[test]
+fn dirichlet_elimination_scales_with_sparse_entries() {
+    let dimension = 5_000;
+    let matrix = FemSparseMatrix {
+        dimension,
+        entries: (0..dimension)
+            .map(|index| FemSparseEntry {
+                row: index,
+                col: index,
+                value: 1.0,
+            })
+            .collect(),
+    };
+    let constraints = (0..400)
+        .map(|dof_index| FemDirichletConstraint {
+            dof_index,
+            value_mm: 0.0,
+        })
+        .collect::<Vec<_>>();
+
+    let started = Instant::now();
+    let reduction = matrix
+        .eliminate_dirichlet(&vec![1.0; dimension], &constraints)
+        .expect("sparse Dirichlet elimination");
+    assert_eq!(reduction.matrix.dimension, dimension - constraints.len());
+    assert_eq!(
+        reduction.matrix.entries.len(),
+        dimension - constraints.len()
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(50),
+        "Dirichlet elimination must scale with sparse entries, not free × constrained DOFs"
+    );
 }

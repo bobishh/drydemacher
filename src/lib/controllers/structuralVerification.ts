@@ -185,18 +185,18 @@ function formatMetricsBlock(metrics: StructuralMetrics): string | null {
   lines.push(`  parts: ${metrics.partCount}`);
   if (metrics.totalVolume != null) lines.push(`  volume: ${metrics.totalVolume.toFixed(2)}`);
   if (metrics.totalArea != null) lines.push(`  area: ${metrics.totalArea.toFixed(2)}`);
-  if (metrics.previewStlSizeBytes != null)
-    lines.push(`  preview STL: ${metrics.previewStlSizeBytes} bytes`);
-  if (metrics.previewStlTriangleCount != null)
-    lines.push(`  triangles: ${metrics.previewStlTriangleCount}`);
-  if (metrics.previewStlComponentCount != null)
-    lines.push(`  components: ${metrics.previewStlComponentCount}`);
-  if (metrics.previewStlNonManifoldEdgeCount != null)
-    lines.push(`  non-manifold edges: ${metrics.previewStlNonManifoldEdgeCount}`);
-  if (metrics.previewStlOverhangTriangleCount != null)
-    lines.push(`  overhang triangles: ${metrics.previewStlOverhangTriangleCount}`);
-  if (metrics.previewStlOverhangRatio != null)
-    lines.push(`  overhang ratio: ${metrics.previewStlOverhangRatio.toFixed(3)}`);
+  if (metrics.modelStlSizeBytes != null)
+    lines.push(`  model STL: ${metrics.modelStlSizeBytes} bytes`);
+  if (metrics.modelStlTriangleCount != null)
+    lines.push(`  triangles: ${metrics.modelStlTriangleCount}`);
+  if (metrics.modelStlComponentCount != null)
+    lines.push(`  components: ${metrics.modelStlComponentCount}`);
+  if (metrics.modelStlNonManifoldEdgeCount != null)
+    lines.push(`  non-manifold edges: ${metrics.modelStlNonManifoldEdgeCount}`);
+  if (metrics.modelStlOverhangTriangleCount != null)
+    lines.push(`  overhang triangles: ${metrics.modelStlOverhangTriangleCount}`);
+  if (metrics.modelStlOverhangRatio != null)
+    lines.push(`  overhang ratio: ${metrics.modelStlOverhangRatio.toFixed(3)}`);
   return lines.length > 1 ? lines.join('\n') : null;
 }
 

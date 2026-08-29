@@ -19,7 +19,7 @@ use crate::ecky_cad_host::analysis_boundary::AnalysisBoundarySurface;
 use crate::fem_engineering::{
     authored_study_from_core, engineering_ledger_from_core, resolve_fem_face_tags, FemAuthoredStudy,
 };
-use crate::fem_mesher::{run_ftetwild_worker, FTetWildRuntimeIdentity, FTetWildWorkerRequest};
+use crate::gmsh_mesher::{run_exact_brep_mesher, ExactBrepMesherRuntime, GmshBrepMeshRequest};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,6 +54,7 @@ pub struct FemPipelineControl {
     pub minimum_scaled_jacobian: f64,
     pub maximum_runtime_ms: u64,
     pub relative_solver_tolerance: f64,
+    pub thread_count: u32,
 }
 
 impl FemPipelineControl {
@@ -72,6 +73,11 @@ impl FemPipelineControl {
         if self.minimum_scaled_jacobian > 1.0 || self.maximum_runtime_ms == 0 {
             return Err(AppError::validation(
                 "FEM pipeline quality threshold must not exceed 1 and timeout must be positive.",
+            ));
+        }
+        if self.thread_count == 0 || self.thread_count > 64 {
+            return Err(AppError::validation(
+                "FEM pipeline thread count must be between 1 and 64.",
             ));
         }
         Ok(())
@@ -129,8 +135,9 @@ pub fn execute_fem_mesh_pipeline<F>(
     analysis_name: &str,
     tagged_anchors: &BTreeMap<String, TaggedAnchorBinding>,
     boundary: &AnalysisBoundarySurface,
+    step_path: &Path,
     budgets: FemBudgetLimits,
-    runtime: &FTetWildRuntimeIdentity,
+    runtime: &ExactBrepMesherRuntime,
     scratch_dir: impl AsRef<Path>,
     control: &FemPipelineControl,
     mesh_size_override_mm: Option<f64>,
@@ -145,6 +152,7 @@ where
         analysis_name,
         tagged_anchors,
         boundary,
+        step_path,
         budgets,
         runtime,
         scratch_dir.as_ref(),
@@ -162,8 +170,9 @@ pub fn execute_fem_pipeline<F>(
     analysis_name: &str,
     tagged_anchors: &BTreeMap<String, TaggedAnchorBinding>,
     boundary: &AnalysisBoundarySurface,
+    step_path: &Path,
     budgets: FemBudgetLimits,
-    runtime: &FTetWildRuntimeIdentity,
+    runtime: &ExactBrepMesherRuntime,
     scratch_dir: impl AsRef<Path>,
     control: &FemPipelineControl,
     cancelled: &AtomicBool,
@@ -177,6 +186,7 @@ where
         analysis_name,
         tagged_anchors,
         boundary,
+        step_path,
         budgets,
         runtime,
         scratch_dir,
@@ -193,8 +203,9 @@ pub fn execute_fem_pipeline_with_mesh_size<F>(
     analysis_name: &str,
     tagged_anchors: &BTreeMap<String, TaggedAnchorBinding>,
     boundary: &AnalysisBoundarySurface,
+    step_path: &Path,
     budgets: FemBudgetLimits,
-    runtime: &FTetWildRuntimeIdentity,
+    runtime: &ExactBrepMesherRuntime,
     scratch_dir: impl AsRef<Path>,
     control: &FemPipelineControl,
     mesh_size_override_mm: Option<f64>,
@@ -212,6 +223,7 @@ where
         analysis_name,
         tagged_anchors,
         boundary,
+        step_path,
         budgets,
         runtime,
         scratch_dir,
@@ -285,6 +297,7 @@ where
             scratch_dir,
             cancelled,
             remaining_runtime_ms,
+            control.thread_count as usize,
         ) {
         ecky_fem::solve_linear_static_with_solver_and_observer(
             &mesh,
@@ -810,8 +823,9 @@ fn execute_fem_mesh_pipeline_started<F>(
     analysis_name: &str,
     tagged_anchors: &BTreeMap<String, TaggedAnchorBinding>,
     boundary: &AnalysisBoundarySurface,
+    step_path: &Path,
     budgets: FemBudgetLimits,
-    runtime: &FTetWildRuntimeIdentity,
+    runtime: &ExactBrepMesherRuntime,
     scratch_dir: &Path,
     control: &FemPipelineControl,
     mesh_size_override_mm: Option<f64>,
@@ -836,15 +850,7 @@ where
     let resolved_faces = resolve_fem_face_tags(tagged_anchors, boundary)?;
     let mut study = authored_study_from_core(program, analysis_name, &resolved_faces, budgets)?;
     if let Some(mesh_size_mm) = mesh_size_override_mm {
-        if !mesh_size_mm.is_finite() || mesh_size_mm <= 0.0 {
-            return Err(AppError::validation(
-                "FEM convergence mesh size must be finite and positive.",
-            ));
-        }
-        study.mesh_control.global_size_mm = mesh_size_mm;
-        study.mesh_control.validate().map_err(|error| {
-            AppError::validation(format!("FEM convergence mesh control is invalid: {error}"))
-        })?;
+        apply_convergence_mesh_size(&mut study.mesh_control, mesh_size_mm)?;
     }
     let authored_ledger = engineering_ledger_from_core(
         program,
@@ -873,6 +879,30 @@ where
         audit_pre_solve_applicability(&pre_solve_input).map_err(|error| {
             AppError::validation(format!("FEM pre-solve applicability failed: {error}"))
         })?;
+    let mut required_face_targets = Vec::new();
+    for constraint in &study.constraints {
+        let faces = match constraint {
+            FemConstraint::Fixed { faces, .. }
+            | FemConstraint::PrescribedDisplacement { faces, .. } => faces,
+        };
+        for face in faces {
+            if !required_face_targets.contains(face) {
+                required_face_targets.push(face.clone());
+            }
+        }
+    }
+    for load in &study.loads {
+        let faces = match load {
+            FemLoad::SurfaceForce { faces, .. }
+            | FemLoad::Traction { faces, .. }
+            | FemLoad::Pressure { faces, .. } => faces,
+        };
+        for face in faces {
+            if !required_face_targets.contains(face) {
+                required_face_targets.push(face.clone());
+            }
+        }
+    }
 
     emit_progress(
         progress,
@@ -880,18 +910,20 @@ where
         FemPipelineStage::VolumeMesh,
         Some(boundary.vertices.len() as u64),
         None,
-        "Running isolated fTetWild worker.",
+        "Running exact-BRep Tet4 meshing through HXT with Netgen fallback.",
         true,
     );
-    let mesh_request = FTetWildWorkerRequest::from_analysis_boundary(
+    let mesh_request = GmshBrepMeshRequest::from_analysis_boundary(
         format!("{analysis_name}-volume-mesh"),
+        step_path.to_path_buf(),
         boundary,
         &study.mesh_control,
-        control.envelope_mm,
         control.minimum_scaled_jacobian,
         control.maximum_runtime_ms,
+        control.thread_count,
+        &required_face_targets,
     )?;
-    let mesh = run_ftetwild_worker(runtime, &mesh_request, scratch_dir, cancelled)?;
+    let mesh = run_exact_brep_mesher(runtime, &mesh_request, scratch_dir, cancelled)?;
     emit_progress(
         progress,
         started,
@@ -934,6 +966,24 @@ where
         pre_solve_applicability,
         study,
         mesh,
+    })
+}
+
+fn apply_convergence_mesh_size(
+    control: &mut ecky_fem::FemMeshControl,
+    mesh_size_mm: f64,
+) -> AppResult<()> {
+    if !mesh_size_mm.is_finite() || mesh_size_mm <= 0.0 {
+        return Err(AppError::validation(
+            "FEM convergence mesh size must be finite and positive.",
+        ));
+    }
+    control.global_size_mm = mesh_size_mm;
+    control
+        .local_refinements
+        .retain(|refinement| refinement.size_mm < mesh_size_mm);
+    control.validate().map_err(|error| {
+        AppError::validation(format!("FEM convergence mesh control is invalid: {error}"))
     })
 }
 
@@ -1098,6 +1148,35 @@ fn boundary_dimensions(boundary: &AnalysisBoundarySurface) -> AppResult<(f64, f6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn convergence_override_drops_redundant_equal_local_refinement() {
+        let mut control = ecky_fem::FemMeshControl {
+            schema_version: FEM_SCHEMA_VERSION,
+            element_kind: ecky_fem::FemElementKind::Tet4,
+            global_size_mm: 2.4,
+            local_refinements: vec![ecky_fem::FemLocalRefinement {
+                schema_version: FEM_SCHEMA_VERSION,
+                faces: Vec::new(),
+                size_mm: 1.2,
+            }],
+            budgets: FemBudgetLimits {
+                schema_version: FEM_SCHEMA_VERSION,
+                boundary_triangles: 1,
+                tet4_cells: 1,
+                nodes: 1,
+                dofs: 1,
+                sparse_nonzeros: 1,
+                result_bytes: 1,
+                convergence_levels: 3,
+            },
+        };
+
+        apply_convergence_mesh_size(&mut control, 1.2).expect("valid convergence override");
+
+        assert_eq!(control.global_size_mm, 1.2);
+        assert!(control.local_refinements.is_empty());
+    }
 
     #[test]
     fn compiler_and_runtime_resolve_typed_fem_max_min_metrics_from_current_study() {

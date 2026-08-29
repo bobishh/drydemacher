@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::thread::JoinHandle;
@@ -9,47 +9,59 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use ecky_fem::{
-    FemApplicabilityCheckKind, FemApplicabilityStatus, FemBudgetLimits,
-    FemEngineeringEvidenceLedger, FemEvidenceAuthority, FemEvidenceSubject,
-    FemIdealizationArtifact, FemIdealizationKind, FemResultExtremum, FemResultFieldKind,
-    FemSafetyFactor, FemStudyAssumptionCategory, FemStudyAssumptionStatus,
+    advance_simp_state_traced_checkpointed, finalize_simp_state, format_gcmma_attempt_trace,
+    initialize_simp_state, reconstruct_density_surface, FemApplicabilityCheckKind,
+    FemApplicabilityStatus, FemBudgetLimits, FemConstraint, FemDensityAnchor,
+    FemDensitySurfaceControls, FemEngineeringEvidenceLedger, FemEvidenceAuthority,
+    FemEvidenceSubject, FemIdealizationArtifact, FemIdealizationKind, FemLoad, FemMaterial,
+    FemResultExtremum, FemResultFieldKind, FemSafetyFactor, FemStudyAssumptionCategory,
+    FemStudyAssumptionStatus, FemTopologyControls, FemTopologyLoadCase, FemTopologyTermination,
     FemValidationEvidenceKind, FEM_SCHEMA_VERSION,
 };
 
 use crate::contracts::{
     AppError, AppResult, FemAcceptanceEvaluationDto, FemAcceptanceEvidenceChainDto,
-    FemApplicabilityCheckDto, FemAssumptionDto, FemCancelResponse, FemConvergenceLevelDto,
-    FemConvergenceRequest, FemConvergenceResponse, FemEngineeringEvidenceDto,
-    FemEngineeringQuestionDto, FemExtremumDto, FemIdealizationDto, FemInputEvidenceDto,
-    FemMeshPreviewResponse, FemResultArrayDto, FemResultReadRequest, FemResultReadResponse,
-    FemResultSummaryDto, FemRunResponse, FemSensitivityEvidenceDto, FemSensitivityMetricDto,
-    FemStudyRequest, FemStudyValidationResponse, FemSupportReactionDto, FemValidationEvidenceDto,
-    FemVerificationLayerDto, FemVtuExportResponse,
+    FemApplicabilityCheckDto, FemAssumptionDto, FemCancelResponse, FemComputeConfig,
+    FemConvergenceLevelDto, FemConvergenceRequest, FemConvergenceResponse,
+    FemEngineeringEvidenceDto, FemEngineeringQuestionDto, FemExtremumDto, FemIdealizationDto,
+    FemInputEvidenceDto, FemMeshPreviewResponse, FemResultArrayDto, FemResultReadRequest,
+    FemResultReadResponse, FemResultSummaryDto, FemRunResponse, FemSensitivityEvidenceDto,
+    FemSensitivityMetricDto, FemStudyRequest, FemStudyValidationResponse, FemSupportReactionDto,
+    FemTopologyControlsDto, FemTopologyMaterialDto, FemTopologyReconstructRequest,
+    FemTopologyReconstructResponse, FemTopologyRunRequest, FemTopologyRunResponse,
+    FemTopologySurfaceLoadDto, FemValidationEvidenceDto, FemVerificationLayerDto,
+    FemVtuExportResponse,
 };
 use crate::ecky_cad_host::analysis_boundary::{
     load_direct_occt_analysis_boundary_surface, AnalysisBoundarySurface,
 };
 use crate::fem_engineering::{
     authored_study_from_core, engineering_ledger_from_core, resolve_fem_face_tags,
+    FemAuthoredTopologyControls,
 };
-use crate::fem_mesher::{probe_ftetwild_runtime, FTetWildRuntimeRequirement};
+use crate::gmsh_mesher::{probe_gmsh_runtime, sha256_file, ExactBrepMesherRuntime};
 use crate::models::{AppState, PathResolver};
+use crate::netgen_mesher::probe_default_netgen_runtime;
 use crate::services::fem::{
     execute_fem_mesh_pipeline, execute_fem_pipeline_with_mesh_size, FemPipelineControl,
     FemPipelineStage, FemProgressEvent,
 };
 use crate::services::fem_artifacts::{
-    export_fem_result_vtu as write_fem_result_vtu, load_fem_mesh_asset, load_fem_result_asset,
-    publish_fem_mesh_asset, publish_fem_result_asset, FemMeshAsset, FemResultAsset, FemScalarType,
+    decode_fem_topology_mesh, export_fem_result_vtu as write_fem_result_vtu, load_fem_mesh_asset,
+    load_fem_result_asset, publish_fem_mesh_asset, publish_fem_result_asset, FemMeshAsset,
+    FemResultAsset, FemScalarType,
+};
+use crate::services::fem_topology_artifacts::{
+    load_fem_topology_artifact, load_fem_topology_state, publish_fem_topology_artifact,
+    publish_fem_topology_state_checkpoint,
 };
 
-const FTETWILD_RUNTIME_VERSION: &str = "0.1.0-ecky.1";
-const FTETWILD_SOURCE_REVISION: &str = "d7d99bb4387a07895b9adce058dc7305f6b6e5ab";
 const FEM_REQUEST_CACHE_ROOT: &str = "fem-request-cache-v1";
 const FEM_MESH_REQUEST_CACHE_ROOT: &str = "fem-mesh-request-cache-v1";
+const FEM_CONVERGENCE_CACHE_ROOT: &str = "fem-convergence-v1";
 const FEM_REQUEST_CACHE_SCHEMA_VERSION: u32 = 2;
 const FEM_SINGLEFLIGHT_LIMIT: usize = 256;
 const FEM_REQUEST_CACHE_ENTRY_LIMIT: usize = 128;
@@ -57,6 +69,16 @@ const FEM_REQUEST_CACHE_BYTE_LIMIT: u64 = 2 * 1024 * 1024;
 static FEM_REQUEST_CACHE_NONCE: AtomicU64 = AtomicU64::new(1);
 static FEM_RUN_SINGLEFLIGHT: OnceLock<StdMutex<HashMap<String, Arc<FemSharedJob>>>> =
     OnceLock::new();
+
+fn probe_system_exact_brep_mesher_runtime() -> AppResult<ExactBrepMesherRuntime> {
+    let executable = std::env::var_os("ECKY_GMSH_EXECUTABLE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("gmsh"));
+    Ok(ExactBrepMesherRuntime {
+        gmsh: probe_gmsh_runtime(Path::new(&executable))?,
+        netgen: probe_default_netgen_runtime().ok(),
+    })
+}
 
 struct FemSharedJob {
     gate: StdMutex<()>,
@@ -175,12 +197,143 @@ struct FemMeshRequestCacheEntry {
     mesh_content_digest: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FemConvergenceCacheEntry {
+    schema_version: u32,
+    request_digest: String,
+    response: FemConvergenceResponse,
+}
+
 struct ResolvedFemRequest {
     program: ecky_render::core_ir::CoreProgram,
     boundary: AnalysisBoundarySurface,
+    step_path: PathBuf,
     manifest: crate::contracts::ModelManifest,
     budgets: FemBudgetLimits,
     control: FemPipelineControl,
+}
+
+struct FemTopologyArtifactRunRequest {
+    job_id: String,
+    analysis_identity_digest: String,
+    mesh_content_digest: String,
+    material: FemTopologyMaterialDto,
+    load_cases: Vec<FemTopologySurfaceLoadDto>,
+    fixed_face_group_indices: Vec<u32>,
+    passive_solid_regions: Vec<FemTopologyFaceRegion>,
+    passive_void_regions: Vec<FemTopologyFaceRegion>,
+    relative_solver_tolerance: f64,
+    controls: crate::contracts::FemTopologyControlsDto,
+    resume_state_digest: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FemTopologyRuntimePolicy {
+    maximum_iterations: u64,
+    maximum_new_iterations: u64,
+    maximum_dimension: u64,
+    maximum_elements: u64,
+    maximum_working_memory_bytes: u64,
+    maximum_result_bytes: u64,
+    maximum_wall_time_ms: u64,
+}
+
+impl FemTopologyRuntimePolicy {
+    pub(crate) fn from_compute(compute: &FemComputeConfig) -> Self {
+        let maximum_iterations = compute.topology_iteration_limit();
+        Self {
+            maximum_iterations,
+            maximum_new_iterations: maximum_iterations,
+            maximum_dimension: compute.maximum_fem_dofs(),
+            maximum_elements: compute.maximum_fem_elements(),
+            maximum_working_memory_bytes: compute.maximum_working_memory_bytes(),
+            maximum_result_bytes: compute.maximum_fem_result_bytes(),
+            maximum_wall_time_ms: compute.maximum_wall_time_ms(),
+        }
+    }
+}
+
+pub(crate) fn apply_fem_compute_policy(compute: &FemComputeConfig, study: &mut FemStudyRequest) {
+    let maximum_elements = compute.maximum_fem_elements();
+    study.budgets.boundary_triangles = maximum_elements;
+    study.budgets.tet4_cells = maximum_elements;
+    study.budgets.nodes = compute.maximum_fem_nodes();
+    study.budgets.dofs = compute.maximum_fem_dofs();
+    study.budgets.sparse_nonzeros = compute.maximum_fem_sparse_nonzeros();
+    study.budgets.result_bytes = compute.maximum_fem_result_bytes();
+    study.budgets.convergence_levels = 3;
+    study.control.maximum_runtime_ms = compute.maximum_wall_time_ms();
+    study.control.thread_count = u32::from(compute.thread_count);
+}
+
+#[derive(Debug, Clone)]
+struct FemTopologyFaceRegion {
+    face_group_indices: Vec<u32>,
+    depth_mm: f64,
+}
+
+fn fem_stage_progress(stage: FemPipelineStage) -> u64 {
+    match stage {
+        FemPipelineStage::Resolve => 1,
+        FemPipelineStage::BoundaryMesh => 2,
+        FemPipelineStage::VolumeMesh => 3,
+        FemPipelineStage::ValidateMesh => 4,
+        FemPipelineStage::Assemble => 5,
+        FemPipelineStage::ApplyConstraints => 6,
+        FemPipelineStage::Solve => 7,
+        FemPipelineStage::Postprocess => 8,
+        FemPipelineStage::Verify => 9,
+        FemPipelineStage::Publish => 10,
+    }
+}
+
+fn emit_ui_fem_long_task(
+    state: &AppState,
+    job_id: &str,
+    analysis_name: &str,
+    stage: &str,
+    detail: Option<String>,
+    progress_current: u64,
+    progress_total: u64,
+    expected_duration_ms: u64,
+    task_state: crate::contracts::AgentActivityState,
+) {
+    let terminal = task_state != crate::contracts::AgentActivityState::Active;
+    let summary = if terminal {
+        match &task_state {
+            crate::contracts::AgentActivityState::Resolved => {
+                format!("{analysis_name} complete")
+            }
+            crate::contracts::AgentActivityState::Canceled => {
+                format!("{analysis_name} canceled")
+            }
+            crate::contracts::AgentActivityState::Failed => format!("{analysis_name} failed"),
+            crate::contracts::AgentActivityState::Active => analysis_name.to_string(),
+        }
+    } else {
+        analysis_name.to_string()
+    };
+    crate::services::agent_activity::record_long_task_activity(
+        state,
+        crate::services::agent_activity::LongTaskActivityInput {
+            session_id: "ui-fem".to_string(),
+            thread_id: None,
+            message_id: None,
+            actor_kind: crate::contracts::AgentActivityActorKind::System,
+            actor_id: "fem".to_string(),
+            actor_label: "FEM".to_string(),
+            job_id: job_id.to_string(),
+            stage: stage.to_string(),
+            summary,
+            detail,
+            progress_current,
+            progress_total,
+            expected_duration_ms,
+            state: task_state,
+            cancellable: true,
+        },
+    );
 }
 
 #[tauri::command]
@@ -236,6 +389,8 @@ pub async fn run_fem_study(
     state: State<'_, AppState>,
 ) -> AppResult<FemRunResponse> {
     validate_job_id(&request.job_id)?;
+    let analysis_name = request.analysis_name.clone();
+    let expected_duration_ms = request.control.maximum_runtime_ms;
     let cancellation = Arc::new(AtomicBool::new(false));
     {
         let mut jobs = state.fem_cancellations.lock().await;
@@ -248,11 +403,35 @@ pub async fn run_fem_study(
         jobs.insert(request.job_id.clone(), cancellation.clone());
     }
     let job_id = request.job_id.clone();
+    emit_ui_fem_long_task(
+        state.inner(),
+        &job_id,
+        &analysis_name,
+        "QUEUED",
+        Some("Native Tet4 study queued.".to_string()),
+        0,
+        10,
+        expected_duration_ms,
+        crate::contracts::AgentActivityState::Active,
+    );
     let jobs = state.fem_cancellations.clone();
     let worker_app = app.clone();
+    let worker_analysis_name = analysis_name.clone();
     let joined = tauri::async_runtime::spawn_blocking(move || {
         let job_id = request.job_id.clone();
         run_fem_study_with_resolver_subscribed(request, &worker_app, cancellation, |progress| {
+            let progress_current = fem_stage_progress(progress.stage);
+            emit_ui_fem_long_task(
+                worker_app.state::<AppState>().inner(),
+                &job_id,
+                &worker_analysis_name,
+                &format!("{:?}", progress.stage).to_ascii_uppercase(),
+                Some(progress.detail.clone()),
+                progress_current,
+                10,
+                expected_duration_ms,
+                crate::contracts::AgentActivityState::Active,
+            );
             let _ = worker_app.emit(
                 "fem-progress",
                 serde_json::json!({"jobId": job_id, "progress": progress}),
@@ -261,7 +440,33 @@ pub async fn run_fem_study(
     })
     .await;
     jobs.lock().await.remove(&job_id);
-    joined.map_err(|error| AppError::internal(format!("FEM job thread failed: {error}")))?
+    let outcome =
+        joined.map_err(|error| AppError::internal(format!("FEM job thread failed: {error}")))?;
+    match &outcome {
+        Ok(_) => emit_ui_fem_long_task(
+            state.inner(),
+            &job_id,
+            &analysis_name,
+            "DONE",
+            Some("Immutable FEM result published.".to_string()),
+            10,
+            10,
+            expected_duration_ms,
+            crate::contracts::AgentActivityState::Resolved,
+        ),
+        Err(error) => emit_ui_fem_long_task(
+            state.inner(),
+            &job_id,
+            &analysis_name,
+            "FAILED",
+            Some(error.to_string()),
+            0,
+            10,
+            expected_duration_ms,
+            crate::contracts::AgentActivityState::Failed,
+        ),
+    }
+    outcome
 }
 
 #[tauri::command]
@@ -320,6 +525,913 @@ pub async fn cancel_fem_study(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn run_fem_topology_optimization(
+    mut request: FemTopologyRunRequest,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<FemTopologyRunResponse> {
+    let compute = state.config.lock().unwrap().fem_compute.clone();
+    apply_fem_compute_policy(&compute, &mut request.study);
+    let runtime_policy = FemTopologyRuntimePolicy::from_compute(&compute);
+    let cancellation = Arc::new(AtomicBool::new(false));
+    {
+        let mut jobs = state.fem_cancellations.lock().await;
+        if jobs.contains_key(&request.study.job_id) {
+            return Err(AppError::conflict(format!(
+                "FEM job '{}' is already running.",
+                request.study.job_id
+            )));
+        }
+        jobs.insert(request.study.job_id.clone(), cancellation.clone());
+    }
+    let jobs = state.fem_cancellations.clone();
+    let job_id = request.study.job_id.clone();
+    let response = tauri::async_runtime::spawn_blocking(move || {
+        run_fem_topology_with_resolver(request, &runtime_policy, &app, cancellation.as_ref())
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("FEM topology worker failed: {error}")))?;
+    jobs.lock().await.remove(&job_id);
+    response
+}
+
+pub(crate) fn run_fem_topology_with_resolver(
+    request: FemTopologyRunRequest,
+    runtime_policy: &FemTopologyRuntimePolicy,
+    app: &dyn PathResolver,
+    cancellation: &AtomicBool,
+) -> AppResult<FemTopologyRunResponse> {
+    let resolved = resolve_request(&request.study, app)?;
+    let resolved_faces =
+        resolve_fem_face_tags(&resolved.manifest.tagged_anchors, &resolved.boundary)?;
+    let authored = authored_study_from_core(
+        &resolved.program,
+        &request.study.analysis_name,
+        &resolved_faces,
+        resolved.budgets.clone(),
+    )?;
+    let model_controls = authored.topology_controls.as_ref().ok_or_else(|| {
+        AppError::validation(format!(
+            "FEM topology analysis '{}' is missing topology-controls.",
+            request.study.analysis_name
+        ))
+    })?;
+    let (
+        material,
+        load_cases,
+        fixed_face_group_indices,
+        passive_solid_regions,
+        passive_void_regions,
+    ) = topology_inputs_from_authored_study(&authored, &resolved.boundary)?;
+    let mesh = preview_fem_mesh_with_resolver_and_subscription(
+        request.study.clone(),
+        app,
+        cancellation,
+        None,
+        |_| {},
+    )?;
+    run_fem_topology_artifact_with_resolver(
+        FemTopologyArtifactRunRequest {
+            job_id: request.study.job_id,
+            analysis_identity_digest: mesh.analysis_identity_digest,
+            mesh_content_digest: mesh.mesh_content_digest,
+            material,
+            load_cases,
+            fixed_face_group_indices,
+            passive_solid_regions,
+            passive_void_regions,
+            relative_solver_tolerance: request.study.control.relative_solver_tolerance,
+            controls: topology_controls_from_authored(model_controls, runtime_policy),
+            resume_state_digest: request.resume_state_digest,
+        },
+        app,
+        cancellation,
+    )
+}
+
+#[allow(dead_code)]
+pub(crate) fn reconstruct_fem_topology_with_resolver(
+    request: FemTopologyReconstructRequest,
+    app: &dyn PathResolver,
+    cancellation: &AtomicBool,
+) -> AppResult<FemTopologyReconstructResponse> {
+    if !request.density_threshold.is_finite() || !(0.0..=1.0).contains(&request.density_threshold) {
+        return Err(AppError::validation(
+            "FEM topology densityThreshold must be finite and within [0, 1].",
+        ));
+    }
+    let maximum_result_bytes = request.study.budgets.result_bytes;
+    let current_mesh = preview_fem_mesh_with_resolver_and_subscription(
+        request.study.clone(),
+        app,
+        cancellation,
+        None,
+        |_| {},
+    )?;
+    if current_mesh.analysis_identity_digest != request.analysis_identity_digest
+        || current_mesh.mesh_content_digest != request.mesh_content_digest
+    {
+        return Err(AppError::conflict(
+            "FEM topology reconstruction artifacts are stale for the current source, study, or mesh.",
+        ));
+    }
+    let mesh_asset = load_fem_mesh_asset(
+        app,
+        &request.analysis_identity_digest,
+        &request.mesh_content_digest,
+        maximum_result_bytes,
+    )?;
+    let mesh_data = decode_fem_topology_mesh(&mesh_asset)?;
+    let topology = load_fem_topology_artifact(
+        app,
+        &request.input_digest,
+        &request.state_digest,
+        maximum_result_bytes,
+    )?;
+    if topology.result.termination != FemTopologyTermination::Converged {
+        return Err(AppError::conflict(format!(
+            "FEM topology reconstruction requires converged density; termination was '{}'.",
+            topology_termination_name(topology.result.termination)
+        )));
+    }
+    if topology.result.densities.len() != mesh_data.mesh.cells.len() {
+        return Err(AppError::conflict(
+            "FEM topology density artifact does not match the bound Tet4 mesh.",
+        ));
+    }
+
+    let resolved = resolve_request(&request.study, app)?;
+    let resolved_faces =
+        resolve_fem_face_tags(&resolved.manifest.tagged_anchors, &resolved.boundary)?;
+    let authored = authored_study_from_core(
+        &resolved.program,
+        &request.study.analysis_name,
+        &resolved_faces,
+        resolved.budgets,
+    )?;
+    let anchors = topology_density_anchors(&authored, &resolved.boundary, &mesh_data)?;
+    let surface = reconstruct_density_surface(
+        &mesh_data.mesh,
+        &topology.result.densities,
+        &anchors,
+        &FemDensitySurfaceControls {
+            density_threshold: request.density_threshold,
+            smoothing_passes: 0,
+            maximum_smoothing_displacement_mm: 0.0,
+        },
+    )
+    .map_err(fem_topology_error)?;
+    let solid_expression =
+        crate::fem_topology_reconstruction::density_surface_solid_expression(&surface)?;
+
+    Ok(FemTopologyReconstructResponse {
+        analysis_identity_digest: request.analysis_identity_digest,
+        mesh_content_digest: request.mesh_content_digest,
+        input_digest: request.input_digest,
+        state_digest: request.state_digest,
+        result_digest: topology.result.result_digest,
+        solid_expression,
+        vertex_count: surface.vertices.len() as u64,
+        triangle_count: surface.triangles.len() as u64,
+        discarded_cell_count: surface.discarded_cell_indices.len() as u64,
+        discarded_active_volume_fraction: surface.discarded_active_volume_fraction,
+        connected_anchor_ids: surface.connected_anchor_ids,
+        signed_volume_mm3: surface.signed_volume_mm3,
+        closed_manifold: true,
+        exact_brep: false,
+        independently_verified: false,
+        scope_disclaimer: "Closed manifold solid expression only. Render through the faceted BRep bridge, preserve authored FEM tags, then independently remesh and solve before publication.".into(),
+    })
+}
+
+fn topology_density_anchors(
+    study: &crate::fem_engineering::FemAuthoredStudy,
+    boundary: &AnalysisBoundarySurface,
+    mesh: &crate::services::fem_artifacts::FemTopologyMeshData,
+) -> AppResult<Vec<FemDensityAnchor>> {
+    let mut anchors = Vec::new();
+    for constraint in &study.constraints {
+        let (name, faces) = match constraint {
+            FemConstraint::Fixed { name, faces, .. }
+            | FemConstraint::PrescribedDisplacement { name, faces, .. } => (name, faces),
+        };
+        let groups = topology_face_group_indices(boundary, faces)?;
+        anchors.push(FemDensityAnchor {
+            id: format!("support:{name}"),
+            cells: topology_boundary_cells(mesh, &groups)?,
+        });
+    }
+    for load in &study.loads {
+        let (name, faces) = match load {
+            FemLoad::SurfaceForce { name, faces, .. }
+            | FemLoad::Traction { name, faces, .. }
+            | FemLoad::Pressure { name, faces, .. } => (name, faces),
+        };
+        let groups = topology_face_group_indices(boundary, faces)?;
+        anchors.push(FemDensityAnchor {
+            id: format!("load:{name}"),
+            cells: topology_boundary_cells(mesh, &groups)?,
+        });
+    }
+    anchors.sort_by(|left, right| left.id.cmp(&right.id));
+    if anchors.is_empty() {
+        return Err(AppError::validation(
+            "FEM topology reconstruction requires at least one authored support or load anchor.",
+        ));
+    }
+    Ok(anchors)
+}
+
+fn topology_boundary_cells(
+    mesh: &crate::services::fem_artifacts::FemTopologyMeshData,
+    groups: &[u32],
+) -> AppResult<Vec<usize>> {
+    let groups =
+        validate_topology_groups(groups, mesh.face_group_count, "anchors.faceGroupIndices")?;
+    let mut owners = BTreeMap::<[u32; 3], Vec<usize>>::new();
+    for (cell_index, cell) in mesh.mesh.cells.iter().enumerate() {
+        for mut face in [
+            [cell[0], cell[1], cell[2]],
+            [cell[0], cell[1], cell[3]],
+            [cell[0], cell[2], cell[3]],
+            [cell[1], cell[2], cell[3]],
+        ] {
+            face.sort_unstable();
+            owners.entry(face).or_default().push(cell_index);
+        }
+    }
+    let mut cells = BTreeSet::new();
+    for (triangle, _group) in mesh
+        .boundary_triangles
+        .iter()
+        .zip(&mesh.boundary_face_group_indices)
+        .filter(|(_, group)| groups.contains(group))
+    {
+        let mut key = *triangle;
+        key.sort_unstable();
+        let owner = owners.get(&key).ok_or_else(|| {
+            AppError::validation("FEM topology anchor boundary triangle has no Tet4 owner.")
+        })?;
+        if owner.len() != 1 {
+            return Err(AppError::validation(
+                "FEM topology anchor boundary triangle must have exactly one Tet4 owner.",
+            ));
+        }
+        cells.insert(owner[0]);
+    }
+    if cells.is_empty() {
+        return Err(AppError::validation(
+            "FEM topology anchor face groups resolve no boundary Tet4 cells.",
+        ));
+    }
+    Ok(cells.into_iter().collect())
+}
+
+fn topology_controls_from_authored(
+    authored: &FemAuthoredTopologyControls,
+    runtime: &FemTopologyRuntimePolicy,
+) -> FemTopologyControlsDto {
+    FemTopologyControlsDto {
+        volume_fraction: authored.volume_fraction,
+        penalty: authored.penalty,
+        minimum_density: authored.minimum_density,
+        filter_radius_mm: authored.filter_radius_mm,
+        move_limit: authored.move_limit,
+        convergence_tolerance: authored.convergence_tolerance,
+        maximum_iterations: runtime.maximum_iterations,
+        maximum_new_iterations: runtime.maximum_new_iterations,
+        maximum_dimension: runtime.maximum_dimension,
+        maximum_elements: runtime.maximum_elements,
+        maximum_solve_count: 0,
+        maximum_working_memory_bytes: runtime.maximum_working_memory_bytes,
+        maximum_result_bytes: runtime.maximum_result_bytes,
+        maximum_wall_time_ms: runtime.maximum_wall_time_ms,
+    }
+}
+
+fn run_fem_topology_artifact_with_resolver(
+    request: FemTopologyArtifactRunRequest,
+    app: &dyn PathResolver,
+    cancellation: &AtomicBool,
+) -> AppResult<FemTopologyRunResponse> {
+    if request.job_id.trim().is_empty() {
+        return Err(AppError::validation(
+            "FEM topology jobId must not be empty.",
+        ));
+    }
+    let maximum_result_bytes = request.controls.maximum_result_bytes;
+    let mesh_asset = load_fem_mesh_asset(
+        app,
+        &request.analysis_identity_digest,
+        &request.mesh_content_digest,
+        maximum_result_bytes,
+    )?;
+    let mesh_data = decode_fem_topology_mesh(&mesh_asset)?;
+    let material = FemMaterial {
+        schema_version: FEM_SCHEMA_VERSION,
+        name: request.material.name.clone(),
+        young_modulus_mpa: request.material.young_modulus_mpa,
+        poisson_ratio: request.material.poisson_ratio,
+        density_kg_per_mm3: request.material.density_kg_per_mm3,
+        yield_strength_mpa: request.material.yield_strength_mpa,
+    };
+    let load_cases = topology_surface_loads(&mesh_data, &request.load_cases)?;
+    let constraints = topology_fixed_constraints(&mesh_data, &request.fixed_face_group_indices)?;
+    let passive_solid_cells =
+        topology_region_cells(&mesh_data, &request.passive_solid_regions, "passive-solid")?;
+    let passive_void_cells =
+        topology_region_cells(&mesh_data, &request.passive_void_regions, "passive-void")?;
+    let runtime_identity_digest = sha256_text(&format!(
+        "ecky-fem:{}:accelerate-sparse-system:tet4-simp-gcmma-normalized-objective-v9",
+        env!("CARGO_PKG_VERSION")
+    ));
+    let maximum_new_iterations = bounded_usize(
+        "maximumNewIterations",
+        request.controls.maximum_new_iterations,
+    )?;
+    let maximum_solve_count =
+        ecky_fem::topology_required_solve_capacity(maximum_new_iterations, load_cases.len());
+    let controls = FemTopologyControls {
+        volume_fraction: request.controls.volume_fraction,
+        penalty: request.controls.penalty,
+        minimum_density: request.controls.minimum_density,
+        filter_radius_mm: request.controls.filter_radius_mm,
+        move_limit: request.controls.move_limit,
+        convergence_tolerance: request.controls.convergence_tolerance,
+        relative_solver_tolerance: request.relative_solver_tolerance,
+        require_parallel_solver: true,
+        maximum_iterations: bounded_usize(
+            "maximumIterations",
+            request.controls.maximum_iterations,
+        )?,
+        maximum_dimension: bounded_usize("maximumDimension", request.controls.maximum_dimension)?,
+        maximum_elements: bounded_usize("maximumElements", request.controls.maximum_elements)?,
+        maximum_solve_count,
+        maximum_working_memory_bytes: bounded_usize(
+            "maximumWorkingMemoryBytes",
+            request.controls.maximum_working_memory_bytes,
+        )?,
+        maximum_result_bytes: bounded_usize(
+            "maximumResultBytes",
+            request.controls.maximum_result_bytes,
+        )?,
+        maximum_wall_time_ms: request.controls.maximum_wall_time_ms,
+        runtime_identity_digest,
+        passive_solid_cells,
+        passive_void_cells,
+    };
+    let initial = initialize_simp_state(
+        &mesh_data.mesh,
+        &material,
+        &load_cases,
+        &constraints,
+        &controls,
+    )
+    .map_err(fem_topology_error)?;
+    let mut state = if let Some(state_digest) = &request.resume_state_digest {
+        load_fem_topology_state(
+            app,
+            &initial.input_digest,
+            state_digest,
+            maximum_result_bytes,
+        )?
+        .state
+    } else {
+        initial
+    };
+    let mut gcmma_trace = Vec::new();
+    let checkpoint_error = std::cell::RefCell::new(None::<String>);
+    let termination = match advance_simp_state_traced_checkpointed(
+        &mesh_data.mesh,
+        &material,
+        &load_cases,
+        &constraints,
+        &controls,
+        &mut state,
+        maximum_new_iterations,
+        || cancellation.load(Ordering::Acquire) || checkpoint_error.borrow().is_some(),
+        |attempt| gcmma_trace.push(attempt),
+        |checkpoint| {
+            if checkpoint_error.borrow().is_some() {
+                return;
+            }
+            if let Err(error) =
+                publish_fem_topology_state_checkpoint(app, checkpoint, maximum_result_bytes)
+            {
+                *checkpoint_error.borrow_mut() = Some(error.to_string());
+            }
+        },
+    ) {
+        Ok(termination) => termination,
+        Err(error) => {
+            let artifact =
+                publish_fem_topology_state_checkpoint(app, &state, maximum_result_bytes)?;
+            return Err(AppError::validation(format!(
+                "FEM topology {}: {}; resumableStateDigest={}; checkpointPath={}",
+                error.field,
+                error.message,
+                state.state_digest,
+                artifact.checkpoint_path.to_string_lossy(),
+            )));
+        }
+    };
+    if let Some(error) = checkpoint_error.into_inner() {
+        return Err(AppError::persistence(format!(
+            "FEM topology iteration checkpoint failed: {error}"
+        )));
+    }
+    if matches!(
+        termination,
+        FemTopologyTermination::Cancelled | FemTopologyTermination::MaximumWallTime
+    ) {
+        let artifact = publish_fem_topology_state_checkpoint(app, &state, maximum_result_bytes)?;
+        return Ok(FemTopologyRunResponse {
+            job_id: request.job_id,
+            analysis_identity_digest: request.analysis_identity_digest,
+            mesh_content_digest: request.mesh_content_digest,
+            input_digest: state.input_digest,
+            state_digest: state.state_digest,
+            result_digest: None,
+            termination: topology_termination_name(termination).into(),
+            iteration_count: state.iterations.len() as u64,
+            initial_compliance: state.initial_compliance,
+            final_compliance: None,
+            final_volume_fraction: None,
+            passive_solid_volume_fraction: None,
+            passive_void_volume_fraction: None,
+            gcmma_trace_edn: format_gcmma_attempt_trace(&gcmma_trace),
+            checkpoint_path: artifact.checkpoint_path.to_string_lossy().into_owned(),
+            density_path: None,
+            preview_vtu_path: None,
+            exact_brep: false,
+            production_step: false,
+            engineering_accepted: false,
+            scope_disclaimer: "Topology run stopped at a safe boundary; resumable state only, no final analysis result.".into(),
+        });
+    }
+    let result = finalize_simp_state(
+        &mesh_data.mesh,
+        &material,
+        &load_cases,
+        &constraints,
+        &controls,
+        &state,
+        termination,
+    )
+    .map_err(fem_topology_error)?;
+    let artifact =
+        publish_fem_topology_artifact(app, &mesh_data.mesh, &state, &result, maximum_result_bytes)?;
+    Ok(FemTopologyRunResponse {
+        job_id: request.job_id,
+        analysis_identity_digest: request.analysis_identity_digest,
+        mesh_content_digest: request.mesh_content_digest,
+        input_digest: state.input_digest,
+        state_digest: state.state_digest,
+        result_digest: Some(result.result_digest),
+        termination: topology_termination_name(termination).into(),
+        iteration_count: result.iterations.len() as u64,
+        initial_compliance: Some(result.initial_compliance),
+        final_compliance: Some(result.final_compliance),
+        final_volume_fraction: Some(result.final_volume_fraction),
+        passive_solid_volume_fraction: Some(result.passive_solid_volume_fraction),
+        passive_void_volume_fraction: Some(result.passive_void_volume_fraction),
+        gcmma_trace_edn: format_gcmma_attempt_trace(&gcmma_trace),
+        checkpoint_path: artifact.checkpoint_path.to_string_lossy().into_owned(),
+        density_path: Some(artifact.density_path.to_string_lossy().into_owned()),
+        preview_vtu_path: Some(artifact.preview_vtu_path.to_string_lossy().into_owned()),
+        exact_brep: false,
+        production_step: false,
+        engineering_accepted: false,
+        scope_disclaimer: "Compliance topology evidence only; independent reconstructed-geometry FEM remains required.".into(),
+    })
+}
+
+fn topology_inputs_from_authored_study(
+    study: &crate::fem_engineering::FemAuthoredStudy,
+    boundary: &AnalysisBoundarySurface,
+) -> AppResult<(
+    FemTopologyMaterialDto,
+    Vec<FemTopologySurfaceLoadDto>,
+    Vec<u32>,
+    Vec<FemTopologyFaceRegion>,
+    Vec<FemTopologyFaceRegion>,
+)> {
+    let material = FemTopologyMaterialDto {
+        name: study.material.name.clone(),
+        young_modulus_mpa: study.material.young_modulus_mpa,
+        poisson_ratio: study.material.poisson_ratio,
+        density_kg_per_mm3: study.material.density_kg_per_mm3,
+        yield_strength_mpa: study.material.yield_strength_mpa,
+    };
+    let load_cases = study
+        .loads
+        .iter()
+        .map(|load| match load {
+            FemLoad::SurfaceForce {
+                name,
+                faces,
+                total_force_n,
+                ..
+            } => Ok(FemTopologySurfaceLoadDto {
+                id: name.clone(),
+                weight: 1.0,
+                face_group_indices: topology_face_group_indices(boundary, faces)?,
+                total_force_n: [total_force_n.x_n, total_force_n.y_n, total_force_n.z_n],
+            }),
+            FemLoad::Traction { name, .. } | FemLoad::Pressure { name, .. } => {
+                Err(AppError::validation(format!(
+                    "FEM topology authored load '{name}' must be surface-force in this slice."
+                )))
+            }
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    let mut fixed_face_group_indices = Vec::new();
+    for constraint in &study.constraints {
+        match constraint {
+            FemConstraint::Fixed { faces, .. } => {
+                fixed_face_group_indices.extend(topology_face_group_indices(boundary, faces)?);
+            }
+            FemConstraint::PrescribedDisplacement { name, .. } => {
+                return Err(AppError::validation(format!(
+                    "FEM topology authored constraint '{name}' must be fixed in this slice."
+                )));
+            }
+        }
+    }
+    fixed_face_group_indices.sort_unstable();
+    fixed_face_group_indices.dedup();
+    if load_cases.is_empty() || fixed_face_group_indices.is_empty() {
+        return Err(AppError::validation(
+            "FEM topology authored study requires at least one surface-force and one fixed support.",
+        ));
+    }
+    let map_regions = |regions: &[crate::fem_engineering::FemAuthoredTopologyRegion]| {
+        regions
+            .iter()
+            .map(|region| {
+                Ok(FemTopologyFaceRegion {
+                    face_group_indices: topology_face_group_indices(boundary, &region.faces)?,
+                    depth_mm: region.depth_mm,
+                })
+            })
+            .collect::<AppResult<Vec<_>>>()
+    };
+    Ok((
+        material,
+        load_cases,
+        fixed_face_group_indices,
+        map_regions(&study.passive_solid_regions)?,
+        map_regions(&study.passive_void_regions)?,
+    ))
+}
+
+fn topology_face_group_indices(
+    boundary: &AnalysisBoundarySurface,
+    faces: &[ecky_fem::FemFaceTarget],
+) -> AppResult<Vec<u32>> {
+    let mut indices = Vec::new();
+    for face in faces {
+        let matches = boundary
+            .face_groups
+            .iter()
+            .enumerate()
+            .filter(|(_, group)| {
+                group.part_id == face.part_id
+                    && group.canonical_target_id == face.canonical_target_id
+                    && group.durable_target_id.as_deref() == Some(face.durable_target_id.as_str())
+            })
+            .map(|(index, _)| index as u32)
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [index] => indices.push(*index),
+            _ => {
+                return Err(AppError::validation(format!(
+                    "FEM topology face target '{}' resolved to {} boundary groups; expected one.",
+                    face.canonical_target_id,
+                    matches.len()
+                )));
+            }
+        }
+    }
+    indices.sort_unstable();
+    indices.dedup();
+    Ok(indices)
+}
+
+fn topology_region_cells(
+    mesh: &crate::services::fem_artifacts::FemTopologyMeshData,
+    regions: &[FemTopologyFaceRegion],
+    label: &str,
+) -> AppResult<Vec<usize>> {
+    let mut selected = BTreeSet::new();
+    for region in regions {
+        if !region.depth_mm.is_finite() || region.depth_mm <= 0.0 {
+            return Err(AppError::validation(format!(
+                "FEM topology {label} depth must be finite and positive."
+            )));
+        }
+        let groups = validate_topology_groups(
+            &region.face_group_indices,
+            mesh.face_group_count,
+            &format!("{label}.faceGroupIndices"),
+        )?;
+        let triangles = mesh
+            .boundary_triangles
+            .iter()
+            .zip(&mesh.boundary_face_group_indices)
+            .filter(|(_, group)| groups.contains(group))
+            .map(|(triangle, _)| triangle.map(|index| point_array(mesh.mesh.nodes[index as usize])))
+            .collect::<Vec<_>>();
+        if triangles.is_empty() {
+            return Err(AppError::validation(format!(
+                "FEM topology {label} region resolves no boundary triangles."
+            )));
+        }
+        let centroids = mesh
+            .mesh
+            .cells
+            .iter()
+            .map(|cell| tet_centroid(cell.map(|index| mesh.mesh.nodes[index as usize])))
+            .collect::<Vec<_>>();
+        for cell_index in indexed_points_near_triangles(&centroids, &triangles, region.depth_mm) {
+            selected.insert(cell_index);
+        }
+    }
+    Ok(selected.into_iter().collect())
+}
+
+fn indexed_points_near_triangles(
+    points: &[[f64; 3]],
+    triangles: &[[[f64; 3]; 3]],
+    distance: f64,
+) -> Vec<usize> {
+    let cell_of = |coordinate: f64| (coordinate / distance).floor() as i64;
+    let mut triangle_grid = HashMap::<(i64, i64, i64), Vec<usize>>::new();
+    for (triangle_index, triangle) in triangles.iter().enumerate() {
+        let mut minimum = [f64::INFINITY; 3];
+        let mut maximum = [f64::NEG_INFINITY; 3];
+        for vertex in triangle {
+            for axis in 0..3 {
+                minimum[axis] = minimum[axis].min(vertex[axis]);
+                maximum[axis] = maximum[axis].max(vertex[axis]);
+            }
+        }
+        let lower = minimum.map(|value| cell_of(value - distance));
+        let upper = maximum.map(|value| cell_of(value + distance));
+        for x in lower[0]..=upper[0] {
+            for y in lower[1]..=upper[1] {
+                for z in lower[2]..=upper[2] {
+                    triangle_grid
+                        .entry((x, y, z))
+                        .or_default()
+                        .push(triangle_index);
+                }
+            }
+        }
+    }
+    let maximum_distance_squared = distance * distance;
+    points
+        .iter()
+        .enumerate()
+        .filter_map(|(point_index, point)| {
+            triangle_grid
+                .get(&(cell_of(point[0]), cell_of(point[1]), cell_of(point[2])))
+                .is_some_and(|candidates| {
+                    candidates.iter().any(|triangle_index| {
+                        point_triangle_distance_squared(*point, triangles[*triangle_index])
+                            <= maximum_distance_squared
+                    })
+                })
+                .then_some(point_index)
+        })
+        .collect()
+}
+
+fn point_array(point: ecky_fem::FemPoint3) -> [f64; 3] {
+    [point.x_mm, point.y_mm, point.z_mm]
+}
+
+fn tet_centroid(points: [ecky_fem::FemPoint3; 4]) -> [f64; 3] {
+    let mut centroid = [0.0; 3];
+    for point in points {
+        centroid[0] += point.x_mm * 0.25;
+        centroid[1] += point.y_mm * 0.25;
+        centroid[2] += point.z_mm * 0.25;
+    }
+    centroid
+}
+
+fn point_triangle_distance_squared(point: [f64; 3], triangle: [[f64; 3]; 3]) -> f64 {
+    let [a, b, c] = triangle;
+    let ab = sub3(b, a);
+    let ac = sub3(c, a);
+    let ap = sub3(point, a);
+    let d1 = dot3(ab, ap);
+    let d2 = dot3(ac, ap);
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return dot3(ap, ap);
+    }
+    let bp = sub3(point, b);
+    let d3 = dot3(ab, bp);
+    let d4 = dot3(ac, bp);
+    if d3 >= 0.0 && d4 <= d3 {
+        return dot3(bp, bp);
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        let projection = add3(a, scale3(ab, d1 / (d1 - d3)));
+        let delta = sub3(point, projection);
+        return dot3(delta, delta);
+    }
+    let cp = sub3(point, c);
+    let d5 = dot3(ab, cp);
+    let d6 = dot3(ac, cp);
+    if d6 >= 0.0 && d5 <= d6 {
+        return dot3(cp, cp);
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        let projection = add3(a, scale3(ac, d2 / (d2 - d6)));
+        let delta = sub3(point, projection);
+        return dot3(delta, delta);
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        let bc = sub3(c, b);
+        let projection = add3(b, scale3(bc, (d4 - d3) / ((d4 - d3) + (d5 - d6))));
+        let delta = sub3(point, projection);
+        return dot3(delta, delta);
+    }
+    let denominator = 1.0 / (va + vb + vc);
+    let projection = add3(
+        a,
+        add3(scale3(ab, vb * denominator), scale3(ac, vc * denominator)),
+    );
+    let delta = sub3(point, projection);
+    dot3(delta, delta)
+}
+
+fn sub3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn add3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+fn scale3(a: [f64; 3], factor: f64) -> [f64; 3] {
+    [a[0] * factor, a[1] * factor, a[2] * factor]
+}
+
+fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn topology_surface_loads(
+    mesh: &crate::services::fem_artifacts::FemTopologyMeshData,
+    loads: &[crate::contracts::FemTopologySurfaceLoadDto],
+) -> AppResult<Vec<FemTopologyLoadCase>> {
+    if loads.is_empty() {
+        return Err(AppError::validation(
+            "FEM topology loadCases must not be empty.",
+        ));
+    }
+    loads
+        .iter()
+        .map(|load| {
+            let groups = validate_topology_groups(
+                &load.face_group_indices,
+                mesh.face_group_count,
+                "loadCases.faceGroupIndices",
+            )?;
+            let mut nodal_weights = BTreeMap::<usize, f64>::new();
+            for (triangle, group) in mesh
+                .boundary_triangles
+                .iter()
+                .zip(&mesh.boundary_face_group_indices)
+            {
+                if !groups.contains(group) {
+                    continue;
+                }
+                let points = triangle.map(|index| mesh.mesh.nodes[index as usize]);
+                let area = triangle_area(points);
+                for node in triangle {
+                    *nodal_weights.entry(*node as usize).or_default() += area / 3.0;
+                }
+            }
+            let total_weight = nodal_weights.values().sum::<f64>();
+            if !total_weight.is_finite() || total_weight <= 0.0 {
+                return Err(AppError::validation(format!(
+                    "FEM topology load '{}' resolves no positive-area boundary triangles.",
+                    load.id
+                )));
+            }
+            let mut rhs_n = vec![0.0; mesh.mesh.nodes.len() * 3];
+            for (node, weight) in nodal_weights {
+                for axis in 0..3 {
+                    rhs_n[node * 3 + axis] += load.total_force_n[axis] * weight / total_weight;
+                }
+            }
+            Ok(FemTopologyLoadCase {
+                id: load.id.clone(),
+                weight: load.weight,
+                rhs_n,
+            })
+        })
+        .collect()
+}
+
+fn topology_fixed_constraints(
+    mesh: &crate::services::fem_artifacts::FemTopologyMeshData,
+    groups: &[u32],
+) -> AppResult<Vec<ecky_fem::FemDirichletConstraint>> {
+    let groups = validate_topology_groups(groups, mesh.face_group_count, "fixedFaceGroupIndices")?;
+    let nodes = mesh
+        .boundary_triangles
+        .iter()
+        .zip(&mesh.boundary_face_group_indices)
+        .filter(|(_, group)| groups.contains(group))
+        .flat_map(|(triangle, _)| triangle.iter().copied())
+        .collect::<BTreeSet<_>>();
+    if nodes.is_empty() {
+        return Err(AppError::validation(
+            "FEM topology fixed face groups resolve no boundary nodes.",
+        ));
+    }
+    Ok(nodes
+        .into_iter()
+        .flat_map(|node| {
+            (0..3).map(move |axis| ecky_fem::FemDirichletConstraint {
+                dof_index: node as usize * 3 + axis,
+                value_mm: 0.0,
+            })
+        })
+        .collect())
+}
+
+fn validate_topology_groups(
+    groups: &[u32],
+    group_count: u32,
+    field: &str,
+) -> AppResult<BTreeSet<u32>> {
+    let unique = groups.iter().copied().collect::<BTreeSet<_>>();
+    if unique.is_empty()
+        || unique.len() != groups.len()
+        || unique.iter().any(|value| *value >= group_count)
+    {
+        return Err(AppError::validation(format!(
+            "FEM topology {field} must contain unique in-range groups."
+        )));
+    }
+    Ok(unique)
+}
+
+fn triangle_area(points: [ecky_fem::FemPoint3; 3]) -> f64 {
+    let a = [
+        points[1].x_mm - points[0].x_mm,
+        points[1].y_mm - points[0].y_mm,
+        points[1].z_mm - points[0].z_mm,
+    ];
+    let b = [
+        points[2].x_mm - points[0].x_mm,
+        points[2].y_mm - points[0].y_mm,
+        points[2].z_mm - points[0].z_mm,
+    ];
+    let cross = [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ];
+    0.5 * cross.iter().map(|value| value * value).sum::<f64>().sqrt()
+}
+
+fn bounded_usize(field: &str, value: u64) -> AppResult<usize> {
+    usize::try_from(value)
+        .map_err(|_| AppError::validation(format!("FEM topology {field} exceeds platform bounds.")))
+}
+
+fn fem_topology_error(error: ecky_fem::FemValidationError) -> AppError {
+    AppError::validation(format!("FEM topology {}: {}", error.field, error.message))
+}
+
+fn topology_termination_name(value: FemTopologyTermination) -> &'static str {
+    match value {
+        FemTopologyTermination::Paused => "paused",
+        FemTopologyTermination::Cancelled => "cancelled",
+        FemTopologyTermination::Converged => "converged",
+        FemTopologyTermination::MaximumIterations => "maximumIterations",
+        FemTopologyTermination::MaximumWallTime => "maximumWallTime",
+    }
+}
+
+fn sha256_text(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn run_fem_convergence(
     request: FemConvergenceRequest,
     app: AppHandle,
@@ -327,6 +1439,14 @@ pub async fn run_fem_convergence(
 ) -> AppResult<FemConvergenceResponse> {
     validate_convergence_request(&request)?;
     let job_id = request.study.job_id.clone();
+    let analysis_name = request.study.analysis_name.clone();
+    let level_count = request.mesh_sizes_mm.len() as u64;
+    let progress_total = level_count.saturating_mul(10).max(1);
+    let expected_duration_ms = request
+        .study
+        .control
+        .maximum_runtime_ms
+        .saturating_mul(level_count.max(1));
     let cancellation = Arc::new(AtomicBool::new(false));
     {
         let mut jobs = state.fem_cancellations.lock().await;
@@ -337,11 +1457,47 @@ pub async fn run_fem_convergence(
         }
         jobs.insert(job_id.clone(), cancellation.clone());
     }
+    emit_ui_fem_long_task(
+        state.inner(),
+        &job_id,
+        &analysis_name,
+        "CONVERGENCE",
+        Some(format!("{level_count} mesh refinement levels queued.")),
+        0,
+        progress_total,
+        expected_duration_ms,
+        crate::contracts::AgentActivityState::Active,
+    );
     let jobs = state.fem_cancellations.clone();
     let worker_app = app.clone();
     let event_job_id = job_id.clone();
+    let worker_analysis_name = analysis_name.clone();
+    let completed_stages = Arc::new(AtomicU64::new(0));
+    let worker_completed_stages = completed_stages.clone();
     let joined = tauri::async_runtime::spawn_blocking(move || {
         run_fem_convergence_with_resolver(request, &worker_app, cancellation.as_ref(), |progress| {
+            let stage_progress = fem_stage_progress(progress.stage);
+            let previous = worker_completed_stages.load(Ordering::Acquire);
+            let level_base = previous / 10 * 10;
+            let candidate = level_base + stage_progress;
+            let progress_current = if candidate <= previous {
+                previous.saturating_add(stage_progress)
+            } else {
+                candidate
+            }
+            .min(progress_total);
+            worker_completed_stages.store(progress_current, Ordering::Release);
+            emit_ui_fem_long_task(
+                worker_app.state::<AppState>().inner(),
+                &event_job_id,
+                &worker_analysis_name,
+                "CONVERGENCE",
+                Some(progress.detail.clone()),
+                progress_current,
+                progress_total,
+                expected_duration_ms,
+                crate::contracts::AgentActivityState::Active,
+            );
             let _ = worker_app.emit(
                 "fem-progress",
                 serde_json::json!({"jobId": event_job_id, "progress": progress}),
@@ -350,7 +1506,50 @@ pub async fn run_fem_convergence(
     })
     .await;
     jobs.lock().await.remove(&job_id);
-    joined.map_err(|error| AppError::internal(format!("FEM convergence thread failed: {error}")))?
+    let outcome = joined
+        .map_err(|error| AppError::internal(format!("FEM convergence thread failed: {error}")))?;
+    match &outcome {
+        Ok(_) => emit_ui_fem_long_task(
+            state.inner(),
+            &job_id,
+            &analysis_name,
+            "DONE",
+            Some("Convergence evidence published.".to_string()),
+            progress_total,
+            progress_total,
+            expected_duration_ms,
+            crate::contracts::AgentActivityState::Resolved,
+        ),
+        Err(error) => emit_ui_fem_long_task(
+            state.inner(),
+            &job_id,
+            &analysis_name,
+            "FAILED",
+            Some(error.to_string()),
+            completed_stages.load(Ordering::Acquire),
+            progress_total,
+            expected_duration_ms,
+            crate::contracts::AgentActivityState::Failed,
+        ),
+    }
+    outcome
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_cached_fem_convergence(
+    request: FemConvergenceRequest,
+    app: AppHandle,
+) -> AppResult<Option<FemConvergenceResponse>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        get_cached_fem_convergence_with_resolver(request, &app)
+    })
+    .await
+    .map_err(|error| {
+        AppError::internal(format!(
+            "FEM convergence cache lookup thread failed: {error}"
+        ))
+    })?
 }
 
 #[tauri::command]
@@ -485,14 +1684,7 @@ where
 {
     let started = Instant::now();
     let resolved = resolve_request(&request, app)?;
-    let runtime_root = crate::runtime_capabilities::resolve_ftetwild_runtime_root(app)?;
-    let runtime = probe_ftetwild_runtime(
-        runtime_root,
-        &FTetWildRuntimeRequirement {
-            runtime_version: FTETWILD_RUNTIME_VERSION.to_string(),
-            source_revision: FTETWILD_SOURCE_REVISION.to_string(),
-        },
-    )?;
+    let runtime = probe_system_exact_brep_mesher_runtime()?;
     let request_digest = fem_request_cache_digest(&request, &resolved, &runtime, None)?;
     let singleflight = fem_singleflight_job(&format!("mesh:{request_digest}"))?;
     let subscription = subscriber_cancellation
@@ -533,7 +1725,7 @@ where
                 .find(|array| array.name == "tet4Cells")
                 .and_then(|array| array.shape.first())
                 .copied(),
-            detail: "Loaded exact immutable FEM mesh cache; fTetWild skipped.".to_string(),
+            detail: "Loaded exact immutable FEM mesh cache; Gmsh HXT skipped.".to_string(),
             cancellation_boundary: true,
         });
         return subscriber_result(
@@ -560,6 +1752,7 @@ where
         &request.analysis_name,
         &resolved.manifest.tagged_anchors,
         &resolved.boundary,
+        &resolved.step_path,
         resolved.budgets,
         &runtime,
         &scratch,
@@ -626,14 +1819,7 @@ where
 {
     let started = Instant::now();
     let resolved = resolve_request(&request, app)?;
-    let runtime_root = crate::runtime_capabilities::resolve_ftetwild_runtime_root(app)?;
-    let runtime = probe_ftetwild_runtime(
-        runtime_root,
-        &FTetWildRuntimeRequirement {
-            runtime_version: FTETWILD_RUNTIME_VERSION.to_string(),
-            source_revision: FTETWILD_SOURCE_REVISION.to_string(),
-        },
-    )?;
+    let runtime = probe_system_exact_brep_mesher_runtime()?;
     let request_digest =
         fem_request_cache_digest(&request, &resolved, &runtime, mesh_size_override_mm)?;
     let singleflight = fem_singleflight_job(&request_digest)?;
@@ -701,6 +1887,7 @@ where
         &request.analysis_name,
         &resolved.manifest.tagged_anchors,
         &resolved.boundary,
+        &resolved.step_path,
         resolved.budgets,
         &runtime,
         &scratch,
@@ -748,13 +1935,15 @@ fn subscriber_result<T>(value: T, cancellation: &AtomicBool, analysis_name: &str
 fn fem_request_cache_digest(
     request: &FemStudyRequest,
     resolved: &ResolvedFemRequest,
-    runtime: &crate::fem_mesher::FTetWildRuntimeIdentity,
+    runtime: &ExactBrepMesherRuntime,
     mesh_size_override_mm: Option<f64>,
 ) -> AppResult<String> {
+    let step_sha256 = sha256_file(&resolved.step_path)?;
     fem_request_cache_digest_components(
         request,
         &resolved.boundary.content_digest,
         &resolved.boundary.source_geometry_digest,
+        &step_sha256,
         &resolved.manifest.tagged_anchors,
         runtime,
         mesh_size_override_mm,
@@ -765,8 +1954,9 @@ fn fem_request_cache_digest_components<T: Serialize>(
     request: &FemStudyRequest,
     boundary_digest: &str,
     source_geometry_digest: &str,
+    step_sha256: &str,
     tagged_anchors: &T,
-    runtime: &crate::fem_mesher::FTetWildRuntimeIdentity,
+    runtime: &ExactBrepMesherRuntime,
     mesh_size_override_mm: Option<f64>,
 ) -> AppResult<String> {
     let value = serde_json::json!({
@@ -776,23 +1966,21 @@ fn fem_request_cache_digest_components<T: Serialize>(
         "analysisName": request.analysis_name,
         "boundaryDigest": boundary_digest,
         "sourceGeometryDigest": source_geometry_digest,
+        "stepSha256": step_sha256,
         "taggedAnchors": tagged_anchors,
         "budgets": request.budgets,
         "control": request.control,
         "meshSizeOverrideMm": mesh_size_override_mm,
         "runtime": {
-            "runtimeName": runtime.runtime_name,
-            "runtimeVersion": runtime.runtime_version,
-            "sourceRevision": runtime.source_revision,
-            "platform": runtime.platform,
-            "arch": runtime.arch,
-            "workerProtocol": runtime.worker_protocol,
-            "executableSha256": runtime.executable_sha256,
-            "sourceSha256": runtime.source_sha256,
-            "licenseSha256": runtime.license_sha256,
-            "noticeSha256": runtime.notice_sha256,
-            "transitiveLicenseInventorySha256": runtime.transitive_license_inventory_sha256,
-            "capabilities": runtime.capabilities,
+            "runtimeName": "exact-BRep HXT plus Netgen fallback",
+            "runtimeVersion": runtime.gmsh.version,
+            "platform": runtime.gmsh.platform,
+            "arch": runtime.gmsh.architecture,
+            "adapterProtocolVersion": 1,
+            "executableSha256": runtime.gmsh.executable_sha256,
+            "netgenVersion": runtime.netgen.as_ref().map(|value| &value.version),
+            "netgenRuntimeDigest": runtime.netgen.as_ref().map(|value| &value.runtime_digest),
+            "distributionBoundary": "external-not-redistributed",
         }
     });
     let bytes = serde_json::to_vec(&value).map_err(|error| {
@@ -849,7 +2037,7 @@ fn load_fem_request_cache(
             "FEM request cache entry exceeds 16 KiB.",
         ));
     }
-    let entry: FemRequestCacheEntry = serde_json::from_slice(&bytes).map_err(|error| {
+    let entry: FemRequestCacheEntry = crate::strict_edn::from_slice(&bytes).map_err(|error| {
         AppError::validation(format!(
             "FEM request cache '{}' is invalid: {error}",
             path.display()
@@ -889,12 +2077,13 @@ fn load_fem_mesh_request_cache(
             "FEM mesh request cache entry exceeds 16 KiB.",
         ));
     }
-    let entry: FemMeshRequestCacheEntry = serde_json::from_slice(&bytes).map_err(|error| {
-        AppError::validation(format!(
-            "FEM mesh request cache '{}' is invalid: {error}",
-            path.display()
-        ))
-    })?;
+    let entry: FemMeshRequestCacheEntry =
+        crate::strict_edn::from_slice(&bytes).map_err(|error| {
+            AppError::validation(format!(
+                "FEM mesh request cache '{}' is invalid: {error}",
+                path.display()
+            ))
+        })?;
     if entry.schema_version != FEM_REQUEST_CACHE_SCHEMA_VERSION
         || entry.request_digest != request_digest
     {
@@ -924,7 +2113,7 @@ fn store_fem_request_cache(
             parent.display()
         ))
     })?;
-    let bytes = serde_json::to_vec_pretty(&FemRequestCacheEntry {
+    let bytes = crate::strict_edn::to_vec(&FemRequestCacheEntry {
         schema_version: FEM_REQUEST_CACHE_SCHEMA_VERSION,
         request_digest: request_digest.to_string(),
         analysis_identity_digest: asset.analysis_identity_digest.clone(),
@@ -965,7 +2154,7 @@ fn store_fem_mesh_request_cache(
     request_digest: &str,
     asset: &FemMeshAsset,
 ) -> AppResult<()> {
-    let bytes = serde_json::to_vec_pretty(&FemMeshRequestCacheEntry {
+    let bytes = crate::strict_edn::to_vec(&FemMeshRequestCacheEntry {
         schema_version: FEM_REQUEST_CACHE_SCHEMA_VERSION,
         request_digest: request_digest.to_string(),
         analysis_identity_digest: asset.analysis_identity_digest.clone(),
@@ -992,7 +2181,7 @@ fn fem_cache_path(app: &dyn PathResolver, root: &str, request_digest: &str) -> A
             "FEM request cache identity must contain 64 hexadecimal characters.",
         ));
     }
-    Ok(app.app_data_dir().join(root).join(format!("{hex}.json")))
+    Ok(app.app_data_dir().join(root).join(format!("{hex}.edn")))
 }
 
 fn store_fem_cache_bytes(
@@ -1049,7 +2238,7 @@ fn prune_fem_cache_directory(
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            if path.extension().and_then(|value| value.to_str()) != Some("edn") {
                 return None;
             }
             let metadata = entry.metadata().ok()?;
@@ -1088,7 +2277,8 @@ where
     F: FnMut(FemProgressEvent),
 {
     validate_convergence_request(&request)?;
-    run_fem_convergence_sequence(request, cancellation, |study, mesh_size_mm| {
+    let request_digest = fem_convergence_cache_digest(&request)?;
+    let response = run_fem_convergence_sequence(request, cancellation, |study, mesh_size_mm| {
         run_fem_study_with_resolver_and_mesh_size(
             study,
             app,
@@ -1096,7 +2286,113 @@ where
             Some(mesh_size_mm),
             &mut progress,
         )
+    })?;
+    store_fem_convergence_cache(app, &request_digest, &response)?;
+    Ok(response)
+}
+
+pub(crate) fn get_cached_fem_convergence_with_resolver(
+    request: FemConvergenceRequest,
+    app: &dyn PathResolver,
+) -> AppResult<Option<FemConvergenceResponse>> {
+    validate_convergence_request(&request)?;
+    let request_digest = fem_convergence_cache_digest(&request)?;
+    if let Some(response) = load_fem_convergence_cache(app, &request_digest)? {
+        return Ok(Some(response));
+    }
+
+    let runtime = probe_system_exact_brep_mesher_runtime()?;
+    let resolved = resolve_request(&request.study, app)?;
+    let mut cached_levels = Vec::with_capacity(request.mesh_sizes_mm.len());
+    for (index, mesh_size_mm) in request.mesh_sizes_mm.iter().copied().enumerate() {
+        let mut study = request.study.clone();
+        study.job_id = format!("{}-cache-level-{}", request.study.job_id, index + 1);
+        let level_digest =
+            fem_request_cache_digest(&study, &resolved, &runtime, Some(mesh_size_mm))?;
+        let Some(asset) = load_fem_request_cache(app, &level_digest, study.budgets.result_bytes)?
+        else {
+            return Ok(None);
+        };
+        cached_levels.push(result_response(&study, asset));
+    }
+
+    let mut cached_levels = cached_levels.into_iter();
+    run_fem_convergence_sequence(request, &AtomicBool::new(false), |_study, _mesh_size_mm| {
+        cached_levels.next().ok_or_else(|| {
+            AppError::internal("FEM convergence cache level sequence ended unexpectedly.")
+        })
     })
+    .map(Some)
+}
+
+fn fem_convergence_cache_digest(request: &FemConvergenceRequest) -> AppResult<String> {
+    let mut identity = request.clone();
+    identity.study.job_id.clear();
+    identity.study.source =
+        crate::services::render_snapshot::canonical_source_digest(&identity.study.source);
+    let bytes = crate::strict_edn::to_vec(&identity).map_err(|error| {
+        AppError::internal(format!(
+            "FEM convergence cache identity serialization failed: {error}"
+        ))
+    })?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+}
+
+fn load_fem_convergence_cache(
+    app: &dyn PathResolver,
+    request_digest: &str,
+) -> AppResult<Option<FemConvergenceResponse>> {
+    let path = fem_cache_path(app, FEM_CONVERGENCE_CACHE_ROOT, request_digest)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path).map_err(|error| {
+        AppError::persistence(format!(
+            "FEM convergence cache '{}' read failed: {error}",
+            path.display()
+        ))
+    })?;
+    if bytes.len() as u64 > FEM_REQUEST_CACHE_BYTE_LIMIT {
+        return Err(AppError::validation(
+            "FEM convergence cache entry exceeds 2 MiB.",
+        ));
+    }
+    let entry: FemConvergenceCacheEntry =
+        crate::strict_edn::from_slice(&bytes).map_err(|error| {
+            AppError::validation(format!(
+                "FEM convergence cache '{}' is invalid: {error}",
+                path.display()
+            ))
+        })?;
+    if entry.schema_version != 1 || entry.request_digest != request_digest {
+        return Err(AppError::conflict(
+            "FEM convergence cache identity is stale.",
+        ));
+    }
+    Ok(Some(entry.response))
+}
+
+fn store_fem_convergence_cache(
+    app: &dyn PathResolver,
+    request_digest: &str,
+    response: &FemConvergenceResponse,
+) -> AppResult<()> {
+    let bytes = crate::strict_edn::to_vec(&FemConvergenceCacheEntry {
+        schema_version: 1,
+        request_digest: request_digest.to_string(),
+        response: response.clone(),
+    })
+    .map_err(|error| {
+        AppError::internal(format!(
+            "FEM convergence cache serialization failed: {error}"
+        ))
+    })?;
+    if bytes.len() as u64 > FEM_REQUEST_CACHE_BYTE_LIMIT {
+        return Err(AppError::validation(
+            "FEM convergence cache entry exceeds 2 MiB.",
+        ));
+    }
+    store_fem_cache_bytes(app, FEM_CONVERGENCE_CACHE_ROOT, request_digest, &bytes)
 }
 
 fn run_fem_convergence_sequence<R>(
@@ -1416,6 +2712,13 @@ fn resolve_request(
         }
     };
     let bundle_dir = crate::model_runtime::runtime_bundle_dir(app, &request.model_id)?;
+    let step_path = bundle_dir.join("model.step");
+    if !step_path.is_file() {
+        return Err(AppError::validation(format!(
+            "Exact-BRep FEM requires generated STEP '{}'.",
+            step_path.display()
+        )));
+    }
     let boundary = load_direct_occt_analysis_boundary_surface(&bundle_dir, &analysis.part)?;
     let budgets = FemBudgetLimits {
         schema_version: FEM_SCHEMA_VERSION,
@@ -1435,15 +2738,29 @@ fn resolve_request(
         minimum_scaled_jacobian: request.control.minimum_scaled_jacobian,
         maximum_runtime_ms: request.control.maximum_runtime_ms,
         relative_solver_tolerance: request.control.relative_solver_tolerance,
+        thread_count: resolved_fem_thread_count(request.control.thread_count),
     };
     control.validate()?;
     Ok(ResolvedFemRequest {
         program,
         boundary,
+        step_path,
         manifest,
         budgets,
         control,
     })
+}
+
+fn resolved_fem_thread_count(requested: u32) -> u32 {
+    let available = std::thread::available_parallelism()
+        .map(|count| count.get() as u32)
+        .unwrap_or(1)
+        .clamp(1, 64);
+    if requested == 0 {
+        available
+    } else {
+        requested.clamp(1, available)
+    }
 }
 
 fn result_response(request: &FemStudyRequest, asset: FemResultAsset) -> FemRunResponse {
@@ -2048,6 +3365,106 @@ mod tests {
     }
 
     #[test]
+    fn indexed_region_selection_matches_exhaustive_triangle_distance() {
+        let triangles = vec![
+            [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]],
+            [[4.0, 4.0, 1.0], [7.0, 4.0, 1.0], [4.0, 7.0, 1.0]],
+            [[-3.0, -2.0, -1.0], [-1.0, -2.0, 2.0], [-2.0, 1.0, 0.0]],
+        ];
+        let points = (-8..=16)
+            .flat_map(|x| {
+                (-8..=16).flat_map(move |y| {
+                    (-4..=8).map(move |z| [x as f64 * 0.5, y as f64 * 0.5, z as f64 * 0.5])
+                })
+            })
+            .collect::<Vec<_>>();
+        for depth in [0.25, 0.75, 1.5] {
+            let expected = points
+                .iter()
+                .enumerate()
+                .filter(|(_, point)| {
+                    triangles.iter().any(|triangle| {
+                        point_triangle_distance_squared(**point, *triangle) <= depth * depth
+                    })
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                indexed_points_near_triangles(&points, &triangles, depth),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "explicit product-scale passive-region latency profile"]
+    fn profile_product_scale_indexed_region_selection() {
+        let points = (0..50_000)
+            .map(|index| {
+                let x = index % 50;
+                let y = (index / 50) % 50;
+                let z = index / 2_500;
+                [x as f64 * 2.4, y as f64 * 2.4, z as f64 * 2.4]
+            })
+            .collect::<Vec<_>>();
+        let triangles = (0..300)
+            .map(|index| {
+                let x = (index % 20) as f64 * 6.0;
+                let y = (index / 20) as f64 * 6.0;
+                [[x, y, 0.0], [x + 5.0, y, 0.0], [x, y + 5.0, 0.0]]
+            })
+            .collect::<Vec<_>>();
+        let started = std::time::Instant::now();
+        let selected = indexed_points_near_triangles(&points, &triangles, 2.5);
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+        eprintln!(
+            "{{:workload \"passive-region-50k\" :points {} :triangles {} :selected {} :elapsed-ms {elapsed_ms}}}",
+            points.len(),
+            triangles.len(),
+            selected.len()
+        );
+        assert!(!selected.is_empty());
+        assert!(elapsed_ms <= 30_000.0);
+    }
+
+    #[test]
+    fn topology_face_groups_translate_to_exact_resultant_and_fixed_dofs() {
+        let mesh = crate::services::fem_artifacts::FemTopologyMeshData {
+            mesh: ecky_fem::FemIndexedTet4Mesh {
+                schema_version: FEM_SCHEMA_VERSION,
+                nodes: vec![
+                    ecky_fem::FemPoint3::new(0.0, 0.0, 0.0),
+                    ecky_fem::FemPoint3::new(1.0, 0.0, 0.0),
+                    ecky_fem::FemPoint3::new(0.0, 1.0, 0.0),
+                    ecky_fem::FemPoint3::new(0.0, 0.0, 1.0),
+                ],
+                cells: vec![[0, 1, 2, 3]],
+            },
+            boundary_triangles: vec![[1, 3, 2], [0, 2, 3], [0, 3, 1], [0, 1, 2]],
+            boundary_face_group_indices: vec![0, 1, 2, 3],
+            face_group_count: 4,
+        };
+        let loads = topology_surface_loads(
+            &mesh,
+            &[crate::contracts::FemTopologySurfaceLoadDto {
+                id: "bottle-lateral".into(),
+                weight: 1.0,
+                face_group_indices: vec![0],
+                total_force_n: [3.0, -4.0, 5.0],
+            }],
+        )
+        .unwrap();
+        let resultant = (0..3)
+            .map(|axis| loads[0].rhs_n.iter().skip(axis).step_by(3).sum::<f64>())
+            .collect::<Vec<_>>();
+        assert_eq!(resultant, vec![3.0, -4.0, 5.0]);
+
+        let fixed = topology_fixed_constraints(&mesh, &[3]).unwrap();
+        assert_eq!(fixed.len(), 9);
+        assert!(fixed.iter().all(|constraint| constraint.dof_index < 9));
+    }
+
+    #[test]
     fn shared_fem_job_stops_only_after_final_subscriber_cancels() {
         let job = Arc::new(FemSharedJob::new());
         let first_cancelled = Arc::new(AtomicBool::new(false));
@@ -2090,7 +3507,7 @@ mod tests {
     }
 
     #[test]
-    fn request_cache_prunes_to_bounded_immutable_json_entries() {
+    fn request_cache_prunes_to_bounded_immutable_edn_entries() {
         let root = std::env::temp_dir().join(format!(
             "ecky-fem-cache-bound-{}-{}",
             std::process::id(),
@@ -2098,62 +3515,57 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         for index in 0..5 {
-            fs::write(root.join(format!("{index}.json")), vec![b'x'; 32]).unwrap();
+            fs::write(root.join(format!("{index}.edn")), vec![b'x'; 32]).unwrap();
         }
         fs::write(root.join("active.tmp"), b"private publication").unwrap();
 
         prune_fem_cache_directory(&root, 3, 80).unwrap();
 
-        let json_entries = fs::read_dir(&root)
+        let edn_entries = fs::read_dir(&root)
             .unwrap()
             .filter_map(Result::ok)
             .filter(|entry| {
-                entry.path().extension().and_then(|value| value.to_str()) == Some("json")
+                entry.path().extension().and_then(|value| value.to_str()) == Some("edn")
             })
             .collect::<Vec<_>>();
-        assert_eq!(json_entries.len(), 2);
+        assert_eq!(edn_entries.len(), 2);
         assert!(root.join("active.tmp").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn request_cache_identity_changes_for_every_physics_and_provenance_input() {
-        use crate::fem_mesher::{FTetWildRuntimeCapabilities, FTetWildRuntimeIdentity};
+        use crate::gmsh_mesher::{ExactBrepMesherRuntime, GmshRuntimeIdentity};
 
         let request = convergence_request().study;
         let selectors = serde_json::json!({
             "mount": {"kind":"face", "durableTargetIds":["body:face:mount"]},
             "load": {"kind":"face", "durableTargetIds":["body:face:load"]}
         });
-        let runtime = FTetWildRuntimeIdentity {
-            runtime_name: "fTetWild".into(),
-            runtime_version: "pinned".into(),
-            source_revision: "revision-a".into(),
-            platform: "test".into(),
-            arch: "test".into(),
-            worker_protocol: "protocol-v1".into(),
-            executable_path: PathBuf::from("/runtime/ftetwild-worker"),
-            runtime_library_paths: vec![],
-            executable_sha256: "sha256:executable-a".into(),
-            source_sha256: "sha256:source-a".into(),
-            license_sha256: "sha256:license".into(),
-            notice_sha256: "sha256:notice".into(),
-            transitive_license_inventory_sha256: "sha256:inventory".into(),
-            capabilities: FTetWildRuntimeCapabilities {
-                structured_arrays: true,
-                tet4: true,
-                wide_surface_tags: true,
-                isolated_worker: true,
+        let runtime = ExactBrepMesherRuntime {
+            gmsh: GmshRuntimeIdentity {
+                version: "4.15.2".into(),
+                platform: "test".into(),
+                architecture: "test".into(),
+                executable_path: PathBuf::from("/runtime/gmsh"),
+                executable_sha256: "sha256:executable-a".into(),
             },
+            netgen: None,
         };
         let digest = |request: &FemStudyRequest,
                       boundary: &str,
                       geometry: &str,
                       selectors: &serde_json::Value,
-                      runtime: &FTetWildRuntimeIdentity,
+                      runtime: &ExactBrepMesherRuntime,
                       mesh_size: Option<f64>| {
             fem_request_cache_digest_components(
-                request, boundary, geometry, selectors, runtime, mesh_size,
+                request,
+                boundary,
+                geometry,
+                "sha256:step-a",
+                selectors,
+                runtime,
+                mesh_size,
             )
             .expect("cache identity")
         };
@@ -2164,6 +3576,29 @@ mod tests {
             &selectors,
             &runtime,
             None,
+        );
+        let mut runtime_with_netgen = runtime.clone();
+        runtime_with_netgen.netgen = Some(crate::netgen_mesher::NetgenRuntimeIdentity {
+            python_path: PathBuf::from("/runtime/python"),
+            python_sha256: "sha256:python-a".into(),
+            module_path: PathBuf::from("/runtime/libngpy.so"),
+            module_sha256: "sha256:libngpy-a".into(),
+            runtime_digest: "sha256:netgen-runtime-a".into(),
+            version: "6.2.2606".into(),
+            platform: "test".into(),
+            architecture: "test".into(),
+        });
+        assert_ne!(
+            baseline,
+            digest(
+                &request,
+                "sha256:boundary-a",
+                "sha256:geometry-a",
+                &selectors,
+                &runtime_with_netgen,
+                None,
+            ),
+            "Netgen fallback runtime mutation must invalidate cache"
         );
 
         for (label, source) in [
@@ -2190,6 +3625,20 @@ mod tests {
 
         let mut changed_params = request.clone();
         changed_params.model_id = "model-parameter-snapshot-b".into();
+        assert_ne!(
+            baseline,
+            fem_request_cache_digest_components(
+                &request,
+                "sha256:boundary-a",
+                "sha256:geometry-a",
+                "sha256:step-b",
+                &selectors,
+                &runtime,
+                None,
+            )
+            .expect("changed STEP identity"),
+            "exact STEP mutation must invalidate cache"
+        );
         assert_ne!(
             baseline,
             digest(
@@ -2267,7 +3716,7 @@ mod tests {
             "volume-mesh control mutation must invalidate cache"
         );
         let mut changed_runtime = runtime.clone();
-        changed_runtime.executable_sha256 = "sha256:executable-b".into();
+        changed_runtime.gmsh.executable_sha256 = "sha256:executable-b".into();
         assert_ne!(
             baseline,
             digest(
@@ -2307,6 +3756,26 @@ mod tests {
         assert!(validate_convergence_request(&invalid).is_err());
     }
 
+    #[test]
+    fn convergence_cache_identity_ignores_ephemeral_job_id_but_tracks_source() {
+        let request = convergence_request();
+        let baseline = fem_convergence_cache_digest(&request).expect("cache identity");
+
+        let mut next_job = request.clone();
+        next_job.study.job_id = "next-window-open".to_string();
+        assert_eq!(
+            baseline,
+            fem_convergence_cache_digest(&next_job).expect("same cache identity")
+        );
+
+        let mut changed_source = request;
+        changed_source.study.source = "(model (part changed (box 1 1 1)))".to_string();
+        assert_ne!(
+            baseline,
+            fem_convergence_cache_digest(&changed_source).expect("changed cache identity")
+        );
+    }
+
     fn convergence_request() -> FemConvergenceRequest {
         FemConvergenceRequest {
             study: FemStudyRequest {
@@ -2328,6 +3797,7 @@ mod tests {
                     minimum_scaled_jacobian: 1.0e-6,
                     maximum_runtime_ms: 1000,
                     relative_solver_tolerance: 1.0e-8,
+                    thread_count: 1,
                 },
             },
             mesh_sizes_mm: vec![4.0, 2.0, 1.0],
@@ -2574,7 +4044,7 @@ mod tests {
             .parent()
             .expect("repository root")
             .to_path_buf();
-        let layout = inspect_occt_runtime(&bundled_occt_runtime_root_from_repo(&repo_root));
+        let layout = inspect_occt_runtime(bundled_occt_runtime_root_from_repo(&repo_root));
         if !layout.runtime_complete() {
             eprintln!("native FEM topology-transition sweep requires complete OCCT runtime");
             return;
@@ -2669,8 +4139,7 @@ mod tests {
             .expect("repository root")
             .to_path_buf();
         let occt_root = bundled_occt_runtime_root_from_repo(&repo_root);
-        let ftetwild_root = repo_root.join(".dist/runtime/ftetwild");
-        if !occt_root.is_dir() || !ftetwild_root.is_dir() {
+        if !occt_root.is_dir() || probe_system_exact_brep_mesher_runtime().is_err() {
             eprintln!("native FEM cache proof is platform-gated");
             return;
         }
@@ -2738,6 +4207,7 @@ mod tests {
                 minimum_scaled_jacobian: 1.0e-6,
                 maximum_runtime_ms: 120_000,
                 relative_solver_tolerance: 1.0e-8,
+                thread_count: 1,
             },
         };
         let mut cold_mesh_progress = Vec::new();
@@ -2764,7 +4234,7 @@ mod tests {
         .expect("warm FEM mesh preview");
         assert_eq!(warm_mesh.mesh_content_digest, cold_mesh.mesh_content_digest);
         assert_eq!(warm_mesh_progress.len(), 1);
-        assert!(warm_mesh_progress[0].detail.contains("fTetWild skipped"));
+        assert!(warm_mesh_progress[0].detail.contains("Gmsh HXT skipped"));
 
         let mut cold_progress = Vec::new();
         let cold = run_fem_study_with_resolver(
@@ -2873,5 +4343,304 @@ mod tests {
             1
         );
         fs::remove_dir_all(root).expect("cleanup cache fixture");
+    }
+
+    #[test]
+    fn authored_topology_run_builds_mesh_internally_and_resumes_deterministically() {
+        use crate::contracts::DesignParams;
+        use crate::ecky_cad_host::direct_occt_runtime::render_core_program_runtime_bundle;
+        use crate::ecky_cad_host::direct_occt_sdk::{
+            bundled_occt_runtime_root_from_repo, inspect_occt_runtime,
+        };
+
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repository root")
+            .to_path_buf();
+        let occt_root = bundled_occt_runtime_root_from_repo(&repo_root);
+        if !occt_root.is_dir() || probe_system_exact_brep_mesher_runtime().is_err() {
+            eprintln!("native topology orchestration proof is platform-gated");
+            return;
+        }
+        let layout = inspect_occt_runtime(&occt_root);
+        if !layout.runtime_complete() {
+            eprintln!("native topology orchestration proof requires complete OCCT runtime");
+            return;
+        }
+        let source = r#"(model
+          (tag-face mounting :faces "bottom" bracket)
+          (tag-face load-pad :faces "top" bracket)
+          (part bracket (box 10 10 10))
+          (analysis bracket-topology
+            (linear-static :part bracket)
+            (question stiffness :statement "Is the load path stiff?" :decision "optimize" :acceptance-metrics [displacement-limit])
+            (acceptance-criterion displacement-limit :field maximum-displacement :comparison less-than-or-equal :limit "1" :unit mm :requires-convergence false)
+            (idealization exact-solid :justification "Exact connected design domain." :accepted true)
+            (evidence material-source :subject material :source "screening datasheet" :authority recorded-source :uncertainty-percent 0 :decision-critical true)
+            (evidence load-source :subject load :source "accepted topology load" :authority user-accepted :uncertainty-percent 0 :decision-critical true)
+            (evidence support-source :subject support :source "accepted mount" :authority user-accepted :uncertainty-percent 0 :decision-critical true)
+            (input-evidence petg-cf :evidence material-source)
+            (input-evidence applied-load :evidence load-source)
+            (input-evidence mounting :evidence support-source)
+            (assumption small-strain :category physics :statement "Small displacement linear elasticity." :status accepted :evidence [material-source load-source support-source])
+            (material petg-cf :young-modulus 4000MPa :poisson-ratio 0.35 :density 1250kg-per-m3 :yield-strength 45MPa)
+            (volume-mesh :element tet4 :size 5mm)
+            (topology-controls :volume-fraction 0.5 :penalty 3 :minimum-density 0.001
+              :filter-radius 2mm :move-limit 0.1 :convergence-tolerance 0.000000000000001)
+            (passive-solid :faces (tag mounting) :depth 3mm)
+            (passive-void :faces (tag load-pad) :depth 3mm)
+            (fixed :faces (tag mounting))
+            (surface-force :faces (tag load-pad) :total [0N 0N -10N])
+            (solve :method sparse-direct)))"#;
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("compile");
+        let topology_analysis = program
+            .analyses
+            .iter()
+            .find(|analysis| analysis.name == "bracket-topology")
+            .expect("topology analysis");
+        assert!(topology_analysis.clauses.iter().any(|clause| matches!(
+            clause.kind,
+            ecky_render::core_ir::CoreAnalysisClauseKind::PassiveSolid { .. }
+        )));
+        assert!(topology_analysis.clauses.iter().any(|clause| matches!(
+            clause.kind,
+            ecky_render::core_ir::CoreAnalysisClauseKind::PassiveVoid { .. }
+        )));
+        let root =
+            std::env::temp_dir().join(format!("ecky-authored-topology-{}", uuid::Uuid::new_v4()));
+        let resolver = TestResolver { root: root.clone() };
+        let (bundle, mut manifest) = render_core_program_runtime_bundle(
+            &program,
+            source,
+            &DesignParams::new(),
+            &layout,
+            &resolver,
+        )
+        .expect("render exact OCCT bundle");
+        manifest.source_digest = Some(crate::services::render_snapshot::canonical_source_digest(
+            source,
+        ));
+        crate::model_runtime::write_runtime_bundle(&resolver, &bundle.model_id, &bundle, &manifest)
+            .expect("bind source digest to runtime bundle");
+
+        let study = |job_id: &str| FemStudyRequest {
+            job_id: job_id.into(),
+            model_id: bundle.model_id.clone(),
+            source: source.into(),
+            analysis_name: "bracket-topology".into(),
+            budgets: crate::contracts::FemBudgetLimitsDto {
+                boundary_triangles: 100_000,
+                tet4_cells: 100_000,
+                nodes: 100_000,
+                dofs: 300_000,
+                sparse_nonzeros: 10_000_000,
+                result_bytes: 64 * 1024 * 1024,
+                convergence_levels: 3,
+            },
+            control: crate::contracts::FemPipelineControlDto {
+                envelope_mm: 0.1,
+                minimum_scaled_jacobian: 1.0e-6,
+                maximum_runtime_ms: 120_000,
+                relative_solver_tolerance: 1.0e-8,
+                thread_count: 1,
+            },
+        };
+        let runtime_policy = |maximum_new_iterations| FemTopologyRuntimePolicy {
+            maximum_iterations: 2,
+            maximum_new_iterations,
+            maximum_dimension: 300_000,
+            maximum_elements: 100_000,
+            maximum_working_memory_bytes: 512 * 1024 * 1024,
+            maximum_result_bytes: 64 * 1024 * 1024,
+            maximum_wall_time_ms: 120_000,
+        };
+
+        assert!(!resolver.app_data_dir().join("fem-meshes-v1").exists());
+        let stepped = run_fem_topology_with_resolver(
+            FemTopologyRunRequest {
+                study: study("topology-step"),
+                resume_state_digest: None,
+            },
+            &runtime_policy(1),
+            &resolver,
+            &AtomicBool::new(false),
+        )
+        .expect("one authored topology operation builds mesh and advances");
+        assert_eq!(stepped.termination, "paused");
+        assert_eq!(stepped.iteration_count, 1);
+        assert!(resolver.app_data_dir().join("fem-meshes-v1").is_dir());
+        assert!(PathBuf::from(&stepped.checkpoint_path).is_file());
+        assert!(PathBuf::from(stepped.density_path.as_ref().unwrap()).is_file());
+        assert!(PathBuf::from(stepped.preview_vtu_path.as_ref().unwrap()).is_file());
+        assert!(stepped.passive_solid_volume_fraction.unwrap() > 0.0);
+        assert!(stepped.passive_void_volume_fraction.unwrap() > 0.0);
+
+        let cancelled_study = study("topology-cancelled");
+        let resolved = resolve_request(&cancelled_study, &resolver).unwrap();
+        let resolved_faces =
+            resolve_fem_face_tags(&resolved.manifest.tagged_anchors, &resolved.boundary).unwrap();
+        let authored = authored_study_from_core(
+            &resolved.program,
+            &cancelled_study.analysis_name,
+            &resolved_faces,
+            resolved.budgets.clone(),
+        )
+        .unwrap();
+        let (
+            material,
+            load_cases,
+            fixed_face_group_indices,
+            passive_solid_regions,
+            passive_void_regions,
+        ) = topology_inputs_from_authored_study(&authored, &resolved.boundary).unwrap();
+        let cancelled = run_fem_topology_artifact_with_resolver(
+            FemTopologyArtifactRunRequest {
+                job_id: cancelled_study.job_id,
+                analysis_identity_digest: stepped.analysis_identity_digest.clone(),
+                mesh_content_digest: stepped.mesh_content_digest.clone(),
+                material,
+                load_cases,
+                fixed_face_group_indices,
+                passive_solid_regions,
+                passive_void_regions,
+                relative_solver_tolerance: cancelled_study.control.relative_solver_tolerance,
+                controls: topology_controls_from_authored(
+                    authored.topology_controls.as_ref().unwrap(),
+                    &runtime_policy(1),
+                ),
+                resume_state_digest: None,
+            },
+            &resolver,
+            &AtomicBool::new(true),
+        )
+        .expect("cancelled optimizer publishes state-only checkpoint");
+        assert_eq!(cancelled.termination, "cancelled");
+        assert!(cancelled.result_digest.is_none());
+        assert!(cancelled.final_compliance.is_none());
+        assert!(cancelled.density_path.is_none());
+        assert!(cancelled.preview_vtu_path.is_none());
+        assert!(PathBuf::from(&cancelled.checkpoint_path).is_file());
+        let resumed_after_cancel = run_fem_topology_with_resolver(
+            FemTopologyRunRequest {
+                study: study("topology-resume-cancelled"),
+                resume_state_digest: Some(cancelled.state_digest),
+            },
+            &runtime_policy(1),
+            &resolver,
+            &AtomicBool::new(false),
+        )
+        .expect("state-only checkpoint resumes through authored pipeline");
+        let stepped_artifact = crate::services::fem_topology_artifacts::load_fem_topology_artifact(
+            &resolver,
+            &stepped.input_digest,
+            &stepped.state_digest,
+            64 * 1024 * 1024,
+        )
+        .expect("load stepped topology artifact");
+        let resumed_after_cancel_artifact =
+            crate::services::fem_topology_artifacts::load_fem_topology_artifact(
+                &resolver,
+                &resumed_after_cancel.input_digest,
+                &resumed_after_cancel.state_digest,
+                64 * 1024 * 1024,
+            )
+            .expect("load topology artifact resumed after cancellation");
+        assert_eq!(
+            resumed_after_cancel_artifact.state.design_densities,
+            stepped_artifact.state.design_densities
+        );
+        assert_eq!(
+            resumed_after_cancel_artifact.state.mma87,
+            stepped_artifact.state.mma87
+        );
+        assert_eq!(
+            resumed_after_cancel_artifact.state.iterations,
+            stepped_artifact.state.iterations
+        );
+        assert_eq!(resumed_after_cancel.state_digest, stepped.state_digest);
+        assert_eq!(resumed_after_cancel.result_digest, stepped.result_digest);
+
+        let resumed = run_fem_topology_with_resolver(
+            FemTopologyRunRequest {
+                study: study("topology-resume"),
+                resume_state_digest: Some(stepped.state_digest.clone()),
+            },
+            &runtime_policy(1),
+            &resolver,
+            &AtomicBool::new(false),
+        )
+        .expect("resume from internal checkpoint");
+        let uninterrupted = run_fem_topology_with_resolver(
+            FemTopologyRunRequest {
+                study: study("topology-uninterrupted"),
+                resume_state_digest: None,
+            },
+            &runtime_policy(2),
+            &resolver,
+            &AtomicBool::new(false),
+        )
+        .expect("uninterrupted authored topology operation");
+        assert_eq!(resumed.termination, "maximumIterations");
+        assert_eq!(resumed.iteration_count, 2);
+        assert_eq!(
+            resumed.analysis_identity_digest,
+            uninterrupted.analysis_identity_digest
+        );
+        assert_eq!(
+            resumed.mesh_content_digest,
+            uninterrupted.mesh_content_digest
+        );
+        let topology_input_dir = PathBuf::from(&uninterrupted.checkpoint_path)
+            .parent()
+            .and_then(Path::parent)
+            .expect("topology input artifact directory")
+            .to_path_buf();
+        let durable_state_count = fs::read_dir(&topology_input_dir)
+            .expect("read topology state directories")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_dir())
+            .count();
+        assert!(
+            durable_state_count >= 2,
+            "every completed outer iteration must leave a resumable state artifact"
+        );
+        let resumed_artifact = crate::services::fem_topology_artifacts::load_fem_topology_artifact(
+            &resolver,
+            &resumed.input_digest,
+            &resumed.state_digest,
+            64 * 1024 * 1024,
+        )
+        .expect("load resumed topology artifact");
+        let uninterrupted_artifact =
+            crate::services::fem_topology_artifacts::load_fem_topology_artifact(
+                &resolver,
+                &uninterrupted.input_digest,
+                &uninterrupted.state_digest,
+                64 * 1024 * 1024,
+            )
+            .expect("load uninterrupted topology artifact");
+        assert_eq!(
+            resumed_artifact.state.design_densities,
+            uninterrupted_artifact.state.design_densities
+        );
+        assert_eq!(
+            resumed_artifact.state.mma87,
+            uninterrupted_artifact.state.mma87
+        );
+        assert_eq!(
+            resumed_artifact.state.iterations,
+            uninterrupted_artifact.state.iterations
+        );
+        assert_eq!(resumed.state_digest, uninterrupted.state_digest);
+        assert_eq!(resumed.result_digest, uninterrupted.result_digest);
+        assert_eq!(resumed.final_compliance, uninterrupted.final_compliance);
+        assert_eq!(
+            resumed.final_volume_fraction,
+            uninterrupted.final_volume_fraction
+        );
+        assert!(!resumed.exact_brep);
+        assert!(!resumed.production_step);
+        assert!(!resumed.engineering_accepted);
+        fs::remove_dir_all(root).expect("cleanup topology orchestration fixture");
     }
 }

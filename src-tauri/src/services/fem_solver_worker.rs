@@ -19,6 +19,7 @@ static WORKER_NONCE: AtomicU64 = AtomicU64::new(1);
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SolverWorkerRequest {
     protocol_version: u32,
+    thread_count: usize,
     matrix: FemSparseMatrix,
     rhs: Vec<f64>,
     relative_tolerance: f64,
@@ -37,6 +38,7 @@ pub(crate) struct KillableFaerWorkerSolver<'a> {
     scratch_dir: &'a Path,
     cancelled: &'a AtomicBool,
     maximum_runtime: Duration,
+    thread_count: usize,
 }
 
 impl<'a> KillableFaerWorkerSolver<'a> {
@@ -44,12 +46,14 @@ impl<'a> KillableFaerWorkerSolver<'a> {
         scratch_dir: &'a Path,
         cancelled: &'a AtomicBool,
         maximum_runtime_ms: u64,
+        thread_count: usize,
     ) -> Option<Self> {
         solver_worker_executable().map(|executable| Self {
             executable,
             scratch_dir,
             cancelled,
             maximum_runtime: Duration::from_millis(maximum_runtime_ms),
+            thread_count,
         })
     }
 
@@ -59,12 +63,14 @@ impl<'a> KillableFaerWorkerSolver<'a> {
         scratch_dir: &'a Path,
         cancelled: &'a AtomicBool,
         maximum_runtime: Duration,
+        thread_count: usize,
     ) -> Self {
         Self {
             executable,
             scratch_dir,
             cancelled,
             maximum_runtime,
+            thread_count,
         }
     }
 
@@ -86,6 +92,7 @@ impl<'a> KillableFaerWorkerSolver<'a> {
         let response_temp_path = response_temp_path(&response_path);
         let request = SolverWorkerRequest {
             protocol_version: WORKER_PROTOCOL_VERSION,
+            thread_count: self.thread_count,
             matrix: matrix.clone(),
             rhs: rhs.to_vec(),
             relative_tolerance,
@@ -223,12 +230,21 @@ fn run_worker_files(request_path: &Path, response_path: &Path) -> Result<(), Fem
             ),
         });
     }
-    let response = match FaerSparseCholeskySolver.solve(
-        &request.matrix,
-        &request.rhs,
-        request.relative_tolerance,
-        request.maximum_dimension,
-    ) {
+    let response = match if request.thread_count > 1 {
+        FaerSparseCholeskySolver::with_thread_count(request.thread_count).solve(
+            &request.matrix,
+            &request.rhs,
+            request.relative_tolerance,
+            request.maximum_dimension,
+        )
+    } else {
+        FaerSparseCholeskySolver.solve(
+            &request.matrix,
+            &request.rhs,
+            request.relative_tolerance,
+            request.maximum_dimension,
+        )
+    } {
         Ok(result) => SolverWorkerResponse::Success { result },
         Err(error) => SolverWorkerResponse::Failure { error },
     };
@@ -303,6 +319,7 @@ mod tests {
         let response_path = root.join("response.json");
         let request = SolverWorkerRequest {
             protocol_version: WORKER_PROTOCOL_VERSION,
+            thread_count: 4,
             matrix: FemSparseMatrix::from_dense(vec![vec![4.0, 1.0], vec![1.0, 3.0]]).unwrap(),
             rhs: vec![1.0, 2.0],
             relative_tolerance: 1.0e-12,
@@ -316,9 +333,12 @@ mod tests {
         assert!(!response_temp_path(&response_path).exists());
         let response: SolverWorkerResponse =
             serde_json::from_slice(&fs::read(&response_path).unwrap()).unwrap();
-        assert!(
-            matches!(response, SolverWorkerResponse::Success { result } if result.solution.iter().all(|value| value.is_finite()))
-        );
+        assert!(matches!(
+            response,
+            SolverWorkerResponse::Success { result }
+                if result.solution.iter().all(|value| value.is_finite())
+                    && result.solver_identity.thread_count == 4
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -344,6 +364,7 @@ mod tests {
             &root,
             cancelled.as_ref(),
             Duration::from_secs(5),
+            2,
         );
         let matrix = FemSparseMatrix::from_dense(vec![vec![1.0, 0.0], vec![0.0, 1.0]]).unwrap();
         let started = Instant::now();

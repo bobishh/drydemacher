@@ -79,10 +79,10 @@ fn assert_vec_close(actual: [f64; 6], expected: [f64; 6]) {
 }
 
 fn assert_matrix_symmetric(matrix: &[[f64; 12]; 12]) {
-    for row in 0..12 {
-        for col in 0..12 {
+    for (row, values) in matrix.iter().enumerate() {
+        for (col, value) in values.iter().enumerate() {
             assert!(
-                (matrix[row][col] - matrix[col][row]).abs() <= 1e-9,
+                (*value - matrix[col][row]).abs() <= 1e-9,
                 "matrix asymmetry at ({row}, {col})"
             );
         }
@@ -189,10 +189,10 @@ fn tet4_isotropic_constitutive_tensor_is_symmetric_positive_and_has_uniaxial_res
         .constitutive_matrix(&material)
         .expect("constitutive matrix");
 
-    for row in 0..6 {
-        for col in 0..6 {
+    for (row, values) in d.iter().enumerate() {
+        for (col, value) in values.iter().enumerate() {
             assert!(
-                (d[row][col] - d[col][row]).abs() <= 1e-12,
+                (*value - d[col][row]).abs() <= 1e-12,
                 "constitutive matrix asymmetry at ({row}, {col})"
             );
         }
@@ -200,9 +200,9 @@ fn tet4_isotropic_constitutive_tensor_is_symmetric_positive_and_has_uniaxial_res
 
     let strain = [0.002, -0.001, 0.003, 0.004, -0.002, 0.005];
     let mut stress = [0.0; 6];
-    for row in 0..6 {
-        for col in 0..6 {
-            stress[row] += d[row][col] * strain[col];
+    for (row, stress_value) in stress.iter_mut().enumerate() {
+        for (col, strain_value) in strain.iter().enumerate() {
+            *stress_value += d[row][col] * strain_value;
         }
     }
     let energy = 0.5

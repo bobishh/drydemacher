@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -9,9 +10,8 @@ use ecky_cad_lib::ecky_cad_host::analysis_boundary::{
     AnalysisBoundaryEvidence, AnalysisBoundaryFaceGroup, AnalysisBoundarySurface,
 };
 use ecky_cad_lib::fem_engineering::authored_study_from_core;
-use ecky_cad_lib::fem_mesher::{
-    probe_ftetwild_runtime, FTetWildRuntimeCapabilities, FTetWildRuntimeIdentity,
-    FTetWildRuntimeRequirement, FTetWildWorkerRequest,
+use ecky_cad_lib::gmsh_mesher::{
+    probe_gmsh_runtime, ExactBrepMesherRuntime, GmshBrepMeshRequest, GmshRuntimeIdentity,
 };
 use ecky_cad_lib::models::PathResolver;
 use ecky_cad_lib::services::fem::{execute_fem_pipeline, FemPipelineControl, FemPipelineStage};
@@ -26,26 +26,28 @@ use ecky_render::scheme::compile_to_core_program;
 
 #[test]
 fn native_pipeline_runs_authored_tagged_study_with_ordered_progress_and_engineering_gates() {
-    let Some(runtime_root) = std::env::var_os("ECKY_FTETWILD_RUNTIME_ROOT") else {
-        eprintln!("ECKY_FTETWILD_RUNTIME_ROOT unset; native FEM pipeline proof is platform-gated");
+    let executable = std::env::var_os("ECKY_GMSH_EXECUTABLE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("gmsh"));
+    let Ok(gmsh_runtime) = probe_gmsh_runtime(&executable) else {
+        eprintln!("Gmsh unavailable; native FEM pipeline proof is platform-gated");
         return;
     };
-    let runtime = probe_ftetwild_runtime(
-        PathBuf::from(runtime_root),
-        &FTetWildRuntimeRequirement {
-            runtime_version: "0.1.0-ecky.1".to_string(),
-            source_revision: "d7d99bb4387a07895b9adce058dc7305f6b6e5ab".to_string(),
-        },
-    )
-    .expect("pinned runtime");
+    let runtime = ExactBrepMesherRuntime {
+        gmsh: gmsh_runtime.clone(),
+        netgen: None,
+    };
     let program = compile_to_core_program(AUTHORED_STUDY).expect("compile study");
     let root = temp_root();
+    let geometry_root = temp_root();
+    let step_path = write_exact_box_step(&gmsh_runtime, &geometry_root);
     let mut progress = Vec::new();
     let result = execute_fem_pipeline(
         &program,
         "bracket-static",
         &tagged_anchors(),
-        &tetra_boundary(),
+        &box_boundary(),
+        &step_path,
         budgets(),
         &runtime,
         &root,
@@ -54,6 +56,7 @@ fn native_pipeline_runs_authored_tagged_study_with_ordered_progress_and_engineer
             minimum_scaled_jacobian: 1.0e-6,
             maximum_runtime_ms: 120_000,
             relative_solver_tolerance: 1.0e-8,
+            thread_count: 1,
         },
         &AtomicBool::new(false),
         |event| progress.push(event),
@@ -152,6 +155,7 @@ fn native_pipeline_runs_authored_tagged_study_with_ordered_progress_and_engineer
         error.to_string().contains("byte length") || error.to_string().contains("digest mismatch")
     );
     let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(geometry_root);
 }
 
 #[test]
@@ -164,6 +168,7 @@ fn outer_failures_stop_at_resolve_boundary_or_rigid_mode_gate_before_publication
         "bracket-static",
         &BTreeMap::new(),
         &tetra_boundary(),
+        PathBuf::from("/must/not/run.step").as_path(),
         budgets(),
         &dummy_runtime(),
         &scratch,
@@ -182,6 +187,7 @@ fn outer_failures_stop_at_resolve_boundary_or_rigid_mode_gate_before_publication
         "bracket-static",
         &tagged_anchors(),
         &tetra_boundary(),
+        PathBuf::from("/must/not/run.step").as_path(),
         budgets(),
         &dummy_runtime(),
         &scratch,
@@ -207,13 +213,15 @@ fn outer_failures_stop_at_resolve_boundary_or_rigid_mode_gate_before_publication
     let mut open_boundary = tetra_boundary();
     open_boundary.evidence.closed = false;
     open_boundary.evidence.boundary_edge_count = 3;
-    let open_error = FTetWildWorkerRequest::from_analysis_boundary(
+    let open_error = GmshBrepMeshRequest::from_analysis_boundary(
         "open-domain",
+        PathBuf::from("/must/not/run.step"),
         &open_boundary,
         &study.mesh_control,
-        0.1,
         1.0e-6,
         1000,
+        1,
+        &[],
     )
     .expect_err("open domain stops at boundary gate");
     assert!(open_error.to_string().contains("closed manifold"));
@@ -266,30 +274,20 @@ fn pipeline_control() -> FemPipelineControl {
         minimum_scaled_jacobian: 1.0e-6,
         maximum_runtime_ms: 1000,
         relative_solver_tolerance: 1.0e-8,
+        thread_count: 1,
     }
 }
 
-fn dummy_runtime() -> FTetWildRuntimeIdentity {
-    FTetWildRuntimeIdentity {
-        runtime_name: "must-not-run".into(),
-        runtime_version: "test".into(),
-        source_revision: "test".into(),
-        platform: "test".into(),
-        arch: "test".into(),
-        worker_protocol: "test".into(),
-        executable_path: PathBuf::from("/must/not/run"),
-        runtime_library_paths: vec![],
-        executable_sha256: "sha256:test".into(),
-        source_sha256: "sha256:test".into(),
-        license_sha256: "sha256:test".into(),
-        notice_sha256: "sha256:test".into(),
-        transitive_license_inventory_sha256: "sha256:test".into(),
-        capabilities: FTetWildRuntimeCapabilities {
-            structured_arrays: true,
-            tet4: true,
-            wide_surface_tags: true,
-            isolated_worker: true,
+fn dummy_runtime() -> ExactBrepMesherRuntime {
+    ExactBrepMesherRuntime {
+        gmsh: GmshRuntimeIdentity {
+            version: "test".into(),
+            platform: "test".into(),
+            architecture: "test".into(),
+            executable_path: PathBuf::from("/must/not/run"),
+            executable_sha256: "sha256:test".into(),
         },
+        netgen: None,
     }
 }
 
@@ -335,6 +333,9 @@ fn one_tet_volume_mesh() -> FemVolumeMesh {
             inserted_source_triangle_count: 4,
             tagged_boundary_triangle_count: 4,
             maximum_boundary_deviation_mm: 0.0,
+            discarded_tet4_component_count: 0,
+            discarded_tet4_cell_count: 0,
+            discarded_low_quality_tet4_cell_count: 0,
             deterministic_thread_count: 1,
         },
         minimum_scaled_jacobian: 1.0e-6,
@@ -400,6 +401,7 @@ fn anchor(name: &str, group: usize) -> TaggedAnchorBinding {
 
 fn tetra_boundary() -> AnalysisBoundarySurface {
     AnalysisBoundarySurface {
+        tessellation_policy: Default::default(),
         part_id: "bracket".to_string(),
         label: "Bracket".to_string(),
         source_geometry_digest: "sha256:geometry".to_string(),
@@ -438,6 +440,87 @@ fn tetra_boundary() -> AnalysisBoundarySurface {
         },
         content_digest: "sha256:boundary".to_string(),
     }
+}
+
+fn box_boundary() -> AnalysisBoundarySurface {
+    let vertices = vec![
+        [0.0, 0.0, 0.0],
+        [10.0, 0.0, 0.0],
+        [10.0, 10.0, 0.0],
+        [0.0, 10.0, 0.0],
+        [0.0, 0.0, 10.0],
+        [10.0, 0.0, 10.0],
+        [10.0, 10.0, 10.0],
+        [0.0, 10.0, 10.0],
+    ];
+    let triangles = vec![
+        [0, 7, 3],
+        [0, 4, 7],
+        [1, 2, 6],
+        [1, 6, 5],
+        [0, 1, 5],
+        [0, 5, 4],
+        [3, 7, 6],
+        [3, 6, 2],
+        [0, 3, 2],
+        [0, 2, 1],
+        [4, 5, 6],
+        [4, 6, 7],
+    ];
+    AnalysisBoundarySurface {
+        tessellation_policy: Default::default(),
+        part_id: "bracket".to_string(),
+        label: "Bracket".to_string(),
+        source_geometry_digest: "sha256:geometry".to_string(),
+        vertices,
+        triangles,
+        triangle_face_group_indices: (0..6).flat_map(|group| [group, group]).collect(),
+        face_groups: (0..6)
+            .map(|group| AnalysisBoundaryFaceGroup {
+                part_id: "bracket".to_string(),
+                target_id: format!("target:{group}"),
+                canonical_target_id: format!("face:{group}"),
+                durable_target_id: Some(format!("durable:{group}")),
+                label: format!("Face {group}"),
+                area: 100.0,
+                triangle_count: 2,
+            })
+            .collect(),
+        evidence: AnalysisBoundaryEvidence {
+            closed: true,
+            manifold: true,
+            component_count: 1,
+            positive_volume: true,
+            boundary_edge_count: 0,
+            non_manifold_edge_count: 0,
+            winding_mismatch_count: 0,
+            signed_volume: 1000.0,
+        },
+        content_digest: "sha256:boundary".to_string(),
+    }
+}
+
+fn write_exact_box_step(runtime: &GmshRuntimeIdentity, root: &std::path::Path) -> PathBuf {
+    let geo = root.join("box.geo");
+    let step = root.join("box.step");
+    fs::write(
+        &geo,
+        "SetFactory(\"OpenCASCADE\");\nBox(1) = {0, 0, 0, 10, 10, 10};\n",
+    )
+    .expect("box GEO fixture");
+    let output = Command::new(&runtime.executable_path)
+        .arg(&geo)
+        .args(["-0", "-format", "step", "-o"])
+        .arg(&step)
+        .args(["-v", "0"])
+        .output()
+        .expect("Gmsh box STEP export");
+    assert!(
+        output.status.success() && step.is_file(),
+        "Gmsh box STEP export failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    step
 }
 
 fn budgets() -> FemBudgetLimits {

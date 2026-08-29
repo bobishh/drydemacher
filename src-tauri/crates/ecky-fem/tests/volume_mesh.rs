@@ -149,6 +149,16 @@ fn volume_mesh_content_mutation_changes_canonical_result_identity() {
     assert_ne!(original.content_digest, changed.content_digest);
 }
 
+#[test]
+fn meshing_evidence_accepts_runtime_core_count_above_legacy_eight() {
+    let mut evidence = meshing_evidence();
+    evidence.deterministic_thread_count = 24;
+
+    evidence
+        .validate()
+        .expect("runtime-selected core count must remain valid evidence");
+}
+
 fn fixture_input() -> FemVolumeMeshInput {
     FemVolumeMeshInput {
         schema_version: FEM_SCHEMA_VERSION,
@@ -207,6 +217,9 @@ fn meshing_evidence() -> FemMeshingEvidence {
         inserted_source_triangle_count: 4,
         tagged_boundary_triangle_count: 4,
         maximum_boundary_deviation_mm: 0.0,
+        discarded_tet4_component_count: 0,
+        discarded_tet4_cell_count: 0,
+        discarded_low_quality_tet4_cell_count: 0,
         deterministic_thread_count: 1,
     }
 }

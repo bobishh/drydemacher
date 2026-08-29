@@ -1,0 +1,9 @@
+[package]
+name = "ecky-accelerate-sparse"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Safe macOS Accelerate sparse Cholesky boundary for Ecky"
+
+[build-dependencies]
+cc = "1.2"

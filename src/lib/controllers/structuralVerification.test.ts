@@ -11,12 +11,12 @@ const PASS_RESULT: StructuralVerificationResult = {
   issues: [],
   metrics: {
     partCount: 1,
-    previewStlSizeBytes: 1024,
-    previewStlTriangleCount: 128,
-    previewStlComponentCount: 1,
-    previewStlNonManifoldEdgeCount: 0,
-    previewStlOverhangTriangleCount: 0,
-    previewStlOverhangRatio: 0,
+    modelStlSizeBytes: 1024,
+    modelStlTriangleCount: 128,
+    modelStlComponentCount: 1,
+    modelStlNonManifoldEdgeCount: 0,
+    modelStlOverhangTriangleCount: 0,
+    modelStlOverhangRatio: 0,
     totalVolume: 1000,
     totalArea: 600,
     bbox: { xMin: -10, yMin: -10, zMin: 0, xMax: 10, yMax: 10, zMax: 20 },
@@ -30,19 +30,19 @@ const FAIL_RESULT: StructuralVerificationResult = {
   issues: [
     {
       code: 'PREVIEW_STL_MISSING',
-      message: 'Preview STL file not found.',
+      message: 'Model STL file not found.',
       partId: null,
       numericPayload: null,
     },
   ],
   metrics: {
     partCount: 0,
-    previewStlSizeBytes: null,
-    previewStlTriangleCount: null,
-    previewStlComponentCount: null,
-    previewStlNonManifoldEdgeCount: null,
-    previewStlOverhangTriangleCount: null,
-    previewStlOverhangRatio: null,
+    modelStlSizeBytes: null,
+    modelStlTriangleCount: null,
+    modelStlComponentCount: null,
+    modelStlNonManifoldEdgeCount: null,
+    modelStlOverhangTriangleCount: null,
+    modelStlOverhangRatio: null,
     totalVolume: null,
     totalArea: null,
     bbox: null,
@@ -56,12 +56,12 @@ const SKIPPED_RESULT: StructuralVerificationResult = {
   issues: [],
   metrics: {
     partCount: 0,
-    previewStlSizeBytes: null,
-    previewStlTriangleCount: null,
-    previewStlComponentCount: null,
-    previewStlNonManifoldEdgeCount: null,
-    previewStlOverhangTriangleCount: null,
-    previewStlOverhangRatio: null,
+    modelStlSizeBytes: null,
+    modelStlTriangleCount: null,
+    modelStlComponentCount: null,
+    modelStlNonManifoldEdgeCount: null,
+    modelStlOverhangTriangleCount: null,
+    modelStlOverhangRatio: null,
     totalVolume: null,
     totalArea: null,
     bbox: null,
@@ -107,7 +107,7 @@ test('repair prompt includes issue codes and summary', async () => {
     ...FAIL_RESULT,
     summary: 'Structural verification failed: PREVIEW_STL_MISSING, MANIFEST_PARTS_EMPTY',
     issues: [
-      { code: 'PREVIEW_STL_MISSING', message: 'Preview STL file not found.', partId: null, numericPayload: null },
+      { code: 'PREVIEW_STL_MISSING', message: 'Model STL file not found.', partId: null, numericPayload: null },
       { code: 'MANIFEST_PARTS_EMPTY', message: 'Manifest contains no parts.', partId: null, numericPayload: null },
     ],
   };
@@ -127,18 +127,18 @@ test('repair prompt includes parsed STL topology metrics', async () => {
       metrics: {
         ...FAIL_RESULT.metrics,
         partCount: 1,
-        previewStlSizeBytes: 2048,
-        previewStlTriangleCount: 64,
-        previewStlComponentCount: 3,
-        previewStlNonManifoldEdgeCount: 7,
-        previewStlOverhangTriangleCount: 9,
-        previewStlOverhangRatio: 0.140625,
+        modelStlSizeBytes: 2048,
+        modelStlTriangleCount: 64,
+        modelStlComponentCount: 3,
+        modelStlNonManifoldEdgeCount: 7,
+        modelStlOverhangTriangleCount: 9,
+        modelStlOverhangRatio: 0.140625,
       },
     }),
   }));
   assert.equal(result.kind, 'repair_needed');
   assert.ok('repairPrompt' in result);
-  assert.match(result.repairPrompt, /preview STL: 2048 bytes/);
+  assert.match(result.repairPrompt, /model STL: 2048 bytes/);
   assert.match(result.repairPrompt, /triangles: 64/);
   assert.match(result.repairPrompt, /components: 3/);
   assert.match(result.repairPrompt, /non-manifold edges: 7/);

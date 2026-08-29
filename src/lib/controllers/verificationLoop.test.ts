@@ -165,15 +165,15 @@ const STRUCTURAL_PASS: StructuralVerificationResult = {
   passed: true,
   summary: 'All structural checks passed.',
   issues: [],
-  metrics: { partCount: 1, previewStlSizeBytes: 1024, totalVolume: 1000, totalArea: 600, bbox: null },
+  metrics: { partCount: 1, modelStlSizeBytes: 1024, totalVolume: 1000, totalArea: 600, bbox: null },
   verifierStatus: 'ok',
 };
 
 const STRUCTURAL_FAIL: StructuralVerificationResult = {
   passed: false,
   summary: 'Structural verification failed: PREVIEW_STL_MISSING',
-  issues: [{ code: 'PREVIEW_STL_MISSING', message: 'Preview STL not found.', partId: null, numericPayload: null }],
-  metrics: { partCount: 0, previewStlSizeBytes: null, totalVolume: null, totalArea: null, bbox: null },
+  issues: [{ code: 'PREVIEW_STL_MISSING', message: 'Model STL not found.', partId: null, numericPayload: null }],
+  metrics: { partCount: 0, modelStlSizeBytes: null, totalVolume: null, totalArea: null, bbox: null },
   verifierStatus: 'ok',
 };
 
@@ -181,7 +181,7 @@ const STRUCTURAL_SKIPPED: StructuralVerificationResult = {
   passed: false,
   summary: 'Verifier unavailable.',
   issues: [],
-  metrics: { partCount: 0, previewStlSizeBytes: null, totalVolume: null, totalArea: null, bbox: null },
+  metrics: { partCount: 0, modelStlSizeBytes: null, totalVolume: null, totalArea: null, bbox: null },
   verifierStatus: 'skipped_unavailable',
 };
 
@@ -222,11 +222,11 @@ async function runTwoStageVerificationLike(
     case 'structural_passed':
       structuralMetrics = structural.metrics;
       structuralSummary = `Structural checks passed.\nParts: ${structural.metrics.partCount}` +
-        (structural.metrics.previewStlTriangleCount != null ? `\nTriangles: ${structural.metrics.previewStlTriangleCount}` : '') +
-        (structural.metrics.previewStlComponentCount != null ? `\nComponents: ${structural.metrics.previewStlComponentCount}` : '') +
-        (structural.metrics.previewStlNonManifoldEdgeCount != null ? `\nNon-manifold edges: ${structural.metrics.previewStlNonManifoldEdgeCount}` : '') +
-        (structural.metrics.previewStlOverhangTriangleCount != null ? `\nOverhang triangles: ${structural.metrics.previewStlOverhangTriangleCount}` : '') +
-        (structural.metrics.previewStlOverhangRatio != null ? `\nOverhang ratio: ${structural.metrics.previewStlOverhangRatio.toFixed(3)}` : '') +
+        (structural.metrics.modelStlTriangleCount != null ? `\nTriangles: ${structural.metrics.modelStlTriangleCount}` : '') +
+        (structural.metrics.modelStlComponentCount != null ? `\nComponents: ${structural.metrics.modelStlComponentCount}` : '') +
+        (structural.metrics.modelStlNonManifoldEdgeCount != null ? `\nNon-manifold edges: ${structural.metrics.modelStlNonManifoldEdgeCount}` : '') +
+        (structural.metrics.modelStlOverhangTriangleCount != null ? `\nOverhang triangles: ${structural.metrics.modelStlOverhangTriangleCount}` : '') +
+        (structural.metrics.modelStlOverhangRatio != null ? `\nOverhang ratio: ${structural.metrics.modelStlOverhangRatio.toFixed(3)}` : '') +
         (structural.metrics.totalVolume != null ? `\nVolume: ${structural.metrics.totalVolume.toFixed(2)}` : '') +
         (structural.metrics.totalArea != null ? `\nArea: ${structural.metrics.totalArea.toFixed(2)}` : '');
       break;

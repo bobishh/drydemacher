@@ -114,6 +114,51 @@ fn authored_fem_mechanics_lower_to_validated_material_mesh_loads_and_supports() 
     assert_eq!(study.solver_method, "sparse-direct");
 }
 
+#[test]
+fn authored_topology_controls_lower_from_selected_ecky_study() {
+    let source = r#"
+      (model
+        (params
+          (number target-volume 0.35 :min 0.1 :max 0.8 :step 0.01)
+          (number filter-radius 3mm :min 0.5mm :max 10mm :step 0.5mm :unit length))
+        (part bracket (box 10 10 10))
+        (analysis bracket-topology
+          (linear-static :part bracket)
+          (material aluminum-6061
+            :young-modulus 68900MPa :poisson-ratio 0.33
+            :density 2700kg-per-m3 :yield-strength 276MPa)
+          (volume-mesh :element tet4 :size 2mm)
+          (topology-controls
+            :volume-fraction target-volume
+            :penalty 3
+            :minimum-density 0.001
+            :filter-radius filter-radius
+            :move-limit 0.2
+            :convergence-tolerance 0.01)
+          (fixed :faces (tag mounting))
+          (surface-force :faces (tag load-pad) :total [0N 0N -1000N])
+          (solve :method sparse-direct)))
+    "#;
+    let program = compile_to_core_program(source).expect("compile authored topology controls");
+    let resolved_faces = BTreeMap::from([
+        ("mounting".to_string(), vec![face("mounting")]),
+        ("load-pad".to_string(), vec![face("load-pad")]),
+    ]);
+
+    let study = authored_study_from_core(&program, "bracket-topology", &resolved_faces, budgets())
+        .expect("lower authored topology controls");
+    let controls = study
+        .topology_controls
+        .expect("selected study owns topology controls");
+
+    assert_eq!(controls.volume_fraction, 0.35);
+    assert_eq!(controls.penalty, 3.0);
+    assert_eq!(controls.minimum_density, 0.001);
+    assert_eq!(controls.filter_radius_mm, 3.0);
+    assert_eq!(controls.move_limit, 0.2);
+    assert_eq!(controls.convergence_tolerance, 0.01);
+}
+
 fn face(name: &str) -> FemFaceTarget {
     FemFaceTarget {
         schema_version: FEM_SCHEMA_VERSION,
@@ -152,6 +197,7 @@ fn fem_face_tags_resolve_through_exact_canonical_and_durable_brep_identity() {
         },
     )]);
     let boundary = AnalysisBoundarySurface {
+        tessellation_policy: Default::default(),
         part_id: "bracket".to_string(),
         label: "Bracket".to_string(),
         source_geometry_digest: "sha256:geometry".to_string(),

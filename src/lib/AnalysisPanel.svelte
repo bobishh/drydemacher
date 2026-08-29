@@ -5,6 +5,7 @@
     cancelFemStudy,
     exportFemResultVtu,
     formatBackendError,
+    getCachedFemConvergence,
     previewFemMesh,
     runFemConvergence,
     runFemStudy,
@@ -62,6 +63,7 @@
   let showOutline = $state(true);
   let clipFraction = $state(1);
   let unlisten: (() => void) | null = null;
+  let convergenceRestoreGeneration = 0;
   const resultIsStale = $derived(Boolean(result && resultSource !== source));
   const meshPreviewIsStale = $derived(Boolean(meshPreview && meshPreviewSource !== source));
 
@@ -83,6 +85,32 @@
     const authored = source.match(/\(volume-mesh\b[^)]*?:size\s+([0-9]+(?:\.[0-9]+)?)mm\b/);
     const size = authored ? Number(authored[1]) : 2;
     if (Number.isFinite(size) && size > 0) meshSizes = [size * 2, size, size / 2];
+  });
+
+  $effect(() => {
+    const currentModelId = modelId;
+    const currentSource = source;
+    const currentAnalysis = selectedAnalysis;
+    const currentMeshSizes = [...meshSizes];
+    const generation = ++convergenceRestoreGeneration;
+    convergence = null;
+    if (!currentModelId || !currentAnalysis) return;
+
+    void getCachedFemConvergence({
+      study: {
+        ...request(nextJobId('convergence-cache')),
+        modelId: currentModelId,
+        source: currentSource,
+        analysisName: currentAnalysis,
+      },
+      meshSizesMm: currentMeshSizes,
+      displacementRelativeTolerance: 0.03,
+      stressRelativeTolerance: 0.05,
+    }).then((cached) => {
+      if (generation === convergenceRestoreGeneration) convergence = cached;
+    }).catch((error) => {
+      if (generation === convergenceRestoreGeneration) errorText = formatBackendError(error);
+    });
   });
 
   $effect(() => {
@@ -241,8 +269,8 @@
       <span class="analysis-panel__eyebrow">NATIVE TET4</span>
       <h2>Structural Analysis</h2>
     </div>
-    <span class:analysis-panel__state--ready={Boolean(result?.decisionReady && !resultIsStale)} class="analysis-panel__state">
-      {runningJobId ? 'RUNNING' : resultIsStale || meshPreviewIsStale ? 'STALE' : result ? (result.decisionReady ? 'READY' : 'REVIEW') : 'IDLE'}
+    <span class:analysis-panel__state--ready={Boolean((result?.decisionReady && !resultIsStale) || convergence)} class="analysis-panel__state">
+      {runningJobId ? 'RUNNING' : resultIsStale || meshPreviewIsStale ? 'STALE' : result ? (result.decisionReady ? 'READY' : 'REVIEW') : convergence ? 'EVIDENCE' : 'IDLE'}
     </span>
   </header>
 

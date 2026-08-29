@@ -20,6 +20,9 @@ pub struct FemPipelineControlDto {
     pub minimum_scaled_jacobian: f64,
     pub maximum_runtime_ms: u64,
     pub relative_solver_tolerance: f64,
+    /// Zero selects available performance cores.
+    #[serde(default)]
+    pub thread_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
@@ -371,4 +374,165 @@ pub struct FemConvergenceResponse {
     pub displacement_status: String,
     pub stress_status: String,
     pub acceptance_evaluations: Vec<FemAcceptanceEvaluationDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FemTopologyMaterialDto {
+    pub name: String,
+    pub young_modulus_mpa: f64,
+    pub poisson_ratio: f64,
+    pub density_kg_per_mm3: f64,
+    pub yield_strength_mpa: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FemTopologySurfaceLoadDto {
+    pub id: String,
+    pub weight: f64,
+    pub face_group_indices: Vec<u32>,
+    pub total_force_n: [f64; 3],
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FemTopologyControlsDto {
+    pub volume_fraction: f64,
+    pub penalty: f64,
+    pub minimum_density: f64,
+    pub filter_radius_mm: f64,
+    pub move_limit: f64,
+    pub convergence_tolerance: f64,
+    #[serde(default)]
+    pub maximum_iterations: u64,
+    #[serde(default)]
+    pub maximum_new_iterations: u64,
+    #[serde(default)]
+    pub maximum_dimension: u64,
+    #[serde(default)]
+    pub maximum_elements: u64,
+    #[serde(default)]
+    pub maximum_solve_count: u64,
+    #[serde(default)]
+    pub maximum_working_memory_bytes: u64,
+    #[serde(default)]
+    pub maximum_result_bytes: u64,
+    #[serde(default)]
+    pub maximum_wall_time_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FemTopologyRunRequest {
+    pub study: FemStudyRequest,
+    pub resume_state_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FemTopologyRunResponse {
+    pub job_id: String,
+    pub analysis_identity_digest: String,
+    pub mesh_content_digest: String,
+    pub input_digest: String,
+    pub state_digest: String,
+    pub result_digest: Option<String>,
+    pub termination: String,
+    pub iteration_count: u64,
+    pub initial_compliance: Option<f64>,
+    pub final_compliance: Option<f64>,
+    pub final_volume_fraction: Option<f64>,
+    pub passive_solid_volume_fraction: Option<f64>,
+    pub passive_void_volume_fraction: Option<f64>,
+    pub gcmma_trace_edn: String,
+    pub checkpoint_path: String,
+    pub density_path: Option<String>,
+    pub preview_vtu_path: Option<String>,
+    pub exact_brep: bool,
+    pub production_step: bool,
+    pub engineering_accepted: bool,
+    pub scope_disclaimer: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FemTopologyReconstructRequest {
+    pub study: FemStudyRequest,
+    pub analysis_identity_digest: String,
+    pub mesh_content_digest: String,
+    pub input_digest: String,
+    pub state_digest: String,
+    pub density_threshold: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FemTopologyReconstructResponse {
+    pub analysis_identity_digest: String,
+    pub mesh_content_digest: String,
+    pub input_digest: String,
+    pub state_digest: String,
+    pub result_digest: String,
+    pub solid_expression: String,
+    pub vertex_count: u64,
+    pub triangle_count: u64,
+    pub discarded_cell_count: u64,
+    pub discarded_active_volume_fraction: f64,
+    pub connected_anchor_ids: Vec<String>,
+    pub signed_volume_mm3: f64,
+    pub closed_manifold: bool,
+    pub exact_brep: bool,
+    pub independently_verified: bool,
+    pub scope_disclaimer: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FemTopologyControlsDto;
+
+    #[test]
+    fn topology_controls_admit_explicit_working_memory_bound() {
+        let controls = serde_json::from_value::<FemTopologyControlsDto>(serde_json::json!({
+            "volumeFraction": 0.5,
+            "penalty": 3.0,
+            "minimumDensity": 0.001,
+            "filterRadiusMm": 5.0,
+            "moveLimit": 0.1,
+            "convergenceTolerance": 0.0001,
+            "maximumIterations": 10,
+            "maximumNewIterations": 2,
+            "maximumDimension": 1000,
+            "maximumElements": 1000,
+            "maximumSolveCount": 20,
+            "maximumWorkingMemoryBytes": 100000000,
+            "maximumResultBytes": 1000000,
+            "maximumWallTimeMs": 10000
+        }))
+        .expect("bounded topology controls");
+        assert_eq!(controls.maximum_working_memory_bytes, 100_000_000);
+    }
+
+    #[test]
+    fn topology_controls_reject_manual_mesh_cell_masks() {
+        let error = serde_json::from_value::<FemTopologyControlsDto>(serde_json::json!({
+            "volumeFraction": 0.5,
+            "penalty": 3.0,
+            "minimumDensity": 0.001,
+            "filterRadiusMm": 5.0,
+            "moveLimit": 0.1,
+            "convergenceTolerance": 0.0001,
+            "maximumIterations": 10,
+            "maximumNewIterations": 2,
+            "maximumDimension": 1000,
+            "maximumElements": 1000,
+            "maximumSolveCount": 20,
+            "maximumWorkingMemoryBytes": 100000000,
+            "maximumResultBytes": 1000000,
+            "maximumWallTimeMs": 10000,
+            "passiveSolidCells": [0]
+        }))
+        .expect_err("mesh cell masks are internal topology state");
+        assert!(error.to_string().contains("passiveSolidCells"));
+    }
 }

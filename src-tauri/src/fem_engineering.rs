@@ -25,7 +25,26 @@ pub struct FemAuthoredStudy {
     pub mesh_control: FemMeshControl,
     pub constraints: Vec<FemConstraint>,
     pub loads: Vec<FemLoad>,
+    pub topology_controls: Option<FemAuthoredTopologyControls>,
+    pub passive_solid_regions: Vec<FemAuthoredTopologyRegion>,
+    pub passive_void_regions: Vec<FemAuthoredTopologyRegion>,
     pub solver_method: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FemAuthoredTopologyControls {
+    pub volume_fraction: f64,
+    pub penalty: f64,
+    pub minimum_density: f64,
+    pub filter_radius_mm: f64,
+    pub move_limit: f64,
+    pub convergence_tolerance: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FemAuthoredTopologyRegion {
+    pub faces: Vec<FemFaceTarget>,
+    pub depth_mm: f64,
 }
 
 pub fn resolve_fem_face_tags(
@@ -112,6 +131,9 @@ pub fn authored_study_from_core(
     let mut mesh_control = None;
     let mut constraints = Vec::new();
     let mut loads = Vec::new();
+    let mut topology_controls = None;
+    let mut passive_solid_regions = Vec::new();
+    let mut passive_void_regions = Vec::new();
     let mut solver_method = None;
     let mut source_geometry_digest = None::<String>;
 
@@ -208,6 +230,77 @@ pub fn authored_study_from_core(
                 return Err(AppError::validation(
                     "FEM `refine` must be nested inside `volume-mesh`.",
                 ));
+            }
+            CoreAnalysisClauseKind::TopologyControls {
+                volume_fraction,
+                penalty,
+                minimum_density,
+                filter_radius,
+                move_limit,
+                convergence_tolerance,
+            } => {
+                let value = FemAuthoredTopologyControls {
+                    volume_fraction: resolve_analysis_scalar(
+                        program,
+                        volume_fraction,
+                        FemScalarUnit::Dimensionless,
+                        "topology volume fraction",
+                    )?,
+                    penalty: resolve_analysis_scalar(
+                        program,
+                        penalty,
+                        FemScalarUnit::Dimensionless,
+                        "topology penalty",
+                    )?,
+                    minimum_density: resolve_analysis_scalar(
+                        program,
+                        minimum_density,
+                        FemScalarUnit::Dimensionless,
+                        "topology minimum density",
+                    )?,
+                    filter_radius_mm: resolve_analysis_scalar(
+                        program,
+                        filter_radius,
+                        FemScalarUnit::Length,
+                        "topology filter radius",
+                    )?,
+                    move_limit: resolve_analysis_scalar(
+                        program,
+                        move_limit,
+                        FemScalarUnit::Dimensionless,
+                        "topology move limit",
+                    )?,
+                    convergence_tolerance: resolve_analysis_scalar(
+                        program,
+                        convergence_tolerance,
+                        FemScalarUnit::Dimensionless,
+                        "topology convergence tolerance",
+                    )?,
+                };
+                validate_authored_topology_controls(&value)?;
+                set_once(&mut topology_controls, value, "topology controls")?;
+            }
+            CoreAnalysisClauseKind::PassiveSolid { face_tag, depth } => {
+                passive_solid_regions.push(resolve_topology_region(
+                    program,
+                    resolved_faces,
+                    &analysis.part,
+                    face_tag,
+                    depth,
+                    &mut source_geometry_digest,
+                    "passive-solid",
+                )?);
+            }
+            CoreAnalysisClauseKind::PassiveVoid { face_tag, depth } => {
+                passive_void_regions.push(resolve_topology_region(
+                    program,
+                    resolved_faces,
+                    &analysis.part,
+                    face_tag,
+                    depth,
+                    &mut source_geometry_digest,
+                    "passive-void",
+                )?);
             }
             CoreAnalysisClauseKind::Fixed { face_tag } => {
                 let value = FemConstraint::Fixed {
@@ -386,9 +479,68 @@ pub fn authored_study_from_core(
         })?,
         constraints,
         loads,
+        topology_controls,
+        passive_solid_regions,
+        passive_void_regions,
         solver_method: solver_method.ok_or_else(|| {
             AppError::validation(format!("FEM analysis '{analysis_name}' is missing solver."))
         })?,
+    })
+}
+
+fn validate_authored_topology_controls(value: &FemAuthoredTopologyControls) -> AppResult<()> {
+    let open_unit = |number: f64| number.is_finite() && number > 0.0 && number < 1.0;
+    if !open_unit(value.volume_fraction) {
+        return Err(AppError::validation(
+            "FEM topology volume fraction must be finite and between 0 and 1.",
+        ));
+    }
+    if !value.penalty.is_finite() || value.penalty < 1.0 {
+        return Err(AppError::validation(
+            "FEM topology penalty must be finite and at least 1.",
+        ));
+    }
+    if !open_unit(value.minimum_density) {
+        return Err(AppError::validation(
+            "FEM topology minimum density must be finite and between 0 and 1.",
+        ));
+    }
+    if !value.filter_radius_mm.is_finite() || value.filter_radius_mm <= 0.0 {
+        return Err(AppError::validation(
+            "FEM topology filter radius must be finite and positive.",
+        ));
+    }
+    if !open_unit(value.move_limit) {
+        return Err(AppError::validation(
+            "FEM topology move limit must be finite and between 0 and 1.",
+        ));
+    }
+    if !value.convergence_tolerance.is_finite() || value.convergence_tolerance <= 0.0 {
+        return Err(AppError::validation(
+            "FEM topology convergence tolerance must be finite and positive.",
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_topology_region(
+    program: &CoreProgram,
+    resolved_faces: &BTreeMap<String, Vec<FemFaceTarget>>,
+    part_id: &str,
+    face_tag: &str,
+    depth: &CoreAnalysisScalarExpr,
+    source_geometry_digest: &mut Option<String>,
+    label: &str,
+) -> AppResult<FemAuthoredTopologyRegion> {
+    let depth_mm = resolve_analysis_scalar(program, depth, FemScalarUnit::Length, label)?;
+    if !depth_mm.is_finite() || depth_mm <= 0.0 {
+        return Err(AppError::validation(format!(
+            "FEM {label} depth must be finite and positive."
+        )));
+    }
+    Ok(FemAuthoredTopologyRegion {
+        faces: resolve_face_tag(resolved_faces, face_tag, part_id, source_geometry_digest)?,
+        depth_mm,
     })
 }
 

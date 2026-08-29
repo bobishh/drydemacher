@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+use ecky_fem::AccelerateSparseCholeskySolver;
 use ecky_fem::{
     FaerSparseCholeskySolver, FemSparseEntry, FemSparseMatrix, LinearSolver,
     ReferenceCholeskySolver,
@@ -55,7 +57,7 @@ fn production_sparse_solver_matches_oracle_and_rejects_non_spd() {
     let oracle = ReferenceCholeskySolver
         .solve(&matrix, &rhs, 1.0e-12, 10)
         .expect("oracle solve");
-    let solved = FaerSparseCholeskySolver::default()
+    let solved = FaerSparseCholeskySolver
         .solve(&matrix, &rhs, 1.0e-12, 10)
         .expect("Faer sparse solve");
     for (actual, expected) in solved.solution.iter().zip(oracle.solution) {
@@ -71,7 +73,7 @@ fn production_sparse_solver_matches_oracle_and_rejects_non_spd() {
 
     let non_spd = FemSparseMatrix::from_dense(vec![vec![1.0, 2.0], vec![2.0, 1.0]])
         .expect("symmetric indefinite matrix");
-    let error = FaerSparseCholeskySolver::default()
+    let error = FaerSparseCholeskySolver
         .solve(&non_spd, &[1.0, 1.0], 1.0e-12, 10)
         .expect_err("non-SPD must fail");
     assert!(error.message.contains("Faer") || error.message.contains("positive definite"));
@@ -114,4 +116,91 @@ fn production_sparse_solver_rejects_solution_above_authored_residual_tolerance()
         .expect_err("residual above an authored tolerance must fail");
     assert_eq!(error.field, "solution.relativeResidual");
     assert!(error.message.contains("exceeds tolerance"));
+}
+
+#[test]
+fn sparse_solver_batch_rhs_matches_independent_solves() {
+    let matrix =
+        FemSparseMatrix::from_dense(vec![vec![4.0, 1.0], vec![1.0, 3.0]]).expect("SPD matrix");
+    let right_hand_sides = vec![vec![1.0, 2.0], vec![-3.0, 4.0]];
+    let batch = FaerSparseCholeskySolver
+        .solve_many(&matrix, &right_hand_sides, 1.0e-12, 2)
+        .expect("one factorization with multiple right-hand sides");
+    assert_eq!(batch.len(), right_hand_sides.len());
+    for (rhs, observed) in right_hand_sides.iter().zip(batch) {
+        let independent = FaerSparseCholeskySolver
+            .solve(&matrix, rhs, 1.0e-12, 2)
+            .expect("independent solve");
+        assert_eq!(observed.solution, independent.solution);
+        assert_eq!(observed.relative_residual, independent.relative_residual);
+    }
+}
+
+#[test]
+fn production_parallel_sparse_solver_records_requested_worker_count() {
+    let matrix = FemSparseMatrix::from_dense(vec![
+        vec![6.0, -1.0, 0.0],
+        vec![-1.0, 6.0, -1.0],
+        vec![0.0, -1.0, 6.0],
+    ])
+    .expect("SPD matrix");
+    let solved = FaerSparseCholeskySolver::with_thread_count(4)
+        .solve_many(
+            &matrix,
+            &[vec![1.0, 0.0, 0.0], vec![0.0, 0.0, 1.0]],
+            1.0e-12,
+            3,
+        )
+        .expect("parallel sparse batch solve");
+
+    assert_eq!(solved.len(), 2);
+    assert!(solved
+        .iter()
+        .all(|result| result.solver_identity.thread_count == 4));
+    assert!(solved
+        .iter()
+        .all(|result| result.solver_identity.parallelism == "rayon"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn accelerate_sparse_solver_reuses_one_factor_for_batch_rhs() {
+    let matrix = FemSparseMatrix::from_dense(vec![
+        vec![10.0, 2.0, 0.0],
+        vec![2.0, 7.0, 1.0],
+        vec![0.0, 1.0, 5.0],
+    ])
+    .expect("SPD matrix");
+    let solved = AccelerateSparseCholeskySolver
+        .solve_many(
+            &matrix,
+            &[vec![7.0, -8.0, 6.0], vec![1.0, 0.0, -1.0]],
+            1.0e-12,
+            3,
+        )
+        .expect("Accelerate batch solve");
+
+    assert_eq!(solved.len(), 2);
+    assert!(solved.iter().all(|item| item.relative_residual <= 1.0e-12));
+    assert!(solved.iter().all(|item| {
+        item.solver_identity.backend == "accelerate-sparse"
+            && item.solver_identity.parallelism == "accelerate-managed"
+            && item.solver_identity.thread_count == 0
+    }));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn accelerate_sparse_solver_preserves_noncanonical_coordinate_compatibility() {
+    let mut matrix = FemSparseMatrix::from_dense(vec![
+        vec![5.0, 1.0, 0.0],
+        vec![1.0, 4.0, -1.0],
+        vec![0.0, -1.0, 3.0],
+    ])
+    .unwrap();
+    matrix.entries.reverse();
+    let solved = AccelerateSparseCholeskySolver
+        .solve(&matrix, &[2.0, -1.0, 3.0], 1.0e-12, 3)
+        .expect("noncanonical compatibility solve");
+    assert!(solved.relative_residual <= 1.0e-12);
 }

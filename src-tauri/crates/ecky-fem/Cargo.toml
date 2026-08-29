@@ -9,7 +9,11 @@ description = "Backend-neutral FEM domain contracts for Ecky"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10.9"
-faer = { version = "=0.24.4", default-features = false, features = ["std", "sparse-linalg"] }
+faer = { version = "=0.24.4", default-features = false, features = ["std", "sparse-linalg", "rayon"] }
+rayon = "1.11"
 
 [dev-dependencies]
 serde_json = "1.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+ecky-accelerate-sparse = { path = "../ecky-accelerate-sparse" }

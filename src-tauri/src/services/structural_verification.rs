@@ -14,63 +14,73 @@ pub fn verify_structure(
     bundle: &ArtifactBundle,
     manifest: &ModelManifest,
 ) -> StructuralVerificationResult {
-    let mut issues: Vec<StructuralIssue> = Vec::new();
-    let mut preview_stl_size: Option<u64> = None;
-    let mut preview_stl_triangle_count: Option<u32> = None;
-    let mut preview_stl_component_count: Option<u32> = None;
-    let mut preview_stl_non_manifold_edge_count: Option<u32> = None;
-    let mut preview_stl_overhang_triangle_count: Option<u32> = None;
-    let mut preview_stl_overhang_ratio: Option<f64> = None;
+    verify_structure_with_expected_component_count(bundle, manifest, None)
+}
 
-    // 1. Preview STL exists and is non-empty
-    let stl_path = Path::new(&bundle.preview_stl_path);
+pub(crate) fn verify_structure_with_expected_component_count(
+    bundle: &ArtifactBundle,
+    manifest: &ModelManifest,
+    authored_expected_component_count: Option<usize>,
+) -> StructuralVerificationResult {
+    let mut issues: Vec<StructuralIssue> = Vec::new();
+    let mut model_stl_size: Option<u64> = None;
+    let mut model_stl_triangle_count: Option<u32> = None;
+    let mut model_stl_component_count: Option<u32> = None;
+    let mut model_stl_non_manifold_edge_count: Option<u32> = None;
+    let mut model_stl_overhang_triangle_count: Option<u32> = None;
+    let mut model_stl_overhang_ratio: Option<f64> = None;
+
+    // 1. Model STL exists and is non-empty
+    let stl_path = Path::new(&bundle.model_stl_path);
     match fs::metadata(stl_path) {
         Ok(meta) => {
             let size = meta.len();
-            preview_stl_size = Some(size);
+            model_stl_size = Some(size);
             if size == 0 {
                 issues.push(StructuralIssue {
                     code: "PREVIEW_STL_EMPTY".into(),
-                    message: "Preview STL file is empty (0 bytes).".into(),
+                    message: "Model STL file is empty (0 bytes).".into(),
                     part_id: None,
                     numeric_payload: Some(0.0),
                     diagnostic_context: None,
                 });
             } else {
-                match preview_stl_triangles(stl_path) {
+                match model_stl_triangles(stl_path) {
                     Ok(StlPreview::Parsed(triangles)) if triangles.is_empty() => {
-                        preview_stl_triangle_count = Some(0);
-                        preview_stl_component_count = Some(0);
-                        preview_stl_non_manifold_edge_count = Some(0);
-                        preview_stl_overhang_triangle_count = Some(0);
-                        preview_stl_overhang_ratio = Some(0.0);
+                        model_stl_triangle_count = Some(0);
+                        model_stl_component_count = Some(0);
+                        model_stl_non_manifold_edge_count = Some(0);
+                        model_stl_overhang_triangle_count = Some(0);
+                        model_stl_overhang_ratio = Some(0.0);
                         issues.push(StructuralIssue {
                             code: "PREVIEW_STL_NO_TRIANGLES".into(),
-                            message: "Preview STL file contains no triangles.".into(),
+                            message: "Model STL file contains no triangles.".into(),
                             part_id: None,
                             numeric_payload: Some(0.0),
                             diagnostic_context: None,
                         });
                     }
                     Ok(StlPreview::Parsed(triangles)) => {
-                        let topology = preview_stl_topology_summary(&triangles);
-                        preview_stl_triangle_count = Some(usize_metric(topology.triangle_count));
-                        preview_stl_component_count = Some(usize_metric(topology.component_count));
-                        preview_stl_non_manifold_edge_count =
+                        let topology = model_stl_topology_summary(&triangles);
+                        model_stl_triangle_count = Some(usize_metric(topology.triangle_count));
+                        model_stl_component_count = Some(usize_metric(topology.component_count));
+                        model_stl_non_manifold_edge_count =
                             Some(usize_metric(topology.non_manifold_edge_count));
-                        preview_stl_overhang_triangle_count =
+                        model_stl_overhang_triangle_count =
                             Some(usize_metric(topology.overhang_triangle_count));
-                        preview_stl_overhang_ratio = Some(topology.overhang_ratio);
-                        add_preview_stl_topology_issues(
+                        model_stl_overhang_ratio = Some(topology.overhang_ratio);
+                        add_model_stl_topology_issues(
                             &mut issues,
                             topology,
-                            expected_preview_component_count(bundle, manifest),
+                            authored_expected_component_count.unwrap_or_else(|| {
+                                expected_preview_component_count(bundle, manifest)
+                            }),
                         );
                     }
                     Ok(StlPreview::Unreadable) | Err(_) => {
                         issues.push(StructuralIssue {
                             code: "PREVIEW_STL_UNREADABLE".into(),
-                            message: "Preview STL file could not be parsed as valid STL.".into(),
+                            message: "Model STL file could not be parsed as valid STL.".into(),
                             part_id: None,
                             numeric_payload: None,
                             diagnostic_context: None,
@@ -82,7 +92,7 @@ pub fn verify_structure(
         Err(_) => {
             issues.push(StructuralIssue {
                 code: "PREVIEW_STL_MISSING".into(),
-                message: format!("Preview STL file not found: {}", bundle.preview_stl_path),
+                message: format!("Model STL file not found: {}", bundle.model_stl_path),
                 part_id: None,
                 numeric_payload: None,
                 diagnostic_context: None,
@@ -331,12 +341,12 @@ pub fn verify_structure(
         authored_verify_checks: Vec::new(),
         metrics: StructuralMetrics {
             part_count: manifest.parts.len() as u32,
-            preview_stl_size_bytes: preview_stl_size,
-            preview_stl_triangle_count,
-            preview_stl_component_count,
-            preview_stl_non_manifold_edge_count,
-            preview_stl_overhang_triangle_count,
-            preview_stl_overhang_ratio,
+            model_stl_size_bytes: model_stl_size,
+            model_stl_triangle_count,
+            model_stl_component_count,
+            model_stl_non_manifold_edge_count,
+            model_stl_overhang_triangle_count,
+            model_stl_overhang_ratio,
             total_volume,
             total_area,
             bbox: merged_bbox,
@@ -370,7 +380,7 @@ enum StlPreview {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct StlVertex([u32; 3]);
+struct StlVertex([i64; 3]);
 
 #[derive(Clone, Copy, Debug)]
 struct StlTriangle {
@@ -419,17 +429,21 @@ impl StlEdge {
     }
 }
 
-fn stl_float_key(value: f32) -> u32 {
-    if value == 0.0 {
-        0.0_f32.to_bits()
-    } else if value.is_nan() {
-        f32::NAN.to_bits()
+const STL_TOPOLOGY_WELD_TOLERANCE_MM: f64 = 1.0e-5;
+
+fn stl_float_key(value: f32) -> i64 {
+    if value.is_nan() {
+        i64::MIN
+    } else if value == f32::NEG_INFINITY {
+        i64::MIN + 1
+    } else if value == f32::INFINITY {
+        i64::MAX
     } else {
-        value.to_bits()
+        ((value as f64) / STL_TOPOLOGY_WELD_TOLERANCE_MM).round() as i64
     }
 }
 
-fn preview_stl_triangles(path: &Path) -> std::io::Result<StlPreview> {
+fn model_stl_triangles(path: &Path) -> std::io::Result<StlPreview> {
     let bytes = fs::read(path)?;
     let first_non_whitespace = bytes.iter().position(|b| !b.is_ascii_whitespace());
 
@@ -576,7 +590,7 @@ fn starts_ascii_case(text: &str, prefix: &str) -> bool {
         .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix.as_bytes()))
 }
 
-fn preview_stl_topology_summary(triangles: &[StlTriangle]) -> StlTopologySummary {
+fn model_stl_topology_summary(triangles: &[StlTriangle]) -> StlTopologySummary {
     let edge_triangles = stl_edge_triangles(triangles);
     let non_manifold_edges = edge_triangles
         .values()
@@ -598,12 +612,12 @@ fn preview_stl_topology_summary(triangles: &[StlTriangle]) -> StlTopologySummary
     }
 }
 
-pub(crate) fn preview_stl_non_manifold_edge_count(path: &Path) -> AppResult<usize> {
-    match preview_stl_triangles(path).map_err(|err| {
+pub(crate) fn model_stl_non_manifold_edge_count(path: &Path) -> AppResult<usize> {
+    match model_stl_triangles(path).map_err(|err| {
         AppError::render(format!("Failed to read STL '{}': {err}", path.display()))
     })? {
         StlPreview::Parsed(triangles) if !triangles.is_empty() => {
-            Ok(preview_stl_topology_summary(&triangles).non_manifold_edge_count)
+            Ok(model_stl_topology_summary(&triangles).non_manifold_edge_count)
         }
         StlPreview::Parsed(_) => Err(AppError::render(format!(
             "STL '{}' contains no triangles.",
@@ -616,7 +630,7 @@ pub(crate) fn preview_stl_non_manifold_edge_count(path: &Path) -> AppResult<usiz
     }
 }
 
-fn add_preview_stl_topology_issues(
+fn add_model_stl_topology_issues(
     issues: &mut Vec<StructuralIssue>,
     topology: StlTopologySummary,
     expected_component_count: usize,
@@ -626,7 +640,7 @@ fn add_preview_stl_topology_issues(
         issues.push(StructuralIssue {
             code: "PREVIEW_STL_NON_MANIFOLD".into(),
             message: format!(
-                "Preview STL contains {} non-manifold edge(s).",
+                "Model STL contains {} non-manifold edge(s).",
                 non_manifold_edges
             ),
             part_id: None,
@@ -640,7 +654,7 @@ fn add_preview_stl_topology_issues(
         issues.push(StructuralIssue {
             code: "PREVIEW_STL_DISCONNECTED_COMPONENTS".into(),
             message: format!(
-                "Preview STL contains {} disconnected triangle components.",
+                "Model STL contains {} disconnected triangle components.",
                 component_count
             ),
             part_id: None,
@@ -651,6 +665,9 @@ fn add_preview_stl_topology_issues(
 }
 
 fn expected_preview_component_count(bundle: &ArtifactBundle, manifest: &ModelManifest) -> usize {
+    if let Some(solid_count) = direct_occt_reported_solid_count(bundle, manifest) {
+        return solid_count;
+    }
     let viewer_part_count = bundle
         .viewer_assets
         .iter()
@@ -658,6 +675,54 @@ fn expected_preview_component_count(bundle: &ArtifactBundle, manifest: &ModelMan
         .collect::<HashSet<_>>()
         .len();
     viewer_part_count.max(manifest.parts.len()).max(1)
+}
+
+fn direct_occt_reported_solid_count(
+    bundle: &ArtifactBundle,
+    manifest: &ModelManifest,
+) -> Option<usize> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TopologyReport {
+        #[serde(default)]
+        parts: Vec<TopologyPart>,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TopologyPart {
+        part_id: String,
+        solid_count: Option<usize>,
+    }
+
+    let topology_path = Path::new(&bundle.model_stl_path)
+        .parent()?
+        .join("topology.json");
+    let report: TopologyReport = serde_json::from_slice(&fs::read(topology_path).ok()?).ok()?;
+    if report.parts.len() != manifest.parts.len() {
+        return None;
+    }
+
+    let manifest_part_ids = manifest
+        .parts
+        .iter()
+        .map(|part| part.part_id.as_str())
+        .collect::<HashSet<_>>();
+    let mut topology_part_ids = HashSet::with_capacity(report.parts.len());
+    let mut total = 0usize;
+    for part in &report.parts {
+        if !manifest_part_ids.contains(part.part_id.as_str())
+            || !topology_part_ids.insert(part.part_id.as_str())
+        {
+            return None;
+        }
+        let solid_count = part.solid_count?;
+        if solid_count == 0 {
+            return None;
+        }
+        total = total.checked_add(solid_count)?;
+    }
+    (topology_part_ids.len() == manifest_part_ids.len()).then_some(total)
 }
 
 fn usize_metric(value: usize) -> u32 {
@@ -763,7 +828,7 @@ mod tests {
     use std::io::Write;
 
     fn test_bundle(dir: &Path) -> ArtifactBundle {
-        let stl_path = dir.join("preview.stl");
+        let stl_path = dir.join("model.stl");
         write_closed_tetra_binary_stl(&stl_path, 0.0);
 
         let manifest_path = dir.join("manifest.json");
@@ -774,6 +839,7 @@ mod tests {
             component_dependency_lock: None,
             component_dependency_lock_digest: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: 1,
             model_id: "generated-test-001".into(),
             source_kind: ModelSourceKind::Generated,
@@ -785,7 +851,7 @@ mod tests {
             fcstd_path: dir.join("model.fcstd").to_string_lossy().into(),
             manifest_path: manifest_path.to_string_lossy().into(),
             macro_path: None,
-            preview_stl_path: stl_path.to_string_lossy().into(),
+            model_stl_path: stl_path.to_string_lossy().into(),
             viewer_assets: vec![],
             edge_targets: vec![],
             face_targets: vec![],
@@ -878,6 +944,7 @@ mod tests {
         ModelManifest {
             geometry_provenance: None,
             component_import_origins: Vec::new(),
+            component_placement_evidence: Vec::new(),
             schema_version: 1,
             model_id: "generated-test-001".into(),
             source_kind: ModelSourceKind::Generated,
@@ -953,24 +1020,24 @@ mod tests {
         assert_eq!(result.verifier_status, VerifierStatus::OkRustOnly);
         assert_eq!(result.verifier_source, Some(VerifierSource::RustStructural));
         assert_eq!(result.metrics.part_count, 1);
-        assert!(result.metrics.preview_stl_size_bytes.unwrap() > 0);
+        assert!(result.metrics.model_stl_size_bytes.unwrap() > 0);
         assert!((result.metrics.total_volume.unwrap() - 1000.0).abs() < f64::EPSILON);
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn closed_tetra_preview_stl_has_no_topology_issues() {
+    fn closed_tetra_model_stl_has_no_topology_issues() {
         let dir = temp_dir("closed_tetra");
         let bundle = test_bundle(&dir);
-        write_closed_tetra_binary_stl(Path::new(&bundle.preview_stl_path), 0.0);
+        write_closed_tetra_binary_stl(Path::new(&bundle.model_stl_path), 0.0);
         let manifest = test_manifest();
         let result = verify_structure(&bundle, &manifest);
         assert!(result.passed, "Expected pass, got: {:?}", result.issues);
-        assert_eq!(result.metrics.preview_stl_triangle_count, Some(4));
-        assert_eq!(result.metrics.preview_stl_component_count, Some(1));
-        assert_eq!(result.metrics.preview_stl_non_manifold_edge_count, Some(0));
-        assert_eq!(result.metrics.preview_stl_overhang_triangle_count, Some(0));
-        assert_eq!(result.metrics.preview_stl_overhang_ratio, Some(0.0));
+        assert_eq!(result.metrics.model_stl_triangle_count, Some(4));
+        assert_eq!(result.metrics.model_stl_component_count, Some(1));
+        assert_eq!(result.metrics.model_stl_non_manifold_edge_count, Some(0));
+        assert_eq!(result.metrics.model_stl_overhang_triangle_count, Some(0));
+        assert_eq!(result.metrics.model_stl_overhang_ratio, Some(0.0));
         assert!(!result
             .issues
             .iter()
@@ -983,10 +1050,10 @@ mod tests {
     }
 
     #[test]
-    fn open_single_triangle_preview_stl_fails_non_manifold() {
+    fn open_single_triangle_model_stl_fails_non_manifold() {
         let dir = temp_dir("binary_one_triangle");
         let bundle = test_bundle(&dir);
-        write_one_triangle_binary_stl(Path::new(&bundle.preview_stl_path));
+        write_one_triangle_binary_stl(Path::new(&bundle.model_stl_path));
         let manifest = test_manifest();
         let result = verify_structure(&bundle, &manifest);
         assert!(!result.passed);
@@ -1002,19 +1069,77 @@ mod tests {
             .issues
             .iter()
             .any(|i| i.code == "PREVIEW_STL_NON_MANIFOLD"));
-        assert_eq!(result.metrics.preview_stl_triangle_count, Some(1));
-        assert_eq!(result.metrics.preview_stl_component_count, Some(1));
-        assert_eq!(result.metrics.preview_stl_non_manifold_edge_count, Some(3));
-        assert_eq!(result.metrics.preview_stl_overhang_triangle_count, Some(0));
-        assert_eq!(result.metrics.preview_stl_overhang_ratio, Some(0.0));
+        assert_eq!(result.metrics.model_stl_triangle_count, Some(1));
+        assert_eq!(result.metrics.model_stl_component_count, Some(1));
+        assert_eq!(result.metrics.model_stl_non_manifold_edge_count, Some(3));
+        assert_eq!(result.metrics.model_stl_overhang_triangle_count, Some(0));
+        assert_eq!(result.metrics.model_stl_overhang_ratio, Some(0.0));
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn raised_downward_preview_stl_reports_overhang_metric_without_failing_for_overhang() {
+    fn stl_topology_welds_sub_micron_tessellation_seams() {
+        let points = [
+            [0.0_f32, 0.0, 0.0],
+            [1.0_f32, 0.0, 0.0],
+            [0.0_f32, 1.0, 0.0],
+            [0.0_f32, 0.0, 1.0],
+        ];
+        let faces = [[0, 1, 2], [0, 3, 1], [1, 3, 2], [2, 3, 0]];
+        let triangles = faces
+            .into_iter()
+            .enumerate()
+            .map(|(face_index, face)| {
+                let jitter = face_index as f32 * 1.0e-6;
+                let coords = face.map(|point_index| {
+                    let mut point = points[point_index];
+                    point[0] += jitter;
+                    point
+                });
+                StlTriangle {
+                    vertices: coords.map(StlVertex::new),
+                    coords,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let topology = model_stl_topology_summary(&triangles);
+        assert_eq!(topology.non_manifold_edge_count, 0);
+        assert_eq!(topology.component_count, 1);
+    }
+
+    #[test]
+    fn stl_topology_keeps_distinct_edges_fifty_nanometres_apart() {
+        let tetrahedron = |offset: f32| {
+            let points = [
+                [offset, 0.0_f32, 0.0],
+                [1.0 + offset, 0.0, 0.0],
+                [offset, 1.0, 0.0],
+                [offset, 0.0, 1.0],
+            ];
+            [[0, 1, 2], [0, 3, 1], [1, 3, 2], [2, 3, 0]].map(|face| {
+                let coords = face.map(|point_index| points[point_index]);
+                StlTriangle {
+                    vertices: coords.map(StlVertex::new),
+                    coords,
+                }
+            })
+        };
+        let triangles = tetrahedron(0.0)
+            .into_iter()
+            .chain(tetrahedron(5.0e-5))
+            .collect::<Vec<_>>();
+
+        let topology = model_stl_topology_summary(&triangles);
+        assert_eq!(topology.non_manifold_edge_count, 0);
+        assert_eq!(topology.component_count, 2);
+    }
+
+    #[test]
+    fn raised_downward_model_stl_reports_overhang_metric_without_failing_for_overhang() {
         let dir = temp_dir("raised_downward_triangle");
         let bundle = test_bundle(&dir);
-        write_raised_downward_triangle_binary_stl(Path::new(&bundle.preview_stl_path));
+        write_raised_downward_triangle_binary_stl(Path::new(&bundle.model_stl_path));
         let manifest = test_manifest();
         let result = verify_structure(&bundle, &manifest);
         assert!(!result.passed);
@@ -1026,18 +1151,18 @@ mod tests {
             .issues
             .iter()
             .any(|i| i.code == "PREVIEW_STL_OVERHANG_RISK"));
-        assert_eq!(result.metrics.preview_stl_triangle_count, Some(2));
-        assert_eq!(result.metrics.preview_stl_overhang_triangle_count, Some(1));
-        assert_eq!(result.metrics.preview_stl_overhang_ratio, Some(0.5));
+        assert_eq!(result.metrics.model_stl_triangle_count, Some(2));
+        assert_eq!(result.metrics.model_stl_overhang_triangle_count, Some(1));
+        assert_eq!(result.metrics.model_stl_overhang_ratio, Some(0.5));
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn ascii_open_single_triangle_preview_stl_fails_non_manifold() {
+    fn ascii_open_single_triangle_model_stl_fails_non_manifold() {
         let dir = temp_dir("ascii_one_triangle");
         let bundle = test_bundle(&dir);
         write_ascii_stl(
-            Path::new(&bundle.preview_stl_path),
+            Path::new(&bundle.model_stl_path),
             &[[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]],
         );
         let manifest = test_manifest();
@@ -1055,10 +1180,10 @@ mod tests {
     }
 
     #[test]
-    fn separated_tetra_preview_stl_fails_disconnected_components() {
+    fn separated_tetra_model_stl_fails_disconnected_components() {
         let dir = temp_dir("two_tetra");
         let bundle = test_bundle(&dir);
-        write_two_tetra_binary_stl(Path::new(&bundle.preview_stl_path));
+        write_two_tetra_binary_stl(Path::new(&bundle.model_stl_path));
         let manifest = test_manifest();
         let result = verify_structure(&bundle, &manifest);
         assert!(!result.passed);
@@ -1068,11 +1193,11 @@ mod tests {
             .find(|i| i.code == "PREVIEW_STL_DISCONNECTED_COMPONENTS")
             .expect("expected disconnected component issue");
         assert_eq!(issue.numeric_payload, Some(2.0));
-        assert_eq!(result.metrics.preview_stl_triangle_count, Some(8));
-        assert_eq!(result.metrics.preview_stl_component_count, Some(2));
-        assert_eq!(result.metrics.preview_stl_non_manifold_edge_count, Some(0));
-        assert_eq!(result.metrics.preview_stl_overhang_triangle_count, Some(0));
-        assert_eq!(result.metrics.preview_stl_overhang_ratio, Some(0.0));
+        assert_eq!(result.metrics.model_stl_triangle_count, Some(8));
+        assert_eq!(result.metrics.model_stl_component_count, Some(2));
+        assert_eq!(result.metrics.model_stl_non_manifold_edge_count, Some(0));
+        assert_eq!(result.metrics.model_stl_overhang_triangle_count, Some(0));
+        assert_eq!(result.metrics.model_stl_overhang_ratio, Some(0.0));
         assert!(!result
             .issues
             .iter()
@@ -1081,10 +1206,10 @@ mod tests {
     }
 
     #[test]
-    fn multipart_preview_stl_allows_one_component_per_part() {
+    fn multipart_model_stl_allows_one_component_per_part() {
         let dir = temp_dir("multipart_two_tetra");
         let mut bundle = test_bundle(&dir);
-        write_two_tetra_binary_stl(Path::new(&bundle.preview_stl_path));
+        write_two_tetra_binary_stl(Path::new(&bundle.model_stl_path));
         bundle.viewer_assets = vec![
             ViewerAsset {
                 part_id: "part-1".into(),
@@ -1113,8 +1238,8 @@ mod tests {
         let result = verify_structure(&bundle, &manifest);
 
         assert!(result.passed, "Expected pass, got: {:?}", result.issues);
-        assert_eq!(result.metrics.preview_stl_component_count, Some(2));
-        assert_eq!(result.metrics.preview_stl_non_manifold_edge_count, Some(0));
+        assert_eq!(result.metrics.model_stl_component_count, Some(2));
+        assert_eq!(result.metrics.model_stl_non_manifold_edge_count, Some(0));
         assert!(!result
             .issues
             .iter()
@@ -1123,10 +1248,38 @@ mod tests {
     }
 
     #[test]
-    fn binary_preview_stl_without_triangles_fails() {
+    fn direct_occt_preview_allows_reported_solid_count_inside_one_authored_part() {
+        let dir = temp_dir("direct_occt_multi_solid_part");
+        let bundle = test_bundle(&dir);
+        write_two_tetra_binary_stl(Path::new(&bundle.model_stl_path));
+        fs::write(
+            dir.join("topology.json"),
+            r#"{
+              "schemaVersion": 1,
+              "parts": [
+                {"partId": "part-1", "solidCount": 2, "brepValid": true}
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let manifest = test_manifest();
+        let result = verify_structure(&bundle, &manifest);
+
+        assert!(result.passed, "Expected pass, got: {:?}", result.issues);
+        assert_eq!(result.metrics.model_stl_component_count, Some(2));
+        assert!(!result
+            .issues
+            .iter()
+            .any(|issue| issue.code == "PREVIEW_STL_DISCONNECTED_COMPONENTS"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn binary_model_stl_without_triangles_fails() {
         let dir = temp_dir("binary_empty_mesh");
         let bundle = test_bundle(&dir);
-        write_zero_triangle_binary_stl(Path::new(&bundle.preview_stl_path));
+        write_zero_triangle_binary_stl(Path::new(&bundle.model_stl_path));
         let manifest = test_manifest();
         let result = verify_structure(&bundle, &manifest);
         assert!(!result.passed);
@@ -1134,19 +1287,19 @@ mod tests {
             .issues
             .iter()
             .any(|i| i.code == "PREVIEW_STL_NO_TRIANGLES"));
-        assert_eq!(result.metrics.preview_stl_triangle_count, Some(0));
-        assert_eq!(result.metrics.preview_stl_component_count, Some(0));
-        assert_eq!(result.metrics.preview_stl_non_manifold_edge_count, Some(0));
-        assert_eq!(result.metrics.preview_stl_overhang_triangle_count, Some(0));
-        assert_eq!(result.metrics.preview_stl_overhang_ratio, Some(0.0));
+        assert_eq!(result.metrics.model_stl_triangle_count, Some(0));
+        assert_eq!(result.metrics.model_stl_component_count, Some(0));
+        assert_eq!(result.metrics.model_stl_non_manifold_edge_count, Some(0));
+        assert_eq!(result.metrics.model_stl_overhang_triangle_count, Some(0));
+        assert_eq!(result.metrics.model_stl_overhang_ratio, Some(0.0));
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn truncated_binary_preview_stl_fails_unreadable() {
+    fn truncated_binary_model_stl_fails_unreadable() {
         let dir = temp_dir("binary_truncated");
         let bundle = test_bundle(&dir);
-        fs::write(&bundle.preview_stl_path, [0u8; 83]).unwrap();
+        fs::write(&bundle.model_stl_path, [0u8; 83]).unwrap();
         let manifest = test_manifest();
         let result = verify_structure(&bundle, &manifest);
         assert!(!result.passed);
@@ -1162,13 +1315,13 @@ mod tests {
     }
 
     #[test]
-    fn binary_preview_stl_count_mismatch_fails_unreadable() {
+    fn binary_model_stl_count_mismatch_fails_unreadable() {
         let dir = temp_dir("binary_count_mismatch");
         let bundle = test_bundle(&dir);
-        write_binary_stl_with_declared_triangle_count(Path::new(&bundle.preview_stl_path), 2);
+        write_binary_stl_with_declared_triangle_count(Path::new(&bundle.model_stl_path), 2);
         let mut f = fs::OpenOptions::new()
             .append(true)
-            .open(&bundle.preview_stl_path)
+            .open(&bundle.model_stl_path)
             .unwrap();
         f.write_all(&[0u8; 50]).unwrap();
         f.flush().unwrap();
@@ -1187,10 +1340,10 @@ mod tests {
     }
 
     #[test]
-    fn ascii_preview_stl_without_facets_fails() {
+    fn ascii_model_stl_without_facets_fails() {
         let dir = temp_dir("ascii_empty_mesh");
         let bundle = test_bundle(&dir);
-        fs::write(&bundle.preview_stl_path, b"solid empty\nendsolid empty\n").unwrap();
+        fs::write(&bundle.model_stl_path, b"solid empty\nendsolid empty\n").unwrap();
         let manifest = test_manifest();
         let result = verify_structure(&bundle, &manifest);
         assert!(!result.passed);
@@ -1202,11 +1355,11 @@ mod tests {
     }
 
     #[test]
-    fn malformed_ascii_preview_stl_without_facets_fails_no_triangles() {
+    fn malformed_ascii_model_stl_without_facets_fails_no_triangles() {
         let dir = temp_dir("ascii_malformed_empty_mesh");
         let bundle = test_bundle(&dir);
         fs::write(
-            &bundle.preview_stl_path,
+            &bundle.model_stl_path,
             b"solid malformed\nvertex nonsense without facet\nendsolid malformed\n",
         )
         .unwrap();
@@ -1225,11 +1378,11 @@ mod tests {
     }
 
     #[test]
-    fn invalid_utf8_ascii_preview_stl_fails_unreadable() {
+    fn invalid_utf8_ascii_model_stl_fails_unreadable() {
         let dir = temp_dir("ascii_invalid_utf8");
         let bundle = test_bundle(&dir);
         fs::write(
-            &bundle.preview_stl_path,
+            &bundle.model_stl_path,
             b"solid invalid\n\xff\nendsolid invalid\n",
         )
         .unwrap();
@@ -1248,10 +1401,10 @@ mod tests {
     }
 
     #[test]
-    fn missing_preview_stl_fails() {
+    fn missing_model_stl_fails() {
         let dir = temp_dir("missing_stl");
         let mut bundle = test_bundle(&dir);
-        bundle.preview_stl_path = dir.join("nonexistent.stl").to_string_lossy().into();
+        bundle.model_stl_path = dir.join("nonexistent.stl").to_string_lossy().into();
         let manifest = test_manifest();
         let result = verify_structure(&bundle, &manifest);
         assert!(!result.passed);
@@ -1263,11 +1416,11 @@ mod tests {
     }
 
     #[test]
-    fn empty_preview_stl_fails() {
+    fn empty_model_stl_fails() {
         let dir = temp_dir("empty_stl");
         let bundle = test_bundle(&dir);
         // Overwrite with empty file
-        fs::write(&bundle.preview_stl_path, b"").unwrap();
+        fs::write(&bundle.model_stl_path, b"").unwrap();
         let manifest = test_manifest();
         let result = verify_structure(&bundle, &manifest);
         assert!(!result.passed);
@@ -1308,7 +1461,7 @@ mod tests {
         let dir = temp_dir("relative_part_asset");
         let bundle = test_bundle(&dir);
         let mut manifest = test_manifest();
-        manifest.parts[0].viewer_asset_path = Some("preview.stl".into());
+        manifest.parts[0].viewer_asset_path = Some("model.stl".into());
 
         let result = verify_structure(&bundle, &manifest);
 

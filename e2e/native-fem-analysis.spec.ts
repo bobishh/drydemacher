@@ -35,12 +35,14 @@ function uint32Le(values: number[]): Buffer {
 }
 
 type FemFailureMode = 'runtime-unavailable' | 'invalid-mesh' | 'cancelled' | 'corrupt-result';
+type CachedConvergence = 'present' | 'missing' | 'stale' | 'error';
 
 async function installFemFixture(
   page: Page,
   failure = false,
   convergenceFailure = false,
   failureMode?: FemFailureMode,
+  cachedConvergence: CachedConvergence = 'present',
 ) {
   const arrays = new Map<string, Buffer>([
     ['nodes.bin', float64Le([0, 0, 0, 10, 0, 0, 0, 10, 0, 0, 0, 10])],
@@ -50,7 +52,7 @@ async function installFemFixture(
   ]);
   await page.route(/.*\/mock\/(?:preview\.stl|fem\/[^?]+).*/, async (route) => {
     const url = route.request().url();
-    if (url.includes('preview.stl')) {
+    if (url.includes('model.stl')) {
       await route.fulfill({ status: 200, contentType: 'model/stl', body: stl });
       return;
     }
@@ -59,12 +61,61 @@ async function installFemFixture(
       ? { status: 200, contentType: 'application/octet-stream', body: arrays.get(name)! }
       : { status: 404, body: 'missing FEM fixture' });
   });
-  await page.addInitScript(({ source, failure, convergenceFailure, failureMode }) => {
+  await page.addInitScript(({ source, failure, convergenceFailure, failureMode, cachedConvergence }) => {
     let cancellationRequested = false;
+    let activityCursor = 0;
+    let nextCallbackId = 1;
+    const eventHandlers = new Map<string, number[]>();
+    const emitTauriEvent = (event: string, payload: unknown) => {
+      for (const handler of eventHandlers.get(event) ?? []) {
+        const callback = (window as unknown as Record<string, unknown>)[`_${handler}`];
+        if (typeof callback === 'function') {
+          (callback as (value: unknown) => void)({ event, payload });
+        }
+      }
+    };
+    const emitFemLongTask = (
+      jobId: string,
+      analysisName: string,
+      stage: string,
+      state: 'active' | 'resolved' | 'failed',
+      detail: string,
+    ) => {
+      const terminal = state !== 'active';
+      activityCursor += 1;
+      emitTauriEvent('agent-activity-event', {
+        eventId: `fem-activity-${activityCursor}`,
+        cursor: activityCursor,
+        sessionId: 'ui-fem',
+        threadId: 'fem-thread',
+        messageId: 'fem-message',
+        versionId: null,
+        actor: { kind: 'system', id: 'fem', label: 'FEM' },
+        kind: 'trace',
+        lifecycleKey: `long-task:${jobId}`,
+        phase: stage.toLowerCase(),
+        summary: terminal ? `${analysisName} ${state === 'resolved' ? 'complete' : 'failed'}` : analysisName,
+        detail,
+        severity: state === 'failed' ? 'error' : state === 'resolved' ? 'success' : 'info',
+        state,
+        requiresAttention: state === 'failed',
+        occurredAt: Date.now(),
+        raw: JSON.stringify({
+          kind: terminal ? 'long_task_finished' : 'long_task_progress',
+          taskId: jobId,
+          expectedDurationMs: 600_000,
+          stage,
+          progressCurrent: terminal ? 1 : 0,
+          progressTotal: 1,
+          jobId,
+          cancellable: !terminal,
+        }),
+      });
+    };
     const artifactBundle = {
       modelId: 'fem-bracket', sourceKind: 'generated', engineKind: 'ecky', sourceLanguage: 'ecky', geometryBackend: 'mesh',
       contentHash: 'sha256:artifact', artifactVersion: 1, fcstdPath: '', manifestPath: '/mock/manifest.json',
-      previewStlPath: '/mock/preview.stl', viewerAssets: [], exportArtifacts: [],
+      modelStlPath: '/mock/model.stl', viewerAssets: [], exportArtifacts: [],
     };
     const modelManifest = {
       schemaVersion: 1, modelId: 'fem-bracket', sourceKind: 'generated', engineKind: 'ecky', sourceLanguage: 'ecky', geometryBackend: 'mesh',
@@ -151,8 +202,21 @@ async function installFemFixture(
     (window as any).__FEM_CALLS__ = [];
     window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
     (window.__TAURI_INTERNALS__ as any).convertFileSrc = (path: string) => path;
+    window.__TAURI_INTERNALS__.transformCallback = (callback: unknown) => {
+      const id = nextCallbackId++;
+      (window as unknown as Record<string, unknown>)[`_${id}`] = callback;
+      return id;
+    };
     window.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: Record<string, any>) => {
       (window as any).__FEM_CALLS__.push({ cmd, args });
+      if (cmd === 'plugin:event|listen') {
+        const event = String(args?.event ?? '');
+        const handler = Number(args?.handler);
+        eventHandlers.set(event, [...(eventHandlers.get(event) ?? []), handler]);
+        return handler;
+      }
+      if (cmd === 'plugin:event|unlisten') return null;
+      if (cmd === 'get_agent_activity') return { events: [], latestCursor: 0 };
       if (cmd === 'get_config') return { engines: [], selectedEngineId: '', freecadCmd: '', assets: [], microwave: { muted: true }, voice: { sttLanguageCode: 'en-US' },
         mcp: { port: null, maxSessions: null, mode: 'passive', primaryAgentId: null, promptTimeoutSecs: 1800, eckyAstAuthoring: false, autoAgents: [] },
         hasSeenOnboarding: true, connectionType: 'mcp', defaultEngineKind: 'ecky', defaultSourceLanguage: 'ecky', defaultGeometryBackend: 'mesh', maxGenerationAttempts: 1, maxVerifyAttempts: 0 };
@@ -175,14 +239,23 @@ async function installFemFixture(
       if (cmd === 'save_model_manifest' || cmd === 'save_last_design' || cmd === 'update_version_runtime') return null;
       if (cmd === 'validate_fem_study') return { ...validation, jobId: args?.request?.jobId ?? 'validate' };
       if (cmd === 'preview_fem_mesh') {
-        if (failureMode === 'runtime-unavailable') throw { code: 'notFound', message: 'Pinned fTetWild runtime unavailable', details: 'runtime manifest missing at bundled runtime root.' };
-        if (failureMode === 'invalid-mesh') throw { code: 'validation', message: 'fTetWild volume mesh rejected', details: 'cell 17 has non-positive signed volume; no artifact published.' };
+        if (failureMode === 'runtime-unavailable') throw { code: 'notFound', message: 'Gmsh HXT runtime unavailable', details: 'Gmsh executable could not be resolved from the configured external runtime.' };
+        if (failureMode === 'invalid-mesh') throw { code: 'validation', message: 'Gmsh HXT volume mesh rejected', details: 'cell 17 has non-positive signed volume; no artifact published.' };
         return { ...meshPreview, jobId: args?.request?.jobId ?? 'mesh' };
       }
       if (cmd === 'run_fem_study') {
-        await new Promise((resolve) => setTimeout(resolve, 180));
-        if (failure) throw { code: 'validation', message: 'FEM linear-static solve failed', details: 'Faer sparse Cholesky rejected singular matrix; constraint rank 5/6.' };
-        if (failureMode === 'cancelled' && cancellationRequested) throw { code: 'conflict', message: "FEM study 'bracket-static' was cancelled at factorization boundary", details: 'No result artifact was published.' };
+        const jobId = args?.request?.jobId ?? 'solve';
+        const analysisName = args?.request?.analysisName ?? 'bracket-static';
+        emitFemLongTask(jobId, analysisName, 'SOLVE', 'active', 'Meshing and solving native Tet4 study.');
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        if (failure) {
+          emitFemLongTask(jobId, analysisName, 'FAILED', 'failed', 'Faer sparse Cholesky rejected singular matrix; constraint rank 5/6.');
+          throw { code: 'validation', message: 'FEM linear-static solve failed', details: 'Faer sparse Cholesky rejected singular matrix; constraint rank 5/6.' };
+        }
+        if (failureMode === 'cancelled' && cancellationRequested) {
+          emitFemLongTask(jobId, analysisName, 'FAILED', 'failed', 'No result artifact was published.');
+          throw { code: 'conflict', message: "FEM study 'bracket-static' was cancelled at factorization boundary", details: 'No result artifact was published.' };
+        }
         if (failureMode === 'corrupt-result') return {
           ...result,
           arrays: result.arrays.map((array) => array.name === 'nodalDisplayVonMisesMpa'
@@ -190,6 +263,7 @@ async function installFemFixture(
             : array),
           jobId: args?.request?.jobId ?? 'solve',
         };
+        emitFemLongTask(jobId, analysisName, 'DONE', 'resolved', 'Immutable FEM result published.');
         return { ...result, jobId: args?.request?.jobId ?? 'solve' };
       }
       if (cmd === 'safe_save_dialog') return '/tmp/bracket-static.vtu';
@@ -206,13 +280,17 @@ async function installFemFixture(
         };
         return { ...convergence, jobId: args?.request?.study?.jobId ?? 'convergence' };
       }
+      if (cmd === 'get_cached_fem_convergence') {
+        if (cachedConvergence === 'error') throw { code: 'validation', message: 'FEM convergence cache is invalid', details: 'manifest.edn digest mismatch.' };
+        return cachedConvergence === 'present' ? convergence : null;
+      }
       if (cmd === 'cancel_fem_study') {
         cancellationRequested = true;
         return { jobId: args?.jobId, cancellationRequested: true };
       }
       return null;
     };
-  }, { source, failure, convergenceFailure, failureMode });
+  }, { source, failure, convergenceFailure, failureMode, cachedConvergence });
 }
 
 test('Given a model contains an analysis When ordinary preview opens Then no FEM worker operation starts', async ({ page }) => {
@@ -226,6 +304,49 @@ test('Given a model contains an analysis When ordinary preview opens Then no FEM
     'run_fem_study',
     'run_fem_convergence',
   ].includes(call.cmd))).toEqual([]);
+});
+
+test('Given current immutable convergence exists When analysis reopens Then evidence restores without a new solve', async ({ page }) => {
+  await installFemFixture(page);
+  await page.goto('/');
+  await expect(page.locator('.boot-overlay')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Structural analysis' }).click();
+  await expect(page.getByTestId('fem-convergence-table')).toContainText('1,440');
+  await expect(page.getByTestId('fem-convergence-status')).toContainText('DISPLACEMENT · CONVERGED');
+  await expect(page.getByText('EVIDENCE', { exact: true })).toBeVisible();
+  const calls = await page.evaluate(() => (window as any).__FEM_CALLS__ as Array<{ cmd: string }>);
+  expect(calls.some((call) => call.cmd === 'get_cached_fem_convergence')).toBe(true);
+  expect(calls.some((call) => call.cmd === 'run_fem_convergence')).toBe(false);
+});
+
+test('Given no current convergence exists When analysis opens Then it stays idle without solving', async ({ page }) => {
+  await installFemFixture(page, false, false, undefined, 'missing');
+  await page.goto('/');
+  await expect(page.locator('.boot-overlay')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Structural analysis' }).click();
+  await expect(page.getByText('IDLE', { exact: true })).toBeVisible();
+  await expect(page.getByTestId('fem-convergence-table')).toHaveCount(0);
+  const calls = await page.evaluate(() => (window as any).__FEM_CALLS__ as Array<{ cmd: string }>);
+  expect(calls.some((call) => call.cmd === 'run_fem_convergence')).toBe(false);
+});
+
+test('Given only stale convergence exists When analysis opens Then stale evidence is not attached', async ({ page }) => {
+  await installFemFixture(page, false, false, undefined, 'stale');
+  await page.goto('/');
+  await expect(page.locator('.boot-overlay')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Structural analysis' }).click();
+  await expect(page.getByTestId('fem-convergence-table')).toHaveCount(0);
+  await expect(page.getByText('IDLE', { exact: true })).toBeVisible();
+});
+
+test('Given cached convergence is corrupt When analysis opens Then raw backend error is visible', async ({ page }) => {
+  await installFemFixture(page, false, false, undefined, 'error');
+  await page.goto('/');
+  await expect(page.locator('.boot-overlay')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Structural analysis' }).click();
+  const error = page.locator('.analysis-panel__error');
+  await expect(error).toContainText('FEM convergence cache is invalid');
+  await expect(error).toContainText('manifest.edn digest mismatch');
 });
 
 test('Given a valid authored study When mesh preview runs Then real Tet4 boundary appears without solving', async ({ page }) => {
@@ -254,6 +375,23 @@ test('Given authored face tags and linear-static study When native FEM runs Then
   await expect(page.getByTestId('fem-acceptance-evidence')).toContainText('stress-limit · PASSED');
   await expect(page.getByTestId('fem-result-legend')).toContainText('PREVIEW ONLY');
   await expect(page.locator('.viewer-host').first()).toHaveAttribute('data-fem-overlay-visible', 'true');
+});
+
+test('Given Mesh + Solve starts When work continues Then global FEM bubble becomes a completion notification', async ({ page }) => {
+  await installFemFixture(page);
+  await page.goto('/');
+  await expect(page.locator('.boot-overlay')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Structural analysis' }).click();
+  await page.getByRole('button', { name: 'MESH + SOLVE' }).click();
+
+  const bubble = page.getByTestId('long-task-bubble');
+  await expect(bubble).toBeVisible();
+  await expect(bubble).toContainText('bracket-static');
+  await expect(bubble).toContainText('SOLVE');
+
+  await expect(page.getByTestId('fem-result-summary')).toContainText('48.00 MPa');
+  await expect(bubble).toHaveCount(0);
+  await expect(page.locator('.agent-card').filter({ hasText: 'bracket-static complete' })).toBeVisible();
 });
 
 test('Given numerical solve succeeds When engineering evidence opens Then verification layers and input provenance stay separate', async ({ page }) => {
@@ -361,23 +499,23 @@ test('Given a current result When display controls change Then manufacturing pip
   await expect(page.getByTestId('fem-result-legend')).toContainText('PREVIEW ONLY · EXPORT GEOMETRY UNCHANGED');
 });
 
-test('Given fTetWild runtime is unavailable When mesh preview starts Then raw runtime detail remains visible', async ({ page }) => {
+test('Given Gmsh HXT runtime is unavailable When mesh preview starts Then raw runtime detail remains visible', async ({ page }) => {
   await installFemFixture(page, false, false, 'runtime-unavailable');
   await page.goto('/');
   await expect(page.locator('.boot-overlay')).toHaveCount(0);
   await page.getByRole('button', { name: 'Structural analysis' }).click();
   await page.getByRole('button', { name: 'MESH PREVIEW' }).click();
-  await expect(page.getByRole('alert')).toContainText('Pinned fTetWild runtime unavailable');
-  await expect(page.getByRole('alert')).toContainText('runtime manifest missing');
+  await expect(page.getByRole('alert')).toContainText('Gmsh HXT runtime unavailable');
+  await expect(page.getByRole('alert')).toContainText('Gmsh executable could not be resolved');
 });
 
-test('Given fTetWild returns an invalid volume mesh When preview runs Then raw mesh invariant remains visible', async ({ page }) => {
+test('Given Gmsh HXT returns an invalid volume mesh When preview runs Then raw mesh invariant remains visible', async ({ page }) => {
   await installFemFixture(page, false, false, 'invalid-mesh');
   await page.goto('/');
   await expect(page.locator('.boot-overlay')).toHaveCount(0);
   await page.getByRole('button', { name: 'Structural analysis' }).click();
   await page.getByRole('button', { name: 'MESH PREVIEW' }).click();
-  await expect(page.getByRole('alert')).toContainText('fTetWild volume mesh rejected');
+  await expect(page.getByRole('alert')).toContainText('Gmsh HXT volume mesh rejected');
   await expect(page.getByRole('alert')).toContainText('cell 17 has non-positive signed volume');
 });
 

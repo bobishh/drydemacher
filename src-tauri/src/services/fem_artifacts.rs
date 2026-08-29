@@ -17,7 +17,7 @@ use crate::services::fem::{FemAcceptanceEvaluation, FemMeshPipelineResult, FemPi
 
 static FEM_ARTIFACT_NONCE: AtomicU64 = AtomicU64::new(1);
 const FEM_RESULT_ROOT: &str = "fem-results-v3";
-const FEM_RESULT_MANIFEST: &str = "manifest.json";
+const FEM_RESULT_MANIFEST: &str = "manifest.edn";
 const FEM_RESULT_ASSET_SCHEMA_VERSION: u32 = 7;
 const FEM_MESH_ROOT: &str = "fem-meshes-v1";
 const FEM_MESH_ASSET_SCHEMA_VERSION: u32 = 1;
@@ -86,6 +86,14 @@ pub struct FemMeshAsset {
     pub face_group_count: u32,
     pub arrays: Vec<FemBinaryArrayAsset>,
     pub manifest_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FemTopologyMeshData {
+    pub mesh: ecky_fem::FemIndexedTet4Mesh,
+    pub boundary_triangles: Vec<[u32; 3]>,
+    pub boundary_face_group_indices: Vec<u32>,
+    pub face_group_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,7 +216,7 @@ pub fn publish_fem_mesh_asset(
         face_group_count: result.mesh.face_group_count,
         arrays,
     };
-    let manifest_bytes = serde_json::to_vec_pretty(&stored).map_err(|error| {
+    let manifest_bytes = crate::strict_edn::to_vec(&stored).map_err(|error| {
         AppError::internal(format!("FEM mesh manifest serialization failed: {error}"))
     })?;
     if manifest_bytes.len() as u64 > maximum_result_bytes {
@@ -262,6 +270,70 @@ pub fn load_fem_mesh_asset(
     load_fem_mesh_asset_from_dir(&directory, analysis_identity_digest, maximum_result_bytes)
 }
 
+pub fn decode_fem_topology_mesh(asset: &FemMeshAsset) -> AppResult<FemTopologyMeshData> {
+    let directory = asset
+        .manifest_path
+        .parent()
+        .ok_or_else(|| AppError::validation("FEM mesh manifest has no artifact directory."))?;
+    let node_values = read_f64_asset(directory, required_array(&asset.arrays, "nodesMm")?)?;
+    let cell_values = read_u32_asset(directory, required_array(&asset.arrays, "tet4Cells")?)?;
+    let triangle_values = read_u32_asset(
+        directory,
+        required_array(&asset.arrays, "boundaryTriangles")?,
+    )?;
+    let boundary_face_group_indices = read_u32_asset(
+        directory,
+        required_array(&asset.arrays, "boundaryFaceGroupIndices")?,
+    )?;
+    if node_values.len() % 3 != 0 || cell_values.len() % 4 != 0 || triangle_values.len() % 3 != 0 {
+        return Err(AppError::validation(
+            "FEM mesh arrays have invalid node/cell/triangle shapes.",
+        ));
+    }
+    let nodes = node_values
+        .chunks_exact(3)
+        .map(|value| ecky_fem::FemPoint3::new(value[0], value[1], value[2]))
+        .collect::<Vec<_>>();
+    let cells = cell_values
+        .chunks_exact(4)
+        .map(|value| [value[0], value[1], value[2], value[3]])
+        .collect::<Vec<_>>();
+    let boundary_triangles = triangle_values
+        .chunks_exact(3)
+        .map(|value| [value[0], value[1], value[2]])
+        .collect::<Vec<_>>();
+    if boundary_face_group_indices.len() != boundary_triangles.len()
+        || boundary_face_group_indices
+            .iter()
+            .any(|group| *group >= asset.face_group_count)
+    {
+        return Err(AppError::validation(
+            "FEM boundary face groups are inconsistent with boundary triangles.",
+        ));
+    }
+    let node_count = nodes.len();
+    if cells
+        .iter()
+        .flatten()
+        .chain(boundary_triangles.iter().flatten())
+        .any(|index| *index as usize >= node_count)
+    {
+        return Err(AppError::validation(
+            "FEM mesh topology contains out-of-range node indices.",
+        ));
+    }
+    Ok(FemTopologyMeshData {
+        mesh: ecky_fem::FemIndexedTet4Mesh {
+            schema_version: ecky_fem::FEM_SCHEMA_VERSION,
+            nodes,
+            cells,
+        },
+        boundary_triangles,
+        boundary_face_group_indices,
+        face_group_count: asset.face_group_count,
+    })
+}
+
 fn load_fem_mesh_asset_from_dir(
     directory: &Path,
     expected_analysis_digest: &str,
@@ -269,12 +341,13 @@ fn load_fem_mesh_asset_from_dir(
 ) -> AppResult<FemMeshAsset> {
     let manifest_path = directory.join(FEM_RESULT_MANIFEST);
     let manifest_bytes = read_bounded(&manifest_path, maximum_result_bytes)?;
-    let stored: StoredFemMeshAsset = serde_json::from_slice(&manifest_bytes).map_err(|error| {
-        AppError::validation(format!(
-            "FEM mesh manifest '{}' is invalid: {error}",
-            manifest_path.display()
-        ))
-    })?;
+    let stored: StoredFemMeshAsset =
+        crate::strict_edn::from_slice(&manifest_bytes).map_err(|error| {
+            AppError::validation(format!(
+                "FEM mesh manifest '{}' is invalid: {error}",
+                manifest_path.display()
+            ))
+        })?;
     if stored.schema_version != FEM_MESH_ASSET_SCHEMA_VERSION {
         return Err(AppError::validation(format!(
             "FEM mesh schemaVersion {} is unsupported.",
@@ -441,7 +514,7 @@ pub fn publish_fem_result_asset(
         acceptance_evaluations: result.acceptance_evaluations.clone(),
         arrays,
     };
-    let manifest_bytes = serde_json::to_vec_pretty(&stored).map_err(|error| {
+    let manifest_bytes = crate::strict_edn::to_vec(&stored).map_err(|error| {
         AppError::internal(format!("FEM result manifest serialization failed: {error}"))
     })?;
     if manifest_bytes.len() as u64 > maximum_result_bytes {
@@ -740,7 +813,7 @@ fn load_fem_result_asset_from_dir(
     let manifest_path = directory.join(FEM_RESULT_MANIFEST);
     let manifest_bytes = read_bounded(&manifest_path, maximum_result_bytes)?;
     let stored: StoredFemResultAsset =
-        serde_json::from_slice(&manifest_bytes).map_err(|error| {
+        crate::strict_edn::from_slice(&manifest_bytes).map_err(|error| {
             AppError::validation(format!(
                 "FEM result manifest '{}' is invalid: {error}",
                 manifest_path.display()
@@ -1151,6 +1224,11 @@ impl Drop for TemporaryDirectory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fem_persistent_manifests_are_strict_edn_only() {
+        assert_eq!(FEM_RESULT_MANIFEST, "manifest.edn");
+    }
 
     fn test_extremum(
         field_kind: ecky_fem::FemResultFieldKind,
