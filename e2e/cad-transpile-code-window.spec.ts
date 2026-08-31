@@ -55,13 +55,15 @@ async function installMocks(page: Page, mode: Mode, provider = false) {
       if (cmd === 'get_agent_activity') return { events: [], latestCursor: 0 };
       if (cmd === 'get_active_agent_sessions' || cmd === 'get_agent_terminal_snapshots') return [];
       if (cmd === 'project_folder_render_activity') return [];
-      if (cmd === 'open_or_create_blank_design_thread') {
+      if (cmd === 'create_design_thread') {
         return {
           threadId: 'transpile-thread',
-          slug: 'transpile-thread',
-          folder: '/mock/projects/transpile-thread',
-          file: '/mock/projects/transpile-thread/model.ecky',
-          source: '(model (part body (box 10 10 10)))',
+          sourceDocument: { folder: '/mock/projects/transpile-thread', file: '/mock/projects/transpile-thread/model.ecky', source: '(model (part body (box 10 10 10)))' },
+          initialVersionId: null, snapshotId: null, parserMatched: null, initialVersionError: null,
+          workspace: {
+            thread: { id: 'transpile-thread', title: 'Untitled design', summary: '', updatedAt: 1, versionCount: 0, pendingCount: 0, queuedCount: 0, errorCount: 0, status: 'active', engineKind: 'ecky', sourceLanguage: 'ecky', geometryBackend: 'mesh' },
+            messagesPage: { messages: [], nextBefore: null, hasMore: false }, selectedVersion: null, requestedMessageFound: false,
+          },
         };
       }
       if (cmd === 'get_project_source') {

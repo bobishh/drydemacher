@@ -182,13 +182,15 @@ endsolid mock
             handles: [],
           };
         }
-        if (cmd === 'open_or_create_blank_design_thread') {
+        if (cmd === 'create_design_thread') {
           return {
             threadId: 'mock-thread-1',
-            slug: 'param-thread-1',
-            folder: '/mock/param-thread-1',
-            file: '/mock/param-thread-1/model.ecky',
-            source: '(model)',
+            sourceDocument: { folder: '/mock/param-thread-1', file: '/mock/param-thread-1/model.ecky', source: '(model)' },
+            initialVersionId: null, snapshotId: null, parserMatched: null, initialVersionError: null,
+            workspace: {
+              thread: { id: 'mock-thread-1', title: 'Untitled design', summary: '', updatedAt: 1, versionCount: 0, pendingCount: 0, queuedCount: 0, errorCount: 0, status: 'active', engineKind: 'ecky', sourceLanguage: 'ecky', geometryBackend: 'mesh' },
+              messagesPage: { messages: [], nextBefore: null, hasMore: false }, selectedVersion: null, requestedMessageFound: false,
+            },
           };
         }
         if (cmd === 'get_config') {
@@ -221,6 +223,48 @@ endsolid mock
         }
         if (cmd === 'get_default_macro') return '# macro';
         if (cmd === 'init_generation_attempt') return 'mock-msg-1';
+        if (cmd === 'start_exploration_run') {
+          const generated = await window.__TAURI_INTERNALS__.invoke('generate_design', {
+            prompt: args?.input?.prompt,
+            threadId: args?.input?.threadId,
+          });
+          const artifactBundle = await window.__TAURI_INTERNALS__.invoke('render_model', {
+            macroCode: generated.design.macroCode,
+            parameters: generated.design.initialParams,
+          });
+          const modelManifest = await window.__TAURI_INTERNALS__.invoke('get_model_manifest', {
+            modelId: artifactBundle.modelId,
+          });
+          sessionStorage.setItem('param-last-design', JSON.stringify({
+            design: generated.design,
+            threadId: generated.threadId,
+            messageId: generated.messageId,
+            artifactBundle,
+            modelManifest,
+            selectedPartId: null,
+          }));
+          return {
+            run: {
+              requestId: args?.input?.requestId,
+              threadId: generated.threadId,
+              phase: 'completed',
+              messageId: generated.messageId,
+              design: generated.design,
+              artifactBundle,
+              modelManifest,
+              structuralVerification: null,
+              usage: null,
+              responseText: generated.design.response ?? 'Design synthesized successfully.',
+              rawError: null,
+              publicationAllowed: true,
+            },
+            message: {
+              id: generated.messageId, role: 'assistant', content: generated.design.response ?? '', status: 'success',
+              timestamp: Date.now(), output: generated.design, artifactBundle, modelManifest,
+            },
+            snapshotId: `snapshot-${generated.messageId}`,
+          };
+        }
         if (cmd === 'classify_intent') {
           return {
             intentMode: 'design',
@@ -534,6 +578,38 @@ endsolid mock
             }
           }
           return nodes;
+        }
+        if (cmd === 'apply_manual_parameters') {
+          if ((window as any).__PARAM_DELAY_APPLY__) {
+            await new Promise((resolve) => setTimeout(resolve, 250));
+          }
+          const storedSnapshot = JSON.parse(sessionStorage.getItem('param-last-design') || 'null');
+          const designOutput = {
+            ...storedSnapshot.design,
+            response: args?.input?.persist
+              ? 'Parameter version appended.'
+              : 'Parameters applied.',
+            initialParams: args?.input?.parameters ?? {},
+          };
+          const messageId = args?.input?.persist ? 'mock-param-version-1' : null;
+          if (storedSnapshot) {
+            sessionStorage.setItem('param-last-design', JSON.stringify({
+              ...storedSnapshot,
+              design: designOutput,
+              messageId: messageId ?? args?.input?.targetMessageId,
+            }));
+          }
+          return {
+            threadId: args?.input?.threadId,
+            baseMessageId: args?.input?.targetMessageId,
+            messageId,
+            status: 'success',
+            designOutput,
+            artifactBundle: storedSnapshot?.artifactBundle ?? (window as any).__PARAM_LAST_BUNDLE__,
+            modelManifest: storedSnapshot?.modelManifest,
+            snapshotId: `snapshot-${messageId ?? args?.input?.targetMessageId}`,
+            error: null,
+          };
         }
         if (cmd === 'render_model' && String(args?.macroCode ?? '').includes('boom')) {
           throw {
@@ -943,6 +1019,35 @@ endsolid mock
         }
         if (cmd === 'add_manual_version') return 'mock-param-version-1';
         if (cmd === 'update_version_runtime') return null;
+        if (cmd === 'persist_control_defaults') {
+          const input = args?.input as Record<string, any>;
+          const storedThread = storedParamThread();
+          const selectedVersion = storedThread?.messages?.[0] ?? null;
+          const parameters = input.mutation.parameters
+            ?? selectedVersion?.output?.initialParams
+            ?? {};
+          const uiSpec = input.mutation.action === 'saveSchema'
+            ? input.mutation.uiSpec
+            : selectedVersion?.output?.uiSpec ?? { fields: [] };
+          if (selectedVersion?.output) {
+            selectedVersion.output = { ...selectedVersion.output, uiSpec, initialParams: parameters };
+          }
+          return {
+            uiSpec,
+            parameters,
+            workspace: {
+              thread: storedThread,
+              messagesPage: {
+                threadId: storedThread?.id ?? 'mock-thread-1',
+                messages: storedThread?.messages ?? [],
+                hasMore: false,
+                nextBefore: null,
+              },
+              selectedVersion,
+              requestedMessageFound: selectedVersion !== null,
+            },
+          };
+        }
         if (cmd === 'update_parameters') return null;
         if (cmd === 'update_post_processing') return null;
         if (cmd === 'finalize_generation_attempt') {
@@ -1565,21 +1670,106 @@ endsolid mock
     await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
     await page.locator('.param-panel input.param-input').first().fill('42');
+    const renderCountBeforeApply = await page.evaluate(
+      () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+    );
     await page.getByRole('button', { name: 'APPLY' }).click();
 
     await expect
       .poll(async () =>
         page.evaluate(
-          () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+          () => (window as any).__PARAM_CALLS__.filter(
+            (entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters',
+          ).length,
         ),
       )
       .toBeGreaterThan(0);
 
     const calls = await page.evaluate(() => (window as any).__PARAM_CALLS__);
-    const renderCall = calls.filter((entry: { cmd: string }) => entry.cmd === 'render_model').at(-1);
-    expect(renderCall?.args?.parameters?.width).toBe(42);
+    const applyCall = calls.filter((entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters').at(-1);
+    expect(applyCall?.args?.input?.parameters?.width).toBe(42);
+    expect(applyCall?.args?.input?.persist).toBe(false);
+    expect(calls.filter((entry: { cmd: string }) => entry.cmd === 'render_model')).toHaveLength(
+      renderCountBeforeApply,
+    );
     expect(calls.map((entry: { cmd: string }) => entry.cmd)).not.toContain('add_manual_version');
     expect(calls.map((entry: { cmd: string }) => entry.cmd)).not.toContain('update_parameters');
+  });
+
+  test('Given edited defaults When Save Values runs Then one Rust intent persists and returns canonical projection', async ({ page }) => {
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.fill('textarea.prompt-input', 'make a param box');
+    await page.locator('textarea.prompt-input').press(
+      process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter',
+    );
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
+    const input = page.locator('.param-panel input.param-input').first();
+    await expect(input).toBeVisible({ timeout: 10000 });
+    await input.fill('73');
+    const historyReadsBefore = await page.evaluate(() => (window as any).__PARAM_CALLS__
+      .filter((entry: { cmd: string }) => entry.cmd === 'get_history').length);
+
+    await page.getByRole('button', { name: 'SAVE VALUES' }).click();
+
+    await expect(page.getByRole('button', { name: 'SAVED' })).toBeVisible();
+    const calls = await page.evaluate(() => (window as any).__PARAM_CALLS__);
+    const intents = calls.filter((entry: { cmd: string }) => entry.cmd === 'persist_control_defaults');
+    expect(intents).toHaveLength(1);
+    expect(intents[0].args.input).toMatchObject({
+      messageId: 'mock-msg-1',
+      mutation: { action: 'saveValues', parameters: { width: 73 } },
+    });
+    expect(calls.filter((entry: { cmd: string }) => entry.cmd === 'get_history')).toHaveLength(historyReadsBefore);
+    expect(calls.map((entry: { cmd: string }) => entry.cmd)).not.toContain('update_parameters');
+  });
+
+  test('Given canonical macro When Read From Macro runs Then Rust derives merges and persists controls', async ({ page }) => {
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.fill('textarea.prompt-input', 'make a param box');
+    await page.locator('textarea.prompt-input').press(
+      process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter',
+    );
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
+    await page.getByRole('button', { name: /EDIT CONTROLS/i }).click();
+    const legacyCallsBefore = await page.evaluate(() => {
+      const calls = (window as any).__PARAM_CALLS__ as Array<{ cmd: string }>;
+      return {
+        parse: calls.filter(entry => entry.cmd === 'parse_macro_params').length,
+        spec: calls.filter(entry => entry.cmd === 'update_ui_spec').length,
+        values: calls.filter(entry => entry.cmd === 'update_parameters').length,
+      };
+    });
+
+    await page.getByRole('button', { name: /READ FROM MACRO/i }).click();
+
+    await expect.poll(() => page.evaluate(() => (window as any).__PARAM_CALLS__
+      .filter((entry: { cmd: string }) => entry.cmd === 'persist_control_defaults').length)).toBe(1);
+    const calls = await page.evaluate(() => (window as any).__PARAM_CALLS__);
+    const intent = calls.find((entry: { cmd: string }) => entry.cmd === 'persist_control_defaults');
+    expect(intent.args.input).toEqual({
+      messageId: 'mock-msg-1',
+      mutation: { action: 'readFromMacro' },
+    });
+    expect(calls.filter((entry: { cmd: string }) => entry.cmd === 'parse_macro_params')).toHaveLength(legacyCallsBefore.parse);
+    expect(calls.filter((entry: { cmd: string }) => entry.cmd === 'update_ui_spec')).toHaveLength(legacyCallsBefore.spec);
+    expect(calls.filter((entry: { cmd: string }) => entry.cmd === 'update_parameters')).toHaveLength(legacyCallsBefore.values);
+  });
+
+  test('Given Rust parameter apply is pending When Apply is clicked Then duplicate apply is disabled', async ({ page }) => {
+    await page.getByRole('button', { name: 'DIALOGUE' }).click();
+    await page.fill('textarea.prompt-input', 'make a param box');
+    await page.locator('textarea.prompt-input').press(
+      process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter',
+    );
+    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
+    await expect(page.locator('.param-panel input.param-input').first()).toBeVisible();
+    await page.evaluate(() => ((window as any).__PARAM_DELAY_APPLY__ = true));
+    await page.locator('.param-panel input.param-input').first().fill('42');
+    await page.getByRole('button', { name: 'APPLY' }).click();
+
+    await expect(page.getByRole('button', { name: 'APPLYING...' })).toBeDisabled();
+    await expect(page.getByText(/APPLY QUEUED/)).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'APPLY' })).toBeEnabled();
   });
 
   test('Given text font select When font changes Then UI stages it and Apply rerenders with the family', async ({ page }) => {
@@ -1688,19 +1878,25 @@ endsolid mock
     await expect
       .poll(async () =>
         page.evaluate(
-          () => (window as any).__PARAM_CALLS__.some((entry: { cmd: string }) => entry.cmd === 'add_manual_version'),
+          () => (window as any).__PARAM_CALLS__.some(
+            (entry: { cmd: string; args?: { input?: { persist?: boolean } } }) =>
+              entry.cmd === 'apply_manual_parameters' && entry.args?.input?.persist === true,
+          ),
         ),
       )
       .toBe(true);
 
     const calls = await page.evaluate(() => (window as any).__PARAM_CALLS__);
-    const addVersionCall = calls.find((entry: { cmd: string }) => entry.cmd === 'add_manual_version');
-    expect(addVersionCall?.args?.input?.macroCode).toBe('print("box")');
-    expect(addVersionCall?.args?.input?.parameters?.width).toBe(42);
-    expect(addVersionCall?.args?.input?.artifactBundle?.modelStlPath).toBe('/model.stl');
+    const commitCall = calls.find(
+      (entry: { cmd: string; args?: { input?: { persist?: boolean } } }) =>
+        entry.cmd === 'apply_manual_parameters' && entry.args?.input?.persist === true,
+    );
+    expect(commitCall?.args?.input?.targetMessageId).toBe('mock-msg-1');
+    expect(commitCall?.args?.input?.parameters?.width).toBe(42);
+    expect(calls.map((entry: { cmd: string }) => entry.cmd)).not.toContain('add_manual_version');
   });
 
-  test('Given params were applied When Commit is clicked Then saved version reuses rendered draft', async ({ page }) => {
+  test('Given params were applied When Commit is clicked Then both actions stay Rust-owned intents', async ({ page }) => {
     await page.getByRole('button', { name: 'DIALOGUE' }).click();
     await page.fill('textarea.prompt-input', 'make a param box');
     await page
@@ -1712,34 +1908,38 @@ endsolid mock
     const width = page.locator('.param-panel input.param-input').first();
     await width.fill('42');
 
-    const renderCountBeforeApply = await page.evaluate(
-      () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
-    );
     await page.getByRole('button', { name: 'APPLY' }).click();
     await expect
       .poll(async () =>
         page.evaluate(
-          () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+          () => (window as any).__PARAM_CALLS__.filter(
+            (entry: { cmd: string; args?: { input?: { persist?: boolean } } }) =>
+              entry.cmd === 'apply_manual_parameters' && entry.args?.input?.persist === false,
+          ).length,
         ),
       )
-      .toBe(renderCountBeforeApply + 1);
+      .toBe(1);
 
     await page.getByRole('button', { name: 'COMMIT' }).click();
     await expect
       .poll(async () =>
         page.evaluate(
-          () => (window as any).__PARAM_CALLS__.some((entry: { cmd: string }) => entry.cmd === 'add_manual_version'),
+          () => (window as any).__PARAM_CALLS__.filter(
+            (entry: { cmd: string; args?: { input?: { persist?: boolean } } }) =>
+              entry.cmd === 'apply_manual_parameters' && entry.args?.input?.persist === true,
+          ).length,
         ),
       )
-      .toBe(true);
+      .toBe(1);
 
     const calls = await page.evaluate(() => (window as any).__PARAM_CALLS__);
-    expect(calls.filter((entry: { cmd: string }) => entry.cmd === 'render_model')).toHaveLength(
-      renderCountBeforeApply + 1,
+    const applyCalls = calls.filter(
+      (entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters',
     );
-    const addVersionCall = calls.find((entry: { cmd: string }) => entry.cmd === 'add_manual_version');
-    expect(addVersionCall?.args?.input?.parameters?.width).toBe(42);
-    expect(addVersionCall?.args?.input?.artifactBundle?.modelStlPath).toBe('/model.stl');
+    expect(applyCalls.map((entry: { args?: { input?: { persist?: boolean } } }) => entry.args?.input?.persist))
+      .toEqual([false, true]);
+    expect(applyCalls.at(-1)?.args?.input?.parameters?.width).toBe(42);
+    expect(calls.map((entry: { cmd: string }) => entry.cmd)).not.toContain('add_manual_version');
   });
 
   test('Given editable macro When part node source is edited in place Then the edit renders', async ({

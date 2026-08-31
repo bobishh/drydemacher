@@ -1,7 +1,7 @@
 use tauri::AppHandle;
 
 use crate::contracts::{
-    AppResult, ArtifactBundle, AuthoringGraph, AuthoringGraphRequest, ModelManifest,
+    AppError, AppResult, ArtifactBundle, AuthoringGraph, AuthoringGraphRequest, ModelManifest,
 };
 
 #[tauri::command]
@@ -19,11 +19,13 @@ pub async fn get_authoring_graph(
             None => (None, None),
         };
 
-    crate::services::authoring_graph::build_authoring_graph(
+    let graph = crate::services::authoring_graph::build_authoring_graph(
         &request.source,
         manifest.as_ref(),
         artifact_bundle.as_ref(),
-    )
+    )?;
+    graph.validate().map_err(AppError::validation)?;
+    Ok(graph)
 }
 
 #[cfg(test)]

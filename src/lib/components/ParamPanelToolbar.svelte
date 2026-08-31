@@ -6,7 +6,6 @@
     applying = false,
     committing = false,
     manualApplyBusy = false,
-    manualApplyQueued = 0,
     reading = false,
     undoDepth = 0,
     saveValuesState = 'idle',
@@ -26,7 +25,6 @@
     undoDepth?: number;
     saveValuesState?: SaveValuesState;
     manualApplyBusy?: boolean;
-    manualApplyQueued?: number;
     activeVersionId?: string | null;
     onApplyChanges?: () => void;
     onUndoParams?: () => void;
@@ -44,16 +42,11 @@
       <button
         class="btn btn-xs btn-primary apply-btn"
         onclick={onApplyChanges}
-        title={manualApplyBusy
-          ? 'Apply is running'
-          : manualApplyQueued > 0
-            ? `Apply queued: ${manualApplyQueued}`
-            : undefined}
+        disabled={applying || manualApplyBusy}
+        title={manualApplyBusy ? 'Apply is running' : undefined}
       >
         {#if applying || manualApplyBusy}
           APPLYING...
-        {:else if manualApplyQueued > 0}
-          APPLY QUEUED ({manualApplyQueued})
         {:else}
           APPLY
         {/if}

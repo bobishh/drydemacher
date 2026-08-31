@@ -13,6 +13,7 @@
     onOpenRelationComposer,
     onOpenEditViewComposer,
     onDeleteManualView,
+    mutationPending = false,
     shouldShowSemanticSource,
     semanticSourceLabel,
   }: {
@@ -26,6 +27,7 @@
     onOpenRelationComposer?: () => void;
     onOpenEditViewComposer?: (view: MaterializedSemanticView) => void;
     onDeleteManualView?: (viewId: string) => void;
+    mutationPending?: boolean;
     shouldShowSemanticSource?: (source: ControlViewSource | undefined) => boolean;
     semanticSourceLabel?: (source: ControlViewSource | undefined) => string;
   } = $props();
@@ -35,7 +37,7 @@
   <div class="context-strip-head">
     <div class="section-label">CONTEXTS</div>
     <div class="context-strip-actions">
-      <button class="btn btn-xs btn-ghost" onclick={() => onOpenCreateViewComposer?.()}>
+      <button class="btn btn-xs btn-ghost" onclick={() => onOpenCreateViewComposer?.()} disabled={mutationPending}>
         + VIEW
       </button>
       <button class="btn btn-xs btn-ghost" onclick={() => onOpenPrimitiveComposer?.()}>
@@ -48,10 +50,10 @@
         + LINK
       </button>
       {#if activeSemanticView?.source === 'manual'}
-        <button class="btn btn-xs btn-ghost" onclick={() => onOpenEditViewComposer?.(activeSemanticView)}>
+        <button class="btn btn-xs btn-ghost" onclick={() => onOpenEditViewComposer?.(activeSemanticView)} disabled={mutationPending}>
           EDIT
         </button>
-        <button class="btn btn-xs btn-ghost" onclick={() => onDeleteManualView?.(activeSemanticView.viewId)}>
+        <button class="btn btn-xs btn-ghost" onclick={() => onDeleteManualView?.(activeSemanticView.viewId)} disabled={mutationPending}>
           DELETE
         </button>
       {/if}

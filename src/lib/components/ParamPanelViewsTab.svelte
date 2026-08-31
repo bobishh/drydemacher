@@ -85,6 +85,7 @@
     composerVisiblePrimitives,
     composerPrimitiveIds,
     composerCanSave,
+    controlViewMutationPending,
     advisories,
     activeViewRelations,
     filteredSemanticSections,
@@ -184,6 +185,7 @@
     composerVisiblePrimitives: { primitiveId: string; label: string; partLabels: string[] }[];
     composerPrimitiveIds: string[];
     composerCanSave: boolean;
+    controlViewMutationPending: boolean;
     advisories: MaterializedSemanticView['advisories'];
     activeViewRelations: ActiveViewRelation[];
     filteredSemanticSections: SemanticSection[];
@@ -255,6 +257,7 @@
   onOpenRelationComposer={onOpenRelationComposer}
   onOpenEditViewComposer={onOpenEditViewComposer}
   onDeleteManualView={onDeleteManualView}
+  mutationPending={controlViewMutationPending}
   {shouldShowSemanticSource}
   {semanticSourceLabel}
 />
@@ -400,6 +403,7 @@
     visiblePrimitives={composerVisiblePrimitives}
     selectedPrimitiveIds={composerPrimitiveIds}
     canSave={composerCanSave}
+    pending={controlViewMutationPending}
     onLabelChange={onComposerLabelChange}
     onScopeChange={onComposerScopeChange}
     onPartIdChange={onComposerPartIdChange}

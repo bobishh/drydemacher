@@ -77,6 +77,41 @@ test('ensureSemanticManifest retains generated views for legacy FreeCAD models',
   assert.ok((result?.controlViews?.length ?? 0) > 0);
 });
 
+test('ensureSemanticManifest projects a canonical manual view returned by Rust', () => {
+  const manifest = semanticManifest('legacyPython');
+  manifest.controlPrimitives = [{
+    primitiveId: 'width-knob',
+    label: 'Width',
+    kind: 'number',
+    source: 'generated',
+    partIds: ['body'],
+    bindings: [{ parameterKey: 'width', scale: 1, offset: 0, min: null, max: null }],
+    editable: true,
+    order: 1,
+  }];
+  manifest.controlViews = [{
+    viewId: 'manual-fit',
+    label: 'Outer Fit',
+    scope: 'part',
+    partIds: ['body'],
+    primitiveIds: ['width-knob'],
+    sections: [{
+      sectionId: 'main',
+      label: 'Main',
+      primitiveIds: ['width-knob'],
+      collapsed: false,
+    }],
+    default: false,
+    source: 'manual',
+    status: 'accepted',
+    order: 2,
+  }];
+
+  const result = ensureSemanticManifest(manifest, semanticUiSpec, { width: 20 });
+
+  assert.equal(result?.controlViews?.some((view) => view.viewId === 'manual-fit'), true);
+});
+
 function control(
   primitiveId: string,
   partIds: string[] = [],

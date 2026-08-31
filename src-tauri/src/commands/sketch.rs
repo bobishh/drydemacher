@@ -11,6 +11,12 @@ use crate::contracts::{
     SketchSuggestionResponse, SketchView,
 };
 use crate::models::AppState;
+use crate::services::sketch_constraint_validation::{
+    SketchConstraintEvaluationRequest, SketchConstraintEvaluationResponse,
+};
+use crate::services::sketch_preview_submission::{
+    SketchPreviewSubmissionPacket, SketchPreviewSubmissionRequest,
+};
 use crate::sketch_draft_runtime;
 
 #[tauri::command]
@@ -55,6 +61,16 @@ pub async fn generate_sketch_preview_hull(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn submit_sketch_preview(
+    request: SketchPreviewSubmissionRequest,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<SketchPreviewSubmissionPacket> {
+    crate::services::sketch_preview_submission::submit_sketch_preview(request, &state, &app).await
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn save_sketch_preview_draft(
     request: SaveSketchPreviewDraftRequest,
     app: AppHandle,
@@ -78,6 +94,14 @@ pub async fn clear_sketch_preview_draft(
     app: AppHandle,
 ) -> AppResult<()> {
     crate::services::sketch_preview_draft::clear_sketch_preview_draft(&app, request)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn evaluate_sketch_document_constraints(
+    request: SketchConstraintEvaluationRequest,
+) -> AppResult<SketchConstraintEvaluationResponse> {
+    Ok(crate::services::sketch_constraint_validation::evaluate_constraints(request))
 }
 
 #[tauri::command]

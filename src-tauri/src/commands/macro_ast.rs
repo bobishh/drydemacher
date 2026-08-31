@@ -31,7 +31,7 @@ pub fn macro_ast_source_map(macro_code: String) -> AppResult<Vec<MacroAstSourceN
     macro_ast_source_map_impl(&macro_code)
 }
 
-fn macro_ast_source_map_impl(source: &str) -> AppResult<Vec<MacroAstSourceNode>> {
+pub(crate) fn macro_ast_source_map_impl(source: &str) -> AppResult<Vec<MacroAstSourceNode>> {
     let forms = Parser::parse_without_lowering(source)
         .map_err(|err| AppError::parse(format!("Macro parse failed: {err}")))?;
     let mut nodes = Vec::new();

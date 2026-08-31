@@ -748,6 +748,7 @@ mod tests {
 
         let graph =
             super::build_authoring_graph(source, Some(&manifest), None).expect("authoring graph");
+        graph.validate().expect("valid graph boundary");
         let parameter = graph
             .ast_nodes
             .iter()
@@ -795,6 +796,9 @@ mod tests {
 
         let graph =
             super::build_authoring_graph(source, Some(&manifest), None).expect("authoring graph");
+        graph
+            .validate()
+            .expect("valid non-editable target boundary");
         let target = graph.targets.first().expect("selectable target");
 
         assert!(!target.editable);
@@ -815,6 +819,7 @@ mod tests {
     fn projects_typed_operation_and_addressable_child_paths() {
         let source = "(model (part body (difference (box 20 10 5) (cylinder 2 8))))";
         let graph = super::build_authoring_graph(source, None, None).expect("authoring graph");
+        graph.validate().expect("valid typed graph boundary");
         let difference = graph
             .ast_nodes
             .iter()

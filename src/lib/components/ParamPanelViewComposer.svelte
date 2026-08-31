@@ -17,6 +17,7 @@
     visiblePrimitives = [],
     selectedPrimitiveIds = [],
     canSave,
+    pending = false,
     onLabelChange,
     onScopeChange,
     onPartIdChange,
@@ -32,6 +33,7 @@
     visiblePrimitives?: ViewComposerPrimitive[];
     selectedPrimitiveIds?: string[];
     canSave: boolean;
+    pending?: boolean;
     onLabelChange?: (value: string) => void;
     onScopeChange?: (value: ControlViewScope) => void;
     onPartIdChange?: (value: string | null) => void;
@@ -113,9 +115,9 @@
     {/if}
   </div>
   <div class="composer-actions">
-    <button class="btn btn-xs btn-ghost" onclick={() => onCancel?.()}>CANCEL</button>
-    <button class="btn btn-xs btn-primary" onclick={() => onSave?.()} disabled={!canSave}>
-      {mode === 'edit' ? 'SAVE VIEW' : 'CREATE VIEW'}
+    <button class="btn btn-xs btn-ghost" onclick={() => onCancel?.()} disabled={pending}>CANCEL</button>
+    <button class="btn btn-xs btn-primary" onclick={() => onSave?.()} disabled={!canSave || pending}>
+      {pending ? 'SAVING VIEW' : mode === 'edit' ? 'SAVE VIEW' : 'CREATE VIEW'}
     </button>
   </div>
 </div>

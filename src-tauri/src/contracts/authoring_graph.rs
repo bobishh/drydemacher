@@ -140,3 +140,150 @@ pub struct AuthoringGraph {
     pub targets: Vec<AuthoringGraphTarget>,
     pub handles: Vec<AuthoringGraphHandle>,
 }
+
+impl AuthoringGraph {
+    pub fn validate(&self) -> Result<(), String> {
+        require_text(&self.source_digest, "Authoring graph sourceDigest")?;
+        require_text(&self.core_digest, "Authoring graph coreDigest")?;
+
+        for node in &self.ast_nodes {
+            let owner = format!("Authoring graph AST node '{}'", node.path);
+            require_text(&node.path, "Authoring graph AST node path")?;
+            require_text(&node.stable_node_key, &format!("{owner} stableNodeKey"))?;
+            require_text(&node.kind, &format!("{owner} kind"))?;
+            require_text(&node.value_kind, &format!("{owner} valueKind"))?;
+            match (
+                node.source_addressable,
+                normalized_reason(&node.non_editable_reason),
+            ) {
+                (true, Some(_)) => {
+                    return Err(format!(
+                        "{owner} cannot include nonEditableReason when source-addressable"
+                    ));
+                }
+                (false, None) => {
+                    return Err(format!(
+                        "{owner} requires raw non-editable reason when non-addressable"
+                    ));
+                }
+                _ => {}
+            }
+            for port in &node.input_ports {
+                require_text(&port.role, &format!("{owner} input port role"))?;
+                require_text(
+                    &port.value_kind,
+                    &format!("{owner} input port '{}' valueKind", port.role),
+                )?;
+                require_text(
+                    &port.child_path,
+                    &format!("{owner} input port '{}' childPath", port.role),
+                )?;
+                if !matches!(port.cardinality.as_str(), "one" | "many") {
+                    return Err(format!(
+                        "{owner} input port '{}' cardinality must be one or many",
+                        port.role
+                    ));
+                }
+            }
+        }
+
+        for target in &self.targets {
+            let owner = format!("Authoring graph target '{}'", target.target_id);
+            require_text(&target.target_id, "Authoring graph targetId")?;
+            require_text(&target.part_id, &format!("{owner} partId"))?;
+            require_text(&target.viewer_node_id, &format!("{owner} viewerNodeId"))?;
+            require_text(&target.label, &format!("{owner} label"))?;
+            let reason = normalized_reason(&target.non_editable_reason);
+            if target.editable {
+                if target.feature_ids.is_empty() || target.source_stable_node_keys.is_empty() {
+                    return Err(format!(
+                        "{owner} is editable but lacks exact feature and source bindings"
+                    ));
+                }
+                if reason.is_some() {
+                    return Err(format!(
+                        "{owner} cannot include nonEditableReason when editable"
+                    ));
+                }
+            } else if reason.is_none() {
+                return Err(format!("{owner} requires raw non-editable reason"));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn require_text(value: &str, field: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        Err(format!("{field} must be non-empty"))
+    } else {
+        Ok(())
+    }
+}
+
+fn normalized_reason(value: &Option<String>) -> Option<&str> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn graph_with_target(target: AuthoringGraphTarget) -> AuthoringGraph {
+        AuthoringGraph {
+            source_digest: "source".to_string(),
+            core_digest: "core".to_string(),
+            artifact_digest: None,
+            ast_nodes: Vec::new(),
+            features: Vec::new(),
+            dependencies: Vec::new(),
+            constraints: Vec::new(),
+            targets: vec![target],
+            handles: Vec::new(),
+        }
+    }
+
+    fn target(editable: bool) -> AuthoringGraphTarget {
+        AuthoringGraphTarget {
+            target_id: "part:body".to_string(),
+            durable_target_id: None,
+            canonical_target_id: None,
+            alias_ids: Vec::new(),
+            part_id: "body".to_string(),
+            viewer_node_id: "body".to_string(),
+            label: "Body".to_string(),
+            kind: SelectionTargetKind::Part,
+            parameter_keys: Vec::new(),
+            primitive_ids: Vec::new(),
+            feature_ids: Vec::new(),
+            source_stable_node_keys: Vec::new(),
+            editable,
+            non_editable_reason: None,
+        }
+    }
+
+    #[test]
+    fn editable_target_requires_exact_feature_and_source_bindings() {
+        let error = graph_with_target(target(true))
+            .validate()
+            .expect_err("editable target without exact bindings must fail");
+
+        assert!(error.contains("part:body"));
+        assert!(error.contains("feature"));
+        assert!(error.contains("source"));
+    }
+
+    #[test]
+    fn non_editable_target_requires_raw_reason() {
+        let error = graph_with_target(target(false))
+            .validate()
+            .expect_err("non-editable target without reason must fail");
+
+        assert!(error.contains("part:body"));
+        assert!(error.contains("reason"));
+    }
+}

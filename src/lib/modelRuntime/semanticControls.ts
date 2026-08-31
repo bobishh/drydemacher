@@ -420,6 +420,13 @@ function carryForwardViews(
     }
   }
 
+  for (const persisted of manifest.controlViews || []) {
+    if (!validateView(persisted, primitiveIds, partIds)) continue;
+    if (next.has(persisted.viewId)) continue;
+    if (!(persisted.status === 'accepted' || persisted.source === 'manual')) continue;
+    next.set(persisted.viewId, persisted);
+  }
+
   for (const inherited of previousManifest?.controlViews || []) {
     if (!validateView(inherited, primitiveIds, partIds)) continue;
     if (next.has(inherited.viewId)) continue;

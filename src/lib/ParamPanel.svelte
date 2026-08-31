@@ -6,11 +6,10 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import {
     formatBackendError,
+    applySemanticManifestEdit,
     getAppErrorDiagnosticContext,
     parseMacroParams,
-    saveModelManifest,
-    updateParameters,
-    updateUiSpec,
+    persistControlDefaults,
   } from './tauri/client';
   import { buildImportedSyntheticDesign } from './modelRuntime/importedRuntime';
   import MacroAstMap from './MacroAstMap.svelte';
@@ -29,9 +28,8 @@
     MaterializedSemanticView,
   } from './modelRuntime/semanticControls';
   import { usesPersistedControlViews } from './modelRuntime/semanticControls';
-  import { persistLastSessionSnapshot } from './modelRuntime/sessionSnapshot';
   import { activeThreadIdStore as activeThreadId, historyStore as history } from './stores/domainState';
-  import { refreshHistory } from './stores/history';
+  import { projectWorkspaceProjection } from './stores/history';
   import ParamPanelToolbar from './components/ParamPanelToolbar.svelte';
   import ParamPanelSearch from './components/ParamPanelSearch.svelte';
   import ParamPanelModeTabs from './components/ParamPanelModeTabs.svelte';
@@ -76,6 +74,7 @@
     UiField,
     UiSpec,
   } from './types/domain';
+  import type { SemanticManifestEditIntent } from './tauri/contracts';
 
   type EditableNumber = number | '' | undefined;
   type EditableRangeField = Omit<RangeField, 'min' | 'max' | 'step'> & {
@@ -151,7 +150,6 @@
     artifactBundle = null,
     onApplyMacroCode = undefined,
     manualApplyBusy = false,
-    manualApplyQueued = 0,
   }: {
     uiSpec?: UiSpec | null;
     parameters?: DesignParams;
@@ -184,10 +182,10 @@
     macroCode?: string;
     onApplyMacroCode?: (code: string) => Promise<unknown>;
     manualApplyBusy?: boolean;
-    manualApplyQueued?: number;
   } = $props();
 
   let editing = $state(false);
+  let controlViewMutationPending = $state(false);
   let editFields = $state<EditableUiField[]>([]);
   let localParams = $state<DesignParams>({});
   let pendingParamDrafts = $state<DesignParams>({});
@@ -295,7 +293,7 @@
   }
 
   function nextLithoId() {
-    return `litho-${crypto.randomUUID().slice(0, 8)}`;
+    return `draft-litho-${crypto.randomUUID()}`;
   }
 
   function defaultLithophaneAttachment(): LithophaneAttachment {
@@ -665,26 +663,6 @@
     editFields = editFields.filter((_, i) => i !== index);
   }
 
-  function mergeParsedEditFields(
-    existingFields: EditableUiField[],
-    parsedFields: UiField[],
-  ): EditableUiField[] {
-    const merged = [...existingFields.filter(Boolean)];
-    const seenKeys = new Set(
-      merged.map((field) => field.key.trim()).filter((key) => key.length > 0),
-    );
-
-    for (const parsedField of parsedFields) {
-      if (!parsedField) continue;
-      const key = parsedField.key.trim();
-      if (!key || seenKeys.has(key)) continue;
-      merged.push(toEditableField(parsedField));
-      seenKeys.add(key);
-    }
-
-    return merged;
-  }
-
   function addSelectOption(index: number) {
     const field = editFields[index];
     if (!field || field.type !== 'select') return;
@@ -1047,20 +1025,26 @@
   });
 
   async function readFromMacro() {
-    if (!macroCode) {
-      session.setStatus('No macro code available to read from.');
+    if (!activeVersionId) {
+      session.setStatus('Generate a version before reading canonical controls.');
       return;
     }
     reading = true;
     try {
-      const result = await parseMacroParams(macroCode);
-      const { fields, params } = result;
+      const existingKeys = new Set(editFields.map((field) => field.key.trim()).filter(Boolean));
+      const result = await persistControlDefaults({
+        messageId: activeVersionId,
+        mutation: { action: 'readFromMacro' },
+      });
+      const { fields } = result.uiSpec;
 
       if (fields && fields.length > 0) {
-        const before = editFields.length;
-        editFields = mergeParsedEditFields(editFields, fields);
-        localParams = { ...params, ...localParams };
-        const added = editFields.length - before;
+        editFields = fields.map(toEditableField);
+        localParams = { ...result.parameters };
+        uiSpec = result.uiSpec;
+        const added = fields.filter((field) => !existingKeys.has(field.key.trim())).length;
+        if (onspecchange) onspecchange(result.uiSpec, result.parameters);
+        await projectWorkspaceProjection(result.workspace);
         if (added > 0) {
           session.setStatus(`${added} new field${added === 1 ? '' : 's'} added from macro.`);
         } else {
@@ -1071,7 +1055,7 @@
       }
     } catch (e: unknown) {
       console.error('ParamPanel: Failed to parse macro params:', e);
-      session.setError('Failed to read from macro.');
+      session.setError(`Read From Macro Failed: ${formatBackendError(e)}`);
     } finally {
       reading = false;
     }
@@ -1086,21 +1070,20 @@
     uiSpec = newSpec;
 
     if (activeVersionId) {
-      console.log('ParamPanel: Saving uiSpec to messageId:', activeVersionId, newSpec);
       try {
-        await updateUiSpec(activeVersionId, newSpec);
-        console.log('ParamPanel: update_ui_spec success');
-        
-        // Also save parameters since readFromMacro might have updated them
-        await updateParameters(activeVersionId, localParams);
-        console.log('ParamPanel: update_parameters success');
-        
-        // Notify parent, but do not rerender geometry for control-only edits.
-        if (onspecchange) onspecchange(newSpec, localParams);
+        const result = await persistControlDefaults({
+          messageId: activeVersionId,
+          mutation: { action: 'saveSchema', uiSpec: newSpec, parameters: localParams },
+        });
+        uiSpec = result.uiSpec;
+        localParams = { ...result.parameters };
+        if (onspecchange) onspecchange(result.uiSpec, result.parameters);
+        await projectWorkspaceProjection(result.workspace);
         session.setStatus('Controls saved.');
       } catch (e: unknown) {
-        console.error('ParamPanel: Failed to save ui_spec/params:', formatBackendError(e));
+        console.error('ParamPanel: Failed to save controls:', formatBackendError(e));
         session.setError(`Control Save Failed: ${formatBackendError(e)}`);
+        return;
       }
     } else {
       if (onspecchange) onspecchange(newSpec, localParams);
@@ -1310,11 +1293,14 @@
     if (!activeVersionId) return;
     saveValuesState = 'saving';
     try {
-      await updateParameters(activeVersionId, localParams);
-      // Sync in-memory state so that isDirty=true and paramPanelState reflects saved values.
-      // This prevents stale state from being used in subsequent renders or overwritten by agent drafts.
-      if (onspecchange) onspecchange(uiSpec ?? { fields: [] }, localParams);
-      await refreshHistory();
+      const result = await persistControlDefaults({
+        messageId: activeVersionId,
+        mutation: { action: 'saveValues', parameters: localParams },
+      });
+      uiSpec = result.uiSpec;
+      localParams = { ...result.parameters };
+      if (onspecchange) onspecchange(result.uiSpec, result.parameters);
+      await projectWorkspaceProjection(result.workspace);
       saveValuesState = 'saved';
       setTimeout(() => {
         if (saveValuesState === 'saved') saveValuesState = 'idle';
@@ -1839,117 +1825,64 @@
       .map(({ order: _order, ...section }) => section);
   }
 
-  function buildManualViewFromBase(
-    baseView: MaterializedSemanticView | null,
-    primitiveIds: string[],
-    fallbackScope: ControlViewScope,
-    fallbackPartId: string | null,
-    existingViews: ControlView[],
-  ): { view: ControlView; selectViewId: string } {
-    const maxOrder = existingViews.reduce((max, view) => Math.max(max, view.order || 0), 0);
-
-    if (baseView?.source === 'manual') {
-      const existing = existingViews.find((view) => view.viewId === baseView.viewId);
-      return {
-        view: {
-          viewId: baseView.viewId,
-          label: baseView.label,
-          scope: baseView.scope,
-          partIds: [...(baseView.partIds || [])],
-          primitiveIds,
-          sections: inferManualSections(primitiveIds),
-          default: existing?.default ?? false,
-          source: 'manual',
-          status: 'accepted',
-          order: existing?.order ?? baseView.order ?? (maxOrder + 1),
-        },
-        selectViewId: baseView.viewId,
-      };
-    }
-
-    const label = baseView ? `${baseView.label} Custom` : (fallbackScope === 'part' ? 'Part Custom' : 'Custom');
-    const viewId = `view-manual-${slugify(label)}-${Date.now().toString(36)}`;
-    return {
-      view: {
-        viewId,
-        label,
-        scope: baseView?.scope || fallbackScope,
-        partIds: [...(baseView?.partIds || (fallbackScope === 'part' && fallbackPartId ? [fallbackPartId] : []))],
-        primitiveIds,
-        sections: inferManualSections(primitiveIds),
-        default: false,
-        source: 'manual',
-        status: 'accepted',
-        order: maxOrder + 1,
-      },
-      selectViewId: viewId,
-    };
-  }
-
-  async function persistManifest(nextManifest: ModelManifest, nextViewId: string | null = null) {
-    const persistedManifest = usesPersistedControlViews(nextManifest)
-      ? nextManifest
-      : { ...nextManifest, controlViews: [] };
-    const versionMessageId = messageId ?? activeVersionId;
-    await saveModelManifest(persistedManifest.modelId, persistedManifest, versionMessageId);
+  function projectPersistedManifest(
+    persistedManifest: ModelManifest,
+    versionMessageId: string | null,
+    nextViewId: string | null,
+  ) {
     updateCachedManifest(persistedManifest, versionMessageId);
     const currentSession = get(session);
     session.setModelRuntime(currentSession.artifactBundle, persistedManifest);
-    await persistLastSessionSnapshot({
-      modelManifest: persistedManifest,
-      messageId: versionMessageId ?? null,
-    });
     if (nextViewId) {
       onSelectControlView?.(nextViewId);
     }
   }
 
-  async function saveManualView() {
-    if (!modelManifest || !composerCanSave) return;
+  async function submitSemanticManifestEdit(edit: SemanticManifestEditIntent) {
+    if (!modelManifest) throw new Error('Semantic edit requires a model manifest.');
+    const versionMessageId = messageId ?? activeVersionId;
+    const result = await applySemanticManifestEdit({
+      modelId: modelManifest.modelId,
+      messageId: versionMessageId,
+      edit,
+    });
+    projectPersistedManifest(
+      result.manifest,
+      versionMessageId,
+      result.selectedViewId ?? null,
+    );
+    return result;
+  }
 
-    const existingViews = (modelManifest.controlViews || []).filter((view) => view.viewId !== composerViewId);
-    const maxOrder = existingViews.reduce((max, view) => Math.max(max, view.order || 0), 0);
-    const nextViewId =
-      composerMode === 'edit' && composerViewId
-        ? composerViewId
-        : `view-manual-${slugify(composerViewLabel)}-${Date.now().toString(36)}`;
-    const nextView: ControlView = {
-      viewId: nextViewId,
+  async function saveManualView() {
+    if (!modelManifest || !composerCanSave || controlViewMutationPending) return;
+
+    const nextView = {
+      action: 'saveView' as const,
+      viewId: composerMode === 'edit' ? composerViewId : null,
       label: composerViewLabel.trim(),
       scope: composerViewScope,
       partIds: composerViewScope === 'part' && composerViewPartId ? [composerViewPartId] : [],
       primitiveIds: [...composerPrimitiveIds],
       sections: inferManualSections(composerPrimitiveIds),
       default: false,
-      source: 'manual',
-      status: 'accepted',
-      order: composerMode === 'edit'
-        ? modelManifest.controlViews?.find((view) => view.viewId === composerViewId)?.order ?? (maxOrder + 1)
-        : maxOrder + 1,
     };
 
-    const nextManifest: ModelManifest = {
-      ...modelManifest,
-      controlViews: [...existingViews, nextView].sort(
-        (left, right) => (left.order ?? 0) - (right.order ?? 0) || left.label.localeCompare(right.label),
-      ),
-    };
-
+    controlViewMutationPending = true;
+    session.setError(null);
     try {
-      await persistManifest(nextManifest, nextView.viewId);
+      await submitSemanticManifestEdit(nextView);
       activeTab = 'views';
       resetComposer();
     } catch (e: unknown) {
       session.setError(`View Save Failed: ${formatBackendError(e)}`);
+    } finally {
+      controlViewMutationPending = false;
     }
   }
 
   async function saveManualPrimitive() {
     if (!modelManifest || !primitiveCanSave || !primitiveKindPreview) return;
-    const nextPrimitiveId =
-      primitiveComposerMode === 'edit' && primitiveEditingId
-        ? primitiveEditingId
-        : `primitive-manual-${slugify(primitiveLabel)}-${Date.now().toString(36)}`;
     const nextBindings: PrimitiveBinding[] = primitiveParameterKeys.map((parameterKey) => {
       const draft = primitiveBindingDrafts[parameterKey];
       const numeric = (value: string, fallback: number) => {
@@ -1969,57 +1902,18 @@
       };
     });
 
-    const nextPrimitive: ControlPrimitive = {
-      primitiveId: nextPrimitiveId,
-      label: primitiveLabel.trim(),
-      kind: primitiveKindPreview,
-      source: 'manual',
-      partIds: primitiveScope === 'part' && primitivePartId ? [primitivePartId] : [],
-      bindings: nextBindings,
-      editable: true,
-      order:
-        primitiveComposerMode === 'edit'
-          ? (modelManifest.controlPrimitives || []).find((primitive) => primitive.primitiveId === primitiveEditingId)?.order ??
-            ((modelManifest.controlPrimitives || []).reduce((max, primitive) => Math.max(max, primitive.order || 0), 0) + 1)
-          : (modelManifest.controlPrimitives || []).reduce((max, primitive) => Math.max(max, primitive.order || 0), 0) + 1,
-    };
-
-    let nextControlViews = [...(modelManifest.controlViews || [])];
-    let selectViewId = activeControlViewId;
-
-    if (primitiveAttachToView) {
-      const baseIds = activeSemanticView ? flattenViewPrimitiveIds(activeSemanticView) : [];
-      const combinedIds = [...new Set([...baseIds, nextPrimitiveId])];
-      const existingWithoutBase =
-        activeSemanticView?.source === 'manual'
-          ? nextControlViews.filter((view) => view.viewId !== activeSemanticView.viewId)
-          : nextControlViews;
-      const { view, selectViewId: nextSelectedViewId } = buildManualViewFromBase(
-        activeSemanticView,
-        combinedIds,
-        primitiveScope === 'part' ? 'part' : 'global',
-        primitivePartId,
-        existingWithoutBase,
-      );
-      nextControlViews = [...existingWithoutBase, view].sort(
-        (left, right) => (left.order ?? 0) - (right.order ?? 0) || left.label.localeCompare(right.label),
-      );
-      selectViewId = nextSelectedViewId;
-    }
-
-    const nextManifest: ModelManifest = {
-      ...modelManifest,
-      controlPrimitives: [
-        ...(modelManifest.controlPrimitives || []).filter((primitive) => primitive.primitiveId !== nextPrimitiveId),
-        nextPrimitive,
-      ].sort(
-        (left, right) => (left.order ?? 0) - (right.order ?? 0) || left.label.localeCompare(right.label),
-      ),
-      controlViews: nextControlViews,
-    };
-
     try {
-      await persistManifest(nextManifest, selectViewId);
+      await submitSemanticManifestEdit({
+        action: 'savePrimitive',
+        primitiveId: primitiveComposerMode === 'edit' ? primitiveEditingId : null,
+        label: primitiveLabel,
+        primitiveKind: primitiveKindPreview,
+        scope: primitiveScope,
+        partId: primitivePartId,
+        bindings: nextBindings,
+        attachToView: primitiveAttachToView,
+        baseViewId: activeSemanticView?.viewId ?? null,
+      });
       activeTab = 'views';
       resetPrimitiveComposer();
     } catch (e: unknown) {
@@ -2030,33 +1924,8 @@
   async function deleteManualPrimitive(primitiveId: string) {
     if (!modelManifest || !primitiveId.startsWith('primitive-manual-')) return;
 
-    const nextViews = (modelManifest.controlViews || [])
-      .map((view) => {
-        const primitiveIds = (view.primitiveIds || []).filter((id) => id !== primitiveId);
-        const sections = (view.sections || [])
-          .map((section) => ({
-            ...section,
-            primitiveIds: (section.primitiveIds || []).filter((id) => id !== primitiveId),
-          }))
-          .filter((section) => section.primitiveIds.length > 0);
-        return {
-          ...view,
-          primitiveIds,
-          sections,
-        };
-      })
-      .filter((view) => (view.primitiveIds || []).length > 0);
-
-    const nextManifest: ModelManifest = {
-      ...modelManifest,
-      controlPrimitives: (modelManifest.controlPrimitives || []).filter(
-        (primitive) => primitive.primitiveId !== primitiveId,
-      ),
-      controlViews: nextViews,
-    };
-
     try {
-      await persistManifest(nextManifest, null);
+      await submitSemanticManifestEdit({ action: 'deletePrimitive', primitiveId });
       if (primitiveEditingId === primitiveId) {
         resetPrimitiveComposer();
       }
@@ -2068,28 +1937,21 @@
   async function saveManualAdvisory() {
     if (!modelManifest || !advisoryCanSave) return;
     const thresholdValue = Number(advisoryThreshold);
-    const nextManifest: ModelManifest = {
-      ...modelManifest,
-      advisories: [
-        ...(modelManifest.advisories || []),
-        {
-          advisoryId: `advisory-manual-${slugify(advisoryLabel)}-${Date.now().toString(36)}`,
-          label: advisoryLabel.trim(),
-          severity: advisorySeverity,
-          primitiveIds: [...advisoryPrimitiveIds],
-          viewIds: activeControlViewId ? [activeControlViewId] : [],
-          message: advisoryMessage.trim(),
-          condition: advisoryCondition,
-          threshold:
-            advisoryCondition === 'always' || !Number.isFinite(thresholdValue)
-              ? null
-              : thresholdValue,
-        },
-      ],
-    };
 
     try {
-      await persistManifest(nextManifest, activeControlViewId);
+      await submitSemanticManifestEdit({
+        action: 'saveAdvisory',
+        label: advisoryLabel,
+        severity: advisorySeverity,
+        primitiveIds: [...advisoryPrimitiveIds],
+        viewId: activeControlViewId,
+        message: advisoryMessage,
+        condition: advisoryCondition,
+        threshold:
+          advisoryCondition === 'always' || !Number.isFinite(thresholdValue)
+            ? null
+            : thresholdValue,
+      });
       resetAdvisoryComposer();
     } catch (e: unknown) {
       session.setError(`Rule Save Failed: ${formatBackendError(e)}`);
@@ -2098,13 +1960,9 @@
 
   async function deleteManualAdvisory(advisoryId: string) {
     if (!modelManifest || !advisoryId.startsWith('advisory-manual-')) return;
-    const nextManifest: ModelManifest = {
-      ...modelManifest,
-      advisories: (modelManifest.advisories || []).filter((advisory) => advisory.advisoryId !== advisoryId),
-    };
 
     try {
-      await persistManifest(nextManifest, activeControlViewId);
+      await submitSemanticManifestEdit({ action: 'deleteAdvisory', advisoryId });
     } catch (e: unknown) {
       session.setError(`Rule Delete Failed: ${formatBackendError(e)}`);
     }
@@ -2114,24 +1972,16 @@
     if (!modelManifest || !relationCanSave || !relationSourcePrimitiveId || !relationTargetPrimitiveId) return;
     const scale = Number(relationScale);
     const offset = Number(relationOffset);
-    const nextManifest: ModelManifest = {
-      ...modelManifest,
-      controlRelations: [
-        ...(modelManifest.controlRelations || []),
-        {
-          relationId: `relation-manual-${Date.now().toString(36)}`,
-          sourcePrimitiveId: relationSourcePrimitiveId,
-          targetPrimitiveId: relationTargetPrimitiveId,
-          mode: relationMode,
-          scale: Number.isFinite(scale) ? scale : 1,
-          offset: Number.isFinite(offset) ? offset : 0,
-          enabled: true,
-        },
-      ],
-    };
 
     try {
-      await persistManifest(nextManifest, activeControlViewId);
+      await submitSemanticManifestEdit({
+        action: 'saveRelation',
+        sourcePrimitiveId: relationSourcePrimitiveId,
+        targetPrimitiveId: relationTargetPrimitiveId,
+        mode: relationMode,
+        scale: Number.isFinite(scale) ? scale : 1,
+        offset: Number.isFinite(offset) ? offset : 0,
+      });
       resetRelationComposer();
     } catch (e: unknown) {
       session.setError(`Link Save Failed: ${formatBackendError(e)}`);
@@ -2140,140 +1990,30 @@
 
   async function deleteControlRelation(relationId: string) {
     if (!modelManifest) return;
-    const nextManifest: ModelManifest = {
-      ...modelManifest,
-      controlRelations: (modelManifest.controlRelations || []).filter(
-        (relation) => relation.relationId !== relationId,
-      ),
-    };
 
     try {
-      await persistManifest(nextManifest, activeControlViewId);
+      await submitSemanticManifestEdit({ action: 'deleteRelation', relationId });
     } catch (e: unknown) {
       session.setError(`Link Delete Failed: ${formatBackendError(e)}`);
     }
   }
 
   async function deleteManualView(viewId: string) {
-    if (!modelManifest) return;
-    const nextManifest: ModelManifest = {
-      ...modelManifest,
-      controlViews: (modelManifest.controlViews || []).filter((view) => view.viewId !== viewId),
-    };
+    if (!modelManifest || controlViewMutationPending) return;
 
+    controlViewMutationPending = true;
+    session.setError(null);
     try {
-      await persistManifest(nextManifest, null);
+      await submitSemanticManifestEdit({ action: 'deleteView', viewId });
       if (activeControlViewId === viewId) {
         onSelectControlView?.(null);
       }
       resetComposer();
     } catch (e: unknown) {
       session.setError(`View Delete Failed: ${formatBackendError(e)}`);
+    } finally {
+      controlViewMutationPending = false;
     }
-  }
-
-  function deriveEnrichmentStatus(proposals: EnrichmentProposal[]): EnrichmentStatus {
-    if (proposals.some((proposal) => proposal.status === 'pending')) return 'pending';
-    if (proposals.some((proposal) => proposal.status === 'accepted')) return 'accepted';
-    if (proposals.some((proposal) => proposal.status === 'rejected')) return 'rejected';
-    return 'none';
-  }
-
-  function proposalGroupId(proposalId: string) {
-    return `proposal-bind-${proposalId}`;
-  }
-
-  function rebuildImportedProposalBindings(
-    manifest: ModelManifest,
-    proposals: EnrichmentProposal[],
-  ): ModelManifest {
-    if (manifest.sourceKind !== 'importedFcstd') {
-      return manifest;
-    }
-
-    const accepted = proposals.filter((proposal) => proposal.status === 'accepted');
-    const autoGroupIds = new Set(
-      (manifest.parameterGroups || [])
-        .filter((group) => group.groupId.startsWith('proposal-bind-'))
-        .map((group) => group.groupId),
-    );
-    const autoKeysByPart = new Map<string, Set<string>>();
-
-    for (const group of manifest.parameterGroups || []) {
-      if (!autoGroupIds.has(group.groupId)) continue;
-      for (const partId of group.partIds || []) {
-        const bucket = autoKeysByPart.get(partId) ?? new Set<string>();
-        for (const key of group.parameterKeys || []) {
-          bucket.add(key);
-        }
-        autoKeysByPart.set(partId, bucket);
-      }
-    }
-
-    const acceptedKeysByPart = new Map<string, Set<string>>();
-    for (const proposal of accepted) {
-      for (const partId of proposal.partIds || []) {
-        const bucket = acceptedKeysByPart.get(partId) ?? new Set<string>();
-        for (const key of proposal.parameterKeys || []) {
-          bucket.add(key);
-        }
-        acceptedKeysByPart.set(partId, bucket);
-      }
-    }
-
-    const nextParts = (manifest.parts || []).map((part) => {
-      const preservedKeys = (part.parameterKeys || []).filter(
-        (key) => !autoKeysByPart.get(part.partId)?.has(key),
-      );
-      const acceptedKeys = [...(acceptedKeysByPart.get(part.partId) ?? new Set<string>())];
-      const parameterKeys = [...new Set([...preservedKeys, ...acceptedKeys])];
-      const editable = parameterKeys.length > 0;
-      return {
-        ...part,
-        parameterKeys,
-        editable,
-      };
-    });
-
-    const editablePartIds = new Set(
-      nextParts.filter((part) => part.editable).map((part) => part.partId),
-    );
-    const nextGroups = [
-      ...(manifest.parameterGroups || []).filter(
-        (group) => !group.groupId.startsWith('proposal-bind-'),
-      ),
-      ...accepted.map((proposal) => ({
-        groupId: proposalGroupId(proposal.proposalId),
-        label: proposal.label,
-        parameterKeys: [...new Set(proposal.parameterKeys || [])],
-        partIds: [...new Set(proposal.partIds || [])],
-        editable: true,
-      })),
-    ];
-    const nextTargets = (manifest.selectionTargets || []).map((target) => ({
-      ...target,
-      editable: editablePartIds.has(target.partId),
-    }));
-
-    const nextWarnings = (manifest.warnings || []).filter(
-      (warning) =>
-        warning !== 'Imported FCStd models are inspect-only until bindings are confirmed.' &&
-        warning !== 'Imported FCStd bindings were accepted from heuristic proposals.',
-    );
-
-    if (accepted.length === 0) {
-      nextWarnings.push('Imported FCStd models are inspect-only until bindings are confirmed.');
-    } else {
-      nextWarnings.push('Imported FCStd bindings were accepted from heuristic proposals.');
-    }
-
-    return {
-      ...manifest,
-      parts: nextParts,
-      parameterGroups: nextGroups,
-      selectionTargets: nextTargets,
-      warnings: nextWarnings,
-    };
   }
 
   function labelPartIds(partIds: string[] | undefined) {
@@ -2314,21 +2054,9 @@
   async function updateProposalStatus(proposalId: string, status: EnrichmentStatus) {
     if (!modelManifest || proposalMutationId) return;
 
-    const nextProposals = enrichmentProposals.map((proposal) =>
-      proposal.proposalId === proposalId ? { ...proposal, status } : proposal,
-    );
-    const nextManifestBase: ModelManifest = {
-      ...modelManifest,
-      enrichmentState: {
-        status: deriveEnrichmentStatus(nextProposals),
-        proposals: nextProposals,
-      },
-    };
-    const nextManifest = rebuildImportedProposalBindings(nextManifestBase, nextProposals);
-
     proposalMutationId = proposalId;
     try {
-      await persistManifest(nextManifest);
+      await submitSemanticManifestEdit({ action: 'setProposalStatus', proposalId, status });
     } catch (e: unknown) {
       session.setError(`Manifest Save Failed: ${formatBackendError(e)}`);
     } finally {
@@ -2570,6 +2298,7 @@
         {composerVisiblePrimitives}
         {composerPrimitiveIds}
         {composerCanSave}
+        {controlViewMutationPending}
         advisories={activeSemanticView?.advisories || []}
         {activeViewRelations}
         {filteredSemanticSections}
@@ -2653,7 +2382,6 @@
         applying={applying}
         committing={committing}
         manualApplyBusy={manualApplyBusy}
-        manualApplyQueued={manualApplyQueued}
         undoDepth={paramUndoDepth}
         saveValuesState={saveValuesState}
         activeVersionId={activeVersionId}

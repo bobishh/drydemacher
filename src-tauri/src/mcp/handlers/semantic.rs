@@ -3,9 +3,8 @@ use super::{
     try_record_agent_error, AgentContext,
 };
 use crate::contracts::{
-    AppError, AppResult, ArtifactBundle, ControlPrimitive, ControlView, ControlViewSource,
-    DesignOutput, MeasurementAnnotation, MeasurementAnnotationSource, ModelManifest,
-    ModelSourceKind,
+    AppError, AppResult, ArtifactBundle, ControlPrimitive, ControlViewSource, DesignOutput,
+    MeasurementAnnotation, MeasurementAnnotationSource, ModelManifest, ModelSourceKind,
 };
 use crate::mcp::contracts::{
     ControlPrimitiveDeleteRequest, ControlPrimitiveSaveRequest, ControlViewDeleteRequest,
@@ -17,6 +16,9 @@ use crate::mcp::contracts::{
 use crate::models::{AppState, PathResolver};
 use crate::services::agent_versions::{
     save_or_update_agent_version_for_session, SaveOrUpdateAgentVersionRequest,
+};
+use crate::services::semantic_manifest::{
+    delete_control_view, upsert_control_view, SemanticEditActor,
 };
 
 async fn resolve_turn_working_semantic_target(
@@ -181,44 +183,6 @@ fn normalize_llm_primitive(
         part_ids: primitive.part_ids,
         bindings: primitive.bindings,
         editable: primitive.editable,
-        order,
-    })
-}
-
-fn normalize_llm_view(
-    view: ControlView,
-    existing: Option<&ControlView>,
-    manifest: &ModelManifest,
-) -> AppResult<ControlView> {
-    let view_id = view.view_id.trim();
-    if view_id.is_empty() {
-        return Err(AppError::validation("View id cannot be empty."));
-    }
-
-    let order = if view.order == 0 {
-        existing.map(|value| value.order).unwrap_or_else(|| {
-            manifest
-                .control_views
-                .iter()
-                .map(|entry| entry.order)
-                .max()
-                .unwrap_or(0)
-                + 1
-        })
-    } else {
-        view.order
-    };
-
-    Ok(ControlView {
-        view_id: view_id.to_string(),
-        label: view.label.trim().to_string(),
-        scope: view.scope,
-        part_ids: view.part_ids,
-        primitive_ids: view.primitive_ids,
-        sections: view.sections,
-        is_default: view.is_default,
-        source: ControlViewSource::Llm,
-        status: view.status,
         order,
     })
 }
@@ -707,25 +671,8 @@ pub async fn handle_control_view_save(
             "Saving semantic view.",
         )?;
 
-        let existing = target
-            .model_manifest
-            .control_views
-            .iter()
-            .find(|entry| entry.view_id == req.view.view_id);
-        let next_view = normalize_llm_view(req.view, existing, &target.model_manifest)?;
-        let next_view_id = next_view.view_id.clone();
-        let mut next_manifest = target.model_manifest.clone();
-        next_manifest.control_views = next_manifest
-            .control_views
-            .into_iter()
-            .filter(|entry| entry.view_id != next_view_id)
-            .chain(std::iter::once(next_view))
-            .collect();
-        next_manifest.control_views.sort_by(|left, right| {
-            left.order
-                .cmp(&right.order)
-                .then_with(|| left.label.cmp(&right.label))
-        });
+        let next_manifest =
+            upsert_control_view(&target.model_manifest, req.view, SemanticEditActor::Llm)?;
 
         drop(conn);
 
@@ -806,14 +753,8 @@ pub async fn handle_control_view_delete(
             "Deleting semantic view.",
         )?;
 
-        let mut next_manifest = target.model_manifest.clone();
-        let view_id = req.view_id;
-        next_manifest
-            .control_views
-            .retain(|entry| entry.view_id != view_id);
-        for advisory in &mut next_manifest.advisories {
-            advisory.view_ids.retain(|entry| entry != &view_id);
-        }
+        let next_manifest =
+            delete_control_view(&target.model_manifest, &req.view_id, SemanticEditActor::Llm)?;
 
         drop(conn);
 
