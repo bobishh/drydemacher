@@ -1,3 +1,4 @@
+use crate::contracts::exploration_cycle::{PlanAction, PlanProposal};
 use crate::contracts::{DesignOutput, Engine, UsageSegment, UsageSummary};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -25,12 +26,125 @@ pub struct LlmOutcome<T> {
     pub usage: Option<UsageSummary>,
 }
 
+/// One provider authoring response.
+///
+/// `design` is the source snapshot that may be persisted. `next_action` is
+/// transient controller input and must never be copied into `DesignOutput` or
+/// the immutable version payload. PLAN and BUILD stay in one provider turn;
+/// the controller may ignore the action when no exploration cycle is active.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderAuthoringOutput {
+    pub design: DesignOutput,
+    pub next_action: Option<PlanProposal>,
+}
+
+/// Parse the single JSON object returned by an authoring provider.
+///
+/// The design fields remain at the top level for compatibility with the
+/// existing authoring contract. `next_action` (and its camelCase wire spelling
+/// `nextAction`) is removed before `DesignOutput` deserialization, ensuring
+/// lifecycle metadata cannot enter the persisted design snapshot. It is
+/// optional for legacy non-cycle/question calls; the generation command
+/// requires it whenever an exploration cycle envelope is active.
+pub fn parse_provider_authoring_output(
+    mut value: serde_json::Value,
+) -> Result<ProviderAuthoringOutput, String> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "Authoring response must be a JSON object.".to_string())?;
+
+    let next_action = object
+        .remove("next_action")
+        .or_else(|| object.remove("nextAction"))
+        .map(parse_plan_proposal)
+        .transpose()?;
+    let design: DesignOutput = serde_json::from_value(value)
+        .map_err(|error| format!("Design output parse error: {error}"))?;
+
+    Ok(ProviderAuthoringOutput {
+        design,
+        next_action,
+    })
+}
+
+fn parse_plan_proposal(value: serde_json::Value) -> Result<PlanProposal, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "`next_action` must be a JSON object.".to_string())?;
+
+    let string_field = |camel: &str, snake: &str| -> Result<String, String> {
+        object
+            .get(camel)
+            .or_else(|| object.get(snake))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|field| !field.is_empty())
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| format!("`next_action.{camel}` must be a non-empty string."))
+    };
+
+    let action_raw = string_field("action", "action")?;
+    let action = match action_raw.to_ascii_lowercase().as_str() {
+        "build" => PlanAction::Build,
+        "ask" => PlanAction::Ask,
+        "stop" => PlanAction::Stop,
+        other => {
+            return Err(format!(
+                "`next_action.action` must be BUILD, ASK, or STOP; got `{other}`."
+            ))
+        }
+    };
+
+    let optional_string = |camel: &str, snake: &str| {
+        object
+            .get(camel)
+            .or_else(|| object.get(snake))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|field| !field.is_empty())
+            .map(ToOwned::to_owned)
+    };
+
+    let source_version_id = string_field("sourceVersionId", "source_version_id")?;
+    let (hypothesis, change_scope, expected_evidence) = if action == PlanAction::Build {
+        (
+            string_field("hypothesis", "hypothesis")?,
+            string_field("changeScope", "change_scope")?,
+            string_field("expectedEvidence", "expected_evidence")?,
+        )
+    } else {
+        (
+            optional_string("hypothesis", "hypothesis").unwrap_or_default(),
+            optional_string("changeScope", "change_scope").unwrap_or_default(),
+            optional_string("expectedEvidence", "expected_evidence").unwrap_or_default(),
+        )
+    };
+    let budget_cost = object
+        .get("budgetCost")
+        .or_else(|| object.get("budget_cost"))
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "`next_action.budgetCost` must be a non-negative integer.".to_string())?;
+    let budget_cost = u32::try_from(budget_cost)
+        .map_err(|_| "`next_action.budgetCost` exceeds u32 range.".to_string())?;
+
+    Ok(PlanProposal {
+        action,
+        source_version_id,
+        hypothesis,
+        change_scope,
+        expected_evidence,
+        budget_cost,
+        question: optional_string("question", "question"),
+        blocked_decision: optional_string("blockedDecision", "blocked_decision"),
+    })
+}
+
 pub async fn generate_design(
     engine: &Engine,
     system_prompt: &str,
     prompt: &str,
     images: Vec<String>,
-) -> Result<LlmOutcome<DesignOutput>, String> {
+) -> Result<LlmOutcome<ProviderAuthoringOutput>, String> {
     if !engine.enabled {
         return Err(format!(
             "Engine \"{}\" is disabled. Enable it in Settings → Agents before making API calls.",
@@ -55,7 +169,7 @@ pub async fn generate_design(
                 ResponseFormat::DesignOutput,
             )
             .await?;
-            let data = serde_json::from_value(res.data).map_err(|e| e.to_string())?;
+            let data = parse_provider_authoring_output(res.data)?;
             Ok(LlmOutcome {
                 data,
                 usage: res.usage,
@@ -73,7 +187,7 @@ pub async fn generate_design(
                 ResponseFormat::DesignOutput,
             )
             .await?;
-            let data = serde_json::from_value(res.data).map_err(|e| e.to_string())?;
+            let data = parse_provider_authoring_output(res.data)?;
             Ok(LlmOutcome {
                 data,
                 usage: res.usage,
@@ -1022,10 +1136,13 @@ async fn call_openai_compatible(
     let clean_content = clean_json_text(&content);
     match format {
         ResponseFormat::DesignOutput => {
-            let parsed: DesignOutput =
+            // Keep the complete provider object intact here. The outer
+            // `generate_design` parser separates transient `next_action` from
+            // the persisted `DesignOutput` after transport succeeds.
+            let parsed: serde_json::Value =
                 serde_json::from_str(&clean_content).map_err(|_| content.clone())?;
             Ok(LlmOutcome {
-                data: serde_json::to_value(parsed).unwrap(),
+                data: parsed,
                 usage,
             })
         }
@@ -1123,13 +1240,15 @@ async fn call_gemini(
     let clean_text = clean_json_text(text);
     match format {
         ResponseFormat::DesignOutput => {
-            let parsed: DesignOutput = serde_json::from_str(&clean_text).map_err(|e| {
-                eprintln!("[LLM] DesignOutput parse FAILED: {}", e);
+            // Keep transient PLAN data available to the caller; it is removed
+            // before the value is deserialized as `DesignOutput`.
+            let parsed: serde_json::Value = serde_json::from_str(&clean_text).map_err(|e| {
+                eprintln!("[LLM] Authoring response parse FAILED: {}", e);
                 eprintln!("[LLM] Raw text was: {}", text);
                 text.to_string()
             })?;
             Ok(LlmOutcome {
-                data: serde_json::to_value(parsed).unwrap(),
+                data: parsed,
                 usage,
             })
         }
@@ -1274,6 +1393,89 @@ async fn fetch_gemini_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn provider_design_json(next_action: serde_json::Value) -> serde_json::Value {
+        json!({
+            "title": "Bracket",
+            "version_name": "V2",
+            "response": "Adjusted bracket.",
+            "interaction_mode": "design",
+            "macro_code": "(model (part body (box 10 10 10)))",
+            "next_action": next_action
+        })
+    }
+
+    #[test]
+    fn authoring_response_carries_typed_plan_without_polluting_design() {
+        let parsed = parse_provider_authoring_output(provider_design_json(json!({
+            "action": "BUILD",
+            "source_version_id": "version-a",
+            "hypothesis": "Increase wall thickness.",
+            "change_scope": "wall parameter only",
+            "expected_evidence": "minimum wall check passes",
+            "budget_cost": 1,
+            "question": null,
+            "blocked_decision": null
+        })))
+        .expect("provider authoring response should parse");
+
+        let next_action = parsed.next_action.expect("typed next action");
+        assert_eq!(next_action.action, PlanAction::Build);
+        assert_eq!(next_action.source_version_id, "version-a");
+        assert_eq!(next_action.budget_cost, 1);
+        let persisted_design = serde_json::to_value(parsed.design).expect("serialize design");
+        assert!(persisted_design.get("next_action").is_none());
+        assert!(persisted_design.get("nextAction").is_none());
+    }
+
+    #[test]
+    fn authoring_response_accepts_camel_case_wire_plan_and_ask() {
+        let parsed = parse_provider_authoring_output(json!({
+            "title": "Bracket",
+            "macroCode": "(model (part body (box 10 10 10)))",
+            "nextAction": {
+                "action": "ask",
+                "sourceVersionId": "version-b",
+                "budgetCost": 0,
+                "question": "Which mounting orientation should be used?",
+                "blockedDecision": "mounting orientation"
+            }
+        }))
+        .expect("camelCase provider response should parse");
+
+        let next_action = parsed.next_action.expect("typed ask action");
+        assert_eq!(next_action.action, PlanAction::Ask);
+        assert_eq!(
+            next_action.question.as_deref(),
+            Some("Which mounting orientation should be used?")
+        );
+        assert_eq!(
+            parsed.design.macro_code,
+            "(model (part body (box 10 10 10)))"
+        );
+    }
+
+    #[test]
+    fn authoring_response_rejects_missing_or_unknown_plan_action() {
+        let mut missing = provider_design_json(json!({}));
+        missing
+            .as_object_mut()
+            .expect("object")
+            .remove("next_action");
+        let parsed = parse_provider_authoring_output(missing).expect("legacy response");
+        assert!(parsed.next_action.is_none());
+
+        let error = parse_provider_authoring_output(provider_design_json(json!({
+            "action": "REPLAN",
+            "source_version_id": "version-a",
+            "hypothesis": "x",
+            "change_scope": "x",
+            "expected_evidence": "x",
+            "budget_cost": 1
+        })))
+        .expect_err("unknown action");
+        assert!(error.contains("BUILD, ASK, or STOP"));
+    }
 
     #[test]
     fn clean_json_text_extracts_from_markdown() {

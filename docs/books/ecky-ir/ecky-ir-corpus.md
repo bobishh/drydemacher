@@ -1709,7 +1709,16 @@ Current shipped metric keys:
 - `stl connected-component-count`
 - `stl non-manifold-edge-count`
 - `stl overhang-face-count`
+- `stl bed-contact-area-ratio [part-id]`
+- `stl bed-contact-x-span-ratio [part-id]`
+- `stl bed-contact-y-span-ratio [part-id]`
 - `clearance min-distance`
+
+Bed-contact ratios compare downward planar faces touching the lowest Z plane
+against all downward planar faces. Area ratio catches models whose nominal
+bottom is mostly suspended. X/Y span ratios catch models resting only on one
+small island, edge, or corner. Pass an optional part id to analyze that part's
+STL instead of the combined model STL.
 
 `clearance min-distance` compares the minimum distance between two named
 selectors.
@@ -3135,10 +3144,18 @@ Write top-level `verify` clauses from measurable requirements. Keep them during 
     (tag preview-exists)
     (metric preview (manifest has-model-stl))
     (expect preview (= true)))
+  (verify
+    (tag body-grounded)
+    (metric contact (stl bed-contact-area-ratio body))
+    (expect contact (>= 0.75)))
   (part body (box 30 20 10)))
 ```
 
 Use `manifest` metrics for artifact and part claims, `stl` metrics for mesh structure, `clearance` for physical gaps, `selector` for measured placement, and `relation` for comparisons between named targets. A failing clause means repair geometry or parameters; never weaken the requirement to manufacture green output.
+
+Use `bed-contact-area-ratio`, `bed-contact-x-span-ratio`, and
+`bed-contact-y-span-ratio` for print-bed grounding. Optional part id scopes the
+metric to one part STL; omit it for the combined model STL.
 
 For a separated print layout, set the model's `assembly-preview` control false.
 Disconnected parts are then expected layout evidence. Non-manifold edges, invalid

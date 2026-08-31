@@ -38,6 +38,7 @@
     providerMessageText,
     type ProviderCodeReference,
   } from './providerMessagePresentation';
+  import { explorationCycleUiCopy, type ExplorationCyclePacket } from './explorationCycle';
 
   type TauriBridgeWindow = Window & typeof globalThis & {
     __TAURI_INTERNALS__?: {
@@ -105,6 +106,7 @@
     onAuthoredVerifyFocus,
     onOpenCapture,
     focusRequest = 0,
+    explorationCycle = null,
   }: {
     onGenerate: (prompt: string, attachments: Attachment[]) => Promise<unknown>;
     isGenerating?: boolean;
@@ -139,6 +141,7 @@
     onAuthoredVerifyFocus?: (message: VersionMessage, stableNodeId: string) => Promise<void> | void;
     onOpenCapture?: (runId: string) => Promise<void> | void;
     focusRequest?: number;
+    explorationCycle?: ExplorationCyclePacket | null;
   } = $props();
 
   const PROMPT_DRAFTS_STORAGE_KEY = 'ecky:prompt-drafts:v1';
@@ -178,6 +181,9 @@
         : 'Type a question or design change... (Cmd+Enter queue)'
       : 'Type a question or design change... (Cmd+Enter to process)',
   );
+  const cycleCopy = $derived(explorationCycle ? explorationCycleUiCopy(explorationCycle) : null);
+  const cycleRunningBuilds = $derived(requests.filter((request) => request.buildQueueState === 'running' && !['success', 'error', 'canceled'].includes(request.phase)).length);
+  const cyclePendingBuilds = $derived(requests.filter((request) => request.buildQueueState === 'pending' && !['success', 'error', 'canceled'].includes(request.phase)).length);
 
   function providerWorkingOpen(message: Message): boolean {
     const stored = providerWorkingExpanded[message.id];
@@ -199,9 +205,6 @@
     return () => cancelAnimationFrame(frame);
   });
   const submitUnavailableReason = $derived.by<string | null>(() => {
-    if (dialogueState.mode === 'provider' && attachments.length > 0) {
-      return `${dialogueState.label} provider currently accepts text only; remove attachments before sending.`;
-    }
     if (dialogueState.mode !== 'generate') return null;
     if (generationUnavailableReason) return generationUnavailableReason;
     if (hasImageAttachments && imageAttachmentUnavailableReason) return imageAttachmentUnavailableReason;
@@ -450,7 +453,7 @@
   }
 
   async function processPaths(paths: string[]) {
-    const allowImages = !imageAttachmentUnavailableReason;
+    const allowImages = dialogueState.mode !== 'generate' || !imageAttachmentUnavailableReason;
     const newAttachments = await Promise.all(paths.map(async (path) => {
       const name = path.split(/[\/\\]/).pop() || path;
       const ext = (name.split('.').pop() || '').toLowerCase();
@@ -607,7 +610,7 @@
 
   async function addAttachment() {
     try {
-      const allowImages = !imageAttachmentUnavailableReason;
+      const allowImages = dialogueState.mode !== 'generate' || !imageAttachmentUnavailableReason;
       const extensions = allowImages
         ? [...IMAGE_EXTENSIONS, ...CAD_EXTENSIONS]
         : [...CAD_EXTENSIONS];
@@ -740,6 +743,7 @@
   });
   const authoredVerifyChipMap = $derived(buildVersionAuthoredVerifyChipMap(messages, requests));
   const versionMessages = $derived(versionTimelineMessages(messages));
+  const headVersionId = $derived(versionMessages.at(-1)?.id ?? null);
   const activeVersionIndex = $derived(
     activeVersionTimelineIndex(versionMessages, activeVersionId),
   );
@@ -975,6 +979,26 @@
       <div class="drag-msg">DROP TO ATTACH REFERENCES</div>
     </div>
   {/if}
+  {#if explorationCycle && cycleCopy}
+    <section class="ecky-cycle-bubble" aria-label="Exploration cycle">
+      <div class="ecky-cycle-bubble__head">
+        <strong>{cycleCopy.phase}</strong>
+        <span>{cycleCopy.budget}</span>
+      </div>
+      {#if cycleCopy.hypothesis}<div>HYPOTHESIS · {cycleCopy.hypothesis}</div>{/if}
+      {#if cycleCopy.runningBuild}<div>{cycleCopy.runningBuild}</div>{/if}
+      {#if cycleCopy.pendingBuilds}<div>{cycleCopy.pendingBuilds}</div>{/if}
+      {#if !cycleCopy.runningBuild && cycleRunningBuilds > 0}<div>RUNNING · {cycleRunningBuilds} BUILD</div>{/if}
+      {#if !cycleCopy.pendingBuilds && cyclePendingBuilds > 0}<div>PENDING · {cyclePendingBuilds} BUILD</div>{/if}
+      {#if cycleCopy.pendingQuestion}<div class="ecky-cycle-bubble__ask">ASK · {cycleCopy.pendingQuestion}</div>{/if}
+      {#if explorationCycle.lastEvidenceRef}
+        <details>
+          <summary>EVIDENCE</summary>
+          <div>{explorationCycle.lastEvidenceRef}</div>
+        </details>
+      {/if}
+    </section>
+  {/if}
   {#if versionToDelete}
     <Modal title="Remove From Carousel" onclose={() => (versionToDelete = null)}>
       <div class="confirm-delete-body">
@@ -1152,6 +1176,7 @@
       {@const isVersion = isVersionMessage(msg)}
       {@const isTuneVersion = isVersion && msg.output?.interactionMode === 'question'}
       {@const isActiveVersion = isVersion && activeVersion?.id === msg.id}
+      {@const isHeadVersion = isVersion && headVersionId === msg.id}
       {@const isDiscardedVersion = isVersion && msg.status === 'discarded'}
       {@const statusLabel = messageStatusLabel(msg)}
       {@const authoredVerifyChips = isVersion ? timelineAuthoredVerifyChips(msg) : []}
@@ -1159,7 +1184,7 @@
         ? providerMessagePresentation(msg.content)
         : null}
       <div
-        class="trail-item {msg.role === 'assistant' ? 'trail-assistant' : 'trail-user'} {isVersion ? 'trail-version-event' : ''} {isActiveVersion ? 'trail-active-version' : ''} {isDiscardedVersion ? 'trail-discarded-version' : ''} {isTuneVersion ? 'trail-tune-version' : ''} {msg.status === 'error' ? 'trail-error' : ''}"
+        class="trail-item {msg.role === 'assistant' ? 'trail-assistant' : 'trail-user'} {isVersion ? 'trail-version-event' : ''} {isHeadVersion ? 'trail-active-version trail-version-head' : ''} {isDiscardedVersion ? 'trail-discarded-version' : ''} {isTuneVersion ? 'trail-tune-version' : ''} {msg.status === 'error' ? 'trail-error' : ''}"
       >
         <div class="trail-header-row">
           <div class="trail-meta">
@@ -1264,10 +1289,16 @@
             </section>
           {:else if isVersion && msg.output}
             <div class="trail-version-title">
-              <span>{isTuneVersion ? 'TUNING NOTE' : msg.status === 'success' || msg.status === 'discarded' ? 'VERSION COMMITTED' : 'VERSION ATTEMPT'}</span>
+              <span>{isTuneVersion ? 'TUNING NOTE' : 'IMMUTABLE VERSION'}</span>
               <strong>{versionTimelineTitle(msg)}</strong>
             </div>
             {msg.output.response || msg.content}
+            {#if msg.status === 'error' && msg.content && msg.content !== msg.output.response}
+              <details class="trail-raw-evidence">
+                <summary>RAW FAILURE</summary>
+                <pre>{msg.content}</pre>
+              </details>
+            {/if}
           {:else}
             {#if providerPresentation}
               {#each providerPresentation.segments as segment, index (`${msg.id}-provider-segment-${index}`)}
@@ -1371,6 +1402,8 @@
           <div class="attachment-hint" class:attachment-hint--warning={Boolean(imageAttachmentUnavailableReason)}>
             {#if imageAttachmentUnavailableReason}
               {imageAttachmentUnavailableReason}
+            {:else if dialogueState.mode === 'provider'}
+              Images and references go to {dialogueState.label}. Add a short note so the provider knows what to inspect.
             {:else}
               Images go to the intent check and the design model. Add a short note so the model knows what to notice in each reference.
             {/if}
@@ -1456,7 +1489,7 @@
             🎙 VOICE
           {/if}
         </button>
-        <button class="btn btn-xs btn-ghost" onclick={addAttachment} title={imageAttachmentUnavailableReason ? `${imageAttachmentUnavailableReason} — image refs will be dropped` : 'Attach images or reference CAD files'}>
+        <button class="btn btn-xs btn-ghost" onclick={addAttachment} title={dialogueState.mode === 'generate' && imageAttachmentUnavailableReason ? `${imageAttachmentUnavailableReason} — image refs will be dropped` : 'Attach images or reference CAD files'}>
           📎 ATTACH REFERENCE
         </button>
         <button
@@ -2657,6 +2690,56 @@
     font-size: 0.64rem;
     letter-spacing: 0.08em;
     white-space: nowrap;
+  }
+
+  .ecky-cycle-bubble {
+    margin: 8px 12px 0;
+    padding: 10px 12px;
+    border: 1px solid var(--primary);
+    border-radius: 0;
+    background: color-mix(in srgb, var(--primary) 8%, var(--bg-100));
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 0.64rem;
+    line-height: 1.45;
+    overflow: hidden;
+  }
+
+  .ecky-cycle-bubble__head {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    color: var(--primary);
+  }
+
+  .ecky-cycle-bubble__ask {
+    color: var(--secondary);
+  }
+
+  .ecky-cycle-bubble details {
+    overflow: hidden;
+  }
+
+  .trail-raw-evidence {
+    margin-top: 8px;
+    border: 1px solid var(--red);
+    border-radius: 0;
+    overflow: hidden;
+  }
+
+  .trail-raw-evidence summary {
+    padding: 6px 8px;
+    color: var(--red);
+    cursor: pointer;
+  }
+
+  .trail-raw-evidence pre {
+    margin: 0;
+    padding: 8px;
+    max-height: 180px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
   }
 
   .workspace-capture-toggle input {

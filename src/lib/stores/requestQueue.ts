@@ -1,7 +1,6 @@
 import { writable, derived, get } from 'svelte/store';
 import { estimateBase64Bytes, profileLog } from '../debug/profiler';
-import { config } from './domainState';
-import type { Attachment, Request, RequestPhase } from '../types/domain';
+import type { Attachment, Request, RequestPatch, RequestPhase } from '../types/domain';
 
 export interface QueuedRequest extends Request {}
 
@@ -28,6 +27,56 @@ function isModelActivePhase(phase: RequestPhase): boolean {
   return MODEL_ACTIVE_PHASES.includes(phase);
 }
 
+/** Apply one lifecycle-safe patch. Exported for focused unit tests. */
+export function applyRequestPatch<T extends Request>(
+  existing: T,
+  changes: RequestPatch,
+  now = Date.now(),
+): T {
+  const nextPhase = 'phase' in changes ? changes.phase : undefined;
+  if (nextPhase && isTerminalPhase(existing.phase) && nextPhase !== existing.phase) {
+    throw new Error(`Cannot transition terminal request ${existing.id} from ${existing.phase} to ${nextPhase}`);
+  }
+  if (nextPhase === 'success' && (!('result' in changes) || !changes.result)) {
+    throw new Error('Successful request requires result payload');
+  }
+  if (nextPhase === 'error' && (!('error' in changes) || !changes.error?.trim())) {
+    throw new Error('Failed request requires error payload');
+  }
+  if (nextPhase === 'success' && 'error' in changes && changes.error != null) {
+    throw new Error('Successful request cannot carry error payload');
+  }
+  if (nextPhase === 'error' && 'result' in changes && changes.result != null) {
+    throw new Error('Failed request cannot carry result payload');
+  }
+  const merged = { ...existing, ...changes } as T;
+  if (nextPhase === 'success') merged.error = null;
+  if (nextPhase === 'error') merged.result = null;
+  if (nextPhase === 'canceled') {
+    merged.result = null;
+    merged.error = null;
+  }
+  if (merged.phase === 'success' && !merged.result) {
+    throw new Error('Successful request requires result payload');
+  }
+  if (merged.phase === 'success' && merged.error !== null) {
+    throw new Error('Successful request cannot carry error payload');
+  }
+  if (merged.phase === 'error' && merged.result !== null) {
+    throw new Error('Failed request cannot carry result payload');
+  }
+  if (merged.phase === 'error' && !merged.error?.trim()) {
+    throw new Error('Failed request requires error payload');
+  }
+  if (merged.phase === 'canceled' && (merged.result !== null || merged.error !== null)) {
+    throw new Error('Canceled request cannot carry terminal payload');
+  }
+  if (nextPhase && isTerminalPhase(nextPhase) && merged.cookingStartTime && !changes.cookingElapsed) {
+    merged.cookingElapsed = Math.max(0, Math.floor(now / 1000) - Math.floor(merged.cookingStartTime / 1000));
+  }
+  return merged;
+}
+
 function queueStats(byId: Record<string, QueuedRequest>) {
   const requests = Object.values(byId);
   const terminal = requests.filter(r => isTerminalPhase(r.phase)).length;
@@ -41,18 +90,12 @@ function queueStats(byId: Record<string, QueuedRequest>) {
   };
 }
 
-export function defaultMaxVerifyAttempts(maxVerifyAttempts: number | null | undefined): number {
-  return Number.isFinite(maxVerifyAttempts) ? maxVerifyAttempts as number : 2;
-}
-
 function createRequestQueue() {
   const { subscribe, set, update } = writable<RequestQueueState>({
     byId: {},
     order: [],
     activeId: null,
   });
-
-  const MAX_CONCURRENT_LLM = 4;
 
   return {
     subscribe,
@@ -63,6 +106,7 @@ function createRequestQueue() {
       threadId: string | null = null,
       baseMessageId: string | null = null,
       baseModelId: string | null = null,
+      buildMode: "interactive" | "controller" = "interactive",
     ): string {
       const id = `req-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       const request: QueuedRequest = {
@@ -71,9 +115,9 @@ function createRequestQueue() {
         attachments,
         createdAt: Date.now(),
         phase: 'classifying',
-        attempt: 1,
-        maxAttempts: get(config)?.maxGenerationAttempts ?? 3,
-        maxVerifyAttempts: defaultMaxVerifyAttempts(get(config)?.maxVerifyAttempts),
+        attempt: 0,
+        maxAttempts: 0,
+        maxVerifyAttempts: 0,
         isQuestion: false,
         lightResponse: '',
         screenshot: null,
@@ -84,6 +128,8 @@ function createRequestQueue() {
         threadId,
         baseMessageId,
         baseModelId,
+        buildMode,
+        buildQueueState: "pending",
       };
       update(q => ({
         ...q,
@@ -100,24 +146,22 @@ function createRequestQueue() {
       return id;
     },
 
-    patch(id: string, changes: Partial<QueuedRequest>) {
+    patch(id: string, changes: RequestPatch) {
       update(q => {
         const existing = q.byId[id];
         if (!existing) return q;
-        const merged: QueuedRequest = { ...existing, ...changes };
-        // Auto-compute cookingElapsed when transitioning to a terminal phase
-        if (changes.phase && isTerminalPhase(changes.phase) && merged.cookingStartTime && !changes.cookingElapsed) {
-          merged.cookingElapsed = Math.max(0, Math.floor(Date.now() / 1000) - Math.floor(merged.cookingStartTime / 1000));
-        }
+        const merged = applyRequestPatch(existing, changes);
+        if (isTerminalPhase(merged.phase)) merged.buildQueueState = "finished";
         const next: RequestQueueState = {
           ...q,
           byId: { ...q.byId, [id]: merged },
         };
-        if (changes.phase && (changes.phase !== existing.phase || isTerminalPhase(changes.phase))) {
+        const patchedPhase = 'phase' in changes ? changes.phase : undefined;
+        if (patchedPhase && (patchedPhase !== existing.phase || isTerminalPhase(patchedPhase))) {
           profileLog('queue.phase', {
             requestId: id,
             from: existing.phase,
-            to: changes.phase,
+            to: patchedPhase,
             ...queueStats(next.byId),
           });
         }
@@ -133,14 +177,7 @@ function createRequestQueue() {
       update(q => {
         const existing = q.byId[id];
         if (!existing || isTerminalPhase(existing.phase)) return q;
-        const elapsed = existing.cookingStartTime
-          ? Math.max(0, Math.floor(Date.now() / 1000) - Math.floor(existing.cookingStartTime / 1000))
-          : 0;
-        const canceledRequest: QueuedRequest = {
-          ...existing,
-          phase: 'canceled',
-          cookingElapsed: elapsed,
-        };
+        const canceledRequest = applyRequestPatch(existing, { phase: 'canceled' });
         const next: RequestQueueState = {
           ...q,
           byId: { ...q.byId, [id]: canceledRequest },
@@ -172,8 +209,6 @@ function createRequestQueue() {
     clear() {
       set({ byId: {}, order: [], activeId: null });
     },
-
-    MAX_CONCURRENT_LLM,
   };
 }
 

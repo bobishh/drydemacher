@@ -1,99 +1,118 @@
 # Tasks: Exploration Build Cycle
 
-## 1. Reconcile lifecycle terminology
+## 1. Reconcile lifecycle semantics
 
-- [ ] Update the active `lossless-version-history` change so durable draft
-  events and failed execution attempts remain lossless without calling every
-  record a version.
-- [ ] Define tagged Rust identities for working draft snapshots, attempts,
-  candidates, committed versions, and legacy records.
-- [ ] Add architecture fitness coverage rejecting ambiguous generic lifecycle
-  refs at new boundaries.
+- [x] Remove attempt/candidate/promotion/commit concepts from exploration contracts.
+- [x] Reuse normal immutable version IDs, input digests, statuses, render snapshots,
+  and verification records.
+- [x] Add architecture fitness coverage rejecting parallel exploration authoring
+  records and generic commit/finalize operations.
 
-## 2. Outer BDD: exploration does not churn versions
+## 2. Outer BDD: every exploratory change is a version
 
-- [ ] Add a failing Playwright scenario: start from one committed version, run
-  failed and successful attempts, promote one candidate, and observe unchanged
-  primary version count.
-- [ ] Extend the scenario: commit the promoted candidate and observe exactly one
-  new version with matching candidate and artifact identity.
-- [ ] Add failure proof: raw attempt error remains visible while the last good
-  viewport snapshot stays active.
+- [x] Add a failing Playwright scenario: start from version A, persist red draft B,
+  then green repair C; history shows A/B/C with exact statuses and no extra commit.
+- [x] Prove B becomes head while A's last-good viewport may remain visible.
+- [x] Prove cycle completion chooses C by ref without creating version D.
 
-## 3. Domain reducer
+## 3. Four-stage reducer
 
-- [ ] Add failing Rust unit tests for allowed cycle transitions and required
-  action payloads.
-- [ ] Implement `ExplorationCycle`, typed actions, events, budget, and a pure
-  reducer.
-- [ ] Reject BUILD without hypothesis, expected evidence, exact input digest, or
-  available budget.
-- [ ] Reject autonomous COMMIT_VERSION transitions.
-- [ ] Add ASK suspension and answer-resume tests.
+- [x] Add failing Rust tests for `PLAN -> BUILD -> VERIFY -> DECIDE` transitions.
+- [x] Implement cycle state, append-only cycle events, budget, evidence refs, and a
+  pure reducer.
+- [x] Reject BUILD without hypothesis, bounded scope, expected evidence, exact source
+  version, or available budget.
+- [x] Add COMPLETE, REPLAN, ASK, STOP, and COMPARE decision tests.
+- [x] Add ASK suspension and answer-resume tests.
+- [x] Make one Rust application service own provider/build/verify/retry transitions;
+  remove caller-authored lifecycle facts from normal Tauri and MCP operation.
+- [x] Replace generic controller plans with provider-authored typed `BUILD`, `ASK`, or
+  `STOP` derived from full context; validate them in Rust before mutation.
+- [x] Persist ASK before yielding and resume the same cycle from the recorded answer.
 
-## 4. Durable attempts and candidates
+## 4. Prompt contract
 
-- [ ] Add backend-owned persistence for cycles, attempts, candidate refs, and
-  outcome evidence without direct SQLite access from callers.
-- [ ] Persist queued attempt input before checks or render.
-- [ ] Attach success, failure, superseded status, artifact digest, verification,
-  and raw diagnostics to the same attempt.
-- [ ] Make candidate promotion and candidate commit idempotent by request ID.
-- [ ] Preserve legacy history records without destructive reclassification.
+- [x] Add prompt tests proving persistence/tool invariants occur once in stable
+  system guidance.
+- [x] Add dynamic cycle envelope containing goal, acceptance criteria, current
+  version/digest/status, last evidence, budget, phase, and required next output.
+- [x] Require one typed next step for PLAN; never send a complete executable plan tail.
+- [x] Bind repair prompts to exact issue codes, raw diagnostics, and source version.
+- [x] Remove stale promote/commit/finalize language from API, MCP, Codex Provider,
+  Agy, and capture guidance where normal authoring semantics apply.
 
-## 5. Cheap-check and render orchestration
+## 5. Version-bound build and verification
 
-- [ ] Add failing service tests proving parse/type/parameter/capability failures
-  complete attempts without invoking OCCT.
-- [ ] Route eligible attempts through the existing immutable render snapshot
-  service.
-- [ ] Bind result publication to cycle, attempt, input, and artifact digests.
-- [ ] Keep late or superseded results out of the active viewport projection.
+- [x] Route BUILD through existing append-before-validation services.
+- [x] Record provider failures before content change as cycle events without creating
+  empty/content-identical versions.
+- [x] Bind render and verification evidence to version ID, version input digest,
+  render snapshot, and artifact digest.
+- [x] Keep deterministic checks authoritative over optional visual evaluation.
+- [x] Keep obsolete results out of active viewport without changing version head.
 
 ## 6. Latest-pending scheduler
 
-- [ ] Add failing actor tests for one running attempt and latest-pending
-  interactive request coalescing.
-- [ ] Preserve explicit controller exploration actions without silent
-  coalescing.
-- [ ] Record superseded running attempt evidence while publishing only the
-  newest eligible result.
-- [ ] Surface running and pending counts through existing Ecky state copy.
+- [x] Add failing actor tests for one running build and latest-pending interactive
+  request coalescing.
+- [x] Preserve explicit controller BUILD actions without silent coalescing.
+- [x] Prove coalescing drops obsolete execution only, never appended versions.
+- [x] Surface running and pending counts through existing Ecky state copy.
 
-## 7. Tauri and MCP boundaries
+## 7. Model routing and evals
 
-- [ ] Add cycle start/get/next/answer/stop commands.
-- [ ] Add attempt build, candidate promote/reject, and candidate commit commands.
-- [ ] Keep TS payloads camelCase, Rust fields snake_case, and boundary serde
+- [x] Record prompt version, provider, model, reasoning effort, latency, tokens, and
+  cost on model-backed cycle events.
+- [x] Establish one capable PLAN+BUILD+repair route as baseline; retain cheap intent
+  routing and deterministic verification.
+- [x] Build representative fixtures for parameter edits, topology changes, constraint
+  repair, image-guided reconstruction, and repeated-red recovery.
+- [x] Add paired model/effort comparison reports that change one variable and record
+  completion, first-build green, repair success, invalid output, unnecessary versions,
+  latency, tokens, and cost.
+- [x] Keep independent vision results separate and unable to override deterministic
+  red evidence.
+- [x] Keep production routing on one capable author; model/effort/vision experiments
+  remain offline evidence and do not add runtime thresholds or automatic escalation.
+
+## 8. Tauri and MCP boundaries
+
+- [x] Add shared run start/stop intents plus cycle get/active/events/answer projections.
+- [x] Keep provider authoring, render, append, verification, retry, and DECIDE behind
+  the Rust application service; expose no caller-authored lifecycle transition.
+- [x] Keep TS payloads camelCase, Rust fields snake_case, and boundary serde
   translation explicit.
-- [ ] Return raw errors and tagged lifecycle refs with source, input, snapshot,
-  and artifact digests.
-- [ ] Expose compact cycle packets by default; attempt evidence detail remains an
-  explicit bounded read.
+- [x] Return raw errors and exact version/input/snapshot/artifact refs.
+- [x] Expose compact cycle packets by default; detailed event/evidence reads remain
+  explicit and bounded.
 
-## 8. Workbench projection
+## 9. Workbench projection
 
-- [ ] Add failing Playwright happy path for cycle state, one promoted candidate,
-  and explicit version commit.
-- [ ] Show current hypothesis, budget, running/pending build, and ASK state in
-  Ecky bubble copy without a separate status bar.
-- [ ] Add candidate comparison separate from primary version history.
-- [ ] Keep attempt ledger collapsed by default with raw failure expansion.
-- [ ] Verify Tactical Midnight styling, square borders, bounded overflow, desktop,
-  and mobile layout.
+- [x] Add failing Playwright happy path for phase copy, immutable version statuses,
+  evidence, and completion by existing version ref.
+- [x] Show current hypothesis, budget, running/pending build, and ASK through Ecky
+  bubble copy without a separate status bar.
+- [x] Project immediate message-received activity from an accepted provider turn,
+  then yield to exact provider thinking or raw terminal failure.
+- [x] Compare ordinary versions; add no candidate UI tier.
+- [x] Keep raw failure/evidence detail collapsed under owning version/cycle event.
+- [x] Verify Tactical Midnight styling, square borders, bounded overflow, and desktop
+  window layout.
+- [x] Remove generation, render, verification, and retry state machines from
+  Svelte/TypeScript; keep submit/answer/stop and backend-event projection only.
 
-## 9. Restart and migration proof
+## 10. Restart proof
 
-- [ ] Add restart integration coverage for cycle state, pending question,
-  attempts, candidate refs, and budget.
-- [ ] Mark orphaned running attempts interrupted without auto-resuming expensive
-  work.
-- [ ] Prove existing history remains readable and new version counts exclude new
-  attempts and draft journal events.
+- [x] Add restart integration coverage for phase, objective, acceptance criteria,
+  budget, version refs, evidence refs, route metadata, and pending question.
+- [x] Mark unproven in-flight work interrupted at cycle level without mutating
+  versions or auto-resuming expensive work.
+- [x] Prove existing history/head/success-filter semantics remain unchanged.
 
-## 10. Final proof
+## 11. Final proof
 
-- [ ] Run targeted Rust reducer, persistence, actor, and command tests.
-- [ ] Run the exploration Playwright happy path and failure/pending scenario.
-- [ ] Run `npm run test:unit`.
-- [ ] Run `cd src-tauri && cargo check`.
+- [x] Run `openspec validate exploration-build-cycle --strict`.
+- [x] Run targeted Rust reducer, persistence, scheduler, prompt, and command tests.
+- [x] Run exploration Playwright happy path plus red-head/pending scenario.
+- [x] Run `npm run test:unit`.
+- [x] Run `cd src-tauri && cargo check`.

@@ -1,209 +1,306 @@
 ## ADDED Requirements
 
-### Requirement: Exploration cycle has an explicit base and bounded objective
+### Requirement: Exploration uses immutable versions as authoring truth
 
-The system SHALL start an exploration cycle from one tagged committed-version or
-canonical-draft snapshot reference. The cycle SHALL persist its objective, hard
-constraints, soft preferences, budget, and status. It SHALL NOT resolve its base
-through an ambiguous generic latest/head lookup.
+The system SHALL use existing immutable versions for every distinct persisted
+authoring change made during exploration. Version creation SHALL NOT depend on
+validation, render, or verification success. The exploration controller SHALL NOT
+create separate authoring attempts, candidates, promotions, or candidate commits.
 
-#### Scenario: Cycle starts from committed version
+#### Scenario: Red exploratory draft is still a version
 
-- **GIVEN** committed version A is visible
-- **WHEN** the user starts exploration with an objective and build budget
-- **THEN** the cycle stores an immutable reference to version A
-- **AND** later thread or draft changes do not change that base reference.
+- **GIVEN** a cycle starts from version A
+- **WHEN** BUILD persists changed draft B and validation fails
+- **THEN** B is appended as an immutable error version and becomes head
+- **AND** exact source plus raw failure remain attached to B
+- **AND** no attempt, candidate, promotion, or extra commit version is created.
 
-#### Scenario: Cycle starts from canonical working draft
+#### Scenario: Green exploratory draft needs no commit
 
-- **GIVEN** a recoverable working draft has an immutable snapshot identity
-- **WHEN** the user starts exploration before committing it
-- **THEN** the cycle stores that exact draft snapshot reference
-- **AND** it does not create a version merely to establish a base.
+- **GIVEN** changed version B rendered and verified green
+- **WHEN** DECIDE completes the cycle with B chosen
+- **THEN** B remains the same version created at draft persistence
+- **AND** choosing B creates no additional version or lifecycle transition.
 
-### Requirement: Next action is selected from current structured state
+### Requirement: Exploration follows an adaptive four-stage loop
 
-The system SHALL select and validate one typed next action from current cycle
-state. It MAY display a short expected action preview, but SHALL NOT treat an
-up-front generated unbounded plan or model-rewritten continuation as lifecycle
-authority.
+The controller SHALL progress through `PLAN`, `BUILD`, `VERIFY`, and `DECIDE`. It
+SHALL select one bounded next step from current structured state and SHALL NOT execute
+an unbounded pre-generated plan tail.
 
-#### Scenario: New evidence changes next action
+#### Scenario: New evidence changes the next plan
 
-- **GIVEN** the expected next action after BUILD was COMPARE
-- **WHEN** a cheap check fails before render
-- **THEN** the reducer records the failed evidence
-- **AND** selects a valid next action from the updated state
-- **AND** no stale pre-generated BUILD tail executes automatically.
+- **GIVEN** PLAN expected BUILD to satisfy minimum wall verification
+- **WHEN** VERIFY reports a red minimum-wall issue on the new version
+- **THEN** DECIDE records the exact evidence and selects REPLAN, ASK, or STOP
+- **AND** the next PLAN uses that evidence
+- **AND** no stale later BUILD executes automatically.
 
-#### Scenario: Invalid model transition is rejected
+#### Scenario: Conclusive evidence completes without another model call
 
-- **GIVEN** model output proposes BUILD without a hypothesis or available budget
-- **WHEN** the reducer validates the action
-- **THEN** the transition is rejected before persistence or render
-- **AND** the raw rejection identifies each missing requirement.
+- **GIVEN** all declared acceptance criteria have deterministic green evidence
+- **WHEN** DECIDE evaluates the result
+- **THEN** the reducer completes the cycle with the evaluated version ref
+- **AND** no planning-model call is required to restate the evidence.
 
-### Requirement: Every build execution is an immutable attempt
+### Requirement: Backend controller owns lifecycle authority
 
-The system SHALL persist an attempt with its hypothesis, expected evidence,
-exact source and effective parameter snapshot, input digest, parent identity,
-and queued status before checks or render begin. Outcome data SHALL attach to
-that attempt without changing its inputs.
+The Rust controller SHALL be the sole authority for generation-run and exploration
+phase transitions, retries, budget reservation, queue arbitration, and terminal
+decisions. Frontend and MCP callers SHALL submit intent or evidence inputs and SHALL
+NOT assert that a build started, a version was appended, or verification succeeded.
 
-#### Scenario: Backend failure retains attempt
+#### Scenario: Frontend cannot manufacture a green cycle
 
-- **GIVEN** an attempt is persisted and starts rendering
-- **WHEN** the backend fails
-- **THEN** the same attempt becomes failed
-- **AND** its exact input and raw backend error remain inspectable
-- **AND** no candidate or version is created.
+- **GIVEN** a caller knows an existing version, snapshot, and artifact identifier
+- **WHEN** it submits those identifiers without the controller performing or
+  validating the owning append/render/verify operations
+- **THEN** the controller rejects the transition
+- **AND** no verification or completion event is persisted.
 
-#### Scenario: Cheap check prevents expensive build
+#### Scenario: UI reload loses no lifecycle authority
 
-- **GIVEN** an attempt contains unsupported Core IR for the selected backend
-- **WHEN** capability validation runs
-- **THEN** the attempt fails with the raw capability diagnostic
-- **AND** OCCT is not invoked
-- **AND** budget usage records the check without charging a completed exact
-  build.
+- **GIVEN** a backend-owned cycle is waiting, running, or awaiting input
+- **WHEN** the Svelte application reloads and its local stores are recreated
+- **THEN** the UI restores a compact projection from backend state
+- **AND** no frontend retry counter or phase value is used as authoritative state.
 
-### Requirement: Builds require hypotheses and expected evidence
+### Requirement: PLAN authorizes one bounded next step
 
-The system SHALL reject a BUILD action that does not name the intended change,
-its hypothesis, and the evidence or checks expected to evaluate it.
+PLAN SHALL identify the exact source version, hypothesis, bounded change scope,
+expected evidence, and available budget. It MAY return ASK or STOP. The reducer SHALL
+reject BUILD authority when required fields are absent. PLAN content SHALL be derived
+from the assembled request, current source/version, constraints, attachments, history,
+answers, and exact prior evidence. Fixed generic hypothesis, scope, or evidence text
+SHALL NOT authorize BUILD. PLAN SHALL remain a typed result of the authoring turn, not
+a version or separate authoring entity. Its accepted action SHALL be copied to a cycle
+event; only changed CAD source SHALL enter version history.
 
-#### Scenario: Repeated geometry change remains attributable
+#### Scenario: Complete context produces a concrete next action
 
-- **GIVEN** a prior attempt failed minimum wall verification
-- **WHEN** a repair BUILD is requested
-- **THEN** the new attempt identifies the wall repair hypothesis
-- **AND** names minimum wall evidence as an expected result
-- **AND** references the prior attempt or promoted base candidate.
+- **GIVEN** a request, current version, constraints, attachments, and prior evidence
+- **WHEN** the authoring turn proposes its next action
+- **THEN** PLAN names the concrete hypothesis, bounded scope, and expected evidence
+  for that exact context
+- **AND** Rust validates the typed `BUILD`, `ASK`, or `STOP` action before mutation
+- **AND** a generic placeholder plan is rejected.
+
+#### Scenario: Invalid plan cannot build
+
+- **GIVEN** model output proposes BUILD without expected evidence or exact source
+  version identity
+- **WHEN** the reducer validates the proposal
+- **THEN** BUILD is rejected before source mutation or expensive render
+- **AND** the raw rejection names every missing field.
+
+#### Scenario: Plan requests material user choice
+
+- **GIVEN** two mounting orientations satisfy technical constraints but represent
+  different product intent
+- **WHEN** PLAN cannot resolve that preference from existing context
+- **THEN** it emits ASK with the blocked decision
+- **AND** the cycle persists the exact pending question before yielding.
+
+### Requirement: BUILD uses append-before-validation
+
+BUILD SHALL apply at most one bounded authoring revision and route persistence through
+the existing version append service before validation or render. Identical content
+SHALL create no duplicate version.
+
+#### Scenario: Invalid build remains recoverable
+
+- **GIVEN** PLAN authorizes one source repair
+- **WHEN** the changed source is persisted but parsing fails
+- **THEN** the exact changed snapshot already exists as a version
+- **AND** parser status and raw diagnostic attach to that version
+- **AND** DECIDE can replan from it.
+
+#### Scenario: Provider fails before producing changed content
+
+- **GIVEN** BUILD calls an authoring model
+- **WHEN** the provider fails before any changed draft is persisted
+- **THEN** no content-identical or empty version is appended
+- **AND** a cycle event records the raw provider failure and route metadata.
+
+### Requirement: VERIFY attaches layered evidence to one exact version
+
+VERIFY SHALL bind validation, render, deterministic structural/authored checks, and
+optional visual evaluation to the same version input and artifact identities. VERIFY
+SHALL NOT create a version or determine history membership.
+
+#### Scenario: Verification identity is exact
+
+- **GIVEN** version B rendered artifact X
+- **WHEN** structural and authored verification run
+- **THEN** records name B, its version input digest, render snapshot, and artifact X
+- **AND** evidence cannot attach to a newer moving head by implication.
+
+#### Scenario: Deterministic failure skips subjective acceptance
+
+- **GIVEN** authored minimum-wall verification is red
+- **WHEN** VERIFY evaluates version B
+- **THEN** deterministic red evidence is attached first
+- **AND** a vision model cannot override that evidence to green.
+
+### Requirement: DECIDE changes cycle state, not version identity
+
+DECIDE SHALL select `COMPLETE`, `REPLAN`, `ASK`, `STOP`, or `COMPARE` from current
+evidence. A chosen or compared version SHALL remain unchanged, including its technical
+status.
+
+#### Scenario: User chooses a red version
+
+- **GIVEN** version B has error status and exact recoverable source
+- **WHEN** the user chooses B for inspection or future work
+- **THEN** the cycle may reference B
+- **AND** B remains error
+- **AND** no promotion, copy, or success rewrite occurs.
+
+#### Scenario: Repair continues from exact red evidence
+
+- **GIVEN** version B failed with repairable issue codes
+- **WHEN** DECIDE selects REPLAN
+- **THEN** next PLAN receives B identity and exact failing evidence
+- **AND** a changed repair becomes a new immutable version C.
+
+### Requirement: Prompt context separates stable policy from changing cycle state
+
+The system SHALL keep language, persistence, safety, and tool invariants in a stable
+prompt prefix. It SHALL provide goal, acceptance criteria, exact current version,
+last evidence, remaining budget, phase, and required next output in dynamic context.
+It SHALL state that no promote, commit, or finalize action exists.
+
+#### Scenario: Repair prompt uses exact evidence
+
+- **GIVEN** version B failed structural verification
+- **WHEN** another BUILD is requested
+- **THEN** dynamic context includes B identity and exact red issue codes/raw messages
+- **AND** asks for the smallest bounded repair
+- **AND** does not resend a stale complete plan as execution authority.
+
+#### Scenario: Stable prompt remains cacheable
+
+- **GIVEN** two turns use the same provider, source language, backend, and policy
+- **WHEN** only current version or evidence changes
+- **THEN** the stable system prefix remains byte-identical
+- **AND** changing cycle state appears only after that prefix.
+
+### Requirement: Model routing is evidence-driven and auditable
+
+The system SHALL record prompt version and selected provider/model/reasoning route for
+model-backed cycle events. Default routing SHALL use deterministic checks where
+possible and one capable authoring route for PLAN, BUILD, and repair. A different
+planner, implementer, or visual verifier SHALL ship only after representative evals
+show required quality at an acceptable latency/cost trade-off.
+
+#### Scenario: Cheap model does not replace deterministic verification
+
+- **GIVEN** the backend can evaluate a declared structural check
+- **WHEN** VERIFY runs
+- **THEN** the deterministic checker owns that result
+- **AND** no model route may override it.
+
+#### Scenario: Route experiment is comparable
+
+- **GIVEN** an alternate planner, author, effort, or vision route is proposed
+- **WHEN** it is evaluated
+- **THEN** the same representative fixtures and acceptance criteria are replayed
+- **AND** completion, first-build green, repair success, invalid output, version count,
+  latency, tokens, and cost are recorded
+- **AND** only one routing variable changes per comparison.
 
 ### Requirement: Interactive pending builds use latest-wins coalescing
 
-The system SHALL run at most one build attempt per cycle at a time. Unstarted
-interactive rebuild requests for the same working target SHALL coalesce to the
-newest exact input. Explicit controller exploration actions SHALL NOT be
-silently coalesced.
+The system SHALL run at most one expensive build per cycle at a time. Unstarted
+interactive rebuild requests for the same working target SHALL coalesce to the newest
+exact input. Explicit controller BUILD steps SHALL NOT be silently coalesced.
 
-#### Scenario: Rapid parameter applies avoid stale FIFO work
+#### Scenario: Rapid parameter applies avoid stale FIFO execution
 
-- **GIVEN** attempt A is running
+- **GIVEN** build A is running
 - **WHEN** interactive requests B, C, and D arrive for the same working target
-- **THEN** only D remains pending
-- **AND** no attempts are created for unstarted B or C
+- **THEN** only D remains pending for execution
+- **AND** already-persisted versions for B and C remain in immutable history
 - **AND** D starts after A completes or cancels.
 
-#### Scenario: Superseded completion keeps evidence but not projection
+#### Scenario: Obsolete completion keeps evidence but not projection
 
-- **GIVEN** running attempt A becomes obsolete after pending request D
+- **GIVEN** running build A becomes obsolete after pending request D
 - **WHEN** A completes successfully
-- **THEN** A retains its result with superseded disposition
-- **AND** A does not replace the active viewport snapshot
-- **AND** D remains eligible to publish after success.
-
-### Requirement: Candidate promotion is explicit and version-free
-
-The system SHALL create a candidate only by explicitly promoting a successful
-attempt that passed every mandatory cycle check. Promotion SHALL store rationale
-and evidence identity, be idempotent, and SHALL NOT create a version.
-
-#### Scenario: Successful attempt becomes candidate
-
-- **GIVEN** attempt A rendered successfully and passed mandatory checks
-- **WHEN** A is promoted with rationale
-- **THEN** one candidate references A and its evidence
-- **AND** the primary version count remains unchanged.
-
-#### Scenario: Failed attempt cannot be promoted
-
-- **GIVEN** attempt A failed or lacks mandatory verification
-- **WHEN** promotion is requested
-- **THEN** no candidate is created
-- **AND** the raw rejection names failed or missing checks.
-
-### Requirement: Version commit uses one verified candidate snapshot
-
-The system SHALL create a version only through an explicit user commit of one
-candidate with green verification naming the same render snapshot and artifact
-digest. Commit SHALL NOT re-render or merge newer working-draft state.
-
-#### Scenario: Candidate commit creates one version
-
-- **GIVEN** candidate C references verified attempt A
-- **WHEN** the user commits C
-- **THEN** exactly one immutable version references C, A, and their exact digests
-- **AND** repeated delivery of the same commit request creates no duplicate.
-
-#### Scenario: Newer draft cannot leak into candidate commit
-
-- **GIVEN** candidate C was promoted from attempt A
-- **AND** the working draft changed after A
-- **WHEN** the user commits C
-- **THEN** the version contains A's source, parameters, artifact, and verification
-- **AND** no value from the newer working draft is merged into the version.
+- **THEN** A's evidence remains attached to A's version
+- **AND** A does not replace the active viewport projection
+- **AND** version head semantics remain based on append order.
 
 ### Requirement: ASK suspends execution with decision context
 
-The system SHALL persist an ASK action with its exact question, the decision it
-affects, and current cycle identity before yielding to the user. Conversation
-history SHALL NOT be the authoritative record of the pending effect.
+The system SHALL persist an ASK event with exact question, blocked decision, cycle
+identity, and current version ref before yielding. Conversation text SHALL NOT be the
+authoritative pending-decision record.
 
 #### Scenario: Answer resumes same decision
 
 - **GIVEN** a cycle waits for mounting-hole spacing
 - **WHEN** the user answers after restart
 - **THEN** the answer attaches to the persisted pending question
-- **AND** the reducer resumes from the same cycle state
-- **AND** it does not infer which old chat question was pending.
+- **AND** PLAN resumes from the same cycle and version state.
 
 ### Requirement: Budget and stop state bound exploration
 
-The system SHALL reserve budget before model or exact-build work and SHALL stop
-automatic progression when the relevant budget is exhausted. Stopping SHALL
-preserve attempts and candidates without committing a version.
+The system SHALL reserve budget before model or expensive build work and SHALL stop
+automatic progression when the relevant budget is exhausted. Stopping SHALL preserve
+all versions and evidence.
 
 #### Scenario: Build budget prevents another render
 
 - **GIVEN** a cycle used its exact-build budget
 - **WHEN** another BUILD is proposed
 - **THEN** the reducer rejects automatic execution
-- **AND** exposes STOP, ASK, or explicit user budget extension as valid next
-  actions.
+- **AND** exposes STOP, ASK, or explicit user budget extension
+- **AND** creates no synthetic final version.
 
 ### Requirement: Restart restores exploration without auto-resume
 
-The system SHALL restore cycle state, attempt ledger, candidates, budget, and
-pending question after restart. It SHALL NOT automatically resume model calls or
-expensive render work whose worker liveness cannot be proven.
+The system SHALL restore cycle phase, objective, acceptance criteria, budget, version
+refs, evidence refs, route metadata, and pending question after restart. It SHALL NOT
+automatically resume model or expensive render work whose liveness cannot be proven.
 
-#### Scenario: Restart interrupts running attempt safely
+#### Scenario: Restart interrupts in-flight build safely
 
-- **GIVEN** an attempt was marked running when the process stopped
+- **GIVEN** a cycle was building when the process stopped
 - **WHEN** the project reopens and no worker can be proven alive
-- **THEN** the attempt becomes interrupted/cancelled with diagnostic evidence
-- **AND** candidates and versions remain unchanged
-- **AND** the user can explicitly retry from the same input.
+- **THEN** the cycle records interrupted work with raw diagnostic
+- **AND** existing versions and evidence remain unchanged
+- **AND** the user may explicitly retry from the same source version.
 
-### Requirement: UI separates versions, candidates, and attempts
+### Requirement: UI projects cycles over ordinary version history
 
-The workbench SHALL show committed versions as primary history, promoted
-candidates as the active comparison set, and attempts as collapsed exploration
-evidence. Pending/running/ASK state SHALL appear through existing Ecky state
-surfaces rather than a separate agent status bar.
+The workbench SHALL show every immutable version in primary history with its status,
+show successful/printable versions through filters, and group cycle state/evidence
+without a candidate tier or separate global agent status bar. When a provider-owned
+turn is active before its first public activity event arrives, the dialogue SHALL
+project a receipt/working fallback from that backend runtime state. Exact provider
+activity, terminal state, or raw failure SHALL replace the fallback.
 
-#### Scenario: Many attempts do not flood version history
+#### Scenario: Active provider turn acknowledges receipt before thinking arrives
 
-- **GIVEN** one cycle contains six attempts and one promoted candidate
+- **GIVEN** the backend accepted a provider turn and reports its exact active turn ID
+- **AND** no public provider activity has arrived yet
+- **WHEN** the dialogue projects that runtime packet
+- **THEN** Ecky shows that the message was received and work started
+- **AND** the first provider thinking/activity event replaces the fallback
+- **AND** terminal failure removes it and exposes the raw provider error.
+
+#### Scenario: Exploration does not create hidden history classes
+
+- **GIVEN** one cycle creates six changed drafts
 - **WHEN** the user opens primary history
-- **THEN** no new version appears until candidate commit
-- **AND** candidate comparison shows one candidate
-- **AND** the six attempts remain available under exploration details.
+- **THEN** six versions appear with their actual statuses
+- **AND** no candidate promotion or commit is required to reveal them.
 
-#### Scenario: Failed attempt preserves last good viewport
+#### Scenario: Red head preserves last good viewport
 
-- **GIVEN** a successful candidate snapshot is visible
-- **WHEN** a newer attempt fails
-- **THEN** the successful snapshot remains visible and actionable
-- **AND** the failed attempt's raw diagnostic is visible in exploration details.
+- **GIVEN** successful version A is visible
+- **WHEN** newer version B fails
+- **THEN** B is version head and its raw diagnostic is inspectable
+- **AND** A's successful render may remain the active viewport projection
+- **AND** the UI identifies that head and viewport refer to different versions.

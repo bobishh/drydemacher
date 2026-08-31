@@ -88,17 +88,7 @@
     }
   });
 
-  // Watch for external code changes (e.g. loading a different version)
-  $effect(() => {
-    if (view && view.state.doc.toString() !== code) {
-      view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: code },
-      });
-    }
-  });
-
-  // Scroll editor to a highlighted line (e.g. on compile error)
-  $effect(() => {
+  function focusHighlightedLine() {
     if (!view || highlightLine === null || highlightLine <= 0) return;
     const line = view.state.doc.line(Math.min(highlightLine, view.state.doc.lines));
     view.dispatch({
@@ -106,6 +96,21 @@
       scrollIntoView: true,
     });
     view.focus();
+  }
+
+  // Watch for external code changes (e.g. loading a different version)
+  $effect(() => {
+    if (view && view.state.doc.toString() !== code) {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: code },
+      });
+      focusHighlightedLine();
+    }
+  });
+
+  // Scroll editor to a highlighted line (e.g. on compile error)
+  $effect(() => {
+    focusHighlightedLine();
   });
 
   $effect(() => {

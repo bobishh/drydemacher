@@ -2,45 +2,50 @@
 
 ## Context
 
-Ecky already has immutable render snapshots, authoring actor ordering, explicit
-verification, drafts, and version history. The missing boundary is product
-meaning. A render is execution. A candidate is a viable option. A version is a
-deliberate saved milestone. Treating all three as one record produces noisy
-history and gives autonomous exploration no bounded state.
+Ecky version history is already append-only and lossless. A version is the exact
+authoring snapshot; its mutable outcome metadata may move through `pending`,
+`working`, `success`, `error`, or `discarded`. Rendering success does not
+decide whether a version exists.
 
-The MVP adds a domain layer over existing authoring and render services. It does
-not add another source of truth. Source and parameter inputs are resolved from
-the existing canonical draft/snapshot path, then copied into immutable attempt
-inputs.
+The old exploration design introduced immutable attempts, promoted candidates,
+and explicit candidate commits. That model duplicated version identity and
+contradicted append-before-validation. The replacement keeps one authoring truth
+and adds a small orchestration state machine around it.
 
 ## Goals / Non-Goals
 
 Goals:
 
-- make exploration replayable, bounded, and restart-safe;
-- distinguish attempt, candidate, and version in storage and UI;
-- attach each expensive build to a hypothesis and expected evidence;
-- avoid stale render queues through latest-pending coalescing;
-- preserve exact failed work without promoting it to version history;
-- keep agent and manual exploration on one backend lifecycle.
+- make exploration bounded, evidence-driven, replayable, and restart-safe;
+- choose one next revision instead of executing a stale complete plan;
+- retain every changed draft as an ordinary immutable version;
+- attach exact failures and verification evidence to the owning version;
+- keep last-good viewport projection separate from latest-version head;
+- make prompt and model decisions measurable.
 
 Non-goals:
 
-- solve CAD planning generally;
-- let the model rewrite an arbitrary remaining plan;
-- rank subjective design quality without declared checks;
-- introduce parallel search, beam search, or genetic optimization;
-- replace thread conversation, source persistence, or render snapshots.
+- create attempt/candidate/version tiers;
+- gate persistence on render or verification success;
+- add manual promotion, commit, or finalize operations;
+- ask an LLM to own lifecycle transitions;
+- assume expensive planning plus cheap implementation is inherently better;
+- replace current source persistence, watcher, render, or verification services.
 
-## Domain Model
+## Authoritative Records
 
-| Entity | Meaning | Created by | Mutable fields | Primary UI |
-| --- | --- | --- | --- | --- |
-| Working draft | Recoverable current authoring state | Manual or agent edit | Source, params, editor state | Editor / controls |
-| Exploration cycle | Bounded search from one base | Explicit start | Status, budget counters, pending question, active candidate refs | Ecky bubble / exploration controls |
-| Attempt | One immutable execution input and outcome | Build request | Outcome attachment only | Expandable evidence ledger |
-| Candidate | Promoted viable attempt | Explicit promote | Label and disposition metadata | Candidate comparison |
-| Version | Deliberate immutable milestone | Explicit candidate commit | No authoring content mutation | Primary history |
+| Record | Meaning | Mutability | Authority |
+| --- | --- | --- | --- |
+| Version | Exact persisted authoring snapshot | Content and identity immutable; outcome evidence attaches | Version history |
+| Exploration cycle | Bounded objective over versions | Phase, budget, pending question, referenced versions | Cycle controller |
+| Cycle event | Plan, phase transition, question, answer, or decision | Immutable append event | Cycle event log |
+| Render snapshot | Geometry produced from one version input digest | Immutable | Render service |
+| Verification record | Evidence for one version/artifact identity | Immutable | Verification service |
+
+No separate attempt or candidate record exists. If a model/provider call fails
+before authoring content changes, the failure is a cycle event. If changed content
+is persisted, that content is a version even when parsing, rendering, or verification
+fails.
 
 ### Exploration cycle
 
@@ -49,278 +54,339 @@ Minimum fields:
 ```text
 cycleId
 threadId
-baseRef
+baseVersionId
 objective
+acceptanceCriteria
 hardConstraints
 softPreferences
-status
+phase
 budget
 budgetUsed
-pendingQuestion
-activeCandidateIds
-acceptedCandidateId
+currentVersionId?
+chosenVersionId?
+pendingQuestion?
+lastEvidenceRef?
+promptVersion
 createdAt
 updatedAt
 ```
 
-`baseRef` is a tagged reference to either a committed version or an immutable
-canonical draft snapshot. It never means "whatever is latest".
+`baseVersionId` is exact and immutable. `currentVersionId` follows work performed by
+this cycle, not an ambiguous generic latest lookup. `chosenVersionId` is a cycle
+result pointer only; choosing it does not promote, copy, or mutate the version.
 
-### Attempt
+### Cycle event
 
 Minimum fields:
 
 ```text
-attemptId
+eventId
 cycleId
-parentAttemptId?
-baseCandidateId?
-hypothesis
-expectedEvidence
-renderSnapshotInput
-inputDigest
-status
-supersededByRequestId?
-checks
-artifactDigest?
+phase
+sourceVersionId?
+resultVersionId?
+hypothesis?
+expectedEvidence?
+evidenceRefs
+decision?
+modelRoute?
 rawError?
 createdAt
-completedAt?
 ```
 
-Attempt statuses are `queued`, `running`, `succeeded`, `failed`, `superseded`,
-or `cancelled`. Input fields never change. Completion attaches evidence to the
-same attempt. A superseded worker result remains inspectable but cannot replace
-the active viewport projection.
+Model route records provider/model/effort/prompt version for evaluation and audit.
+It never participates in version identity or artifact cache identity.
 
-### Candidate
+## Adaptive Four-Stage Loop
 
-A candidate is an immutable reference to one successful attempt plus promotion
-metadata:
+The four stages are controller phases, not four persisted authoring object types.
+Only one phase is active at a time.
+
+### 1. PLAN
+
+Inspect exact current version, current artifact/verification evidence, user goal,
+acceptance criteria, constraints, and remaining budget. Produce one bounded next
+step:
 
 ```text
-candidateId
-cycleId
-attemptId
-label
-promotionRationale
-evidenceSummary
-disposition
-createdAt
+action: BUILD | ASK | STOP
+hypothesis
+changeScope
+expectedEvidence
+sourceVersionId
 ```
 
-Disposition is `active`, `accepted`, or `rejected`. Changing disposition does
-not change the referenced attempt or render snapshot. Re-promoting the same
-attempt is idempotent.
+The plan may preview likely later work for user explanation, but only this next step
+has execution authority. The reducer rejects `BUILD` without exact source identity,
+hypothesis, expected evidence, or budget.
 
-### Version
+### 2. BUILD
 
-A version references the exact candidate attempt snapshot and green explicit
-verification record. Commit does not re-render, copy current editor state, or
-resolve a moving thread head. Candidate identity and input/artifact digests are
-stored as provenance.
-
-## Cycle Policy
-
-The controller selects one next action from current structured state. It may
-offer a short preview of the next two or three expected actions for UX, but that
-preview is not executable authority.
-
-MVP action kinds:
+Apply one bounded source/parameter change. Existing authoring services own the
+pipeline:
 
 ```text
-ASK
-HYPOTHESIZE
-PATCH
-CHECK
-BUILD
-COMPARE
-PROMOTE_CANDIDATE
-REJECT
-STOP
+inspect exact source
+  -> append changed snapshot as immutable version
+  -> validate / preview / render
+  -> attach outcome and raw evidence to that version
 ```
 
-`COMMIT_VERSION` remains an explicit user action outside autonomous cycle
-progression.
+Identical content is a no-op and creates no duplicate. A changed invalid draft still
+creates a version and becomes head. The controller never waits for success before
+persisting it.
 
-Each `BUILD` requires:
+### 3. VERIFY
 
-- one hypothesis;
-- an exact source/parameter snapshot;
-- expected evidence or declared checks;
-- a budget reservation;
-- a parent attempt or base candidate when one exists.
+Verification is layered:
 
-The model may propose an action. A deterministic reducer validates allowed
-transitions and updates cycle state. Model output never mutates cycle state,
-history, or render projection directly.
+1. parse, type, parameter, constraint, and backend capability checks;
+2. render/artifact identity checks;
+3. deterministic structural and authored `(verify ...)` clauses;
+4. optional screenshot/vision evaluation for visual or mechanical intent not
+   established by deterministic evidence.
+
+Every record names the exact version ID, `versionInputDigest`, render snapshot, and
+artifact digest it evaluated. Verification attaches evidence; it does not create a
+version or decide history membership.
+
+### 4. DECIDE
+
+The deterministic reducer chooses among:
+
+- `COMPLETE`: acceptance criteria satisfied; store chosen version ref;
+- `REPLAN`: repairable red evidence or a useful next hypothesis exists;
+- `ASK`: user choice materially affects geometry or acceptance;
+- `STOP`: budget exhausted, user stopped, or no justified next change exists;
+- `COMPARE`: expose referenced versions without promoting either.
+
+`REPLAN` returns to `PLAN` with exact new evidence. `ASK` persists question plus the
+decision it blocks. `COMPLETE`, `STOP`, and `COMPARE` never alter version status.
+The user may explicitly choose a red or artifact-less version; cycle selection and
+technical verification status remain separate facts.
 
 ## State Transitions
 
 ```text
-idle
-  -> exploring
-exploring
-  -> awaiting_input
-  -> checking
-  -> building
-  -> stopped
-awaiting_input
-  -> exploring
-checking
-  -> exploring
-  -> building
-  -> stopped
-building
-  -> evaluating
-evaluating
-  -> exploring
-  -> awaiting_input
-  -> stopped
-  -> completed
-completed
-  -> stopped
+idle -> planning
+planning -> building | awaiting_input | stopped
+building -> verifying | deciding
+verifying -> deciding
+deciding -> planning | awaiting_input | completed | stopped
+awaiting_input -> planning | stopped
+completed -> stopped
 ```
 
-The reducer rejects transitions without required identity, budget, or evidence.
-`ASK` yields control and persists the exact question plus the decision it will
-affect. A user answer appends an answer event and resumes from structured cycle
-state; conversation text is context, not lifecycle authority.
+The reducer validates identity, budget, evidence, and phase. Model output proposes
+content or a typed next step; it never mutates cycle state, version history, or
+viewport projection directly.
 
-## Cheap Checks Before Build
+## Controller Authority
 
-Before an exact backend render, the MVP runs available deterministic checks:
+The Rust application service is the sole owner of cycle and generation-run
+lifecycle. It performs or authorizes provider calls, immutable draft appends,
+render, deterministic verification, retry/replan, queue arbitration, and terminal
+decisions. Tauri and MCP are adapters over that same service.
 
-- source parse and Core type validation;
-- parameter and declared constraint validation;
-- backend capability validation;
-- input digest and dependency-lock validation.
+Frontend code may:
 
-A failed cheap check completes the attempt as failed without invoking OCCT.
-Geometry-dependent verification still runs after successful render. The attempt
-records which checks ran, which were unavailable, and their raw outputs.
+- submit an objective or explicit user action;
+- provide requested visual evidence captured from the viewport;
+- answer a persisted ASK or stop a cycle;
+- subscribe to compact progress events and project backend packets into stores.
+
+Frontend code may not:
+
+- maintain a generation-attempt or verification retry loop;
+- decide whether red evidence retries, completes, or becomes accepted;
+- manufacture `BUILD started`, `version appended`, or `verification recorded`
+  lifecycle facts;
+- arbitrate latest-wins work or infer completion from component-local state.
+
+An application-window reload can lose ephemeral UI projection without changing
+the durable cycle. Process restart marks unproven in-flight backend work
+interrupted and never reconstructs authority from Svelte stores.
+
+## Prompt Contract
+
+### Current split
+
+- API mode uses a stable design system prompt and a dynamic contextual user payload.
+  The model emits one `DesignOutput`; the application owns render, structural verify,
+  optional vision verify, and bounded repair.
+- MCP/provider mode uses shared authoring guidance. Bound-file edits trigger watcher
+  append/validate/preview; the agent then calls verification. No commit exists.
+
+### Required delta
+
+Keep stable system instructions lean and cacheable. State each invariant once:
+
+- every changed draft is already a version before validation;
+- build/verify attach status and evidence to that version;
+- no promote, commit, or finalize action exists;
+- stop only on acceptance, required user input, explicit stop, or budget exhaustion.
+
+Put changing cycle data in the dynamic context, after the stable prefix:
+
+```text
+GOAL
+ACCEPTANCE CRITERIA
+HARD CONSTRAINTS
+CURRENT VERSION ID + INPUT DIGEST + STATUS
+LAST VERIFICATION EVIDENCE
+REMAINING BUDGET
+CURRENT PHASE
+REQUIRED NEXT OUTPUT
+```
+
+For `PLAN`, require one typed next step, not a complete executable program. For
+`BUILD`, provide the accepted next step, exact current source/version identity, and
+relevant diagnostics. For repair, include exact red issue codes/raw errors and ask
+for the smallest change that addresses them. `VERIFY` remains deterministic first;
+vision receives original intent, acceptance criteria, deterministic evidence, and
+render images. `DECIDE` is reducer-owned when evidence is conclusive.
+
+PLAN is not a controller-written placeholder. The authoring turn derives its concrete
+hypothesis, bounded scope, expected evidence, or ASK/STOP decision from the complete
+assembled context. Rust validates that typed action against current version and budget
+before accepting any accompanying BUILD output. Planning metadata is stored in cycle
+state/events and never inside the immutable version payload.
+
+PLAN is not a version, message class, or separate product entity. It is the typed action
+portion of the same authoring turn that may also contain BUILD source. After validation,
+Rust copies that exact action into the append-only cycle event for audit/restart. Only a
+changed CAD source snapshot enters immutable version history.
+
+PLAN and BUILD are conceptual phases, not mandatory separate provider requests. The
+MVP keeps them in one authoring turn when one model can safely inspect and edit. A
+separate planning call is allowed only when evals show a quality gain that exceeds
+handoff cost and plan staleness.
+
+## Model Policy
+
+### MVP route
+
+- Cheap/deterministic router: question vs design, simple capability routing, and
+  context shaping.
+- One capable authoring model: PLAN + BUILD + red-to-green repair. Same model/context
+  retains geometric intent and exact diagnostics.
+- Deterministic backend: parse, type, constraint, artifact, structural, and authored
+  verification. No LLM substitutes for these gates.
+- Optional vision model: visual/reference comparison only. It may be independently
+  selected when a measured vision-capable route meets the quality bar.
+
+Do not default to a strong planner plus weak implementer. CAD implementation is where
+language precision, topology reasoning, and diagnostic repair are required; weakening
+that stage loses the plan during translation. A cheap router plus strong author is a
+safer first split. A separate strong planner is justified only for genuinely broad,
+ambiguous work and still hands off one bounded next step.
+
+### Runtime route
+
+Production uses the configured capable author for PLAN, BUILD, and repair. Runtime
+does not contain automatic model escalation, reasoning thresholds, or planner/author
+model splitting. Alternate model, effort, and vision routes are offline experiments;
+adopting one requires a later explicit product decision backed by recorded results.
+
+### Evaluation
+
+Route decisions ship only after replaying representative cycle fixtures. Compare:
+
+- acceptance-criteria completion rate;
+- first-build green rate;
+- red-to-green repair rate;
+- invalid-language and unsupported-op rate;
+- unnecessary version count;
+- total tokens, latency, and cost;
+- user questions and unjustified stops.
+
+Test one variable at a time: prompt version, model, or reasoning effort. Record route
+metadata in cycle events. Never encode provider-specific quality claims as domain
+rules.
 
 ## Scheduling And Publication
 
-One authoring actor owns one cycle mailbox. Render workers remain stateless.
+One cycle runs at most one expensive build at a time.
 
-- At most one attempt is `running` per cycle.
-- An explicit controller exploration step is never silently replaced.
-- Repeated unstarted interactive rebuilds for the same working target coalesce
-  into one pending request containing the newest exact input snapshot.
-- When a pending request is replaced, no attempt record is created for work that
-  never started.
-- When running work becomes obsolete, its attempt receives `superseded` after
-  completion or cancellation. Its evidence remains inspectable.
-- Only the newest non-superseded successful attempt may publish the active
-  viewport snapshot.
+- Explicit controller BUILD steps are never silently replaced.
+- Repeated unstarted interactive rebuilds for the same working target coalesce to the
+  newest exact input.
+- If an obsolete running render completes, its evidence remains attached to its
+  version but it cannot replace the active viewport projection.
+- Only the newest eligible non-obsolete render may publish the active viewport.
+- Version head still follows append order and may be red while viewport shows an older
+  successful snapshot.
 
-This preserves evidence without forcing users to wait through a FIFO queue of
-obsolete parameter states.
-
-## Promotion And Commit
-
-Attempt promotion requires successful render plus every mandatory check declared
-for the cycle. Promotion stores rationale and an evidence summary. It creates no
-version and does not overwrite the working draft.
-
-Candidate commit requires:
-
-- explicit user action;
-- candidate disposition `active` or `accepted`;
-- green explicit verification naming the same render snapshot and artifact
-  digest;
-- unchanged candidate attempt input and artifact identity.
-
-Commit creates exactly one version. Repeating the same commit request is
-idempotent. A changed draft after promotion requires a new attempt and candidate;
-commit never mixes candidate geometry with newer editor parameters.
+Coalescing execution work does not delete versions already appended by source/draft
+persistence.
 
 ## Persistence And Recovery
 
-Backend services own cycle, attempt, candidate, and version mutations. Frontend,
-watchers, and agents call Tauri or MCP boundaries; none write SQLite directly.
+Backend services own cycle events and version mutations. Frontend, watchers, and
+agents use Tauri or MCP boundaries; none write SQLite directly.
 
-The persistence order is:
+Persistence order:
 
 ```text
-resolve exact canonical input
-  -> persist attempt as queued
-  -> reserve budget and mark running
-  -> run checks/render
-  -> attach outcome and evidence
-  -> publish eligible snapshot
-  -> optionally promote candidate
-  -> optionally commit version
+persist PLAN event
+  -> reserve budget
+  -> persist changed draft through version append service
+  -> run validation/render
+  -> attach version outcome
+  -> attach verification evidence
+  -> persist DECIDE event
 ```
 
-Restart recovery marks orphaned `running` attempts as interrupted unless the
-worker can be proven alive. It restores pending questions and candidate refs.
-It does not automatically resume paid/model work or expensive render work.
+Restart marks an unproven in-flight build interrupted at cycle level. Existing
+version and evidence records remain unchanged. Recovery restores pending questions
+and refs but never automatically resumes model calls or expensive render work.
 
 ## UI Projection
 
-No new global status bar is introduced.
+No new global status bar.
 
-- Ecky bubble copy exposes cycle state, current hypothesis, budget, pending
-  question, and running/pending build status.
-- Candidate comparison shows promoted candidates only.
-- Primary history shows committed versions and preserved legacy records.
-- Attempt details stay collapsed under the owning cycle/candidate by default.
-- Failed attempts show raw backend/provider diagnostics.
-- Last good viewport snapshot remains visible while failed or pending attempts
-  are inspected.
+- Primary history shows every immutable version and its status.
+- Successful/printable filtering remains a projection.
+- Ecky bubble copy shows cycle phase, current hypothesis, budget, pending question,
+  and running/pending build state.
+- Comparison selects ordinary version refs; no candidate UI tier exists.
+- Raw errors and verification evidence expand under the owning version/cycle event.
+- Last good viewport may remain visible while latest head is red or pending.
 
-Major layout containers keep `overflow: hidden`; controls follow Tactical
-Midnight styling and square borders.
+Major layout containers keep `overflow: hidden`; controls follow Tactical Midnight
+styling and square borders.
 
 ## Boundary Contracts
 
-Frontend and MCP-facing JSON use camelCase. Rust domain fields use snake_case.
-Every Rust boundary struct uses `#[serde(rename_all = "camelCase")]` unless a
-protocol-fixed JSON-RPC shape requires otherwise.
+Frontend and MCP-facing JSON use camelCase. Rust fields use snake_case. Every Rust
+boundary struct uses `#[serde(rename_all = "camelCase")]` unless a protocol-fixed
+JSON-RPC shape requires otherwise.
 
-Minimum commands/tools:
+Minimum caller intents and projections:
 
 ```text
-exploration_cycle_start
+exploration_run_start
 exploration_cycle_get
-exploration_cycle_next
+exploration_cycle_active_get
+exploration_cycle_events
 exploration_cycle_answer
-exploration_attempt_build
-exploration_candidate_promote
-exploration_candidate_reject
-exploration_candidate_commit
-exploration_cycle_stop
+exploration_run_stop
 ```
 
-Commands are idempotent by request ID. Read responses return tagged refs and
-digests, never ambiguous generic `head` identifiers.
-
-## Version-History Reconciliation
-
-`lossless-version-history` correctly requires append-before-validation and exact
-failure retention, but its generic "version" record carries two meanings. The
-implementation separates them:
-
-- draft journal event: changed recoverable authoring content;
-- attempt: an execution snapshot and outcome;
-- version: explicit candidate commit.
-
-For migration, existing records remain readable and are tagged `legacy` when
-explicit promotion provenance cannot be derived. No existing rows or source
-bytes are deleted. New version counts exclude attempts and draft journal events.
-Legacy counts remain available as a compatibility projection.
+Command/tool names remain snake_case; JS invocation payload fields use camelCase.
+No public `cycle_next`, build-started, version-appended, verify-recorded, or decide
+input exists. The Rust application service invokes internal authoring, render, and
+verification services and persists those lifecycle facts itself. No candidate
+promote/commit commands are added.
 
 ## Risks / Trade-offs
 
-- More lifecycle entities increase storage and query complexity. Typed refs and
-  one backend service boundary keep ownership explicit.
-- Candidate promotion can still preserve weak designs. Mandatory checks prove
-  declared requirements, not aesthetics.
-- Coalescing drops unstarted intermediate slider states. Their working drafts
-  remain recoverable, but they are intentionally not execution attempts.
-- Legacy history cannot always reveal original user intent. Preserve it without
-  guessing instead of destructive reclassification.
-- A single running attempt limits throughput. MVP favors predictable state and
-  cost; parallel search can be added after evidence proves need.
+- Version history remains noisy by design. Filters and cycle grouping solve
+  navigation without redefining persistence.
+- Same-model PLAN + BUILD can preserve correlated mistakes. Deterministic verification
+  and optional independent vision evaluation provide stronger boundaries than a weak
+  second author.
+- Separate planner calls may improve broad tasks but add latency, context transfer,
+  and stale-plan risk. Evals decide.
+- Coalescing drops obsolete execution work, not appended authoring history.
+- A single running build limits throughput. MVP favors predictable state and cost.

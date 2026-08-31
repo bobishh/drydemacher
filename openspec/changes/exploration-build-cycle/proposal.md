@@ -2,73 +2,82 @@
 
 ## Why
 
-Ecky currently exposes too many exploratory renders as peer history versions. A
-long CAD search can produce dozens of records without showing which records were
-failed experiments, viable alternatives, or deliberate user milestones. The
-flat history also gives the agent no bounded, replayable exploration state: it
-can repeat failed changes, invoke expensive geometry too early, and continue
-without an explicit success condition.
+Ecky already has lossless immutable version history. Every distinct persisted
+authoring change is a version before validation or render, regardless of whether
+the result later succeeds or fails. Version status and attached evidence describe
+the outcome; exploration must not add a second attempt/candidate/commit lifecycle
+that competes with this truth.
 
-The product needs a small exploration loop that separates execution evidence
-from user decisions. Lossless persistence remains mandatory, but persistence
-alone must not promote every changed draft or render into a version.
+The missing product boundary is bounded reasoning. Long CAD work still needs a
+restart-safe loop that chooses one useful revision, builds it, evaluates exact
+evidence, and decides whether to stop, ask, or revise again. A static multi-step
+plan becomes stale after the first compiler, geometry, or verification result.
 
 ## What Changes
 
-- Add an explicit exploration cycle rooted at one committed version or canonical
-  working draft snapshot.
-- Choose the next typed action from current cycle state. Do not generate an
-  unbounded plan up front.
-- Record every build execution as an immutable attempt with its hypothesis,
-  exact input snapshot, status, evidence, and raw failure.
-- Promote a successful attempt into a candidate only through an explicit
-  promotion action. Candidate promotion creates no version.
-- Create a version only through an explicit commit of one verified candidate.
-- Keep versions in the primary history. Show candidates as the comparison set
-  and attempts as expandable exploration evidence.
-- Run at most one build attempt per cycle at a time. Coalesce unstarted
-  interactive rebuild requests to the latest input.
-- Persist cycle state and attempts before expensive execution so restart or
-  failure cannot lose work or evidence.
+- Add one adaptive four-stage controller loop:
+  `PLAN -> BUILD -> VERIFY -> DECIDE`.
+- Treat the loop as orchestration over immutable versions, not as a new authoring
+  record hierarchy.
+- In `PLAN`, select one bounded next change from current version state, user goal,
+  acceptance criteria, prior evidence, and remaining budget.
+- In `BUILD`, persist every distinct changed draft through the existing append
+  path. That append is immediately the new version and head. No success gate,
+  promotion, or manual commit exists.
+- In `VERIFY`, attach validation, render, structural, authored, and optional visual
+  evidence to that same version.
+- In `DECIDE`, complete, ask, stop, compare, or start another plan from observed
+  evidence. The decision may reference a chosen version but never changes version
+  identity or rewrites its status.
+- Persist compact cycle state and append-only cycle events so restart retains the
+  objective, acceptance criteria, budget, pending question, version refs, and
+  decisions.
+- Make the Rust controller the only lifecycle authority. Frontend code may submit,
+  answer, stop, and project events, but SHALL NOT own retry loops, budget,
+  phase transitions, queue arbitration, or completion decisions.
+- Run at most one expensive build for a cycle at a time. Coalesce unstarted
+  interactive rebuild requests to the latest exact input while retaining every
+  draft version already appended by normal authoring.
+- Define a lean prompt contract and an evidence-driven model routing policy.
 
 ## Relationship To Existing Changes
 
-This change revises terminology in `lossless-version-history`.
+`lossless-version-history` is authoritative for persistence:
 
-The following invariants remain:
+- every distinct persisted source/draft change is an immutable version;
+- head is the latest append, independent of status;
+- validation, render, and verification outcomes attach to that version;
+- successful versions are a filter, not a different lifecycle;
+- there is no generic commit/finalize authoring operation.
 
-- exact changed authoring content is recoverable before validation or render;
-- failed work and raw diagnostics are retained;
-- persistence flows through backend services or MCP commands;
-- no direct SQLite writes occur.
-
-The following rule is superseded:
-
-- every persisted draft or changed source observation is a version.
-
-Draft journal events and exploration attempts become durable authoring records.
-Only explicit candidate commits become new versions. The implementation MUST
-reconcile both active changes before either is archived as baseline truth.
+This change adds orchestration metadata only. It does not revise those semantics.
 
 ## Out Of Scope
 
-- A general workflow language or arbitrary continuation rewriting.
-- Up-front generation of a complete SPEC/ASK/BUILD/VERIFY program.
-- Parallel candidate builds or distributed workers.
-- Global geometry optimization or automatic aesthetic ranking.
+- A separate attempt, candidate, promotion, or candidate-commit entity.
+- Up-front generation of a complete executable plan.
+- Hiding, deleting, or squashing failed, superseded, or exploratory versions.
+- Parallel geometry builds or distributed workers.
+- Automatic subjective design ranking without declared evidence.
+- Hard-coding one vendor model to each stage before representative evals.
 - New CAD language operations, constraints, or feature semantics.
-- Automatic candidate promotion or automatic version commit.
-- Deleting, squashing, or reclassifying legacy history records destructively.
+- A second browser-owned generation or retry state machine beside the Rust
+  controller.
 
 ## Proof Gates
 
-- Six build attempts containing failures and superseded work can produce one
-  candidate and zero versions until the user commits that candidate.
-- Committing the candidate creates exactly one immutable version bound to the
-  candidate's verified render snapshot.
-- A failed attempt retains exact input and raw diagnostics while the last good
-  viewport snapshot remains visible.
-- Three queued interactive rebuild requests produce the running attempt plus
-  one attempt for the newest pending input, not three stale renders.
-- Restart restores the active cycle, candidate set, attempt ledger, budget, and
-  pending user question without promoting any record.
+- Six changed exploratory drafts create six immutable versions. Failed and
+  successful statuses remain attached to their versions; no promotion or commit
+  step creates an extra version.
+- A red version remains head and inspectable while the last good render may remain
+  the active viewport projection.
+- Verification evidence names the exact version input and artifact digest it
+  evaluated.
+- New evidence changes the next `PLAN`; no stale pre-generated build tail runs.
+- Three queued interactive rebuild requests produce the running build plus one
+  newest pending build, while already-appended draft versions remain recoverable.
+- Restart restores cycle phase, objective, acceptance criteria, budget, referenced
+  versions, last evidence, and pending user question without resuming expensive
+  work automatically.
+- Model-routing experiments compare completion quality, red-to-green repair rate,
+  latency, token use, and cost before any non-default route ships.

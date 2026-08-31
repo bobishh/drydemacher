@@ -1,172 +1,38 @@
 import { get } from 'svelte/store';
 import { convertFileSrc } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { workingCopy } from '../stores/workingCopy';
-import { activeThreadIdStore as activeThreadId, activeVersionId, config, historyStore as history } from '../stores/domainState';
-import { createNewThread, refreshHistory } from '../stores/history';
+import { activeThreadIdStore as activeThreadId, activeVersionId, config } from '../stores/domainState';
+import { createNewThread, rememberCommittedVersionMessage } from '../stores/history';
 import { requestQueue } from '../stores/requestQueue';
 import { session, syncSessionPhaseFromQueue } from '../stores/sessionStore';
 import { paramPanelState } from '../stores/paramPanelState';
 import { ensureContext, startRequestHum, stopRequestHum } from '../audio/microwave';
-import { startCookingPhraseLoop, startLightReasoningPhraseLoop, stopPhraseLoop } from '../stores/phraseEngine';
-import { persistLastSessionSnapshot } from '../modelRuntime/sessionSnapshot';
-import { getRenderableRuntimeBundle, inspectRuntimeBundle } from '../modelRuntime/runtimeBundle';
-import { ensureSemanticManifest } from '../modelRuntime/semanticControls';
+import { startCookingPhraseLoop, stopPhraseLoop } from '../stores/phraseEngine';
+import { getRenderableRuntimeBundle } from '../modelRuntime/runtimeBundle';
 import type {
   AppConfig,
   Attachment,
   DesignOutput,
-  GenerateOutput,
-  IntentDecision,
-  Message,
   Request,
-  RuntimeAuthoringContext,
-  StructuralMetrics,
   StructuralVerificationResult,
-  UsageSummary,
 } from '../types/domain';
 import { estimateBase64Bytes, profileLog } from '../debug/profiler';
-import { detectFollowUpAnswer } from './followUpGuard';
-import { needsGeneratedQuestionAnswer, pendingQuestionCopy } from './questionAnswer';
-import { runStructuralCheck } from './structuralVerification';
-import { runVerificationRound } from './verificationLoop';
-import {
-  resolveEngineCapabilitySummary,
-  type ModelCapabilitySummary,
-} from '../modelRuntime/modelCapabilities';
-import { buildAuthoringDigest } from '../llmContextDigest';
-import { resolveActiveAuthoringContext } from '../runtimeCapabilities';
-import {
-  classifyIntent,
-  finalizeGenerationAttempt,
-  formatBackendError,
-  generateDesign,
-  getThreadMessagesPage,
-  getModelManifest,
-  getMessStlPath,
-  initGenerationAttempt,
-  persistStructuralVerification,
-  renderModel,
-  saveModelManifest,
-  saveConfig,
-  verifyRender,
-  verifyGeneratedModel,
-} from '../tauri/client';
-import { pendingImageGeometry, pendingImageGeometryStatus } from '../imageGeometryPending';
+import { formatBackendError, startExplorationRun } from '../tauri/client';
 import { hydrateActiveRenderSnapshot } from '../stores/activeRenderSnapshot';
 import type { AppError } from '../tauri/contracts';
 
-// ---------------------------------------------------------------------------
-// Constants & Helpers
-// ---------------------------------------------------------------------------
-
-const DUPLICATE_REQUEST_WINDOW_MS = 1500;
-const TEXT_ONLY_AFTER_REJECTION_REASON =
-  'Provider rejected image input; model set to text-only for this run. Adjust in Settings → Agents.';
-const MODEL_CAPABILITIES_MODULE_SPECIFIER = '../modelRuntime/modelCapabilities';
-const GENERIC_ROUTING_RESPONSE_MARKERS = [
-  'this looks like a geometry change request',
-  'intent looks like a design change request',
-  'thinking not deep enough',
-  'answering the question without generating geometry',
-  'treating this as a question',
-  'question answered. geometry unchanged',
-];
-
-const REPAIR_PHRASES = [
-  "FreeCAD blinked first. Asking the LLM for a cleaner retry.",
-  "Repair cycle engaged. Convincing the macro to respect causality.",
-  "Patching the geometry after a Boolean tantrum.",
-  "Render failed. Rewriting the macro before the solver notices.",
-  "Running emergency emotional support for a wounded BRep.",
-  "The mesh has unionized. Negotiating a repair attempt.",
-  "Reconstructing dignity after a FreeCAD traceback.",
-  "The model broke character. Sending it back with notes.",
-  "Second pass active: less chaos, more solids.",
-  "Repairing the macro with the confidence of a forged permit."
-];
-
-let modelCapabilitiesModulePromise: Promise<typeof import('../modelRuntime/modelCapabilities') | null> | null = null;
-// Snapshot writes target one session-global restore file. Serialize them so a
-// slower older invoke cannot complete after a newer request's snapshot.
-let projectionSnapshotWrite: Promise<void> = Promise.resolve();
-
-function pickRetryMessage(nextAttempt: number, maxAttempts: number): string {
-  const phrase = REPAIR_PHRASES[Math.floor(Math.random() * REPAIR_PHRASES.length)];
-  return `${phrase} Retry ${nextAttempt} of ${maxAttempts}.`;
-}
-
-function renderBackendLabel(design: DesignOutput): string {
-  if (design.macroDialect === 'ecky' || design.sourceLanguage === 'ecky') {
-    return 'Ecky';
-  }
-  return 'FreeCAD';
-}
-
-export function isExplicitQuestionOnlyIntent(promptText: string): boolean {
-  const prompt = `${promptText ?? ''}`.trim().toLowerCase();
-  if (!prompt) return false;
-  if (prompt.startsWith('/ask ')) return true;
-
-  return [
-    'answer only',
-    'just answer',
-    'only answer',
-    'do not generate',
-    "don't generate",
-    'without generating',
-    'no generation',
-    'do not change the model',
-    "don't change the model",
-    'without changing the model',
-    'только ответь',
-    'только ответ',
-    'просто ответь',
-    'без генерации',
-    'не генерируй',
-    'не меняй модель',
-    'не трогай модель',
-  ].some((marker) => prompt.includes(marker));
-}
-
-export function isQuestionIntent(promptText: string): boolean {
-  const prompt = `${promptText ?? ''}`.trim().toLowerCase();
-  if (!prompt) return false;
-  if (isExplicitQuestionOnlyIntent(prompt)) return true;
-  const hasQuestionSignal = prompt.includes('?') || /\b(explain|why|how|what|which)\b/.test(prompt);
-  const hasDesignAction = /\b(generate|create|make|add|remove|change|update|resize)\b/.test(prompt);
-  return hasQuestionSignal && !hasDesignAction;
-}
-
-function isGenericRoutingResponse(responseText: string): boolean {
-  const normalized = `${responseText ?? ''}`.trim().toLowerCase();
-  if (!normalized) return true;
-  return GENERIC_ROUTING_RESPONSE_MARKERS.some((marker) => normalized.includes(marker));
-}
-
-function toErrorMessage(err: unknown): string {
-  return formatBackendError(err);
-}
-
-function toSessionError(err: unknown): string | AppError {
+function toSessionError(error: unknown): string | AppError {
   if (
-    err &&
-    typeof err === 'object' &&
-    'code' in err &&
-    'message' in err &&
-    typeof (err as { message?: unknown }).message === 'string'
-  ) {
-    return err as AppError;
-  }
-  return toErrorMessage(err);
+    error && typeof error === 'object' && 'code' in error && 'message' in error &&
+    typeof (error as { message?: unknown }).message === 'string'
+  ) return error as AppError;
+  return formatBackendError(error);
 }
 
 function toAssetUrl(path: string | null | undefined): string {
   if (!path) return '';
-  try {
-    return convertFileSrc(path);
-  } catch {
-    return path;
-  }
+  try { return convertFileSrc(path); } catch { return path; }
 }
 
 export type GenerationProjectionGuard = {
@@ -176,12 +42,7 @@ export type GenerationProjectionGuard = {
   activeThreadId: string | null;
 };
 
-/**
- * A completed request may update the workspace only while it remains the
- * request selected to own that thread's visible projection. This prevents an
- * older same-thread completion from replacing a newer model or its restore
- * snapshot.
- */
+/** Only newest request for active thread may update visible runtime. */
 export function canPublishGenerationProjection({
   requestId,
   requestThreadId,
@@ -191,1266 +52,310 @@ export function canPublishGenerationProjection({
   return latestThreadRequestId === requestId && activeThreadId === requestThreadId;
 }
 
-function formatStructuralSummary(metrics: StructuralMetrics): string {
-  const lines = [`Structural checks passed.`, `Parts: ${metrics.partCount}`];
-  if (metrics.modelStlTriangleCount != null) lines.push(`Triangles: ${metrics.modelStlTriangleCount}`);
-  if (metrics.modelStlComponentCount != null) lines.push(`Components: ${metrics.modelStlComponentCount}`);
-  if (metrics.modelStlNonManifoldEdgeCount != null) lines.push(`Non-manifold edges: ${metrics.modelStlNonManifoldEdgeCount}`);
-  if (metrics.modelStlOverhangTriangleCount != null) lines.push(`Overhang triangles: ${metrics.modelStlOverhangTriangleCount}`);
-  if (metrics.modelStlOverhangRatio != null) lines.push(`Overhang ratio: ${metrics.modelStlOverhangRatio.toFixed(3)}`);
-  if (metrics.totalVolume != null) lines.push(`Volume: ${metrics.totalVolume.toFixed(2)}mm³`);
-  if (metrics.totalArea != null) lines.push(`Area: ${metrics.totalArea.toFixed(2)}mm²`);
-  if (metrics.bbox) {
-    const b = metrics.bbox;
-    lines.push(`BBox: [${b.xMin.toFixed(1)}, ${b.yMin.toFixed(1)}, ${b.zMin.toFixed(1)}] → [${b.xMax.toFixed(1)}, ${b.yMax.toFixed(1)}, ${b.zMax.toFixed(1)}]`);
-  }
-  return lines.join('\n');
-}
-
-function mergeUsageSummary(
-  left: UsageSummary | null | undefined,
-  right: UsageSummary | null | undefined,
-): UsageSummary | null {
-  if (!left && !right) return null;
-  if (!left) return right ?? null;
-  if (!right) return left;
-
-  return {
-    inputTokens: (left.inputTokens ?? 0) + (right.inputTokens ?? 0),
-    outputTokens: (left.outputTokens ?? 0) + (right.outputTokens ?? 0),
-    totalTokens: (left.totalTokens ?? 0) + (right.totalTokens ?? 0),
-    cachedInputTokens: (left.cachedInputTokens ?? 0) + (right.cachedInputTokens ?? 0),
-    reasoningTokens: (left.reasoningTokens ?? 0) + (right.reasoningTokens ?? 0),
-    estimatedCostUsd:
-      typeof left.estimatedCostUsd === 'number' || typeof right.estimatedCostUsd === 'number'
-        ? (left.estimatedCostUsd ?? 0) + (right.estimatedCostUsd ?? 0)
-        : null,
-    segments: [...(left.segments || []), ...(right.segments || [])],
-  };
-}
-
-function normalizeCapabilitySummary(
-  summary: Partial<ModelCapabilitySummary> | null | undefined,
-): ModelCapabilitySummary | null {
-  if (!summary || typeof summary.supportsVision !== 'boolean') return null;
-  return {
-    supportsVision: summary.supportsVision,
-    reason: summary.reason ?? null,
-  };
-}
-
-function isMissingModelCapabilitiesModule(error: unknown): boolean {
-  const message = formatBackendError(error).toLowerCase();
-  return (
-    message.includes('modelcapabilities') &&
-    (
-      message.includes('cannot find module') ||
-      message.includes('failed to fetch dynamically imported module') ||
-      message.includes('failed to resolve module specifier') ||
-      message.includes('error loading dynamically imported module')
-    )
-  );
-}
-
-async function loadModelCapabilitiesModule(): Promise<typeof import('../modelRuntime/modelCapabilities') | null> {
-  if (!modelCapabilitiesModulePromise) {
-    modelCapabilitiesModulePromise = (async () => {
-      try {
-        return await import(/* @vite-ignore */ MODEL_CAPABILITIES_MODULE_SPECIFIER);
-      } catch (error) {
-        if (!isMissingModelCapabilitiesModule(error)) {
-          console.warn('[Orchestrator] modelCapabilities helper unavailable:', error);
-        }
-        return null;
-      }
-    })();
-  }
-
-  return modelCapabilitiesModulePromise;
-}
-
-function selectedEngineFromConfig(
-  currentConfig: AppConfig,
-): AppConfig['engines'][number] | null {
-  return currentConfig.engines.find((engine) => engine.id === currentConfig.selectedEngineId) ?? null;
-}
-
-async function inferSelectedModelCapabilities(
-  currentConfig: AppConfig,
-): Promise<ModelCapabilitySummary> {
-  const selectedEngine = selectedEngineFromConfig(currentConfig);
-  const fallback = resolveEngineCapabilitySummary(selectedEngine);
-  const helper = await loadModelCapabilitiesModule();
-  if (!helper) return fallback;
-
-  const model = selectedEngine?.model ?? '';
-  const resolved =
-    typeof helper.resolveEngineCapabilitySummary === 'function'
-      ? normalizeCapabilitySummary(helper.resolveEngineCapabilitySummary(selectedEngine, model))
-      : null;
-  if (resolved) return resolved;
-  return fallback;
-}
-
-/** Detects provider 400s that mean "this model rejects image inputs". */
-function isVisionRejectedError(message: string): boolean {
-  const lower = message.toLowerCase();
-  return (
-    (lower.includes('400') || lower.includes('bad request')) &&
-    (lower.includes('content.type') &&
-      (lower.includes('invalid') || lower.includes('allowed values'))) ||
-    lower.includes("messages.content.type is invalid") ||
-    lower.includes("allowed values: ['text']") ||
-    lower.includes('only supports text')
-  );
-}
-
-function filterModelFacingAttachments(
-  attachments: Attachment[],
-  supportsVision: boolean,
-): Attachment[] {
-  if (supportsVision) return attachments;
-  return attachments.filter((attachment) => attachment.type !== 'image');
-}
-
-function requestAttachmentSignature(attachment: Attachment): string {
-  return [
-    attachment.type || '',
-    attachment.path || '',
-    attachment.dataUrl || '',
-    attachment.name || '',
-    attachment.explanation || '',
-  ].join('|');
-}
-
-function requestSignature(
-  prompt: string,
-  attachments: Attachment[],
-  threadId: string | null,
-): string {
-  const normalizedPrompt = `${prompt ?? ''}`.trim();
-  const attachmentSignature = attachments
-    .map(requestAttachmentSignature)
-    .sort()
-    .join('||');
-  return `${threadId ?? 'new-thread'}::${normalizedPrompt}::${attachmentSignature}`;
-}
-
-function findRecentDuplicateRequest(
-  prompt: string,
-  attachments: Attachment[],
-  threadId: string | null,
-): Request | null {
-  const now = Date.now();
-  const targetSignature = requestSignature(prompt, attachments, threadId);
-  const queue = get(requestQueue);
-
-  for (const id of queue.order) {
-    const existing = queue.byId[id];
-    if (!existing) continue;
-    if (now - existing.createdAt > DUPLICATE_REQUEST_WINDOW_MS) continue;
-    if (requestSignature(existing.prompt, existing.attachments, existing.threadId) !== targetSignature) {
-      continue;
-    }
-    return existing;
-  }
-
-  return null;
-}
-
-class CancelError extends Error {
-  constructor() {
-    super('Request canceled');
-    this.name = 'CancelError';
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Dependencies (Injected from UI)
-// ---------------------------------------------------------------------------
-
 type ViewerRef = {
   captureScreenshot: (overlayCanvas?: HTMLCanvasElement | null) => string | null;
-  captureMultiAngleScreenshots: () => string[];
 };
-
-type OpenCodeModalManual = (data: DesignOutput) => void;
 
 type OrchestratorUiDeps = {
   viewerComponent?: ViewerRef | null;
-  openCodeModalManual?: OpenCodeModalManual | null;
   getDrawingCanvas?: (() => HTMLCanvasElement | null) | null;
   clearDrawing?: (() => void) | null;
 };
 
-// ---------------------------------------------------------------------------
-// Orchestration Logic
-// ---------------------------------------------------------------------------
-
-function buildLightReasoningContext(): string {
-  const wc = get(workingCopy);
-  const panel = get(paramPanelState);
-  return buildAuthoringDigest({
-    title: wc.title,
-    versionName: wc.versionName,
-    sourceLanguage: wc.sourceLanguage,
-    uiSpec: panel.uiSpec,
-    params: panel.params,
-    modelManifest: get(session).modelManifest,
-  });
-}
-
-function buildWorkingDesignSnapshot(): DesignOutput | null {
-  const wc = get(workingCopy);
-  const panel = get(paramPanelState);
-  if (!wc.macroCode) return null;
-  return {
-    title: wc.title || 'Untitled Design',
-    versionName: wc.versionName || 'Working Copy',
-    response: '',
-    interactionMode: 'design',
-    macroCode: wc.macroCode,
-    macroDialect: wc.macroDialect ?? 'legacy',
-    engineKind: wc.engineKind ?? 'freecad',
-    sourceLanguage: wc.sourceLanguage ?? 'legacyPython',
-    geometryBackend: wc.geometryBackend ?? 'freecad',
-    uiSpec: panel.uiSpec || { fields: [] },
-    initialParams: panel.params || {},
-    postProcessing: wc.postProcessing ?? null,
-  };
-}
-
-function selectedVersionMessage(): Pick<Message, 'output' | 'artifactBundle' | 'modelManifest'> | null {
-  const threadId = get(activeThreadId);
-  const versionId = get(activeVersionId);
-  if (!threadId || !versionId) return null;
-  const thread = get(history).find((candidate) => candidate.id === threadId);
-  return thread?.messages.find((message) => message.id === versionId) ?? null;
-}
-
-function currentAuthoringContext(currentConfig: AppConfig): RuntimeAuthoringContext {
-  const currentSession = get(session);
-  return resolveActiveAuthoringContext({
-    config: currentConfig,
-    activeVersionMessage: selectedVersionMessage(),
-    sessionArtifactBundle: currentSession.artifactBundle,
-    sessionModelManifest: currentSession.modelManifest,
-  });
-}
-
 type GenerateSubmissionOptions = {
   imageDataOverride?: string | null;
   uiDeps?: OrchestratorUiDeps;
+  buildMode?: 'interactive' | 'controller';
 };
 
-export async function handleGenerate(
-  initialPrompt: string,
-  attachments: Attachment[] = [],
-  options: GenerateSubmissionOptions = {},
-): Promise<string> {
-  const uiDeps = options.uiDeps ?? {};
-  session.setError(null);
+export type ExplorationRunProgressEvent = {
+  requestId: string;
+  threadId: string;
+  phase: string;
+  attempt: number;
+  maxAttempts: number;
+  runningBuilds: number;
+  pendingBuilds: number;
+  currentVersionId?: string | null;
+  summary: string;
+  rawError?: string | null;
+};
 
-  // Keep backend AppState config in sync with current UI config before generation.
-  const currentConfig = get(config);
-  await saveConfig(currentConfig);
-  const modelCapabilities = await inferSelectedModelCapabilities(currentConfig);
+export type ExplorationRunProgressProjection = {
+  requestPhase: Request['phase'];
+  buildQueueState: Request['buildQueueState'];
+  attempt: number;
+  maxAttempts: number;
+  copy: string;
+};
 
-  // Capture screenshot with drawing overlay synchronously before clearing
-  let preCapture: string | null = modelCapabilities.supportsVision
-    ? options.imageDataOverride ?? null
-    : null;
-  if (!preCapture && modelCapabilities.supportsVision && uiDeps.viewerComponent && get(session).stlUrl) {
-    const overlay = uiDeps.getDrawingCanvas?.() ?? null;
-    preCapture = uiDeps.viewerComponent.captureScreenshot(overlay);
+/** Pure backend-progress to existing request/session projection mapping. */
+export function projectExplorationRunProgress(
+  progress: ExplorationRunProgressEvent,
+): ExplorationRunProgressProjection {
+  const phase = `${progress.phase ?? ''}`.trim().toLowerCase();
+  const attempt = Math.max(1, Number(progress.attempt) || 1);
+  const maxAttempts = Math.max(attempt, Number(progress.maxAttempts) || attempt);
+  const requestPhase: Request['phase'] = phase === 'building'
+    ? attempt > 1 ? 'repairing' : 'generating'
+    : phase === 'verifying' || phase === 'deciding'
+      ? 'rendering'
+      : phase === 'awaitinginput' || phase === 'awaiting_input' ? 'classifying' : 'classifying';
+  const pending = Math.max(0, Number(progress.pendingBuilds) || 0);
+  const running = Math.max(0, Number(progress.runningBuilds) || 0);
+  const buildQueueState: Request['buildQueueState'] = running > 0
+    ? 'running'
+    : pending > 0 || phase === 'queued' ? 'pending' : 'running';
+  const summary = `${progress.summary ?? ''}`.trim() || phase.toUpperCase() || 'EXPLORATION RUNNING';
+  const copy = `${summary} · RUNNING ${running} · PENDING ${pending}`;
+  return { requestPhase, buildQueueState, attempt, maxAttempts, copy };
+}
+
+export type ExplorationRunTerminalProjection = {
+  requestPhase: 'success' | 'error' | 'canceled';
+  copy: string;
+  error: string | null;
+};
+
+/** Keep terminal backend outcomes distinct without making frontend decisions. */
+export function projectExplorationRunTerminal(
+  phase: string,
+  rawError: string | null | undefined,
+  responseText: string | null | undefined = null,
+): ExplorationRunTerminalProjection {
+  const normalized = `${phase ?? ''}`.trim().toLowerCase();
+  if (normalized === 'completed' && !rawError?.trim()) {
+    return { requestPhase: 'success', copy: responseText?.trim() || 'EXPLORATION COMPLETE', error: null };
   }
-  // Clear drawing immediately so the user sees it disappear on send
-  uiDeps.clearDrawing?.();
+  if ((normalized === 'awaitinginput' || normalized === 'awaiting_input') && !rawError?.trim()) {
+    return { requestPhase: 'success', copy: responseText?.trim() || 'EXPLORATION AWAITING INPUT', error: null };
+  }
+  if (normalized === 'stopped') {
+    return { requestPhase: 'canceled', copy: 'EXPLORATION STOPPED', error: null };
+  }
+  if (normalized === 'superseded') {
+    return { requestPhase: 'canceled', copy: 'EXPLORATION SUPERSEDED BY NEWER INPUT', error: null };
+  }
+  if (normalized === 'interrupted') {
+    return { requestPhase: 'canceled', copy: 'EXPLORATION INTERRUPTED', error: null };
+  }
+  const error = rawError?.trim() || `Exploration run ended in ${phase}.`;
+  return { requestPhase: 'error', copy: `EXPLORATION FAILED · ${error}`, error };
+}
 
+function buildWorkingDesignSnapshot(): DesignOutput | null {
+  const copy = get(workingCopy);
+  const panel = get(paramPanelState);
+  if (!copy.macroCode) return null;
+  return {
+    title: copy.title || 'Untitled Design',
+    versionName: copy.versionName || 'Working Copy',
+    response: '',
+    interactionMode: 'design',
+    macroCode: copy.macroCode,
+    macroDialect: copy.macroDialect ?? 'legacy',
+    engineKind: copy.engineKind ?? 'freecad',
+    sourceLanguage: copy.sourceLanguage ?? 'legacyPython',
+    geometryBackend: copy.geometryBackend ?? 'freecad',
+    uiSpec: panel.uiSpec || { fields: [] },
+    initialParams: panel.params || {},
+    postProcessing: copy.postProcessing ?? null,
+  };
+}
+
+function stopRequestHumFor(requestId: string, success: boolean, currentConfig: AppConfig, threadId: string) {
+  const queue = get(requestQueue);
+  const activeIds = queue.order.filter((id) => {
+    const request = queue.byId[id];
+    return request && request.threadId === threadId && !['success', 'error', 'canceled'].includes(request.phase);
+  });
+  stopRequestHum(requestId, success, currentConfig, Math.max(0, activeIds.indexOf(requestId)));
+}
+
+type ExplorationRunResult = {
+  requestId: string;
+  threadId: string;
+  phase: string;
+  messageId: string;
+  design?: DesignOutput | null;
+  artifactBundle?: import('../types/domain').ArtifactBundle | null;
+  modelManifest?: import('../types/domain').ModelManifest | null;
+  structuralVerification?: StructuralVerificationResult | null;
+  message?: import('../types/domain').Message | null;
+  snapshotId?: string | null;
+  responseText?: string | null;
+  rawError?: string | null;
+  publicationAllowed: boolean;
+};
+
+function latestRequestIdForThread(threadId: string): string | null {
+  const queue = get(requestQueue);
+  return [...queue.order].reverse().find((id) => queue.byId[id]?.threadId === threadId) ?? null;
+}
+
+async function projectExplorationRun(requestId: string, currentConfig: AppConfig, output: ExplorationRunResult) {
+  const terminal = projectExplorationRunTerminal(output.phase, output.rawError, output.responseText);
+  if (terminal.requestPhase !== 'success') {
+    if (terminal.requestPhase === 'error') {
+      if (get(activeThreadId) === output.threadId) session.setError(toSessionError(terminal.error));
+      requestQueue.patch(requestId, { phase: 'error', error: terminal.error ?? terminal.copy });
+    } else {
+      if (get(activeThreadId) === output.threadId) session.setStatus(terminal.copy);
+      requestQueue.patch(requestId, { phase: 'canceled' });
+    }
+    stopRequestHumFor(requestId, false, currentConfig, output.threadId);
+    syncSessionPhaseFromQueue();
+    return;
+  }
+
+  const design = output.design ?? null;
+  const artifactBundle = output.artifactBundle ?? null;
+  const modelManifest = output.modelManifest ?? null;
+  if (output.publicationAllowed && design && artifactBundle && modelManifest && !output.snapshotId) {
+    throw new Error('Exploration run returned renderable runtime without backend snapshotId.');
+  }
+  const result = {
+    design,
+    threadId: output.threadId,
+    messageId: output.messageId,
+    stlUrl: toAssetUrl(artifactBundle?.modelStlPath),
+    artifactBundle,
+    modelManifest,
+    structuralVerification: output.structuralVerification ?? null,
+  };
+  requestQueue.patch(requestId, { phase: 'success', result });
+
+  const mayPublish = output.publicationAllowed && canPublishGenerationProjection({
+    requestId,
+    requestThreadId: output.threadId,
+    latestThreadRequestId: latestRequestIdForThread(output.threadId),
+    activeThreadId: get(activeThreadId),
+  });
+  if (mayPublish && output.message) {
+    rememberCommittedVersionMessage(output.threadId, output.design?.title ?? 'Design', output.message);
+  }
+  if (mayPublish && design && artifactBundle && modelManifest) {
+    const renderableBundle = getRenderableRuntimeBundle(
+      artifactBundle,
+      design.postProcessing ?? null,
+      design.initialParams ?? {},
+    ) ?? artifactBundle;
+    activeThreadId.set(output.threadId);
+    hydrateActiveRenderSnapshot({
+      snapshotId: output.snapshotId!,
+      threadId: output.threadId,
+      messageId: output.messageId,
+      design,
+      artifactBundle: renderableBundle,
+      modelManifest,
+      selectedPartId: null,
+      stlUrl: toAssetUrl(renderableBundle.modelStlPath),
+      status: output.responseText?.trim() || design.response?.trim() || 'Design synthesized successfully.',
+      targetRef: { kind: 'savedVersion', threadId: output.threadId, messageId: output.messageId },
+    });
+  }
+  if (get(activeThreadId) === output.threadId) {
+    session.setStatus(output.responseText?.trim() || design?.response?.trim() || 'Design synthesized successfully.');
+  }
+  stopRequestHumFor(requestId, true, currentConfig, output.threadId);
+  syncSessionPhaseFromQueue();
+}
+
+/** Submit intent to Rust-owned exploration runner; frontend owns projection only. */
+export async function handleGenerate(initialPrompt: string, attachments: Attachment[] = [], options: GenerateSubmissionOptions = {}): Promise<string> {
+  session.setError(null);
+  const currentConfig = get(config);
   if (!get(activeThreadId)) {
     const createdThreadId = await createNewThread({ mode: 'blank' });
     if (!createdThreadId) throw new Error('Failed to open a design thread for generation.');
   }
-  const currentThreadId = get(activeThreadId);
-  const currentVersionId = get(activeVersionId);
-  const currentModelId = get(session).artifactBundle?.modelId ?? null;
-  const duplicateRequest = findRecentDuplicateRequest(initialPrompt, attachments, currentThreadId);
-  if (duplicateRequest) {
-    requestQueue.setActive(duplicateRequest.id);
-    session.setStatus('Request already in flight.');
-    return duplicateRequest.id;
-  }
+  const threadId = get(activeThreadId);
+  if (!threadId) throw new Error('Generation requires an active thread.');
+  const buildMode = options.buildMode ?? 'interactive';
+  const baseVersionId = get(activeVersionId);
   const requestId = requestQueue.submit(
     initialPrompt,
     attachments,
-    currentThreadId,
-    currentVersionId,
-    currentModelId,
+    threadId,
+    baseVersionId,
+    get(session).artifactBundle?.modelId ?? null,
+    buildMode,
   );
   requestQueue.setActive(requestId);
 
-  if (preCapture) {
-    requestQueue.patch(requestId, { screenshot: preCapture });
-  }
-
+  const overlay = options.uiDeps?.getDrawingCanvas?.() ?? null;
+  const imageData = options.imageDataOverride ?? (options.uiDeps?.viewerComponent && get(session).stlUrl
+    ? options.uiDeps.viewerComponent.captureScreenshot(overlay)
+    : null);
+  options.uiDeps?.clearDrawing?.();
+  if (imageData) requestQueue.patch(requestId, { screenshot: imageData });
+  requestQueue.patch(requestId, { cookingStartTime: Date.now() });
+  syncSessionPhaseFromQueue();
+  ensureContext();
+  startCookingPhraseLoop();
+  startRequestHum(requestId, currentConfig, threadId);
   profileLog('generate.submit', {
     requestId,
-    threadId: currentThreadId,
+    threadId,
     promptChars: initialPrompt.length,
     attachments: attachments.length,
-    screenshotMb: Number((estimateBase64Bytes(preCapture) / (1024 * 1024)).toFixed(2)),
-    supportsVision: modelCapabilities.supportsVision,
-  });
-  if (!modelCapabilities.supportsVision) {
-    console.info('[Orchestrator] vision inputs suppressed for selected model', {
-      requestId,
-      reason: modelCapabilities.reason,
-    });
-  }
-
-  ensureContext();
-
-  const pipeline = new GenerationPipeline(requestId, uiDeps);
-  pipeline.preCapture = preCapture;
-  pipeline.modelCapabilities = modelCapabilities;
-  pipeline.modelFacingAttachments = filterModelFacingAttachments(
-    attachments,
-    modelCapabilities.supportsVision,
-  );
-  pipeline.execute().catch(err => {
-    console.error("[Orchestrator] Pipeline hard failure:", err);
+    screenshotMb: Number((estimateBase64Bytes(imageData) / (1024 * 1024)).toFixed(2)),
   });
 
-  return requestId;
-}
-
-/**
- * Encapsulates the entire generation lifecycle for a single request,
- * providing strict isolation, cancellation checks, and immutable persistence.
- */
-class GenerationPipeline {
-  requestId: string;
-  req: Request;
-  snapshotThreadId: string;
-  snapshotParentMacroCode: string | null;
-  snapshotWorkingDesign: DesignOutput | null;
-  snapshotAuthoringContext: RuntimeAuthoringContext;
-  currentConfig: AppConfig;
-  
-  assistantMessageId: string | null = null;
-  currentScreenshot: string | null = null;
-  preCapture: string | null = null;
-  modelCapabilities: ModelCapabilitySummary = { supportsVision: true, reason: null };
-  modelFacingAttachments: Attachment[] = [];
-  visionRetried: boolean = false;
-  isQuestion: boolean = false;
-  forcedQuestionOnly: boolean = false;
-  lightResponse: string = '';
-  finalResponse: string = '';
-  usageSummary: UsageSummary | null = null;
-  routeReason: string = 'unclassified';
-  followUpQuestion: string | null = null;
-  followUpMessageId: string | null = null;
-  uiDeps: OrchestratorUiDeps;
-
-  constructor(requestId: string, uiDeps: OrchestratorUiDeps = {}) {
-    this.requestId = requestId;
-    this.uiDeps = uiDeps;
-    const q = get(requestQueue);
-    this.req = q.byId[requestId];
-    
-    if (!this.req.threadId) throw new Error('Generation request requires a backend-owned thread.');
-    this.snapshotThreadId = this.req.threadId;
-
-    this.snapshotParentMacroCode = get(workingCopy).macroCode || null;
-    this.snapshotWorkingDesign = buildWorkingDesignSnapshot();
-    this.currentConfig = get(config);
-    this.snapshotAuthoringContext = currentAuthoringContext(this.currentConfig);
-    this.modelFacingAttachments = this.req.attachments;
-  }
-
-  // --- Main Execution ---
-
-  async execute() {
+  void (async () => {
+    const request = get(requestQueue).byId[requestId];
+    if (!request || request.phase === 'canceled') return;
+    let unlisten: (() => void) | null = null;
     try {
-      await this.stepClassify();
-      
-      if (this.isQuestion) {
-        await this.stepAnswerQuestion();
-      } else {
-        await this.stepGenerateAndRender();
-      }
-    } catch (err) {
-      if (err instanceof CancelError) {
-        await this.finalizeAttempt('discarded');
-        this.stopMicrowave(false);
-        return;
-      }
-      await this.handleGlobalError(err);
-    } finally {
-      stopPhraseLoop();
-    }
-  }
-
-  // --- Discrete Steps ---
-
-  private async stepClassify() {
-    this.checkCanceled();
-    requestQueue.patch(this.requestId, { phase: 'classifying' });
-    syncSessionPhaseFromQueue();
-    startLightReasoningPhraseLoop();
-
-    this.forcedQuestionOnly = isExplicitQuestionOnlyIntent(this.req.prompt);
-    this.isQuestion = this.forcedQuestionOnly || isQuestionIntent(this.req.prompt);
-    this.routeReason = this.forcedQuestionOnly
-      ? 'explicit-question-only marker'
-      : this.isQuestion
-        ? 'local question heuristic'
-        : 'local design heuristic';
-
-    // Use pre-captured screenshot (with drawing overlay composited) from handleGenerate
-    if (this.modelCapabilities.supportsVision) {
-      if (this.preCapture) {
-        this.currentScreenshot = this.preCapture;
-      } else if (this.uiDeps.viewerComponent && get(session).stlUrl) {
-        this.currentScreenshot = this.uiDeps.viewerComponent.captureScreenshot();
-      }
-    } else {
-      this.currentScreenshot = null;
-    }
-    if (this.currentScreenshot) {
-      requestQueue.patch(this.requestId, { screenshot: this.currentScreenshot });
-    }
-    profileLog('generate.classify_image', {
-      requestId: this.requestId,
-      threadId: this.snapshotThreadId,
-      screenshotMb: Number((estimateBase64Bytes(this.currentScreenshot) / (1024 * 1024)).toFixed(2)),
-      supportsVision: this.modelCapabilities.supportsVision,
-      screenshotSuppressedReason: this.modelCapabilities.supportsVision ? null : this.modelCapabilities.reason,
-    });
-
-    const followUpMatched = await this.applyFollowUpAnswerGuard();
-    await this.initDatabaseRecord();
-    if (!followUpMatched) {
-      await this.classifyIntent();
-    }
-    console.info('[Pipeline] route decision', {
-      requestId: this.requestId,
-      threadId: this.snapshotThreadId,
-      finalMode: this.isQuestion ? 'question' : 'design',
-      reason: this.routeReason,
-      classifierPreview: this.lightResponse,
-      finalResponse: this.finalResponse,
-    });
-    profileLog('generate.route', {
-      requestId: this.requestId,
-      threadId: this.snapshotThreadId,
-      finalMode: this.isQuestion ? 'question' : 'design',
-      reason: this.routeReason,
-      classifierPreview: this.lightResponse,
-      finalResponse: this.finalResponse,
-    });
-  }
-
-  private async stepAnswerQuestion(): Promise<void> {
-    const pendingCopy = pendingQuestionCopy(this.finalResponse);
-    this.updateStatus(pendingCopy);
-    requestQueue.patch(this.requestId, { phase: 'answering', lightResponse: pendingCopy });
-    syncSessionPhaseFromQueue();
-
-    let questionReplyText = this.finalResponse.trim();
-    if (needsGeneratedQuestionAnswer(questionReplyText)) {
-      const authoringContext = this.snapshotWorkingDesign ?? this.snapshotAuthoringContext;
-      try {
-        const result = await generateDesign({
-          prompt: this.req.prompt,
-          threadId: this.snapshotThreadId,
-          parentMacroCode: this.snapshotParentMacroCode,
-          workingDesign: this.snapshotWorkingDesign,
-          isRetry: false,
-          imageData: this.currentScreenshot,
-          attachments: this.modelFacingAttachments,
-          questionMode: true,
-          followUpQuestion: null,
-          engineKind: authoringContext.engineKind ?? null,
-          sourceLanguage: authoringContext.sourceLanguage,
-          geometryBackend: authoringContext.geometryBackend,
+      unlisten = await listen<ExplorationRunProgressEvent>('exploration-run-progress', (event) => {
+        if (event.payload.requestId !== requestId || event.payload.threadId !== threadId) return;
+        const projection = projectExplorationRunProgress(event.payload);
+        requestQueue.patch(requestId, {
+          phase: projection.requestPhase,
+          buildQueueState: projection.buildQueueState,
+          attempt: projection.attempt,
+          maxAttempts: projection.maxAttempts,
+          lightResponse: projection.copy,
         });
-        this.checkCanceled();
-        this.usageSummary = mergeUsageSummary(this.usageSummary, result.usage);
-        questionReplyText =
-          result.design.response?.trim() ||
-          'Question answered. Geometry unchanged.';
-      } catch (e) {
-        this.checkCanceled();
-        const errMsg = toErrorMessage(e);
-        if (
-          !this.visionRetried &&
-          this.modelCapabilities.supportsVision &&
-          isVisionRejectedError(errMsg) &&
-          (await this.disableVisionAndPersist())
-        ) {
-          this.visionRetried = true;
-          console.info('[Pipeline] provider rejected image input (question mode); retrying as text-only', {
-            requestId: this.requestId,
-          });
-          return this.stepAnswerQuestion();
-        }
-        await this.handleGenerationFailure(errMsg);
-        return;
-      }
-    }
-
-    // Finalize the existing attempt with the answer
-    await this.finalizeAttempt('success', undefined, undefined, questionReplyText);
-
-    if (this.isActiveThread()) {
-      session.setStatus(questionReplyText);
-    }
-    
-    await refreshHistory();
-    this.checkCanceled();
-
-    requestQueue.patch(this.requestId, {
-      phase: 'success',
-      lightResponse: questionReplyText,
-      result: {
-        design: null,
-        threadId: this.snapshotThreadId,
-        messageId: this.assistantMessageId || '',
-        stlUrl: '',
-        artifactBundle: null,
-        modelManifest: null,
-      },
-    });
-    syncSessionPhaseFromQueue();
-  }
-
-  private async stepGenerateAndRender() {
-    this.checkCanceled();
-    console.info('[Pipeline] starting generate path', {
-      requestId: this.requestId,
-      threadId: this.snapshotThreadId,
-      reason: this.routeReason,
-      prompt: this.req.prompt,
-    });
-    stopPhraseLoop();
-    startCookingPhraseLoop();
-    requestQueue.patch(this.requestId, { cookingStartTime: Date.now() });
-    startRequestHum(this.requestId, this.currentConfig, this.snapshotThreadId);
-
-    let attempt = 1;
-    let currentPrompt = this.req.prompt;
-    // Screenshot/VLM verification attempts (0 = disabled).
-    // Structural verification always runs regardless.
-    const maxVerifyAttempts = this.req.maxVerifyAttempts;
-
-    while (attempt <= this.req.maxAttempts) {
-      this.checkCanceled();
-
-      if (attempt === 1 && this.isActiveThread()) {
-        session.setStlUrl(null);
-      }
-
-      requestQueue.patch(this.requestId, { phase: attempt > 1 ? 'repairing' : 'generating', attempt });
-      syncSessionPhaseFromQueue();
-      this.updateStatus(`Consulting LLM (Attempt ${attempt}/${this.req.maxAttempts})...`);
-
-      try {
-        const authoringContext = this.snapshotWorkingDesign ?? this.snapshotAuthoringContext;
-        const result = await generateDesign({
-          prompt: currentPrompt,
-          threadId: this.snapshotThreadId,
-          parentMacroCode: this.snapshotParentMacroCode,
-          workingDesign: this.snapshotWorkingDesign,
-          isRetry: attempt > 1,
-          imageData: this.currentScreenshot,
-          attachments: this.modelFacingAttachments,
-          questionMode: false,
-          followUpQuestion: attempt === 1 ? this.followUpQuestion : null,
-          engineKind: authoringContext.engineKind ?? null,
-          sourceLanguage: authoringContext.sourceLanguage,
-          geometryBackend: authoringContext.geometryBackend,
-        });
-        this.checkCanceled();
-        this.usageSummary = mergeUsageSummary(this.usageSummary, result.usage);
-
-        const data = result.design;
-        const interactionMode = `${data.interactionMode ?? ''}`.toLowerCase();
-
-        if (interactionMode === 'question') {
-          await this.handleFallbackQuestion(data, currentPrompt);
-          return;
-        }
-
-        // --- Render Step ---
-        const pendingImages = pendingImageGeometry(
-          data.macroCode,
-          data.uiSpec,
-          data.initialParams || {},
-        );
-        if (pendingImages.length > 0) {
-          await this.commitPendingImageGeometry(data, pendingImageGeometryStatus(pendingImages));
-          return;
-        }
-        requestQueue.patch(this.requestId, { phase: 'rendering' });
+        if (get(activeThreadId) === threadId) session.setStatus(projection.copy);
         syncSessionPhaseFromQueue();
-        const backendLabel = renderBackendLabel(data);
-        this.updateStatus(`Executing ${backendLabel} engine...`);
-
-        try {
-          const bundle = await renderModel(
-            data.macroCode,
-            data.initialParams || {},
-            data.macroDialect ?? null,
-            data.geometryBackend ?? null,
-            data.postProcessing ?? null,
-            get(activeThreadId) === this.snapshotThreadId ? get(session).modelManifest : null,
-          );
-          const rawManifest = await getModelManifest(bundle.modelId);
-          const previousManifest =
-            get(activeThreadId) === this.snapshotThreadId ? get(session).modelManifest : null;
-          const manifest =
-            ensureSemanticManifest(
-              rawManifest,
-              data.uiSpec,
-              data.initialParams || {},
-              previousManifest,
-            ) ?? rawManifest;
-          if (JSON.stringify(manifest) !== JSON.stringify(rawManifest)) {
-            await saveModelManifest(bundle.modelId, manifest);
-          }
-          this.checkCanceled();
-
-          // Collect reference image paths from attachments for verification
-          const referenceImagePaths = (this.modelFacingAttachments ?? [])
-            .filter((a) => a.type === 'image')
-            .map((a) => a.path);
-          const visionVerificationSkipReason = this.modelCapabilities.supportsVision
-            ? null
-            : this.modelCapabilities.reason;
-
-          // ── Stage 1: Structural verification (always runs) ──────────────
-          let structuralSummary: string | null = null;
-          let structuralMetrics: StructuralMetrics | null = null;
-          let structuralVerification: StructuralVerificationResult | null = null;
-          {
-            this.updateStatus('Structural verification...');
-            const structResult = await runStructuralCheck({
-              modelId: bundle.modelId,
-              originalPrompt: this.req.prompt,
-              currentGenerationAttempt: attempt,
-              maxGenerationAttempts: this.req.maxAttempts,
-              verify: (modelId, prompt) => verifyGeneratedModel(modelId, prompt),
-            });
-
-            console.info('[Pipeline] structural verify:', structResult.kind);
-            structuralVerification =
-              structResult.kind === 'structural_skipped' ? null : structResult.verification;
-
-            if (structResult.kind === 'repair_needed') {
-              currentPrompt = structResult.repairPrompt;
-              attempt++;
-              if (attempt <= this.req.maxAttempts) {
-                const firstIssue = structResult.repairPrompt.split('\n').find((l: string) => l.startsWith('- [')) ?? structResult.repairPrompt.split('\n')[0];
-                if (this.isActiveThread()) session.setRepairMessage(`Structural: ${firstIssue}`);
-                this.checkCanceled();
-                continue;
-              }
-              // attempt cap hit — fall through to commit best-effort
-            } else if (structResult.kind === 'failed_terminal') {
-              console.warn('[Pipeline] structural terminal failure:', structResult.issues);
-              await this.handleVerificationFailure(data, `Structural verification failed:\n${structResult.issues}`);
-              return;
-            } else if (structResult.kind === 'structural_passed') {
-              structuralMetrics = structResult.metrics;
-              structuralSummary = formatStructuralSummary(structResult.metrics);
-            }
-            // structural_passed or structural_skipped → proceed
-            this.checkCanceled();
-          }
-
-          // ── Stage 2: Screenshot/VLM verification (gated by config) ───────
-          if (maxVerifyAttempts > 0 && (this.uiDeps.viewerComponent || visionVerificationSkipReason)) {
-            if (this.uiDeps.viewerComponent && !visionVerificationSkipReason) {
-              // Give Three.js one frame to render the new STL before capturing
-              await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-            }
-
-            let verifyAttempt = 0;
-            while (verifyAttempt < maxVerifyAttempts) {
-              this.checkCanceled();
-              verifyAttempt++;
-
-              requestQueue.patch(this.requestId, { phase: 'rendering' });
-              this.updateStatus(
-                visionVerificationSkipReason
-                  ? 'Vision verify skipped for selected model.'
-                  : `Vision verify (${verifyAttempt}/${maxVerifyAttempts})...`,
-              );
-
-              const vResult = await runVerificationRound(verifyAttempt, {
-                originalPrompt: this.req.prompt,
-                maxVerifyAttempts,
-                currentGenerationAttempt: attempt,
-                maxGenerationAttempts: this.req.maxAttempts,
-                skipReason: visionVerificationSkipReason,
-                capture: () => this.uiDeps.viewerComponent?.captureMultiAngleScreenshots() ?? [],
-                verify: (prompt, screenshots, refImages, structSummary) =>
-                  verifyRender(prompt, screenshots, refImages, structSummary),
-                referenceImages: referenceImagePaths,
-                structuralSummary,
-                structuralMetrics,
-              });
-
-              if (vResult.kind === 'skipped') {
-                console.info('[Pipeline] vision verify skipped:', vResult.reason);
-              } else {
-                console.info('[Pipeline] vision verify:', vResult.kind);
-              }
-
-              if (vResult.kind === 'passed' || vResult.kind === 'skipped') break;
-
-              if (vResult.kind === 'repair_needed') {
-                currentPrompt = vResult.repairPrompt;
-                attempt++;
-                if (attempt > this.req.maxAttempts) break;
-                if (this.isActiveThread()) session.setRepairMessage(`Vision: ${vResult.repairPrompt.split('\n')[0]}`);
-                break; // break verify loop, continue generate loop
-              }
-
-              // failed_terminal → stop; generated geometry is known bad.
-              if (vResult.kind === 'failed_terminal') {
-                console.warn('[Pipeline] vision terminal failure:', vResult.issues);
-                await this.handleVerificationFailure(data, `Vision verification failed:\n${vResult.issues}`);
-                return;
-              }
-              break;
-            }
-            this.checkCanceled();
-          }
-          // ── End verification ──────────────────────────────────────────────
-
-          await this.commitSuccess(data, bundle, manifest, structuralVerification);
-          return;
-
-        } catch (renderError) {
-          this.checkCanceled();
-          if (attempt < this.req.maxAttempts) {
-            const repairMsg = pickRetryMessage(attempt + 1, this.req.maxAttempts);
-            if (this.isActiveThread()) session.setRepairMessage(repairMsg);
-            const renderErrorText = toErrorMessage(renderError);
-            currentPrompt = `The previous code failed in ${backendLabel} with this error:\n${renderErrorText}\n\nPlease fix it.`;
-            attempt++;
-            continue;
-          } else {
-            await this.handleRenderFailure(data, renderError);
-            return;
-          }
-        }
-      } catch (e) {
-        this.checkCanceled();
-        const errMsg = toErrorMessage(e);
-        if (
-          !this.visionRetried &&
-          this.modelCapabilities.supportsVision &&
-          isVisionRejectedError(errMsg) &&
-          (await this.disableVisionAndPersist())
-        ) {
-          this.visionRetried = true;
-          console.info('[Pipeline] provider rejected image input; retrying as text-only', {
-            requestId: this.requestId,
-          });
-          // Re-run this attempt without images. Do not increment attempt counter.
-          continue;
-        }
-        await this.handleGenerationFailure(errMsg);
-        return;
-      }
-    }
-  }
-
-  // --- Logic Sub-methods ---
-
-  private async initDatabaseRecord() {
-    this.checkCanceled();
-    this.assistantMessageId = await initGenerationAttempt({
-      threadId: this.snapshotThreadId,
-      prompt: this.req.prompt,
-      attachments: this.req.attachments,
-      imageData: this.currentScreenshot
-    });
-    
-    requestQueue.patch(this.requestId, { 
-      result: {
-        design: null,
-        threadId: this.snapshotThreadId,
-        messageId: this.assistantMessageId,
-        stlUrl: '',
-        artifactBundle: null,
-        modelManifest: null,
-      } 
-    });
-    await refreshHistory();
-  }
-
-  private async classifyIntent() {
-    this.checkCanceled();
-    try {
-      const intent = await classifyIntent({
-        prompt: this.req.prompt,
-        threadId: this.snapshotThreadId,
-        context: buildLightReasoningContext(),
-        imageData: this.currentScreenshot,
-        attachments: this.modelFacingAttachments
       });
-      this.checkCanceled();
-      this.usageSummary = mergeUsageSummary(this.usageSummary, intent.usage);
-
-      const heuristicQuestion = isQuestionIntent(this.req.prompt);
-      const classifierIntent = `${intent?.intentMode ?? ''}`.trim().toLowerCase();
-      const classifierResponse = `${intent?.response ?? ''}`.trim();
-      const classifierFinalResponse = `${intent?.finalResponse ?? ''}`.trim();
-      const classifierConfidence = Number.isFinite(intent?.confidence) ? intent.confidence : 0;
-      this.finalResponse = classifierFinalResponse;
-
-      if (this.forcedQuestionOnly) {
-        this.isQuestion = true;
-        this.routeReason = 'explicit-question-only marker';
-      } else if (classifierFinalResponse) {
-        this.isQuestion = true;
-        this.routeReason = `classifier provided final_response (${classifierConfidence.toFixed(2)})`;
-      } else if (classifierIntent === 'question') {
-        this.isQuestion = true;
-        this.routeReason = `classifier chose question (${classifierConfidence.toFixed(2)})`;
-      } else if (classifierIntent === 'design') {
-        this.isQuestion = false;
-        this.routeReason = `classifier chose design (${classifierConfidence.toFixed(2)})`;
-      } else {
-        this.routeReason = heuristicQuestion
-          ? 'classifier fallback kept question heuristic'
-          : 'classifier fallback kept design heuristic';
-      }
-
-      const bubbleCandidate = this.finalResponse || classifierResponse;
-      if (bubbleCandidate) {
-        this.lightResponse = classifierResponse;
-        const bubbleText =
-          this.finalResponse || this.isQuestion || !isGenericRoutingResponse(classifierResponse)
-            ? bubbleCandidate
-            : 'Routing request...';
-        if (this.isActiveThread()) session.setCookingPhrase(bubbleText);
-      }
-      requestQueue.patch(this.requestId, { isQuestion: this.isQuestion, lightResponse: this.lightResponse });
-    } catch (e) {
-      console.warn(`[Pipeline:${this.requestId}] Intent classification fallback:`, e);
-      this.routeReason = this.isQuestion
-        ? 'classifier failed; kept local question heuristic'
-        : 'classifier failed; kept local design heuristic';
-    }
-  }
-
-  private async resolveThreadForFollowUpGuard(): Promise<{
-    thread: import('../types/domain').Thread | null;
-    source: 'none' | 'cached' | 'fetched' | 'fetch-failed';
-  }> {
-    if (!this.req.threadId) {
-      return { thread: null, source: 'none' };
-    }
-
-    const cachedThread = get(history).find((thread) => thread.id === this.snapshotThreadId) ?? null;
-    const hasCachedMessages = Boolean(cachedThread?.messages?.length);
-
-    try {
-      const page = await getThreadMessagesPage(this.snapshotThreadId, null, 8, false);
-      const projectedThread = cachedThread
-        ? { ...cachedThread, messages: page.messages }
-        : {
-            id: this.snapshotThreadId,
-            title: '',
-            summary: '',
-            messages: page.messages,
-            updatedAt: 0,
-            versionCount: 0,
-            pendingCount: 0,
-            queuedCount: 0,
-            errorCount: 0,
-          };
-      return { thread: projectedThread, source: 'fetched' };
     } catch (error) {
-      console.warn('[Pipeline] follow-up guard failed to load recent dialogue', {
-        requestId: this.requestId,
-        threadId: this.snapshotThreadId,
-        error: toErrorMessage(error),
-      });
-      if (hasCachedMessages) {
-        return { thread: cachedThread, source: 'cached' };
-      }
-      return { thread: cachedThread, source: 'fetch-failed' };
+      console.warn('[Orchestrator] exploration progress subscription unavailable:', error);
     }
-  }
-
-  private async applyFollowUpAnswerGuard(): Promise<boolean> {
-    const { thread: activeThread, source } = await this.resolveThreadForFollowUpGuard();
-    const guard = detectFollowUpAnswer({
-      promptText: this.req.prompt,
-      attachments: this.req.attachments,
-      activeThread,
-      explicitQuestionOnly: this.forcedQuestionOnly,
-    });
-
-    const details = {
-      requestId: this.requestId,
-      threadId: this.snapshotThreadId,
-      evaluated: true,
-      matched: guard.matched,
-      matchedMessageId: guard.messageId,
-      reason: guard.reason,
-      threadSource: source,
-      classifySkipped: guard.matched,
-    };
-    console.info('[Pipeline] follow-up guard', details);
-    profileLog('generate.followup_guard', details);
-
-    if (!guard.matched || !guard.question) {
-      return false;
-    }
-
-    this.followUpQuestion = guard.question;
-    this.followUpMessageId = guard.messageId;
-    this.isQuestion = false;
-    this.routeReason = 'follow-up answer to last assistant question';
-    this.lightResponse = 'Using your answer to continue the design.';
-    this.finalResponse = '';
-    if (this.isActiveThread()) {
-      session.setCookingPhrase(this.lightResponse);
-    }
-    requestQueue.patch(this.requestId, {
-      isQuestion: false,
-      lightResponse: this.lightResponse,
-    });
-    return true;
-  }
-
-  private async commitSuccess(
-    data: DesignOutput,
-    bundle: import('../types/domain').ArtifactBundle,
-    manifest: import('../types/domain').ModelManifest,
-    structuralVerification: StructuralVerificationResult | null,
-  ) {
-    const runtime = await inspectRuntimeBundle(
-      bundle,
-      undefined,
-      data.postProcessing ?? null,
-      data.initialParams ?? {},
-    );
-    const renderableBundle =
-      runtime.bundle ??
-      getRenderableRuntimeBundle(bundle, data.postProcessing ?? null, data.initialParams ?? {}) ??
-      bundle;
-    const stlUrlValue = toAssetUrl(renderableBundle.modelStlPath);
-    requestQueue.patch(this.requestId, { phase: 'committing' });
-    syncSessionPhaseFromQueue();
-
-    await this.finalizeAttempt('success', data, undefined, undefined, bundle, manifest);
-    this.checkCanceled();
-    if (this.assistantMessageId && structuralVerification) {
-      await persistStructuralVerification(this.assistantMessageId, structuralVerification);
-      this.checkCanceled();
-    }
-
-    if (this.canPublishGenerationProjection()) {
-      activeThreadId.set(this.snapshotThreadId);
-      hydrateActiveRenderSnapshot({
-        threadId: this.snapshotThreadId,
-        messageId: this.assistantMessageId,
-        design: data,
-        artifactBundle: renderableBundle,
-        modelManifest: manifest,
-        selectedPartId: null,
-        stlUrl: stlUrlValue,
-        status: 'Design synthesized successfully.',
-        targetRef: this.assistantMessageId ? {
-          kind: 'savedVersion',
-          threadId: this.snapshotThreadId,
-          messageId: this.assistantMessageId,
-        } : null,
-      });
-    }
-    requestQueue.patch(this.requestId, { threadId: this.snapshotThreadId });
-
-    await this.persistProjectionSnapshot({
-      design: data,
-      threadId: this.snapshotThreadId,
-      messageId: this.assistantMessageId,
-      artifactBundle: renderableBundle,
-      modelManifest: manifest,
-      selectedPartId: null,
-      targetRef: this.assistantMessageId ? {
-        kind: 'savedVersion',
-        threadId: this.snapshotThreadId,
-        messageId: this.assistantMessageId,
-      } : null,
-    });
-
-    await refreshHistory();
-    requestQueue.patch(this.requestId, {
-      phase: 'success',
-      lightResponse: data.response?.trim() || 'Design synthesized successfully.',
-      result: {
-        design: data,
-        threadId: this.snapshotThreadId,
-        messageId: this.assistantMessageId!,
-        stlUrl: stlUrlValue,
-        artifactBundle: renderableBundle,
-        modelManifest: manifest,
-        structuralVerification,
-      }
-    });
-    this.stopMicrowave(true);
-    syncSessionPhaseFromQueue();
-  }
-
-  private async commitPendingImageGeometry(data: DesignOutput, statusText: string) {
-    await this.finalizeAttempt('success', data, undefined, statusText);
-    this.checkCanceled();
-    const currentSession = get(session);
-    if (this.canPublishGenerationProjection()) {
-      activeThreadId.set(this.snapshotThreadId);
-      activeVersionId.set(this.assistantMessageId);
-      workingCopy.loadVersion(data, this.assistantMessageId);
-      paramPanelState.hydrateFromVersion(data, this.assistantMessageId);
-      session.setStatus(statusText);
-    }
-    await refreshHistory();
-    requestQueue.patch(this.requestId, {
-      phase: 'success',
-      lightResponse: statusText,
-      result: {
-        design: data,
-        threadId: this.snapshotThreadId,
-        messageId: this.assistantMessageId || '',
-        stlUrl: currentSession.stlUrl || '',
-        artifactBundle: currentSession.artifactBundle,
-        modelManifest: currentSession.modelManifest,
-      },
-    });
-    this.stopMicrowave(true);
-    syncSessionPhaseFromQueue();
-  }
-
-  private async handleFallbackQuestion(data: DesignOutput, currentPrompt: string) {
-    void currentPrompt;
-    const responseText = data.response || 'Question answered.';
-    await this.finalizeAttempt('success', undefined, undefined, responseText);
-
-    if (this.canPublishGenerationProjection()) {
-      session.setStatus(responseText);
-    }
-    await this.persistProjectionSnapshot({
-        design: data,
-        threadId: this.snapshotThreadId,
-        messageId: this.assistantMessageId,
-        artifactBundle: null,
-        modelManifest: null,
-        selectedPartId: null,
-      });
-    await refreshHistory();
-    requestQueue.patch(this.requestId, {
-      phase: 'success',
-      lightResponse: responseText,
-      result: {
-        design: data,
-        threadId: this.snapshotThreadId,
-        messageId: this.assistantMessageId || '',
-        stlUrl: '',
-        artifactBundle: null,
-        modelManifest: null,
-      },
-    });
-    this.stopMicrowave(true);
-    syncSessionPhaseFromQueue();
-  }
-
-  // --- Utility & Error Handlers ---
-
-  private checkCanceled() {
-    const r = get(requestQueue).byId[this.requestId];
-    if (!r || r.phase === 'canceled') {
-      throw new CancelError();
-    }
-  }
-
-  private isActiveThread() {
-    return get(activeThreadId) === this.snapshotThreadId;
-  }
-
-  private canPublishGenerationProjection() {
-    const queue = get(requestQueue);
-    const latestThreadRequestId = [...queue.order]
-      .reverse()
-      .find((id) => queue.byId[id]?.threadId === this.snapshotThreadId) ?? null;
-    return canPublishGenerationProjection({
-      requestId: this.requestId,
-      requestThreadId: this.snapshotThreadId,
-      latestThreadRequestId,
-      activeThreadId: get(activeThreadId),
-    });
-  }
-
-  private async persistProjectionSnapshot(snapshot: Parameters<typeof persistLastSessionSnapshot>[0]) {
-    const write = projectionSnapshotWrite.then(async () => {
-      if (!this.canPublishGenerationProjection()) return;
-      await persistLastSessionSnapshot(snapshot);
-    });
-    projectionSnapshotWrite = write.catch(() => undefined);
-    await write;
-  }
-
-  private updateStatus(msg: string) {
-    if (this.isActiveThread()) session.setStatus(msg);
-  }
-
-  private updateError(err: unknown) {
-    if (this.isActiveThread()) session.setError(toSessionError(err));
-  }
-
-  private stopMicrowave(success: boolean) {
-    const currentQ = get(requestQueue);
-    const activeIds = currentQ.order.filter(id => {
-      const r = currentQ.byId[id];
-      return r && !['success', 'error', 'canceled'].includes(r.phase);
-    });
-    const slot = activeIds.indexOf(this.requestId);
-    stopRequestHum(this.requestId, success, this.currentConfig, Math.max(0, slot));
-  }
-
-  private async finalizeAttempt(
-    status: 'success' | 'error' | 'discarded',
-    design?: DesignOutput,
-    errorMessage?: string,
-    responseText?: string,
-    artifactBundle?: import('../types/domain').ArtifactBundle | null,
-    modelManifest?: import('../types/domain').ModelManifest | null,
-  ) {
-    if (!this.assistantMessageId) return;
     try {
-      await finalizeGenerationAttempt({
-        messageId: this.assistantMessageId,
-        status,
-        design,
-        usage: this.usageSummary,
-        artifactBundle,
-        modelManifest,
-        errorMessage,
-        responseText
+      const workingDesign = buildWorkingDesignSnapshot();
+      const output = await startExplorationRun({
+        requestId,
+        threadId,
+        prompt: initialPrompt,
+        attachments,
+        imageData,
+        parentMacroCode: get(workingCopy).macroCode || null,
+        workingDesign,
+        baseVersionId,
+        kind: buildMode,
+        options: {
+          engineKind: workingDesign?.engineKind ?? currentConfig.defaultEngineKind,
+          sourceLanguage: workingDesign?.sourceLanguage ?? currentConfig.defaultSourceLanguage,
+          geometryBackend: workingDesign?.geometryBackend ?? currentConfig.defaultGeometryBackend,
+        },
+        acceptanceCriteria: [],
+        hardConstraints: [],
+        softPreferences: [],
       });
-    } catch (e) {
-      console.error("[Pipeline] Failed to finalize attempt:", e);
+      await projectExplorationRun(requestId, currentConfig, output as ExplorationRunResult);
+    } finally {
+      unlisten?.();
     }
-  }
-
-  private async handleGlobalError(err: unknown) {
-    const errText = toErrorMessage(err);
-    this.updateError(err && typeof err === 'object' ? err : `Pipeline Error: ${errText}`);
-    if (this.isActiveThread()) {
-      try {
-        const messPath = await getMessStlPath();
-        session.setStlUrl(toAssetUrl(messPath));
-        session.clearModelRuntime();
-      } catch (e) {
-        session.setStlUrl(null);
-      }
-    }
-    requestQueue.patch(this.requestId, { phase: 'error', error: errText });
-    await this.finalizeAttempt('error', undefined, errText);
-    this.stopMicrowave(false);
+  })().catch((error) => {
+    const message = formatBackendError(error);
+    if (get(activeThreadId) === threadId) session.setError(toSessionError(error));
+    requestQueue.patch(requestId, { phase: 'error', error: message });
+    stopRequestHumFor(requestId, false, currentConfig, threadId);
     syncSessionPhaseFromQueue();
-  }
-
-  private async handleRenderFailure(data: DesignOutput, renderError: unknown) {
-    const renderErrorText = toErrorMessage(renderError);
-    this.updateError(
-      renderError && typeof renderError === 'object'
-        ? renderError
-        : `Render Error: ${renderErrorText}`,
-    );
-    if (this.isActiveThread()) {
-      try {
-        const messPath = await getMessStlPath();
-        session.setStlUrl(toAssetUrl(messPath));
-        session.clearModelRuntime();
-      } catch (e) {
-        session.setStlUrl(null);
-      }
-    }
-
-    await this.finalizeAttempt('error', data, `Render Error: ${renderErrorText}`);
-    this.uiDeps.openCodeModalManual?.(data);
-    requestQueue.patch(this.requestId, { phase: 'error', error: `Render Error: ${renderErrorText}` });
-    this.stopMicrowave(false);
-    syncSessionPhaseFromQueue();
-  }
-
-  private async handleVerificationFailure(data: DesignOutput, verificationError: string) {
-    this.updateError(verificationError);
-    if (this.isActiveThread()) {
-      try {
-        const messPath = await getMessStlPath();
-        session.setStlUrl(toAssetUrl(messPath));
-        session.clearModelRuntime();
-      } catch (e) {
-        session.setStlUrl(null);
-      }
-    }
-
-    await this.finalizeAttempt('error', data, verificationError);
-    this.uiDeps.openCodeModalManual?.(data);
-    requestQueue.patch(this.requestId, { phase: 'error', error: verificationError });
-    this.stopMicrowave(false);
-    syncSessionPhaseFromQueue();
-  }
-
-  private async disableVisionAndPersist(): Promise<boolean> {
-    const currentConfig = get(config);
-    const engine = currentConfig.engines.find((e) => e.id === currentConfig.selectedEngineId);
-    if (!engine) return false;
-    const model = `${engine.model ?? ''}`.trim();
-    if (!model) return false;
-
-    const overrides = { ...(engine.visionOverrides ?? {}) };
-    overrides[model] = 'textOnly';
-    engine.visionOverrides = overrides;
-
-    try {
-      await saveConfig(currentConfig);
-    } catch (err) {
-      console.warn('[Pipeline] failed to persist text-only override', err);
-    }
-
-    // Drop all vision inputs for the rest of this pipeline run.
-    this.modelCapabilities = { supportsVision: false, reason: TEXT_ONLY_AFTER_REJECTION_REASON };
-    this.preCapture = null;
-    this.currentScreenshot = null;
-    this.modelFacingAttachments = filterModelFacingAttachments(this.modelFacingAttachments, false);
-    return true;
-  }
-
-  private async handleGenerationFailure(e: string) {
-    this.updateError(`Generation Failed: ${e}`);
-    if (this.isActiveThread()) {
-      try {
-        const messPath = await getMessStlPath();
-        session.setStlUrl(toAssetUrl(messPath));
-        session.clearModelRuntime();
-      } catch (err) {
-        session.setStlUrl(null);
-      }
-    }
-
-    await this.finalizeAttempt('error', undefined, `Generation Failed: ${e}`);
-    requestQueue.patch(this.requestId, { phase: 'error', error: `Generation Failed: ${e}` });
-    this.stopMicrowave(false);
-    syncSessionPhaseFromQueue();
-  }
+  }).finally(() => {
+    stopPhraseLoop();
+  });
+  return requestId;
 }
