@@ -494,6 +494,20 @@ test.describe('Project folder mirror (filesystem-project-mirror T5.2/T5.3)', () 
     await expect(page.locator('.viewport-transmutation')).toHaveCount(0);
   });
 
+  test('Given active source change is settling When watcher reports it Then render overlay appears before backend lock', async ({ page }) => {
+    await bootIntoBracketWorkspace(page);
+
+    await page.evaluate(() => {
+      window.__emitTauriEvent?.('project-folder-sync', [
+        { kind: 'detected', slug: 'bracket-abc12345', threadId: 'mock-thread-1' },
+      ]);
+    });
+
+    await expect(page.locator('.viewport-transmutation')).toBeVisible();
+    await expect(page.locator('.viewport-transmutation')).toHaveAttribute('data-phase', 'generating');
+    await expect(page.getByRole('img', { name: 'Settling changed source.' })).toBeVisible();
+  });
+
   test('Given a watcher batch contains multiple folders When active source changes Then its render overlay wins', async ({ page }) => {
     await bootIntoBracketWorkspace(page);
 

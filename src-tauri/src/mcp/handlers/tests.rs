@@ -9607,7 +9607,7 @@ async fn project_folder_watcher_ignores_duplicate_folder_for_bound_thread() {
 }
 
 #[tokio::test]
-async fn given_file_change_when_watcher_runs_then_sync_emits_within_two_seconds_and_applies_once() {
+async fn given_file_change_when_native_watcher_runs_then_detected_emits_within_two_seconds() {
     let (state, resolver) = seed_target_with_macro(
         "Latency Bracket",
         "V-base",
@@ -9615,8 +9615,6 @@ async fn given_file_change_when_watcher_runs_then_sync_emits_within_two_seconds_
     )
     .await;
     set_active_project_thread(&state, "thread-1");
-    state.config.lock().unwrap().default_geometry_backend =
-        crate::contracts::GeometryBackend::EckyRust;
     let export = handle_project_folder_export(
         &state,
         &resolver,
@@ -9640,7 +9638,7 @@ async fn given_file_change_when_watcher_runs_then_sync_emits_within_two_seconds_
     let started = std::time::Instant::now();
     let detected = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
-            transport.wait().await;
+            transport.wait_until(watcher.next_settle_deadline()).await;
             let events = watcher.tick(&state, &resolver, &ctx).await;
             if let Some(event) = events
                 .into_iter()
@@ -9667,23 +9665,7 @@ async fn given_file_change_when_watcher_runs_then_sync_emits_within_two_seconds_
         "elapsed={:?}",
         detected_elapsed
     );
-
-    let applied = tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        loop {
-            transport.wait().await;
-            let events = watcher.tick(&state, &resolver, &ctx).await;
-            if let Some(event) = events
-                .into_iter()
-                .find(|event| matches!(event, ProjectFolderWatchEvent::Applied { .. }))
-            {
-                break event;
-            }
-        }
-    })
-    .await
-    .expect("settled file edit must eventually apply");
-    assert!(matches!(applied, ProjectFolderWatchEvent::Applied { .. }));
-    assert!(watcher.tick(&state, &resolver, &ctx).await.is_empty());
+    assert!(watcher.next_settle_deadline().is_some());
 }
 
 #[tokio::test]

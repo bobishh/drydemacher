@@ -211,6 +211,10 @@ pub struct ConfigPersistenceStatus {
 
 pub struct GeometryRenderGuard {
     _lock: tokio::sync::OwnedMutexGuard<()>,
+    _activity: GeometryRenderActivityGuard,
+}
+
+struct GeometryRenderActivityGuard {
     active_count: Arc<AtomicUsize>,
     app_handle: Arc<Mutex<Option<tauri::AppHandle>>>,
 }
@@ -231,7 +235,21 @@ fn emit_geometry_render_activity(
     }
 }
 
-impl Drop for GeometryRenderGuard {
+impl GeometryRenderActivityGuard {
+    fn activate(
+        active_count: Arc<AtomicUsize>,
+        app_handle: Arc<Mutex<Option<tauri::AppHandle>>>,
+    ) -> Self {
+        let next_active_count = active_count.fetch_add(1, Ordering::AcqRel) + 1;
+        emit_geometry_render_activity(&app_handle, next_active_count);
+        Self {
+            active_count,
+            app_handle,
+        }
+    }
+}
+
+impl Drop for GeometryRenderActivityGuard {
     fn drop(&mut self) {
         let previous = self.active_count.fetch_sub(1, Ordering::AcqRel);
         let active_count = previous.saturating_sub(1);
@@ -379,16 +397,14 @@ impl AppState {
     }
 
     pub async fn acquire_geometry_render(&self) -> GeometryRenderGuard {
+        let activity = GeometryRenderActivityGuard::activate(
+            self.geometry_render_active_count.clone(),
+            self.app_handle.clone(),
+        );
         let lock = self.render_lock.clone().lock_owned().await;
-        let active_count = self
-            .geometry_render_active_count
-            .fetch_add(1, Ordering::AcqRel)
-            + 1;
-        emit_geometry_render_activity(&self.app_handle, active_count);
         GeometryRenderGuard {
             _lock: lock,
-            active_count: self.geometry_render_active_count.clone(),
-            app_handle: self.app_handle.clone(),
+            _activity: activity,
         }
     }
 
@@ -1034,6 +1050,42 @@ mod tests {
         assert_eq!(state.geometry_render_active_count(), 1);
 
         drop(guard);
+        assert_eq!(state.geometry_render_active_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn geometry_render_activity_includes_renders_waiting_for_the_backend_lock() {
+        let state = state();
+        let first_guard = state.acquire_geometry_render().await;
+        let waiting_state = state.clone();
+        let waiting_render =
+            tokio::spawn(async move { waiting_state.acquire_geometry_render().await });
+
+        tokio::task::yield_now().await;
+        assert_eq!(state.geometry_render_active_count(), 2);
+
+        drop(first_guard);
+        let second_guard = waiting_render.await.expect("waiting render guard");
+        assert_eq!(state.geometry_render_active_count(), 1);
+        drop(second_guard);
+        assert_eq!(state.geometry_render_active_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_waiting_render_clears_its_activity() {
+        let state = state();
+        let first_guard = state.acquire_geometry_render().await;
+        let waiting_state = state.clone();
+        let waiting_render =
+            tokio::spawn(async move { waiting_state.acquire_geometry_render().await });
+
+        tokio::task::yield_now().await;
+        assert_eq!(state.geometry_render_active_count(), 2);
+
+        waiting_render.abort();
+        let _ = waiting_render.await;
+        assert_eq!(state.geometry_render_active_count(), 1);
+        drop(first_guard);
         assert_eq!(state.geometry_render_active_count(), 0);
     }
 

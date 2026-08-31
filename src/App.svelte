@@ -1578,6 +1578,11 @@ import {
   });
   const geometryRenderActive = $derived(geometryRenderActiveCount > 0);
   const suppressViewportBusyUi = $derived(isBooting);
+  const projectFolderRenderPending = $derived(
+    !suppressViewportBusyUi &&
+      projectFolderNotice?.tone === 'pending' &&
+      projectFolderNotice.threadId === ($activeThreadId ?? null),
+  );
   let showEnrichmentModal = $state(false);
   let showExportChooser = $state(false);
   const enrichmentManifest = $derived.by(() => {
@@ -1590,6 +1595,7 @@ import {
   const viewerBusyState = $derived.by(() =>
     deriveViewerBusyState({
       geometryRenderActive,
+      projectFolderRenderPending,
     }),
   );
   const showViewerBusyMask = $derived(viewerBusyState.showViewerBusyMask);

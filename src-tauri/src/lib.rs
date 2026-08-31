@@ -738,7 +738,7 @@ pub fn run() {
                     .await;
                     let ctx = crate::mcp::handlers::project_folder_watcher_context();
                     loop {
-                        transport.wait().await;
+                        transport.wait_until(watcher.next_settle_deadline()).await;
                         let events = watcher.tick(&watcher_state, resolver.as_ref(), &ctx).await;
                         if events.is_empty() {
                             continue;

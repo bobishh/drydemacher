@@ -598,6 +598,19 @@ pub struct ProjectFolderWatchTransport {
     wake_rx: tokio::sync::mpsc::Receiver<()>,
 }
 
+fn project_folder_watch_wait_duration(
+    next_settle_deadline: Option<Instant>,
+    now: Instant,
+) -> Duration {
+    next_settle_deadline
+        .map(|deadline| {
+            deadline
+                .saturating_duration_since(now)
+                .min(PROJECT_FOLDER_FALLBACK_POLL)
+        })
+        .unwrap_or(PROJECT_FOLDER_FALLBACK_POLL)
+}
+
 impl ProjectFolderWatchTransport {
     pub async fn new(state: &AppState, app: &dyn PathResolver) -> Self {
         let (wake_tx, wake_rx) = tokio::sync::mpsc::channel(1);
@@ -641,9 +654,11 @@ impl ProjectFolderWatchTransport {
         }
     }
 
-    pub async fn wait(&mut self) {
+    pub async fn wait_until(&mut self, next_settle_deadline: Option<Instant>) {
+        let wait_duration =
+            project_folder_watch_wait_duration(next_settle_deadline, Instant::now());
         tokio::select! {
-            _ = tokio::time::sleep(PROJECT_FOLDER_FALLBACK_POLL) => {}
+            _ = tokio::time::sleep(wait_duration) => {}
             Some(_) = self.wake_rx.recv() => {}
         }
         while self.wake_rx.try_recv().is_ok() {}
@@ -869,6 +884,13 @@ impl ProjectFolderWatcher {
             debounce,
             ..Self::default()
         }
+    }
+
+    pub fn next_settle_deadline(&self) -> Option<Instant> {
+        self.pending
+            .values()
+            .map(|pending| pending.observed_at + self.debounce)
+            .min()
     }
 
     pub async fn tick(
@@ -1340,10 +1362,12 @@ mod verification_gate_tests {
     use super::{
         cancel_active_project_folder_render, declared_separated_print_layout,
         is_project_source_path, only_nonblocking_disconnected_codes,
-        ActiveProjectFolderRenderGuard,
+        project_folder_watch_wait_duration, ActiveProjectFolderRenderGuard,
+        PROJECT_FOLDER_DEBOUNCE, PROJECT_FOLDER_FALLBACK_POLL,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::time::Instant;
 
     #[test]
     fn model_source_change_cancels_only_the_active_watcher_render() {
@@ -1359,6 +1383,20 @@ mod verification_gate_tests {
 
         drop(guard);
         assert!(!cancel_active_project_folder_render());
+    }
+
+    #[test]
+    fn pending_edit_deadline_preempts_fallback_poll() {
+        let now = Instant::now();
+
+        assert_eq!(
+            project_folder_watch_wait_duration(Some(now + PROJECT_FOLDER_DEBOUNCE), now),
+            PROJECT_FOLDER_DEBOUNCE,
+        );
+        assert_eq!(
+            project_folder_watch_wait_duration(None, now),
+            PROJECT_FOLDER_FALLBACK_POLL,
+        );
     }
 
     #[test]
