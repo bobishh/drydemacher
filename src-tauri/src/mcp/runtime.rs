@@ -1992,14 +1992,11 @@ fn clear_live_session_for_disconnect(state: &AppState, session_id: &str, status_
         let session_id = session_id.to_string();
         let status_text = status_text.to_string();
         handle.block_on(async move {
-            // Close pending prompts before removing from mcp_sessions.
+            // Close pending prompts before removing from the MCP session registry.
             state
                 .close_prompts_for_session(&session_id, "session_disconnected")
                 .await;
-            let disconnected_session = {
-                let mut sessions = state.mcp_sessions.lock().await;
-                sessions.remove(&session_id)
-            };
+            let disconnected_session = state.mcp_session_registry.remove(&session_id).await;
             if let Some(session) = disconnected_session {
                 let conn = state.db.lock().await;
                 let _ = db::upsert_agent_session(

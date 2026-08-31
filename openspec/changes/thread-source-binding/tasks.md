@@ -20,6 +20,10 @@
 - [x] 1.5 Bind new threads; atomically write default source + sidecar.
 - [x] 1.6 Safely backfill existing thread on first open/export.
 - [x] 1.7 Focused proof and `cargo check`.
+- [x] 1.8 Replace frontend blank-then-manual initialization authority with one
+  Rust thread-creation intent. Rust owns thread/version ids, binding creation,
+  initial append/render/runtime outcome, raw error, and workspace projection.
+  Route edited-source fork and detached manual commit through the same intent.
 
 ## 2. Automatic Sync
 

@@ -101,7 +101,7 @@ pub async fn resolve_session_thread_target(
     session_id: &str,
 ) -> AppResult<Option<SessionThreadTarget>> {
     let live_target = {
-        let sessions = state.mcp_sessions.lock().await;
+        let sessions = state.mcp_session_registry.with_sessions().lock().await;
         sessions.get(session_id).and_then(|session| {
             session
                 .last_target
@@ -171,7 +171,10 @@ pub async fn add_dialogue_message(
     message: &Message,
 ) -> AppResult<()> {
     let conn = state.db.lock().await;
-    db::add_message(&conn, thread_id, message).map_err(|err| AppError::persistence(err.to_string()))
+    // Provider dialogue may arrive as a partial working row; legacy path until
+    // provider emits an atomic MessagePayload.
+    db::add_legacy_message(&conn, thread_id, message)
+        .map_err(|err| AppError::persistence(err.to_string()))
 }
 
 #[cfg(test)]
@@ -274,34 +277,37 @@ mod tests {
     async fn resolve_session_thread_target_prefers_live_target() {
         let conn = crate::db::init_db(&test_db_path("live-target")).expect("db");
         let state = AppState::new(test_config(), None, conn);
-        state.mcp_sessions.lock().await.insert(
-            "session-1".to_string(),
-            McpSessionState {
-                client_kind: "mcp-http".to_string(),
-                host_label: "Claude".to_string(),
-                agent_label: "Claude".to_string(),
-                llm_model_id: None,
-                llm_model_label: None,
-                bound_thread_id: None,
-                last_target: Some(McpTargetRef {
-                    thread_id: "thread-live".to_string(),
-                    message_id: "msg-live".to_string(),
-                    model_id: Some("model-live".to_string()),
-                }),
-                phase: None,
-                status_text: None,
-                busy: false,
-                activity_label: None,
-                activity_started_at: None,
-                attention_kind: None,
-                waiting_on_prompt: false,
-                current_turn_id: None,
-                current_turn_thread_id: None,
-                current_turn_working_message_ids: Vec::new(),
-                current_turn_working_version_message_id: None,
-                updated_at: 0,
-            },
-        );
+        state
+            .mcp_session_registry
+            .insert(
+                "session-1".to_string(),
+                McpSessionState {
+                    client_kind: "mcp-http".to_string(),
+                    host_label: "Claude".to_string(),
+                    agent_label: "Claude".to_string(),
+                    llm_model_id: None,
+                    llm_model_label: None,
+                    bound_thread_id: None,
+                    last_target: Some(McpTargetRef {
+                        thread_id: "thread-live".to_string(),
+                        message_id: "msg-live".to_string(),
+                        model_id: Some("model-live".to_string()),
+                    }),
+                    phase: None,
+                    status_text: None,
+                    busy: false,
+                    activity_label: None,
+                    activity_started_at: None,
+                    attention_kind: None,
+                    waiting_on_prompt: false,
+                    current_turn_id: None,
+                    current_turn_thread_id: None,
+                    current_turn_working_message_ids: Vec::new(),
+                    current_turn_working_version_message_id: None,
+                    updated_at: 0,
+                },
+            )
+            .await;
 
         let target = resolve_session_thread_target(&state, "session-1")
             .await
@@ -316,30 +322,33 @@ mod tests {
     async fn resolve_session_thread_target_falls_back_to_bound_thread() {
         let conn = crate::db::init_db(&test_db_path("bound-thread")).expect("db");
         let state = AppState::new(test_config(), None, conn);
-        state.mcp_sessions.lock().await.insert(
-            "session-1".to_string(),
-            McpSessionState {
-                client_kind: "mcp-http".to_string(),
-                host_label: "Claude".to_string(),
-                agent_label: "Claude".to_string(),
-                llm_model_id: None,
-                llm_model_label: None,
-                bound_thread_id: Some("thread-bound".to_string()),
-                last_target: None,
-                phase: Some("idle".to_string()),
-                status_text: None,
-                busy: false,
-                activity_label: None,
-                activity_started_at: None,
-                attention_kind: None,
-                waiting_on_prompt: false,
-                current_turn_id: None,
-                current_turn_thread_id: None,
-                current_turn_working_message_ids: Vec::new(),
-                current_turn_working_version_message_id: None,
-                updated_at: 0,
-            },
-        );
+        state
+            .mcp_session_registry
+            .insert(
+                "session-1".to_string(),
+                McpSessionState {
+                    client_kind: "mcp-http".to_string(),
+                    host_label: "Claude".to_string(),
+                    agent_label: "Claude".to_string(),
+                    llm_model_id: None,
+                    llm_model_label: None,
+                    bound_thread_id: Some("thread-bound".to_string()),
+                    last_target: None,
+                    phase: Some("idle".to_string()),
+                    status_text: None,
+                    busy: false,
+                    activity_label: None,
+                    activity_started_at: None,
+                    attention_kind: None,
+                    waiting_on_prompt: false,
+                    current_turn_id: None,
+                    current_turn_thread_id: None,
+                    current_turn_working_message_ids: Vec::new(),
+                    current_turn_working_version_message_id: None,
+                    updated_at: 0,
+                },
+            )
+            .await;
 
         let target = resolve_session_thread_target(&state, "session-1")
             .await

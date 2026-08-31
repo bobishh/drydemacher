@@ -54,6 +54,19 @@ external editor save
   -> advance head to appended version
 ```
 
+Workbench creation uses one `create_design_thread` intent with `mode`, optional
+title, and source only for macro mode. Rust allocates thread identity and
+atomically creates the SQLite thread plus bound blank source. In macro mode the
+same intent appends source before validation, renders it, attaches success or
+raw failure to that initial version, refreshes the binding, and returns one
+bounded workspace projection. The frontend does not open a blank thread and
+then invoke a second manual commit. New-project creation, edited-source fork,
+and manual commit without an active thread all use this intent; no frontend
+caller manufactures a thread identity. Edited-source forks may provide an exact
+immutable base thread/version identity. Rust rejects partial or stale identity
+before mutation and derives language, backend, parameters, controls, and
+post-processing from that persisted base instead of frontend copies.
+
 Each settled changed save is one append event. Append order is the only head
 order; the last append transaction always becomes head. Version records are
 immutable and retain source bytes (or a durable source reference/digest) plus

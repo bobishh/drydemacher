@@ -226,7 +226,7 @@ pub async fn save_or_update_agent_version_for_session(
     );
 
     let live_session_started = Instant::now();
-    let live_session = state.mcp_sessions.lock().await.get(&session_id).cloned();
+    let live_session = state.mcp_session_registry.get(&session_id).await;
     push_save_profile(
         state,
         &session_id,
@@ -344,7 +344,7 @@ pub async fn save_or_update_agent_version_for_session(
             } else {
                 response_text_created.clone()
             };
-            db::add_message(
+            db::add_legacy_message(
                 &conn,
                 &thread_id,
                 &Message {
@@ -419,7 +419,7 @@ pub async fn save_or_update_agent_version_for_session(
     };
     let state_update_started = Instant::now();
     {
-        let mut sessions = state.mcp_sessions.lock().await;
+        let mut sessions = state.mcp_session_registry.with_sessions().lock().await;
         if let Some(session) = sessions.get_mut(&session_id) {
             session.last_target = Some(next_target.clone());
             session.phase = Some("saving_version".to_string());

@@ -15,6 +15,33 @@ thread creation. It SHALL retain exact bound path after title/root changes.
 - AND `history.sqlite` contains exact source binding
 - AND file contains default editable source
 
+#### Scenario: Macro thread is created through one backend intent
+
+- GIVEN user supplies a title and non-empty initial macro source
+- WHEN workbench creates a macro thread
+- THEN Rust allocates the thread and initial-version identities
+- AND one intent creates the source binding, appends the exact source, validates,
+  renders, and attaches runtime or raw failure evidence
+- AND response contains the created bound source and bounded workspace projection
+- AND frontend does not compose blank creation with a later manual commit
+- AND new-project, edited-source fork, and detached manual-commit callers do not
+  manufacture thread identities
+
+#### Scenario: Edited-source fork retains immutable base policy
+
+- GIVEN edited source and an exact base thread/version identity
+- WHEN workbench creates the fork
+- THEN Rust derives language, geometry backend, parameters, controls, and
+  post-processing from the persisted base version
+- AND partial or stale base identity fails before thread, binding, folder, or
+  version mutation
+
+#### Scenario: Invalid creation intent leaves no partial thread
+
+- GIVEN macro mode has no non-empty source or blank mode carries source
+- WHEN creation intent is validated
+- THEN it fails before thread, binding, folder, or version mutation.
+
 ### Requirement: Ecky and External Editors Synchronize One Bound File
 
 The system SHALL append one immutable version for every settled changed save
