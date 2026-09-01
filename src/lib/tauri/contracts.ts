@@ -13,6 +13,38 @@ async getConfig() : Promise<Result<Config, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+async getBootProjection() : Promise<Result<BootProjection, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_boot_projection") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getBootRuntimeProjection() : Promise<Result<BootRuntimeProjection, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_boot_runtime_projection") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async saveConfigProjection(config: Config) : Promise<Result<BootRuntimeProjection, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_config_projection", { config }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async refreshModelCatalog() : Promise<Result<ModelCatalogProjection, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("refresh_model_catalog") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getAgyProvider(eckyThreadId: string) : Promise<Result<AgyProviderSnapshot | null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_agy_provider", { eckyThreadId }) };
@@ -32,14 +64,6 @@ async getAgyProviderMessages(input: AgyMessagePageInput) : Promise<Result<AgyMes
 async sendAgyProviderPrompt(input: AgyPromptInput) : Promise<Result<AgyProviderSnapshot, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("send_agy_provider_prompt", { input }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async dispatchAgyPromptQueue(eckyThreadId: string) : Promise<Result<AgyProviderSnapshot, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("dispatch_agy_prompt_queue", { eckyThreadId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -96,14 +120,6 @@ async getCodexTakeoverMessages(input: CodexMessagePageInput) : Promise<Result<Co
 async sendCodexTakeoverPrompt(input: CodexPromptInput) : Promise<Result<CodexTakeoverSnapshot, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("send_codex_takeover_prompt", { input }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async dispatchCodexPromptQueue(eckyThreadId: string) : Promise<Result<CodexTakeoverSnapshot, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("dispatch_codex_prompt_queue", { eckyThreadId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -205,14 +221,6 @@ async exportEckyMcpSkillZip(targetPath: string) : Promise<Result<null, AppError>
     else return { status: "error", error: e  as any };
 }
 },
-async openOrCreateBlankDesignThread(title: string | null) : Promise<Result<ProjectSourceDocument, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("open_or_create_blank_design_thread", { title }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 /**
  * Read the authoritative bound `model.ecky` for a design thread.
  * Missing legacy bindings are created before the file is read.
@@ -233,22 +241,6 @@ async getProjectSource(threadId: string) : Promise<Result<ProjectSourceDocument,
 async listExternalShapeSources(threadId: string) : Promise<Result<ExternalShapeSource[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_external_shape_sources", { threadId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async applyExternalShapePlaneCrop(request: ApplyExternalShapePlaneCropRequest) : Promise<Result<ApplyExternalShapePlaneCropResult, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("apply_external_shape_plane_crop", { request }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async removeExternalShapePlaneCrop(request: RemoveExternalShapePlaneCropRequest) : Promise<Result<RemoveExternalShapePlaneCropResult, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("remove_external_shape_plane_crop", { request }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -278,30 +270,9 @@ async previewExternalShapeSurfaceTrimRegion(request: SurfaceTrimRegionPreviewReq
     else return { status: "error", error: e  as any };
 }
 },
-async applyExternalShapeSurfaceTrim(request: ApplySurfaceTrimRequest) : Promise<Result<ApplySurfaceTrimResult, AppError>> {
+async applyExternalShapeEdit(input: ApplyExternalShapeEditInput) : Promise<Result<ApplyExternalShapeEditResult, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("apply_external_shape_surface_trim", { request }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async removeExternalShapeSurfaceTrim(request: RemoveSurfaceTrimRequest) : Promise<Result<RemoveSurfaceTrimResult, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("remove_external_shape_surface_trim", { request }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Atomically replace the one bound source used by editor, renderer, and diff.
- * The project watcher observes the changed bytes and appends their version;
- * no second commit/finalize action exists.
- */
-async saveProjectSource(threadId: string, source: string) : Promise<Result<ProjectSourceDocument, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("save_project_source", { threadId, source }) };
+    return { status: "ok", data: await TAURI_INVOKE("apply_external_shape_edit", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -456,22 +427,6 @@ async extractComponentPackageArchive(archivePath: string, targetDir: string) : P
     else return { status: "error", error: e  as any };
 }
 },
-async installComponentPackageArchive(archivePath: string) : Promise<Result<InstalledComponentPackage, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("install_component_package_archive", { archivePath }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async listInstalledComponentPackageHeaders() : Promise<Result<ComponentPackageHeader[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("list_installed_component_package_headers") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async uninstallComponentPackageCoordinate(packageId: string, version: string) : Promise<Result<boolean, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("uninstall_component_package_coordinate", { packageId, version }) };
@@ -496,13 +451,17 @@ async resolveInstalledComponentSource(packageId: string, version: string, compon
     else return { status: "error", error: e  as any };
 }
 },
-/**
- * Workbench entry point for the same copy-inline materializer used by the
- * MCP `component_import` tool. Do not replace this with a live import.
- */
-async componentImportCopyInline(request: CopyInlineComponentImportRequest) : Promise<Result<CopyInlineComponentImportResponse, AppError>> {
+async applyInlineComponentImport(input: ApplyInlineComponentImportInput) : Promise<Result<ApplyInlineComponentImportResult, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("component_import_copy_inline", { request }) };
+    return { status: "ok", data: await TAURI_INVOKE("apply_inline_component_import", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async libraryPanelIntent(intent: LibraryPanelIntent) : Promise<Result<LibraryPanelProjection, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("library_panel_intent", { intent }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -604,9 +563,9 @@ async checkCampaignStep(definitionId: string, stepId: string, candidateSource: s
     else return { status: "error", error: e  as any };
 }
 },
-async createCampaignRun(input: CreateCampaignRunInput) : Promise<Result<CampaignRun, AppError>> {
+async openCampaignProject(intent: OpenCampaignProjectIntent) : Promise<Result<OpenCampaignProjectResult, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("create_campaign_run", { input }) };
+    return { status: "ok", data: await TAURI_INVOKE("open_campaign_project", { intent }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -628,9 +587,9 @@ async getCampaignRun(id: string) : Promise<Result<CampaignRun, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
-async saveCampaignRun(run: CampaignRun) : Promise<Result<CampaignRun, AppError>> {
+async transitionCampaignRun(input: TransitionCampaignRunInput) : Promise<Result<TransitionCampaignRunResult, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("save_campaign_run", { run }) };
+    return { status: "ok", data: await TAURI_INVOKE("transition_campaign_run", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -647,14 +606,6 @@ async deleteCampaignRun(id: string) : Promise<Result<null, AppError>> {
 async getActiveProjectNavigation() : Promise<Result<ActiveProjectNavigation | null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_active_project_navigation") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async saveActiveProjectNavigation(navigation: ActiveProjectNavigation) : Promise<Result<ActiveProjectNavigation, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("save_active_project_navigation", { navigation }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -684,9 +635,17 @@ async saveAppWindowLayout(layout: ThreadWindowLayout) : Promise<Result<null, App
     else return { status: "error", error: e  as any };
 }
 },
-async startCaptureSession(threadId: string, messageId: string | null, title: string, targetSource: string, targetSourceLanguage: string, startedFromEmpty: boolean) : Promise<Result<CaptureSessionInfo, AppError>> {
+async startCaptureSession(target: ExistingCaptureTarget | null) : Promise<Result<CaptureSessionInfo, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("start_capture_session", { threadId, messageId, title, targetSource, targetSourceLanguage, startedFromEmpty }) };
+    return { status: "ok", data: await TAURI_INVOKE("start_capture_session", { target }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async applyCapturePreview(input: ApplyCapturePreviewInput) : Promise<Result<ApplyCapturePreviewResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("apply_capture_preview", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -708,9 +667,9 @@ async reopenCaptureRun(runId: string) : Promise<Result<ReopenedCaptureRun, AppEr
     else return { status: "error", error: e  as any };
 }
 },
-async adoptLatestCaptureRun(threadId: string, messageId: string | null, title: string, targetSource: string, targetSourceLanguage: string, startedFromEmpty: boolean) : Promise<Result<ReopenedCaptureRun, AppError>> {
+async adoptLatestCaptureRun(target: ExistingCaptureTarget | null) : Promise<Result<ReopenedCaptureRun, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("adopt_latest_capture_run", { threadId, messageId, title, targetSource, targetSourceLanguage, startedFromEmpty }) };
+    return { status: "ok", data: await TAURI_INVOKE("adopt_latest_capture_run", { target }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -724,41 +683,25 @@ async saveCapturePreviewSettings(runId: string, cropBounds: CaptureCropBounds | 
     else return { status: "error", error: e  as any };
 }
 },
-async getCaptureReconstructionGuide(runId: string) : Promise<Result<CaptureReconstructionGuide | null, AppError>> {
+async ensureCaptureReconstructionGuide(runId: string) : Promise<Result<EnsureCaptureReconstructionGuideResult, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("get_capture_reconstruction_guide", { runId }) };
+    return { status: "ok", data: await TAURI_INVOKE("ensure_capture_reconstruction_guide", { runId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async getCaptureGuideSourceIdentity(runId: string) : Promise<Result<CaptureGuideSourceMesh, AppError>> {
+async applyCaptureGuideEdit(input: ApplyCaptureGuideEditInput) : Promise<Result<ApplyCaptureGuideEditResult, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("get_capture_guide_source_identity", { runId }) };
+    return { status: "ok", data: await TAURI_INVOKE("apply_capture_guide_edit", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async getCaptureGuideContext(runId: string) : Promise<Result<CaptureGuideContext, AppError>> {
+async validateCaptureGuideIntent(input: ValidateCaptureGuideIntentInput) : Promise<Result<ValidateCaptureGuideIntentResult, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("get_capture_guide_context", { runId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async saveCaptureReconstructionGuide(runId: string, expectedRevision: number, expectedMeshDigest: string, guide: CaptureReconstructionGuide, guideState: CaptureReconstructionGuideState) : Promise<Result<CaptureReconstructionGuide, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("save_capture_reconstruction_guide", { runId, expectedRevision, expectedMeshDigest, guide, guideState }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async evaluateCaptureReconstructionGuide(runId: string, expectedMeshDigest: string, guide: CaptureReconstructionGuide) : Promise<Result<CaptureReconstructionGuide, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("evaluate_capture_reconstruction_guide", { runId, expectedMeshDigest, guide }) };
+    return { status: "ok", data: await TAURI_INVOKE("validate_capture_guide_intent", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -775,14 +718,6 @@ async queueCaptureGuidedReconstruction(runId: string, expectedGuideRevision: num
 async getCaptureSessionStatus(token: string) : Promise<Result<CaptureSessionInfo | null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_capture_session_status", { token }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async pairCaptureSession(token: string) : Promise<Result<CaptureSessionInfo, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("pair_capture_session", { token }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -916,6 +851,30 @@ async getThreadMessagesPage(threadId: string, before: string | null, limit: numb
     else return { status: "error", error: e  as any };
 }
 },
+async getWorkspaceProjection(threadId: string, preferredMessageId: string | null, messageLimit: number | null) : Promise<Result<WorkspaceProjection, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_workspace_projection", { threadId, preferredMessageId, messageLimit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async forkDesign(input: ForkDesignRequest) : Promise<Result<ForkDesignResponse, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("fork_design", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async createDesignThread(input: CreateDesignThreadIntent) : Promise<Result<CreateDesignThreadResponse, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_design_thread", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async clearHistory() : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("clear_history") };
@@ -924,9 +883,9 @@ async clearHistory() : Promise<Result<null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
-async deleteThread(id: string) : Promise<Result<null, AppError>> {
+async deleteThreadIntent(input: ThreadLifecycleIntent) : Promise<Result<ThreadLifecycleProjection, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_thread", { id }) };
+    return { status: "ok", data: await TAURI_INVOKE("delete_thread_intent", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -940,17 +899,17 @@ async renameThread(id: string, title: string) : Promise<Result<null, AppError>> 
     else return { status: "error", error: e  as any };
 }
 },
-async deleteVersion(messageId: string) : Promise<Result<null, AppError>> {
+async deleteVersionIntent(input: VersionHistoryIntent) : Promise<Result<VersionHistoryIntentResponse, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_version", { messageId }) };
+    return { status: "ok", data: await TAURI_INVOKE("delete_version_intent", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async restoreVersion(messageId: string) : Promise<Result<null, AppError>> {
+async restoreVersionIntent(input: VersionHistoryIntent) : Promise<Result<VersionHistoryIntentResponse, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("restore_version", { messageId }) };
+    return { status: "ok", data: await TAURI_INVOKE("restore_version_intent", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -996,17 +955,25 @@ async hideDeletedMessage(messageId: string) : Promise<Result<null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
-async finalizeThread(id: string, messageId: string | null) : Promise<Result<null, AppError>> {
+async finalizeThreadIntent(input: ThreadLifecycleIntent) : Promise<Result<ThreadLifecycleProjection, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("finalize_thread", { id, messageId }) };
+    return { status: "ok", data: await TAURI_INVOKE("finalize_thread_intent", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async reopenThread(id: string) : Promise<Result<null, AppError>> {
+async reopenThreadIntent(input: ThreadLifecycleIntent) : Promise<Result<ThreadLifecycleProjection, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("reopen_thread", { id }) };
+    return { status: "ok", data: await TAURI_INVOKE("reopen_thread_intent", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openInventoryThreadIntent(input: OpenInventoryThreadIntent) : Promise<Result<WorkspaceProjection, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_inventory_thread_intent", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1036,57 +1003,71 @@ async saveThreadWindowLayout(threadId: string, layout: ThreadWindowLayout) : Pro
     else return { status: "error", error: e  as any };
 }
 },
-async generateDesign(prompt: string, threadId: string | null, parentMacroCode: string | null, workingDesign: DesignOutput | null, isRetry: boolean, imageData: string | null, attachments: Attachment[] | null, options: GenerateDesignOptions | null) : Promise<Result<GenerateOutput, AppError>> {
+async startExplorationCycle(input: StartCycleInput) : Promise<Result<CyclePacket, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("generate_design", { prompt, threadId, parentMacroCode, workingDesign, isRetry, imageData, attachments, options }) };
+    return { status: "ok", data: await TAURI_INVOKE("start_exploration_cycle", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async initGenerationAttempt(threadId: string, prompt: string, attachments: Attachment[] | null, imageData: string | null) : Promise<Result<string, AppError>> {
+async getExplorationCycle(cycleId: string) : Promise<Result<CyclePacket, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("init_generation_attempt", { threadId, prompt, attachments, imageData }) };
+    return { status: "ok", data: await TAURI_INVOKE("get_exploration_cycle", { cycleId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async finalizeGenerationAttempt(messageId: string, status: FinalizeStatus, design: DesignOutput | null, usage: UsageSummary | null, artifactBundle: ArtifactBundle | null, modelManifest: ModelManifest | null, errorMessage: string | null, responseText: string | null) : Promise<Result<null, AppError>> {
+async getActiveExplorationCycle(threadId: string) : Promise<Result<CyclePacket | null, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("finalize_generation_attempt", { messageId, status, design, usage, artifactBundle, modelManifest, errorMessage, responseText }) };
+    return { status: "ok", data: await TAURI_INVOKE("get_active_exploration_cycle", { threadId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async persistStructuralVerification(messageId: string, structuralVerification: StructuralVerificationResult) : Promise<Result<null, AppError>> {
+async getExplorationCycleEvents(cycleId: string, afterSequence: number | null, limit: number | null) : Promise<Result<CycleEvent[], AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("persist_structural_verification", { messageId, structuralVerification }) };
+    return { status: "ok", data: await TAURI_INVOKE("get_exploration_cycle_events", { cycleId, afterSequence, limit }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async classifyIntent(prompt: string, threadId: string | null, context: string | null, imageData: string | null, attachments: Attachment[] | null) : Promise<Result<IntentDecision, AppError>> {
+async answerExplorationCycle(cycleId: string, answer: string) : Promise<Result<CyclePacket, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("classify_intent", { prompt, threadId, context, imageData, attachments }) };
+    return { status: "ok", data: await TAURI_INVOKE("answer_exploration_cycle", { cycleId, answer }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async verifyRender(originalPrompt: string, screenshots: string[], referenceImagePaths: string[], structuralSummary: string | null) : Promise<Result<VisualVerificationResult, AppError>> {
+async stopExplorationCycle(cycleId: string) : Promise<Result<CyclePacket, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("verify_render", { originalPrompt, screenshots, referenceImagePaths, structuralSummary }) };
+    return { status: "ok", data: await TAURI_INVOKE("stop_exploration_cycle", { cycleId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async verifyGeneratedModel(modelId: string, originalPrompt: string) : Promise<Result<StructuralVerificationResult, AppError>> {
+async startExplorationRun(input: StartExplorationRunInput) : Promise<Result<ExplorationRunProjection, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("verify_generated_model", { modelId, originalPrompt }) };
+    return { status: "ok", data: await TAURI_INVOKE("start_exploration_run", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Cancel backend-owned work for one request and stop its durable cycle, if any.
+ *
+ * Callers provide cancellation intent only. The registry and cycle reducer own
+ * the actual lifecycle transitions.
+ */
+async stopExplorationRun(input: StopExplorationRunInput) : Promise<Result<CyclePacket | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("stop_exploration_run", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1124,65 +1105,17 @@ async renderModel(macroCode: string, parameters: Partial<{ [key in string]: Para
     else return { status: "error", error: e  as any };
 }
 },
-async importFcstd(sourcePath: string) : Promise<Result<ArtifactBundle, AppError>> {
+async applySemanticManifestEdit(input: ApplySemanticManifestEditInput) : Promise<Result<SemanticManifestEditResult, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("import_fcstd", { sourcePath }) };
+    return { status: "ok", data: await TAURI_INVOKE("apply_semantic_manifest_edit", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async searchFreecadLibrary(request: FreecadLibrarySearchRequest) : Promise<Result<FreecadLibraryItem[], AppError>> {
+async applySemanticControlValue(input: ApplySemanticControlValueInput) : Promise<Result<ApplySemanticControlValueResult, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("search_freecad_library", { request }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async importFreecadLibraryPart(request: FreecadLibraryImportRequest) : Promise<Result<ArtifactBundle, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("import_freecad_library_part", { request }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async applyImportedModel(artifactBundle: ArtifactBundle, manifest: ModelManifest, parameters: Partial<{ [key in string]: ParamValue }>, messageId: string | null) : Promise<Result<ArtifactBundle, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("apply_imported_model", { artifactBundle, manifest, parameters, messageId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async getModelManifest(modelId: string) : Promise<Result<ModelManifest, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_model_manifest", { modelId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async extractBrepHiddenLineProjections(request: BrepHiddenLineProjectionRequest) : Promise<Result<BrepHiddenLineProjectionResponse, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("extract_brep_hidden_line_projections", { request }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async saveModelManifest(modelId: string, manifest: ModelManifest, messageId: string | null) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("save_model_manifest", { modelId, manifest, messageId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async getDefaultMacro() : Promise<Result<string, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_default_macro") };
+    return { status: "ok", data: await TAURI_INVOKE("apply_semantic_control_value", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1236,25 +1169,25 @@ async safeSaveDialog(defaultPath: string, filterName: string, extensions: string
     else return { status: "error", error: e  as any };
 }
 },
-async validateFemStudy(request: FemStudyRequest) : Promise<Result<FemStudyValidationResponse, AppError>> {
+async validateFemStudyIntent(input: FemRunIntentInput) : Promise<Result<FemStudyValidationResponse, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("validate_fem_study", { request }) };
+    return { status: "ok", data: await TAURI_INVOKE("validate_fem_study_intent", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async previewFemMesh(request: FemStudyRequest) : Promise<Result<FemMeshPreviewResponse, AppError>> {
+async runFemStudyIntent(input: FemRunIntentInput) : Promise<Result<FemRunIntentResponse, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("preview_fem_mesh", { request }) };
+    return { status: "ok", data: await TAURI_INVOKE("run_fem_study_intent", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async runFemStudy(request: FemStudyRequest) : Promise<Result<FemRunResponse, AppError>> {
+async previewFemMeshIntent(input: FemRunIntentInput) : Promise<Result<FemMeshPreviewIntentResponse, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("run_fem_study", { request }) };
+    return { status: "ok", data: await TAURI_INVOKE("preview_fem_mesh_intent", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1268,33 +1201,25 @@ async cancelFemStudy(jobId: string) : Promise<Result<FemCancelResponse, AppError
     else return { status: "error", error: e  as any };
 }
 },
-async readFemResult(request: FemResultReadRequest) : Promise<Result<FemResultReadResponse, AppError>> {
+async exportFemResultVtuIntent(input: FemVtuExportIntentInput, targetPath: string) : Promise<Result<FemVtuExportResponse, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("read_fem_result", { request }) };
+    return { status: "ok", data: await TAURI_INVOKE("export_fem_result_vtu_intent", { input, targetPath }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async exportFemResultVtu(request: FemResultReadRequest, targetPath: string) : Promise<Result<FemVtuExportResponse, AppError>> {
+async runFemConvergenceIntent(input: FemConvergenceIntentInput) : Promise<Result<FemConvergenceResponse, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("export_fem_result_vtu", { request, targetPath }) };
+    return { status: "ok", data: await TAURI_INVOKE("run_fem_convergence_intent", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async runFemConvergence(request: FemConvergenceRequest) : Promise<Result<FemConvergenceResponse, AppError>> {
+async getCachedFemConvergenceIntent(input: FemConvergenceIntentInput) : Promise<Result<FemConvergenceResponse | null, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("run_fem_convergence", { request }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async getCachedFemConvergence(request: FemConvergenceRequest) : Promise<Result<FemConvergenceResponse | null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_cached_fem_convergence", { request }) };
+    return { status: "ok", data: await TAURI_INVOKE("get_cached_fem_convergence_intent", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1332,9 +1257,9 @@ async generateSketchDraftPreview(request: SketchDraftRequest) : Promise<Result<[
     else return { status: "error", error: e  as any };
 }
 },
-async generateSketchPreviewHull(request: SketchPreviewHullRequest) : Promise<Result<[SketchDraftSource, ArtifactBundle], AppError>> {
+async submitSketchPreview(request: SketchPreviewSubmissionRequest) : Promise<Result<SketchPreviewSubmissionPacket, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("generate_sketch_preview_hull", { request }) };
+    return { status: "ok", data: await TAURI_INVOKE("submit_sketch_preview", { request }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1356,14 +1281,6 @@ async saveSketchPreviewDraft(request: SaveSketchPreviewDraftRequest) : Promise<R
     else return { status: "error", error: e  as any };
 }
 },
-async loadSketchPreviewDraft(request: LoadSketchPreviewDraftRequest) : Promise<Result<SketchPreviewDraft | null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("load_sketch_preview_draft", { request }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async clearSketchPreviewDraft(request: ClearSketchPreviewDraftRequest) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("clear_sketch_preview_draft", { request }) };
@@ -1372,9 +1289,9 @@ async clearSketchPreviewDraft(request: ClearSketchPreviewDraftRequest) : Promise
     else return { status: "error", error: e  as any };
 }
 },
-async analyzeSketchBrepCandidates(request: SketchBrepCandidateRequest) : Promise<Result<SketchBrepCandidateResponse, AppError>> {
+async evaluateSketchDocumentConstraints(request: SketchConstraintEvaluationRequest) : Promise<Result<SketchConstraintEvaluationResponse, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("analyze_sketch_brep_candidates", { request }) };
+    return { status: "ok", data: await TAURI_INVOKE("evaluate_sketch_document_constraints", { request }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1396,49 +1313,49 @@ async acceptSketchBrepCandidateSolution(request: SketchBrepCandidateAcceptReques
     else return { status: "error", error: e  as any };
 }
 },
-async addManualVersion(input: AddManualVersionInput) : Promise<Result<string, AppError>> {
+async applyManualCode(input: ManualCodeApplyRequest) : Promise<Result<ManualCodeApplyResponse, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("add_manual_version", { input }) };
+    return { status: "ok", data: await TAURI_INVOKE("apply_manual_code", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async addImportedModelVersion(threadId: string, title: string, artifactBundle: ArtifactBundle, modelManifest: ModelManifest) : Promise<Result<string, AppError>> {
+async applyManualParameters(input: ManualParameterApplyRequest) : Promise<Result<ManualParameterApplyResponse, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("add_imported_model_version", { threadId, title, artifactBundle, modelManifest }) };
+    return { status: "ok", data: await TAURI_INVOKE("apply_manual_parameters", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async updateUiSpec(messageId: string, uiSpec: UiSpec) : Promise<Result<null, AppError>> {
+async applyImportedParameters(input: ImportedParameterApplyRequest) : Promise<Result<ManualParameterApplyResponse, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("update_ui_spec", { messageId, uiSpec }) };
+    return { status: "ok", data: await TAURI_INVOKE("apply_imported_parameters", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async updateParameters(messageId: string, parameters: Partial<{ [key in string]: ParamValue }>) : Promise<Result<null, AppError>> {
+async importModelIntent(input: ImportModelIntent) : Promise<Result<ImportedModelProjection, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("update_parameters", { messageId, parameters }) };
+    return { status: "ok", data: await TAURI_INVOKE("import_model_intent", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async updatePostProcessing(messageId: string, postProcessing: PostProcessingSpec | null) : Promise<Result<null, AppError>> {
+async persistControlDefaults(input: PersistControlDefaultsInput) : Promise<Result<PersistControlDefaultsResult, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("update_post_processing", { messageId, postProcessing }) };
+    return { status: "ok", data: await TAURI_INVOKE("persist_control_defaults", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async repairMissingVersionRuntime(messageId: string, artifactBundle: ArtifactBundle, modelManifest: ModelManifest) : Promise<Result<null, AppError>> {
+async repairVersionRuntime(input: RepairVersionRuntimeIntent) : Promise<Result<RepairVersionRuntimeResponse, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("repair_missing_version_runtime", { messageId, artifactBundle, modelManifest }) };
+    return { status: "ok", data: await TAURI_INVOKE("repair_version_runtime", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1583,14 +1500,6 @@ async preparePromptWorkspaceCapture(input: PreparePromptWorkspaceCaptureInput) :
     else return { status: "error", error: e  as any };
 }
 },
-async getMessageAttachments(messageId: string) : Promise<Result<Attachment[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_message_attachments", { messageId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async queueAgentPrompt(input: QueueAgentPromptInput) : Promise<Result<QueuedAgentPrompt, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("queue_agent_prompt", { input }) };
@@ -1611,13 +1520,9 @@ async resolveAgentConfirm(requestId: string, choice: string) : Promise<Result<nu
     else return { status: "error", error: e  as any };
 }
 },
-/**
- * Called by the frontend when the user submits a prompt in MCP mode.
- * Resolves the pending oneshot channel so the MCP handler can return the text and attachments.
- */
-async resolveAgentPrompt(input: ResolveAgentPromptInput) : Promise<Result<null, AppError>> {
+async submitAgentPromptReply(input: SubmitAgentPromptReplyInput) : Promise<Result<SubmitAgentPromptReplyResult, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("resolve_agent_prompt", { input }) };
+    return { status: "ok", data: await TAURI_INVOKE("submit_agent_prompt_reply", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1656,7 +1561,6 @@ async rejectAgentViewportScreenshot(input: RejectViewportScreenshotInput) : Prom
  * deliberately keep separate identities.
  */
 export type ActiveProjectNavigation = { kind: string; id: string; view: string }
-export type AddManualVersionInput = { threadId: string; title: string; versionName: string; macroCode: string; sourceLanguage: SourceLanguage | null; geometryBackend: GeometryBackend | null; parameters: Partial<{ [key in string]: ParamValue }>; uiSpec: UiSpec; postProcessing: PostProcessingSpec | null; artifactBundle: ArtifactBundle | null; modelManifest: ModelManifest | null; status?: MessageStatus | null; errorMessage?: string | null }
 export type Advisory = { advisoryId: string; label: string; severity: AdvisorySeverity; primitiveIds?: string[]; viewIds?: string[]; message: string; condition?: AdvisoryCondition; threshold?: number | null }
 export type AdvisoryCondition = "always" | "below" | "above"
 export type AdvisorySeverity = "info" | "warning"
@@ -1700,7 +1604,7 @@ vtStream?: string;
 vtDelta?: string | null; attentionRequired: boolean; busy?: boolean; activityLabel?: string | null; activityStartedAt?: number | null; attentionKind?: string | null; summary?: string | null; active: boolean; updatedAt: number }
 export type AgyMessagePage = { messages: CodexDialogueMessage[]; nextCursor: string | null; backwardsCursor: string | null }
 export type AgyMessagePageInput = { eckyThreadId: string; cursor: string | null; direction: string | null }
-export type AgyPromptInput = { eckyThreadId: string; promptText: string }
+export type AgyPromptInput = { eckyThreadId: string; promptText: string; attachments?: Attachment[] }
 export type AgyProviderBinding = { eckyThreadId: string; agyConversationId: string; label: string; cwd: string; bootstrapVersion: number; createdAt: number; updatedAt: number }
 export type AgyProviderSnapshot = { binding: AgyProviderBinding; messages: CodexDialogueMessage[]; liveMessages: CodexDialogueMessage[]; turnTraces: ProviderTurnTrace[]; nextCursor: string | null; backwardsCursor: string | null; runtime: CodexTakeoverRuntime; queue: CodexQueuedPrompt[]; capabilities: ProviderCapabilities }
 export type AgyStopInput = { eckyThreadId: string; turnId: string }
@@ -1708,10 +1612,17 @@ export type AnalysisDeclarationBinding = { analysisId: string; kind: string; par
 export type AppError = { code: AppErrorCode; message: string; details?: string | null; stableNodeKey?: string | null; startLine?: number | null; endLine?: number | null; operation?: string | null; diagnosticContext?: DiagnosticContext | null; layer?: ErrorLayer | null; fix?: ErrorFix | null }
 export type AppErrorCode = "validation" | "notFound" | "conflict" | "provider" | "persistence" | "render" | "parse" | "internal"
 export type AppLogEntry = { tsMs: number; message: string }
-export type ApplyExternalShapePlaneCropRequest = { threadId: string; nodeId: number; expectedSourceDigest: string; expectedMeshContentDigest: string; anchors: CaptureSurfaceAnchor[]; keepPositive: boolean; replaceCropNodeId?: number | null }
-export type ApplyExternalShapePlaneCropResult = { source: string; sourceDigest: string; origin: [number, number, number]; normal: [number, number, number]; keepPositive: boolean }
-export type ApplySurfaceTrimRequest = { schemaVersion: number; threadId: string; targetMessageId?: string | null; nodeId: number; expectedSourceDigest: string; expectedMeshContentDigest: string; loopAnchors: CaptureSurfaceAnchor[]; keepSeed: CaptureSurfaceAnchor; pathMode: SurfaceTrimPathMode; capMode: SurfaceTrimCapMode; replaceTrimNodeId?: number | null }
-export type ApplySurfaceTrimResult = { source: string; sourceDigest: string; trimNodeId: number; pointCount: number; pathMode: SurfaceTrimPathMode; capMode: SurfaceTrimCapMode; topology: SurfaceTrimMeshDiagnostics; capReports: SurfaceTrimCapReport[] }
+export type ApplyCaptureGuideEditInput = { runId: string; expectedRevision: number; expectedMeshDigest: string; edit: CaptureGuideEditIntent }
+export type ApplyCaptureGuideEditResult = { guide: CaptureReconstructionGuide; state: CaptureReconstructionGuideState; baseRevision: number; expectedRevisionMatched: boolean; sourceDigestMatched: boolean; rawEvidence: string[] }
+export type ApplyCapturePreviewInput = { runId: string }
+export type ApplyCapturePreviewResult = { source: string; draft: ManualCodeApplyResponse }
+export type ApplyExternalShapeEditInput = { threadId: string; baseMessageId?: string | null; expectedSourceDigest: string; edit: ExternalShapeEditIntent }
+export type ApplyExternalShapeEditResult = { version: ManualCodeApplyResponse; sourceDigest: string; externalSources: ExternalShapeSource[] }
+export type ApplyInlineComponentImportInput = { threadId: string; baseMessageId: string; expectedSourceDigest: string; packageId: string; version: string; componentId: string }
+export type ApplyInlineComponentImportResult = { version: ManualCodeApplyResponse; sourceDigest: string; entrySymbol: string; partKey: string }
+export type ApplySemanticControlValueInput = { threadId: string; targetMessageId: string; primitiveId: string; value: ParamValue }
+export type ApplySemanticControlValueResult = { parameterPatch: Partial<{ [key in string]: ParamValue }>; changedParameterKeys: string[]; appliedPrimitiveIds: string[] }
+export type ApplySemanticManifestEditInput = { modelId: string; messageId?: string | null; edit: SemanticManifestEditIntent }
 export type ArtifactBundle = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; contentHash: string; artifactVersion?: number; fcstdPath: string; manifestPath: string; macroPath?: string | null; modelStlPath: string; viewerAssets?: ViewerAsset[]; edgeTargets?: ViewerEdgeTarget[]; faceTargets?: ViewerFaceTarget[]; calloutAnchors?: CalloutAnchor[]; measurementGuides?: MeasurementGuide[]; exportArtifacts?: ExportArtifact[]; geometryProvenance?: GeometryProvenance | null; componentDependencyLock?: ComponentDependencyLock | null; componentDependencyLockDigest?: string | null; componentImportOrigins?: ComponentImportOrigin[]; componentPlacementEvidence?: ComponentPlacementEvidence[] }
 export type ArtifactBundleComponentPackageRequest = { packageId: string; version: string; displayName: string; tags?: string[]; componentId: string; componentVersion: string; componentDisplayName: string; sourceRef?: string | null; artifactBundle: ArtifactBundle; portTypes?: PortTypeDefinition[]; params?: ComponentParam[]; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; ports?: ComponentPort[] }
 export type AssemblyComponentRef = { instanceId: string; componentId: string }
@@ -1759,7 +1670,8 @@ export type AutoAgent = { id: string; label: string; cmd: string; model?: string
  * Active-mode wake behavior now depends on `mcp.mode` and `mcp.primaryAgentId`.
  */
 startOnDemand?: boolean }
-export type BrepHiddenLineProjectionRequest = { artifactBundle: ArtifactBundle; views?: SketchView[]; tolerance?: number | null; sketchDocument?: SketchDocument | null }
+export type BootProjection = { config: Config; history: Thread[]; workspace: WorkspaceProjection | null; selectedPartId: string | null }
+export type BootRuntimeProjection = { config: Config; capabilities: RuntimeCapabilities }
 export type BrepHiddenLineProjectionResponse = { modelId: string; sourceArtifactPath: string; views?: BrepHiddenLineProjectionView[]; warningEntries?: BrepHiddenLineWarning[]; validation?: SketchBrepProjectionValidation | null }
 export type BrepHiddenLineProjectionView = { view: SketchView; direction: [number, number, number]; visibleEdges?: BrepProjectedEdge2d[]; hiddenEdges?: BrepProjectedEdge2d[]; loops?: BrepProjectedLoop2d[] }
 export type BrepHiddenLineWarning = { kind: BrepHiddenLineWarningKind; view: SketchView; message: string }
@@ -1781,8 +1693,10 @@ export type CampaignRun = { id: string;
  * Explicit discriminator for heterogeneous Projects inventory.
  */
 kind?: string; title: string; definitionId: string; definitionVersion: string; currentStepId: string; completedStepIds?: string[]; passedChallengeIds?: string[]; draftOverridesByStepId?: Partial<{ [key in string]: string }>; createdAt: number; updatedAt: number }
+export type CampaignRunTransitionAction = { action: "saveDraft"; draft: string } | { action: "continue"; draft?: string | null } | { action: "back"; draft?: string | null } | { action: "checkSolution"; candidateSource: string }
 export type CampaignStepPayload = { definitionId: string; definitionVersion: string; currentStep: CampaignCurrentStep | null }
 export type CampaignSummary = { definitionId: string; sectionSlug: string; title: string; stepCount: number; firstStepId: string }
+export type CampaignTransitionCheck = { matched: boolean }
 export type CaptureAnalyticPrimitive = { kind: "line"; originMm: [number, number, number]; direction: [number, number, number] } | { kind: "plane"; originMm: [number, number, number]; normal: [number, number, number] } | { kind: "circle"; centerMm: [number, number, number]; normal: [number, number, number]; radiusMm: number } | { kind: "cylinder"; originMm: [number, number, number]; axisDirection: [number, number, number]; radiusMm: number; minAxisMm: number; maxAxisMm: number } | { kind: "cone"; apexMm: [number, number, number]; axisDirection: [number, number, number]; halfAngleDeg: number; minAxisMm: number; maxAxisMm: number } | { kind: "sphere"; centerMm: [number, number, number]; radiusMm: number }
 export type CaptureAnchorRemapProposal = { proposalId: string; landmarkId: string; oldAnchor: CaptureSurfaceAnchor; newAnchor: CaptureSurfaceAnchor; residualMm: number; confirmed: boolean }
 export type CaptureAuthoredSelector = { kind: "binding"; name: string } | { kind: "tag"; name: string }
@@ -1809,7 +1723,7 @@ export type CaptureFeatureOperationTrace = { operationIndex: number; operationKi
 export type CaptureFeaturePlanCandidate = { planId: string; label: string; operations: CaptureFeatureOperation[]; supportingEvidenceIds: string[]; rejectingEvidence: string[]; score: number; status: CaptureFeaturePlanStatus }
 export type CaptureFeaturePlanStatus = "supported" | "rejected" | "needsConfirmation"
 export type CaptureFitResidual = { rmsMm: number; maxMm: number; toleranceMm: number }
-export type CaptureGuideContext = { sourceMesh: CaptureGuideSourceMesh; targetSourceDigest: string; targetVersionId: string | null }
+export type CaptureGuideEditIntent = { kind: "addLandmark"; role: CaptureLandmarkRole; anchor: CaptureSurfaceAnchor } | { kind: "updateLandmark"; landmarkId: string; label: string; role: CaptureLandmarkRole } | { kind: "deleteLandmark"; landmarkId: string } | { kind: "replaceDraft"; guide: CaptureReconstructionGuide } | { kind: "configureProfile"; profileId: string; label: string; profileKind: CaptureProfileKind; operationHint: CaptureProfileOperationHint; supportPlaneId: string; featureLabel: string | null; fitRole: string | null } | { kind: "reorderProfileLandmark"; profileId: string; landmarkId: string; targetIndex: number } | { kind: "updateFeatureExpectation"; expectationId: string; label: string; expectedGeometryKind: CaptureExpectedGeometryKind; requiredBrepTopologyKind: CaptureRequiredBrepTopologyKind; cardinality: CaptureSelectorCardinality; partId: string; instancePath: string | null; expectedAuthoredSelector: CaptureAuthoredSelector; requiredForAcceptance: boolean; positionToleranceMm: number | null; normalToleranceDeg: number | null; radialToleranceMm: number | null } | { kind: "selectFeaturePlan"; planId: string | null }
 export type CaptureGuideResultProvenance = { guideId: string; guideRevision: number; guideCanonicalDigest: string; sourceMeshArtifactDigest: string; sourceMeshContentDigest: string; targetSourceDigest: string; targetVersionId: string | null; generatedSourceDigest: string; geometryDigest: string; assumptions: string[]; inferredRegions: string[]; selectedFeaturePlanId?: string | null; featureOperationTraces?: CaptureFeatureOperationTrace[]; correspondences: CaptureEvidenceCorrespondence[] }
 export type CaptureGuideSourceMesh = { artifactDigest: string; contentDigest: string; selection: CaptureMeshSelection; cropDigest: string | null; triangleCount: number; sourceBounds: CaptureSourceBounds }
 export type CaptureIgnoredRegion = { regionId: string; label: string; landmarkIds: string[]; reason: string }
@@ -1849,7 +1763,7 @@ export type CaptureRegionRelation = "smooth" | "sharp" | "unknown"
 export type CaptureRequiredBrepTopologyKind = "vertex" | "edge" | "face" | "orderedEdges"
 export type CaptureRun = { id: string; targetThreadId: string; targetMessageId?: string | null; title: string; state: CaptureSessionState; createdAt: number; updatedAt: number; acceptedFrameCount: number; meshPreview?: CaptureMeshPreview | null; derivedStlPath?: string | null; cropBounds?: CaptureCropBounds | null; previewScale: number; targetSource: string; targetSourceLanguage: string; startedFromEmpty: boolean; rawError?: string | null; reconstructionGuide?: CaptureReconstructionGuide | null; reconstructionGuideState?: CaptureReconstructionGuideState | null; guidedReconstructionMessageId?: string | null; guidedReconstructionModelId?: string | null; guidedReconstructionResult?: CaptureGuideResultProvenance | null; guidedReconstructionDeviation?: CaptureObservedDeviationReport | null }
 export type CaptureSelectorCardinality = "one" | "oneOrMore"
-export type CaptureSessionInfo = { sessionId: string; targetThreadId: string; targetMessageId?: string | null; pairingToken: string; pairingUrl: string; trustUrl: string; protocolVersion: number; clientCapabilities: CaptureClientCapabilities; state: CaptureSessionState; createdAt: number; expiresAt: number; acceptedFrameCount?: number; coveragePercent?: number; guidance?: string; rawError?: string | null; reconstructionProgress?: number | null; meshPreview?: CaptureMeshPreview | null }
+export type CaptureSessionInfo = { sessionId: string; targetThreadId: string; targetMessageId?: string | null; targetTitle: string; targetSource: string; targetSourceLanguage: string; startedFromEmpty: boolean; pairingToken: string; pairingUrl: string; trustUrl: string; protocolVersion: number; clientCapabilities: CaptureClientCapabilities; state: CaptureSessionState; createdAt: number; expiresAt: number; acceptedFrameCount?: number; coveragePercent?: number; guidance?: string; rawError?: string | null; reconstructionProgress?: number | null; meshPreview?: CaptureMeshPreview | null }
 export type CaptureSessionState = "pairing" | "capturing" | "reconstructing" | "preview" | "failed" | "cancelled"
 export type CaptureSourceBounds = { min: [number, number, number]; max: [number, number, number] }
 export type CaptureStageBypass = { stage: CaptureReconstructionStage; affectedEvidenceIds: string[]; explicitConstraintIds: string[]; rationale: string; acceptedByUser: boolean }
@@ -1859,12 +1773,12 @@ export type CaptureSurfaceRegion = { regionId: string; sourceMeshContentDigest: 
 export type CaptureSurfaceRegionKind = "plane" | "cylinder" | "cone" | "sphere" | "freeform" | "ignoredDamage"
 export type CaptureSymmetryCompletion = { kind: "none" } | { kind: "half"; planeId: string } | { kind: "quarter"; firstPlaneId: string; secondPlaneId: string }
 export type ClearSketchPreviewDraftRequest = { scopeId?: string | null }
-export type CodexDialogueMessage = { id: string; role: string; content: string; status: string; timestamp: number; providerEventKind?: ProviderEventKind | null }
+export type CodexDialogueMessage = { id: string; role: string; content: string; status: string; timestamp: number; attachments: Attachment[]; providerEventKind?: ProviderEventKind | null }
 export type CodexMessagePage = { messages: CodexDialogueMessage[]; nextCursor: string | null; backwardsCursor: string | null }
 export type CodexMessagePageInput = { eckyThreadId: string; cursor: string | null; direction: string | null }
-export type CodexPromptInput = { eckyThreadId: string; promptText: string }
-export type CodexQueuedPrompt = { id: string; eckyThreadId: string; promptText: string; status: string; error: string | null; createdAt: number; updatedAt: number }
-export type CodexSteerInput = { eckyThreadId: string; promptText: string; expectedTurnId: string }
+export type CodexPromptInput = { eckyThreadId: string; promptText: string; attachments?: Attachment[] }
+export type CodexQueuedPrompt = { id: string; eckyThreadId: string; promptText: string; attachments?: Attachment[]; status: string; error: string | null; createdAt: number; updatedAt: number }
+export type CodexSteerInput = { eckyThreadId: string; promptText: string; expectedTurnId: string; attachments?: Attachment[] }
 export type CodexStopInput = { eckyThreadId: string; turnId: string }
 export type CodexTakeoverBinding = { eckyThreadId: string; codexThreadId: string; label: string; cwd: string; bootstrapVersion: number; createdAt: number; updatedAt: number }
 export type CodexTakeoverRuntime = { phase: string; activeTurnId: string | null; error: string | null }
@@ -1980,24 +1894,19 @@ export type ControlView = { viewId: string; label: string; scope: ControlViewSco
 export type ControlViewScope = "global" | "part"
 export type ControlViewSection = { sectionId: string; label: string; primitiveIds?: string[]; collapsed?: boolean }
 export type ControlViewSource = "generated" | "inherited" | "llm" | "manual"
-/**
- * Request for the copy-inline component workflow used by MCP and Workbench.
- * This is intentionally distinct from the live-reference resolver above.
- */
-export type CopyInlineComponentImportRequest = { packageId: string; version: string; componentId: string;
-/**
- * Current persisted-or-draft authoring source. The inserted result remains
- * ordinary source and carries no package dependency state.
- */
-authoredSource: string }
-/**
- * Result of a copy-inline component insertion. `authored_source` contains
- * full package definitions plus one concrete `(part ...)` instance.
- */
-export type CopyInlineComponentImportResponse = { authoredSource: string; componentSource: string; entrySymbol: string; partKey: string }
 export type CorrespondenceEdge = { edgeId: string; source: FeatureOutputRef; target: FeatureOutputRef; relation: string; sourceRef?: SourceRef | null }
 export type CorrespondenceGraph = { edges: CorrespondenceEdge[] }
-export type CreateCampaignRunInput = { title: string; definitionId: string; definitionVersion: string; currentStepId: string }
+export type CreateDesignThreadIntent = { mode: DesignThreadCreationMode; title?: string | null; source?: string | null; baseThreadId?: string | null; baseMessageId?: string | null }
+export type CreateDesignThreadResponse = { threadId: string; sourceDocument: CreatedThreadSourceDocument; initialVersionId?: string | null; snapshotId?: string | null; parserMatched?: boolean | null; initialVersionError?: AppError | null; workspace: WorkspaceProjection }
+export type CreatedThreadSourceDocument = { folder: string; file: string; source: string }
+export type CycleDefinition = { objective: string; acceptanceCriteria?: string[]; hardConstraints?: string[]; softPreferences?: string[] }
+export type CycleEvent = { eventId: string; cycleId: string; sequence: number; eventType: CycleEventType; phase: CyclePhase; sourceVersionId?: string | null; resultVersionId?: string | null; evidenceRef?: string | null; rawError?: string | null; renderSnapshotId?: string | null; artifactDigest?: string | null; route?: CycleRouteMetadata | null; plan?: PlanProposal | null; question?: string | null; blockedDecision?: string | null; answer?: string | null; timestamp: number }
+export type CycleEventType = "started" | "planAccepted" | "buildStarted" | "buildUnchanged" | "versionAppended" | "verificationRecorded" | "decisionRecorded" | "providerFailed" | "modelCallRecorded" | "answered" | "stopped" | "interrupted"
+export type CyclePacket = { state: CycleState; baseVersionId: string; definition: CycleDefinition; hypothesis?: string | null; lastVerification?: Verification | null; lastRoute?: CycleRouteMetadata | null; eventCount: number; promptVersion: string }
+export type CyclePhase = "idle" | "planning" | "building" | "verifying" | "deciding" | "awaitingInput"
+export type CycleRouteMetadata = { promptVersion: string; provider: string; model: string; reasoningEffort?: string | null; latencyMs?: number | null; inputTokens?: number | null; outputTokens?: number | null; estimatedCostUsd?: number | null }
+export type CycleState = { cycleId: string; threadId: string; phase: CyclePhase; status: CycleStatus; currentVersionId: string; chosenVersionId?: string | null; pendingQuestion: string | null; pendingBlockedDecision?: string | null; lastAnswer?: string | null; lastEvidenceRef?: string | null; budget: number; budgetUsed: number }
+export type CycleStatus = "active" | "interrupted" | "completed" | "stopped"
 export type DeletedMessage = { id: string; threadId: string; threadTitle: string; role: MessageRole; content: string; output?: DesignOutput | null; usage?: UsageSummary | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; structuralVerification?: StructuralVerificationResult | null; agentOrigin?: AgentOrigin | null; timestamp: number; imageData?: string | null; visualKind?: MessageVisualKind | null; attachmentImages?: string[]; deletedAt: number }
 export type DeletedThreadSummary = { id: string; title: string; summary?: string; updatedAt: number; deletedAt: number; versionCount: number }
 export type DeletedThreadsPage = { items: DeletedThreadSummary[]; nextBefore: string | null; hasMore: boolean }
@@ -2005,6 +1914,7 @@ export type DenseTopologyItem = { kind: "edge"; value: ViewerEdgeTarget } | { ki
 export type DenseTopologyKind = "edge" | "face" | "selection"
 export type DenseTopologyPage = { snapshotRef: string; kind: DenseTopologyKind; items: DenseTopologyItem[]; nextCursor: string | null; totalCount: number; observedBytes: number }
 export type DesignOutput = { title?: string; versionName?: string; response?: string; interactionMode?: InteractionMode; macroCode: string; macroDialect?: MacroDialect; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; postProcessing?: PostProcessingSpec | null }
+export type DesignThreadCreationMode = "blank" | "macro"
 export type DiagnosticContext = { partKey?: string | null; opName?: string | null; startLine?: number | null; endLine?: number | null; resolvedParams: DiagnosticParamValue[] }
 export type DiagnosticParamValue = { key: string; value: ParamValue }
 export type DisplacementSpec = { imageParam: string; projection: ProjectionType; depthMm: number; invert?: boolean }
@@ -2017,6 +1927,7 @@ visionOverrides: Partial<{ [key in string]: VisionCapability }> }
 export type EngineKind = "freecad" | "ecky" | "build123d"
 export type EnrichmentProposal = { proposalId: string; label: string; partIds?: string[]; parameterKeys?: string[]; confidence?: number | null; status: EnrichmentStatus; provenance: string }
 export type EnrichmentStatus = "none" | "pending" | "accepted" | "rejected"
+export type EnsureCaptureReconstructionGuideResult = { guide: CaptureReconstructionGuide; state: CaptureReconstructionGuideState; created: boolean }
 /**
  * A structured next-action for an error: a one-line hint plus concrete valid
  * alternatives (e.g. nearest-op "did you mean" suggestions).
@@ -2040,8 +1951,14 @@ export type ErrorLayer =
  * The active geometry backend cannot execute a lowered op.
  */
 "backend"
+export type ExistingCaptureTarget = { threadId: string; messageId?: string | null; source: string; sourceLanguage: string }
+export type ExplorationRunKind = "interactive" | "controller"
+export type ExplorationRunOutput = { requestId: string; threadId: string; cycleId?: string | null; phase: ExplorationRunPhase; messageId: string; design?: DesignOutput | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; structuralVerification?: StructuralVerificationResult | null; usage?: UsageSummary | null; responseText?: string | null; rawError?: string | null; publicationAllowed: boolean }
+export type ExplorationRunPhase = "queued" | "planning" | "building" | "verifying" | "deciding" | "awaitingInput" | "completed" | "stopped" | "interrupted" | "superseded" | "failed"
+export type ExplorationRunProjection = { run: ExplorationRunOutput; message?: Message | null; snapshotId?: string | null }
 export type ExportArtifact = { label: string; format: string; path: string; role: string; geometryProvenance?: GeometryProvenance | null }
 export type ExportPartInput = { label: string; path: string; objectName?: string | null; partId?: string | null; displayColor?: string | null; placementFrame?: PortFrame | null }
+export type ExternalShapeEditIntent = { action: "applyPlaneCrop"; nodeId: number; expectedMeshContentDigest: string; anchors: CaptureSurfaceAnchor[]; keepPositive: boolean; replaceCropNodeId?: number | null } | { action: "removePlaneCrop"; nodeId: number; cropNodeId: number } | { action: "applySurfaceTrim"; schemaVersion: number; nodeId: number; expectedMeshContentDigest: string; loopAnchors: CaptureSurfaceAnchor[]; keepSeed: CaptureSurfaceAnchor; pathMode: SurfaceTrimPathMode; capMode: SurfaceTrimCapMode; replaceTrimNodeId?: number | null } | { action: "removeSurfaceTrim"; nodeId: number; trimNodeId: number }
 export type ExternalShapePlaneCrop = { nodeId: number; origin: [number, number, number]; normal: [number, number, number]; keepPositive: boolean }
 export type ExternalShapeSource = { nodeId: number; partKey: string; path: string; displayName: string; sourceDigest: string; contentDigest: string | null; byteLength: number | null; exists: boolean; planeCrops: ExternalShapePlaneCrop[]; surfaceTrims: ExternalShapeSurfaceTrim[] }
 export type ExternalShapeSurfaceTrim = { nodeId: number; schemaVersion: number; sourceDigest: string; loopAnchors: ExternalShapeSurfaceTrimAnchor[]; keepSeed: ExternalShapeSurfaceTrimAnchor; pathMode: SurfaceTrimPathMode; capMode: SurfaceTrimCapMode }
@@ -2063,14 +1980,15 @@ export type FemComputeConfig = { quality?: FemComputeQuality; maximumWallTimeMin
  */
 threadCount?: number }
 export type FemComputeQuality = "draft" | "balanced" | "fine"
+export type FemConvergenceIntentInput = { modelId: string; source: string; analysisName: string; meshSizesMm: number[] }
 export type FemConvergenceLevelDto = { meshSizeMm: number; status: string; error: string | null; analysisIdentityDigest: string | null; solutionDigest: string | null; resultDigest: string | null; meshContentDigest: string | null; nodeCount: number | null; tet4CellCount: number | null; minimumScaledJacobian: number | null; equilibriumRelativeImbalance: number | null; solverRelativeResidual: number | null; maximumDisplacementMm: number | null; maximumVonMisesMpa: number | null; displacementRelativeDelta: number | null; stressRelativeDelta: number | null }
-export type FemConvergenceRequest = { study: FemStudyRequest; meshSizesMm: number[]; displacementRelativeTolerance: number; stressRelativeTolerance: number }
 export type FemConvergenceResponse = { jobId: string; modelId: string; analysisName: string; sequenceStatus: string; levels: FemConvergenceLevelDto[]; displacementStatus: string; stressStatus: string; acceptanceEvaluations: FemAcceptanceEvaluationDto[] }
 export type FemEngineeringEvidenceDto = { question: FemEngineeringQuestionDto; idealization: FemIdealizationDto; inputs: FemInputEvidenceDto[]; assumptions: FemAssumptionDto[]; applicability: FemApplicabilityCheckDto[]; sensitivity: FemSensitivityEvidenceDto | null; validationEvidence: FemValidationEvidenceDto[]; verificationLayers: FemVerificationLayerDto[] }
 export type FemEngineeringQuestionDto = { questionId: string; statement: string; decision: string; acceptanceMetricIds: string[] }
 export type FemExtremumDto = { fieldKind: string; value: number; unit: string; nodeId: number | null; elementId: number | null; coordinateMm: [number, number, number]; meshContentDigest: string; sourceBoundaryDigest: string }
 export type FemIdealizationDto = { artifactDigest: string; kind: string; sourceGeometryDigest: string; analysisGeometryDigest: string; manufacturingGeometryDigest: string; affectedTopologyIds: string[]; justification: string; expectedInfluencePercent: number; acceptedByUser: boolean }
 export type FemInputEvidenceDto = { inputName: string; evidenceId: string; subject: string; source: string; authority: string; uncertaintyPercent: number | null; decisionCritical: boolean }
+export type FemMeshPreviewIntentResponse = { validation: FemStudyValidationResponse; mesh: FemMeshPreviewResponse }
 export type FemMeshPreviewResponse = { jobId: string; modelId: string; analysisName: string; analysisIdentityDigest: string; meshContentDigest: string; sourceBoundaryDigest: string; manifestPath: string; arrays: FemResultArrayDto[]; nodeCount: number; tet4CellCount: number; boundaryTriangleCount: number; faceGroupCount: number; minimumScaledJacobian: number; minimumRadiusRatio: number; connectedComponentCount: number; boundaryAreaMm2ByGroup: number[] }
 export type FemPipelineControlDto = { envelopeMm: number; minimumScaledJacobian: number; maximumRuntimeMs: number; relativeSolverTolerance: number;
 /**
@@ -2078,9 +1996,9 @@ export type FemPipelineControlDto = { envelopeMm: number; minimumScaledJacobian:
  */
 threadCount?: number }
 export type FemResultArrayDto = { name: string; path: string; scalarType: string; shape: number[]; byteLength: number; sha256: string }
-export type FemResultReadRequest = { analysisIdentityDigest: string; solutionDigest: string; maximumResultBytes: number }
-export type FemResultReadResponse = { sourceDigest: string; analysisIdentityDigest: string; solutionDigest: string; resultDigest: string; meshContentDigest: string; sourceBoundaryDigest: string; decisionReady: boolean; decisionReadinessError: string | null; manifestPath: string; arrays: FemResultArrayDto[]; summary: FemResultSummaryDto; supportReactions: FemSupportReactionDto[]; engineeringEvidence: FemEngineeringEvidenceDto; acceptanceEvaluations: FemAcceptanceEvaluationDto[] }
 export type FemResultSummaryDto = { maximumDisplacementMm: number; maximumVonMisesMpa: number; maximumPrincipalStressMpa: number; volumeMm3: number; massKg: number; minimumYieldSafetyFactor: number | null; equilibriumRelativeImbalance: number; solverRelativeResidual: number; minimumScaledJacobian: number; nodeCount: number; tet4CellCount: number; extrema: FemExtremumDto[] }
+export type FemRunIntentInput = { modelId: string; source: string; analysisName: string }
+export type FemRunIntentResponse = { validation: FemStudyValidationResponse; result: FemRunResponse }
 export type FemRunResponse = { jobId: string; modelId: string; analysisName: string; sourceDigest: string; analysisIdentityDigest: string; solutionDigest: string; resultDigest: string; meshContentDigest: string; sourceBoundaryDigest: string; decisionReady: boolean; decisionReadinessError: string | null; manifestPath: string; arrays: FemResultArrayDto[]; summary: FemResultSummaryDto; supportReactions: FemSupportReactionDto[]; engineeringEvidence: FemEngineeringEvidenceDto; acceptanceEvaluations: FemAcceptanceEvaluationDto[] }
 export type FemSensitivityEvidenceDto = { completed: boolean; caseResultDigests: string[]; metricRanges: FemSensitivityMetricDto[] }
 export type FemSensitivityMetricDto = { metricId: string; nominal: number; minimum: number; maximum: number; unit: string; dominantInputName: string | null; decisionChanged: boolean }
@@ -2091,17 +2009,21 @@ export type FemTopologyRunRequest = { study: FemStudyRequest; resumeStateDigest:
 export type FemTopologyRunResponse = { jobId: string; analysisIdentityDigest: string; meshContentDigest: string; inputDigest: string; stateDigest: string; resultDigest: string | null; termination: string; iterationCount: number; initialCompliance: number | null; finalCompliance: number | null; finalVolumeFraction: number | null; passiveSolidVolumeFraction: number | null; passiveVoidVolumeFraction: number | null; gcmmaTraceEdn: string; checkpointPath: string; densityPath: string | null; previewVtuPath: string | null; exactBrep: boolean; productionStep: boolean; engineeringAccepted: boolean; scopeDisclaimer: string }
 export type FemValidationEvidenceDto = { validationId: string; kind: string; source: string; resultDigest: string }
 export type FemVerificationLayerDto = { layer: string; status: string; evidenceIds: string[]; detail: string }
+export type FemVtuExportIntentInput = { analysisIdentityDigest: string; solutionDigest: string }
 export type FemVtuExportResponse = { path: string; byteLength: number; sha256: string; resultDigest: string }
 export type FinalizeStatus = "success" | "error" | "discarded"
-export type FreecadLibraryImportRequest = { item: FreecadLibraryItem; threadId?: string | null; title?: string | null }
+export type ForkDesignRequest = { sourceThreadId: string; sourceMessageId: string; title: string | null; versionName: string | null; messageLimit: number | null }
+export type ForkDesignResponse = { threadId: string; messageId: string; workspace: WorkspaceProjection }
 export type FreecadLibraryItem = { id: string; name: string; categoryPath: string; rootPath: string; relativePath: string; formats: string[]; preferredFormat: string; importPath: string; previewPath?: string | null; tags: string[] }
-export type FreecadLibrarySearchRequest = { query: string; roots?: string[]; limit?: number | null; offset?: number; includeArchitecture?: boolean }
 export type GenerateDesignOptions = { questionMode?: boolean | null; followUpQuestion?: string | null; engineKind?: EngineKind | null; sourceLanguage?: SourceLanguage | null; geometryBackend?: GeometryBackend | null }
-export type GenerateOutput = { design: DesignOutput; threadId: string; messageId: string; usage?: UsageSummary | null }
 export type GenieTraits = { version?: number; seed: number; colorHue: number; vertexCount: number; radiusBase: number; stretchY: number; asymmetry: number; chordSkip: number; jitterScale: number; pulseScale: number; hoverScale: number; warpScale: number; glowHueShift: number; eyeStyle: EyeStyle; eyeSpacing: number; eyeSize: number; mouthCurve: number; thinkingBias: number; repairBias: number; renderBias: number; expressiveness: number }
 export type GeometryBackend = "freecad" | "build123d" | "mesh"
 export type GeometryProvenance = { representation: GeometryRepresentation; sourceMeshDigests: string[]; closed?: boolean | null; boundaryOrNonManifoldEdgeCount?: number | null }
 export type GeometryRepresentation = "meshNative" | "facetedPolyBrep" | "analyticBrep" | "hybrid"
+export type ImportModelIntent = { source: ImportedModelSource; threadId?: string | null; title?: string | null }
+export type ImportedModelProjection = { threadId: string; messageId: string; title: string; message: Message; designOutput: DesignOutput; artifactBundle: ArtifactBundle; modelManifest: ModelManifest; snapshotId: string }
+export type ImportedModelSource = { kind: "fcstd"; sourcePath: string } | { kind: "freecadLibrary"; item: FreecadLibraryItem }
+export type ImportedParameterApplyRequest = { threadId: string; targetMessageId: string; parameters: Partial<{ [key in string]: ParamValue }>; persist?: boolean; title?: string | null; versionName?: string | null }
 export type InstalledAssemblyComponentControls = { instanceId: string; componentId: string; parameters: Partial<{ [key in string]: ParamValue }>; placementFrame?: PortFrame | null; installedSource: InstalledComponentSource }
 export type InstalledAssemblyComponentRuntime = { instanceId: string; componentId: string; parameters: Partial<{ [key in string]: ParamValue }>; placementFrame?: PortFrame | null; runtime: InstalledComponentRuntime }
 export type InstalledAssemblyComponentSource = { instanceId: string; componentId: string; placementFrame?: PortFrame | null; installedSource: InstalledComponentSource }
@@ -2112,13 +2034,14 @@ export type InstalledAssemblyOutputRuntime = { artifactBundle: ArtifactBundle; m
 export type InstalledAssemblyRuntime = { packageId: string; version: string; packageDisplayName: string; packageDir: string; assembly: AssemblyDefinition; portTypes?: PortTypeDefinition[]; mateTypes?: MateTypeDefinition[]; components?: InstalledAssemblyComponentRuntime[]; mateResults?: InstalledAssemblyMateResult[]; matesSolved?: boolean; operationResults?: InstalledAssemblyOperationResult[]; operationsApplied?: boolean; outputRuntime?: InstalledAssemblyOutputRuntime | null; warnings?: string[] }
 export type InstalledAssemblySource = { packageId: string; version: string; packageDisplayName: string; packageDir: string; assembly: AssemblyDefinition; portTypes?: PortTypeDefinition[]; mateTypes?: MateTypeDefinition[]; components?: InstalledAssemblyComponentSource[]; mateResults?: InstalledAssemblyMateResult[] }
 export type InstalledComponentControls = { installedSource: InstalledComponentSource; parameters: Partial<{ [key in string]: ParamValue }> }
-export type InstalledComponentPackage = { header: ComponentPackageHeader; packageDir: string }
 export type InstalledComponentRuntime = { installedSource: InstalledComponentSource; parameters: Partial<{ [key in string]: ParamValue }>; artifactBundle: ArtifactBundle; modelManifest: ModelManifest }
 export type InstalledComponentSource = { packageId: string; version: string; packageDisplayName: string; packageDir: string; component: ComponentDefinition; portTypes?: PortTypeDefinition[]; mateTypes?: MateTypeDefinition[]; sourcePath: string }
 export type IntentDecision = { intentMode: string; confidence: number; response: string; finalResponse?: string | null; usage?: UsageSummary | null }
 export type InteractionMode = "design" | "question" | "tune"
 export type KeepoutVolumeKind = "box" | "cylinder" | "sphere" | "custom"
 export type LastDesignSnapshot = { design?: DesignOutput | null; threadId?: string | null; messageId?: string | null; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; selectedPartId?: string | null; targetRef?: AuthoringTargetRef | null }
+export type LibraryPanelIntent = { kind: "loadComponents" } | { kind: "installPackage"; archivePath: string } | { kind: "loadFreecad"; query: string; page: number } | { kind: "setFreecadRoot"; root: string; query: string }
+export type LibraryPanelProjection = { kind: "componentPackages"; packageHeaders: ComponentPackageHeader[] } | { kind: "freecadLibrary"; freecadLibraryRoots: string[]; items: FreecadLibraryItem[]; page: number; hasMore: boolean }
 export type LithophaneAttachment = { id: string; enabled?: boolean; source: LithophaneAttachmentSource; targetPartId?: string; placement?: LithophanePlacement; relief?: LithophaneRelief; color?: LithophaneColor }
 export type LithophaneAttachmentSource = { kind: "file"; imagePath: string } | { kind: "param"; imageParam: string }
 export type LithophaneColor = { mode?: LithophaneColorMode; channelThicknessMm?: number }
@@ -2127,7 +2050,6 @@ export type LithophanePlacement = { mode?: LithophanePlacementMode; side?: Litho
 export type LithophanePlacementMode = "partSidePatch"
 export type LithophaneRelief = { depthMm?: number; invert?: boolean }
 export type LithophaneSide = "front" | "back" | "left" | "right" | "top" | "bottom"
-export type LoadSketchPreviewDraftRequest = { scopeId?: string | null }
 export type MacroAstSourceNode = { id: string; kind: string; label: string;
 /**
  * Byte offsets into the exact source string that was passed in.
@@ -2136,6 +2058,10 @@ startByte: number; endByte: number }
 export type MacroDialect = "legacy" | "cadFrameworkV1" | "ecky" | "build123d"
 export type ManifestBounds = { xMin: number; yMin: number; zMin: number; xMax: number; yMax: number; zMax: number }
 export type ManifestEnrichmentState = { status: EnrichmentStatus; proposals?: EnrichmentProposal[] }
+export type ManualCodeApplyRequest = { threadId: string; baseMessageId?: string | null; source: string; persist?: boolean; title?: string | null; versionName?: string | null; uiSpec?: UiSpec; parameters?: Partial<{ [key in string]: ParamValue }>; postProcessing?: PostProcessingSpec | null; sourceLanguage?: SourceLanguage | null; geometryBackend?: GeometryBackend | null }
+export type ManualCodeApplyResponse = { threadId: string; baseMessageId?: string | null; messageId?: string | null; status: MessageStatus; designOutput: DesignOutput; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; snapshotId?: string | null; parserMatched: boolean; error?: AppError | null }
+export type ManualParameterApplyRequest = { threadId: string; targetMessageId: string; parameters: Partial<{ [key in string]: ParamValue }>; persist?: boolean; title?: string | null; versionName?: string | null }
+export type ManualParameterApplyResponse = { threadId: string; baseMessageId: string; messageId?: string | null; status: MessageStatus; designOutput: DesignOutput; artifactBundle?: ArtifactBundle | null; modelManifest?: ModelManifest | null; snapshotId?: string | null; error?: AppError | null }
 export type MatePortTypePair = { aTypeId: string; bTypeId: string }
 export type MateTypeDefinition = { typeId: string; displayName: string; allowedPortTypePairs?: MatePortTypePair[]; params?: ComponentParam[] }
 export type McpConfig = {
@@ -2181,8 +2107,12 @@ export type MessageStatus = "pending" | "working" | "success" | "error" | "disca
 export type MessageVisualKind = "conceptPreview"
 export type MicrowaveConfig = { humId?: string | null; dingId?: string | null; muted?: boolean }
 export type MissionCoreIrEvaluation = { matched: boolean }
+export type ModelCatalogProjection = { config: Config; models: string[] }
 export type ModelManifest = { schemaVersion?: number; modelId: string; sourceKind: ModelSourceKind; sourceDigest?: string | null; coreDigest?: string | null; astSchemaVersion?: number | null; engineKind?: EngineKind; sourceLanguage?: SourceLanguage; geometryBackend?: GeometryBackend; document: DocumentMetadata; parts?: PartBinding[]; parameterGroups?: ParameterGroup[]; controlPrimitives?: ControlPrimitive[]; controlRelations?: ControlRelation[]; controlViews?: ControlView[]; previewViews?: PreviewView[]; advisories?: Advisory[]; selectionTargets?: SelectionTarget[]; measurementAnnotations?: MeasurementAnnotation[]; taggedAnchors: Partial<{ [key in string]: TaggedAnchorBinding }>; featureGraph?: FeatureGraph | null; correspondenceGraph?: CorrespondenceGraph | null; analysisDeclarations: AnalysisDeclarationBinding[]; warnings?: string[]; enrichmentState?: ManifestEnrichmentState; geometryProvenance?: GeometryProvenance | null; componentImportOrigins?: ComponentImportOrigin[]; componentPlacementEvidence?: ComponentPlacementEvidence[] }
 export type ModelSourceKind = "generated" | "importedFcstd" | "importedStep" | "importedMesh"
+export type OpenCampaignProjectIntent = { kind: "start"; definitionId: string } | { kind: "resume"; runId: string }
+export type OpenCampaignProjectResult = { run: CampaignRun; step: CampaignStepPayload }
+export type OpenInventoryThreadIntent = { threadId: string; messageLimit: number | null }
 export type OperationKind = "place" | "mate" | "join" | "cut" | "fuse" | "mold" | "blend"
 export type OverflowMode = "contain" | "cover" | "clamp" | "bleed"
 export type PackageVisibility = "source" | "compiled" | "locked" | "private"
@@ -2190,6 +2120,11 @@ export type ParamValue = string | number | boolean | null
 export type ParameterGroup = { groupId: string; label: string; parameterKeys?: string[]; partIds?: string[]; editable: boolean; presentation?: string | null; order?: number | null }
 export type ParsedParamsResult = { fields: UiField[]; params: Partial<{ [key in string]: ParamValue }> }
 export type PartBinding = { partId: string; freecadObjectName: string; label: string; kind: string; semanticRole?: string | null; viewerAssetPath?: string | null; viewerNodeIds?: string[]; parameterKeys?: string[]; editable: boolean; bounds?: ManifestBounds | null; volume?: number | null; area?: number | null }
+export type PersistControlDefaultsInput = { messageId: string; mutation: PersistControlDefaultsMutation }
+export type PersistControlDefaultsMutation = { action: "readFromMacro" } | { action: "saveSchema"; uiSpec: UiSpec; parameters: Partial<{ [key in string]: ParamValue }> } | { action: "saveValues"; parameters: Partial<{ [key in string]: ParamValue }> }
+export type PersistControlDefaultsResult = { uiSpec: UiSpec; parameters: Partial<{ [key in string]: ParamValue }>; workspace: WorkspaceProjection }
+export type PlanAction = "build" | "ask" | "stop"
+export type PlanProposal = { action: PlanAction; sourceVersionId: string; hypothesis: string; changeScope: string; expectedEvidence: string; budgetCost: number; question?: string | null; blockedDecision?: string | null }
 export type PortFrame = { origin: [number, number, number]; xAxis: [number, number, number]; yAxis: [number, number, number]; zAxis: [number, number, number] }
 export type PortReference = { instanceId: string; portId: string }
 export type PortTypeDefinition = { typeId: string; displayName: string; base?: string | null; interfaces?: string[]; compatibleWith?: string[]; allowedOps?: OperationKind[]; params?: ComponentParam[] }
@@ -2240,6 +2175,7 @@ export type ProjectSyncState =
 "conflict"
 export type ProjectionType = "planar" | "auto" | "cylindrical" | "spherical"
 export type PromptTranscription = { text: string; provider: string; model: string }
+export type ProposalStatusEdit = { proposalId: string; status: EnrichmentStatus }
 export type ProviderCapabilities = { steer: boolean; stop: boolean }
 export type ProviderEventKind = "assistant" | "activity"
 export type ProviderModels = { codex?: string; agy?: string }
@@ -2255,28 +2191,27 @@ export type RasterTraceProvenance = { kind: string; asset: RasterTraceAssetIdent
 export type RasterTraceRequest = { imagePath: string; view: SketchView; calibration: RasterTraceCalibration; threshold: number; invert?: boolean; maxContours?: number | null }
 export type RasterTraceResponse = { asset: RasterTraceAssetIdentity; contours: RasterTraceContour[]; connectedComponentCount: number; extractorVersion: string; evidence?: string[] }
 export type RejectViewportScreenshotInput = { requestId: string; error: string }
-export type RemoveExternalShapePlaneCropRequest = { threadId: string; nodeId: number; cropNodeId: number; expectedSourceDigest: string }
-export type RemoveExternalShapePlaneCropResult = { source: string; sourceDigest: string; removedCropNodeId: number }
-export type RemoveSurfaceTrimRequest = { threadId: string; targetMessageId?: string | null; nodeId: number; trimNodeId: number; expectedSourceDigest: string }
-export type RemoveSurfaceTrimResult = { source: string; sourceDigest: string; removedTrimNodeId: number }
 export type ReopenedCaptureRun = { run: CaptureRun; session: CaptureSessionInfo }
-export type ResolveAgentPromptInput = { requestId: string; promptText: string; messageIds: string[]; messageId?: string | null; attachments?: Attachment[] }
+export type RepairVersionRuntimeIntent = { threadId: string; messageId: string; expectedArtifactIdentity?: string | null }
+export type RepairVersionRuntimeResponse = { snapshotId: string; artifactIdentity: string; workspace: WorkspaceProjection }
 export type ResolveViewportScreenshotInput = { requestId: string; dataUrl: string; width: number; height: number; camera: ViewportCameraState; source: string; threadId: string; messageId: string; modelId?: string | null; includeOverlays: boolean }
 export type RuntimeAuthoringContext = { engineKind: EngineKind; sourceLanguage: SourceLanguage; geometryBackend: GeometryBackend }
 export type RuntimeBackendCapability = { available: boolean; detail: string; path?: string | null }
 export type RuntimeCapabilities = { freecad: RuntimeBackendCapability; build123D: RuntimeBackendCapability; directOcct: RuntimeBackendCapability; mesh: RuntimeBackendCapability; recommendedAuthoringContext: RuntimeAuthoringContext }
-export type SaveSketchPreviewDraftRequest = { scopeId?: string | null; draftSource: SketchDraftSource; artifactBundle: ArtifactBundle; sketchDocument?: SketchDocument | null }
+export type SaveSketchPreviewDraftRequest = { scopeId?: string | null; newScope?: boolean; draftSource: SketchDraftSource; artifactBundle: ArtifactBundle; sketchDocument?: SketchDocument | null }
 export type SelectOption = { label: string; value: SelectValue }
 export type SelectValue = string | number
 export type SelectionTarget = { targetId?: string | null; durableTargetId?: string | null; canonicalTargetId?: string | null; aliasIds?: string[]; partId: string; viewerNodeId: string; label: string; kind: SelectionTargetKind; editable: boolean; parameterKeys?: string[]; primitiveIds?: string[]; viewIds?: string[] }
 export type SelectionTargetKind = "part" | "object" | "group" | "vertex" | "edge" | "face"
+export type SemanticManifestEditIntent = { action: "saveView"; viewId?: string | null; label: string; scope: ControlViewScope; partIds?: string[]; primitiveIds?: string[]; sections?: ControlViewSection[]; default?: boolean } | { action: "deleteView"; viewId: string } | { action: "savePrimitive"; primitiveId?: string | null; label: string; primitiveKind: ControlPrimitiveKind; scope: ControlViewScope; partId?: string | null; bindings: PrimitiveBinding[]; attachToView?: boolean; baseViewId?: string | null } | { action: "deletePrimitive"; primitiveId: string } | { action: "saveAdvisory"; label: string; severity: AdvisorySeverity; primitiveIds: string[]; viewId?: string | null; message: string; condition: AdvisoryCondition; threshold?: number | null } | { action: "deleteAdvisory"; advisoryId: string } | { action: "saveRelation"; sourcePrimitiveId: string; targetPrimitiveId: string; mode: ControlRelationMode; scale?: number; offset?: number } | { action: "deleteRelation"; relationId: string } | { action: "setProposalStatus"; proposalId: string; status: EnrichmentStatus } | { action: "setProposalStatuses"; entries: ProposalStatusEdit[] }
+export type SemanticManifestEditResult = { manifest: ModelManifest; editedId: string; selectedViewId?: string | null }
 export type SketchAcceptedBrepComponentPackageRequest = { packageId: string; version: string; displayName: string; tags?: string[]; componentId: string; componentVersion: string; componentDisplayName: string; sourceRef: string; artifactBundle?: ArtifactBundle | null; document: SketchDocument; solutionId: string; portTypes?: PortTypeDefinition[]; params?: ComponentParam[]; uiSpec?: UiSpec; initialParams?: Partial<{ [key in string]: ParamValue }>; ports?: ComponentPort[] }
+export type SketchBrepAutoRepairEvidence = { primitiveId: string; view: SketchView; detail: string }
 export type SketchBrepCandidateAcceptRequest = { partId: string; document: SketchDocument; solutionId: string; tolerance?: number | null }
 export type SketchBrepCandidateAcceptResponse = { draftSource: SketchDraftSource; artifactBundle: ArtifactBundle; hiddenLineResponse: BrepHiddenLineProjectionResponse; candidateResponse: SketchBrepCandidateResponse; acceptedSolution: SketchBrepCandidateSolution; evidence?: string[] }
 export type SketchBrepCandidateCell = { cellId: string; min: [number, number, number]; max: [number, number, number]; supportViews?: SketchView[] }
 export type SketchBrepCandidateEdge = { edgeId: string; a: string; b: string; supportViews?: SketchView[] }
 export type SketchBrepCandidateGraph = { vertices?: SketchBrepCandidateVertex[]; edges?: SketchBrepCandidateEdge[] }
-export type SketchBrepCandidateRequest = { document: SketchDocument }
 export type SketchBrepCandidateResponse = { graph: SketchBrepCandidateGraph; search: SketchBrepCandidateSearch; validation: SketchBrepProjectionValidation }
 export type SketchBrepCandidateSearch = { cells?: SketchBrepCandidateCell[]; rejectedCellCount?: number; solutions?: SketchBrepCandidateSolution[]; evidence?: string[] }
 export type SketchBrepCandidateSolution = { solutionId: string; cellIds?: string[]; score: number; sourceStrategy?: SketchBrepCandidateSourceStrategy; evidence?: string[] }
@@ -2284,6 +2219,10 @@ export type SketchBrepCandidateSourceStrategy = "cellUnion" | "frontProfilePrism
 export type SketchBrepCandidateVertex = { vertexId: string; point: [number, number, number]; evidenceViews?: SketchView[] }
 export type SketchBrepProjectionValidation = { passed: boolean; issues?: SketchValidationIssue[]; evidence?: string[] }
 export type SketchConstraint = { constraintId: string; kind: SketchConstraintKind; targetIds?: string[]; value?: number | null }
+export type SketchConstraintEvaluationMode = "validate" | "repairConstraintValues" | "autoRepairGeometry"
+export type SketchConstraintEvaluationRequest = { document: SketchDocument; mode: SketchConstraintEvaluationMode; maxDelta?: number | null }
+export type SketchConstraintEvaluationResponse = { kind: "validation"; passed: boolean; evidence: string[]; issues: string[] } | { kind: "constraintValuesRepaired"; document: SketchDocument; evidence: string[] } | { kind: "geometryRepaired"; document: SketchDocument; evidence: SketchConstraintGeometryRepairEvidence[] } | { kind: "error"; error: string }
+export type SketchConstraintGeometryRepairEvidence = { primitiveId: string; detail: string }
 export type SketchConstraintKind = "closed" | "horizontal" | "vertical" | "tangent" | "equal" | "symmetric" | "dimension"
 export type SketchDefinition = { sketchId: string; view: SketchView; plane?: PortFrame | null; primitives?: SketchPrimitive[]; constraints?: SketchConstraint[] }
 export type SketchDocument = { documentId: string; sketches?: SketchDefinition[]; activeSketchId?: string | null; units?: string | null; metadata?: Partial<{ [key in string]: string }> | null }
@@ -2292,7 +2231,13 @@ export type SketchDraftRequest = { partId: string; sketch: SketchDefinition; ope
 export type SketchDraftSource = { sourceLanguage: SourceLanguage; geometryBackend: GeometryBackend; macroDialect: MacroDialect; source: string; warnings?: string[] }
 export type SketchFeatureSuggestion = { suggestionId: string; sketchId: string; primitiveId?: string | null; partId: string; operation: SketchDraftOperationKind; amount: number; symmetric?: boolean; confidence: number; reason: string; warnings?: string[] }
 export type SketchPreviewDraft = { scopeId?: string | null; draftSource: SketchDraftSource; artifactBundle: ArtifactBundle; sketchDocument?: SketchDocument | null; updatedAt: number }
-export type SketchPreviewHullRequest = { partId: string; document: SketchDocument; fallbackDepth: number }
+export type SketchPreviewFailureStage = "validation" | "render" | "candidateAnalysis" | "hiddenLineProjection"
+export type SketchPreviewMode = "manual" | "auto"
+export type SketchPreviewRenderer = "draft" | "previewHull"
+export type SketchPreviewSubmissionPacket = { previewId: string; target: SketchPreviewTarget; mode: SketchPreviewMode; status: SketchPreviewSubmissionStatus; renderer?: SketchPreviewRenderer | null; document: SketchDocument; repairAttempts: number; repairEvidence: SketchBrepAutoRepairEvidence[]; draftSource?: SketchDraftSource | null; artifactBundle?: ArtifactBundle | null; candidateResponse?: SketchBrepCandidateResponse | null; hiddenLineResponse?: BrepHiddenLineProjectionResponse | null; failureStage?: SketchPreviewFailureStage | null; error?: AppError | null }
+export type SketchPreviewSubmissionRequest = { target: SketchPreviewTarget; document: SketchDocument; mode: SketchPreviewMode }
+export type SketchPreviewSubmissionStatus = "completed" | "failed" | "superseded"
+export type SketchPreviewTarget = { targetId: string; partId: string }
 export type SketchPrimitive = { primitiveId: string; kind: SketchPrimitiveKind; points?: ([number, number])[]; closed?: boolean; radius?: number | null; topology?: SketchPrimitiveTopology | null; provenance?: RasterTraceProvenance | null }
 export type SketchPrimitiveKind = "point" | "line" | "polyline" | "spline" | "arc" | "circle"
 export type SketchPrimitiveTopology = { loopId?: string | null; edgeIds?: string[]; loopRole?: BrepProjectedLoopRole | null; sourceClass?: string | null }
@@ -2305,6 +2250,9 @@ export type SketchView = "front" | "side" | "top" | "custom"
 export type SourceLanguage = "legacyPython" | "ecky" | "build123d"
 export type SourceRef = { sourceId?: string | null; path?: string | null; startByte?: number | null; endByte?: number | null }
 export type SourceWindow = { threadId: string; messageId: string; digest: string; content: string; startByte: number; endByte: number; totalBytes: number; nextStartByte: number | null; truncated: boolean }
+export type StartCycleInput = { threadId: string; baseVersionId: string; objective: string; acceptanceCriteria?: string[]; hardConstraints?: string[]; softPreferences?: string[]; budget: number }
+export type StartExplorationRunInput = { requestId: string; threadId: string; prompt: string; attachments?: Attachment[]; imageData?: string | null; parentMacroCode?: string | null; workingDesign?: DesignOutput | null; baseVersionId?: string | null; kind: ExplorationRunKind; options?: GenerateDesignOptions; acceptanceCriteria?: string[]; hardConstraints?: string[]; softPreferences?: string[] }
+export type StopExplorationRunInput = { requestId: string; threadId: string }
 export type StructuralIssue = { code: string; message: string;
 /**
  * ID of the affected part, when the issue is part-specific.
@@ -2312,6 +2260,8 @@ export type StructuralIssue = { code: string; message: string;
 partId?: string | null; numericPayload?: number | null; diagnosticContext?: DiagnosticContext | null }
 export type StructuralMetrics = { partCount: number; modelStlSizeBytes?: number | null; modelStlTriangleCount?: number | null; modelStlComponentCount?: number | null; modelStlNonManifoldEdgeCount?: number | null; modelStlOverhangTriangleCount?: number | null; modelStlOverhangRatio?: number | null; totalVolume?: number | null; totalArea?: number | null; bbox?: ManifestBounds | null }
 export type StructuralVerificationResult = { passed: boolean; summary: string; issues: StructuralIssue[]; authoredVerifyChecks?: AuthoredVerifyCheck[]; metrics: StructuralMetrics; verifierStatus: VerifierStatus; verifierSource?: VerifierSource | null }
+export type SubmitAgentPromptReplyInput = { requestId: string; threadId: string; promptText: string; attachments?: Attachment[] }
+export type SubmitAgentPromptReplyResult = { outcome: "resolved" } | { outcome: "queued"; threadId: string; messageId: string }
 export type SurfaceTrimBoundaryPoint = { sourcePosition: [number, number, number]; sharedEdge: [number, number] | null }
 export type SurfaceTrimCapMode = "open" | "flat" | "surfaceFill"
 export type SurfaceTrimCapPreview = { vertices: ([number, number, number])[]; triangles: ([number, number, number])[] }
@@ -2336,6 +2286,8 @@ export type Thread = { id: string; title: string; summary?: string; messages: Me
  * Technical reusable blank: no visible messages and blank bound source.
  */
 isBlank?: boolean; status?: ThreadStatus; finalizedAt?: number | null; pendingConfirm?: string | null }
+export type ThreadLifecycleIntent = { threadId: string; selectedMessageId: string | null }
+export type ThreadLifecycleProjection = { threadId: string; history: Thread[] }
 export type ThreadMessagesPage = { messages: ThreadTimelineRow[]; nextBefore: string | null; hasMore: boolean; observedBytes: number; truncatedFields: string[] }
 export type ThreadStatus = "active" | "finalized"
 export type ThreadTimelineRow = { id: string; role: MessageRole; content: string; contentTruncated: boolean; contentObservedBytes: number; contentAllowedBytes: number; status: MessageStatus; agentOrigin: AgentOrigin | null; timestamp: number; timelineOrder: number; versionSummary: ThreadTimelineVersionSummary | null; hasImage: boolean; attachmentCount: number; visualKind: MessageVisualKind | null }
@@ -2343,13 +2295,21 @@ export type ThreadTimelineVersionSummary = { title: string | null; versionName: 
 export type ThreadWindowLayout = { schemaVersion?: number; rememberLayout?: boolean; windows: Partial<{ [key in string]: ThreadWindowState }> }
 export type ThreadWindowState = { visible: boolean; minimized?: boolean; x: number; y: number; width: number; height: number; z: number }
 export type TranscribePromptAudioInput = { base64Data: string; mimeType: string; languageCode?: string | null }
+export type TransitionCampaignRunInput = { runId: string; action: CampaignRunTransitionAction }
+export type TransitionCampaignRunResult = { run: CampaignRun; step: CampaignStepPayload; check?: CampaignTransitionCheck | null }
 export type UiField = { type: "range"; key: string; label?: string; min?: number | null; max?: number | null; step?: number | null; minFrom?: string | null; maxFrom?: string | null; frozen?: boolean } | { type: "number"; key: string; label?: string; min?: number | null; max?: number | null; step?: number | null; minFrom?: string | null; maxFrom?: string | null; frozen?: boolean } | { type: "select"; key: string; label?: string; options?: SelectOption[]; frozen?: boolean } | { type: "checkbox"; key: string; label?: string; frozen?: boolean } | { type: "image"; key: string; label?: string; frozen?: boolean }
 export type UiSpec = { fields?: UiField[] }
 export type UsageSegment = { stage: string; provider: string; model: string; inputTokens?: number; outputTokens?: number; totalTokens?: number; cachedInputTokens?: number; reasoningTokens?: number; estimatedCostUsd?: number | null }
 export type UsageSummary = { inputTokens?: number; outputTokens?: number; totalTokens?: number; cachedInputTokens?: number; reasoningTokens?: number; estimatedCostUsd?: number | null; segments?: UsageSegment[] }
+export type ValidateCaptureGuideIntentInput = { runId: string; expectedRevision: number; expectedMeshDigest: string; knownDistanceMm: number; instruction: string; featureDepthMm: number }
+export type ValidateCaptureGuideIntentResult = { guide: CaptureReconstructionGuide; state: CaptureReconstructionGuideState; baseRevision: number; expectedRevisionMatched: boolean; sourceDigestMatched: boolean; rawEvidence: string[] }
+export type Verification = { versionId: string; inputDigest: string; evidenceRef: string; deterministic: VerificationVerdict; vision?: VerificationVerdict | null }
+export type VerificationVerdict = "green" | "red"
 export type VerifierSource = "rust_structural" | "rust_plus_backend"
 export type VerifierStatus = "ok" | "ok_rust_only" | "ok_with_backend" | "skipped_unavailable" | "skipped_backend_unavailable"
 export type VersionDetail = { message: Message; denseTopologyRef: string | null; edgeCount: number; faceCount: number; selectionTargetCount: number; observedBytes: number; truncatedFields: string[]; availableSections: string[] }
+export type VersionHistoryIntent = { messageId: string; selectedThreadId: string | null; selectedMessageId: string | null; messageLimit: number | null }
+export type VersionHistoryIntentResponse = { threadId: string; workspace: WorkspaceProjection | null; threadRemoved: boolean }
 export type VersionPreviewRuntime = { artifactBundle: ArtifactBundle; modelManifest: ModelManifest; leaseId?: string | null; ephemeral: boolean }
 export type ViewerAsset = { partId: string; nodeId: string; objectName: string; label: string; path: string; format: ViewerAssetFormat }
 export type ViewerAssetFormat = "stl" | "gltf" | "glb" | "obj" | "3mf"
@@ -2379,6 +2339,11 @@ export type VisualIssueCategory = "missing_part" | "floating_part" | "connector_
 export type VisualVerificationResult = { passed: boolean; summary: string; issues: VisualIssue[]; usage?: UsageSummary | null }
 export type VoiceConfig = { sttLanguageCode?: string }
 export type WebContentRecoveryState = { terminationCount: number; automaticReloadUsed: boolean; blocked: boolean; rawError: string | null; occurredAt: number | null }
+/**
+ * Coherent first-load projection for one design thread. Timeline rows stay
+ * bounded while exactly one selected version carries full runtime payloads.
+ */
+export type WorkspaceProjection = { thread: Thread; messagesPage: ThreadMessagesPage; selectedVersion: Message | null; requestedMessageFound: boolean }
 
 /** tauri-specta globals **/
 

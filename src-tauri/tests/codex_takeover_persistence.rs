@@ -1,11 +1,12 @@
-use ecky_cad_lib::contracts::CodexDialogueMessage;
+use ecky_cad_lib::contracts::{Attachment, AttachmentKind, CodexDialogueMessage};
 use ecky_cad_lib::services::codex_takeover::{
     bind_owned_thread, build_provider_handoff_summary, claim_queue_item, defer_queue_item,
-    enqueue_prompt, ensure_schema, fail_queue_item, get_agent_binding_for_provider, get_binding,
-    list_binding_lineage, list_provider_messages, list_queue, mark_queue_sending,
-    pending_queue_bindings, persist_finished_provider_messages, persist_provider_turn_user_input,
-    provider_message_page, recover_retryable_failures, recover_stale_sending, remove_queue_item,
-    retry_queue_item, rotate_owned_thread, upsert_agent_binding, AgentThreadBindingRecord,
+    enqueue_prompt, enqueue_prompt_with_attachments, ensure_schema, fail_queue_item,
+    get_agent_binding_for_provider, get_binding, list_binding_lineage, list_provider_messages,
+    list_queue, mark_queue_sending, pending_queue_bindings, persist_finished_provider_messages,
+    persist_provider_turn_user_input, provider_message_page, recover_retryable_failures,
+    recover_stale_sending, remove_queue_item, retry_queue_item, rotate_owned_thread,
+    upsert_agent_binding, AgentThreadBindingRecord,
 };
 use rusqlite::{params, Connection};
 use std::sync::Mutex;
@@ -215,6 +216,7 @@ fn provider_handoff_merges_canonical_target_with_recent_provider_dialogue() {
                 content: "Keep walls at 3 mm".into(),
                 status: "success".into(),
                 timestamp: 1,
+                attachments: Vec::new(),
                 provider_event_kind: None,
             },
             CodexDialogueMessage {
@@ -223,6 +225,7 @@ fn provider_handoff_merges_canonical_target_with_recent_provider_dialogue() {
                 content: "Added four symmetric ribs".into(),
                 status: "success".into(),
                 timestamp: 2,
+                attachments: Vec::new(),
                 provider_event_kind: None,
             },
         ],
@@ -243,6 +246,7 @@ fn provider_handoff_reenters_existing_api_and_mcp_context_assembler() {
             content: "Current target has four symmetric ribs".into(),
             status: "success".into(),
             timestamp: 2,
+            attachments: Vec::new(),
             provider_event_kind: None,
         }],
     );
@@ -278,6 +282,7 @@ fn finished_codex_turns_are_durable_across_binding_rotation() {
                 content: "Keep the 3 mm walls.".into(),
                 status: "success".into(),
                 timestamp: 101,
+                attachments: Vec::new(),
                 provider_event_kind: None,
             },
             CodexDialogueMessage {
@@ -286,6 +291,7 @@ fn finished_codex_turns_are_durable_across_binding_rotation() {
                 content: "Walls retained.".into(),
                 status: "success".into(),
                 timestamp: 102,
+                attachments: Vec::new(),
                 provider_event_kind: None,
             },
             CodexDialogueMessage {
@@ -294,6 +300,7 @@ fn finished_codex_turns_are_durable_across_binding_rotation() {
                 content: "Still working.".into(),
                 status: "pending".into(),
                 timestamp: 103,
+                attachments: Vec::new(),
                 provider_event_kind: None,
             },
         ],
@@ -343,6 +350,7 @@ fn durable_provider_history_is_cursor_paged_without_provider_io() {
             content: format!("finished-{index}"),
             status: "success".into(),
             timestamp: 1_000 + index,
+            attachments: Vec::new(),
             provider_event_kind: None,
         })
         .collect::<Vec<_>>();
@@ -393,14 +401,23 @@ fn steer_input_is_durable_immediately_and_final_backfill_deduplicates_exact_turn
             content: "Initial prompt".into(),
             status: "success".into(),
             timestamp: 101,
+            attachments: Vec::new(),
             provider_event_kind: None,
         }],
     )
     .unwrap();
 
-    let steer =
-        persist_provider_turn_user_input(&conn, "ecky-1", "codex", "codex-7", "turn-1", "ж?", 105)
-            .unwrap();
+    let steer = persist_provider_turn_user_input(
+        &conn,
+        "ecky-1",
+        "codex",
+        "codex-7",
+        "turn-1",
+        "ж?",
+        &[],
+        105,
+    )
+    .unwrap();
     assert_eq!(steer.id, "codex:codex-7:turn-1:user:1");
     assert_eq!(
         list_provider_messages(&conn, "ecky-1", "codex", 30)
@@ -420,6 +437,7 @@ fn steer_input_is_durable_immediately_and_final_backfill_deduplicates_exact_turn
             content: "ж?".into(),
             status: "success".into(),
             timestamp: 101,
+            attachments: Vec::new(),
             provider_event_kind: None,
         }],
     )
@@ -459,6 +477,57 @@ fn queue_preserves_fifo_and_recovers_stale_sending_rows() {
         vec![first.id, second.id]
     );
     assert!(queue.iter().all(|item| item.status == "queued"));
+}
+
+#[test]
+fn queue_round_trip_preserves_prompt_attachments() {
+    let conn = connection();
+    bind_owned_thread(
+        &conn,
+        "ecky-1",
+        "codex-7",
+        "Gearbox agent",
+        "/workspace/gearbox",
+        100,
+    )
+    .unwrap();
+    let attachments = vec![
+        Attachment {
+            path: "/tmp/reference.png".to_string(),
+            name: "reference.png".to_string(),
+            explanation: "Reference image".to_string(),
+            data_url: None,
+            kind: AttachmentKind::Image,
+        },
+        Attachment {
+            path: "/tmp/assembly.step".to_string(),
+            name: "assembly.step".to_string(),
+            explanation: String::new(),
+            data_url: None,
+            kind: AttachmentKind::Cad,
+        },
+    ];
+
+    let queued = enqueue_prompt_with_attachments(
+        &conn,
+        "ecky-1",
+        "Use these references.",
+        &attachments,
+        110,
+    )
+    .unwrap();
+    assert_eq!(queued.attachments, attachments);
+    assert_eq!(
+        list_queue(&conn, "ecky-1").unwrap()[0].attachments,
+        attachments
+    );
+    assert_eq!(
+        ecky_cad_lib::services::codex_takeover::queue_head(&conn, "ecky-1")
+            .unwrap()
+            .unwrap()
+            .attachments,
+        attachments
+    );
 }
 
 #[test]

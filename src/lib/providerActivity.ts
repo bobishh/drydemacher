@@ -21,6 +21,7 @@ type ProviderTurnProjectionInput = {
 };
 
 const LEGACY_ACTIVITY_PREFIX = /^(?:THINKING|PLAN|WORKING|USING TOOL|RUNNING|EDITING|SEARCHING|DELEGATING)\s*·/i;
+const TURN_RECEIVED_ACTIVITY = 'THINKING · Message received. Starting work.';
 
 function isActivityMessage(message: ProviderLiveMessage): boolean {
   if (message.providerEventKind) return message.providerEventKind === 'activity';
@@ -88,6 +89,21 @@ export function collapseProviderActivity(input: {
 }
 
 export function projectProviderTurnMessages(input: ProviderTurnProjectionInput): Message[] {
+  if (input.phase === 'active' && input.activeTurnId && input.messages.length === 0) {
+    const receipt = collapseProviderActivity({
+      ...input,
+      messages: [{
+        id: `${input.activeTurnId}:received`,
+        role: 'assistant',
+        content: TURN_RECEIVED_ACTIVITY,
+        status: 'working',
+        timestamp: 0,
+        providerEventKind: 'activity',
+      }],
+    });
+    return receipt ? [receipt] : [];
+  }
+
   const activityMessages = input.messages.filter(isActivityMessage);
   if (input.phase === 'completed') {
     const activity = collapseProviderActivity({ ...input, messages: activityMessages });

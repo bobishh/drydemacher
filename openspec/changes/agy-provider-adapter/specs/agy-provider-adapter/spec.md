@@ -150,6 +150,13 @@ between turns.
 - **THEN** Ecky requests at most 30 local transcript rows by opaque cursor
 - **AND** merges them with Ecky versions without replacing the timeline
 
+#### Scenario: Agy image attachment survives history reload
+
+- **GIVEN** an accepted Agy user message includes an image attachment
+- **WHEN** its FIFO row completes and Dialogue later reloads local history
+- **THEN** the persisted user message still renders that image
+- **AND** deleting the completed queue row does not delete attachment metadata
+
 #### Scenario: Agy performs long-running work
 
 - **WHEN** one turn emits many activity updates, repeats tool activity, or runs longer than 10 minutes

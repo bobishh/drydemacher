@@ -26,6 +26,7 @@
 - [x] 3.11 Bound Agy turns by activity count, repeated activity, and wall time.
 - [x] 3.12 Resume a new child when the MCP endpoint changes; avoid handoff duplication on warm turns.
 - [x] 3.13 Isolate Agy process groups, stop them on clean Tauri exit, and reconcile durable run leases after crashes.
+- [x] 3.14 Copy accepted FIFO attachments into durable provider transcript rows before queue deletion.
 
 ## 4. UI
 
@@ -38,6 +39,7 @@
 - [x] 4.7 Share bound-source Code references and internal-ID presentation cleanup with Codex.
 - [x] 4.8 Keep assistant speech outside expandable `WORKING`; hide accepted `sending` leases.
 - [x] 4.9 Preserve raw terminal provider errors across durable refresh and expose retryable FIFO.
+- [x] 4.10 Render persisted provider image attachments through the shared timeline after reload.
 
 ## 5. Proof
 

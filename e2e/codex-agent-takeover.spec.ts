@@ -46,13 +46,22 @@ const initialAgySnapshot = {
   capabilities: { steer: false, stop: true },
 };
 
-async function installProviderMocks(page: Page, mode: ProviderMockMode, initiallyBound = false) {
-  await page.addInitScript(({ mode, eckyThread, binding, initialSnapshot, agyBinding, initialAgySnapshot, initiallyBound }) => {
+async function installProviderMocks(page: Page, mode: ProviderMockMode, initiallyBound = false, persistedImage = false) {
+  await page.addInitScript(({ mode, eckyThread, binding, initialSnapshot, agyBinding, initialAgySnapshot, initiallyBound, persistedImage }) => {
     const w = window as any;
     localStorage.clear();
     w.__CODEX_CALLS__ = [];
     w.__CODEX_BINDING__ = initiallyBound ? structuredClone(binding) : null;
     w.__CODEX_SNAPSHOT__ = structuredClone(initialSnapshot);
+    if (persistedImage) {
+      w.__CODEX_SNAPSHOT__.messages[0].attachments = [{
+        path: '/workspace/gearbox/.ecky/attachments/gearbox-reference.png',
+        name: 'gearbox-reference.png',
+        explanation: 'Match this bearing shoulder.',
+        dataUrl: 'data:image/png;base64,iVBORw0KGgo=',
+        kind: 'image',
+      }];
+    }
     w.__AGY_BINDING__ = initiallyBound ? structuredClone(agyBinding) : null;
     w.__AGY_SNAPSHOT__ = structuredClone(initialAgySnapshot);
     w.__EVENT_HANDLERS__ = {};
@@ -78,6 +87,7 @@ async function installProviderMocks(page: Page, mode: ProviderMockMode, initiall
           { id: 'codex:assistant-delayed', role: 'assistant', content: 'Dovetail checked.', status: 'success', timestamp: sentAt },
         ],
         liveMessages: [],
+        turnTraces: [],
         nextCursor: null, backwardsCursor: 'newer-cursor-2', runtime: { phase: 'idle', activeTurnId: null, error: null }, queue: [],
       };
       w.__EMIT_CODEX_EVENT__('turn/completed');
@@ -174,6 +184,13 @@ async function installProviderMocks(page: Page, mode: ProviderMockMode, initiall
       if (cmd === 'get_active_agent_sessions' || cmd === 'get_agent_terminal_snapshots') return [];
       if (cmd === 'get_thread_agent_state') return { threadId: args?.threadId ?? null, connectionState: 'disconnected', sessions: [], primaryAgentLabel: null, statusText: '', phase: null, busy: false, agentLabel: null, activityLabel: '', sessionId: null };
       if (cmd === 'get_mcp_server_status') return { running: true, endpointUrl: 'http://127.0.0.1:39249/mcp', sessions: [] };
+      if (cmd === 'prepare_prompt_attachments') {
+        return ((args?.attachments as any[]) ?? []).map((attachment: any) => ({
+          ...attachment,
+          path: `/workspace/gearbox/.ecky/attachments/${attachment.name}`,
+          dataUrl: null,
+        }));
+      }
       if (cmd === 'activate_provider_writer') {
         if (w.__PROVIDER_WRITER_ACTIVATION_ERROR__) throw w.__PROVIDER_WRITER_ACTIVATION_ERROR__;
         w.__ACTIVE_PROVIDER_WRITER__ = structuredClone(args?.input ?? null);
@@ -191,7 +208,7 @@ async function installProviderMocks(page: Page, mode: ProviderMockMode, initiall
         if (mode === 'delayed') {
           const queued = {
             id: 'queue-delayed', eckyThreadId: eckyThread.id, promptText: prompt,
-            status: 'queued', error: null, createdAt: 1787263300, updatedAt: 1787263300,
+            attachments: [], status: 'queued', error: null, createdAt: 1787263300, updatedAt: 1787263300,
           };
           w.__PENDING_CODEX_SENDS__.push({ prompt });
           w.__CODEX_SNAPSHOT__.queue = [queued];
@@ -200,11 +217,11 @@ async function installProviderMocks(page: Page, mode: ProviderMockMode, initiall
         if (mode === 'startFailure' && w.__START_FAILURES__++ === 0) throw 'thread/start failed: Codex login expired (401 raw body)';
         w.__CODEX_BINDING__ = structuredClone(binding);
         if (mode === 'turnFailure') {
-          w.__CODEX_SNAPSHOT__.queue = [{ id: 'queue-failed', eckyThreadId: eckyThread.id, promptText: prompt, status: 'failed', error: 'turn/start failed: workspace sandbox denied write', createdAt: 1787263300, updatedAt: 1787263300 }];
+          w.__CODEX_SNAPSHOT__.queue = [{ id: 'queue-failed', eckyThreadId: eckyThread.id, promptText: prompt, attachments: [], status: 'failed', error: 'turn/start failed: workspace sandbox denied write', createdAt: 1787263300, updatedAt: 1787263300 }];
           return structuredClone(w.__CODEX_SNAPSHOT__);
         }
         if (mode === 'controls') {
-          w.__CODEX_SNAPSHOT__.queue.push({ id: 'queue-2', eckyThreadId: eckyThread.id, promptText: prompt, status: 'queued', error: null, createdAt: 1787263300, updatedAt: 1787263300 });
+          w.__CODEX_SNAPSHOT__.queue.push({ id: 'queue-2', eckyThreadId: eckyThread.id, promptText: prompt, attachments: [], status: 'queued', error: null, createdAt: 1787263300, updatedAt: 1787263300 });
           return structuredClone(w.__CODEX_SNAPSHOT__);
         }
         w.__CODEX_SNAPSHOT__ = {
@@ -214,6 +231,7 @@ async function installProviderMocks(page: Page, mode: ProviderMockMode, initiall
             { id: 'codex:assistant-2', role: 'assistant', content: 'Four constrained ribs added and previewed.', status: 'success', timestamp: 1787263310 },
           ],
           liveMessages: [],
+          turnTraces: [],
           nextCursor: null, backwardsCursor: 'newer-cursor-2', runtime: { phase: 'idle', activeTurnId: null, error: null }, queue: [],
         };
         return structuredClone(w.__CODEX_SNAPSHOT__);
@@ -258,7 +276,7 @@ async function installProviderMocks(page: Page, mode: ProviderMockMode, initiall
       if (cmd === 'get_mess_stl_path') return '/mock/mess.stl';
       return null;
     };
-  }, { mode, eckyThread, binding, initialSnapshot, agyBinding, initialAgySnapshot, initiallyBound });
+  }, { mode, eckyThread, binding, initialSnapshot, agyBinding, initialAgySnapshot, initiallyBound, persistedImage });
 }
 
 async function selectCodexProvider(page: Page) {
@@ -350,9 +368,90 @@ test.describe('Codex provider integration', () => {
     });
     expect(calls).toContainEqual({
       cmd: 'send_agy_provider_prompt',
-      args: { input: { eckyThreadId: 'ecky-thread-1', promptText: 'Inspect the current model through Ecky MCP.' } },
+      args: { input: { eckyThreadId: 'ecky-thread-1', promptText: 'Inspect the current model through Ecky MCP.', attachments: [] } },
     });
     await expect(page.locator('.trail-assistant').filter({ hasText: 'Current model inspected through Ecky MCP.' })).toBeVisible();
+  });
+
+  test('Given provider history contains an image When dialogue reloads Then the original attachment remains visible', async ({ page }) => {
+    await installProviderMocks(page, 'happy', true, true);
+    await bootProviderDialogue(page);
+
+    const image = page.locator('.trail-user .trail-image');
+    await expect(image).toHaveCount(1);
+    await expect(image).toHaveAttribute('src', 'data:image/png;base64,iVBORw0KGgo=');
+  });
+
+  test('Given a Codex provider image attachment When sending Then the provider receives it and the composer clears it', async ({ page }) => {
+    await installProviderMocks(page, 'happy', true);
+    await bootProviderDialogue(page);
+
+    await page.evaluate(() => {
+      const container = document.querySelector('.prompt-container');
+      if (!container) throw new Error('Prompt container missing');
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(['image'], 'gearbox-reference.png', { type: 'image/png' }));
+      container.dispatchEvent(new DragEvent('drop', {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer: transfer,
+      }));
+    });
+
+    await expect(page.locator('.attachment-item')).toContainText('gearbox-reference.png');
+    await page.locator('.att-explanation').fill('Match this bearing shoulder.');
+    await page.locator('.prompt-input').fill('Update the housing from this reference.');
+
+    const send = page.getByRole('button', { name: 'SEND TO CODEX' });
+    await expect(send).toBeEnabled();
+    await send.click();
+
+    await expect(page.locator('.attachment-item')).toHaveCount(0);
+    const calls = await page.evaluate(() => (window as any).__CODEX_CALLS__);
+    const sendCall = calls.find((call: any) => call.cmd === 'send_codex_takeover_prompt');
+    expect(sendCall).toEqual({
+      cmd: 'send_codex_takeover_prompt',
+      args: {
+        input: {
+          eckyThreadId: 'ecky-thread-1',
+          promptText: 'Update the housing from this reference.',
+          attachments: [{
+            path: '/workspace/gearbox/.ecky/attachments/gearbox-reference.png',
+            name: 'gearbox-reference.png',
+            explanation: 'Match this bearing shoulder.',
+            dataUrl: null,
+            kind: 'image',
+          }],
+        },
+      },
+    });
+  });
+
+  test('Given provider delivery fails When sending an image Then raw error shows and the complete draft returns', async ({ page }) => {
+    await installProviderMocks(page, 'startFailure', true);
+    await bootProviderDialogue(page);
+
+    await page.evaluate(() => {
+      const container = document.querySelector('.prompt-container');
+      if (!container) throw new Error('Prompt container missing');
+      const transfer = new DataTransfer();
+      transfer.items.add(new File(['image'], 'failed-reference.png', { type: 'image/png' }));
+      container.dispatchEvent(new DragEvent('drop', {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer: transfer,
+      }));
+    });
+
+    await expect(page.locator('.attachment-item')).toContainText('failed-reference.png');
+    await page.locator('.att-explanation').fill('Keep the failed reference note.');
+    await page.locator('.prompt-input').fill('Try this reference.');
+    await page.getByRole('button', { name: 'SEND TO CODEX' }).click();
+
+    await expect(page.locator('.provider-conversation-error')).toContainText('Codex login expired (401 raw body)');
+    await expect(page.locator('.prompt-input')).toHaveValue('Try this reference.');
+    await expect(page.locator('.attachment-item')).toContainText('failed-reference.png');
+    await expect(page.locator('.att-explanation')).toHaveValue('Keep the failed reference note.');
   });
 
   test('Given an Ecky thread switched from AGY to Codex When config saves once Then the next message uses Codex runtime', async ({ page }) => {
@@ -486,7 +585,7 @@ test.describe('Codex provider integration', () => {
     await page.getByRole('button', { name: 'SEND TO CODEX' }).click();
     await expect(page.locator('.trail-assistant').last()).toContainText('Four constrained ribs added and previewed.');
     const calls = await page.evaluate(() => (window as any).__CODEX_CALLS__);
-    expect(calls).toContainEqual({ cmd: 'send_codex_takeover_prompt', args: { input: { eckyThreadId: 'ecky-thread-1', promptText: 'Add four constrained mounting ribs.' } } });
+    expect(calls).toContainEqual({ cmd: 'send_codex_takeover_prompt', args: { input: { eckyThreadId: 'ecky-thread-1', promptText: 'Add four constrained mounting ribs.', attachments: [] } } });
     expect(calls.some((call: any) => call.cmd === 'list_codex_threads' || call.cmd === 'take_over_codex_thread')).toBe(false);
   });
 
@@ -602,7 +701,7 @@ test.describe('Codex provider integration', () => {
     await answer.getByRole('button', { name: 'Open model.ecky at line 110' }).click();
 
     await expect(answer.getByRole('alert')).toContainText('project source missing (raw backend body)');
-    await expect(page.locator('[data-window-id="code"]')).toHaveCount(0);
+    await expect(page.locator('[data-window-id="code"]')).not.toBeVisible();
   });
 
   test('Given an active Codex turn When stream deltas arrive Then live work renders without reloading transcript pages', async ({ page }) => {
@@ -678,6 +777,61 @@ test.describe('Codex provider integration', () => {
     expect(await page.evaluate(() =>
       (window as any).__CODEX_CALLS__.filter((call: any) => call.cmd === 'get_codex_takeover').length,
     )).toBe(readsBefore);
+  });
+
+  test('Given a provider turn starts before activity arrives When thinking or failure follows Then Ecky confirms receipt and yields to exact provider state', async ({ page }) => {
+    await installProviderMocks(page, 'controls', true); await bootProviderDialogue(page);
+    await page.evaluate(() => {
+      const snapshot = (window as any).__CODEX_SNAPSHOT__;
+      snapshot.liveMessages = [];
+      snapshot.runtime = { phase: 'active', activeTurnId: 'turn-starting-12', error: null };
+      (window as any).__EMIT_CODEX_EVENT__('turn/started', [], snapshot.runtime);
+    });
+
+    const activity = page.getByRole('region', { name: 'Codex working activity' });
+    await expect(activity.locator('.provider-working__summary')).toHaveText(
+      'THINKING · Message received. Starting work.',
+    );
+
+    await page.evaluate(() => {
+      const snapshot = (window as any).__CODEX_SNAPSHOT__;
+      const thinking = {
+        id: 'codex:codex-owned-by-ecky-7:reasoning-12',
+        role: 'assistant',
+        content: 'THINKING · Inspecting current constraints.',
+        status: 'working',
+        timestamp: 1787263600,
+        providerEventKind: 'activity',
+      };
+      snapshot.liveMessages = [thinking];
+      (window as any).__EMIT_CODEX_EVENT__(
+        'item/reasoning/summaryTextDelta',
+        snapshot.liveMessages,
+        snapshot.runtime,
+      );
+    });
+    await expect(activity.locator('.provider-working__summary')).toHaveText(
+      'THINKING · Inspecting current constraints.',
+    );
+
+    await page.evaluate(() => {
+      const snapshot = (window as any).__CODEX_SNAPSHOT__;
+      snapshot.liveMessages = [];
+      snapshot.runtime = {
+        phase: 'error',
+        activeTurnId: null,
+        error: 'provider rejected turn: raw upstream body',
+      };
+      (window as any).__EMIT_CODEX_EVENT__(
+        'thread/status/changed',
+        snapshot.liveMessages,
+        snapshot.runtime,
+      );
+    });
+    await expect(activity).toHaveCount(0);
+    await expect(page.locator('.provider-conversation-error')).toContainText(
+      'provider rejected turn: raw upstream body',
+    );
   });
 
   test('Given a successful provider turn When final answer arrives Then trace collapses before the answer', async ({ page }) => {

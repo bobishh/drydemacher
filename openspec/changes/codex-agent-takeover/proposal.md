@@ -25,6 +25,8 @@ without exposing or importing unrelated Codex conversations.
 - Project recent Codex dialogue back into Ecky's canonical compacted thread summary
   so switching among API, MCP, and Provider retains “what are we building?” context.
 - Persist finished provider turns in Ecky and page them by opaque local cursor. Keep
+  user attachment metadata with each normalized message so images survive reload.
+  Keep
   read-only provider backfill, FIFO queue, exact-turn steer, stop,
   timeout recovery, and compaction-safe completion semantics.
 - Stream public commentary, readable reasoning summaries, plans, and tool activity as
@@ -58,7 +60,7 @@ without exposing or importing unrelated Codex conversations.
 - Playwright: Settings Provider→Codex, first-message auto-create, exact routing, no
   takeover UI, raw start failure/retry.
 - Playwright: owned-history cursor loading, queue, steer, stop, compaction event, live
-  working bubbles without transcript reload.
+  working bubbles and persisted image attachments without transcript loss.
 - Rust: start/resume bootstrap, one-to-one binding, handoff projection, atomic queue
   claim/recovery, and app-server delta assembly.
 - Frontend unit: provider-mode routing independent of existing binding.

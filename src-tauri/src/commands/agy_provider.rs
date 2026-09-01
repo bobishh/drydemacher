@@ -5,7 +5,7 @@ use tauri::{Emitter, State};
 
 use crate::contracts::{
     AgyMessagePage, AgyMessagePageInput, AgyPromptInput, AgyProviderBinding, AgyProviderSnapshot,
-    AgyStopInput, AppError, AppResult, ProviderCapabilities,
+    AgyStopInput, AppError, AppResult, Attachment, ProviderCapabilities,
 };
 use crate::models::AppState;
 use crate::services::{agy_provider, codex_takeover};
@@ -254,10 +254,12 @@ fn provider_prompt(
     tool_guide_path: &str,
     handoff: &str,
     prompt: &str,
+    attachments: &[Attachment],
 ) -> String {
+    let attachment_manifest = build_agy_attachment_manifest(attachments);
     if phase == AgyPromptPhase::Continuation {
         return format!(
-            "[ECKY USER TURN v{}]\nContinue the already pre-bound Ecky provider conversation. Do not call `thread_borrow`. Answer this user message directly.\n\n[USER MESSAGE]\n{prompt}",
+            "[ECKY USER TURN v{}]\nContinue the already pre-bound Ecky provider conversation. Do not call `thread_borrow`. Answer this user message directly.\n\n[USER MESSAGE]\n{prompt}{attachment_manifest}",
             agy_provider::AGY_BOOTSTRAP_VERSION,
         );
     }
@@ -267,9 +269,33 @@ fn provider_prompt(
         AgyPromptPhase::Continuation => unreachable!(),
     };
     format!(
-        "[ECKY {phase_label} v{}]\nYou are Agy inside Ecky CAD. This provider conversation belongs only to Ecky thread {ecky_thread_id} ({title}).\nCanonical workspace: {cwd}\nWorkspace MCP config: {mcp_config_path}\nRequired MCP endpoint: {endpoint} under ecky_mcp. The workspace plugin overrides any same-named global server for this project.\nThis MCP connection is already pre-bound to thread {ecky_thread_id}. Do not call `thread_borrow`; it is only for an intentional switch to another existing target.\nRead the provider tool guide first: {tool_guide_path}. Then call `workspace_overview`, verify its target, and read `agentBrief.primaryGuideUri` plus every URI in `agentBrief.mustRead` before editing.\nUse MCP inspect -> validate -> preview -> verify for CAD changes; the bound file watcher creates the version, so do not call a manual commit/finalize operation. Never invent thread ids or import foreign conversations. Treat the context below as canonical across API/MCP/Codex/Agy switching.\nWhen useful, cite the bound source in the user-facing answer as `[model.ecky]({cwd}/model.ecky:LINE)` so Ecky can open the exact line. Do not include internal `messageId` or `modelId` fields in the user-facing answer; keep those identifiers only in internal tool evidence.\n\n{handoff}\n\n[USER MESSAGE]\n{prompt}",
+        "[ECKY {phase_label} v{}]\nYou are Agy inside Ecky CAD. This provider conversation belongs only to Ecky thread {ecky_thread_id} ({title}).\nCanonical workspace: {cwd}\nWorkspace MCP config: {mcp_config_path}\nRequired MCP endpoint: {endpoint} under ecky_mcp. The workspace plugin overrides any same-named global server for this project.\nThis MCP connection is already pre-bound to thread {ecky_thread_id}. Do not call `thread_borrow`; it is only for an intentional switch to another existing target.\nRead the provider tool guide first: {tool_guide_path}. Then call `workspace_overview`, verify its target, and read `agentBrief.primaryGuideUri` plus every URI in `agentBrief.mustRead` before editing.\nUse MCP inspect -> validate -> preview -> verify for CAD changes; the bound file watcher creates the version, so do not call a manual commit/finalize operation. Never invent thread ids or import foreign conversations. Treat the context below as canonical across API/MCP/Codex/Agy switching.\nWhen useful, cite the bound source in the user-facing answer as `[model.ecky]({cwd}/model.ecky:LINE)` so Ecky can open the exact line. Do not include internal `messageId` or `modelId` fields in the user-facing answer; keep those identifiers only in internal tool evidence.\n\n{handoff}\n\n[USER MESSAGE]\n{prompt}{attachment_manifest}",
         agy_provider::AGY_BOOTSTRAP_VERSION,
     )
+}
+
+fn build_agy_attachment_manifest(attachments: &[Attachment]) -> String {
+    if attachments.is_empty() {
+        return String::new();
+    }
+    let entries = attachments
+        .iter()
+        .map(|attachment| {
+            let label = if attachment.name.trim().is_empty() {
+                attachment.kind.as_str()
+            } else {
+                attachment.name.trim()
+            };
+            let location = if attachment.path.trim().is_empty() {
+                "inline payload (prepare attachment for an absolute path)".to_string()
+            } else {
+                attachment.path.trim().to_string()
+            };
+            format!("- {label} [{}]: {location}", attachment.kind.as_str())
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("\n\n[ATTACHMENT MANIFEST]\n{entries}")
 }
 
 async fn binding_for(state: &AppState, ecky_thread_id: &str) -> AppResult<AgyProviderBinding> {
@@ -469,6 +495,7 @@ async fn dispatch_queue_for(
         &workspace.guide_path,
         &handoff,
         &head.prompt_text,
+        &head.attachments,
     );
     let claimed = {
         let conn = state.db.lock().await;
@@ -510,13 +537,14 @@ async fn dispatch_queue_for(
                 &started.process,
                 now_seconds(),
             )?;
-            agy_provider::insert_message_with_id(
+            agy_provider::insert_message_with_id_and_attachments(
                 &conn,
                 &format!("agy:user:{}", head.id),
                 &binding.ecky_thread_id,
                 &binding.agy_conversation_id,
                 "user",
                 &head.prompt_text,
+                &head.attachments,
                 "success",
                 head.created_at,
             )?;
@@ -587,10 +615,11 @@ pub async fn send_agy_provider_prompt(
     } {
         {
             let conn = state.db.lock().await;
-            agy_provider::enqueue_prompt(
+            agy_provider::enqueue_prompt_with_attachments(
                 &conn,
                 &input.ecky_thread_id,
                 &input.prompt_text,
+                &input.attachments,
                 now_seconds(),
             )?;
         }
@@ -628,6 +657,7 @@ pub async fn send_agy_provider_prompt(
         &workspace.guide_path,
         &handoff,
         &input.prompt_text,
+        &input.attachments,
     );
     let started = state
         .agy_provider
@@ -661,10 +691,11 @@ pub async fn send_agy_provider_prompt(
     };
     let queue = {
         let conn = state.db.lock().await;
-        let item = agy_provider::enqueue_prompt(
+        let item = agy_provider::enqueue_prompt_with_attachments(
             &conn,
             &input.ecky_thread_id,
             &input.prompt_text,
+            &input.attachments,
             now_seconds(),
         )?;
         codex_takeover::claim_queue_item(&conn, &item.id, now_seconds())?;
@@ -680,13 +711,14 @@ pub async fn send_agy_provider_prompt(
                 &started.process,
                 now_seconds(),
             )?;
-            agy_provider::insert_message_with_id(
+            agy_provider::insert_message_with_id_and_attachments(
                 &conn,
                 &format!("agy:user:{}", queue.id),
                 &binding.ecky_thread_id,
                 &binding.agy_conversation_id,
                 "user",
                 &input.prompt_text,
+                &input.attachments,
                 "success",
                 queue.created_at,
             )?;
@@ -725,10 +757,11 @@ async fn send_existing(
 ) -> AppResult<AgyProviderSnapshot> {
     {
         let conn = state.db.lock().await;
-        agy_provider::enqueue_prompt(
+        agy_provider::enqueue_prompt_with_attachments(
             &conn,
             &input.ecky_thread_id,
             &input.prompt_text,
+            &input.attachments,
             now_seconds(),
         )?;
     }
@@ -836,7 +869,10 @@ pub fn initialize_agy_queue_supervisor(state: AppState, app: tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{materialize_agy_mcp_config, provider_prompt, AgyPromptPhase};
+    use super::{
+        build_agy_attachment_manifest, materialize_agy_mcp_config, provider_prompt, AgyPromptPhase,
+    };
+    use crate::contracts::{Attachment, AttachmentKind};
 
     #[test]
     fn provider_prompt_requests_clickable_bound_source_evidence_without_internal_ids() {
@@ -850,6 +886,7 @@ mod tests {
             "/workspace/dryer/.agents/ecky-provider-tools.md",
             "Current target: dryer",
             "Increase capacity.",
+            &[],
         );
 
         assert!(prompt.contains("[model.ecky](/workspace/dryer/model.ecky:LINE)"));
@@ -871,12 +908,37 @@ mod tests {
             "/workspace/dryer/.agents/plugins/ecky-provider/rules/AGENTS.md",
             "THREAD SUMMARY\nlarge canonical handoff",
             "Increase capacity.",
+            &[],
         );
 
         assert!(prompt.contains("[ECKY USER TURN v2]"));
         assert!(prompt.contains("Increase capacity."));
         assert!(!prompt.contains("large canonical handoff"));
         assert!(!prompt.contains("THREAD BOOTSTRAP"));
+    }
+
+    #[test]
+    fn agy_manifest_preserves_absolute_attachment_paths() {
+        let manifest = build_agy_attachment_manifest(&[
+            Attachment {
+                path: "/Users/test/mcp-attachments/ref.png".to_string(),
+                name: "ref.png".to_string(),
+                explanation: String::new(),
+                data_url: None,
+                kind: AttachmentKind::Image,
+            },
+            Attachment {
+                path: "/Users/test/model.step".to_string(),
+                name: "model.step".to_string(),
+                explanation: String::new(),
+                data_url: None,
+                kind: AttachmentKind::Cad,
+            },
+        ]);
+
+        assert!(manifest.contains("[ATTACHMENT MANIFEST]"));
+        assert!(manifest.contains("ref.png [image]: /Users/test/mcp-attachments/ref.png"));
+        assert!(manifest.contains("model.step [cad]: /Users/test/model.step"));
     }
 
     #[test]

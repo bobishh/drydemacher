@@ -12,7 +12,7 @@ context when switching modes.
 - Add `AGY` beside `CODEX` in Provider settings as `provider:agy`.
 - Generalize binding and FIFO ownership to one binding per Ecky thread and provider.
 - Add a long-lived Antigravity stream-json adapter with version gating, live progress,
-  durable local transcript pages, resume, raw errors, and stop.
+  durable local transcript pages including user attachments, resume, raw errors, and stop.
 - Inject Ecky thread identity, canonical handoff, project cwd, and workspace MCP
   configuration into the first Antigravity turn.
 - Expose adapter capabilities so Dialogue does not offer unsupported steering.

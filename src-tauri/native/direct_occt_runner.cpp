@@ -2717,6 +2717,38 @@ bool wire_inside_face(const TopoDS_Wire& wire, const TopoDS_Face& face) {
 TopoDS_Shape make_faces_from_wire_soup(
     const std::vector<TopoDS_Shape>& wire_shapes
 ) {
+    struct FacedWire {
+        TopoDS_Wire wire;
+        TopoDS_Face face;
+        double area = 0.0;
+    };
+    std::vector<FacedWire> faced;
+    faced.reserve(wire_shapes.size());
+    for (const auto& shape : wire_shapes) {
+        try {
+            TopoDS_Wire wire = first_wire(shape, "profile");
+            BRepBuilderAPI_MakeFace builder(wire, Standard_True);
+            if (!builder.IsDone()) {
+                continue;
+            }
+            TopoDS_Face face = TopoDS::Face(builder.Shape());
+            ShapeFix_Face fixer(face);
+            fixer.Perform();
+            fixer.FixOrientation();
+            face = fixer.Face();
+            if (!BRepCheck_Analyzer(face).IsValid()) {
+                continue;
+            }
+            FacedWire entry;
+            entry.wire = wire;
+            entry.face = face;
+            entry.area = face_area(face);
+            faced.push_back(entry);
+        } catch (...) {
+            continue;
+        }
+    }
+    const bool can_classify_fill = faced.size() == wire_shapes.size();
     {
         // 1. General-fuse every edge against every other: self-intersecting
         //    and mutually intersecting artwork contours get split at their
@@ -2740,18 +2772,45 @@ TopoDS_Shape make_faces_from_wire_soup(
                     BOPAlgo_Tools::EdgesToWires(splitter.Shape(), wires_shape, Standard_False);
                     TopoDS_Shape faces_shape;
                     if (BOPAlgo_Tools::WiresToFaces(wires_shape, faces_shape)) {
-                        // 3. Every returned face is material (holes are inner
-                        //    wires already). Adjacent regions share seam edges
+                        // WiresToFaces returns every atomic region. Keep only
+                        // regions covered by an odd number of source contours;
+                        // otherwise nested glyph counters become material.
+                        TopoDS_Shape filled_faces = faces_shape;
+                        if (can_classify_fill) {
+                            BRep_Builder filled_builder;
+                            TopoDS_Compound filled_compound;
+                            filled_builder.MakeCompound(filled_compound);
+                            int filled_count = 0;
+                            for (TopExp_Explorer explorer(faces_shape, TopAbs_FACE);
+                                 explorer.More(); explorer.Next()) {
+                                TopoDS_Face candidate = TopoDS::Face(explorer.Current());
+                                TopoDS_Wire outer = BRepTools::OuterWire(candidate);
+                                int coverage = 0;
+                                for (const auto& source : faced) {
+                                    if (wire_inside_face(outer, source.face)) {
+                                        ++coverage;
+                                    }
+                                }
+                                if (coverage % 2 != 0) {
+                                    filled_builder.Add(filled_compound, candidate);
+                                    ++filled_count;
+                                }
+                            }
+                            if (filled_count > 0) {
+                                filled_faces = filled_compound;
+                            }
+                        }
+                        // 3. Selected material regions share seam edges
                         //    from the arrangement; unify them into one face so
                         //    the per-region prisms don't fight over coincident
                         //    walls in later booleans. Unify (not fuse!) keeps
                         //    hole rings intact.
                         ShapeUpgrade_UnifySameDomain unify(
-                            faces_shape, Standard_True, Standard_True, Standard_False);
+                            filled_faces, Standard_True, Standard_True, Standard_False);
                         unify.Build();
                         TopoDS_Shape unified = unify.Shape();
                         if (unified.IsNull()) {
-                            unified = faces_shape;
+                            unified = filled_faces;
                         }
                         std::vector<TopoDS_Shape> region_faces;
                         for (TopExp_Explorer explorer(unified, TopAbs_FACE); explorer.More();
@@ -2775,34 +2834,6 @@ TopoDS_Shape make_faces_from_wire_soup(
                 }
             } catch (...) {
             }
-        }
-    }
-    struct FacedWire {
-        TopoDS_Wire wire;
-        TopoDS_Face face;
-        double area = 0.0;
-    };
-    std::vector<FacedWire> faced;
-    faced.reserve(wire_shapes.size());
-    for (const auto& shape : wire_shapes) {
-        try {
-            TopoDS_Wire wire = first_wire(shape, "profile");
-            BRepBuilderAPI_MakeFace builder(wire, Standard_True);
-            if (!builder.IsDone()) {
-                continue;
-            }
-            TopoDS_Face face = TopoDS::Face(builder.Shape());
-            ShapeFix_Face fixer(face);
-            fixer.Perform();
-            fixer.FixOrientation();
-            face = fixer.Face();
-            FacedWire entry;
-            entry.wire = wire;
-            entry.face = face;
-            entry.area = face_area(face);
-            faced.push_back(entry);
-        } catch (...) {
-            continue;
         }
     }
     if (faced.empty()) {

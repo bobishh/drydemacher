@@ -1,10 +1,10 @@
 use crate::contracts::{
-    AgyMessagePage, AgyProviderBinding, AppError, AppResult, CodexDialogueMessage,
+    AgyMessagePage, AgyProviderBinding, AppError, AppResult, Attachment, CodexDialogueMessage,
     CodexQueuedPrompt, CodexTakeoverRuntime, ProviderEventKind, ProviderTurnTrace,
 };
 use crate::services::provider_executable::resolve_provider_executable;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, types::Type, Connection, OptionalExtension};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::process::{Command as ProcessCommand, Stdio};
@@ -1022,6 +1022,7 @@ fn append_live_delta(session: &mut AgySession, step_index: i64, delta: &str) {
             content: delta.chars().take(LIVE_MESSAGE_CHAR_LIMIT).collect(),
             status: "working".to_string(),
             timestamp: now_seconds(),
+            attachments: Vec::new(),
             provider_event_kind: Some(ProviderEventKind::Assistant),
         });
     }
@@ -1043,6 +1044,7 @@ fn upsert_live_working(session: &mut AgySession, step_index: i64, text: &str) {
             content: text.chars().take(LIVE_MESSAGE_CHAR_LIMIT).collect(),
             status: "working".to_string(),
             timestamp: now_seconds(),
+            attachments: Vec::new(),
             provider_event_kind: Some(ProviderEventKind::Activity),
         });
     }
@@ -1595,8 +1597,20 @@ pub fn enqueue_prompt(
     prompt_text: &str,
     now: i64,
 ) -> AppResult<CodexQueuedPrompt> {
-    if prompt_text.trim().is_empty() {
-        return Err(AppError::validation("Agy queued prompt must not be empty."));
+    enqueue_prompt_with_attachments(conn, ecky_thread_id, prompt_text, &[], now)
+}
+
+pub fn enqueue_prompt_with_attachments(
+    conn: &Connection,
+    ecky_thread_id: &str,
+    prompt_text: &str,
+    attachments: &[Attachment],
+    now: i64,
+) -> AppResult<CodexQueuedPrompt> {
+    if prompt_text.trim().is_empty() && attachments.is_empty() {
+        return Err(AppError::validation(
+            "Agy queued prompt must include text or attachments.",
+        ));
     }
     if get_binding(conn, ecky_thread_id)?.is_none() {
         return Err(AppError::not_found(format!(
@@ -1607,6 +1621,7 @@ pub fn enqueue_prompt(
         id: uuid::Uuid::new_v4().to_string(),
         ecky_thread_id: ecky_thread_id.to_string(),
         prompt_text: prompt_text.to_string(),
+        attachments: attachments.to_vec(),
         status: "queued".to_string(),
         error: None,
         created_at: now,
@@ -1614,13 +1629,15 @@ pub fn enqueue_prompt(
     };
     conn.execute(
         "INSERT INTO agent_prompt_queue
-            (id, ecky_thread_id, provider, prompt_text, status, error, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, 'queued', NULL, ?5, ?5)",
+            (id, ecky_thread_id, provider, prompt_text, attachments_json, status, error, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'queued', NULL, ?6, ?6)",
         params![
             item.id,
             item.ecky_thread_id,
             AGY_PROVIDER_ID,
             item.prompt_text,
+            serde_json::to_string(&item.attachments)
+                .map_err(|error| AppError::persistence(error.to_string()))?,
             now
         ],
     )
@@ -1631,7 +1648,7 @@ pub fn enqueue_prompt(
 pub fn list_queue(conn: &Connection, ecky_thread_id: &str) -> AppResult<Vec<CodexQueuedPrompt>> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, ecky_thread_id, prompt_text, status, error, created_at, updated_at
+            "SELECT id, ecky_thread_id, prompt_text, attachments_json, status, error, created_at, updated_at
              FROM agent_prompt_queue
              WHERE ecky_thread_id = ?1 AND provider = ?2
              ORDER BY created_at ASC, id ASC",
@@ -1643,10 +1660,11 @@ pub fn list_queue(conn: &Connection, ecky_thread_id: &str) -> AppResult<Vec<Code
                 id: row.get(0)?,
                 ecky_thread_id: row.get(1)?,
                 prompt_text: row.get(2)?,
-                status: row.get(3)?,
-                error: row.get(4)?,
-                created_at: row.get(5)?,
-                updated_at: row.get(6)?,
+                attachments: decode_queue_attachments(row.get(3)?)?,
+                status: row.get(4)?,
+                error: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
             })
         })
         .map_err(|error| AppError::persistence(error.to_string()))?;
@@ -1688,7 +1706,7 @@ pub fn pending_queue_bindings(conn: &Connection) -> AppResult<Vec<AgyProviderBin
 
 pub fn queue_head(conn: &Connection, ecky_thread_id: &str) -> AppResult<Option<CodexQueuedPrompt>> {
     conn.query_row(
-        "SELECT id, ecky_thread_id, prompt_text, status, error, created_at, updated_at
+        "SELECT id, ecky_thread_id, prompt_text, attachments_json, status, error, created_at, updated_at
          FROM agent_prompt_queue
          WHERE ecky_thread_id = ?1 AND provider = ?2
          ORDER BY created_at ASC, id ASC LIMIT 1",
@@ -1698,15 +1716,22 @@ pub fn queue_head(conn: &Connection, ecky_thread_id: &str) -> AppResult<Option<C
                 id: row.get(0)?,
                 ecky_thread_id: row.get(1)?,
                 prompt_text: row.get(2)?,
-                status: row.get(3)?,
-                error: row.get(4)?,
-                created_at: row.get(5)?,
-                updated_at: row.get(6)?,
+                attachments: decode_queue_attachments(row.get(3)?)?,
+                status: row.get(4)?,
+                error: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
             })
         },
     )
     .optional()
     .map_err(|error| AppError::persistence(error.to_string()))
+}
+
+fn decode_queue_attachments(value: String) -> rusqlite::Result<Vec<Attachment>> {
+    serde_json::from_str(&value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
+    })
 }
 
 pub fn retry_queue_item(
@@ -1797,10 +1822,34 @@ pub fn insert_message_with_id(
     status: &str,
     now: i64,
 ) -> AppResult<CodexDialogueMessage> {
+    insert_message_with_id_and_attachments(
+        conn,
+        id,
+        ecky_thread_id,
+        conversation_id,
+        role,
+        content,
+        &[],
+        status,
+        now,
+    )
+}
+
+pub fn insert_message_with_id_and_attachments(
+    conn: &Connection,
+    id: &str,
+    ecky_thread_id: &str,
+    conversation_id: &str,
+    role: &str,
+    content: &str,
+    attachments: &[Attachment],
+    status: &str,
+    now: i64,
+) -> AppResult<CodexDialogueMessage> {
     conn.execute(
         "INSERT OR IGNORE INTO agent_provider_messages
-            (id, ecky_thread_id, provider, external_thread_id, role, content, status, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            (id, ecky_thread_id, provider, external_thread_id, role, content, attachments_json, status, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             id,
             ecky_thread_id,
@@ -1808,6 +1857,8 @@ pub fn insert_message_with_id(
             conversation_id,
             role,
             content,
+            serde_json::to_string(attachments)
+                .map_err(|error| AppError::persistence(error.to_string()))?,
             status,
             now
         ],
@@ -1819,6 +1870,7 @@ pub fn insert_message_with_id(
         content: content.to_string(),
         status: status.to_string(),
         timestamp: now,
+        attachments: attachments.to_vec(),
         provider_event_kind: None,
     })
 }
@@ -1844,6 +1896,11 @@ fn decode_cursor(cursor: &str) -> AppResult<(i64, String)> {
     ))
 }
 
+fn decode_message_attachments(value: String) -> rusqlite::Result<Vec<Attachment>> {
+    serde_json::from_str(&value)
+        .map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error)))
+}
+
 pub fn message_page(
     conn: &Connection,
     ecky_thread_id: &str,
@@ -1853,7 +1910,7 @@ pub fn message_page(
     let boundary = cursor.map(decode_cursor).transpose()?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, role, content, status, created_at
+            "SELECT id, role, content, attachments_json, status, created_at
              FROM agent_provider_messages
              WHERE ecky_thread_id = ?1 AND provider = ?2
                AND (?3 IS NULL OR created_at < ?3 OR (created_at = ?3 AND id < ?4))
@@ -1875,8 +1932,9 @@ pub fn message_page(
                     id: row.get(0)?,
                     role: row.get(1)?,
                     content: row.get(2)?,
-                    status: row.get(3)?,
-                    timestamp: row.get(4)?,
+                    attachments: decode_message_attachments(row.get(3)?)?,
+                    status: row.get(4)?,
+                    timestamp: row.get(5)?,
                     provider_event_kind: None,
                 })
             },

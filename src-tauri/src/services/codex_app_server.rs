@@ -1,6 +1,6 @@
 use crate::contracts::{
-    AppError, AppResult, CodexDialogueMessage, CodexMessagePage, CodexTakeoverRuntime,
-    CodexThreadSummary, ProviderTurnTrace,
+    AppError, AppResult, Attachment, AttachmentKind, CodexDialogueMessage, CodexMessagePage,
+    CodexTakeoverRuntime, CodexThreadSummary, ProviderTurnTrace,
 };
 use crate::services::provider_executable::resolve_provider_executable;
 use serde_json::{json, Value};
@@ -831,9 +831,20 @@ impl CodexAppServerSupervisor {
         prompt: &str,
         model: Option<&str>,
     ) -> AppResult<String> {
+        self.start_turn_with_attachments(thread_id, prompt, model, &[])
+            .await
+    }
+
+    pub async fn start_turn_with_attachments(
+        &self,
+        thread_id: &str,
+        prompt: &str,
+        model: Option<&str>,
+        attachments: &[Attachment],
+    ) -> AppResult<String> {
         let mut params = json!({
             "threadId": thread_id,
-            "input": [{ "type": "text", "text": prompt }]
+            "input": build_user_input(prompt, attachments)
         });
         if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
             params["model"] = Value::String(model.trim().to_string());
@@ -863,12 +874,23 @@ impl CodexAppServerSupervisor {
         expected_turn_id: &str,
         prompt: &str,
     ) -> AppResult<()> {
+        self.steer_turn_with_attachments(thread_id, expected_turn_id, prompt, &[])
+            .await
+    }
+
+    pub async fn steer_turn_with_attachments(
+        &self,
+        thread_id: &str,
+        expected_turn_id: &str,
+        prompt: &str,
+        attachments: &[Attachment],
+    ) -> AppResult<()> {
         self.request(
             "turn/steer",
             json!({
                 "threadId": thread_id,
                 "expectedTurnId": expected_turn_id,
-                "input": [{ "type": "text", "text": prompt }]
+                "input": build_user_input(prompt, attachments)
             }),
         )
         .await?;
@@ -889,6 +911,77 @@ impl CodexAppServerSupervisor {
         }
         Ok(())
     }
+}
+
+/// Translate Ecky attachments into Codex app-server UserInput blocks. CAD files
+/// remain explicit path context because app-server only accepts native image
+/// blocks for image attachments.
+pub fn build_user_input(prompt: &str, attachments: &[Attachment]) -> Vec<Value> {
+    let mut text = prompt.trim().to_string();
+    let attachment_notes = attachments
+        .iter()
+        .filter_map(|attachment| {
+            let explanation = attachment.explanation.trim();
+            if explanation.is_empty() {
+                return None;
+            }
+            let label = if attachment.name.trim().is_empty() {
+                attachment.path.trim()
+            } else {
+                attachment.name.trim()
+            };
+            Some(format!("- {label}: {explanation}"))
+        })
+        .collect::<Vec<_>>();
+    if !attachment_notes.is_empty() {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str("[ATTACHMENT NOTES]\n");
+        text.push_str(&attachment_notes.join("\n"));
+    }
+    let cad_context = attachments
+        .iter()
+        .filter(|attachment| attachment.kind == AttachmentKind::Cad)
+        .filter_map(|attachment| {
+            let path = attachment.path.trim();
+            (!path.is_empty()).then(|| {
+                let name = attachment.name.trim();
+                if name.is_empty() {
+                    format!("- {path}")
+                } else {
+                    format!("- {name}: {path}")
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    if !cad_context.is_empty() {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str("[CAD ATTACHMENTS]\n");
+        text.push_str(&cad_context.join("\n"));
+    }
+
+    let mut input = Vec::new();
+    if !text.is_empty() {
+        input.push(json!({ "type": "text", "text": text }));
+    }
+    for attachment in attachments
+        .iter()
+        .filter(|attachment| attachment.kind == AttachmentKind::Image)
+    {
+        if let Some(data_url) = attachment
+            .data_url
+            .as_deref()
+            .filter(|value| value.trim_start().starts_with("data:image/"))
+        {
+            input.push(json!({ "type": "image", "url": data_url }));
+        } else if !attachment.path.trim().is_empty() {
+            input.push(json!({ "type": "localImage", "path": attachment.path }));
+        }
+    }
+    input
 }
 
 fn should_skip_resume(
@@ -1131,6 +1224,7 @@ fn append_live_delta(
         content: format!("{prefix}{delta}"),
         status: "working".to_string(),
         timestamp: now,
+        attachments: Vec::new(),
         provider_event_kind: Some(provider_event_kind),
     });
 }
@@ -1157,6 +1251,7 @@ fn replace_live_message(
         content,
         status: "working".to_string(),
         timestamp: now,
+        attachments: Vec::new(),
         provider_event_kind: Some(provider_event_kind),
     });
 }
@@ -1571,9 +1666,8 @@ pub fn project_turn_messages(thread_id: &str, turns: &[Value]) -> Vec<CodexDialo
             };
             match item.get("type").and_then(Value::as_str) {
                 Some("userMessage") => {
-                    let content = item
-                        .get("content")
-                        .and_then(Value::as_array)
+                    let item_content = item.get("content").and_then(Value::as_array);
+                    let content = item_content
                         .into_iter()
                         .flatten()
                         .filter(|input| input.get("type").and_then(Value::as_str) == Some("text"))
@@ -1581,13 +1675,47 @@ pub fn project_turn_messages(thread_id: &str, turns: &[Value]) -> Vec<CodexDialo
                         .filter(|text| !text.trim().is_empty())
                         .collect::<Vec<_>>()
                         .join("\n");
-                    if !content.is_empty() {
+                    let attachments = item_content
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|input| match input.get("type").and_then(Value::as_str) {
+                            Some("image") => input
+                                .get("url")
+                                .and_then(Value::as_str)
+                                .filter(|url| !url.trim().is_empty())
+                                .map(|url| Attachment {
+                                    path: String::new(),
+                                    name: "image".to_string(),
+                                    explanation: String::new(),
+                                    data_url: Some(url.to_string()),
+                                    kind: AttachmentKind::Image,
+                                }),
+                            Some("localImage") => input
+                                .get("path")
+                                .and_then(Value::as_str)
+                                .filter(|path| !path.trim().is_empty())
+                                .map(|path| Attachment {
+                                    path: path.to_string(),
+                                    name: std::path::Path::new(path)
+                                        .file_name()
+                                        .and_then(|name| name.to_str())
+                                        .unwrap_or("image")
+                                        .to_string(),
+                                    explanation: String::new(),
+                                    data_url: None,
+                                    kind: AttachmentKind::Image,
+                                }),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    if !content.is_empty() || !attachments.is_empty() {
                         user_messages.push(CodexDialogueMessage {
                             id: format!("codex:{thread_id}:{turn_id}:user:{user_ordinal}"),
                             role: "user".to_string(),
                             content,
                             status: "success".to_string(),
                             timestamp: started_at,
+                            attachments,
                             provider_event_kind: None,
                         });
                         user_ordinal += 1;
@@ -1602,6 +1730,7 @@ pub fn project_turn_messages(thread_id: &str, turns: &[Value]) -> Vec<CodexDialo
                             content: text.to_string(),
                             status: status.to_string(),
                             timestamp: completed_at,
+                            attachments: Vec::new(),
                             provider_event_kind: None,
                         });
                     }
@@ -1664,5 +1793,83 @@ mod tests {
         assert!(!should_skip_resume(Some(9), 9, true, false));
         assert!(!should_skip_resume(Some(9), 9, false, true));
         assert!(!should_skip_resume(Some(8), 9, false, false));
+    }
+
+    #[test]
+    fn user_input_uses_native_inline_and_local_image_blocks_and_cad_context() {
+        let input = build_user_input(
+            "Review these files.",
+            &[
+                crate::contracts::Attachment {
+                    path: String::new(),
+                    name: "inline.png".to_string(),
+                    explanation: "Match the bearing shoulder.".to_string(),
+                    data_url: Some("data:image/png;base64,abc".to_string()),
+                    kind: crate::contracts::AttachmentKind::Image,
+                },
+                crate::contracts::Attachment {
+                    path: "/tmp/local.png".to_string(),
+                    name: "local.png".to_string(),
+                    explanation: String::new(),
+                    data_url: None,
+                    kind: crate::contracts::AttachmentKind::Image,
+                },
+                crate::contracts::Attachment {
+                    path: "/tmp/model.step".to_string(),
+                    name: "model.step".to_string(),
+                    explanation: String::new(),
+                    data_url: None,
+                    kind: crate::contracts::AttachmentKind::Cad,
+                },
+            ],
+        );
+
+        assert_eq!(input[0]["type"], "text");
+        assert!(input[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("/tmp/model.step"));
+        assert!(input[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("inline.png: Match the bearing shoulder."));
+        assert_eq!(
+            input[1],
+            json!({"type": "image", "url": "data:image/png;base64,abc"})
+        );
+        assert_eq!(
+            input[2],
+            json!({"type": "localImage", "path": "/tmp/local.png"})
+        );
+    }
+
+    #[test]
+    fn provider_thread_projection_keeps_inline_and_local_user_images() {
+        let messages = project_turn_messages(
+            "codex-thread",
+            &[json!({
+                "id": "turn-1",
+                "status": "completed",
+                "startedAt": 10,
+                "completedAt": 11,
+                "items": [{
+                    "id": "user-item",
+                    "type": "userMessage",
+                    "content": [
+                        {"type": "text", "text": "Use these."},
+                        {"type": "image", "url": "data:image/png;base64,abc"},
+                        {"type": "localImage", "path": "/tmp/reference.png"}
+                    ]
+                }]
+            })],
+        );
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].attachments.len(), 2);
+        assert_eq!(
+            messages[0].attachments[0].data_url.as_deref(),
+            Some("data:image/png;base64,abc")
+        );
+        assert_eq!(messages[0].attachments[1].name, "reference.png");
     }
 }

@@ -45,7 +45,7 @@ const DIRECT_OCCT_HOT_CACHE_CAPACITY: usize = 2;
 /// on top of [`DIRECT_OCCT_HOT_CACHE_CAPACITY`]; it guards a couple of
 /// pathological oversized renders from pinning the hot cache.
 const DIRECT_OCCT_HOT_CACHE_BYTE_BUDGET: u64 = 128 * 1024 * 1024;
-const DIRECT_OCCT_CACHE_SCHEMA: &str = "direct-occt-v9-lexical-shape-provenance";
+const DIRECT_OCCT_CACHE_SCHEMA: &str = "direct-occt-v10-svg-fill-parity";
 const DIRECT_OCCT_GEOMETRY_CACHE_SCHEMA: &str = "direct-occt-geometry-v1";
 const DIRECT_OCCT_GEOMETRY_CACHE_DIR: &str = "direct-occt-geometry";
 const DIRECT_OCCT_GEOMETRY_CACHE_FILE: &str = "geometry-cache.json";
@@ -8191,5 +8191,21 @@ printf 'run\n' >> "$invoked_marker"
             current,
             "production must key on DIRECT_OCCT_CACHE_SCHEMA with no legacy branch"
         );
+    }
+
+    #[test]
+    fn svg_counter_fill_fix_invalidates_v9_cached_artifacts() {
+        let source = r#"(model (part body (extrude (svg "<svg/>" 10 10 "contain") 2)))"#;
+        let params_json = "{}";
+        let stale = content_hash_with_backend_version(
+            "direct-occt-v9-lexical-shape-provenance",
+            source,
+            params_json,
+            None,
+        );
+        let current =
+            content_hash_with_backend_version(DIRECT_OCCT_CACHE_SCHEMA, source, params_json, None);
+
+        assert_ne!(current, stale, "SVG fill repair must not reuse v9 geometry");
     }
 }

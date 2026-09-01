@@ -134,6 +134,14 @@ SHALL NOT replace already visible Ecky messages or versions.
 - **THEN** versions remain visible in the same timeline
 - **AND** no source replaces or flashes over the other
 
+#### Scenario: Provider image attachment survives history reload
+
+- **GIVEN** a provider user message includes an image attachment
+- **WHEN** the accepted turn is persisted and Dialogue later reloads its local page
+- **THEN** Ecky renders the original image beside that user message
+- **AND** read-only Codex backfill may restore missing image metadata from `image` or `localImage` input blocks
+- **AND** an attachment-free later projection does not erase an already persisted image
+
 #### Scenario: User searches versions
 
 - **WHEN** user selects `VERSIONS` or enters timeline search text

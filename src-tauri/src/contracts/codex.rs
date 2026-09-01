@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
+use super::Attachment;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexThreadSummary {
@@ -41,6 +43,8 @@ pub struct CodexDialogueMessage {
     pub content: String,
     pub status: String,
     pub timestamp: i64,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_event_kind: Option<ProviderEventKind>,
 }
@@ -91,6 +95,8 @@ pub struct CodexQueuedPrompt {
     pub id: String,
     pub ecky_thread_id: String,
     pub prompt_text: String,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
     pub status: String,
     pub error: Option<String>,
     pub created_at: i64,
@@ -118,6 +124,8 @@ pub struct CodexMessagePage {
 pub struct CodexPromptInput {
     pub ecky_thread_id: String,
     pub prompt_text: String,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -126,6 +134,8 @@ pub struct CodexSteerInput {
     pub ecky_thread_id: String,
     pub prompt_text: String,
     pub expected_turn_id: String,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]

@@ -553,10 +553,11 @@ async fn dispatch_queue_for(state: &AppState, binding: &CodexTakeoverBinding) ->
 
         match state
             .codex_app_server
-            .start_turn(
+            .start_turn_with_attachments(
                 &binding.codex_thread_id,
                 &head.prompt_text,
                 configured_codex_model(state).as_deref(),
+                &head.attachments,
             )
             .await
         {
@@ -573,6 +574,7 @@ async fn dispatch_queue_for(state: &AppState, binding: &CodexTakeoverBinding) ->
                         content: head.prompt_text.clone(),
                         status: "success".to_string(),
                         timestamp: head.created_at,
+                        attachments: head.attachments.clone(),
                         provider_event_kind: None,
                     }],
                 )?;
@@ -761,10 +763,11 @@ pub async fn send_codex_takeover_prompt(
     };
     {
         let conn = state.db.lock().await;
-        codex_takeover::enqueue_prompt(
+        codex_takeover::enqueue_prompt_with_attachments(
             &conn,
             &input.ecky_thread_id,
             &input.prompt_text,
+            &input.attachments,
             now_seconds(),
         )?;
     }
@@ -818,10 +821,11 @@ pub async fn steer_codex_takeover(
     }
     state
         .codex_app_server
-        .steer_turn(
+        .steer_turn_with_attachments(
             &binding.codex_thread_id,
             &input.expected_turn_id,
             &input.prompt_text,
+            &input.attachments,
         )
         .await?;
     {
@@ -833,6 +837,7 @@ pub async fn steer_codex_takeover(
             &binding.codex_thread_id,
             &input.expected_turn_id,
             &input.prompt_text,
+            &input.attachments,
             now_seconds(),
         )?;
     }

@@ -21,10 +21,15 @@ capabilities. It never exposes a provider-global conversation index.
 references the composite binding, and orders FIFO inside that pair. Existing Codex
 rows migrate as `provider = 'codex'`.
 
-`agent_provider_messages` stores normalized Agy user/assistant transcript entries.
+`agent_provider_messages` stores normalized Agy user/assistant transcript entries and
+serialized user attachment metadata.
 Rows are keyed by stable id and indexed by `(ecky_thread_id, provider, created_at,
 id)`. Cursor pages use an opaque encoding of the final sort key. Full Agy global
 history is never imported.
+
+The claimed FIFO row copies its prepared attachments into the accepted user transcript
+before queue deletion. Dialogue projects persisted image paths/data into the shared
+timeline visual renderer, so switching providers or reopening the thread loses no image.
 
 ## Agy lifecycle
 

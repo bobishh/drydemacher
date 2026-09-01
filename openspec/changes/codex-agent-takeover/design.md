@@ -65,7 +65,7 @@ At thread/start and each process-generation resume, developer instructions conta
   digest from the existing context assembler.
 
 After successful read-only backfill, Ecky stores normalized finished Codex
-user/assistant messages and builds a bounded handoff from canonical Ecky messages
+user/assistant messages plus user attachment metadata and builds a bounded handoff from canonical Ecky messages
 plus recent provider dialogue. API and MCP already consume that canonical summary.
 Provider compaction or cursor replacement cannot erase Ecky's finished transcript.
 
@@ -76,7 +76,9 @@ reads opaque-cursor pages from Ecky SQLite, prepends by stable item id, and pres
 scroll anchor. Provider I/O never sits on this UI path. Background provider backfill
 is cursor paged and writes finished messages incrementally. Provider turns are
 normalized oldest-first; user items precede assistant items inside a turn even when
-timestamps collide.
+timestamps collide. `agent_provider_messages.attachments_json` preserves prepared
+local image paths or provider-backed inline image data. Backfill updates missing
+attachment metadata without letting attachment-free projections erase stored images.
 
 One long-lived app-server supervisor owns JSONL framing, request timeout, stderr tail,
 process restart, notification state, and active turn ids. Timeout kills wedged process;
@@ -115,7 +117,8 @@ Provider mode reuses normal trail/composer. Ecky messages, authored versions, Co
 messages, and local queued prompts form one timeline; provider snapshot arrival never
 replaces Ecky history. Timeline controls provide text search plus `ALL`/`VERSIONS`
 filter. It also adds unified pagination, queue, `STEER`, and `STOP` when applicable.
-Raw adapter errors appear in Dialogue.
+Raw adapter errors appear in Dialogue. Persisted user image attachments render through
+the same trail visual path after reload.
 
 Provider final-answer presentation is derived from the raw durable transcript. A
 Markdown link targeting an absolute `model.ecky:LINE` becomes a Tactical Midnight

@@ -1,5 +1,7 @@
 use ecky_cad_lib::contracts::CodexTakeoverRuntime;
-use ecky_cad_lib::contracts::{CodexDialogueMessage, CodexTakeoverBinding, ProviderEventKind};
+use ecky_cad_lib::contracts::{
+    Attachment, AttachmentKind, CodexDialogueMessage, CodexTakeoverBinding, ProviderEventKind,
+};
 use ecky_cad_lib::services::codex_app_server::{
     apply_live_notification, apply_runtime_notification, apply_start_response,
     bootstrap_instructions, message_page_params, parse_model_list_page, project_thread_messages,
@@ -342,6 +344,13 @@ fn transcript_projection_keeps_only_user_and_agent_messages_in_turn_order() {
                 content: "Make a rib.".to_string(),
                 status: "success".to_string(),
                 timestamp: 100,
+                attachments: vec![Attachment {
+                    path: String::new(),
+                    name: "image".to_string(),
+                    explanation: String::new(),
+                    data_url: Some("data:image/png;base64,abc".to_string()),
+                    kind: AttachmentKind::Image,
+                }],
                 provider_event_kind: None,
             },
             CodexDialogueMessage {
@@ -350,6 +359,7 @@ fn transcript_projection_keeps_only_user_and_agent_messages_in_turn_order() {
                 content: "Rib ready.".to_string(),
                 status: "success".to_string(),
                 timestamp: 104,
+                attachments: Vec::new(),
                 provider_event_kind: None,
             },
             CodexDialogueMessage {
@@ -358,6 +368,7 @@ fn transcript_projection_keeps_only_user_and_agent_messages_in_turn_order() {
                 content: "Cut seat.".to_string(),
                 status: "success".to_string(),
                 timestamp: 200,
+                attachments: Vec::new(),
                 provider_event_kind: None,
             },
         ],

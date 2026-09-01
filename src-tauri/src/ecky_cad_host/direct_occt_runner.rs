@@ -7179,6 +7179,36 @@ exit 7
     }
 
     #[test]
+    fn live_precompiled_runner_preserves_svg_wire_soup_counters_when_available() {
+        // Disjoint material forces the wire-soup fallback. The nested contour
+        // models a glyph counter and must remain a hole in the top planar face.
+        let program = crate::ecky_scheme::compile_to_core_program(
+            r##"(model (part body (extrude (svg "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 30 20\"><path fill-rule=\"evenodd\" d=\"M0 0h20v20h-20z M5 5h10v10h-10z M25 0h5v5h-5z\"/></svg>" 30 20 "contain") 4)))"##,
+        )
+        .expect("compile");
+        let plan = crate::ecky_cad_host::direct_occt::plan_core_program(&program).expect("plan");
+
+        let Some((root, topology)) =
+            run_real_runner_plan_json("live-runner-svg-wire-soup-counter", &plan)
+        else {
+            return;
+        };
+
+        let faces = topology["parts"][0]["faces"].as_array().expect("faces");
+        assert!(
+            faces.iter().any(|face| {
+                face["exactGeometry"]["kind"] == "planeFace"
+                    && face["exactGeometry"]["boundaryEdgeTargetIds"]
+                        .as_array()
+                        .is_some_and(|loops| loops.len() >= 2)
+            }),
+            "expected a planar cap with an inner counter loop"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn live_precompiled_runner_accepts_clip_box_keywords_when_available() {
         let Some((root, topology)) =
             run_real_runner_plan_json("live-runner-clip-box", &keyword_clip_box_plan())

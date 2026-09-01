@@ -63,3 +63,4 @@
 - [x] 7.4 Rotate to a new Codex thread on active-writer conflict and carry canonical handoff plus previous id.
 - [x] 7.5 Keep queued prompt durable across rotation and persist accepted user item under stable turn identity.
 - [x] 7.6 Green focused Rust/Playwright proof, strict OpenSpec validation, production app build, and installed app smoke.
+- [x] 7.7 Persist provider user attachments, recover Codex image blocks, and render images after history reload.

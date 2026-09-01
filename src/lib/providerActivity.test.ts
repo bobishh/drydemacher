@@ -37,6 +37,50 @@ test('Given no public provider action When projected Then no placeholder is inve
   }), null);
 });
 
+test('Given an accepted provider turn before its first event When projected Then receipt activity is visible', () => {
+  const projected = projectProviderTurnMessages({
+    providerId: 'codex',
+    providerLabel: 'Codex',
+    externalConversationId: 'codex-7',
+    activeTurnId: 'turn-starting',
+    phase: 'active',
+    messages: [],
+  });
+
+  assert.equal(projected.length, 1);
+  assert.equal(projected[0].id, 'provider-working:codex:codex-7:turn-starting');
+  assert.deepEqual(projected[0].providerActivity, {
+    providerLabel: 'Codex',
+    summary: 'THINKING · Message received. Starting work.',
+    phase: 'active',
+    items: ['THINKING · Message received. Starting work.'],
+  });
+});
+
+test('Given provider thinking arrives after receipt When projected Then exact provider activity replaces fallback', () => {
+  const projected = projectProviderTurnMessages({
+    providerId: 'agy',
+    providerLabel: 'Agy',
+    externalConversationId: 'agy-8',
+    activeTurnId: 'turn-thinking',
+    phase: 'active',
+    messages: [
+      {
+        id: 'thinking-1',
+        role: 'assistant',
+        content: 'THINKING · Inspecting current constraints.',
+        status: 'working',
+        timestamp: 10,
+        providerEventKind: 'activity',
+      },
+    ],
+  });
+
+  assert.deepEqual(projected[0].providerActivity?.items, [
+    'THINKING · Inspecting current constraints.',
+  ]);
+});
+
 test('Given repeated provider events When projected Then arrival sequence stays lossless', () => {
   const grouped = collapseProviderActivity({
     providerId: 'codex',
