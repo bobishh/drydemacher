@@ -75,3 +75,18 @@
 - [ ] Preview manifest validation passes without invoking render.
 - [ ] `cd src-tauri && cargo check` passes after persistence changes.
 - [ ] `openspec validate campaign-project-learning-flow --strict` passes.
+
+## 8. Rust-owned progression
+
+- [x] Add failing browser proof requiring one transition intent and no replacement-run save.
+- [x] Add Rust transition service for draft, continue, back, and challenge check.
+- [x] Wire workbench to canonical transition result and pending/raw-error projection.
+- [x] Prove transition happy and failure/pending browser states.
+
+## 9. Rust-owned campaign opening
+
+- [x] Add failing architecture proof for identity-only start/resume.
+- [x] Add tagged Rust start/resume projection with atomic navigation.
+- [x] Make active-run deletion clear matching navigation atomically.
+- [x] Wire App to project returned run/step without choosing first step/version.
+- [x] Regenerate contracts and pass focused Rust/typecheck gates.

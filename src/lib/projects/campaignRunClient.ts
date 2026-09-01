@@ -1,15 +1,14 @@
 import type { ThreadWindowLayout } from '../tauri/contracts';
 import {
   clearActiveProjectNavigation,
-  createCampaignRun,
   deleteCampaignRun,
   getActiveProjectNavigation,
   getAppWindowLayout,
   getCampaignRun,
   listCampaignRuns,
-  saveActiveProjectNavigation,
+  openCampaignProject,
   saveAppWindowLayout,
-  saveCampaignRun,
+  transitionCampaignRun,
 } from '../tauri/client';
 
 /** Driver-facing contract. Campaign runs are projects, but never design threads. */
@@ -27,8 +26,6 @@ export type CampaignRun = {
   updatedAt: number;
 };
 
-export type CreateCampaignRunInput = Pick<CampaignRun, 'title' | 'definitionId' | 'definitionVersion' | 'currentStepId'>;
-
 export type ActiveProjectNavigation = {
   kind: 'design' | 'campaign';
   id: string;
@@ -36,8 +33,8 @@ export type ActiveProjectNavigation = {
 };
 
 export const campaignRunClient = {
-  create(input: CreateCampaignRunInput) {
-    return createCampaignRun(input).then((run) => run as CampaignRun);
+  open(input: import('../tauri/contracts').OpenCampaignProjectIntent) {
+    return openCampaignProject(input);
   },
   list() {
     return listCampaignRuns().then((runs) => runs as CampaignRun[]);
@@ -45,17 +42,14 @@ export const campaignRunClient = {
   get(id: string) {
     return getCampaignRun(id).then((run) => run as CampaignRun);
   },
-  save(run: CampaignRun) {
-    return saveCampaignRun(run).then((saved) => saved as CampaignRun);
+  transition(input: import('../tauri/contracts').TransitionCampaignRunInput) {
+    return transitionCampaignRun(input);
   },
   delete(id: string) {
     return deleteCampaignRun(id);
   },
   getActiveProjectNavigation() {
     return getActiveProjectNavigation().then((navigation) => navigation as ActiveProjectNavigation | null);
-  },
-  saveActiveProjectNavigation(navigation: ActiveProjectNavigation) {
-    return saveActiveProjectNavigation(navigation).then((saved) => saved as ActiveProjectNavigation);
   },
   clearActiveProjectNavigation() {
     return clearActiveProjectNavigation();

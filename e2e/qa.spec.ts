@@ -50,6 +50,8 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
       forkConfirmResult?: boolean;
       bootWithGeneratedDesign?: boolean;
       renderModelDelayMs?: number;
+      semanticViewDelayMs?: number;
+      failSemanticViewSave?: boolean;
     } = {},
   ) {
     const stlFixtures: Record<string, string> = {
@@ -77,6 +79,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
 
     await page.addInitScript((mockOptions) => {
       window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
+      window.__TAURI_INTERNALS__.transformCallback = () => 1;
       window.__MOCK_THREADS__ = {};
       window.__MOCK_HISTORY__ = [];
       window.__MOCK_LAST_DESIGN__ = null;
@@ -492,6 +495,56 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
           return assistantId;
         }
 
+        if (cmd === 'start_exploration_run') {
+          const input = args.input;
+          const messageId = await window.__TAURI_INTERNALS__.invoke('init_generation_attempt', {
+            threadId: input.threadId,
+            prompt: input.prompt,
+          });
+          const generated = await window.__TAURI_INTERNALS__.invoke('generate_design', {
+            threadId: input.threadId,
+            messageId,
+            prompt: input.prompt,
+          });
+          const artifactBundle = await window.__TAURI_INTERNALS__.invoke('render_model', {
+            macroCode: generated.design.macroCode,
+            parameters: generated.design.initialParams,
+          });
+          const modelManifest = await window.__TAURI_INTERNALS__.invoke('get_model_manifest', {
+            modelId: artifactBundle.modelId,
+          });
+          await window.__TAURI_INTERNALS__.invoke('finalize_generation_attempt', {
+            threadId: generated.threadId,
+            messageId: generated.messageId,
+            status: 'success',
+            responseText: generated.design.response,
+            design: generated.design,
+            artifactBundle,
+            modelManifest,
+          });
+          return {
+            run: {
+              requestId: input.requestId,
+              threadId: generated.threadId,
+              phase: 'completed',
+              messageId: generated.messageId,
+              design: generated.design,
+              artifactBundle,
+              modelManifest,
+              structuralVerification: null,
+              usage: generated.usage ?? null,
+              responseText: generated.design.response,
+              rawError: null,
+              publicationAllowed: true,
+            },
+            message: {
+              id: generated.messageId, role: 'assistant', content: generated.design.response ?? '', status: 'success',
+              timestamp: Date.now(), output: generated.design, artifactBundle, modelManifest,
+            },
+            snapshotId: `snapshot-${generated.messageId}`,
+          };
+        }
+
         if (cmd === 'classify_intent') {
           const isQuestion = args.prompt.includes('?');
           return { 
@@ -606,6 +659,47 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
           return window.__MOCK_BUNDLES__['imported-fcstd-1'];
         }
 
+        if (cmd === 'import_model_intent') {
+          const input = args.input;
+          const artifactBundle = window.__MOCK_BUNDLES__['imported-fcstd-1'];
+          const modelManifest = structuredClone(window.__MOCK_MODEL_MANIFESTS__['imported-fcstd-1']);
+          const designOutput = buildImportedOutput(modelManifest, null);
+          const threadId = input.threadId || 'import-thread-intent';
+          const messageId = 'import-message-intent';
+          const title = input.title || modelManifest.document.documentLabel || modelManifest.document.documentName;
+          const message = {
+            id: messageId,
+            role: 'assistant',
+            content: designOutput.response,
+            status: 'success',
+            timestamp: Date.now() / 1000,
+            output: designOutput,
+            artifactBundle,
+            modelManifest,
+            usage: null,
+            structuralVerification: null,
+            agentOrigin: null,
+            imageData: null,
+            visualKind: null,
+            attachmentImages: [],
+          };
+          const historyThread = upsertHistoryThread(threadId, title);
+          historyThread.versionCount = 1;
+          historyThread.pendingCount = 0;
+          historyThread.errorCount = 0;
+          historyThread.messages = [message];
+          window.__MOCK_THREADS__[threadId] = { id: threadId, title, messages: [message] };
+          window.__MOCK_LAST_DESIGN__ = {
+            design: designOutput,
+            threadId,
+            messageId,
+            artifactBundle,
+            modelManifest,
+            selectedPartId: null,
+          };
+          return { threadId, messageId, title, message, designOutput, artifactBundle, modelManifest, snapshotId: `snapshot-${messageId}` };
+        }
+
         if (cmd === 'get_model_manifest') {
           if (args.modelId === 'imported-fcstd-1') {
             return window.__MOCK_MODEL_MANIFESTS__['imported-fcstd-1'];
@@ -699,6 +793,114 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
           };
         }
 
+        if (cmd === 'fork_design') {
+          const input = args.input;
+          const sourceThread = window.__MOCK_THREADS__[input.sourceThreadId];
+          const sourceMessage = sourceThread?.messages.find((message: any) => message.id === input.sourceMessageId);
+          if (!sourceMessage) throw new Error('Fork source version not found.');
+          const threadId = `fork-thread-${Object.keys(window.__MOCK_THREADS__).length + 1}`;
+          const messageId = `fork-message-${Object.keys(window.__MOCK_THREADS__).length + 1}`;
+          const selectedVersion: any = structuredClone({ ...sourceMessage, id: messageId, timestamp: Date.now() / 1000 });
+          selectedVersion.output = selectedVersion.output ? {
+            ...selectedVersion.output,
+            title: input.title || selectedVersion.output.title,
+            versionName: input.versionName || selectedVersion.output.versionName,
+          } : null;
+          const title = selectedVersion.output?.title || input.title || 'Forked Design';
+          const thread = {
+            id: threadId,
+            title,
+            updatedAt: Date.now() / 1000,
+            versionCount: 1,
+            pendingCount: 0,
+            queuedCount: 0,
+            errorCount: 0,
+            status: 'ready',
+            summary: '',
+            messages: [selectedVersion],
+          };
+          window.__MOCK_THREADS__[threadId] = { id: threadId, title, messages: [selectedVersion] };
+          window.__MOCK_HISTORY__.unshift(thread);
+          return {
+            threadId,
+            messageId,
+            workspace: {
+              thread,
+              messagesPage: { messages: [selectedVersion], nextBefore: null, hasMore: false },
+              selectedVersion,
+              requestedMessageFound: true,
+            },
+          };
+        }
+
+        if (cmd === 'create_design_thread') {
+          const input = args.input;
+          const threadId = `created-thread-${Object.keys(window.__MOCK_THREADS__).length + 1}`;
+          const messageId = input.mode === 'macro' ? `created-message-${Date.now()}` : null;
+          const selectedVersion = messageId ? {
+            id: messageId,
+            role: 'assistant',
+            content: 'Initial macro rendered.',
+            status: 'success',
+            timestamp: Date.now() / 1000,
+            output: {
+              title: input.title || 'Untitled design',
+              versionName: 'V1',
+              macroCode: input.source,
+              sourceLanguage: 'legacyPython',
+              geometryBackend: 'freecad',
+              engineKind: 'freecad',
+              uiSpec: { fields: [] },
+              initialParams: {},
+              response: 'Initial macro rendered.',
+              interactionMode: 'design',
+            },
+            artifactBundle: generatedBundle(),
+            modelManifest: generatedManifest(),
+            usage: null,
+            agentOrigin: null,
+            imageData: null,
+            visualKind: null,
+            attachmentImages: [],
+          } : null;
+          const thread = {
+            id: threadId,
+            title: input.title || 'Untitled design',
+            summary: '',
+            messages: selectedVersion ? [selectedVersion] : [],
+            updatedAt: Date.now() / 1000,
+            versionCount: selectedVersion ? 1 : 0,
+            pendingCount: 0,
+            queuedCount: 0,
+            errorCount: 0,
+            status: 'active',
+          };
+          window.__MOCK_THREADS__[threadId] = thread;
+          window.__MOCK_HISTORY__.unshift(thread);
+          return {
+            threadId,
+            sourceDocument: {
+              folder: `/mock/${threadId}`,
+              file: `/mock/${threadId}/model.ecky`,
+              source: input.source || '',
+            },
+            initialVersionId: messageId,
+            snapshotId: messageId ? `snapshot-${messageId}` : null,
+            parserMatched: messageId ? false : null,
+            initialVersionError: null,
+            workspace: {
+              thread,
+              messagesPage: {
+                messages: selectedVersion ? [selectedVersion] : [],
+                nextBefore: null,
+                hasMore: false,
+              },
+              selectedVersion,
+              requestedMessageFound: Boolean(selectedVersion),
+            },
+          };
+        }
+
         if (cmd === 'add_manual_version') {
           const input = args.input ?? args;
           const messageId = 'manual-' + Math.random();
@@ -788,6 +990,146 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
           return null;
         }
 
+        if (cmd === 'apply_semantic_manifest_edit') {
+          const input = args.input;
+          const edit = input.edit;
+          const manifest = structuredClone(window.__MOCK_MODEL_MANIFESTS__[input.modelId]);
+          let editedId = '';
+          let selectedViewId: string | null = null;
+          if (edit.action === 'saveView') {
+            const delayMs = Number(mockOptions.semanticViewDelayMs ?? 0);
+            if (delayMs > 0) await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+            if (mockOptions.failSemanticViewSave) {
+              throw { code: 'validation', message: 'semantic view rejected: raw backend body', details: null };
+            }
+            editedId = edit.viewId || `view-manual-${Math.random().toString(36).slice(2)}`;
+            selectedViewId = editedId;
+            const existing = (manifest.controlViews || []).find((view: any) => view.viewId === editedId);
+            const nextView = {
+              viewId: editedId, label: edit.label.trim(), scope: edit.scope,
+              partIds: edit.partIds, primitiveIds: edit.primitiveIds, sections: edit.sections,
+              default: edit.default, source: 'manual', status: 'accepted', order: existing?.order ?? 99,
+            };
+            manifest.controlViews = [
+              ...(manifest.controlViews || []).filter((view: any) => view.viewId !== editedId),
+              nextView,
+            ];
+          } else if (edit.action === 'deleteView') {
+            editedId = edit.viewId;
+            manifest.controlViews = (manifest.controlViews || []).filter((view: any) => view.viewId !== edit.viewId);
+            manifest.advisories = (manifest.advisories || []).map((advisory: any) => ({
+              ...advisory,
+              viewIds: (advisory.viewIds || []).filter((viewId: string) => viewId !== edit.viewId),
+            }));
+          } else if (edit.action === 'savePrimitive') {
+            editedId = edit.primitiveId || `primitive-manual-${Math.random().toString(36).slice(2)}`;
+            const existing = (manifest.controlPrimitives || []).find((item: any) => item.primitiveId === editedId);
+            const order = existing?.order ?? Math.max(0, ...(manifest.controlPrimitives || []).map((item: any) => item.order || 0)) + 1;
+            const primitive = {
+              primitiveId: editedId,
+              label: edit.label.trim(),
+              kind: edit.primitiveKind,
+              source: 'manual',
+              partIds: edit.scope === 'part' && edit.partId ? [edit.partId] : [],
+              bindings: edit.bindings,
+              editable: true,
+              order,
+            };
+            manifest.controlPrimitives = [
+              ...(manifest.controlPrimitives || []).filter((item: any) => item.primitiveId !== editedId),
+              primitive,
+            ];
+            if (edit.attachToView) {
+              const base = (manifest.controlViews || []).find((view: any) => view.viewId === edit.baseViewId);
+              selectedViewId = base?.source === 'manual'
+                ? base.viewId
+                : `view-manual-${Math.random().toString(36).slice(2)}`;
+              const view = base?.source === 'manual'
+                ? { ...base, primitiveIds: [...new Set([...(base.primitiveIds || []), editedId])] }
+                : {
+                    viewId: selectedViewId,
+                    label: base ? `${base.label} Custom` : 'Custom',
+                    scope: edit.scope,
+                    partIds: edit.scope === 'part' && edit.partId ? [edit.partId] : [],
+                    primitiveIds: [editedId],
+                    sections: [], default: false, source: 'manual', status: 'accepted', order: 99,
+                  };
+              manifest.controlViews = [
+                ...(manifest.controlViews || []).filter((item: any) => item.viewId !== selectedViewId),
+                view,
+              ];
+            }
+          } else if (edit.action === 'deletePrimitive') {
+            editedId = edit.primitiveId;
+            manifest.controlPrimitives = (manifest.controlPrimitives || []).filter((item: any) => item.primitiveId !== editedId);
+            manifest.controlRelations = (manifest.controlRelations || []).filter((item: any) => item.sourcePrimitiveId !== editedId && item.targetPrimitiveId !== editedId);
+            manifest.controlViews = (manifest.controlViews || []).map((view: any) => ({
+              ...view,
+              primitiveIds: (view.primitiveIds || []).filter((id: string) => id !== editedId),
+            })).filter((view: any) => view.source !== 'manual' || view.primitiveIds.length > 0);
+          } else if (edit.action === 'saveAdvisory') {
+            editedId = `advisory-manual-${Math.random().toString(36).slice(2)}`;
+            manifest.advisories = [...(manifest.advisories || []), {
+              advisoryId: editedId, label: edit.label.trim(), severity: edit.severity,
+              primitiveIds: edit.primitiveIds, viewIds: edit.viewId ? [edit.viewId] : [],
+              message: edit.message.trim(), condition: edit.condition, threshold: edit.threshold ?? null,
+            }];
+          } else if (edit.action === 'deleteAdvisory') {
+            editedId = edit.advisoryId;
+            manifest.advisories = (manifest.advisories || []).filter((item: any) => item.advisoryId !== editedId);
+          } else if (edit.action === 'saveRelation') {
+            editedId = `relation-manual-${Math.random().toString(36).slice(2)}`;
+            manifest.controlRelations = [...(manifest.controlRelations || []), {
+              relationId: editedId, sourcePrimitiveId: edit.sourcePrimitiveId,
+              targetPrimitiveId: edit.targetPrimitiveId, mode: edit.mode,
+              scale: edit.scale ?? 1, offset: edit.offset ?? 0, enabled: true,
+            }];
+          } else if (edit.action === 'deleteRelation') {
+            editedId = edit.relationId;
+            manifest.controlRelations = (manifest.controlRelations || []).filter((item: any) => item.relationId !== editedId);
+          } else if (edit.action === 'setProposalStatus' || edit.action === 'setProposalStatuses') {
+            const entries = edit.action === 'setProposalStatus'
+              ? [{ proposalId: edit.proposalId, status: edit.status }]
+              : edit.entries;
+            const statuses = new Map(entries.map((entry: any) => [entry.proposalId, entry.status]));
+            editedId = entries.map((entry: any) => entry.proposalId).join(',');
+            const proposals = (manifest.enrichmentState?.proposals || []).map((proposal: any) =>
+              statuses.has(proposal.proposalId)
+                ? { ...proposal, status: statuses.get(proposal.proposalId) }
+                : proposal,
+            );
+            const status = proposals.some((proposal: any) => proposal.status === 'pending')
+              ? 'pending'
+              : proposals.some((proposal: any) => proposal.status === 'accepted')
+                ? 'accepted'
+                : proposals.some((proposal: any) => proposal.status === 'rejected')
+                  ? 'rejected'
+                  : 'none';
+            manifest.enrichmentState = { status, proposals };
+            const accepted = proposals.filter((proposal: any) => proposal.status === 'accepted');
+            manifest.parameterGroups = [
+              ...(manifest.parameterGroups || []).filter((group: any) => !group.groupId.startsWith('proposal-bind-')),
+              ...accepted.map((proposal: any) => ({
+                groupId: `proposal-bind-${proposal.proposalId}`, label: proposal.label,
+                parameterKeys: [...new Set(proposal.parameterKeys || [])],
+                partIds: [...new Set(proposal.partIds || [])], editable: true,
+              })),
+            ];
+            manifest.parts = (manifest.parts || []).map((part: any) => {
+              const acceptedKeys = accepted
+                .filter((proposal: any) => (proposal.partIds || []).includes(part.partId))
+                .flatMap((proposal: any) => proposal.parameterKeys || []);
+              const parameterKeys = [...new Set([...(part.parameterKeys || []), ...acceptedKeys])];
+              return { ...part, parameterKeys, editable: parameterKeys.length > 0 };
+            });
+          }
+          window.__MOCK_MODEL_MANIFESTS__[input.modelId] = manifest;
+          if (input.messageId) {
+            updateMessageById(input.messageId, (message) => { message.modelManifest = manifest; });
+          }
+          return { manifest, editedId, selectedViewId };
+        }
+
         if (cmd === 'update_parameters') {
           const message = updateMessageById(args.messageId, (entry) => {
             if (!entry.output && entry.modelManifest?.sourceKind === 'importedFcstd') {
@@ -857,7 +1199,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
   async function openParams(page: Page) {
     const paramsWindow = page.locator('[data-window-id="params"]');
     if (!(await paramsWindow.isVisible().catch(() => false))) {
-      await page.getByRole('button', { name: 'PARAMS' }).click();
+      await page.getByRole('button', { name: /^(PARAMS|Parameters)$/i }).click();
     }
     await expect(paramsWindow).toBeVisible();
   }
@@ -972,9 +1314,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
 
     const before = await page.evaluate(() => ({
       threadIds: Object.keys((window as any).__MOCK_THREADS__),
-      addVersionCalls: (window as any).__MOCK_CALLS__.filter((entry: { cmd: string }) =>
-        ['add_manual_version', 'add_imported_model_version'].includes(entry.cmd),
-      ).length,
+      forkCalls: (window as any).__MOCK_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'fork_design').length,
     }));
 
     await forkButton.click();
@@ -988,11 +1328,9 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await expect
       .poll(async () => {
         const calls = await page.evaluate(() => (window as any).__MOCK_CALLS__);
-        return calls.filter((entry: { cmd: string }) =>
-          ['add_manual_version', 'add_imported_model_version'].includes(entry.cmd),
-        ).length;
+        return calls.filter((entry: { cmd: string }) => entry.cmd === 'fork_design').length;
       })
-      .toBe(before.addVersionCalls);
+      .toBe(before.forkCalls);
 
     const afterThreadIds = await page.evaluate(() => Object.keys((window as any).__MOCK_THREADS__));
     expect(afterThreadIds).toEqual(before.threadIds);
@@ -1027,12 +1365,10 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
         return page.evaluate(() => Object.keys((window as any).__MOCK_THREADS__).length);
       })
       .toBe(beforeThreadCount + 1);
-    const forkWrite = await page.evaluate(() =>
-      (window as any).__MOCK_CALLS__.find((entry: { cmd: string }) =>
-        ['add_manual_version', 'add_imported_model_version'].includes(entry.cmd),
-      ),
+    const forkWrites = await page.evaluate(() =>
+      (window as any).__MOCK_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'fork_design'),
     );
-    expect(forkWrite?.cmd).toBeTruthy();
+    expect(forkWrites).toHaveLength(1);
   });
 
   test('Given floating window header is inconvenient When dragging visible content and double-clicking body Then window moves and fits viewport', async ({
@@ -1311,8 +1647,82 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     );
     expect(Boolean(manualView)).toBeTruthy();
     const calls = await page.evaluate(() => (window as any).__MOCK_CALLS__);
-    const saveManifestCall = [...calls].reverse().find((entry: { cmd: string }) => entry.cmd === 'save_model_manifest');
-    expect(saveManifestCall?.args?.manifest?.controlPrimitives?.some((entry: { label: string }) => entry.label === 'Shell Pair')).toBeTruthy();
+    const semanticEdit = [...calls].reverse().find((entry: { cmd: string }) => entry.cmd === 'apply_semantic_manifest_edit');
+    expect(semanticEdit?.args?.input?.edit).toMatchObject({
+      action: 'savePrimitive',
+      label: 'Shell Pair',
+      attachToView: true,
+    });
+    expect(semanticEdit?.args?.input?.edit?.primitiveId).toBeNull();
+  });
+
+  test('Given imported controls When a manual view saves Then one Rust intent owns pending success', async ({ page }) => {
+    await setupMocks(page, { semanticViewDelayMs: 400 });
+    await gotoWorkbench(page);
+
+    await openNewProjectChooser(page);
+    await page.getByRole('button', { name: /Import FreeCAD|Import FCStd/i }).click();
+    const importDialog = page.getByRole('dialog');
+    await importDialog.getByRole('button', { name: 'ACCEPT ALL' }).click();
+    await importDialog.getByRole('button', { name: 'APPLY' }).click();
+
+    await openParams(page);
+    await page.getByRole('button', { name: 'VIEWS', exact: true }).click();
+    await page.getByRole('button', { name: '+ VIEW' }).click();
+    await page.locator('#composer-view-label').fill('Outer Fit');
+    await page.locator('.view-composer .primitive-picker').first().click();
+    const save = page.getByRole('button', { name: 'CREATE VIEW' });
+    await save.click();
+
+    await expect(page.getByRole('button', { name: 'SAVING VIEW' })).toBeDisabled();
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__MOCK_CALLS__.filter((entry: { cmd: string; args?: any }) =>
+        entry.cmd === 'apply_semantic_manifest_edit' && entry.args?.input?.edit?.action === 'saveView').length,
+    )).toBe(1);
+    await expect(page.getByRole('alert').filter({ hasText: 'View Save Failed' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Outer Fit' })).toBeVisible();
+    const mutation = await page.evaluate(() =>
+      (window as any).__MOCK_CALLS__.find((entry: { cmd: string; args?: any }) =>
+        entry.cmd === 'apply_semantic_manifest_edit' && entry.args?.input?.edit?.action === 'saveView'),
+    );
+    expect(mutation.args.input).toMatchObject({
+      modelId: 'imported-fcstd-1',
+      edit: { action: 'saveView', label: 'Outer Fit' },
+    });
+    expect(mutation.args.input.manifest).toBeUndefined();
+    expect(await page.evaluate(() => (window as any).__MOCK_CALLS__
+      .map((entry: { cmd: string }) => entry.cmd))).not.toContain('save_control_view');
+
+    await page.getByRole('button', { name: 'DELETE', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Outer Fit' })).toHaveCount(0);
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__MOCK_CALLS__.filter((entry: { cmd: string; args?: any }) =>
+        entry.cmd === 'apply_semantic_manifest_edit' && entry.args?.input?.edit?.action === 'deleteView').length,
+    )).toBe(1);
+    expect(await page.evaluate(() => (window as any).__MOCK_CALLS__
+      .map((entry: { cmd: string }) => entry.cmd))).not.toContain('delete_control_view');
+  });
+
+  test('Given Rust rejects a manual view When save fails Then raw error remains and draft stays open', async ({ page }) => {
+    await setupMocks(page, { failSemanticViewSave: true });
+    await gotoWorkbench(page);
+
+    await openNewProjectChooser(page);
+    await page.getByRole('button', { name: /Import FreeCAD|Import FCStd/i }).click();
+    const importDialog = page.getByRole('dialog');
+    await importDialog.getByRole('button', { name: 'ACCEPT ALL' }).click();
+    await importDialog.getByRole('button', { name: 'APPLY' }).click();
+
+    await openParams(page);
+    await page.getByRole('button', { name: 'VIEWS', exact: true }).click();
+    await page.getByRole('button', { name: '+ VIEW' }).click();
+    await page.locator('#composer-view-label').fill('Rejected Fit');
+    await page.locator('.view-composer .primitive-picker').first().click();
+    await page.getByRole('button', { name: 'CREATE VIEW' }).click();
+
+    await expect(page.getByRole('alert')).toContainText('semantic view rejected: raw backend body');
+    await expect(page.locator('#composer-view-label')).toHaveValue('Rejected Fit');
+    await expect(page.getByRole('button', { name: 'CREATE VIEW' })).toBeEnabled();
   });
 
   test('linked semantic knobs propagate related param updates', async ({ page }) => {
@@ -1330,10 +1740,14 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await page.getByRole('button', { name: '+ LINK' }).click();
     await page.locator('.view-composer').getByRole('button', { name: 'CREATE LINK' }).click();
 
-    const saveCalls = await page.evaluate(() =>
-      (window as any).__MOCK_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'save_model_manifest'),
+    const relationEdit = await page.evaluate(() =>
+      [...(window as any).__MOCK_CALLS__].reverse().find(
+        (entry: { cmd: string; args?: any }) =>
+          entry.cmd === 'apply_semantic_manifest_edit' && entry.args?.input?.edit?.action === 'saveRelation',
+      ),
     );
-    const relationManifest = [...saveCalls].reverse()[0]?.args?.manifest;
+    expect(relationEdit?.args?.input?.edit).toMatchObject({ action: 'saveRelation' });
+    const relationManifest = await page.evaluate(() => (window as any).__MOCK_MODEL_MANIFESTS__['generated-box']);
     expect(relationManifest?.controlRelations?.length).toBeGreaterThan(0);
 
     const beforeRenderCount = await page.evaluate(
@@ -1390,7 +1804,7 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await expect(page.locator('.viewer-part-overlay')).toHaveCount(0);
   });
 
-  test('importing a macro should create a manual version via the manual commit path', async ({ page }) => {
+  test('Given imported macro When thread is created Then frontend sends one Rust-owned intent', async ({ page }) => {
     await setupMocks(page);
     await gotoWorkbench(page);
 
@@ -1402,9 +1816,24 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await expect
       .poll(async () => {
         const calls = await page.evaluate(() => (window as any).__MOCK_CALLS__);
-        return calls.filter((entry: { cmd: string }) => entry.cmd === 'add_manual_version').length;
+        return calls.filter((entry: { cmd: string }) => entry.cmd === 'create_design_thread').length;
       })
       .toBeGreaterThan(0);
+
+    const creation = await page.evaluate(() =>
+      (window as any).__MOCK_CALLS__.find(
+        (entry: { cmd: string }) => entry.cmd === 'create_design_thread',
+      ),
+    );
+    expect(creation?.args?.input).toEqual({
+      mode: 'macro',
+      title: 'Manual Import',
+      source: 'print("manual")',
+      baseThreadId: null,
+      baseMessageId: null,
+    });
+    expect(creation?.args?.input).not.toHaveProperty('threadId');
+    await expect(page.getByRole('button', { name: /CREATE THREAD/i })).toHaveCount(0);
   });
 
   test('project choosers should not expose canonical cup entry', async ({ page }) => {
@@ -1456,13 +1885,11 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
         const calls = await page.evaluate(() => (window as any).__MOCK_CALLS__.map((entry: { cmd: string }) => entry.cmd));
         return calls;
       })
-      .toContain('import_fcstd');
-    await expect
-      .poll(async () => {
-        const calls = await page.evaluate(() => (window as any).__MOCK_CALLS__.map((entry: { cmd: string }) => entry.cmd));
-        return calls;
-      })
-      .toContain('add_imported_model_version');
+      .toContain('import_model_intent');
+    const importCalls = await page.evaluate(() => (window as any).__MOCK_CALLS__);
+    expect(importCalls.filter((entry: { cmd: string }) => entry.cmd === 'import_model_intent')).toHaveLength(1);
+    expect(importCalls.some((entry: { cmd: string }) => entry.cmd === 'import_fcstd')).toBeFalsy();
+    expect(importCalls.some((entry: { cmd: string }) => entry.cmd === 'add_imported_model_version')).toBeFalsy();
 
     const importDialog = page.getByRole('dialog');
     await expect(importDialog).toContainText('IMPORT ENRICHMENT');
@@ -1480,8 +1907,10 @@ test.describe('Q&A and Design Flow (Mocked)', () => {
     await expect(page.locator('.param-field', { hasText: 'Outer Shell Width' })).toBeVisible();
 
     const calls = await page.evaluate(() => (window as any).__MOCK_CALLS__);
-    const saveManifestCall = calls.find((entry: { cmd: string }) => entry.cmd === 'save_model_manifest');
-    expect(saveManifestCall?.args?.messageId).toBeTruthy();
+    const semanticEdit = calls.find((entry: { cmd: string; args?: any }) =>
+      entry.cmd === 'apply_semantic_manifest_edit' && entry.args?.input?.edit?.action === 'setProposalStatuses');
+    expect(semanticEdit?.args?.input?.messageId).toBeTruthy();
+    expect(semanticEdit?.args?.input?.edit?.entries?.length).toBeGreaterThan(0);
   });
 
   test('accepted imported bindings become editable and persist control values', async ({ page }) => {

@@ -18,8 +18,38 @@ Mesh generation and solve SHALL be explicit workbench or MCP actions.
 #### Scenario: User runs the study
 
 - **WHEN** the user invokes run for a valid current study
-- **THEN** the runtime executes the ordered FEM pipeline
+- **THEN** the workbench submits one intent containing current model identity,
+  source, and authored analysis name
+- **AND** Rust allocates the run identity, applies configured validation and
+  compute policy, validates, executes, and publishes the ordered FEM pipeline
 - **AND** progress, cancellation, and final result identity are available.
+
+#### Scenario: Frontend attempts to author FEM lifecycle policy
+
+- **GIVEN** a workbench caller includes a job id, budgets, or numerical control
+  fields in the run intent
+- **WHEN** the Tauri boundary decodes the intent
+- **THEN** the request is rejected as an unknown-field contract violation
+- **AND** no validation, meshing, solve, or result publication starts.
+
+#### Scenario: User validates or previews the current study
+
+- **WHEN** the user invokes validation or mesh preview
+- **THEN** the workbench submits exactly one action-specific intent containing
+  current model identity, source, and authored analysis name
+- **AND** Rust allocates the job identity and applies configured budgets and
+  numerical control
+- **AND** mesh preview performs validation then mesh generation inside Rust and
+  returns both projections.
+
+#### Scenario: User runs or restores convergence evidence
+
+- **WHEN** the user runs convergence or requests cached convergence
+- **THEN** the workbench submits one action-specific intent with current target
+  inputs and user-selected mesh sizes
+- **AND** Rust owns job identity, configured budgets, numerical control, and
+  convergence tolerances
+- **AND** the frontend does not manufacture those lifecycle-policy fields.
 
 ### Requirement: Workbench inspection presents current result evidence
 
@@ -42,6 +72,14 @@ export without introducing a separate agent status bar.
 - **THEN** stage, raw backend detail, observed values, and actionable source or
   selector context remain visible
 - **AND** the message is not replaced by generic solver advice.
+
+#### Scenario: User exports a current result
+
+- **GIVEN** a current immutable FEM result identity
+- **WHEN** the user chooses a VTU target path and invokes export
+- **THEN** the workbench submits the result identity and target path
+- **AND** Rust loads and enforces the configured maximum result-byte policy
+- **AND** the frontend does not send a byte cap.
 
 ### Requirement: MCP exposes compact artifact-aware FEM operations
 

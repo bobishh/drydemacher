@@ -12,7 +12,7 @@ use crate::models::AppState;
 #[cfg(test)]
 use crate::thread_source_binding::ThreadSourceBinding;
 
-fn persist_config_transaction(
+pub(crate) fn persist_config_transaction(
     config_dir: &Path,
     mut config: Config,
     state: &AppState,

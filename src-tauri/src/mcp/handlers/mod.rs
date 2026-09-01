@@ -29,6 +29,7 @@ mod authoring_actor;
 mod compare;
 mod component;
 pub(crate) mod ecky_ast;
+mod exploration;
 pub(super) mod macro_buffer;
 mod printability;
 mod project_folder;
@@ -64,6 +65,11 @@ pub use ecky_ast::{
     handle_ecky_ast_get, handle_ecky_ast_patch_validate, handle_ecky_ast_replace_and_render,
     handle_ecky_constraints_validate, handle_ecky_dependency_get, handle_ecky_selector_resolve,
 };
+pub use exploration::{
+    handle_active_exploration_cycle_get, handle_exploration_cycle_answer,
+    handle_exploration_cycle_events, handle_exploration_cycle_get, handle_exploration_run_start,
+    handle_exploration_run_stop,
+};
 #[cfg(test)]
 use macro_buffer::apply_macro_buffer_replacements;
 pub use macro_buffer::{
@@ -82,10 +88,9 @@ pub use project_folder::{
     ProjectFolderExportRequest, ProjectFolderStatusRequest, ProjectFolderWatchEvent,
     ProjectFolderWatchTransport, ProjectFolderWatcher,
 };
+pub(crate) use render_preview::resolve_macro_authoring_context;
 #[cfg(test)]
-use render_preview::{
-    first_version_authoring_context, infer_macro_source_language, resolve_macro_authoring_context,
-};
+use render_preview::{first_version_authoring_context, infer_macro_source_language};
 pub use render_preview::{handle_macro_preview_render, handle_params_preview_render};
 pub use semantic::{
     handle_control_primitive_delete, handle_control_primitive_save, handle_control_view_delete,
@@ -328,7 +333,7 @@ fn is_specific_selection_binding(target: &crate::contracts::SelectionTarget) -> 
         || target.parameter_keys.len() <= 2
 }
 
-pub(super) fn carry_forward_semantic_manifest(
+pub(crate) fn carry_forward_semantic_manifest(
     previous: Option<&ModelManifest>,
     next: ModelManifest,
     artifact_bundle: &ArtifactBundle,
@@ -438,7 +443,7 @@ fn live_claim_session(
 }
 
 pub async fn claim_owners_by_thread(state: &AppState) -> HashMap<String, AgentSession> {
-    let sessions = state.mcp_sessions.lock().await;
+    let sessions = state.mcp_session_registry.with_sessions().lock().await;
     let mut claims = HashMap::<String, AgentSession>::new();
     for (session_id, session) in sessions.iter() {
         let Some(claim) = live_claim_session(session_id, session) else {
@@ -489,7 +494,7 @@ async fn release_thread_claim(
     released_by: &AgentContext,
 ) -> AppResult<()> {
     let released_session = {
-        let mut sessions = state.mcp_sessions.lock().await;
+        let mut sessions = state.mcp_session_registry.with_sessions().lock().await;
         let Some(session) = sessions.get_mut(&owner.session_id) else {
             return Ok(());
         };
@@ -877,7 +882,7 @@ pub(super) async fn mutate_live_session<F>(state: &AppState, ctx: &AgentContext,
 where
     F: FnOnce(&mut crate::models::McpSessionState),
 {
-    let mut sessions = state.mcp_sessions.lock().await;
+    let mut sessions = state.mcp_session_registry.with_sessions().lock().await;
     if let Some(session) = sessions.get_mut(&ctx.session_id) {
         session.agent_label = ctx.agent_label.clone();
         session.llm_model_id = ctx.llm_model_id.clone();
@@ -891,7 +896,7 @@ pub(super) async fn drop_live_session(state: &AppState, session_id: &str) {
     state
         .close_prompts_for_session(session_id, "session_disconnected")
         .await;
-    state.mcp_sessions.lock().await.remove(session_id);
+    state.mcp_session_registry.remove(session_id).await;
 }
 
 pub(super) fn session_target_ref(
@@ -1016,7 +1021,8 @@ pub(super) async fn current_turn_working_user_message_ids_for_thread(
     thread_id: &str,
 ) -> Vec<String> {
     state
-        .mcp_sessions
+        .mcp_session_registry
+        .with_sessions()
         .lock()
         .await
         .get(session_id)
@@ -1033,7 +1039,8 @@ async fn current_turn_working_version_message_id_for_thread(
     thread_id: &str,
 ) -> Option<String> {
     state
-        .mcp_sessions
+        .mcp_session_registry
+        .with_sessions()
         .lock()
         .await
         .get(session_id)
@@ -1050,7 +1057,7 @@ pub(super) async fn remember_turn_working_user_messages(
     thread_id: &str,
     message_ids: &[String],
 ) {
-    let mut sessions = state.mcp_sessions.lock().await;
+    let mut sessions = state.mcp_session_registry.with_sessions().lock().await;
     if let Some(session) = sessions.get_mut(session_id) {
         if session.current_turn_id.is_none() {
             session.current_turn_id = Some(Uuid::new_v4().to_string());
@@ -1073,7 +1080,7 @@ async fn remember_turn_working_version_message(
     thread_id: &str,
     message_id: &str,
 ) {
-    let mut sessions = state.mcp_sessions.lock().await;
+    let mut sessions = state.mcp_session_registry.with_sessions().lock().await;
     if let Some(session) = sessions.get_mut(session_id) {
         if session.current_turn_id.is_none() {
             session.current_turn_id = Some(Uuid::new_v4().to_string());
@@ -1085,7 +1092,7 @@ async fn remember_turn_working_version_message(
 }
 
 pub(super) async fn clear_turn_working_state(state: &AppState, session_id: &str, thread_id: &str) {
-    let mut sessions = state.mcp_sessions.lock().await;
+    let mut sessions = state.mcp_session_registry.with_sessions().lock().await;
     if let Some(session) = sessions.get_mut(session_id) {
         if session.current_turn_thread_id.as_deref() == Some(thread_id) {
             session.current_turn_working_message_ids.clear();
@@ -1763,10 +1770,11 @@ async fn store_session_render_preview_unchecked(
     );
 
     let snapshot_started = Instant::now();
-    let snapshot = crate::services::session::build_runtime_snapshot(
+    let snapshot = crate::services::session::build_draft_snapshot(
         Some(preview.design_output.clone()),
-        Some(preview.thread_id.clone()),
-        Some(preview.preview_id.clone()),
+        preview.thread_id.clone(),
+        preview.preview_id.clone(),
+        preview.session_id.clone(),
         Some(preview.artifact_bundle.clone()),
         Some(preview.model_manifest.clone()),
         None,

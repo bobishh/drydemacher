@@ -11,11 +11,16 @@ function installProjectSwitcherMocks(options?: {
   }>;
   latestVersions?: Record<string, Record<string, unknown> | null>;
   messagePages?: Record<string, Array<Record<string, unknown>>>;
-  latestVersionDelayMs?: number;
+  workspaceProjectionDelayMs?: number;
   threadPreviews?: Record<string, string | null>;
   threadPreviewDelayMs?: number;
   campaignRuns?: Array<Record<string, unknown>>;
+  campaignStep?: Record<string, unknown> | null;
+  campaignTransitionResult?: Record<string, unknown> | null;
+  campaignTransitionError?: string | null;
+  campaignTransitionDelayMs?: number;
   runtimeFileDelay?: { includes: string; ms: number };
+  bootThreadId?: string | null;
 }) {
   const history = options?.history ?? [];
   const inventory = options?.inventory ?? [];
@@ -23,11 +28,16 @@ function installProjectSwitcherMocks(options?: {
   const deletedProjectPages = options?.deletedProjectPages ?? {};
   const latestVersions = options?.latestVersions ?? {};
   const messagePages = options?.messagePages ?? {};
-  const latestVersionDelayMs = options?.latestVersionDelayMs ?? 0;
+  const workspaceProjectionDelayMs = options?.workspaceProjectionDelayMs ?? 0;
   const threadPreviews = options?.threadPreviews ?? {};
   const threadPreviewDelayMs = options?.threadPreviewDelayMs ?? 0;
   const campaignRuns = options?.campaignRuns ?? [];
+  const campaignStep = options?.campaignStep ?? null;
+  const campaignTransitionResult = options?.campaignTransitionResult ?? null;
+  const campaignTransitionError = options?.campaignTransitionError ?? null;
+  const campaignTransitionDelayMs = options?.campaignTransitionDelayMs ?? 0;
   const runtimeFileDelay = options?.runtimeFileDelay ?? null;
+  const bootThreadId = options?.bootThreadId ?? null;
 
   return async ({ page }: { page: import('@playwright/test').Page }) => {
     await page.addInitScript(
@@ -38,11 +48,16 @@ function installProjectSwitcherMocks(options?: {
         deletedProjectPages,
         latestVersions,
         messagePages,
-        latestVersionDelayMs,
+        workspaceProjectionDelayMs,
         threadPreviews,
         threadPreviewDelayMs,
         campaignRuns,
+        campaignStep,
+        campaignTransitionResult,
+        campaignTransitionError,
+        campaignTransitionDelayMs,
         runtimeFileDelay,
+        bootThreadId,
       }) => {
         const mockWindow = window as any;
         localStorage.clear();
@@ -50,6 +65,30 @@ function installProjectSwitcherMocks(options?: {
         let mutableHistory = structuredClone(history);
         let mutableInventory = structuredClone(inventory);
         let mutableDeletedProjectPages = structuredClone(deletedProjectPages);
+
+        const messagesPageFor = (threadId: string) => ({
+          messages: structuredClone(messagePages[threadId] ?? []),
+          nextBefore: null,
+          hasMore: false,
+          observedBytes: 0,
+          truncatedFields: [],
+        });
+        const workspaceFor = (threadId: string, completed = false) => {
+          const source = completed ? mutableInventory : mutableHistory;
+          const thread = source.find((item: any) => item.id === threadId);
+          if (!thread) return null;
+          const selectedVersion = structuredClone(latestVersions[threadId] ?? null);
+          const page = messagesPageFor(threadId);
+          if (selectedVersion && !page.messages.some((message: any) => message.id === selectedVersion.id)) {
+            page.messages.push(selectedVersion);
+          }
+          return {
+            thread: { ...structuredClone(thread), messages: [] },
+            messagesPage: page,
+            selectedVersion,
+            requestedMessageFound: false,
+          };
+        };
 
         const config = {
           engines: [{ id: 'mock', name: 'Mock', provider: 'openai', apiKey: '', model: 'mock', baseUrl: '', enabled: true }],
@@ -77,9 +116,49 @@ function installProjectSwitcherMocks(options?: {
         };
         window.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: Record<string, unknown>) => {
           mockWindow.__PROJECTS_CALLS__.push({ cmd, args });
+          if (cmd === 'get_boot_projection') {
+            return {
+              config: structuredClone(config),
+              history: structuredClone(mutableHistory),
+              workspace: bootThreadId ? workspaceFor(bootThreadId) : null,
+              selectedPartId: null,
+            };
+          }
           if (cmd === 'get_config') return structuredClone(config);
+          if (cmd === 'get_agent_activity') {
+            return {
+              events: [],
+              latestCursor: 0,
+              oldestCursor: 0,
+              hasMore: false,
+              droppedCount: 0,
+              retainedBytes: 0,
+            };
+          }
+          if (cmd === 'list_capture_runs') return [];
           if (cmd === 'list_campaign_runs') return structuredClone(campaignRuns);
           if (cmd === 'list_campaign_definitions') return [];
+          if (cmd === 'get_campaign_step') return structuredClone(campaignStep);
+          if (cmd === 'open_campaign_project') {
+            const intent = args?.intent as { kind?: string; runId?: string } | undefined;
+            const run = intent?.runId
+              ? campaignRuns.find((candidate: any) => candidate.id === intent.runId)
+              : campaignRuns[0];
+            return run && campaignStep
+              ? { run: structuredClone(run), step: structuredClone(campaignStep) }
+              : null;
+          }
+          if (cmd === 'save_active_project_navigation') return structuredClone(args?.navigation ?? null);
+          if (cmd === 'get_app_window_layout') return null;
+          if (cmd === 'transition_campaign_run') {
+            if (campaignTransitionDelayMs > 0) {
+              await new Promise((resolve) => setTimeout(resolve, campaignTransitionDelayMs));
+            }
+            if (campaignTransitionError) {
+              throw { code: 'validation', message: campaignTransitionError };
+            }
+            return structuredClone(campaignTransitionResult);
+          }
           if (cmd === 'save_config') return null;
           if (cmd === 'get_runtime_capabilities') {
             return {
@@ -95,14 +174,27 @@ function installProjectSwitcherMocks(options?: {
           }
           if (cmd === 'list_installed_component_package_headers') return [];
           if (cmd === 'get_history') return structuredClone(mutableHistory);
+          if (cmd === 'get_workspace_projection') {
+            if (workspaceProjectionDelayMs > 0) {
+              await new Promise((resolve) => setTimeout(resolve, workspaceProjectionDelayMs));
+            }
+            return structuredClone(workspaceFor(String(args?.threadId ?? '')));
+          }
           if (cmd === 'get_inventory') {
             if (inventoryError) {
               throw { code: 'persistence', message: inventoryError.message, details: inventoryError.details };
             }
             return structuredClone(mutableInventory);
           }
-          if (cmd === 'finalize_thread') {
-            const id = String(args?.id ?? '');
+          if (cmd === 'delete_thread_intent') {
+            const input = args?.input as { threadId?: string } | undefined;
+            const id = String(input?.threadId ?? '');
+            mutableHistory = mutableHistory.filter((item: any) => item.id !== id);
+            return { threadId: id, history: structuredClone(mutableHistory) };
+          }
+          if (cmd === 'finalize_thread_intent') {
+            const input = args?.input as { threadId?: string } | undefined;
+            const id = String(input?.threadId ?? '');
             const project = mutableHistory.find((item: any) => item.id === id);
             if (project) {
               mutableHistory = mutableHistory.filter((item: any) => item.id !== id);
@@ -115,7 +207,24 @@ function installProjectSwitcherMocks(options?: {
                 ...mutableInventory.filter((item: any) => item.id !== id),
               ];
             }
-            return null;
+            return { threadId: id, history: structuredClone(mutableHistory) };
+          }
+          if (cmd === 'reopen_thread_intent') {
+            const input = args?.input as { threadId?: string } | undefined;
+            const id = String(input?.threadId ?? '');
+            const project = mutableInventory.find((item: any) => item.id === id);
+            if (project) {
+              mutableInventory = mutableInventory.filter((item: any) => item.id !== id);
+              mutableHistory = [
+                { ...project, status: 'active', finalizedAt: null },
+                ...mutableHistory.filter((item: any) => item.id !== id),
+              ];
+            }
+            return { threadId: id, history: structuredClone(mutableHistory) };
+          }
+          if (cmd === 'open_inventory_thread_intent') {
+            const input = args?.input as { threadId?: string } | undefined;
+            return structuredClone(workspaceFor(String(input?.threadId ?? ''), true));
           }
           if (cmd === 'get_deleted_messages') return [];
           if (cmd === 'get_deleted_threads_page') {
@@ -177,9 +286,6 @@ function installProjectSwitcherMocks(options?: {
           }
           if (cmd === 'plugin:fs|size') return 1024;
           if (cmd === 'get_thread_latest_version') {
-            if (latestVersionDelayMs > 0) {
-              await new Promise((resolve) => setTimeout(resolve, latestVersionDelayMs));
-            }
             return structuredClone(latestVersions[String(args?.threadId ?? '')] ?? null);
           }
           if (cmd === 'get_thread_messages_page') {
@@ -207,17 +313,144 @@ function installProjectSwitcherMocks(options?: {
         deletedProjectPages,
         latestVersions,
         messagePages,
-        latestVersionDelayMs,
+        workspaceProjectionDelayMs,
         threadPreviews,
         threadPreviewDelayMs,
         campaignRuns,
+        campaignStep,
+        campaignTransitionResult,
+        campaignTransitionError,
+        campaignTransitionDelayMs,
         runtimeFileDelay,
+        bootThreadId,
       },
     );
   };
 }
 
 test.describe('Projects', () => {
+  test('Given active campaign step When learner continues Then one Rust transition owns progress persistence', async ({ page }) => {
+    const run = {
+      id: 'campaign-run-transition',
+      kind: 'campaignRun',
+      title: 'Atomic campaign',
+      definitionId: 'ecky-ir-build-missions',
+      definitionVersion: 'sha256:test',
+      currentStepId: 'mission-01/intro',
+      completedStepIds: [],
+      passedChallengeIds: [],
+      draftOverridesByStepId: {},
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const nextRun = {
+      ...run,
+      currentStepId: 'mission-01/worked',
+      completedStepIds: ['mission-01/intro'],
+      updatedAt: 2,
+    };
+    const currentStep = {
+      definitionId: run.definitionId,
+      definitionVersion: run.definitionVersion,
+      currentStep: {
+        id: run.currentStepId,
+        title: 'Introduction',
+        kind: 'explain',
+        prose: 'Learn one bounded concept.',
+        source: null,
+        canonicalSourceDigest: null,
+        canonicalPreview: null,
+        acceptance: null,
+        nextStepId: nextRun.currentStepId,
+        previousStep: null,
+        missionIndex: 1,
+        missionCount: 1,
+        stepIndex: 1,
+        stepCount: 2,
+      },
+    };
+    const nextStep = {
+      ...currentStep,
+      currentStep: {
+        ...currentStep.currentStep,
+        id: nextRun.currentStepId,
+        title: 'Worked model',
+        kind: 'worked',
+        stepIndex: 2,
+        nextStepId: null,
+        previousStep: { id: run.currentStepId },
+      },
+    };
+    await installProjectSwitcherMocks({
+      campaignRuns: [run],
+      campaignStep: currentStep,
+      campaignTransitionResult: { run: nextRun, step: nextStep, check: null },
+    })({ page });
+
+    await page.goto('/');
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    const projectsWindow = page.locator('[data-window-id="projects"]');
+    await projectsWindow.getByRole('button', { name: 'CAMPAIGNS' }).click();
+    await projectsWindow.getByRole('button', { name: 'RESUME' }).click();
+    await page.getByRole('button', { name: 'CONTINUE' }).click();
+
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__PROJECTS_CALLS__.filter(
+        (entry: { cmd: string }) => entry.cmd === 'transition_campaign_run',
+      ),
+    )).toEqual([{
+      cmd: 'transition_campaign_run',
+      args: { input: { runId: run.id, action: { action: 'continue', draft: null } } },
+    }]);
+    await expect(page.getByRole('heading', { name: 'Worked model' })).toBeVisible();
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__PROJECTS_CALLS__.filter(
+        (entry: { cmd: string }) => entry.cmd === 'save_campaign_run',
+      ).length,
+    )).toBe(0);
+  });
+
+  test('Given campaign transition is pending then rejected When learner continues Then duplicate action is blocked and raw error remains', async ({ page }) => {
+    const run = {
+      id: 'campaign-run-failure', kind: 'campaignRun', title: 'Atomic campaign',
+      definitionId: 'ecky-ir-build-missions', definitionVersion: 'sha256:test',
+      currentStepId: 'mission-01/intro', completedStepIds: [], passedChallengeIds: [],
+      draftOverridesByStepId: {}, createdAt: 1, updatedAt: 1,
+    };
+    const currentStep = {
+      definitionId: run.definitionId,
+      definitionVersion: run.definitionVersion,
+      currentStep: {
+        id: run.currentStepId, title: 'Introduction', kind: 'explain',
+        prose: 'Learn one bounded concept.', source: null, canonicalSourceDigest: null,
+        canonicalPreview: null, acceptance: null, nextStepId: 'mission-01/worked',
+        previousStep: null, missionIndex: 1, missionCount: 1, stepIndex: 1, stepCount: 2,
+      },
+    };
+    await installProjectSwitcherMocks({
+      campaignRuns: [run],
+      campaignStep: currentStep,
+      campaignTransitionDelayMs: 400,
+      campaignTransitionError: 'campaign transition rejected: raw backend body',
+    })({ page });
+
+    await page.goto('/');
+    await page.getByRole('button', { name: 'PROJECTS' }).click();
+    const projectsWindow = page.locator('[data-window-id="projects"]');
+    await projectsWindow.getByRole('button', { name: 'CAMPAIGNS' }).click();
+    await projectsWindow.getByRole('button', { name: 'RESUME' }).click();
+    await page.getByRole('button', { name: 'CONTINUE' }).click();
+
+    await expect(page.getByRole('button', { name: 'CONTINUING…' })).toBeDisabled();
+    await expect(page.getByText('campaign transition rejected: raw backend body')).toBeVisible();
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__PROJECTS_CALLS__.filter(
+        (entry: { cmd: string }) => entry.cmd === 'transition_campaign_run',
+      ).length,
+    )).toBe(1);
+    await expect(page.getByRole('heading', { name: 'Introduction' })).toBeVisible();
+  });
+
   test('Given campaign projects When Campaigns opens Then each run shows its current mission preview', async ({ page }) => {
     await installProjectSwitcherMocks({
       campaignRuns: [
@@ -333,7 +566,12 @@ test.describe('Projects', () => {
     const getHistoryCalls = page.evaluate(() =>
       (window as any).__PROJECTS_CALLS__.filter((call: { cmd: string }) => call.cmd === 'get_history').length,
     );
-    await expect(getHistoryCalls).resolves.toBeGreaterThanOrEqual(2);
+    await expect(getHistoryCalls).resolves.toBe(1);
+    await expect(page.evaluate(() =>
+      (window as any).__PROJECTS_CALLS__.filter(
+        (call: { cmd: string }) => call.cmd === 'get_boot_projection',
+      ).length,
+    )).resolves.toBe(1);
     await expect(page.locator('[data-window-id="projects"] [data-project-id="existing-project"]')).toBeVisible();
   });
 
@@ -384,8 +622,8 @@ test.describe('Projects', () => {
         enrichmentState: { status: 'none', proposals: [] },
       },
     });
-    const alphaVersion = makeVersion('alpha', 'alpha-model', '/mock/alpha.stl');
-    const betaVersion = makeVersion('beta', 'beta-model', '/mock/beta.stl');
+    const alphaVersion = makeVersion('alpha', 'alpha-model', '/mock/alpha/model.stl');
+    const betaVersion = makeVersion('beta', 'beta-model', '/mock/beta/model.stl');
     const makeThread = (id: string, title: string, version: Record<string, unknown>) => ({
       id,
       title,
@@ -403,11 +641,12 @@ test.describe('Projects', () => {
       history: [makeThread('alpha', 'Alpha project', alphaVersion), makeThread('beta', 'Beta project', betaVersion)],
       latestVersions: { alpha: alphaVersion, beta: betaVersion },
       messagePages: { alpha: [alphaVersion], beta: [betaVersion] },
-      runtimeFileDelay: { includes: 'beta.stl', ms: 700 },
+      workspaceProjectionDelayMs: 700,
+      bootThreadId: 'alpha',
     })({ page });
     let betaStlRequests = 0;
-    await page.route(/\/mock\/(alpha|beta)\.stl(?:\?.*)?$/, (route) => {
-      if (route.request().url().includes('/beta.stl')) betaStlRequests += 1;
+    await page.route(/\/mock\/(alpha|beta)\/model\.stl(?:\?.*)?$/, (route) => {
+      if (route.request().url().includes('/beta/')) betaStlRequests += 1;
       return route.fulfill({
         status: 200,
         contentType: 'model/stl',
@@ -420,6 +659,12 @@ test.describe('Projects', () => {
     await expect(viewer).toHaveAttribute('data-model-status', 'loaded');
     await page.getByRole('button', { name: 'PROJECTS' }).click();
     await page.locator('[data-project-id="beta"]').getByRole('button', { name: 'OPEN' }).click();
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__PROJECTS_CALLS__.filter(
+        (call: { cmd: string; args?: { threadId?: string } }) =>
+          call.cmd === 'get_workspace_projection' && call.args?.threadId === 'beta',
+      ).length,
+    )).toBe(1);
     await expect(viewer).toHaveAttribute('data-model-status', 'loaded');
     await expect(page.locator('.viewer-shell')).toHaveAttribute('data-model-key', /beta-model/);
     expect(betaStlRequests).toBe(1);
@@ -475,9 +720,14 @@ test.describe('Projects', () => {
 
     await expect.poll(() => page.evaluate(() =>
       (window as any).__PROJECTS_CALLS__.filter(
-        (call: { cmd: string }) => call.cmd === 'get_thread_latest_version',
+        (call: { cmd: string }) => call.cmd === 'get_workspace_projection',
       ).length,
     )).toBeGreaterThan(0);
+    await expect(page.evaluate(() =>
+      (window as any).__PROJECTS_CALLS__.filter(
+        (call: { cmd: string }) => call.cmd === 'get_thread_latest_version',
+      ).length,
+    )).resolves.toBe(0);
     await expect.poll(() => page.evaluate(() =>
       (window as any).__PROJECTS_CALLS__.filter(
         (call: { cmd: string }) => call.cmd === 'render_model',
@@ -581,28 +831,7 @@ test.describe('Projects', () => {
           title: 'Paged Preview Thread',
           summary: '',
           updatedAt: Date.UTC(2026, 5, 1),
-          messages: [
-            {
-              id: 'older-version',
-              role: 'assistant',
-              status: 'success',
-              output: {},
-              artifactBundle: {},
-              imageData: previewImage,
-              timestamp: 100,
-              content: '',
-            },
-            {
-              id: 'current-head',
-              role: 'assistant',
-              status: 'error',
-              output: {},
-              artifactBundle: {},
-              imageData: null,
-              timestamp: 200,
-              content: '',
-            },
-          ],
+          messages: [],
           genieTraits: null,
           versionCount: 2,
           pendingCount: 0,
@@ -615,6 +844,26 @@ test.describe('Projects', () => {
       ],
       threadPreviews: {
         'thread-preview': null,
+      },
+      messagePages: {
+        'thread-preview': [
+          {
+            id: 'older-version',
+            role: 'assistant',
+            status: 'success',
+            imageData: previewImage,
+            timestamp: 100,
+            content: '',
+          },
+          {
+            id: 'current-head',
+            role: 'assistant',
+            status: 'error',
+            imageData: null,
+            timestamp: 200,
+            content: '',
+          },
+        ],
       },
     })({ page });
 
@@ -718,8 +967,13 @@ test.describe('Projects', () => {
 
     const calls = await page.evaluate(() => (window as any).__PROJECTS_CALLS__);
     expect(calls).toContainEqual({
-      cmd: 'finalize_thread',
-      args: expect.objectContaining({ id: 'project-same-id' }),
+      cmd: 'finalize_thread_intent',
+      args: {
+        input: {
+          threadId: 'project-same-id',
+          selectedMessageId: null,
+        },
+      },
     });
   });
 

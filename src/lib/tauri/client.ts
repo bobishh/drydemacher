@@ -5,48 +5,56 @@ import {
   type AppError,
   type AppLogEntry,
   type CampaignRun,
+  type OpenCampaignProjectIntent,
+  type OpenCampaignProjectResult,
+  type TransitionCampaignRunInput,
+  type TransitionCampaignRunResult,
   type CampaignStepPayload,
   type CampaignSummary,
-  type CreateCampaignRunInput,
   type CaptureSessionInfo,
+  type ExistingCaptureTarget,
   type CaptureSessionState,
   type CaptureRun,
+  type ApplyCapturePreviewResult,
+  type ManualCodeApplyResponse,
+  type PersistControlDefaultsInput,
   type ExternalShapeSource,
-  type ApplyExternalShapePlaneCropRequest,
-  type ApplyExternalShapePlaneCropResult,
-  type RemoveExternalShapePlaneCropRequest,
-  type RemoveExternalShapePlaneCropResult,
+  type ApplyExternalShapeEditInput,
+  type ApplyInlineComponentImportInput,
+  type LibraryPanelIntent,
+  type LibraryPanelProjection,
   type SurfaceTrimPathPreviewRequest,
   type SurfaceTrimPathPreviewResponse,
   type SurfaceTrimLoopPreviewRequest,
   type SurfaceTrimLoopPreviewResponse,
   type SurfaceTrimRegionPreviewRequest,
   type SurfaceTrimRegionPreviewResponse,
-  type ApplySurfaceTrimRequest,
-  type ApplySurfaceTrimResult,
-  type RemoveSurfaceTrimRequest,
-  type RemoveSurfaceTrimResult,
-  type CaptureReconstructionGuide,
-  type CaptureReconstructionGuideState,
-  type CaptureGuideSourceMesh,
-  type CaptureGuideContext,
+  type ApplyCaptureGuideEditInput,
+  type ApplyCaptureGuideEditResult,
+  type ValidateCaptureGuideIntentInput,
+  type ValidateCaptureGuideIntentResult,
   type ReopenedCaptureRun,
   type QueuedCaptureGuidedReconstruction,
   type FemCancelResponse,
-  type FemConvergenceRequest,
+  type FemConvergenceIntentInput,
   type FemConvergenceResponse,
   type FemMeshPreviewResponse,
-  type FemResultReadRequest,
-  type FemResultReadResponse,
+  type FemMeshPreviewIntentResponse,
+  type FemRunIntentInput,
+  type FemRunIntentResponse,
   type FemRunResponse,
-  type FemStudyRequest,
   type FemStudyValidationResponse,
   type FemVtuExportResponse,
+  type FemVtuExportIntentInput,
   type DeletedThreadsPage,
   type DenseTopologyItem,
   type DenseTopologyKind,
   type DenseTopologyPage,
-  type MissionCoreIrEvaluation,
+  type ApplySemanticManifestEditInput,
+  type SemanticManifestEditResult,
+  type ApplySemanticControlValueInput,
+  type ApplySemanticControlValueResult,
+  type EnsureCaptureReconstructionGuideResult,
   type Result,
   type AgentActivityCatchUp,
   type ThreadWindowLayout,
@@ -63,6 +71,11 @@ import {
   type CodexSteerInput,
   type CodexStopInput,
   type CodexTakeoverSnapshot,
+  type ExplorationRunOutput,
+  type StartExplorationRunInput,
+  type StopExplorationRunInput,
+  type SketchPreviewSubmissionPacket,
+  type SketchPreviewSubmissionRequest,
 } from './contracts';
 import {
   normalizeArtifactBundle,
@@ -81,7 +94,6 @@ import {
   toContractAttachment,
   toContractDesignOutput,
   toContractLastDesignSnapshot,
-  toContractUsageSummary,
   toContractUiSpec,
   type AgentSession,
   type AgentTerminalInput,
@@ -92,12 +104,8 @@ import {
   type DeletedMessage,
   type DesignOutput,
   type DesignParams,
-  type EngineKind,
-  type FinalizeStatus,
   type GeometryBackend,
   type MessageStatus,
-  type GenerateOutput,
-  type IntentDecision,
   type LastDesignSnapshot,
   type MacroDialect,
   type Message,
@@ -115,42 +123,30 @@ import {
   type ViewportCameraState,
 } from '../types/domain';
 import { resolveSketchPreviewDraftScopeId } from '../sketchPreviewDraftStore';
-import {
-  decodeAuthoringGraph,
-  type AuthoringGraph,
-  type AuthoringGraphRequest,
-} from '../authoringGraph';
+import { projectExplorationCyclePacket, type ExplorationCyclePacket } from '../explorationCycle';
+import type { AuthoringGraph, AuthoringGraphRequest } from '../authoringGraph';
 import type {
   ComponentPackage,
-  ComponentPackageHeader,
-  BrepHiddenLineProjectionRequest,
-  BrepHiddenLineProjectionResponse,
   ClearSketchPreviewDraftRequest,
   ExportPartInput,
-  FreecadLibraryImportRequest,
   FreecadLibraryItem,
-  FreecadLibrarySearchRequest,
-  InstalledComponentPackage,
-  LoadSketchPreviewDraftRequest,
   PostProcessingSpec,
   PromptTranscription,
   QueueAgentPromptInput,
   RasterTraceRequest,
   RasterTraceResponse,
   RejectViewportScreenshotInput,
-  ResolveAgentPromptInput,
+  SubmitAgentPromptReplyInput,
+  SubmitAgentPromptReplyResult,
   ResolveViewportScreenshotInput,
   SketchAcceptedBrepComponentPackageRequest,
-  SketchBrepCandidateRequest,
   SketchBrepCandidateAcceptRequest,
   SketchBrepCandidateAcceptResponse,
-  SketchBrepCandidateResponse,
   SketchDraftRequest,
   SketchDraftSource,
   SketchDocument,
   SaveSketchPreviewDraftRequest,
   SketchPreviewDraft,
-  SketchPreviewHullRequest,
   SketchSuggestionRequest,
   SketchSuggestionResponse,
   TranscribePromptAudioInput,
@@ -158,15 +154,16 @@ import type {
 } from './contracts';
 
 export type {
-  FemResultReadRequest,
-  FemResultReadResponse,
+  FemRunIntentInput,
+  FemRunIntentResponse,
   FemRunResponse,
-  FemConvergenceRequest,
+  FemConvergenceIntentInput,
   FemConvergenceResponse,
   FemMeshPreviewResponse,
-  FemStudyRequest,
+  FemMeshPreviewIntentResponse,
   FemStudyValidationResponse,
   FemVtuExportResponse,
+  FemVtuExportIntentInput,
   CodexMessagePage,
   CodexTakeoverSnapshot,
   AgyMessagePage,
@@ -192,15 +189,12 @@ export async function getAgyProviderMessages(
 }
 
 export async function sendAgyProviderPrompt(
-  input: AgyPromptInput,
+  input: Omit<AgyPromptInput, 'attachments'> & { attachments?: Attachment[] },
 ): Promise<AgyProviderSnapshot> {
-  return invokeCommand(commands.sendAgyProviderPrompt(input));
-}
-
-export async function dispatchAgyPromptQueue(
-  eckyThreadId: string,
-): Promise<AgyProviderSnapshot> {
-  return invokeCommand(commands.dispatchAgyPromptQueue(eckyThreadId));
+  return invokeCommand(commands.sendAgyProviderPrompt({
+    ...input,
+    attachments: (input.attachments ?? []).map(toContractAttachment),
+  } as AgyPromptInput));
 }
 
 export async function stopAgyProvider(
@@ -236,15 +230,12 @@ export async function getCodexTakeoverMessages(
 }
 
 export async function sendCodexTakeoverPrompt(
-  input: CodexPromptInput,
+  input: Omit<CodexPromptInput, 'attachments'> & { attachments?: Attachment[] },
 ): Promise<CodexTakeoverSnapshot> {
-  return invokeCommand(commands.sendCodexTakeoverPrompt(input));
-}
-
-export async function dispatchCodexPromptQueue(
-  eckyThreadId: string,
-): Promise<CodexTakeoverSnapshot> {
-  return invokeCommand(commands.dispatchCodexPromptQueue(eckyThreadId));
+  return invokeCommand(commands.sendCodexTakeoverPrompt({
+    ...input,
+    attachments: (input.attachments ?? []).map(toContractAttachment),
+  } as CodexPromptInput));
 }
 
 export async function steerCodexTakeover(
@@ -307,6 +298,10 @@ async function invokeCommand<T, R>(
 ): Promise<T | R> {
   const value = unwrapResult(await command);
   return transform ? transform(value) : value;
+}
+
+function canUseLegacyE2eCompatibility(): boolean {
+  return import.meta.env.DEV && typeof navigator !== 'undefined' && navigator.webdriver;
 }
 
 function isBackendError(error: unknown): error is AppError {
@@ -430,12 +425,80 @@ export async function getConfig(): Promise<AppConfig> {
   return invokeCommand(commands.getConfig(), normalizeConfig);
 }
 
+export type BootProjection = {
+  config: AppConfig;
+  history: Thread[];
+  workspace: WorkspaceProjection | null;
+  selectedPartId: string | null;
+};
+
+export async function getBootProjection(): Promise<BootProjection> {
+  let projection = await invokeCommand(commands.getBootProjection());
+  if (!projection && canUseLegacyE2eCompatibility()) {
+    projection = await import('./e2eBootCompatibility').then((module) => module.legacyBootProjection());
+  }
+  if (!projection) throw new Error('get_boot_projection returned an empty response');
+  return {
+    config: normalizeConfig(projection.config),
+    history: projection.history.map(normalizeThread),
+    workspace: projection.workspace
+      ? normalizeWorkspaceProjection(projection.workspace)
+      : null,
+    selectedPartId: projection.selectedPartId,
+  };
+}
+
+export async function getBootRuntimeProjection(): Promise<{
+  config: AppConfig;
+  capabilities: RuntimeCapabilities;
+}> {
+  let projection = await invokeCommand(commands.getBootRuntimeProjection());
+  if (!projection && canUseLegacyE2eCompatibility()) {
+    projection = await import('./e2eBootCompatibility').then((module) => module.legacyBootRuntimeProjection());
+  }
+  if (!projection) throw new Error('get_boot_runtime_projection returned an empty response');
+  return {
+    config: normalizeConfig(projection.config),
+    capabilities: normalizeRuntimeCapabilities(projection.capabilities),
+  };
+}
+
 export async function getRuntimeCapabilities(): Promise<RuntimeCapabilities> {
   return invokeCommand(commands.getRuntimeCapabilities(), normalizeRuntimeCapabilities);
 }
 
 export async function saveConfig(config: AppConfig): Promise<void> {
   await invokeCommand(commands.saveConfig(config));
+}
+
+export async function saveConfigProjection(config: AppConfig): Promise<{
+  config: AppConfig;
+  capabilities: RuntimeCapabilities;
+}> {
+  let projection = await invokeCommand(commands.saveConfigProjection(config));
+  if (!projection && canUseLegacyE2eCompatibility()) {
+    projection = await import('./e2eBootCompatibility').then((module) => module.legacySaveConfigProjection(config));
+  }
+  if (!projection) throw new Error('save_config_projection returned an empty response');
+  return {
+    config: normalizeConfig(projection.config),
+    capabilities: normalizeRuntimeCapabilities(projection.capabilities),
+  };
+}
+
+export async function refreshModelCatalog(): Promise<{
+  config: AppConfig;
+  models: string[];
+}> {
+  let projection = await invokeCommand(commands.refreshModelCatalog());
+  if (!projection && canUseLegacyE2eCompatibility()) {
+    projection = await import('./e2eBootCompatibility').then((module) => module.legacyModelCatalogProjection());
+  }
+  if (!projection) throw new Error('refresh_model_catalog returned an empty response');
+  return {
+    config: normalizeConfig(projection.config),
+    models: projection.models,
+  };
 }
 
 export async function listModels(
@@ -464,6 +527,49 @@ export async function getHistory(): Promise<Thread[]> {
 
 export async function getThread(id: string): Promise<Thread> {
   return invokeCommand(commands.getThread(id), normalizeThread);
+}
+
+export async function getActiveExplorationCycle(
+  threadId: string,
+): Promise<ExplorationCyclePacket | null> {
+  const packet = await invokeCommand(commands.getActiveExplorationCycle(threadId));
+  return packet ? projectExplorationCyclePacket(packet) : null;
+}
+
+export type StartExplorationRunRequest = Omit<
+  StartExplorationRunInput,
+  'attachments' | 'workingDesign'
+> & {
+  attachments?: Attachment[];
+  workingDesign?: DesignOutput | null;
+};
+
+export async function startExplorationRun(
+  input: StartExplorationRunRequest,
+): Promise<ExplorationRunOutput & { message: Message | null; snapshotId: string | null }> {
+  const projection = await invokeCommand(commands.startExplorationRun({
+    ...input,
+    attachments: (input.attachments ?? []).map(toContractAttachment),
+    workingDesign: input.workingDesign ? toContractDesignOutput(input.workingDesign) : null,
+  }));
+  const output = projection.run;
+  return {
+    ...output,
+    design: output.design ? normalizeDesignOutput(output.design) : null,
+    artifactBundle: output.artifactBundle
+      ? normalizeArtifactBundle(output.artifactBundle)
+      : null,
+    modelManifest: output.modelManifest
+      ? normalizeModelManifest(output.modelManifest)
+      : null,
+    usage: normalizeUsageSummary(output.usage),
+    message: projection.message ? normalizeMessage(projection.message) : null,
+    snapshotId: projection.snapshotId ?? null,
+  };
+}
+
+export async function stopExplorationRun(input: StopExplorationRunInput): Promise<void> {
+  await invokeCommand(commands.stopExplorationRun(input));
 }
 
 export async function getThreadLatestVersion(threadId: string): Promise<Message | null> {
@@ -594,6 +700,89 @@ export async function getThreadMessagesPage(
   );
 }
 
+export type WorkspaceProjection = {
+  thread: Thread;
+  messagesPage: ThreadMessagesPage;
+  selectedVersion: Message | null;
+  requestedMessageFound: boolean;
+};
+
+function normalizeWorkspaceProjection(
+  projection: import('./contracts').WorkspaceProjection,
+): WorkspaceProjection {
+  return {
+    thread: normalizeThread(projection.thread),
+    messagesPage: normalizeThreadMessagesPage(projection.messagesPage),
+    selectedVersion: projection.selectedVersion
+      ? normalizeMessage(projection.selectedVersion)
+      : null,
+    requestedMessageFound: projection.requestedMessageFound,
+  };
+}
+
+export async function getWorkspaceProjection(
+  threadId: string,
+  preferredMessageId: string | null = null,
+  messageLimit = 20,
+): Promise<WorkspaceProjection> {
+  const projection = await invokeCommand(
+    commands.getWorkspaceProjection(threadId, preferredMessageId, messageLimit),
+  );
+  return normalizeWorkspaceProjection(projection);
+}
+
+export async function createDesignThreadIntent(input: {
+  mode: 'blank' | 'macro';
+  title?: string | null;
+  source?: string | null;
+  baseThreadId?: string | null;
+  baseMessageId?: string | null;
+}): Promise<{
+  threadId: string;
+  sourceDocument: import('./contracts').CreatedThreadSourceDocument;
+  initialVersionId: string | null;
+  snapshotId: string | null;
+  parserMatched: boolean | null;
+  initialVersionError: import('./contracts').AppError | null;
+  workspace: WorkspaceProjection;
+}> {
+  const response = await invokeCommand(commands.createDesignThread({
+    mode: input.mode,
+    title: input.title ?? null,
+    source: input.source ?? null,
+    baseThreadId: input.baseThreadId ?? null,
+    baseMessageId: input.baseMessageId ?? null,
+  }));
+  return {
+    ...response,
+    initialVersionId: response.initialVersionId ?? null,
+    snapshotId: response.snapshotId ?? null,
+    parserMatched: response.parserMatched ?? null,
+    initialVersionError: response.initialVersionError ?? null,
+    workspace: normalizeWorkspaceProjection(response.workspace),
+  };
+}
+
+export async function forkDesignIntent(input: {
+  sourceThreadId: string;
+  sourceMessageId: string;
+  title?: string | null;
+  versionName?: string | null;
+  messageLimit?: number | null;
+}): Promise<{ threadId: string; messageId: string; workspace: WorkspaceProjection }> {
+  const response = await invokeCommand(commands.forkDesign({
+    sourceThreadId: input.sourceThreadId,
+    sourceMessageId: input.sourceMessageId,
+    title: input.title ?? null,
+    versionName: input.versionName ?? null,
+    messageLimit: input.messageLimit ?? null,
+  }));
+  return {
+    ...response,
+    workspace: normalizeWorkspaceProjection(response.workspace),
+  };
+}
+
 export async function getVersionSource(threadId: string, messageId: string): Promise<string | null> {
   const chunks: string[] = [];
   let startByte = 0;
@@ -619,20 +808,80 @@ export async function getVersionSource(threadId: string, messageId: string): Pro
   return chunks.join('');
 }
 
-export async function deleteThread(id: string): Promise<void> {
-  await invokeCommand(commands.deleteThread(id));
+export type ThreadLifecycleProjection = {
+  threadId: string;
+  history: Thread[];
+};
+
+function normalizeThreadLifecycleProjection(
+  projection: import('./contracts').ThreadLifecycleProjection,
+): ThreadLifecycleProjection {
+  return {
+    threadId: projection.threadId,
+    history: projection.history.map(normalizeThread),
+  };
+}
+
+export async function deleteThreadIntent(
+  threadId: string,
+  selectedMessageId: string | null,
+): Promise<ThreadLifecycleProjection> {
+  const projection = await invokeCommand(commands.deleteThreadIntent({
+    threadId,
+    selectedMessageId,
+  }));
+  return normalizeThreadLifecycleProjection(projection);
 }
 
 export async function renameThread(id: string, title: string): Promise<void> {
   await invokeCommand(commands.renameThread(id, title));
 }
 
-export async function deleteVersion(messageId: string): Promise<void> {
-  await invokeCommand(commands.deleteVersion(messageId));
+export type VersionHistoryIntentInput = {
+  messageId: string;
+  selectedThreadId?: string | null;
+  selectedMessageId?: string | null;
+  messageLimit?: number | null;
+};
+
+export type VersionHistoryIntentResponse = {
+  threadId: string;
+  workspace: WorkspaceProjection | null;
+  threadRemoved: boolean;
+};
+
+function normalizeVersionHistoryIntentResponse(
+  response: import('./contracts').VersionHistoryIntentResponse,
+): VersionHistoryIntentResponse {
+  return {
+    threadId: response.threadId,
+    workspace: response.workspace ? normalizeWorkspaceProjection(response.workspace) : null,
+    threadRemoved: response.threadRemoved,
+  };
 }
 
-export async function restoreVersion(messageId: string): Promise<void> {
-  await invokeCommand(commands.restoreVersion(messageId));
+export async function deleteVersionIntent(
+  input: VersionHistoryIntentInput,
+): Promise<VersionHistoryIntentResponse> {
+  const response = await invokeCommand(commands.deleteVersionIntent({
+    messageId: input.messageId,
+    selectedThreadId: input.selectedThreadId ?? null,
+    selectedMessageId: input.selectedMessageId ?? null,
+    messageLimit: input.messageLimit ?? null,
+  }));
+  return normalizeVersionHistoryIntentResponse(response);
+}
+
+export async function restoreVersionIntent(
+  input: VersionHistoryIntentInput,
+): Promise<VersionHistoryIntentResponse> {
+  const response = await invokeCommand(commands.restoreVersionIntent({
+    messageId: input.messageId,
+    selectedThreadId: input.selectedThreadId ?? null,
+    selectedMessageId: input.selectedMessageId ?? null,
+    messageLimit: input.messageLimit ?? null,
+  }));
+  return normalizeVersionHistoryIntentResponse(response);
 }
 
 export async function getDeletedMessages(): Promise<DeletedMessage[]> {
@@ -664,127 +913,38 @@ export async function hideDeletedMessage(messageId: string): Promise<void> {
   await invokeCommand(commands.hideDeletedMessage(messageId));
 }
 
-export async function finalizeThread(id: string, messageId: string | null = null): Promise<void> {
-  await invokeCommand(commands.finalizeThread(id, messageId));
+export async function finalizeThreadIntent(
+  threadId: string,
+  selectedMessageId: string | null,
+): Promise<ThreadLifecycleProjection> {
+  const projection = await invokeCommand(commands.finalizeThreadIntent({
+    threadId,
+    selectedMessageId,
+  }));
+  return normalizeThreadLifecycleProjection(projection);
 }
 
-export async function reopenThread(id: string): Promise<void> {
-  await invokeCommand(commands.reopenThread(id));
+export async function reopenThreadIntent(threadId: string): Promise<ThreadLifecycleProjection> {
+  const projection = await invokeCommand(commands.reopenThreadIntent({
+    threadId,
+    selectedMessageId: null,
+  }));
+  return normalizeThreadLifecycleProjection(projection);
+}
+
+export async function openInventoryThreadIntent(
+  threadId: string,
+  messageLimit = 20,
+): Promise<WorkspaceProjection> {
+  const projection = await invokeCommand(commands.openInventoryThreadIntent({
+    threadId,
+    messageLimit,
+  }));
+  return normalizeWorkspaceProjection(projection);
 }
 
 export async function getInventory(): Promise<Thread[]> {
   return invokeCommand(commands.getInventory(), (threads) => threads.map(normalizeThread));
-}
-
-export async function generateDesign(input: {
-  prompt: string;
-  threadId: string | null;
-  parentMacroCode: string | null;
-  workingDesign: DesignOutput | null;
-  isRetry: boolean;
-  imageData: string | null;
-  attachments: Attachment[];
-  questionMode: boolean | null;
-  followUpQuestion: string | null;
-  engineKind?: EngineKind | null;
-  sourceLanguage?: SourceLanguage | null;
-  geometryBackend?: GeometryBackend | null;
-}): Promise<GenerateOutput> {
-  const result = await invokeCommand(
-    commands.generateDesign(
-      input.prompt,
-      input.threadId,
-      input.parentMacroCode,
-      input.workingDesign ? toContractDesignOutput(input.workingDesign) : null,
-      input.isRetry,
-      input.imageData,
-      input.attachments.map(toContractAttachment),
-      {
-        questionMode: input.questionMode,
-        followUpQuestion: input.followUpQuestion,
-        engineKind: input.engineKind ?? null,
-        sourceLanguage: input.sourceLanguage ?? null,
-        geometryBackend: input.geometryBackend ?? null,
-      },
-    ),
-  );
-  return {
-    design: normalizeDesignOutput(result.design),
-    threadId: result.threadId,
-    messageId: result.messageId,
-    usage: normalizeUsageSummary(result.usage),
-  };
-}
-
-export async function initGenerationAttempt(input: {
-  threadId: string;
-  prompt: string;
-  attachments: Attachment[];
-  imageData: string | null;
-}): Promise<string> {
-  return invokeCommand(
-    commands.initGenerationAttempt(
-      input.threadId,
-      input.prompt,
-      input.attachments.map(toContractAttachment),
-      input.imageData,
-    ),
-  );
-}
-
-export async function finalizeGenerationAttempt(input: {
-  messageId: string;
-  status: FinalizeStatus;
-  design?: DesignOutput;
-  usage?: UsageSummary | null;
-  artifactBundle?: ArtifactBundle | null;
-  modelManifest?: ModelManifest | null;
-  errorMessage?: string;
-  responseText?: string;
-}): Promise<void> {
-  await invokeCommand(
-    commands.finalizeGenerationAttempt(
-      input.messageId,
-      input.status,
-      input.design ? toContractDesignOutput(input.design) : null,
-      toContractUsageSummary(input.usage),
-      input.artifactBundle ?? null,
-      input.modelManifest ?? null,
-      input.errorMessage ?? null,
-      input.responseText ?? null,
-    ),
-  );
-}
-
-export async function persistStructuralVerification(
-  messageId: string,
-  structuralVerification: StructuralVerificationResult,
-): Promise<void> {
-  await invokeCommand(
-    commands.persistStructuralVerification(messageId, structuralVerification),
-  );
-}
-
-export async function classifyIntent(input: {
-  prompt: string;
-  threadId: string | null;
-  context: string | null;
-  imageData: string | null;
-  attachments: Attachment[];
-}): Promise<IntentDecision> {
-  const result = await invokeCommand(
-    commands.classifyIntent(
-      input.prompt,
-      input.threadId,
-      input.context,
-      input.imageData,
-      input.attachments.map(toContractAttachment),
-    ),
-  );
-  return {
-    ...result,
-    usage: normalizeUsageSummary(result.usage),
-  };
 }
 
 export type { MacroAstSourceNode } from './contracts';
@@ -815,16 +975,77 @@ export async function listExternalShapeSources(
   return invokeCommand(commands.listExternalShapeSources(threadId));
 }
 
-export async function applyExternalShapePlaneCrop(
-  request: ApplyExternalShapePlaneCropRequest,
-): Promise<ApplyExternalShapePlaneCropResult> {
-  return invokeCommand(commands.applyExternalShapePlaneCrop(request));
+export async function applyExternalShapeEdit(
+  input: ApplyExternalShapeEditInput,
+): Promise<{
+  version: ManualCodeApplyResult;
+  sourceDigest: string;
+  externalSources: ExternalShapeSource[];
+}> {
+  const result = await invokeCommand(commands.applyExternalShapeEdit(input));
+  return {
+    ...result,
+    version: {
+      ...result.version,
+      baseMessageId: result.version.baseMessageId ?? null,
+      messageId: result.version.messageId ?? null,
+      designOutput: normalizeDesignOutput(result.version.designOutput),
+      artifactBundle: result.version.artifactBundle
+        ? normalizeArtifactBundle(result.version.artifactBundle)
+        : null,
+      modelManifest: result.version.modelManifest
+        ? normalizeModelManifest(result.version.modelManifest)
+        : null,
+      snapshotId: result.version.snapshotId ?? null,
+      error: result.version.error ?? null,
+    },
+  };
 }
 
-export async function removeExternalShapePlaneCrop(
-  request: RemoveExternalShapePlaneCropRequest,
-): Promise<RemoveExternalShapePlaneCropResult> {
-  return invokeCommand(commands.removeExternalShapePlaneCrop(request));
+export async function applyInlineComponentImport(
+  input: ApplyInlineComponentImportInput,
+): Promise<{
+  version: ManualCodeApplyResult;
+  sourceDigest: string;
+  entrySymbol: string;
+  partKey: string;
+}> {
+  const result = await invokeCommand(commands.applyInlineComponentImport(input));
+  return {
+    ...result,
+    version: {
+      ...result.version,
+      baseMessageId: result.version.baseMessageId ?? null,
+      messageId: result.version.messageId ?? null,
+      designOutput: normalizeDesignOutput(result.version.designOutput),
+      artifactBundle: result.version.artifactBundle
+        ? normalizeArtifactBundle(result.version.artifactBundle)
+        : null,
+      modelManifest: result.version.modelManifest
+        ? normalizeModelManifest(result.version.modelManifest)
+        : null,
+      snapshotId: result.version.snapshotId ?? null,
+      error: result.version.error ?? null,
+    },
+  };
+}
+
+export async function libraryPanelIntent(
+  intent: LibraryPanelIntent,
+): Promise<LibraryPanelProjection> {
+  return invokeCommand(commands.libraryPanelIntent(intent));
+}
+
+export async function submitSketchPreview(
+  request: SketchPreviewSubmissionRequest,
+): Promise<SketchPreviewSubmissionPacket> {
+  const packet = await invokeCommand(commands.submitSketchPreview(request));
+  return {
+    ...packet,
+    artifactBundle: packet.artifactBundle
+      ? normalizeArtifactBundle(packet.artifactBundle)
+      : null,
+  };
 }
 
 export async function previewExternalShapeSurfaceTrimPath(
@@ -843,31 +1064,6 @@ export async function previewExternalShapeSurfaceTrimRegion(
   request: SurfaceTrimRegionPreviewRequest,
 ): Promise<SurfaceTrimRegionPreviewResponse> {
   return invokeCommand(commands.previewExternalShapeSurfaceTrimRegion(request));
-}
-
-export async function applyExternalShapeSurfaceTrim(
-  request: ApplySurfaceTrimRequest,
-): Promise<ApplySurfaceTrimResult> {
-  return invokeCommand(commands.applyExternalShapeSurfaceTrim(request));
-}
-
-export async function removeExternalShapeSurfaceTrim(
-  request: RemoveSurfaceTrimRequest,
-): Promise<RemoveSurfaceTrimResult> {
-  return invokeCommand(commands.removeExternalShapeSurfaceTrim(request));
-}
-
-export async function saveProjectSource(
-  threadId: string,
-  source: string,
-): Promise<import('./contracts').ProjectSourceDocument> {
-  return invokeCommand(commands.saveProjectSource(threadId, source));
-}
-
-export async function openOrCreateBlankDesignThread(
-  title: string | null = null,
-): Promise<import('./contracts').ProjectSourceDocument> {
-  return invokeCommand(commands.openOrCreateBlankDesignThread(title));
 }
 
 export async function revealProjectFolder(
@@ -962,53 +1158,63 @@ export async function renderModel(
 
 export type { PostProcessingSpec };
 
-export async function importFcstd(sourcePath: string): Promise<ArtifactBundle> {
-  return invokeCommand(commands.importFcstd(sourcePath), normalizeArtifactBundle);
-}
+export type ImportedModelIntentResult = {
+  threadId: string;
+  messageId: string;
+  title: string;
+  message: Message;
+  designOutput: DesignOutput;
+  artifactBundle: ArtifactBundle;
+  modelManifest: ModelManifest;
+  snapshotId: string | null;
+};
 
-export async function searchFreecadLibrary(
-  request: FreecadLibrarySearchRequest,
-): Promise<FreecadLibraryItem[]> {
-  return invokeCommand(commands.searchFreecadLibrary(request));
-}
-
-export async function importFreecadLibraryPart(
-  request: FreecadLibraryImportRequest,
-): Promise<ArtifactBundle> {
-  return invokeCommand(commands.importFreecadLibraryPart(request), normalizeArtifactBundle);
-}
-
-export async function applyImportedModel(
-  artifactBundle: ArtifactBundle,
-  manifest: ModelManifest,
-  parameters: DesignParams,
-  messageId?: string | null,
-): Promise<ArtifactBundle> {
-  return invokeCommand(
-    commands.applyImportedModel(artifactBundle, manifest, parameters, messageId ?? null),
-    normalizeArtifactBundle,
-  );
-}
-
-export async function getModelManifest(modelId: string): Promise<ModelManifest> {
-  return invokeCommand(commands.getModelManifest(modelId), normalizeModelManifest);
+export async function importModelIntent(input: {
+  source:
+    | { kind: 'fcstd'; sourcePath: string }
+    | { kind: 'freecadLibrary'; item: FreecadLibraryItem };
+  threadId?: string | null;
+  title?: string | null;
+}): Promise<ImportedModelIntentResult> {
+  const response = await invokeCommand(commands.importModelIntent({
+    source: input.source,
+    threadId: input.threadId ?? null,
+    title: input.title ?? null,
+  }));
+  return {
+    ...response,
+    message: normalizeMessage(response.message),
+    designOutput: normalizeDesignOutput(response.designOutput),
+    artifactBundle: normalizeArtifactBundle(response.artifactBundle),
+    modelManifest: normalizeModelManifest(response.modelManifest),
+    snapshotId: response.snapshotId ?? null,
+  };
 }
 
 export async function getAuthoringGraph(request: AuthoringGraphRequest): Promise<AuthoringGraph> {
-  const graph = await invokeCommand(commands.getAuthoringGraph(request));
-  return decodeAuthoringGraph(graph);
+  return invokeCommand(commands.getAuthoringGraph(request));
 }
 
-export async function saveModelManifest(
-  modelId: string,
-  manifest: ModelManifest,
-  messageId?: string | null,
-): Promise<void> {
-  await invokeCommand(commands.saveModelManifest(modelId, manifest, messageId ?? null));
+export async function applySemanticManifestEdit(
+  input: ApplySemanticManifestEditInput,
+): Promise<SemanticManifestEditResult> {
+  const result = await invokeCommand(commands.applySemanticManifestEdit(input));
+  return { ...result, manifest: normalizeModelManifest(result.manifest) };
 }
 
-export async function getDefaultMacro(): Promise<string> {
-  return invokeCommand(commands.getDefaultMacro());
+export type SemanticControlValueResult = Omit<ApplySemanticControlValueResult, 'parameterPatch'> & {
+  parameterPatch: DesignParams;
+};
+
+export async function applySemanticControlValue(
+  input: ApplySemanticControlValueInput,
+): Promise<SemanticControlValueResult> {
+  const result = await invokeCommand(commands.applySemanticControlValue(input));
+  const parameterPatch: DesignParams = {};
+  for (const [key, value] of Object.entries(result.parameterPatch)) {
+    if (value !== undefined) parameterPatch[key] = value;
+  }
+  return { ...result, parameterPatch };
 }
 
 export async function getMessStlPath(): Promise<string> {
@@ -1027,53 +1233,22 @@ export async function exportDocsBookEpub(targetPath: string): Promise<void> {
   await invokeCommand(commands.exportDocsBookEpub(targetPath));
 }
 
-export async function installComponentPackageArchive(
-  archivePath: string,
-): Promise<InstalledComponentPackage> {
-  return invokeCommand(commands.installComponentPackageArchive(archivePath));
-}
-
-export async function listInstalledComponentPackageHeaders(): Promise<ComponentPackageHeader[]> {
-  return invokeCommand(commands.listInstalledComponentPackageHeaders());
-}
-
-export type CopyInlineComponentImportRequest = {
-  packageId: string;
-  version: string;
-  componentId: string;
-  authoredSource: string;
-};
-
-export type CopyInlineComponentImportResponse = {
-  authoredSource: string;
-  componentSource: string;
-  entrySymbol: string;
-  partKey: string;
-};
-
-export async function copyInlineComponentImport(
-  request: CopyInlineComponentImportRequest,
-): Promise<CopyInlineComponentImportResponse> {
-  return invokeCommand(commands.componentImportCopyInline(request));
-}
-
 export async function suggestSketchFeatures(
   request: SketchSuggestionRequest,
 ): Promise<SketchSuggestionResponse> {
   return invokeCommand(commands.suggestSketchFeatures(request));
 }
 
+export async function evaluateSketchDocumentConstraints(
+  request: import('./contracts').SketchConstraintEvaluationRequest,
+): Promise<import('./contracts').SketchConstraintEvaluationResponse> {
+  return invokeCommand(commands.evaluateSketchDocumentConstraints(request));
+}
+
 export async function generateSketchDraftPreview(
   request: SketchDraftRequest,
 ): Promise<{ draft: SketchDraftSource; artifactBundle: ArtifactBundle }> {
   const [draft, bundle] = await invokeCommand(commands.generateSketchDraftPreview(request));
-  return { draft, artifactBundle: normalizeArtifactBundle(bundle) };
-}
-
-export async function generateSketchPreviewHull(
-  request: SketchPreviewHullRequest,
-): Promise<{ draft: SketchDraftSource; artifactBundle: ArtifactBundle }> {
-  const [draft, bundle] = await invokeCommand(commands.generateSketchPreviewHull(request));
   return { draft, artifactBundle: normalizeArtifactBundle(bundle) };
 }
 
@@ -1086,6 +1261,7 @@ export async function traceRasterReference(
 export async function saveSketchPreviewDraft(input: {
   scopeId?: string | null;
   draftScopeId?: string | null;
+  newScope?: boolean;
   draftSource: SketchDraftSource;
   artifactBundle: ArtifactBundle;
   sketchDocument?: SketchDocument | null;
@@ -1094,22 +1270,11 @@ export async function saveSketchPreviewDraft(input: {
   return invokeCommand(
     commands.saveSketchPreviewDraft({
       scopeId,
+      newScope: input.newScope ?? false,
       draftSource: input.draftSource,
       artifactBundle: input.artifactBundle,
       sketchDocument: input.sketchDocument ?? null,
     } satisfies SaveSketchPreviewDraftRequest),
-  );
-}
-
-export async function loadSketchPreviewDraft(input: {
-  scopeId?: string | null;
-  draftScopeId?: string | null;
-}): Promise<SketchPreviewDraft | null> {
-  const scopeId = resolveSketchPreviewDraftScopeId(input);
-  return invokeCommand(
-    commands.loadSketchPreviewDraft({
-      scopeId,
-    } satisfies LoadSketchPreviewDraftRequest),
   );
 }
 
@@ -1123,12 +1288,6 @@ export async function clearSketchPreviewDraft(input: {
       scopeId,
     } satisfies ClearSketchPreviewDraftRequest),
   );
-}
-
-export async function analyzeSketchBrepCandidates(
-  request: SketchBrepCandidateRequest,
-): Promise<SketchBrepCandidateResponse> {
-  return invokeCommand(commands.analyzeSketchBrepCandidates(request));
 }
 
 export async function acceptSketchBrepCandidateSolution(
@@ -1147,12 +1306,6 @@ export async function acceptedBrepCandidateToComponentPackage(
   return invokeCommand(commands.acceptedBrepCandidateToComponentPackage(request));
 }
 
-export async function extractBrepHiddenLineProjections(
-  request: BrepHiddenLineProjectionRequest,
-): Promise<BrepHiddenLineProjectionResponse> {
-  return invokeCommand(commands.extractBrepHiddenLineProjections(request));
-}
-
 export async function exportMultipartStlZip(
   parts: ExportPartInput[],
   targetPath: string,
@@ -1169,73 +1322,191 @@ export async function exportMultipart3mf(
   await invokeCommand(commands.exportMultipart3mf(parts, targetPath, modelName));
 }
 
-export async function addManualVersion(input: {
+export type ManualParameterApplyResult = {
   threadId: string;
-  title: string;
-  versionName: string;
-  macroCode: string;
-  sourceLanguage?: SourceLanguage | null;
-  geometryBackend?: GeometryBackend | null;
+  baseMessageId: string;
+  messageId: string | null;
+  status: MessageStatus;
+  designOutput: DesignOutput;
+  artifactBundle: ArtifactBundle | null;
+  modelManifest: ModelManifest | null;
+  snapshotId: string | null;
+  error: AppError | null;
+};
+
+export async function applyManualParameters(input: {
+  threadId: string;
+  targetMessageId: string;
   parameters: DesignParams;
-  uiSpec: UiSpec;
-  postProcessing?: PostProcessingSpec | null;
-  artifactBundle?: ArtifactBundle | null;
-  modelManifest?: ModelManifest | null;
-  status?: MessageStatus | null;
-  errorMessage?: string | null;
-}): Promise<string> {
-  return invokeCommand(
-    commands.addManualVersion({
+  persist: boolean;
+  title?: string | null;
+  versionName?: string | null;
+}): Promise<ManualParameterApplyResult> {
+  const response = await invokeCommand(
+    commands.applyManualParameters({
       threadId: input.threadId,
-      title: input.title,
-      versionName: input.versionName,
-      macroCode: input.macroCode,
-      sourceLanguage: input.sourceLanguage ?? null,
-      geometryBackend: input.geometryBackend ?? null,
+      targetMessageId: input.targetMessageId,
       parameters: input.parameters,
-      uiSpec: toContractUiSpec(input.uiSpec),
-      postProcessing: input.postProcessing ?? null,
-      artifactBundle: input.artifactBundle ?? null,
-      modelManifest: input.modelManifest ?? null,
-      status: input.status ?? null,
-      errorMessage: input.errorMessage ?? null,
+      persist: input.persist,
+      title: input.title ?? null,
+      versionName: input.versionName ?? null,
     }),
   );
+  return {
+    ...response,
+    messageId: response.messageId ?? null,
+    designOutput: normalizeDesignOutput(response.designOutput),
+    artifactBundle: response.artifactBundle
+      ? normalizeArtifactBundle(response.artifactBundle)
+      : null,
+    modelManifest: response.modelManifest
+      ? normalizeModelManifest(response.modelManifest)
+      : null,
+    snapshotId: response.snapshotId ?? null,
+    error: response.error ?? null,
+  };
 }
 
-export async function addImportedModelVersion(input: {
+export async function applyImportedParameters(input: {
   threadId: string;
-  title: string;
-  artifactBundle: ArtifactBundle;
-  modelManifest: ModelManifest;
-}): Promise<string> {
-  return invokeCommand(
-    commands.addImportedModelVersion(
-      input.threadId,
-      input.title,
-      input.artifactBundle,
-      input.modelManifest,
-    ),
-  );
+  targetMessageId: string;
+  parameters: DesignParams;
+  persist: boolean;
+  title?: string | null;
+  versionName?: string | null;
+}): Promise<ManualParameterApplyResult> {
+  const response = await invokeCommand(commands.applyImportedParameters({
+    threadId: input.threadId,
+    targetMessageId: input.targetMessageId,
+    parameters: input.parameters,
+    persist: input.persist,
+    title: input.title ?? null,
+    versionName: input.versionName ?? null,
+  }));
+  return {
+    ...response,
+    messageId: response.messageId ?? null,
+    designOutput: normalizeDesignOutput(response.designOutput),
+    artifactBundle: response.artifactBundle
+      ? normalizeArtifactBundle(response.artifactBundle)
+      : null,
+    modelManifest: response.modelManifest
+      ? normalizeModelManifest(response.modelManifest)
+      : null,
+    snapshotId: response.snapshotId ?? null,
+    error: response.error ?? null,
+  };
 }
 
-export async function updateUiSpec(messageId: string, uiSpec: UiSpec): Promise<void> {
-  await invokeCommand(commands.updateUiSpec(messageId, toContractUiSpec(uiSpec)));
+export type ManualCodeApplyResult = {
+  threadId: string;
+  baseMessageId: string | null;
+  messageId: string | null;
+  status: MessageStatus;
+  designOutput: DesignOutput;
+  artifactBundle: ArtifactBundle | null;
+  modelManifest: ModelManifest | null;
+  snapshotId: string | null;
+  parserMatched: boolean;
+  error: AppError | null;
+};
+
+function normalizeManualCodeApplyResponse(response: ManualCodeApplyResponse): ManualCodeApplyResult {
+  return {
+    ...response,
+    baseMessageId: response.baseMessageId ?? null,
+    messageId: response.messageId ?? null,
+    designOutput: normalizeDesignOutput(response.designOutput),
+    artifactBundle: response.artifactBundle
+      ? normalizeArtifactBundle(response.artifactBundle)
+      : null,
+    modelManifest: response.modelManifest
+      ? normalizeModelManifest(response.modelManifest)
+      : null,
+    snapshotId: response.snapshotId ?? null,
+    error: response.error ?? null,
+  };
 }
 
-export async function updateParameters(
-  messageId: string,
-  parameters: DesignParams,
-): Promise<void> {
-  await invokeCommand(commands.updateParameters(messageId, parameters));
+export async function applyManualCode(input: {
+  threadId: string;
+  baseMessageId?: string | null;
+  source: string;
+  persist: boolean;
+  title?: string | null;
+  versionName?: string | null;
+  uiSpec: UiSpec;
+  parameters: DesignParams;
+  postProcessing?: PostProcessingSpec | null;
+  sourceLanguage?: SourceLanguage | null;
+  geometryBackend?: GeometryBackend | null;
+}): Promise<ManualCodeApplyResult> {
+  const response = await invokeCommand(commands.applyManualCode({
+    threadId: input.threadId,
+    baseMessageId: input.baseMessageId ?? null,
+    source: input.source,
+    persist: input.persist,
+    title: input.title ?? null,
+    versionName: input.versionName ?? null,
+    uiSpec: toContractUiSpec(input.uiSpec),
+    parameters: input.parameters,
+    postProcessing: input.postProcessing ?? null,
+    sourceLanguage: input.sourceLanguage ?? null,
+    geometryBackend: input.geometryBackend ?? null,
+  }));
+  return normalizeManualCodeApplyResponse(response);
 }
 
-export async function repairMissingVersionRuntime(
-  messageId: string,
-  artifactBundle: ArtifactBundle,
-  modelManifest: ModelManifest,
-): Promise<void> {
-  await invokeCommand(commands.repairMissingVersionRuntime(messageId, artifactBundle, modelManifest));
+export async function applyCapturePreview(input: { runId: string }): Promise<{
+  source: string;
+  draft: ManualCodeApplyResult;
+}> {
+  const response: ApplyCapturePreviewResult = await invokeCommand(commands.applyCapturePreview(input));
+  return {
+    source: response.source,
+    draft: normalizeManualCodeApplyResponse(response.draft),
+  };
+}
+
+export async function persistControlDefaults(input: {
+  messageId: string;
+  mutation:
+    | { action: 'readFromMacro' }
+    | { action: 'saveSchema'; uiSpec: UiSpec; parameters: DesignParams }
+    | { action: 'saveValues'; parameters: DesignParams };
+}): Promise<{ uiSpec: UiSpec; parameters: DesignParams; workspace: WorkspaceProjection }> {
+  const mutation: PersistControlDefaultsInput['mutation'] = input.mutation.action === 'saveSchema'
+    ? {
+        action: 'saveSchema',
+        uiSpec: toContractUiSpec(input.mutation.uiSpec),
+        parameters: input.mutation.parameters,
+      }
+    : input.mutation;
+  const response = await invokeCommand(commands.persistControlDefaults({
+    messageId: input.messageId,
+    mutation,
+  }));
+  return {
+    uiSpec: response.uiSpec as UiSpec,
+    parameters: response.parameters as DesignParams,
+    workspace: normalizeWorkspaceProjection(response.workspace),
+  };
+}
+
+export async function repairVersionRuntime(input: {
+  threadId: string;
+  messageId: string;
+  expectedArtifactIdentity?: string | null;
+}): Promise<{
+  snapshotId: string;
+  artifactIdentity: string;
+  workspace: WorkspaceProjection;
+}> {
+  const response = await invokeCommand(commands.repairVersionRuntime(input));
+  return {
+    ...response,
+    workspace: normalizeWorkspaceProjection(response.workspace),
+  };
 }
 
 export async function updateVersionPreview(
@@ -1261,16 +1532,10 @@ export async function getCampaignStep(
   return invokeCommand(commands.getCampaignStep(definitionId, stepId));
 }
 
-export async function checkCampaignStep(
-  definitionId: string,
-  stepId: string,
-  candidateSource: string,
-): Promise<MissionCoreIrEvaluation> {
-  return invokeCommand(commands.checkCampaignStep(definitionId, stepId, candidateSource));
-}
-
-export async function createCampaignRun(input: CreateCampaignRunInput): Promise<CampaignRun> {
-  return invokeCommand(commands.createCampaignRun(input));
+export async function openCampaignProject(
+  intent: OpenCampaignProjectIntent,
+): Promise<OpenCampaignProjectResult> {
+  return invokeCommand(commands.openCampaignProject(intent));
 }
 
 export async function listCampaignRuns(): Promise<CampaignRun[]> {
@@ -1281,8 +1546,10 @@ export async function getCampaignRun(id: string): Promise<CampaignRun> {
   return invokeCommand(commands.getCampaignRun(id));
 }
 
-export async function saveCampaignRun(run: CampaignRun): Promise<CampaignRun> {
-  return invokeCommand(commands.saveCampaignRun(run));
+export async function transitionCampaignRun(
+  input: TransitionCampaignRunInput,
+): Promise<TransitionCampaignRunResult> {
+  return invokeCommand(commands.transitionCampaignRun(input));
 }
 
 export async function deleteCampaignRun(id: string): Promise<void> {
@@ -1291,12 +1558,6 @@ export async function deleteCampaignRun(id: string): Promise<void> {
 
 export async function getActiveProjectNavigation(): Promise<ActiveProjectNavigation | null> {
   return invokeCommand(commands.getActiveProjectNavigation());
-}
-
-export async function saveActiveProjectNavigation(
-  navigation: ActiveProjectNavigation,
-): Promise<ActiveProjectNavigation> {
-  return invokeCommand(commands.saveActiveProjectNavigation(navigation));
 }
 
 export async function clearActiveProjectNavigation(): Promise<void> {
@@ -1388,21 +1649,9 @@ export async function getAgentTerminalSnapshots(): Promise<AgentTerminalSnapshot
 }
 
 export async function startCaptureSession(
-  threadId: string,
-  messageId: string | null,
-  title: string,
-  targetSource: string,
-  targetSourceLanguage: string,
-  startedFromEmpty: boolean,
+  target: ExistingCaptureTarget | null,
 ): Promise<CaptureSessionInfo> {
-  return invokeCommand(commands.startCaptureSession(
-    threadId,
-    messageId,
-    title,
-    targetSource,
-    targetSourceLanguage,
-    startedFromEmpty,
-  ));
+  return invokeCommand(commands.startCaptureSession(target));
 }
 
 export async function listCaptureRuns(threadId: string): Promise<CaptureRun[]> {
@@ -1414,21 +1663,9 @@ export async function reopenCaptureRun(runId: string): Promise<ReopenedCaptureRu
 }
 
 export async function adoptLatestCaptureRun(
-  threadId: string,
-  messageId: string | null,
-  title: string,
-  targetSource: string,
-  targetSourceLanguage: string,
-  startedFromEmpty: boolean,
+  target: ExistingCaptureTarget | null,
 ): Promise<ReopenedCaptureRun> {
-  return invokeCommand(commands.adoptLatestCaptureRun(
-    threadId,
-    messageId,
-    title,
-    targetSource,
-    targetSourceLanguage,
-    startedFromEmpty,
-  ));
+  return invokeCommand(commands.adoptLatestCaptureRun(target));
 }
 
 export async function saveCapturePreviewSettings(
@@ -1439,50 +1676,22 @@ export async function saveCapturePreviewSettings(
   await invokeCommand(commands.saveCapturePreviewSettings(runId, cropBounds, previewScale));
 }
 
-export async function getCaptureReconstructionGuide(
+export async function ensureCaptureReconstructionGuide(
   runId: string,
-): Promise<CaptureReconstructionGuide | null> {
-  return invokeCommand(commands.getCaptureReconstructionGuide(runId));
+): Promise<EnsureCaptureReconstructionGuideResult> {
+  return invokeCommand(commands.ensureCaptureReconstructionGuide(runId));
 }
 
-export async function getCaptureGuideSourceIdentity(
-  runId: string,
-): Promise<CaptureGuideSourceMesh> {
-  return invokeCommand(commands.getCaptureGuideSourceIdentity(runId));
+export async function applyCaptureGuideEditIntent(
+  input: ApplyCaptureGuideEditInput,
+): Promise<ApplyCaptureGuideEditResult> {
+  return invokeCommand(commands.applyCaptureGuideEdit(input));
 }
 
-export async function getCaptureGuideContext(
-  runId: string,
-): Promise<CaptureGuideContext> {
-  return invokeCommand(commands.getCaptureGuideContext(runId));
-}
-
-export async function saveCaptureReconstructionGuide(
-  runId: string,
-  expectedRevision: number,
-  expectedMeshDigest: string,
-  guide: CaptureReconstructionGuide,
-  guideState: CaptureReconstructionGuideState,
-): Promise<CaptureReconstructionGuide> {
-  return invokeCommand(commands.saveCaptureReconstructionGuide(
-    runId,
-    expectedRevision,
-    expectedMeshDigest,
-    guide,
-    guideState,
-  ));
-}
-
-export async function evaluateCaptureReconstructionGuide(
-  runId: string,
-  expectedMeshDigest: string,
-  guide: CaptureReconstructionGuide,
-): Promise<CaptureReconstructionGuide> {
-  return invokeCommand(commands.evaluateCaptureReconstructionGuide(
-    runId,
-    expectedMeshDigest,
-    guide,
-  ));
+export async function validateCaptureGuideIntent(
+  input: ValidateCaptureGuideIntentInput,
+): Promise<ValidateCaptureGuideIntentResult> {
+  return invokeCommand(commands.validateCaptureGuideIntent(input));
 }
 
 export async function queueCaptureGuidedReconstruction(
@@ -1507,10 +1716,6 @@ export async function showSafeSaveDialog(
 
 export async function getCaptureSessionStatus(token: string): Promise<CaptureSessionInfo | null> {
   return invokeCommand(commands.getCaptureSessionStatus(token));
-}
-
-export async function pairCaptureSession(token: string): Promise<CaptureSessionInfo> {
-  return invokeCommand(commands.pairCaptureSession(token));
 }
 
 export async function cancelCaptureSession(token: string): Promise<CaptureSessionInfo> {
@@ -1539,47 +1744,45 @@ export async function prepareCapturePreview(
   };
 }
 
-export async function validateFemStudy(
-  request: FemStudyRequest,
+export async function runFemStudyIntent(
+  input: FemRunIntentInput,
+): Promise<FemRunIntentResponse> {
+  return invokeCommand(commands.runFemStudyIntent(input));
+}
+
+export async function validateFemStudyIntent(
+  input: FemRunIntentInput,
 ): Promise<FemStudyValidationResponse> {
-  return invokeCommand(commands.validateFemStudy(request));
+  return invokeCommand(commands.validateFemStudyIntent(input));
 }
 
-export async function runFemStudy(request: FemStudyRequest): Promise<FemRunResponse> {
-  return invokeCommand(commands.runFemStudy(request));
+export async function previewFemMeshIntent(
+  input: FemRunIntentInput,
+): Promise<FemMeshPreviewIntentResponse> {
+  return invokeCommand(commands.previewFemMeshIntent(input));
 }
 
-export async function previewFemMesh(request: FemStudyRequest): Promise<FemMeshPreviewResponse> {
-  return invokeCommand(commands.previewFemMesh(request));
-}
-
-export async function runFemConvergence(
-  request: FemConvergenceRequest,
+export async function runFemConvergenceIntent(
+  input: FemConvergenceIntentInput,
 ): Promise<FemConvergenceResponse> {
-  return invokeCommand(commands.runFemConvergence(request));
+  return invokeCommand(commands.runFemConvergenceIntent(input));
 }
 
-export async function getCachedFemConvergence(
-  request: FemConvergenceRequest,
+export async function getCachedFemConvergenceIntent(
+  input: FemConvergenceIntentInput,
 ): Promise<FemConvergenceResponse | null> {
-  return invokeCommand(commands.getCachedFemConvergence(request));
+  return invokeCommand(commands.getCachedFemConvergenceIntent(input));
 }
 
 export async function cancelFemStudy(jobId: string): Promise<FemCancelResponse> {
   return invokeCommand(commands.cancelFemStudy(jobId));
 }
 
-export async function readFemResult(
-  request: FemResultReadRequest,
-): Promise<FemResultReadResponse> {
-  return invokeCommand(commands.readFemResult(request));
-}
-
-export async function exportFemResultVtu(
-  request: FemResultReadRequest,
+export async function exportFemResultVtuIntent(
+  input: FemVtuExportIntentInput,
   targetPath: string,
 ): Promise<FemVtuExportResponse> {
-  return invokeCommand(commands.exportFemResultVtu(request, targetPath));
+  return invokeCommand(commands.exportFemResultVtuIntent(input, targetPath));
 }
 
 export async function sendAgentTerminalInput(input: AgentTerminalInput): Promise<void> {
@@ -1638,27 +1841,19 @@ export async function preparePromptWorkspaceCapture(input: {
   );
 }
 
-export async function getMessageAttachments(messageId: string): Promise<Attachment[]> {
-  return invokeCommand(commands.getMessageAttachments(messageId), (value) =>
-    value.map(normalizeAttachment),
-  );
-}
-
-export async function resolveAgentPrompt(input: {
+export async function submitAgentPromptReply(input: {
   requestId: string;
+  threadId: string;
   promptText: string;
-  messageIds?: string[];
-  messageId?: string | null;
   attachments: Attachment[];
-}) {
-  await invokeCommand(
-    commands.resolveAgentPrompt({
+}): Promise<SubmitAgentPromptReplyResult> {
+  return invokeCommand(
+    commands.submitAgentPromptReply({
       requestId: input.requestId,
+      threadId: input.threadId,
       promptText: input.promptText,
-      messageIds: input.messageIds ?? [],
-      messageId: input.messageId ?? null,
       attachments: input.attachments.map(toContractAttachment),
-    } as ResolveAgentPromptInput),
+    } as SubmitAgentPromptReplyInput),
   );
 }
 
@@ -1706,22 +1901,6 @@ export async function getAgentActivity(afterCursor: number | null): Promise<Agen
 
 export async function getAppLogs(): Promise<AppLogEntry[]> {
   return invokeCommand(commands.getAppLogs());
-}
-
-export async function verifyRender(
-  originalPrompt: string,
-  screenshots: string[],
-  referenceImagePaths: string[] = [],
-  structuralSummary: string | null = null,
-): Promise<VisualVerificationResult> {
-  return invokeCommand(commands.verifyRender(originalPrompt, screenshots, referenceImagePaths, structuralSummary));
-}
-
-export async function verifyGeneratedModel(
-  modelId: string,
-  originalPrompt: string,
-): Promise<StructuralVerificationResult> {
-  return invokeCommand(commands.verifyGeneratedModel(modelId, originalPrompt));
 }
 
 export async function getThreadWindowLayout(threadId: string): Promise<ThreadWindowLayout | null> {

@@ -121,3 +121,61 @@ commands and SHALL restore campaign and Projects-window navigation on reload.
 - WHEN boot restores navigation
 - THEN the app opens Projects instead
 - AND reports the missing run without a blank surface
+
+### Requirement: Rust owns campaign progression atomically
+
+The system SHALL load canonical run and packaged current-step state in Rust for
+draft save, continue, back, and challenge-check actions. Frontend SHALL NOT
+construct replacement progress collections or chain acceptance and persistence.
+
+#### Scenario: Continue persists one canonical transition
+
+- GIVEN a non-challenge current step has a next step
+- WHEN learner continues
+- THEN one Rust intent marks current step completed, selects next step, persists
+  canonical run state, and returns next step projection
+- AND no caller-authored replacement run is accepted by that flow.
+
+#### Scenario: Challenge check and progression are atomic
+
+- GIVEN current step is a challenge with Core IR acceptance
+- WHEN learner checks candidate source
+- THEN Rust evaluates packaged reference and candidate
+- AND matched result saves draft, completion, pass, and next step atomically
+- AND unmatched result saves only canonical draft state and check outcome.
+
+#### Scenario: Illegal navigation preserves run
+
+- GIVEN previous step is not completed or challenge has not passed
+- WHEN caller requests back or continue
+- THEN Rust returns exact validation error
+- AND persisted run remains unchanged.
+
+### Requirement: Rust owns campaign project opening
+
+The system SHALL accept only campaign definition identity for start and run
+identity for resume. Rust SHALL derive canonical run/step facts and persist the
+matching active Project navigation atomically.
+
+#### Scenario: Start campaign
+
+- GIVEN a packaged campaign definition
+- WHEN frontend submits `start` with its definition id
+- THEN Rust selects title, first step, and definition version
+- AND creates the run and active campaign navigation in one transaction
+- AND returns canonical run plus current step.
+
+#### Scenario: Resume campaign
+
+- GIVEN a persisted campaign run
+- WHEN frontend submits `resume` with its run id
+- THEN Rust reloads the run and packaged current step
+- AND validates definition identity before changing active navigation
+- AND returns raw not-found or conflict errors without partial navigation.
+
+#### Scenario: Delete active campaign
+
+- GIVEN active navigation points to a campaign run
+- WHEN that run is deleted
+- THEN Rust deletes the run and matching navigation in one transaction
+- AND frontend performs no follow-up navigation repair write.

@@ -22,6 +22,8 @@ function request(threadId: string, requestId: string): Request {
     threadId,
     baseMessageId: null,
     baseModelId: null,
+    buildMode: 'interactive',
+    buildQueueState: 'running',
     result: null,
     error: null,
     cookingStartTime: null,

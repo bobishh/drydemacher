@@ -9,6 +9,8 @@ import {
   createNewThread,
   evictSupersededVersionDetails,
   resolveCommittedVersionAfterHistoryRefresh,
+  resolveProjectedPageState,
+  projectHistorySummaries,
   threadMessagePageState,
 } from './history';
 import type { Thread } from '../types/domain';
@@ -140,6 +142,35 @@ test('history refresh preserves an explicitly selected committed version', () =>
     resolveCommittedVersionAfterHistoryRefresh('message-selected', [selected, newer]),
     null,
   );
+});
+
+test('canonical head projection preserves an already-loaded older-page cursor', () => {
+  assert.deepEqual(
+    resolveProjectedPageState(
+      { isLoading: false, hasMore: true, nextBefore: 'older-page-cursor', error: null },
+      { hasMore: false, nextBefore: null },
+    ),
+    { hasMore: true, nextBefore: 'older-page-cursor' },
+  );
+  assert.deepEqual(
+    resolveProjectedPageState(undefined, { hasMore: true, nextBefore: 'first-page-cursor' }),
+    { hasMore: true, nextBefore: 'first-page-cursor' },
+  );
+});
+
+test('canonical lifecycle summary projection preserves loaded timeline pages', () => {
+  const loaded = sampleMessage(
+    'loaded-version',
+    sampleBundle('loaded-model', '/tmp/loaded-model.stl'),
+    sampleManifest('loaded-model'),
+  );
+  historyStore.set([sampleThread('kept-thread', [loaded]), sampleThread('removed-thread')]);
+
+  projectHistorySummaries([{ ...sampleThread('kept-thread'), title: 'Canonical title' }]);
+
+  assert.deepEqual(get(historyStore).map((thread) => thread.id), ['kept-thread']);
+  assert.equal(get(historyStore)[0]?.title, 'Canonical title');
+  assert.deepEqual(get(historyStore)[0]?.messages.map((message) => message.id), ['loaded-version']);
 });
 
 test('history keeps failed artifactless versions and advances head to latest append', () => {
@@ -389,16 +420,35 @@ test('Given stale thread messages are loading When backend opens the reusable em
     },
   });
 
+  let receivedIntent: unknown = null;
   await createNewThread(
     { mode: 'blank' },
     {
-      openBlank: async () => ({
-        threadId: 'thread-empty',
-        slug: 'untitled-thread-empty',
-        folder: '/tmp/untitled-thread-empty',
-        file: '/tmp/untitled-thread-empty/model.ecky',
-        source: '(model (part body (box 20 20 20)))',
-      }),
+      createThread: async (input) => {
+        receivedIntent = input;
+        return {
+          threadId: 'thread-empty',
+          sourceDocument: {
+            folder: '/tmp/untitled-thread-empty',
+            file: '/tmp/untitled-thread-empty/model.ecky',
+            source: '',
+          },
+          initialVersionId: null,
+          snapshotId: null,
+          parserMatched: null,
+          initialVersionError: null,
+          workspace: {
+            thread: sampleThread('thread-empty'),
+            messagesPage: {
+              messages: [],
+              nextBefore: null,
+              hasMore: false,
+            },
+            selectedVersion: null,
+            requestedMessageFound: false,
+          },
+        };
+      },
     },
   );
 
@@ -411,6 +461,8 @@ test('Given stale thread messages are loading When backend opens the reusable em
   assert.equal(get(activeThreadMessagesLoading), false);
   assert.equal(get(activeThreadVersionLoading), false);
   assert.equal(get(threadMessagePageState)[newThreadId!]?.isLoading, false);
+  assert.deepEqual(receivedIntent, { mode: 'blank', title: null, source: null });
+  assert.equal(get(historyStore)[0]?.id, 'thread-empty');
 });
 
 test('selected detail hydration evicts superseded heavy version payloads', () => {

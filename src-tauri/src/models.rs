@@ -126,6 +126,214 @@ pub struct McpSessionState {
     pub updated_at: u64,
 }
 
+/// All ephemeral state owned by one MCP session.  Keep lifecycle cleanup here:
+/// disconnect must remove every per-session projection together.
+#[derive(Clone)]
+pub struct McpSessionRegistry {
+    sessions: Arc<tokio::sync::Mutex<HashMap<String, McpSessionState>>>,
+    read_resources: Arc<tokio::sync::Mutex<HashMap<String, HashSet<String>>>>,
+    enabled_groups: Arc<tokio::sync::Mutex<HashMap<String, HashSet<String>>>>,
+    pending_notifications: Arc<tokio::sync::Mutex<HashMap<String, Vec<serde_json::Value>>>>,
+}
+
+impl McpSessionRegistry {
+    pub fn with_sessions(&self) -> &Arc<tokio::sync::Mutex<HashMap<String, McpSessionState>>> {
+        &self.sessions
+    }
+    pub async fn insert(&self, session_id: String, session: McpSessionState) {
+        self.sessions.lock().await.insert(session_id, session);
+    }
+
+    pub async fn get(&self, session_id: &str) -> Option<McpSessionState> {
+        self.sessions.lock().await.get(session_id).cloned()
+    }
+
+    pub async fn update<F>(&self, session_id: &str, mutate: F) -> bool
+    where
+        F: FnOnce(&mut McpSessionState),
+    {
+        let mut sessions = self.sessions.lock().await;
+        let Some(session) = sessions.get_mut(session_id) else {
+            return false;
+        };
+        mutate(session);
+        true
+    }
+
+    pub async fn contains(&self, session_id: &str) -> bool {
+        self.sessions.lock().await.contains_key(session_id)
+    }
+
+    pub async fn list(&self) -> Vec<(String, McpSessionState)> {
+        self.sessions
+            .lock()
+            .await
+            .iter()
+            .map(|(id, session)| (id.clone(), session.clone()))
+            .collect()
+    }
+
+    pub async fn mark_resource_read(&self, session_id: &str, uri: String) {
+        self.read_resources
+            .lock()
+            .await
+            .entry(session_id.to_string())
+            .or_default()
+            .insert(uri);
+    }
+
+    pub async fn read_resources(&self, session_id: &str) -> HashSet<String> {
+        self.read_resources
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub async fn enabled_groups(&self, session_id: &str) -> HashSet<String> {
+        self.enabled_groups
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub async fn enable_group(&self, session_id: &str, group: &str) -> bool {
+        let mut groups = self.enabled_groups.lock().await;
+        groups
+            .entry(session_id.to_string())
+            .or_default()
+            .insert(group.to_string())
+    }
+
+    pub async fn enqueue_notification(&self, session_id: &str, notification: serde_json::Value) {
+        self.pending_notifications
+            .lock()
+            .await
+            .entry(session_id.to_string())
+            .or_default()
+            .push(notification);
+    }
+
+    pub async fn drain_notifications(&self, session_id: &str) -> Vec<serde_json::Value> {
+        self.pending_notifications
+            .lock()
+            .await
+            .remove(session_id)
+            .unwrap_or_default()
+    }
+
+    pub async fn remove(&self, session_id: &str) -> Option<McpSessionState> {
+        let removed = self.sessions.lock().await.remove(session_id);
+        self.read_resources.lock().await.remove(session_id);
+        self.enabled_groups.lock().await.remove(session_id);
+        self.pending_notifications.lock().await.remove(session_id);
+        removed
+    }
+}
+
+#[cfg(test)]
+mod mcp_session_registry_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn registry_crud_uses_owned_map() {
+        let registry = McpSessionRegistry {
+            sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            read_resources: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            enabled_groups: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pending_notifications: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        };
+        registry
+            .insert(
+                "s1".to_string(),
+                McpSessionState::new("client".into(), "host".into()),
+            )
+            .await;
+        assert!(registry.contains("s1").await);
+        assert_eq!(registry.get("s1").await.unwrap().client_kind, "client");
+        assert!(
+            registry
+                .update("s1", |session| session.phase = Some("active".into()))
+                .await
+        );
+        assert_eq!(
+            registry.get("s1").await.unwrap().phase.as_deref(),
+            Some("active")
+        );
+        assert_eq!(registry.list().await.len(), 1);
+        assert!(registry.remove("s1").await.is_some());
+        assert!(!registry.contains("s1").await);
+    }
+
+    #[tokio::test]
+    async fn remove_clears_all_session_state_and_new_session_starts_empty() {
+        let registry = McpSessionRegistry {
+            sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            read_resources: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            enabled_groups: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pending_notifications: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        };
+        let session_id = "session-1";
+        registry.sessions.lock().await.insert(
+            session_id.to_string(),
+            McpSessionState::new("test".to_string(), "host".to_string()),
+        );
+        registry.read_resources.lock().await.insert(
+            session_id.to_string(),
+            HashSet::from(["guide://one".to_string()]),
+        );
+        registry.enabled_groups.lock().await.insert(
+            session_id.to_string(),
+            HashSet::from(["target-reads".to_string()]),
+        );
+        registry.pending_notifications.lock().await.insert(
+            session_id.to_string(),
+            vec![serde_json::json!({"method": "notifications/tools/list_changed"})],
+        );
+
+        assert!(registry.remove(session_id).await.is_some());
+        assert!(!registry.sessions.lock().await.contains_key(session_id));
+        assert!(!registry
+            .read_resources
+            .lock()
+            .await
+            .contains_key(session_id));
+        assert!(!registry
+            .enabled_groups
+            .lock()
+            .await
+            .contains_key(session_id));
+        assert!(!registry
+            .pending_notifications
+            .lock()
+            .await
+            .contains_key(session_id));
+
+        registry.sessions.lock().await.insert(
+            session_id.to_string(),
+            McpSessionState::new("new".to_string(), "new-host".to_string()),
+        );
+        assert!(!registry
+            .read_resources
+            .lock()
+            .await
+            .contains_key(session_id));
+        assert!(!registry
+            .enabled_groups
+            .lock()
+            .await
+            .contains_key(session_id));
+        assert!(!registry
+            .pending_notifications
+            .lock()
+            .await
+            .contains_key(session_id));
+    }
+}
+
 impl McpSessionState {
     fn now_secs() -> u64 {
         SystemTime::now()
@@ -274,22 +482,7 @@ pub struct AppState {
     pub mcp_status: Arc<Mutex<McpServerStatus>>,
     pub codex_app_server: Arc<crate::services::codex_app_server::CodexAppServerSupervisor>,
     pub agy_provider: Arc<crate::services::agy_provider::AgyProviderSupervisor>,
-    pub mcp_sessions: Arc<tokio::sync::Mutex<HashMap<String, McpSessionState>>>,
-    /// MCP guide/resource URIs read by each live session.
-    pub mcp_session_read_resources: Arc<tokio::sync::Mutex<HashMap<String, HashSet<String>>>>,
-    /// OpenSpec `agent-context-budgeting` §5: capability groups explicitly enabled
-    /// for each compact-managed MCP session (group ids, e.g. `target-reads`).
-    /// Core workflow tools are always available; specialist groups load on demand
-    /// via the `capability_enable` control. Kept as a side map (mirroring
-    /// `mcp_session_read_resources`) so `McpSessionState` literals need no change.
-    pub mcp_session_enabled_groups: Arc<tokio::sync::Mutex<HashMap<String, HashSet<String>>>>,
-    /// OpenSpec `agent-context-budgeting` §5.3: queued MCP server→client
-    /// notifications (e.g. `notifications/tools/list_changed`) keyed by session
-    /// id. This Streamable-HTTP server answers each request with one JSON-RPC
-    /// object, so server-initiated notifications are recorded here for delivery
-    /// to managed agents on their next poll rather than as an out-of-band push.
-    pub mcp_session_pending_notifications:
-        Arc<tokio::sync::Mutex<HashMap<String, Vec<serde_json::Value>>>>,
+    pub mcp_session_registry: McpSessionRegistry,
     /// Pending user-confirmation requests keyed by requestId.
     pub confirm_channels: Arc<tokio::sync::Mutex<HashMap<String, oneshot::Sender<String>>>>,
     /// Pending user-prompt requests keyed by requestId (agent waits for text/attachments from UI).
@@ -325,6 +518,11 @@ pub struct AppState {
     /// `thread_id` strings), while a UI mutation still invalidates every
     /// session's actor for that thread within this `AppState`.
     pub authoring_actor_registry: Arc<crate::mcp::handlers::AuthoringActorRegistry>,
+    /// Sole admission/cancellation authority for API and controller builds.
+    pub exploration_run_registry: Arc<crate::exploration_run_registry::ExplorationRunRegistry>,
+    /// Latest-wins admission authority for sketch preview submissions.
+    pub sketch_preview_run_registry:
+        Arc<crate::services::sketch_preview_submission::SketchPreviewRunRegistry>,
     /// App-global journal of typed agent activity events.
     pub agent_activity: Arc<Mutex<crate::services::agent_activity::AgentActivityJournal>>,
     /// App handle for emitting runtime PTY events back into the frontend.
@@ -346,6 +544,10 @@ impl AppState {
         conn: rusqlite::Connection,
         read_conn: Option<rusqlite::Connection>,
     ) -> Self {
+        let mcp_session_map = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let mcp_session_read_resources = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let mcp_session_enabled_groups = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let mcp_session_pending_notifications = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         Self {
             config: Arc::new(Mutex::new(config)),
             config_persistence_status: Arc::new(Mutex::new(ConfigPersistenceStatus::default())),
@@ -364,10 +566,12 @@ impl AppState {
                 crate::services::codex_app_server::CodexAppServerSupervisor::new(),
             ),
             agy_provider: Arc::new(crate::services::agy_provider::AgyProviderSupervisor::new()),
-            mcp_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            mcp_session_read_resources: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            mcp_session_enabled_groups: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            mcp_session_pending_notifications: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            mcp_session_registry: McpSessionRegistry {
+                sessions: mcp_session_map,
+                read_resources: Arc::clone(&mcp_session_read_resources),
+                enabled_groups: Arc::clone(&mcp_session_enabled_groups),
+                pending_notifications: Arc::clone(&mcp_session_pending_notifications),
+            },
             confirm_channels: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             prompt_channels: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             auto_agent_runtime: Arc::new(Mutex::new(
@@ -384,6 +588,12 @@ impl AppState {
             capture_trust_url: Arc::new(Mutex::new(None)),
             authoring_actor_registry: Arc::new(
                 crate::mcp::handlers::AuthoringActorRegistry::default(),
+            ),
+            exploration_run_registry: Arc::new(
+                crate::exploration_run_registry::ExplorationRunRegistry::default(),
+            ),
+            sketch_preview_run_registry: Arc::new(
+                crate::services::sketch_preview_submission::SketchPreviewRunRegistry::default(),
             ),
             agent_activity: Arc::new(Mutex::new(
                 crate::services::agent_activity::AgentActivityJournal::default(),
@@ -463,6 +673,10 @@ impl AppState {
             session_id: session_id.clone(),
             target_thread_id,
             target_message_id,
+            target_title: String::new(),
+            target_source: String::new(),
+            target_source_language: String::new(),
+            started_from_empty: false,
             pairing_token: pairing_token.clone(),
             pairing_url,
             trust_url,
@@ -521,6 +735,10 @@ impl AppState {
             session_id: run.id.clone(),
             target_thread_id: run.target_thread_id.clone(),
             target_message_id: run.target_message_id.clone(),
+            target_title: run.title.clone(),
+            target_source: run.target_source.clone(),
+            target_source_language: run.target_source_language.clone(),
+            started_from_empty: run.started_from_empty,
             pairing_token: pairing_token.clone(),
             pairing_url,
             trust_url,
@@ -932,7 +1150,7 @@ impl AppState {
             }
         }
         {
-            let mut sessions = self.mcp_sessions.lock().await;
+            let mut sessions = self.mcp_session_registry.with_sessions().lock().await;
             if let Some(session) = sessions.get_mut(session_id) {
                 session.waiting_on_prompt = false;
             }

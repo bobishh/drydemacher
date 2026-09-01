@@ -108,6 +108,26 @@ resets expansion, scroll, search, or filter state.
 Point-navigation events carry thread/version references. Missing rows are
 hydrated with `VersionDetail`; they do not fetch a full thread.
 
+Delete and restore are single backend mutation intents. Each transaction owns
+the tombstone change, selected-version fallback, bounded newest timeline page,
+thread summary, and durable restart pointer, then returns one optional
+`WorkspaceProjection`. Frontend removes or merges the named row and applies the
+projection without global history/latest/page reads. An already-loaded older
+page cursor remains authoritative, so a head refresh does not collapse the
+user's timeline window. Projection hydration never echoes a second restart
+snapshot write; explicit user version selection remains the pointer-changing
+path.
+
+Thread delete, finalize, and reopen likewise return one bounded canonical
+thread-list projection from the mutation transaction. Rust clears the restart
+pointer only when it actually targets a deleted/finalized thread. Opening a
+completed project is one point intent returning its workspace projection; it
+does not scan inventory and then issue a second workspace read. Frontend keeps
+already-loaded timeline pages for surviving summaries and performs no global
+follow-up refresh. These local UI intents do not emit a history invalidation
+echo after returning their authoritative projection; external mutation paths
+continue to emit targeted invalidations for cross-view consumers.
+
 ## Preview delivery
 
 The authoring actor persists the immutable draft snapshot once. It then emits a
@@ -183,8 +203,11 @@ On macOS, Wry already receives
 `webViewWebContentProcessDidTerminate`; Ecky SHALL connect a native termination
 callback through the available runtime integration (or a minimal upstreamed
 runtime hook if Tauri does not expose it). Recovery reloads the UI once, then
-hydrates thread summary, selected timeline page, selected version reference,
-and last durable render snapshot. It marks any unknown in-flight UI delivery as
+hydrates config, bounded thread summaries, restart-pointer selection, selected
+timeline page, and selected version through one Rust-owned boot projection. A
+separate Rust runtime projection keeps slow capability probing off the cached
+workspace restore critical path and owns any resulting default-context repair.
+It marks any unknown in-flight UI delivery as
 requiring reconciliation. It does not replay provider input, queued delivery,
 or render work without backend idempotency evidence.
 

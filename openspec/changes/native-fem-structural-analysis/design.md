@@ -424,6 +424,22 @@ status bar is introduced. Actions are:
 - inspect extrema and reactions;
 - export VTU when present.
 
+The workbench run action submits one `run_fem_study_intent` carrying only the
+current model id, source, and authored analysis name. Rust allocates the run/job
+id, applies the configured compute budgets and numerical-control policy,
+validates the current study, executes and publishes the immutable result, and
+returns both validation and result projections. The frontend does not mint FEM
+job ids or compose validate-then-run lifecycle calls.
+
+The validate, mesh-preview, convergence-run, and cached-convergence actions use
+dedicated intents carrying only current target inputs and explicit mesh sizes
+where those are user-selected. Rust allocates every job id, applies configured
+budgets, numerical controls, and convergence tolerances, and owns the
+validate-then-preview sequence. VTU export carries the immutable result identity
+and the user-selected target path; Rust loads and enforces the configured result
+byte cap. The frontend may submit intent, project the returned state, display
+pending/raw failure, and cancel using the Rust-emitted job id.
+
 The viewport can show undeformed outline, deformed boundary, Tet4 edges or a
 cut/clip view, and a legend for displacement magnitude, von Mises, principal
 stress, or safety factor. These are display-only overlays and material buffers.

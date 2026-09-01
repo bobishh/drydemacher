@@ -31,6 +31,25 @@ agent handoff. Frontend never becomes geometry authority.
   prompt string and not a mesh mutation.
 - Frontend raycasts and presents handles; backend validates anchors and derives
   calibrated coordinates.
+- Mechanical-guide preparation accepts user intent values only. Rust owns role
+  readiness, canonical calibration/frame/plane/profile/expectation assembly,
+  computed-evidence invalidation, and deterministic reevaluation through one
+  capture command.
+- Capture-guide draft mutations use one typed Rust intent boundary for landmark
+  add/update/delete, identity-checked draft replacement, profile configuration
+  and ordering, expectation edits, and feature-plan selection. Frontend submits
+  user intent and projects returned canonical head; it does not serialize saves
+  or author guide revisions.
+- First guided-edit entry uses an idempotent Rust ensure command. Rust derives
+  guide ID, run/thread/target ownership, selected source identity, defaults,
+  canonical digest, and initial append-only revision without accepting a guide
+  payload from frontend.
+- Guide validation/finalization uses one persisted Rust intent containing only
+  run/revision/mesh guards and known-distance, instruction, and feature-depth
+  evidence. Rust loads current head, finalizes, deterministically evaluates,
+  classifies ready/draft/stale, appends next revision, and returns raw evidence.
+  Frontend does not send full guide, inspect readiness to choose persistence, or
+  issue a second save.
 - Every surface anchor is guarded by exact source mesh content digest.
 - Triangle index plus barycentric coordinates identify a hit only within that
   digest. They are never claimed stable across crop or reconstruction changes.
@@ -424,6 +443,12 @@ Successful versions can be filtered or projected for rendering, but failed
 versions retain exact source and raw backend/agent evidence and remain in
 history. Accepted generated source can additionally follow normal Apply/Commit
 projection.
+
+Draft replacement used for undo is not an unchecked full-guide overwrite. Rust
+requires schema, guide, capture-run, target source/version, and exact source-mesh
+identity to match current head, assigns next revision itself, invalidates derived
+evidence, validates anchors against selected source when available, and appends
+the replacement as a new candidate.
 
 ## Agent Handoff
 

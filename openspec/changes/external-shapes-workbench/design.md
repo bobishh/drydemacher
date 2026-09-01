@@ -61,6 +61,13 @@ setup documentation.
 - `.ecky`: canonical applied geometry operations.
 - Guide artifact: evidence anchors and fit/validation provenance.
 
+Applied crop and trim edits enter one Rust intent boundary. Rust loads bound
+source and selected version context, checks expected source/mesh digests, applies
+the exact AST patch, renders and appends one immutable success/error version,
+updates bound source/runtime/manifest/snapshot through manual authoring service,
+then rereads canonical external sources. Frontend submits intent and projects
+returned version/runtime/source state only.
+
 ## Rejected Paths
 
 - Rotated giant boxes as authored plane cuts: obscures intent and weakens bounds.

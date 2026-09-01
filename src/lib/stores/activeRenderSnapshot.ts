@@ -19,8 +19,7 @@ export type ActiveRenderSnapshot = Readonly<{
   targetRef: AuthoringTargetRef | null;
 }>;
 
-export type ActiveRenderSnapshotInput = Omit<ActiveRenderSnapshot, 'snapshotId' | 'targetRef'> & {
-  snapshotId?: string | null;
+export type ActiveRenderSnapshotInput = Omit<ActiveRenderSnapshot, 'targetRef'> & {
   eventModelId?: string | null;
   targetRef?: AuthoringTargetRef | null;
 };
@@ -30,26 +29,6 @@ export class RenderSnapshotMismatch extends Error {
     super(message);
     this.name = 'RenderSnapshotMismatch';
   }
-}
-
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
-  if (value && typeof value === 'object') {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`)
-      .join(',')}}`;
-  }
-  return JSON.stringify(value);
-}
-
-function fnv1a(value: string): string {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
 function assertMatching(label: string, left: string | null | undefined, right: string | null | undefined) {
@@ -86,16 +65,10 @@ export function buildActiveRenderSnapshot(input: ActiveRenderSnapshotInput): Act
     input.modelManifest.geometryBackend,
   );
 
-  const snapshotId = input.snapshotId?.trim() || `frontend-${fnv1a(stableJson({
-    threadId: input.threadId,
-    messageId: input.messageId,
-    source: input.design.macroCode,
-    params: input.design.initialParams,
-    postProcessing: input.design.postProcessing ?? null,
-    backend: input.design.geometryBackend,
-    modelId: input.artifactBundle.modelId,
-    contentHash: input.artifactBundle.contentHash,
-  }))}`;
+  const snapshotId = input.snapshotId.trim();
+  if (!snapshotId) {
+    throw new RenderSnapshotMismatch('Render snapshotId is required from backend authority.');
+  }
 
   return Object.freeze({
     snapshotId,
@@ -141,15 +114,14 @@ export function hydrateActiveRenderSnapshot(input: ActiveRenderSnapshotInput): A
   activeVersionId.set(snapshot.messageId);
   workingCopy.loadVersion(snapshot.design, snapshot.messageId);
   paramPanelState.hydrateFromVersion(snapshot.design, snapshot.messageId);
-  session.update((current) => ({
-    ...current,
-    status: snapshot.status,
+  session.setStatus(snapshot.status);
+  session.setRuntime({
+    kind: 'model',
     stlUrl: snapshot.stlUrl,
-    runtimeRevision: current.runtimeRevision + 1,
     artifactBundle: snapshot.artifactBundle,
     modelManifest: snapshot.modelManifest,
     selectedPartId: snapshot.selectedPartId,
-  }));
+  });
 
   // Publish authority last. Compatibility stores above are projections.
   snapshotStore.set(snapshot);

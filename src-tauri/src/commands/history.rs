@@ -1,6 +1,7 @@
 use crate::contracts::{
     AppError, AppResult, ArtifactBundle, DenseTopologyKind, DenseTopologyPage, Message,
     SourceWindow, Thread, ThreadMessagesPage, VersionDetail, VersionPreviewRuntime,
+    WorkspaceProjection,
 };
 use crate::db;
 use crate::models::AppState;
@@ -397,6 +398,63 @@ pub async fn get_thread_messages_page(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn get_workspace_projection(
+    state: State<'_, AppState>,
+    thread_id: String,
+    preferred_message_id: Option<String>,
+    message_limit: Option<usize>,
+) -> AppResult<WorkspaceProjection> {
+    let started = Instant::now();
+    let conn = if let Some(read_conn) = state.db_read.as_ref() {
+        read_conn.lock().await
+    } else {
+        state.db.lock().await
+    };
+    let acquired = Instant::now();
+    let result = history_service::get_workspace_projection(
+        &conn,
+        &thread_id,
+        preferred_message_id.as_deref(),
+        message_limit,
+    );
+    let finished = Instant::now();
+    if let Ok(value) = &result {
+        crate::transport_budget::observe_projection(
+            "get_workspace_projection",
+            "workspace_projection",
+            value,
+            value.messages_page.messages.len(),
+            value.messages_page.truncated_fields.len(),
+            usize::from(value.selected_version.is_some()),
+            acquired.duration_since(started),
+            finished.duration_since(acquired),
+        );
+    }
+    result
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn fork_design(
+    input: crate::services::history::ForkDesignRequest,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<crate::services::history::ForkDesignResponse> {
+    history_service::fork_design(input, &state, &app).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn create_design_thread(
+    input: crate::services::thread_creation::CreateDesignThreadIntent,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<crate::services::thread_creation::CreateDesignThreadResponse> {
+    crate::services::thread_creation::create_design_thread(input, &state, &app).await
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn clear_history(state: State<'_, AppState>) -> AppResult<()> {
     let conn = state.db.lock().await;
     crate::db::clear_history(&conn).map_err(|err| AppError::persistence(err.to_string()))
@@ -445,6 +503,26 @@ pub async fn delete_version(message_id: String, state: State<'_, AppState>) -> A
 pub async fn restore_version(message_id: String, state: State<'_, AppState>) -> AppResult<()> {
     let conn = state.db.lock().await;
     history_service::restore_version(&conn, &message_id)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn delete_version_intent(
+    input: history_service::VersionHistoryIntent,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<history_service::VersionHistoryIntentResponse> {
+    history_service::delete_version_intent(input, &state, &app).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn restore_version_intent(
+    input: history_service::VersionHistoryIntent,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<history_service::VersionHistoryIntentResponse> {
+    history_service::restore_version_intent(input, &state, &app).await
 }
 
 #[tauri::command]
@@ -546,6 +624,45 @@ pub async fn finalize_thread(
 pub async fn reopen_thread(id: String, state: State<'_, AppState>) -> AppResult<()> {
     let conn = state.db.lock().await;
     history_service::reopen_thread(&conn, &id)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn delete_thread_intent(
+    input: history_service::ThreadLifecycleIntent,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<history_service::ThreadLifecycleProjection> {
+    history_service::delete_thread_intent(input, &state, &app).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn finalize_thread_intent(
+    input: history_service::ThreadLifecycleIntent,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<history_service::ThreadLifecycleProjection> {
+    history_service::finalize_thread_intent(input, &state, &app).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn reopen_thread_intent(
+    input: history_service::ThreadLifecycleIntent,
+    state: State<'_, AppState>,
+) -> AppResult<history_service::ThreadLifecycleProjection> {
+    history_service::reopen_thread_intent(input, &state).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn open_inventory_thread_intent(
+    input: history_service::OpenInventoryThreadIntent,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<WorkspaceProjection> {
+    history_service::open_inventory_thread_intent(input, &state, &app).await
 }
 
 #[tauri::command]

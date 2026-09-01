@@ -1,5 +1,11 @@
 use crate::contracts::{
-    AppError, AppResult, CaptureCalibrationMethod, CaptureReconstructionGuide, CaptureSurfaceAnchor,
+    AppError, AppResult, CaptureAuthoredSelector, CaptureCalibration, CaptureCalibrationMethod,
+    CaptureExpectedGeometryKind, CaptureFeatureExpectation, CaptureFitResidual,
+    CaptureIgnoredRegion, CaptureKnownDistanceMeasurement, CaptureLandmarkRole, CaptureNamedAxis,
+    CaptureNamedMeasurement, CaptureNamedPlane, CaptureOrderedProfile, CapturePlaneRole,
+    CaptureProfileKind, CaptureProfileOperationHint, CaptureReconstructionGuide,
+    CaptureRequiredBrepTopologyKind, CaptureSelectorCardinality, CaptureSurfaceAnchor,
+    CaptureSymmetryCompletion,
 };
 use crate::ecky_ir::mesh_asset::{IndexedMeshAsset, MeshAssetSource};
 use sha2::{Digest, Sha256};
@@ -7,6 +13,285 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::Path;
 
 const VECTOR_EPSILON: f64 = 1.0e-12;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MechanicalGuideReadiness {
+    pub ready: bool,
+    pub reasons: Vec<String>,
+}
+
+pub fn invalidate_computed_reconstruction_evidence(guide: &mut CaptureReconstructionGuide) {
+    guide.surface_neighborhoods.clear();
+    guide.primitive_candidates.clear();
+    guide.primitive_hypotheses.clear();
+    guide.surface_regions.clear();
+    guide.region_adjacency.clear();
+    guide.reconstructed_profiles.clear();
+    guide.constraint_graph = Default::default();
+    guide.feature_plan_candidates.clear();
+    guide.selected_feature_plan_id = None;
+    guide.reconstruction_readiness = Default::default();
+    guide.evidence_views.clear();
+    guide.canonical_digest.clear();
+    for landmark in &mut guide.landmarks {
+        landmark.uncertainty_mm = None;
+    }
+}
+
+pub fn mechanical_guide_readiness(guide: &CaptureReconstructionGuide) -> MechanicalGuideReadiness {
+    let count = |role: CaptureLandmarkRole| {
+        guide
+            .landmarks
+            .iter()
+            .filter(|landmark| landmark.role == role)
+            .count()
+    };
+    let mut reasons = Vec::new();
+    if count(CaptureLandmarkRole::CalibrationEndpoint) < 2 {
+        reasons.push("Pick two calibration endpoints.".into());
+    }
+    if count(CaptureLandmarkRole::FrameOrigin) < 1 {
+        reasons.push("Pick one frame origin.".into());
+    }
+    if count(CaptureLandmarkRole::FrameDirection) < 2 {
+        reasons.push("Pick X and XY frame directions.".into());
+    }
+    if count(CaptureLandmarkRole::SymmetrySample) < 3 {
+        reasons.push("Pick three symmetry-plane samples.".into());
+    }
+    if count(CaptureLandmarkRole::ProfileVertex) < 3 {
+        reasons.push("Pick at least three ordered profile vertices.".into());
+    }
+    MechanicalGuideReadiness {
+        ready: reasons.is_empty(),
+        reasons,
+    }
+}
+
+pub fn finalize_mechanical_guide_draft(
+    mut guide: CaptureReconstructionGuide,
+    known_distance_mm: f64,
+    instruction: &str,
+    feature_depth_mm: f64,
+) -> AppResult<CaptureReconstructionGuide> {
+    let readiness = mechanical_guide_readiness(&guide);
+    if !readiness.ready {
+        return Err(AppError::validation(readiness.reasons.join(" ")));
+    }
+    if !known_distance_mm.is_finite() || known_distance_mm <= 0.0 {
+        return Err(AppError::validation(
+            "Known calibration distance must be finite and positive.",
+        ));
+    }
+    if !feature_depth_mm.is_finite() || feature_depth_mm <= 0.0 {
+        return Err(AppError::validation(
+            "Feature depth must be finite and positive.",
+        ));
+    }
+
+    let ids_for_role = |role: CaptureLandmarkRole| {
+        guide
+            .landmarks
+            .iter()
+            .filter(|landmark| landmark.role == role)
+            .map(|landmark| landmark.landmark_id.clone())
+            .collect::<Vec<_>>()
+    };
+    let calibration_ids = ids_for_role(CaptureLandmarkRole::CalibrationEndpoint);
+    let frame_origin_id = ids_for_role(CaptureLandmarkRole::FrameOrigin)[0].clone();
+    let frame_direction_ids = ids_for_role(CaptureLandmarkRole::FrameDirection);
+    let symmetry_ids = ids_for_role(CaptureLandmarkRole::SymmetrySample);
+    let profile_ids = ids_for_role(CaptureLandmarkRole::ProfileVertex);
+    let rotation_axis_ids = ids_for_role(CaptureLandmarkRole::RotationAxisEndpoint);
+    let ignored_damage_ids = ids_for_role(CaptureLandmarkRole::IgnoredDamagedRegion);
+    let existing_profile = guide
+        .profiles
+        .iter()
+        .find(|profile| profile.profile_id == "profile-1")
+        .cloned();
+    let existing_symmetry_expectation = guide
+        .feature_expectations
+        .iter()
+        .find(|expectation| expectation.expectation_id == "expectation-symmetry-face")
+        .cloned();
+    let existing_profile_expectation = guide
+        .feature_expectations
+        .iter()
+        .find(|expectation| expectation.expectation_id == "expectation-profile-edges")
+        .cloned();
+    let mut ordered_profile_ids = existing_profile
+        .as_ref()
+        .map(|profile| {
+            profile
+                .landmark_ids
+                .iter()
+                .filter(|id| profile_ids.contains(id))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let missing_profile_ids = profile_ids
+        .iter()
+        .filter(|id| !ordered_profile_ids.contains(id))
+        .cloned()
+        .collect::<Vec<_>>();
+    ordered_profile_ids.extend(missing_profile_ids);
+    let rotation_axis_origin = rotation_axis_ids.first().and_then(|id| {
+        guide
+            .landmarks
+            .iter()
+            .find(|landmark| landmark.landmark_id == *id)
+            .map(|landmark| landmark.local_position_mm)
+    });
+
+    let current_scale = guide.calibration.millimetres_per_source_unit;
+    invalidate_computed_reconstruction_evidence(&mut guide);
+    guide.calibration = CaptureCalibration {
+        source_units: "sourceUnit".into(),
+        millimetres_per_source_unit: if current_scale.is_finite() && current_scale > 0.0 {
+            current_scale
+        } else {
+            1.0
+        },
+        method: CaptureCalibrationMethod::KnownDistance,
+        measurements: vec![CaptureKnownDistanceMeasurement {
+            measurement_id: "calibration-1".into(),
+            label: "Known calibration distance".into(),
+            first_landmark_id: calibration_ids[0].clone(),
+            second_landmark_id: calibration_ids[1].clone(),
+            known_distance_mm,
+            fitted_distance_mm: 0.0,
+            residual_mm: 0.0,
+            accepted_tolerance_mm: f64::max(0.01, known_distance_mm * 0.0025),
+        }],
+        residual_mm: 0.0,
+    };
+    guide.reconstruction_frame.source_landmark_ids = vec![
+        frame_origin_id,
+        frame_direction_ids[0].clone(),
+        frame_direction_ids[1].clone(),
+    ];
+    guide.planes = vec![CaptureNamedPlane {
+        plane_id: "symmetry-plane-1".into(),
+        label: "Primary symmetry plane".into(),
+        role: CapturePlaneRole::Symmetry,
+        landmark_ids: symmetry_ids,
+        origin_mm: [0.0, 0.0, 0.0],
+        normal: [1.0, 0.0, 0.0],
+        fit: CaptureFitResidual {
+            rms_mm: 0.0,
+            max_mm: 0.0,
+            tolerance_mm: 0.25,
+        },
+    }];
+    guide.axes = match rotation_axis_origin {
+        Some(origin_mm) if rotation_axis_ids.len() >= 2 => vec![CaptureNamedAxis {
+            axis_id: "axis-1".into(),
+            label: "Named rotation axis".into(),
+            landmark_ids: rotation_axis_ids,
+            origin_mm,
+            direction: [0.0, 0.0, 1.0],
+            fit: CaptureFitResidual {
+                rms_mm: 0.0,
+                max_mm: 0.0,
+                tolerance_mm: 0.25,
+            },
+        }],
+        _ => Vec::new(),
+    };
+    guide.ignored_regions = if ignored_damage_ids.is_empty() {
+        Vec::new()
+    } else {
+        vec![CaptureIgnoredRegion {
+            region_id: "ignored-damage-1".into(),
+            label: "Observed damaged region".into(),
+            landmark_ids: ignored_damage_ids,
+            reason: "Excluded from fit evidence by explicit user role.".into(),
+        }]
+    };
+    guide.profiles = vec![CaptureOrderedProfile {
+        profile_id: "profile-1".into(),
+        label: existing_profile
+            .as_ref()
+            .map(|profile| profile.label.clone())
+            .unwrap_or_else(|| "Ordered reconstruction profile".into()),
+        kind: existing_profile
+            .as_ref()
+            .map(|profile| profile.kind.clone())
+            .unwrap_or(CaptureProfileKind::Closed),
+        support_plane_id: existing_profile
+            .as_ref()
+            .map(|profile| profile.support_plane_id.clone())
+            .unwrap_or_else(|| "symmetry-plane-1".into()),
+        landmark_ids: ordered_profile_ids,
+        operation_hint: existing_profile
+            .as_ref()
+            .map(|profile| profile.operation_hint.clone())
+            .unwrap_or(CaptureProfileOperationHint::Extrude),
+        feature_label: existing_profile
+            .as_ref()
+            .and_then(|profile| profile.feature_label.clone())
+            .or_else(|| Some("insert-body".into())),
+        fit_role: existing_profile
+            .as_ref()
+            .and_then(|profile| profile.fit_role.clone())
+            .or_else(|| Some("line".into())),
+    }];
+    let mut symmetry_expectation =
+        existing_symmetry_expectation.unwrap_or(CaptureFeatureExpectation {
+            expectation_id: "expectation-symmetry-face".into(),
+            guide_item_ids: vec!["symmetry-plane-1".into()],
+            label: "Exact symmetry support face".into(),
+            expected_geometry_kind: CaptureExpectedGeometryKind::Plane,
+            required_brep_topology_kind: CaptureRequiredBrepTopologyKind::Face,
+            cardinality: CaptureSelectorCardinality::One,
+            part_id: "insert-body".into(),
+            instance_path: None,
+            expected_authored_selector: CaptureAuthoredSelector::Tag {
+                name: "symmetry-face".into(),
+            },
+            required_for_acceptance: true,
+            position_tolerance_mm: Some(0.25),
+            normal_tolerance_deg: Some(1.0),
+            radial_tolerance_mm: None,
+        });
+    symmetry_expectation.guide_item_ids = vec!["symmetry-plane-1".into()];
+    let mut profile_expectation =
+        existing_profile_expectation.unwrap_or(CaptureFeatureExpectation {
+            expectation_id: "expectation-profile-edges".into(),
+            guide_item_ids: vec!["profile-1".into()],
+            label: "Exact ordered profile edges".into(),
+            expected_geometry_kind: CaptureExpectedGeometryKind::Profile,
+            required_brep_topology_kind: CaptureRequiredBrepTopologyKind::OrderedEdges,
+            cardinality: CaptureSelectorCardinality::OneOrMore,
+            part_id: "insert-body".into(),
+            instance_path: None,
+            expected_authored_selector: CaptureAuthoredSelector::Tag {
+                name: "profile-edges".into(),
+            },
+            required_for_acceptance: true,
+            position_tolerance_mm: Some(0.25),
+            normal_tolerance_deg: None,
+            radial_tolerance_mm: None,
+        });
+    profile_expectation.guide_item_ids = vec!["profile-1".into()];
+    guide.feature_expectations = vec![symmetry_expectation, profile_expectation];
+    guide.symmetry_completion = CaptureSymmetryCompletion::Half {
+        plane_id: "symmetry-plane-1".into(),
+    };
+    guide.measurements = vec![CaptureNamedMeasurement {
+        measurement_id: "feature-depth".into(),
+        label: "Feature depth".into(),
+        landmark_ids: Vec::new(),
+        value: feature_depth_mm,
+        unit: "mm".into(),
+        fit_critical: true,
+        authored_parameter_name: Some("feature-depth".into()),
+        constraint_kind: Some(crate::contracts::CaptureConstraintKind::Extent),
+    }];
+    guide.instruction = instruction.trim().into();
+    Ok(guide)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidatedSurfaceAnchor {
@@ -3370,15 +3655,15 @@ pub fn guided_reconstruction_prompt(
         .map_err(|error| AppError::internal(format!("Guided request encoding failed: {error}")))?;
     let prompt = format!(
         "Build parametric .ecky analytic BRep from exact capture guide below.\n\
-         Follow MCP order: inspect -> validate -> preview -> commit. Keep source/history unchanged until explicit commit.\n\
+         Follow MCP order: inspect -> append version -> validate -> preview. Every source change is already an immutable version; no promotion or commit step exists.\n\
          Do not solidify, mirror, patch, or export the scan mesh as manufacturing geometry.\n\
          Author unique half/quarter features once; use explicit named mirror/repeat/instance operations.\n\
          Represent every fit-critical offset as named parameter/binding/constraint.\n\
          Author only operations from requirements.selectedFeaturePlanId and guide.featurePlanCandidates; do not invent primitives, dimensions, or feature operations.\n\
          Bind every selected-plan operation to authored stable nodes and exact BRep targets.\n\
          Emit named authored binding or selector tag for every required feature expectation.\n\
-         Before commit, pass captureGuidedResult with exact requestId/guideCanonicalDigest, unresolvedAssumptions, and inferredRegions.\n\
-         If unresolvedAssumptions is non-empty, call user_confirm_request and do not commit.\n\
+         Before reporting completion, pass captureGuidedResult with exact requestId/guideCanonicalDigest, unresolvedAssumptions, and inferredRegions.\n\
+         If unresolvedAssumptions is non-empty, call user_confirm_request and do not report completion.\n\
          Keep inferred regions explicit; never hide an assumption.\n\
          CANONICAL_CAPTURE_GUIDE_REQUEST={request_json}"
     );
@@ -3550,7 +3835,102 @@ fn normalize(value: [f64; 3]) -> Option<[f64; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contracts::CaptureSurfaceAnchor;
+    use crate::contracts::{CaptureLandmarkRole, CaptureSurfaceAnchor};
+
+    fn mechanical_guide_fixture() -> CaptureReconstructionGuide {
+        let mut guide = crate::contracts::CaptureReconstructionGuide::test_fixture();
+        let template = guide.landmarks[0].clone();
+        let evidence = [
+            (CaptureLandmarkRole::CalibrationEndpoint, [0.0, 0.0, 0.0]),
+            (CaptureLandmarkRole::CalibrationEndpoint, [4.0, 0.0, 0.0]),
+            (CaptureLandmarkRole::FrameOrigin, [0.0, 0.0, 0.0]),
+            (CaptureLandmarkRole::FrameDirection, [4.0, 0.0, 0.0]),
+            (CaptureLandmarkRole::FrameDirection, [0.0, 4.0, 0.0]),
+            (CaptureLandmarkRole::SymmetrySample, [0.0, 0.0, 0.0]),
+            (CaptureLandmarkRole::SymmetrySample, [0.0, 4.0, 0.0]),
+            (CaptureLandmarkRole::SymmetrySample, [0.0, 0.0, 2.0]),
+            (CaptureLandmarkRole::ProfileVertex, [0.0, 0.0, 0.0]),
+            (CaptureLandmarkRole::ProfileVertex, [4.0, 0.0, 0.0]),
+            (CaptureLandmarkRole::ProfileVertex, [4.0, 4.0, 0.0]),
+        ];
+        guide.landmarks = evidence
+            .into_iter()
+            .enumerate()
+            .map(|(index, (role, position))| {
+                let mut landmark = template.clone();
+                landmark.landmark_id = format!("landmark-{}", index + 1);
+                landmark.label = format!("landmark-{}", index + 1);
+                landmark.role = role;
+                landmark.anchor.source_position = position;
+                landmark.local_position_mm = position;
+                landmark.uncertainty_mm = Some(0.25);
+                landmark
+            })
+            .collect();
+        guide.selected_feature_plan_id = Some("stale-plan".into());
+        guide.reconstruction_readiness.ready = true;
+        guide.constraint_graph.content_digest = "sha256:stale-evidence".into();
+        guide.canonical_digest = "sha256:stale-guide".into();
+        guide
+    }
+
+    #[test]
+    fn backend_finalizes_mechanical_draft_and_invalidates_computed_evidence() {
+        let guide = finalize_mechanical_guide_draft(
+            mechanical_guide_fixture(),
+            40.0,
+            "  Build exact insert.  ",
+            18.0,
+        )
+        .unwrap();
+
+        assert_eq!(guide.calibration.measurements[0].known_distance_mm, 40.0);
+        assert_eq!(
+            guide.reconstruction_frame.source_landmark_ids,
+            ["landmark-3", "landmark-4", "landmark-5"]
+        );
+        assert_eq!(
+            guide.planes[0].landmark_ids,
+            ["landmark-6", "landmark-7", "landmark-8"]
+        );
+        assert_eq!(
+            guide.profiles[0].landmark_ids,
+            ["landmark-9", "landmark-10", "landmark-11"]
+        );
+        assert_eq!(guide.instruction, "Build exact insert.");
+        assert_eq!(guide.selected_feature_plan_id, None);
+        assert!(!guide.reconstruction_readiness.ready);
+        assert!(guide.reconstruction_readiness.stages.is_empty());
+        assert!(guide.constraint_graph.content_digest.is_empty());
+        assert!(guide
+            .landmarks
+            .iter()
+            .all(|landmark| landmark.uncertainty_mm.is_none()));
+        assert!(guide.canonical_digest.is_empty());
+    }
+
+    #[test]
+    fn backend_mechanical_readiness_and_finalization_reject_missing_or_invalid_input() {
+        let mut guide = mechanical_guide_fixture();
+        guide
+            .landmarks
+            .retain(|landmark| landmark.role != CaptureLandmarkRole::SymmetrySample);
+        let readiness = mechanical_guide_readiness(&guide);
+        assert!(!readiness.ready);
+        assert_eq!(readiness.reasons, ["Pick three symmetry-plane samples."]);
+        assert_eq!(
+            finalize_mechanical_guide_draft(guide, 40.0, "Build.", 18.0)
+                .unwrap_err()
+                .message,
+            "Pick three symmetry-plane samples."
+        );
+        assert_eq!(
+            finalize_mechanical_guide_draft(mechanical_guide_fixture(), f64::NAN, "Build.", 18.0,)
+                .unwrap_err()
+                .message,
+            "Known calibration distance must be finite and positive."
+        );
+    }
 
     fn write_triangle_stl() -> std::path::PathBuf {
         write_triangle_stl_at_z(0.0)
@@ -4372,10 +4752,10 @@ mod tests {
         assert!(first.requirements.require_parametric_source);
         assert!(first.requirements.forbid_mesh_solidification);
         let prompt = guided_reconstruction_prompt(&first).unwrap();
-        assert!(prompt.contains("inspect -> validate -> preview -> commit"));
+        assert!(prompt.contains("inspect -> append version -> validate -> preview"));
         assert!(prompt.contains("Do not solidify, mirror, patch, or export the scan mesh"));
         assert!(prompt.contains("captureGuidedResult"));
-        assert!(prompt.contains("call user_confirm_request and do not commit"));
+        assert!(prompt.contains("call user_confirm_request and do not report completion"));
         assert!(prompt.len() < 65_536);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }

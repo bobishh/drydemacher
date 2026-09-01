@@ -124,7 +124,7 @@ fn assemble(db: &Connection, id: &str) -> AppResult<CampaignRun> {
     })
 }
 
-pub fn create(db: &mut Connection, input: CreateCampaignRunInput) -> AppResult<CampaignRun> {
+pub fn create(db: &Connection, input: CreateCampaignRunInput) -> AppResult<CampaignRun> {
     validate_create(&input)?;
     let id = uuid::Uuid::new_v4().to_string();
     let timestamp = now()?;
@@ -231,7 +231,7 @@ pub fn save(db: &mut Connection, run: CampaignRun) -> AppResult<CampaignRun> {
     assemble(db, &run.id)
 }
 
-pub fn delete(db: &mut Connection, id: &str) -> AppResult<()> {
+pub fn delete(db: &Connection, id: &str) -> AppResult<()> {
     let deleted = db
         .execute("DELETE FROM campaign_runs WHERE id = ?1", [id])
         .map_err(fail)?;
@@ -240,6 +240,17 @@ pub fn delete(db: &mut Connection, id: &str) -> AppResult<()> {
     } else {
         Ok(())
     }
+}
+
+pub fn delete_with_navigation(db: &mut Connection, id: &str) -> AppResult<()> {
+    let tx = db.transaction().map_err(fail)?;
+    delete(&tx, id)?;
+    if get_active_project_navigation(&tx)?
+        .is_some_and(|navigation| navigation.kind == "campaign" && navigation.id == id)
+    {
+        clear_active_project_navigation(&tx)?;
+    }
+    tx.commit().map_err(fail)
 }
 
 fn validate_active_project(navigation: &ActiveProjectNavigation) -> AppResult<()> {
@@ -414,6 +425,26 @@ mod tests {
             )
             .unwrap();
         assert_eq!(orphan_count, 0);
+    }
+
+    #[test]
+    fn deleting_active_campaign_clears_navigation_atomically() {
+        let mut db = database();
+        let run = create(&db, create_input("Active")).unwrap();
+        save_active_project_navigation(
+            &db,
+            ActiveProjectNavigation {
+                kind: "campaign".to_string(),
+                id: run.id.clone(),
+                view: "campaign".to_string(),
+            },
+        )
+        .unwrap();
+
+        delete_with_navigation(&mut db, &run.id).unwrap();
+
+        assert!(matches!(get(&db, &run.id), Err(AppError { .. })));
+        assert_eq!(get_active_project_navigation(&db).unwrap(), None);
     }
 
     #[test]

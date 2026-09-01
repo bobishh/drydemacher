@@ -436,6 +436,8 @@ pub struct SketchPreviewDraft {
 pub struct SaveSketchPreviewDraftRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_id: Option<String>,
+    #[serde(default)]
+    pub new_scope: bool,
     pub draft_source: SketchDraftSource,
     pub artifact_bundle: ArtifactBundle,
     #[serde(default, skip_serializing_if = "Option::is_none")]

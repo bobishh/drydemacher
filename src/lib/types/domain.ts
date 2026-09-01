@@ -528,11 +528,33 @@ export interface Request {
   threadId: string | null;
   baseMessageId?: string | null;
   baseModelId?: string | null;
+  buildMode: "interactive" | "controller";
+  buildQueueState: "pending" | "running" | "finished";
   result: RequestResult | null;
   error: string | null;
   cookingStartTime: number | null;
   cookingElapsed: number;
 }
+
+/**
+ * Patch accepted by the request lifecycle store. Phase-bearing patches carry
+ * only payload valid for that phase; ordinary metadata patches cannot change
+ * lifecycle phase.
+ */
+type RequestPatchFields = Partial<Omit<Request, 'phase' | 'result' | 'error'>>;
+
+export type RequestMetadataPatch = RequestPatchFields & {
+  result?: RequestResult | null;
+  error?: never;
+};
+
+export type RequestLifecyclePatch =
+  | ({ phase: Exclude<RequestPhase, 'success' | 'error' | 'canceled'>; result?: never; error?: never })
+  | ({ phase: 'success'; result: RequestResult; error?: never })
+  | ({ phase: 'error'; error: string; result?: never })
+  | ({ phase: 'canceled'; result?: never; error?: never });
+
+export type RequestPatch = RequestMetadataPatch | (RequestPatchFields & RequestLifecyclePatch);
 
 function optionalNumber(value: number | null | undefined): number | undefined {
   return typeof value === "number" && Number.isFinite(value)

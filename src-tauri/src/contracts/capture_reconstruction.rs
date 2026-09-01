@@ -41,6 +41,14 @@ pub struct CaptureGuideContext {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EnsureCaptureReconstructionGuideResult {
+    pub guide: CaptureReconstructionGuide,
+    pub state: crate::contracts::CaptureReconstructionGuideState,
+    pub created: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CaptureSurfaceAnchor {
     pub source_mesh_content_digest: String,
     pub triangle_index: u64,
@@ -989,6 +997,108 @@ pub struct CaptureAnchorRemapProposal {
     pub new_anchor: CaptureSurfaceAnchor,
     pub residual_mm: f64,
     pub confirmed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind",
+    deny_unknown_fields
+)]
+pub enum CaptureGuideEditIntent {
+    #[specta(rename_all = "camelCase")]
+    AddLandmark {
+        role: CaptureLandmarkRole,
+        anchor: CaptureSurfaceAnchor,
+    },
+    #[specta(rename_all = "camelCase")]
+    UpdateLandmark {
+        landmark_id: String,
+        label: String,
+        role: CaptureLandmarkRole,
+    },
+    #[specta(rename_all = "camelCase")]
+    DeleteLandmark { landmark_id: String },
+    #[specta(rename_all = "camelCase")]
+    ReplaceDraft {
+        guide: Box<CaptureReconstructionGuide>,
+    },
+    #[specta(rename_all = "camelCase")]
+    ConfigureProfile {
+        profile_id: String,
+        label: String,
+        profile_kind: CaptureProfileKind,
+        operation_hint: CaptureProfileOperationHint,
+        support_plane_id: String,
+        feature_label: Option<String>,
+        fit_role: Option<String>,
+    },
+    #[specta(rename_all = "camelCase")]
+    ReorderProfileLandmark {
+        profile_id: String,
+        landmark_id: String,
+        target_index: u64,
+    },
+    #[specta(rename_all = "camelCase")]
+    UpdateFeatureExpectation {
+        expectation_id: String,
+        label: String,
+        expected_geometry_kind: CaptureExpectedGeometryKind,
+        required_brep_topology_kind: CaptureRequiredBrepTopologyKind,
+        cardinality: CaptureSelectorCardinality,
+        part_id: String,
+        instance_path: Option<String>,
+        expected_authored_selector: CaptureAuthoredSelector,
+        required_for_acceptance: bool,
+        position_tolerance_mm: Option<f64>,
+        normal_tolerance_deg: Option<f64>,
+        radial_tolerance_mm: Option<f64>,
+    },
+    #[specta(rename_all = "camelCase")]
+    SelectFeaturePlan { plan_id: Option<String> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplyCaptureGuideEditInput {
+    pub run_id: String,
+    pub expected_revision: u64,
+    pub expected_mesh_digest: String,
+    pub edit: CaptureGuideEditIntent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplyCaptureGuideEditResult {
+    pub guide: CaptureReconstructionGuide,
+    pub state: crate::contracts::CaptureReconstructionGuideState,
+    pub base_revision: u64,
+    pub expected_revision_matched: bool,
+    pub source_digest_matched: bool,
+    pub raw_evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ValidateCaptureGuideIntentInput {
+    pub run_id: String,
+    pub expected_revision: u64,
+    pub expected_mesh_digest: String,
+    pub known_distance_mm: f64,
+    pub instruction: String,
+    pub feature_depth_mm: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ValidateCaptureGuideIntentResult {
+    pub guide: CaptureReconstructionGuide,
+    pub state: crate::contracts::CaptureReconstructionGuideState,
+    pub base_revision: u64,
+    pub expected_revision_matched: bool,
+    pub source_digest_matched: bool,
+    pub raw_evidence: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -2267,6 +2377,27 @@ mod tests {
         let decoded: CaptureReconstructionGuide =
             serde_json::from_value(json).expect("deserialize guide");
         assert_eq!(decoded, guide);
+    }
+
+    #[test]
+    fn capture_guide_edit_intent_serializes_tag_and_fields_as_camel_case() {
+        let edit = CaptureGuideEditIntent::ConfigureProfile {
+            profile_id: "profile-1".into(),
+            label: "outline".into(),
+            profile_kind: CaptureProfileKind::Closed,
+            operation_hint: CaptureProfileOperationHint::Extrude,
+            support_plane_id: "plane-1".into(),
+            feature_label: Some("body".into()),
+            fit_role: None,
+        };
+
+        let json = serde_json::to_value(&edit).expect("serialize capture guide edit");
+
+        assert_eq!(json["kind"], "configureProfile");
+        assert_eq!(json["profileId"], "profile-1");
+        assert_eq!(json["profileKind"], "closed");
+        assert_eq!(json["operationHint"], "extrude");
+        assert!(json.get("profile_id").is_none());
     }
 
     #[test]

@@ -94,3 +94,35 @@ derive append order deterministically, and preserve successful-version queries.
 - THEN all legacy records remain inspectable
 - AND head uses latest append order
 - AND successful filtering returns the same successful records.
+
+### Requirement: Missing head runtime rebuilds from durable version inputs
+
+The system SHALL repair a missing runtime through one backend intent containing
+only thread identity, version identity, and an optional expected artifact
+content hash. The backend SHALL load the exact stored source and complete effective
+parameter map, render them, validate coherent artifact/model identities, attach
+the runtime to the same durable head version, and return its bounded workspace
+projection. A caller SHALL NOT submit replacement source, parameters, artifact
+bundles, or manifests during repair.
+
+#### Scenario: Head artifact cache is missing
+
+- GIVEN the current head retains source and parameters but its runtime file is missing
+- WHEN runtime repair is requested with the observed artifact identity
+- THEN the backend rebuilds from that head's exact stored inputs
+- AND atomically attaches the validated artifact and manifest
+- AND returns the repaired version as the selected workspace projection.
+
+#### Scenario: Repair evidence is stale
+
+- GIVEN the caller observed an older artifact identity
+- WHEN runtime repair reaches a head with a different artifact identity
+- THEN repair returns a conflict before rendering or persistence.
+
+#### Scenario: Durable source cannot reproduce the runtime
+
+- GIVEN a legacy imported head has no stored reproducible source
+- OR the renderer returns a backend failure
+- WHEN runtime repair is requested
+- THEN no runtime metadata is replaced
+- AND the raw source/render error is returned.

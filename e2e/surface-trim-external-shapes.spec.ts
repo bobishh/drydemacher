@@ -349,7 +349,7 @@ async function installSurfaceTrimMocks(page: Page, config: MockConfig = {}) {
         };
       }
 
-      if (cmd === 'apply_external_shape_surface_trim') {
+      if (cmd === 'apply_external_shape_edit') {
         if (config.applyError) {
           throw new Error(config.applyError);
         }
@@ -359,9 +359,21 @@ async function installSurfaceTrimMocks(page: Page, config: MockConfig = {}) {
           });
         }
 
-        const request = (args?.request ?? {}) as Record<string, unknown>;
-        const loopAnchors = (request.loopAnchors ?? []) as Array<Record<string, unknown>>;
-        const keepSeed = request.keepSeed as Record<string, unknown>;
+        const input = (args?.input ?? {}) as Record<string, unknown>;
+        const edit = (input.edit ?? {}) as Record<string, unknown>;
+        const isRemove = edit.action === 'removeSurfaceTrim';
+        if (isRemove) {
+          externalShapeSources = externalShapeSources.map((source) => ({
+            ...source,
+            sourceDigest: 'sha256:source-3',
+            surfaceTrims: ((source.surfaceTrims as Array<Record<string, unknown>> | undefined) ?? [])
+              .filter((trim) => trim.nodeId !== edit.trimNodeId),
+          }));
+          canonicalSource = '(model (part head (import-stl "/tmp/donor.stl")))';
+          window.localStorage.setItem(storageKey, JSON.stringify(externalShapeSources));
+        }
+        const loopAnchors = (edit.loopAnchors ?? []) as Array<Record<string, unknown>>;
+        const keepSeed = (edit.keepSeed ?? {}) as Record<string, unknown>;
         const surfaceTrim = {
           nodeId: 31,
           schemaVersion: 1,
@@ -378,65 +390,73 @@ async function installSurfaceTrimMocks(page: Page, config: MockConfig = {}) {
             sourcePosition: keepSeed.sourcePosition,
             sourceNormal: keepSeed.sourceNormal,
           },
-          pathMode: request.pathMode ?? 'shortest',
-          capMode: request.capMode ?? 'open',
+          pathMode: edit.pathMode ?? 'shortest',
+          capMode: edit.capMode ?? 'open',
         };
 
-        pendingExternalShapeSources = externalShapeSources.map((source) => ({
-          ...source,
-          nodeId: 21,
-          sourceDigest: 'sha256:source-2',
-          surfaceTrims: [surfaceTrim],
-        }));
-        pendingCanonicalSource = '(model (part head (surface-trim (import-stl "/tmp/donor.stl") :schema-version 1 :source-digest "sha256:mesh-1" :loop ((mesh-anchor 0 1 0 0) (mesh-anchor 1 1 0 0) (mesh-anchor 2 1 0 0)) :keep-seed (mesh-anchor 3 1 0 0) :path-mode "shortest" :cap "flat")))';
+        if (!isRemove) {
+          externalShapeSources = externalShapeSources.map((source) => ({
+            ...source,
+            nodeId: 21,
+            sourceDigest: 'sha256:source-2',
+            surfaceTrims: [surfaceTrim],
+          }));
+          canonicalSource = '(model (part head (surface-trim (import-stl "/tmp/donor.stl") :schema-version 1 :source-digest "sha256:mesh-1" :loop ((mesh-anchor 0 1 0 0) (mesh-anchor 1 1 0 0) (mesh-anchor 2 1 0 0)) :keep-seed (mesh-anchor 3 1 0 0) :path-mode "shortest" :cap "flat")))';
+          window.localStorage.setItem(storageKey, JSON.stringify(externalShapeSources));
+        }
+
+        const sourceDigest = isRemove ? 'sha256:source-3' : 'sha256:source-2';
+        const modelId = isRemove ? 'surface-trim-model-removed' : 'surface-trim-model';
 
         return {
-          source: pendingCanonicalSource,
-          sourceDigest: 'sha256:source-2',
-          trimNodeId: 31,
-          pointCount: 3,
-          pathMode: request.pathMode ?? 'shortest',
-          capMode: request.capMode ?? 'open',
-          topology: {
-            retainedArea: 1,
-            outputVertexCount: 4,
-            outputTriangleCount: 4,
-            duplicatePositionCount: 0,
-            boundaryEdgeCount: 0,
-            nonManifoldEdgeCount: 0,
-            orientationMismatchCount: 0,
-            invalidCutVertexDegreeCount: 0,
-            closedBoundaryLoops: [],
-            openBoundaryChains: [],
-          },
-          capReports: [
-            {
-              mode: request.capMode ?? 'open',
-              boundaryPointCount: 3,
-              addedVertexCount: 0,
-              addedTriangleCount: 1,
-              maxPlanarityDeviation: 0,
-              rmsPlanarityDeviation: 0,
-              explicitlyOpen: false,
+          version: {
+            threadId: input.threadId,
+            baseMessageId: input.baseMessageId ?? null,
+            messageId: isRemove ? 'surface-trim-remove-version' : 'surface-trim-apply-version',
+            status: 'success',
+            designOutput: {
+              title: 'Finger fixture',
+              versionName: isRemove ? 'Surface trim removed' : 'Surface trim applied',
+              response: isRemove ? 'Surface trim removed.' : 'Surface trim applied.',
+              interactionMode: 'design',
+              macroCode: canonicalSource,
+              macroDialect: 'ecky',
+              sourceLanguage: 'ecky',
+              geometryBackend: 'mesh',
+              engineKind: 'ecky',
+              uiSpec: { fields: [] },
+              initialParams: {},
+              postProcessing: null,
             },
-          ],
-        };
-      }
-
-      if (cmd === 'remove_external_shape_surface_trim') {
-        const request = (args?.request ?? {}) as Record<string, unknown>;
-        pendingExternalShapeSources = externalShapeSources.map((source) => ({
-          ...source,
-          sourceDigest: 'sha256:source-3',
-          surfaceTrims: ((source.surfaceTrims as Array<Record<string, unknown>> | undefined) ?? [])
-            .filter((trim) => trim.nodeId !== request.trimNodeId),
-        }));
-        pendingCanonicalSource = '(model (part head (import-stl "/tmp/donor.stl")))';
-
-        return {
-          source: pendingCanonicalSource,
-          sourceDigest: 'sha256:source-3',
-          removedTrimNodeId: request.trimNodeId ?? null,
+            artifactBundle: {
+              modelId,
+              sourceKind: 'generated',
+              sourceLanguage: 'ecky',
+              geometryBackend: 'mesh',
+              engineKind: 'ecky',
+              contentHash: sourceDigest,
+              artifactVersion: 1,
+              fcstdPath: null,
+              manifestPath: `/tmp/${modelId}-manifest.json`,
+              modelStlPath: `/tmp/${modelId}.stl`,
+              viewerAssets: [], exportArtifacts: [], edgeTargets: [], faceTargets: [],
+              calloutAnchors: [], measurementGuides: [],
+            },
+            modelManifest: {
+              schemaVersion: 1, modelId, sourceKind: 'generated', sourceLanguage: 'ecky',
+              geometryBackend: 'mesh', engineKind: 'ecky', sourceDigest,
+              document: { documentName: 'Surface Trim', documentLabel: 'Surface Trim', objectCount: 1, warnings: [] },
+              parts: [], parameterGroups: [], controlPrimitives: [], controlRelations: [], controlViews: [],
+              previewViews: [], advisories: [], selectionTargets: [], measurementAnnotations: [],
+              taggedAnchors: {}, analysisDeclarations: [], warnings: [],
+              enrichmentState: { status: 'none', proposals: [] },
+            },
+            snapshotId: `snapshot-${modelId}`,
+            parserMatched: true,
+            error: null,
+          },
+          sourceDigest,
+          externalSources: JSON.parse(JSON.stringify(externalShapeSources)),
         };
       }
 
@@ -625,28 +645,33 @@ test('Given External Shapes crop, When TRACE SURFACE closes a loop, Then region 
   await expect(page.locator('[role="dialog"][data-window-id="capture"] .viewer-host[data-surface-trim-cap-preview="true"]')).toHaveCount(1);
   await page.getByRole('button', { name: /^APPLY SURFACE TRIM$/ }).click();
 
-  const applyCall = (await getInvokeCalls(page)).find((call) => call.cmd === 'apply_external_shape_surface_trim');
+  const applyCall = (await getInvokeCalls(page)).find((call) => call.cmd === 'apply_external_shape_edit');
   expect(applyCall).toBeTruthy();
-  expect(applyCall?.args?.request).toMatchObject({
-    schemaVersion: 1,
+  expect(applyCall?.args?.input).toMatchObject({
     threadId: THREAD_ID,
-    targetMessageId: null,
-    nodeId: 11,
+    baseMessageId: null,
     expectedSourceDigest: SOURCE_DIGEST,
-    expectedMeshContentDigest: MESH_DIGEST,
-    replaceTrimNodeId: null,
-    pathMode: expect.any(String),
-    capMode: 'flat',
-    loopAnchors: [
-      expect.objectContaining({ sourceMeshContentDigest: MESH_DIGEST }),
-      expect.objectContaining({ sourceMeshContentDigest: MESH_DIGEST }),
-      expect.objectContaining({ sourceMeshContentDigest: MESH_DIGEST }),
-    ],
-    keepSeed: expect.objectContaining({ sourceMeshContentDigest: MESH_DIGEST }),
+    edit: {
+      action: 'applySurfaceTrim',
+      schemaVersion: 1,
+      nodeId: 11,
+      expectedMeshContentDigest: MESH_DIGEST,
+      replaceTrimNodeId: null,
+      pathMode: expect.any(String),
+      capMode: 'flat',
+      loopAnchors: [
+        expect.objectContaining({ sourceMeshContentDigest: MESH_DIGEST }),
+        expect.objectContaining({ sourceMeshContentDigest: MESH_DIGEST }),
+        expect.objectContaining({ sourceMeshContentDigest: MESH_DIGEST }),
+      ],
+      keepSeed: expect.objectContaining({ sourceMeshContentDigest: MESH_DIGEST }),
+    },
   });
-  await expect.poll(async () => (await getInvokeCalls(page)).some((call) => call.cmd === 'save_project_source')).toBe(true);
-  const saveCall = (await getInvokeCalls(page)).find((call) => call.cmd === 'save_project_source');
-  expect(saveCall?.args?.source).toBe('(model (part head (surface-trim (import-stl "/tmp/donor.stl") :schema-version 1 :source-digest "sha256:mesh-1" :loop ((mesh-anchor 0 1 0 0) (mesh-anchor 1 1 0 0) (mesh-anchor 2 1 0 0)) :keep-seed (mesh-anchor 3 1 0 0) :path-mode "shortest" :cap "flat")))');
+  const mutationCalls = await getInvokeCalls(page);
+  expect(mutationCalls.filter((call) => call.cmd === 'apply_external_shape_edit')).toHaveLength(1);
+  expect(mutationCalls.some((call) => call.cmd === 'render_model')).toBe(false);
+  expect(mutationCalls.some((call) => call.cmd === 'save_project_source')).toBe(false);
+  expect(mutationCalls.some((call) => call.cmd === 'save_model_manifest')).toBe(false);
 
   await page.reload();
   await expect(page.locator('.boot-overlay')).toHaveCount(0);
@@ -665,14 +690,13 @@ test('Given External Shapes crop, When TRACE SURFACE closes a loop, Then region 
   await page.getByRole('button', { name: /^CANCEL$/ }).click();
   await page.getByRole('button', { name: 'Remove surface trim 1' }).click();
 
-  const removeCall = (await getInvokeCalls(page)).find((call) => call.cmd === 'remove_external_shape_surface_trim');
+  const removeCall = (await getInvokeCalls(page)).find((call) => call.cmd === 'apply_external_shape_edit');
   expect(removeCall).toBeTruthy();
-  expect(removeCall?.args?.request).toMatchObject({
+  expect(removeCall?.args?.input).toMatchObject({
     threadId: THREAD_ID,
-    targetMessageId: null,
-    nodeId: 21,
-    trimNodeId: 31,
+    baseMessageId: null,
     expectedSourceDigest: 'sha256:source-2',
+    edit: { action: 'removeSurfaceTrim', nodeId: 21, trimNodeId: 31 },
   });
 });
 
@@ -722,7 +746,9 @@ test('Given pending apply, When APPLY SURFACE TRIM runs, Then mutation waits for
   expect(pendingCalls.some((call) => call.cmd === 'render_model')).toBe(false);
   expect(pendingCalls.some((call) => call.cmd === 'save_project_source')).toBe(false);
 
-  await expect(page.getByRole('region', { name: 'Existing surface trims' })).toBeVisible({ timeout: 3000 });
+  await expect(page.getByRole('button', { name: /^APPLYING$/ })).toHaveCount(0, { timeout: 3000 });
+  const completedCalls = await getInvokeCalls(page);
+  expect(completedCalls.filter((call) => call.cmd === 'apply_external_shape_edit')).toHaveLength(1);
 });
 
 test('Given non-planar Flat cap failure, When FLAT runs, Then raw error shows and apply stays unavailable', async ({ page }) => {

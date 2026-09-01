@@ -282,13 +282,15 @@ function projectFolderMockScript() {
         source: '(model (part body (solidify (import-stl "scan.stl"))))',
       };
     }
-    if (cmd === 'open_or_create_blank_design_thread') {
+    if (cmd === 'create_design_thread') {
       return {
         threadId: 'mock-thread-1',
-        slug: 'bracket-abc12345',
-        folder: '/mock/projects/bracket-abc12345',
-        file: '/mock/projects/bracket-abc12345/model.ecky',
-        source: '(model (part body (box 20 20 20)))',
+        sourceDocument: { folder: '/mock/projects/bracket-abc12345', file: '/mock/projects/bracket-abc12345/model.ecky', source: '(model (part body (box 20 20 20)))' },
+        initialVersionId: null, snapshotId: null, parserMatched: null, initialVersionError: null,
+        workspace: {
+          thread: { id: 'mock-thread-1', title: 'Untitled design', summary: '', updatedAt: 1, versionCount: 0, pendingCount: 0, queuedCount: 0, errorCount: 0, status: 'active', engineKind: 'ecky', sourceLanguage: 'ecky', geometryBackend: 'mesh' },
+          messagesPage: { messages: [], nextBefore: null, hasMore: false }, selectedVersion: null, requestedMessageFound: false,
+        },
       };
     }
     if (cmd === 'open_project_in_editor' || cmd === 'reveal_project_folder') {

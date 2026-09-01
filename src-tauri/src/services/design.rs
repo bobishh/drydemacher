@@ -137,7 +137,7 @@ fn resolve_macro_contracts(
     }
 }
 
-fn resolve_manual_authoring_context(
+pub(crate) fn resolve_manual_authoring_context(
     macro_dialect: MacroDialect,
     source_language: Option<crate::contracts::SourceLanguage>,
     geometry_backend: Option<crate::contracts::GeometryBackend>,
@@ -199,23 +199,24 @@ pub async fn add_manual_version(
     } = request;
 
     let requested_status = status.unwrap_or(MessageStatus::Success);
-    let (ui_spec, parameters, macro_dialect) =
-        match resolve_macro_contracts(&macro_code, &parameters, &ui_spec) {
-            Ok(resolved) => resolved,
-            Err(_) if requested_status == MessageStatus::Error => (
-                ui_spec,
-                parameters,
-                infer_macro_dialect_from_code(&macro_code),
-            ),
-            Err(error) => return Err(error),
-        };
+    let (ui_spec, parameters, macro_dialect) = if requested_status != MessageStatus::Success {
+        // Non-terminal immutable versions preserve attempted values verbatim. Reconciliation is
+        // a successful-outcome operation and must not replace invalid user input before append.
+        (
+            ui_spec,
+            parameters,
+            infer_macro_dialect_from_code(&macro_code),
+        )
+    } else {
+        resolve_macro_contracts(&macro_code, &parameters, &ui_spec)?
+    };
     let (ui_spec, parameters) = crate::contracts::reconcile_post_processing_controls(
         &ui_spec,
         &parameters,
         post_processing.as_ref(),
     );
 
-    if requested_status != MessageStatus::Error {
+    if requested_status == MessageStatus::Success {
         validate_ui_spec(&ui_spec)?;
         validate_design_params(&parameters, &ui_spec)?;
     }
@@ -252,7 +253,7 @@ pub async fn add_manual_version(
         initial_params: parameters,
         post_processing,
     };
-    if requested_status != MessageStatus::Error {
+    if requested_status == MessageStatus::Success {
         validate_design_output(&output)?;
     }
     let thread_traits = if db::get_thread_title(&db, &thread_id)
@@ -344,7 +345,9 @@ pub async fn add_manual_version(
         timestamp: now,
     };
 
-    db::add_message(&db, &thread_id, &msg).map_err(|err| AppError::persistence(err.to_string()))?;
+    // Some design commits intentionally persist output before runtime hydrate.
+    db::add_legacy_message(&db, &thread_id, &msg)
+        .map_err(|err| AppError::persistence(err.to_string()))?;
     crate::thread_source_binding::refresh_on_version_append(
         app,
         &db,

@@ -2,13 +2,11 @@
   import { get } from 'svelte/store';
   import Modal from './Modal.svelte';
   import {
+    applySemanticManifestEdit,
     formatBackendError,
-    saveModelManifest,
   } from './tauri/client';
   import { buildImportedSyntheticDesign } from './modelRuntime/importedRuntime';
-  import { persistLastSessionSnapshot } from './modelRuntime/sessionSnapshot';
   import { activeThreadIdStore as activeThreadId, historyStore as history } from './stores/domainState';
-  import { refreshHistory } from './stores/history';
   import { session } from './stores/sessionStore';
   import type {
     DesignParams,
@@ -57,98 +55,6 @@
     localProposals.filter((p) => p.status === 'rejected').length,
   );
 
-  function deriveEnrichmentStatus(proposals: EnrichmentProposal[]): EnrichmentStatus {
-    if (proposals.some((p) => p.status === 'pending')) return 'pending';
-    if (proposals.some((p) => p.status === 'accepted')) return 'accepted';
-    if (proposals.some((p) => p.status === 'rejected')) return 'rejected';
-    return 'none';
-  }
-
-  function proposalGroupId(proposalId: string) {
-    return `proposal-bind-${proposalId}`;
-  }
-
-  function rebuildImportedProposalBindings(
-    m: ModelManifest,
-    props: EnrichmentProposal[],
-  ): ModelManifest {
-    if (m.sourceKind !== 'importedFcstd') return m;
-
-    const accepted = props.filter((p) => p.status === 'accepted');
-    const autoGroupIds = new Set(
-      (m.parameterGroups || [])
-        .filter((g) => g.groupId.startsWith('proposal-bind-'))
-        .map((g) => g.groupId),
-    );
-    const autoKeysByPart = new Map<string, Set<string>>();
-    for (const group of m.parameterGroups || []) {
-      if (!autoGroupIds.has(group.groupId)) continue;
-      for (const partId of group.partIds || []) {
-        const bucket = autoKeysByPart.get(partId) ?? new Set<string>();
-        for (const key of group.parameterKeys || []) bucket.add(key);
-        autoKeysByPart.set(partId, bucket);
-      }
-    }
-
-    const acceptedKeysByPart = new Map<string, Set<string>>();
-    for (const proposal of accepted) {
-      for (const partId of proposal.partIds || []) {
-        const bucket = acceptedKeysByPart.get(partId) ?? new Set<string>();
-        for (const key of proposal.parameterKeys || []) bucket.add(key);
-        acceptedKeysByPart.set(partId, bucket);
-      }
-    }
-
-    const nextParts = (m.parts || []).map((part) => {
-      const preservedKeys = (part.parameterKeys || []).filter(
-        (key) => !autoKeysByPart.get(part.partId)?.has(key),
-      );
-      const acceptedKeys = [...(acceptedKeysByPart.get(part.partId) ?? new Set<string>())];
-      const parameterKeys = [...new Set([...preservedKeys, ...acceptedKeys])];
-      const editable = parameterKeys.length > 0;
-      return { ...part, parameterKeys, editable };
-    });
-
-    const editablePartIds = new Set(
-      nextParts.filter((p) => p.editable).map((p) => p.partId),
-    );
-    const nextGroups = [
-      ...(m.parameterGroups || []).filter(
-        (g) => !g.groupId.startsWith('proposal-bind-'),
-      ),
-      ...accepted.map((proposal) => ({
-        groupId: proposalGroupId(proposal.proposalId),
-        label: proposal.label,
-        parameterKeys: [...new Set(proposal.parameterKeys || [])],
-        partIds: [...new Set(proposal.partIds || [])],
-        editable: true,
-      })),
-    ];
-    const nextTargets = (m.selectionTargets || []).map((target) => ({
-      ...target,
-      editable: editablePartIds.has(target.partId),
-    }));
-
-    const nextWarnings = (m.warnings || []).filter(
-      (w) =>
-        w !== 'Imported FCStd models are inspect-only until bindings are confirmed.' &&
-        w !== 'Imported FCStd bindings were accepted from heuristic proposals.',
-    );
-    if (accepted.length === 0) {
-      nextWarnings.push('Imported FCStd models are inspect-only until bindings are confirmed.');
-    } else {
-      nextWarnings.push('Imported FCStd bindings were accepted from heuristic proposals.');
-    }
-
-    return {
-      ...m,
-      parts: nextParts,
-      parameterGroups: nextGroups,
-      selectionTargets: nextTargets,
-      warnings: nextWarnings,
-    };
-  }
-
   function labelPartIds(partIds: string[] | undefined): string {
     if (!partIds?.length || !parts.length) return 'No parts';
     return partIds
@@ -185,18 +91,19 @@
     saving = true;
 
     try {
-      const nextProposals = localProposals;
-      const nextManifestBase: ModelManifest = {
-        ...manifest,
-        enrichmentState: {
-          status: deriveEnrichmentStatus(nextProposals),
-          proposals: nextProposals,
-        },
-      };
-      const nextManifest = rebuildImportedProposalBindings(nextManifestBase, nextProposals);
       const versionMessageId = activeVersionId;
-
-      await saveModelManifest(nextManifest.modelId, nextManifest, versionMessageId);
+      const result = await applySemanticManifestEdit({
+        modelId: manifest.modelId,
+        messageId: versionMessageId,
+        edit: {
+          action: 'setProposalStatuses',
+          entries: localProposals.map((proposal) => ({
+            proposalId: proposal.proposalId,
+            status: proposal.status,
+          })),
+        },
+      });
+      const nextManifest = result.manifest;
 
       const threadId = get(activeThreadId);
       if (threadId && versionMessageId) {
@@ -218,11 +125,6 @@
 
       const currentSession = get(session);
       session.setModelRuntime(currentSession.artifactBundle, nextManifest);
-      await persistLastSessionSnapshot({
-        modelManifest: nextManifest,
-        messageId: versionMessageId ?? null,
-      });
-      await refreshHistory();
 
       ondone(nextManifest);
       onclose();

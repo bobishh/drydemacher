@@ -296,6 +296,7 @@ async function installContextMocks(
     design?: typeof design;
     authoringGraph?: typeof authoringGraph;
     authoringGraphDelayMs?: number;
+    semanticControlError?: string;
   },
 ) {
   const bundle = overrides?.artifactBundle ?? artifactBundle;
@@ -303,12 +304,13 @@ async function installContextMocks(
   const mockedDesign = overrides?.design ?? design;
   const graph = overrides?.authoringGraph ?? authoringGraph;
   const graphDelayMs = overrides?.authoringGraphDelayMs ?? 0;
+  const semanticControlError = overrides?.semanticControlError ?? null;
   await page.route(/\/mock\/context\/.*\.stl(?:\?.*)?$/, async (route) => {
     const body = route.request().url().includes('offscreen') ? MOCK_STL_OFFSCREEN : MOCK_STL;
     await route.fulfill({ status: 200, contentType: 'model/stl', body });
   });
 
-  await page.addInitScript(({ config, runtimeCapabilities, artifactBundle, modelManifest, design, authoringGraph, authoringGraphDelayMs }) => {
+  await page.addInitScript(({ config, runtimeCapabilities, artifactBundle, modelManifest, design, authoringGraph, authoringGraphDelayMs, semanticControlError }) => {
     (window as any).__CONTEXT_CALLS__ = [];
     window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
     let nextCallbackId = 1;
@@ -322,13 +324,15 @@ async function installContextMocks(
       if (cmd === 'plugin:event|listen') return Number(args?.handler ?? 0);
       if (cmd === 'plugin:event|unlisten') return null;
       if (cmd === 'get_config') return config;
-      if (cmd === 'open_or_create_blank_design_thread') {
+      if (cmd === 'create_design_thread') {
         return {
           threadId: 'thread-context',
-          slug: 'context-controls',
-          folder: '/mock/context-controls',
-          file: '/mock/context-controls/model.ecky',
-          source: '(model)',
+          sourceDocument: { folder: '/mock/context-controls', file: '/mock/context-controls/model.ecky', source: '(model)' },
+          initialVersionId: null, snapshotId: null, parserMatched: null, initialVersionError: null,
+          workspace: {
+            thread: { id: 'thread-context', title: 'Untitled design', summary: '', updatedAt: 1, versionCount: 0, pendingCount: 0, queuedCount: 0, errorCount: 0, status: 'active', engineKind: 'ecky', sourceLanguage: 'ecky', geometryBackend: 'mesh' },
+            messagesPage: { messages: [], nextBefore: null, hasMore: false }, selectedVersion: null, requestedMessageFound: false,
+          },
         };
       }
       if (cmd === 'get_runtime_capabilities') return runtimeCapabilities;
@@ -336,6 +340,36 @@ async function installContextMocks(
       if (cmd === 'get_last_design') return null;
       if (cmd === 'get_default_macro') return '';
       if (cmd === 'check_freecad') return true;
+      if (cmd === 'start_exploration_run') {
+        return {
+          run: {
+            requestId: args.input.requestId,
+            threadId: args.input.threadId,
+            cycleId: 'cycle-context',
+            phase: 'completed',
+            messageId: 'msg-context',
+            design,
+            artifactBundle,
+            modelManifest,
+            structuralVerification: null,
+            usage: null,
+            responseText: 'Context controls ready.',
+            rawError: null,
+            publicationAllowed: true,
+          },
+          message: {
+            id: 'msg-context',
+            role: 'assistant',
+            content: 'Context controls ready.',
+            status: 'success',
+            output: design,
+            artifactBundle,
+            modelManifest,
+            timestamp: 100,
+          },
+          snapshotId: 'snapshot-context',
+        };
+      }
       if (cmd === 'init_generation_attempt') return 'msg-context';
       if (cmd === 'classify_intent') {
         return {
@@ -361,6 +395,19 @@ async function installContextMocks(
           await new Promise((resolve) => setTimeout(resolve, authoringGraphDelayMs));
         }
         return authoringGraph;
+      }
+      if (cmd === 'apply_semantic_control_value') {
+        if (semanticControlError) {
+          throw { code: 'validation', message: semanticControlError };
+        }
+        const primitiveId = args?.input?.primitiveId;
+        return {
+          parameterPatch: primitiveId === 'ast-param:dryer_param_2'
+            ? { dryer_param_2: args?.input?.value }
+            : {},
+          changedParameterKeys: primitiveId === 'ast-param:dryer_param_2' ? ['dryer_param_2'] : [],
+          appliedPrimitiveIds: primitiveId ? [primitiveId] : [],
+        };
       }
       if (cmd === 'get_thread') {
         return {
@@ -439,7 +486,7 @@ async function installContextMocks(
       }
       return null;
     };
-  }, { config, runtimeCapabilities, artifactBundle: bundle, modelManifest: manifest, design: mockedDesign, authoringGraph: graph, authoringGraphDelayMs: graphDelayMs });
+  }, { config, runtimeCapabilities, artifactBundle: bundle, modelManifest: manifest, design: mockedDesign, authoringGraph: graph, authoringGraphDelayMs: graphDelayMs, semanticControlError });
 }
 
 async function selectViewerTarget(page: Page, expectedPanelText: string) {
@@ -461,7 +508,8 @@ async function selectViewerTarget(page: Page, expectedPanelText: string) {
 async function waitForContextRender(page: Page) {
   try {
     await expect.poll(() => page.evaluate(() =>
-      (window as any).__CONTEXT_CALLS__.some((entry: { cmd: string }) => entry.cmd === 'get_model_manifest'),
+      (window as any).__CONTEXT_CALLS__.some((entry: { cmd: string }) =>
+        entry.cmd === 'get_model_manifest' || entry.cmd === 'start_exploration_run'),
     ), { timeout: 15000 }).toBe(true);
   } catch {
     const commands = await page.evaluate(() =>
@@ -909,6 +957,21 @@ test('Given exact generated Ecky provenance When target is selected Then viewpor
   await expect(overlay).not.toContainText('Dryer Param 3');
 
   await overlay.locator('.viewer-overlay-input[type="number"]').fill('77');
+  await expect.poll(() => page.evaluate(() =>
+    (window as any).__CONTEXT_CALLS__.filter(
+      (entry: { cmd: string }) => entry.cmd === 'apply_semantic_control_value',
+    ),
+  )).toEqual([{
+    cmd: 'apply_semantic_control_value',
+    args: {
+      input: {
+        threadId: 'thread-context',
+        targetMessageId: 'msg-context',
+        primitiveId: 'ast-param:dryer_param_2',
+        value: 77,
+      },
+    },
+  }]);
   await page.getByRole('button', { name: 'PARAMETERS', exact: true }).click();
   const selectedSection = page.getByTestId('parameter-ownership-section').first();
   await expect(selectedSection).toHaveAttribute('data-selected', 'true');
@@ -916,6 +979,38 @@ test('Given exact generated Ecky provenance When target is selected Then viewpor
   await expect(selectedSection.locator('.param-field')).toHaveCount(1);
   await expect(selectedSection.locator('input[type="number"]')).toHaveValue('77');
   await expect(page.getByRole('button', { name: 'APPLY', exact: true })).toBeEnabled();
+});
+
+test('Given semantic value rejection When overlay changes Then raw backend error is shown and patch is not staged', async ({ page }) => {
+  const fixture = dryerContextFixture(['dryer_param_2']);
+  await installContextMocks(page, {
+    ...fixture,
+    semanticControlError: 'semantic primitive stale: raw backend body',
+  } as any);
+  await page.goto('/');
+  await expect(page.locator('.boot-overlay')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'DIALOGUE' }).click();
+  await page.fill('textarea.prompt-input', 'make selectable dryer controls');
+  await page.locator('textarea.prompt-input').press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+  await waitForContextRender(page);
+  await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
+  await page.getByRole('button', { name: 'MESH', exact: true }).click();
+  await page.getByRole('button', { name: 'SELECT', exact: true }).click();
+  await selectViewerTarget(page, 'Dryer Param 2');
+
+  const overlay = page.locator('.viewer-part-overlay');
+  await overlay.locator('.viewer-overlay-input[type="number"]').fill('77');
+  await expect(page.getByText(/semantic primitive stale: raw backend body/).first()).toBeVisible();
+  await expect.poll(() => page.evaluate(() =>
+    (window as any).__CONTEXT_CALLS__.filter(
+      (entry: { cmd: string }) => entry.cmd === 'apply_semantic_control_value',
+    ).length,
+  )).toBe(1);
+
+  await page.getByRole('button', { name: 'PARAMETERS', exact: true }).click();
+  const selectedSection = page.getByTestId('parameter-ownership-section').first();
+  await expect(selectedSection.locator('input[type="number"]')).toHaveValue('3');
 });
 
 test('Given ambiguous generated Ecky provenance When target is selected Then viewport keeps editable overlay absent', async ({ page }) => {

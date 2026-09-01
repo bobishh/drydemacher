@@ -25,15 +25,16 @@ use ecky_fem::{
 use crate::contracts::{
     AppError, AppResult, FemAcceptanceEvaluationDto, FemAcceptanceEvidenceChainDto,
     FemApplicabilityCheckDto, FemAssumptionDto, FemCancelResponse, FemComputeConfig,
-    FemConvergenceLevelDto, FemConvergenceRequest, FemConvergenceResponse,
-    FemEngineeringEvidenceDto, FemEngineeringQuestionDto, FemExtremumDto, FemIdealizationDto,
-    FemInputEvidenceDto, FemMeshPreviewResponse, FemResultArrayDto, FemResultReadRequest,
-    FemResultReadResponse, FemResultSummaryDto, FemRunResponse, FemSensitivityEvidenceDto,
+    FemConvergenceIntentInput, FemConvergenceLevelDto, FemConvergenceRequest,
+    FemConvergenceResponse, FemEngineeringEvidenceDto, FemEngineeringQuestionDto, FemExtremumDto,
+    FemIdealizationDto, FemInputEvidenceDto, FemMeshPreviewIntentResponse, FemMeshPreviewResponse,
+    FemResultArrayDto, FemResultReadRequest, FemResultReadResponse, FemResultSummaryDto,
+    FemRunIntentInput, FemRunIntentResponse, FemRunResponse, FemSensitivityEvidenceDto,
     FemSensitivityMetricDto, FemStudyRequest, FemStudyValidationResponse, FemSupportReactionDto,
     FemTopologyControlsDto, FemTopologyMaterialDto, FemTopologyReconstructRequest,
     FemTopologyReconstructResponse, FemTopologyRunRequest, FemTopologyRunResponse,
     FemTopologySurfaceLoadDto, FemValidationEvidenceDto, FemVerificationLayerDto,
-    FemVtuExportResponse,
+    FemVtuExportIntentInput, FemVtuExportResponse,
 };
 use crate::ecky_cad_host::analysis_boundary::{
     load_direct_occt_analysis_boundary_surface, AnalysisBoundarySurface,
@@ -267,6 +268,65 @@ pub(crate) fn apply_fem_compute_policy(compute: &FemComputeConfig, study: &mut F
     study.control.thread_count = u32::from(compute.thread_count);
 }
 
+fn fem_study_request_from_intent(
+    input: FemRunIntentInput,
+    compute: &FemComputeConfig,
+    job_id: String,
+) -> FemStudyRequest {
+    let maximum_elements = compute.maximum_fem_elements();
+    FemStudyRequest {
+        job_id,
+        model_id: input.model_id,
+        source: input.source,
+        analysis_name: input.analysis_name,
+        budgets: crate::contracts::FemBudgetLimitsDto {
+            boundary_triangles: maximum_elements,
+            tet4_cells: maximum_elements,
+            nodes: compute.maximum_fem_nodes(),
+            dofs: compute.maximum_fem_dofs(),
+            sparse_nonzeros: compute.maximum_fem_sparse_nonzeros(),
+            result_bytes: compute.maximum_fem_result_bytes(),
+            convergence_levels: 3,
+        },
+        control: crate::contracts::FemPipelineControlDto {
+            envelope_mm: 0.1,
+            minimum_scaled_jacobian: 1.0e-6,
+            maximum_runtime_ms: compute.maximum_wall_time_ms(),
+            relative_solver_tolerance: 1.0e-8,
+            thread_count: u32::from(compute.thread_count),
+        },
+    }
+}
+
+fn next_fem_run_job_id() -> String {
+    format!("fem-run-{}", uuid::Uuid::new_v4())
+}
+
+fn next_fem_job_id(kind: &str) -> String {
+    format!("fem-{kind}-{}", uuid::Uuid::new_v4())
+}
+
+fn fem_convergence_request_from_intent(
+    input: FemConvergenceIntentInput,
+    compute: &FemComputeConfig,
+    job_id: String,
+) -> FemConvergenceRequest {
+    FemConvergenceRequest {
+        study: fem_study_request_from_intent(
+            FemRunIntentInput {
+                model_id: input.model_id,
+                source: input.source,
+                analysis_name: input.analysis_name,
+            },
+            compute,
+            job_id,
+        ),
+        mesh_sizes_mm: input.mesh_sizes_mm,
+        displacement_relative_tolerance: 0.03,
+        stress_relative_tolerance: 0.05,
+    }
+}
+
 #[derive(Debug, Clone)]
 struct FemTopologyFaceRegion {
     face_group_indices: Vec<u32>,
@@ -343,6 +403,129 @@ pub fn validate_fem_study(
     app: AppHandle,
 ) -> AppResult<FemStudyValidationResponse> {
     validate_fem_study_with_resolver(request, &app)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn validate_fem_study_intent(
+    input: FemRunIntentInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<FemStudyValidationResponse> {
+    let compute = state
+        .config
+        .lock()
+        .map_err(|_| AppError::internal("FEM compute configuration lock was poisoned."))?
+        .fem_compute
+        .clone();
+    let request = fem_study_request_from_intent(input, &compute, next_fem_job_id("validate"));
+    validate_fem_study_with_resolver(request, &app)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn run_fem_study_intent(
+    input: FemRunIntentInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<FemRunIntentResponse> {
+    let compute = state
+        .config
+        .lock()
+        .map_err(|_| AppError::internal("FEM compute configuration lock was poisoned."))?
+        .fem_compute
+        .clone();
+    let request = fem_study_request_from_intent(input, &compute, next_fem_run_job_id());
+    validate_job_id(&request.job_id)?;
+
+    let analysis_name = request.analysis_name.clone();
+    let expected_duration_ms = request.control.maximum_runtime_ms;
+    let cancellation = Arc::new(AtomicBool::new(false));
+    {
+        let mut jobs = state.fem_cancellations.lock().await;
+        if jobs.contains_key(&request.job_id) {
+            return Err(AppError::conflict(format!(
+                "FEM job '{}' is already running.",
+                request.job_id
+            )));
+        }
+        jobs.insert(request.job_id.clone(), cancellation.clone());
+    }
+
+    let job_id = request.job_id.clone();
+    emit_ui_fem_long_task(
+        state.inner(),
+        &job_id,
+        &analysis_name,
+        "QUEUED",
+        Some("Native Tet4 study queued.".to_string()),
+        0,
+        10,
+        expected_duration_ms,
+        crate::contracts::AgentActivityState::Active,
+    );
+
+    let jobs = state.fem_cancellations.clone();
+    let worker_app = app.clone();
+    let worker_analysis_name = analysis_name.clone();
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        let event_job_id = request.job_id.clone();
+        let validation = validate_fem_study_with_resolver(request.clone(), &worker_app)?;
+        let result = run_fem_study_with_resolver_subscribed(
+            request,
+            &worker_app,
+            cancellation,
+            |progress| {
+                let progress_current = fem_stage_progress(progress.stage);
+                emit_ui_fem_long_task(
+                    worker_app.state::<AppState>().inner(),
+                    &event_job_id,
+                    &worker_analysis_name,
+                    &format!("{:?}", progress.stage).to_ascii_uppercase(),
+                    Some(progress.detail.clone()),
+                    progress_current,
+                    10,
+                    expected_duration_ms,
+                    crate::contracts::AgentActivityState::Active,
+                );
+                let _ = worker_app.emit(
+                    "fem-progress",
+                    serde_json::json!({"jobId": event_job_id, "progress": progress}),
+                );
+            },
+        )?;
+        Ok(FemRunIntentResponse { validation, result })
+    })
+    .await;
+
+    jobs.lock().await.remove(&job_id);
+    let outcome: AppResult<FemRunIntentResponse> =
+        joined.map_err(|error| AppError::internal(format!("FEM intent thread failed: {error}")))?;
+    match &outcome {
+        Ok(_) => emit_ui_fem_long_task(
+            state.inner(),
+            &job_id,
+            &analysis_name,
+            "DONE",
+            Some("Immutable FEM result published.".to_string()),
+            10,
+            10,
+            expected_duration_ms,
+            crate::contracts::AgentActivityState::Resolved,
+        ),
+        Err(error) => emit_ui_fem_long_task(
+            state.inner(),
+            &job_id,
+            &analysis_name,
+            "FAILED",
+            Some(error.to_string()),
+            0,
+            10,
+            expected_duration_ms,
+            crate::contracts::AgentActivityState::Failed,
+        ),
+    }
+    outcome
 }
 
 pub(crate) fn validate_fem_study_with_resolver(
@@ -503,6 +686,52 @@ pub async fn preview_fem_mesh(
     .await;
     jobs.lock().await.remove(&job_id);
     joined.map_err(|error| AppError::internal(format!("FEM mesh thread failed: {error}")))?
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn preview_fem_mesh_intent(
+    input: FemRunIntentInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<FemMeshPreviewIntentResponse> {
+    let compute = state
+        .config
+        .lock()
+        .map_err(|_| AppError::internal("FEM compute configuration lock was poisoned."))?
+        .fem_compute
+        .clone();
+    let request = fem_study_request_from_intent(input, &compute, next_fem_job_id("preview"));
+    validate_job_id(&request.job_id)?;
+    let cancellation = Arc::new(AtomicBool::new(false));
+    {
+        let mut jobs = state.fem_cancellations.lock().await;
+        jobs.insert(request.job_id.clone(), cancellation.clone());
+    }
+    let job_id = request.job_id.clone();
+    let jobs = state.fem_cancellations.clone();
+    let worker_app = app.clone();
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        let event_job_id = request.job_id.clone();
+        let validation = validate_fem_study_with_resolver(request.clone(), &worker_app)?;
+        let mesh = preview_fem_mesh_with_resolver_subscribed(
+            request,
+            &worker_app,
+            cancellation,
+            |progress| {
+                let _ = worker_app.emit(
+                    "fem-progress",
+                    serde_json::json!({"jobId": event_job_id, "progress": progress}),
+                );
+            },
+        )?;
+        Ok(FemMeshPreviewIntentResponse { validation, mesh })
+    })
+    .await;
+    jobs.lock().await.remove(&job_id);
+    let outcome: AppResult<FemMeshPreviewIntentResponse> = joined
+        .map_err(|error| AppError::internal(format!("FEM mesh intent thread failed: {error}")))?;
+    outcome
 }
 
 #[tauri::command]
@@ -1537,6 +1766,24 @@ pub async fn run_fem_convergence(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn run_fem_convergence_intent(
+    input: FemConvergenceIntentInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<FemConvergenceResponse> {
+    let compute = state
+        .config
+        .lock()
+        .map_err(|_| AppError::internal("FEM compute configuration lock was poisoned."))?
+        .fem_compute
+        .clone();
+    let request =
+        fem_convergence_request_from_intent(input, &compute, next_fem_job_id("convergence"));
+    run_fem_convergence(request, app, state).await
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn get_cached_fem_convergence(
     request: FemConvergenceRequest,
     app: AppHandle,
@@ -1554,11 +1801,20 @@ pub async fn get_cached_fem_convergence(
 
 #[tauri::command]
 #[specta::specta]
-pub fn read_fem_result(
-    request: FemResultReadRequest,
+pub async fn get_cached_fem_convergence_intent(
+    input: FemConvergenceIntentInput,
     app: AppHandle,
-) -> AppResult<FemResultReadResponse> {
-    read_fem_result_with_resolver(request, &app)
+    state: State<'_, AppState>,
+) -> AppResult<Option<FemConvergenceResponse>> {
+    let compute = state
+        .config
+        .lock()
+        .map_err(|_| AppError::internal("FEM compute configuration lock was poisoned."))?
+        .fem_compute
+        .clone();
+    let request =
+        fem_convergence_request_from_intent(input, &compute, next_fem_job_id("convergence-cache"));
+    get_cached_fem_convergence(request, app).await
 }
 
 pub(crate) fn read_fem_result_with_resolver(
@@ -1600,6 +1856,31 @@ pub fn export_fem_result_vtu(
         sha256,
         result_digest: asset.result_digest,
     })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn export_fem_result_vtu_intent(
+    input: FemVtuExportIntentInput,
+    target_path: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<FemVtuExportResponse> {
+    let maximum_result_bytes = state
+        .config
+        .lock()
+        .map_err(|_| AppError::internal("FEM compute configuration lock was poisoned."))?
+        .fem_compute
+        .maximum_fem_result_bytes();
+    export_fem_result_vtu(
+        FemResultReadRequest {
+            analysis_identity_digest: input.analysis_identity_digest,
+            solution_digest: input.solution_digest,
+            maximum_result_bytes,
+        },
+        target_path,
+        app,
+    )
 }
 
 #[cfg(test)]
@@ -3362,6 +3643,68 @@ mod tests {
         fn resource_path(&self, _path: &str) -> Option<PathBuf> {
             None
         }
+    }
+
+    #[test]
+    fn run_intent_owns_job_identity_and_compute_policy() {
+        let first_job_id = next_fem_run_job_id();
+        let second_job_id = next_fem_run_job_id();
+        assert_ne!(first_job_id, second_job_id);
+        validate_job_id(&first_job_id).expect("Rust-owned job id");
+
+        let input = crate::contracts::FemRunIntentInput {
+            model_id: "model-current".into(),
+            source: "(model (analysis bracket-static))".into(),
+            analysis_name: "bracket-static".into(),
+        };
+        let compute = FemComputeConfig {
+            quality: crate::contracts::FemComputeQuality::Draft,
+            maximum_wall_time_minutes: 7,
+            maximum_memory_mib: 2_048,
+            thread_count: 3,
+        };
+
+        let request = fem_study_request_from_intent(input, &compute, "fem-run-owned-id".into());
+
+        assert_eq!(request.job_id, "fem-run-owned-id");
+        assert_eq!(request.model_id, "model-current");
+        assert_eq!(request.analysis_name, "bracket-static");
+        assert_eq!(request.budgets.tet4_cells, compute.maximum_fem_elements());
+        assert_eq!(request.budgets.nodes, compute.maximum_fem_nodes());
+        assert_eq!(request.budgets.dofs, compute.maximum_fem_dofs());
+        assert_eq!(request.control.maximum_runtime_ms, 7 * 60_000);
+        assert_eq!(request.control.thread_count, 3);
+    }
+
+    #[test]
+    fn convergence_intent_owns_job_identity_tolerances_and_compute_policy() {
+        let compute = FemComputeConfig {
+            quality: crate::contracts::FemComputeQuality::Draft,
+            maximum_wall_time_minutes: 4,
+            maximum_memory_mib: 1_024,
+            thread_count: 2,
+        };
+        let request = fem_convergence_request_from_intent(
+            crate::contracts::FemConvergenceIntentInput {
+                model_id: "model-current".into(),
+                source: "(model (analysis bracket-static))".into(),
+                analysis_name: "bracket-static".into(),
+                mesh_sizes_mm: vec![4.0, 2.0, 1.0],
+            },
+            &compute,
+            next_fem_job_id("convergence"),
+        );
+
+        validate_job_id(&request.study.job_id).expect("Rust-owned convergence job id");
+        assert!(request.study.job_id.starts_with("fem-convergence-"));
+        assert_eq!(request.study.control.maximum_runtime_ms, 4 * 60_000);
+        assert_eq!(request.study.control.thread_count, 2);
+        assert_eq!(
+            request.study.budgets.tet4_cells,
+            compute.maximum_fem_elements()
+        );
+        assert_eq!(request.displacement_relative_tolerance, 0.03);
+        assert_eq!(request.stress_relative_tolerance, 0.05);
     }
 
     #[test]

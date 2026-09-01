@@ -85,6 +85,8 @@
 - [x] 5.8 Separate expected analytic geometry kind from required BRep topology
   kind. Define cylinder/axis -> supporting face/edge, plane -> face, and profile
   -> ordered edges extraction.
+- [x] 5.9 Add backend-owned mechanical-guide readiness/finalization and computed-
+  evidence invalidation behind one intent-level capture evaluation command.
 
 ## 6. Persistence, Staleness, And Historical Capture
 
@@ -105,6 +107,22 @@
 - [ ] 6.7 Migrate guide/source/draft persistence to append every distinct
   candidate before validation; retain failed/stale candidates, exact source, and
   raw evidence, serialize appends, and advance `head` to the latest candidate.
+  - [x] 6.7a Route typed landmark update/delete intent through one Rust
+    current-head mutation transaction; append stale expected-revision edits and
+    source-drift stale candidates with raw divergence evidence.
+  - [ ] 6.7b Route landmark add, identity-checked draft restore, profile
+    configure/reorder, expectation edit, and feature-plan selection through same
+    Rust current-head mutation transaction; frontend projects canonical result.
+    - [x] Implement typed Rust mutations, canonical identity checks, derived
+      evidence invalidation, append-only revision ownership, and focused tests.
+    - [ ] Replace frontend draft mutation/save queue with intent submission and
+      canonical result projection.
+  - [x] 6.7c Add idempotent Rust guide initialization deriving ownership,
+    selected source identity, defaults, canonical digest, and revision-one head
+    from capture run; accept no frontend guide payload.
+  - [x] 6.7d Add one Rust validation/finalization intent loading canonical head,
+    accepting evidence scalars only, deterministically evaluating, classifying
+    ready/draft/stale, retaining raw failure evidence, and appending next head.
 - [ ] 6.8 Add migration tests proving stale expected revisions and changed mesh
   digests append without conflict/refusal; successful-version filtering remains
   a projection only.

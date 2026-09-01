@@ -1,10 +1,8 @@
 import type { ArtifactBundle } from '../types/domain';
 import {
-  checkCampaignStep,
   getCampaignStep,
   listCampaignDefinitions,
 } from '../tauri/client';
-import { formatBackendError } from '../tauri/client';
 
 /**
  * Backend-owned campaign projection. The desktop shell receives one current
@@ -54,16 +52,4 @@ export const campaignDefinitionClient = {
   list: (): Promise<CampaignDefinitionSummary[]> => listCampaignDefinitions(),
   getStep: (definitionId: string, stepId: string): Promise<CampaignCurrentStepPayload> =>
     getCampaignStep(definitionId, stepId).then((step) => step as CampaignCurrentStepPayload),
-  checkSolution: async (definitionId: string, stepId: string, candidateSource: string): Promise<CampaignCheckOutcome> => {
-    try {
-      const result = await checkCampaignStep(definitionId, stepId, candidateSource);
-      return { ok: true, matched: result.matched };
-    } catch (error) {
-      return { ok: false, rawError: formatBackendError(error) };
-    }
-  },
 };
-
-export type CampaignCheckOutcome =
-  | { ok: true; matched: boolean }
-  | { ok: false; rawError: string };

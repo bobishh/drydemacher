@@ -4,6 +4,8 @@ declare global {
   interface Window {
     __manualCodeApplyMock?: {
       addManualVersionCalls: Array<{ input: Record<string, unknown> }>;
+      applyManualCodeCalls: Array<{ input: Record<string, unknown> }>;
+      applyManualParametersCalls: Array<{ input: Record<string, unknown> }>;
       renderModelCalls: Array<{ macroCode: string; parameters: Record<string, unknown> }>;
       saveProjectSourceCalls: Array<{ threadId: string; source: string }>;
       updateParametersCalls: Array<{ messageId: string; parameters: Record<string, unknown> }>;
@@ -42,6 +44,8 @@ function manualCodeApplyMockScript() {
   };
   window.__manualCodeApplyMock = {
     addManualVersionCalls: [],
+    applyManualCodeCalls: [],
+    applyManualParametersCalls: [],
     renderModelCalls: [],
     saveProjectSourceCalls: [],
     updateParametersCalls: [],
@@ -149,13 +153,15 @@ function manualCodeApplyMockScript() {
         edgeCount: 0, faceCount: 0, selectionTargetCount: 0, observedBytes: 2048, truncatedFields: [],
       };
     }
-    if (cmd === 'open_or_create_blank_design_thread') {
+    if (cmd === 'create_design_thread') {
       return {
         threadId: 'mock-thread-1',
-        slug: 'bracket-thread-1',
-        folder: '/mock/bracket-thread-1',
-        file: '/mock/bracket-thread-1/model.ecky',
-        source: canonicalSource,
+        sourceDocument: { folder: '/mock/bracket-thread-1', file: '/mock/bracket-thread-1/model.ecky', source: canonicalSource },
+        initialVersionId: null, snapshotId: null, parserMatched: null, initialVersionError: null,
+        workspace: {
+          thread: { id: 'mock-thread-1', title: 'Untitled design', summary: '', updatedAt: 1, versionCount: 0, pendingCount: 0, queuedCount: 0, errorCount: 0, status: 'active', engineKind: 'ecky', sourceLanguage: 'ecky', geometryBackend: 'mesh' },
+          messagesPage: { messages: [], nextBefore: null, hasMore: false }, selectedVersion: null, requestedMessageFound: false,
+        },
       };
     }
     if (cmd === 'get_project_source') {
@@ -186,6 +192,42 @@ function manualCodeApplyMockScript() {
     if (cmd === 'init_generation_attempt') {
       window.__manualCodeApplyMock!.latestThreadId = String(args?.threadId ?? '') || null;
       return 'mock-msg-1';
+    }
+    if (cmd === 'start_exploration_run') {
+      const input = args?.input as Record<string, any>;
+      window.__manualCodeApplyMock!.latestThreadId = String(input.threadId ?? '') || null;
+      const generated = await window.__TAURI_INTERNALS__.invoke('generate_design', {
+        prompt: input.prompt,
+        threadId: input.threadId,
+      });
+      const artifactBundle = await window.__TAURI_INTERNALS__.invoke('render_model', {
+        macroCode: generated.design.macroCode,
+        parameters: generated.design.initialParams,
+      });
+      const modelManifest = await window.__TAURI_INTERNALS__.invoke('get_model_manifest', {
+        modelId: artifactBundle.modelId,
+      });
+      return {
+        run: {
+          requestId: input.requestId,
+          threadId: generated.threadId,
+          phase: 'completed',
+          messageId: generated.messageId,
+          design: generated.design,
+          artifactBundle,
+          modelManifest,
+          structuralVerification: null,
+          usage: null,
+          responseText: generated.design.response ?? 'Design synthesized successfully.',
+          rawError: null,
+          publicationAllowed: true,
+        },
+        message: {
+          id: generated.messageId, role: 'assistant', content: generated.design.response ?? '', status: 'success',
+          timestamp: Date.now(), output: generated.design, artifactBundle, modelManifest,
+        },
+        snapshotId: `snapshot-${generated.messageId}`,
+      };
     }
     if (cmd === 'classify_intent') {
       return {
@@ -259,6 +301,110 @@ function manualCodeApplyMockScript() {
         calloutAnchors: [],
         measurementGuides: [],
         edgeTargets: [],
+      };
+    }
+    if (cmd === 'apply_manual_code') {
+      const input = (args?.input as Record<string, any>) ?? {};
+      window.__manualCodeApplyMock!.applyManualCodeCalls.push({ input });
+      const persist = Boolean(input.persist);
+      const sourceLanguage = input.sourceLanguage ?? window.__manualCodeApplyMockConfig?.sourceLanguage ?? 'legacyPython';
+      const geometryBackend = input.geometryBackend ?? (sourceLanguage === 'ecky' ? 'build123d' : 'freecad');
+      const engineKind = sourceLanguage === 'ecky' ? 'ecky' : 'freecad';
+      const messageId = persist
+        ? `manual-intent-msg-${window.__manualCodeApplyMock!.applyManualCodeCalls.length}`
+        : null;
+      if (window.__manualCodeApplyMockConfig?.renderModelError) {
+        const configured = window.__manualCodeApplyMockConfig.renderModelError;
+        const message = typeof configured === 'string' ? configured : String(configured.message ?? configured);
+        return {
+          threadId: input.threadId,
+          baseMessageId: input.baseMessageId ?? null,
+          messageId,
+          status: 'error',
+          designOutput: {
+            title: input.title, versionName: input.versionName, response: 'Manual code draft failed.',
+            interactionMode: 'design', macroCode: input.source, sourceLanguage, geometryBackend, engineKind,
+            uiSpec: input.uiSpec, initialParams: input.parameters, postProcessing: input.postProcessing ?? null,
+          },
+          artifactBundle: null,
+          modelManifest: null,
+          parserMatched: false,
+          error: { code: 'render', message },
+        };
+      }
+      const renderIndex = window.__manualCodeApplyMockConfig?.reuseArtifactIdentity
+        ? 1
+        : window.__manualCodeApplyMock!.applyManualCodeCalls.length;
+      const modelId = `mock-model-${renderIndex}`;
+      const artifactBundle = {
+        modelId, sourceKind: 'generated', sourceLanguage, geometryBackend, engineKind,
+        contentHash: `mock-hash-${renderIndex}`, artifactVersion: 1,
+        fcstdPath: `/mock-${renderIndex}.FCStd`, manifestPath: `/mock-${renderIndex}/manifest.json`,
+        modelStlPath: `/mock-${renderIndex}.stl`, viewerAssets: [], exportArtifacts: [],
+        calloutAnchors: [], measurementGuides: [], edgeTargets: [], faceTargets: [],
+      };
+      const modelManifest = {
+        schemaVersion: 1, modelId, sourceKind: 'generated', sourceLanguage, geometryBackend, engineKind,
+        document: { documentName: 'Bracket', documentLabel: 'Bracket', objectCount: 0, warnings: [] },
+        parts: [], parameterGroups: [], controlPrimitives: [], controlRelations: [], controlViews: [],
+        previewViews: [], selectionTargets: [], advisories: [], measurementAnnotations: [], warnings: [],
+        enrichmentState: { status: 'none', proposals: [] },
+      };
+      const write = { threadId: String(input.threadId), source: String(input.source) };
+      window.__manualCodeApplyMock!.saveProjectSourceCalls.push(write);
+      canonicalSource = write.source;
+      return {
+        threadId: input.threadId,
+        baseMessageId: input.baseMessageId ?? null,
+        messageId,
+        status: 'success',
+        designOutput: {
+          title: input.title, versionName: input.versionName,
+          response: persist ? 'Manual edit appended as new version.' : 'Code draft applied.',
+          interactionMode: 'design', macroCode: input.source, sourceLanguage, geometryBackend, engineKind,
+          uiSpec: input.uiSpec, initialParams: input.parameters, postProcessing: input.postProcessing ?? null,
+        },
+        artifactBundle,
+        modelManifest,
+        snapshotId: `snapshot-${modelId}`,
+        parserMatched: true,
+        error: null,
+      };
+    }
+    if (cmd === 'apply_manual_parameters') {
+      const input = (args?.input as Record<string, any>) ?? {};
+      window.__manualCodeApplyMock!.applyManualParametersCalls.push({ input });
+      const sourceLanguage = window.__manualCodeApplyMockConfig?.sourceLanguage ?? 'legacyPython';
+      const geometryBackend = sourceLanguage === 'ecky' ? 'build123d' : 'freecad';
+      const engineKind = sourceLanguage === 'ecky' ? 'ecky' : 'freecad';
+      const renderIndex = window.__manualCodeApplyMock!.applyManualParametersCalls.length + 10;
+      const modelId = `mock-model-${renderIndex}`;
+      return {
+        threadId: input.threadId,
+        baseMessageId: input.targetMessageId,
+        messageId: input.persist ? `manual-param-msg-${renderIndex}` : null,
+        status: 'success',
+        designOutput: {
+          title: 'Bracket', versionName: 'V1', response: 'Parameters applied.', interactionMode: 'design',
+          macroCode: canonicalSource, sourceLanguage, geometryBackend, engineKind,
+          uiSpec: { fields: [{ type: 'number', key: 'width', label: 'Width' }] },
+          initialParams: input.parameters, postProcessing: null,
+        },
+        artifactBundle: {
+          modelId, sourceKind: 'generated', sourceLanguage, geometryBackend, engineKind,
+          contentHash: `mock-hash-${renderIndex}`, artifactVersion: 1, fcstdPath: '',
+          manifestPath: `/mock-${renderIndex}/manifest.json`, modelStlPath: `/mock-${renderIndex}.stl`,
+          viewerAssets: [], exportArtifacts: [], edgeTargets: [], faceTargets: [], calloutAnchors: [], measurementGuides: [],
+        },
+        modelManifest: {
+          schemaVersion: 1, modelId, sourceKind: 'generated', sourceLanguage, geometryBackend, engineKind,
+          document: { documentName: 'Bracket', documentLabel: 'Bracket', objectCount: 0, warnings: [] },
+          parts: [], parameterGroups: [], controlPrimitives: [], controlRelations: [], controlViews: [], previewViews: [],
+          selectionTargets: [], advisories: [], measurementAnnotations: [], warnings: [],
+          enrichmentState: { status: 'none', proposals: [] },
+        },
+        snapshotId: `snapshot-${modelId}`,
+        error: null,
       };
     }
     if (cmd === 'get_model_manifest') {
@@ -543,7 +689,7 @@ test.describe('Manual code apply/version coverage', () => {
     await expect(modal.locator('.cm-content')).not.toContainText('print("mismatch")');
   });
 
-  test('Given edited code draft When applying without commit Then render uses current params and add_manual_version stays untouched', async ({ page }) => {
+  test('Given edited version source When Apply runs Then one Rust intent owns render and immutable commit', async ({ page }) => {
     await bootManualCodeFlow(page);
 
     await page.locator('.param-panel').getByRole('button', { name: 'CODE' }).click();
@@ -562,7 +708,7 @@ test.describe('Manual code apply/version coverage', () => {
         page.evaluate(() => ({
           addManualVersionCount: window.__manualCodeApplyMock?.addManualVersionCalls.length ?? -1,
           savedSource: window.__manualCodeApplyMock?.saveProjectSourceCalls.at(-1) ?? null,
-          renderModel: window.__manualCodeApplyMock?.renderModelCalls.at(-1) ?? null,
+          manualCode: window.__manualCodeApplyMock?.applyManualCodeCalls.at(-1) ?? null,
         })),
       )
       .toMatchObject({
@@ -571,21 +717,25 @@ test.describe('Manual code apply/version coverage', () => {
           threadId: 'mock-thread-1',
           source: 'print("draft bracket")',
         },
-        renderModel: {
-          macroCode: 'print("draft bracket")',
-          parameters: { width: 10 },
+        manualCode: {
+          input: {
+            source: 'print("draft bracket")',
+            parameters: { width: 10 },
+            persist: true,
+          },
         },
       });
 
-    await modal.locator('.window-close').click();
+    await expect(modal).toBeHidden();
     await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: /CODE/i }).click();
     await expect(page.locator('.cm-content').first()).toContainText('print("draft bracket")');
   });
 
   test('Given Apply reuses backend artifact identity When draft renders Then viewport reloads the STL', async ({ page }) => {
-    const stlRequestCount = await bootManualCodeFlow(page);
-    await expect.poll(stlRequestCount).toBeGreaterThan(0);
-    const requestsBeforeApply = stlRequestCount();
+    await bootManualCodeFlow(page);
+    const viewerShell = page.locator('.viewer-shell');
+    await expect(viewerShell).toHaveAttribute('data-model-key', /.+/);
+    const modelKeyBeforeApply = await viewerShell.getAttribute('data-model-key');
     await page.evaluate(() => {
       window.__manualCodeApplyMockConfig = { reuseArtifactIdentity: true };
     });
@@ -598,7 +748,7 @@ test.describe('Manual code apply/version coverage', () => {
     await page.keyboard.type('print("same identity, new draft")');
     await modal.getByRole('button', { name: 'APPLY', exact: true }).click();
 
-    await expect.poll(stlRequestCount).toBeGreaterThan(requestsBeforeApply);
+    await expect.poll(() => viewerShell.getAttribute('data-model-key')).not.toBe(modelKeyBeforeApply);
     await expect(modal.locator('.commit-error')).toHaveCount(0);
   });
 
@@ -641,16 +791,19 @@ test.describe('Manual code apply/version coverage', () => {
     await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A');
     await page.keyboard.type('print("diffed bracket")');
     await modal.getByRole('button', { name: 'APPLY', exact: true }).click();
+    await expect(modal).toBeHidden();
+    await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: /CODE/i }).click();
+    await expect(modal).toBeVisible();
 
     const diffPanel = modal.getByTestId('last-macro-diff');
     await expect(diffPanel).toBeVisible();
     await expect(diffPanel.getByTestId('last-macro-diff-meta')).toContainText('SYSTEM');
     await expect(diffPanel.getByTestId('last-macro-diff-meta')).toContainText('line');
-    await expect(diffPanel.getByTestId('last-macro-diff-summary')).toContainText('Code draft applied');
+    await expect(diffPanel.getByTestId('last-macro-diff-summary')).toContainText('Manual');
     await expect(diffPanel.getByTestId('last-macro-diff-rows')).toContainText('print("diffed bracket")');
   });
 
-  test('Given ecky workbench code When verify template inserts and applies Then render uses authored verify source without committing', async ({
+  test('Given ecky workbench code When verify template inserts and applies Then one Rust intent commits authored verify source', async ({
     page,
   }) => {
     await page.addInitScript(() => {
@@ -675,20 +828,23 @@ test.describe('Manual code apply/version coverage', () => {
       .poll(async () =>
         page.evaluate(() => ({
           addManualVersionCount: window.__manualCodeApplyMock?.addManualVersionCalls.length ?? -1,
-          renderModel: window.__manualCodeApplyMock?.renderModelCalls.at(-1) ?? null,
+          manualCode: window.__manualCodeApplyMock?.applyManualCodeCalls.at(-1) ?? null,
         })),
       )
       .toMatchObject({
         addManualVersionCount: 0,
-        renderModel: {
-          macroCode:
+        manualCode: {
+          input: {
+            source:
             '(model\n' +
             '  (verify\n' +
             '    (tag body_shell)\n' +
             '    (metric check (manifest has-step))\n' +
             '    (expect check (= true)))\n' +
             ')\n',
-          parameters: { width: 10 },
+            persist: true,
+            parameters: { width: 10 },
+          },
         },
       });
   });
@@ -736,7 +892,7 @@ test.describe('Manual code apply/version coverage', () => {
     await expect(modal.locator('.cm-ecky-atom').filter({ hasText: ':label' })).toBeVisible();
   });
 
-  test('Given params changed and code edited When commit creates new version Then add_manual_version uses latest params and chosen title/version', async ({
+  test('Given params changed and code edited When commit runs Then one Rust intent owns immutable version creation', async ({
     page,
   }) => {
     await bootManualCodeFlow(page);
@@ -747,7 +903,11 @@ test.describe('Manual code apply/version coverage', () => {
 
     await expect
       .poll(async () =>
-        page.evaluate(() => window.__manualCodeApplyMock?.renderModelCalls.at(-1)?.parameters.width ?? null),
+        page.evaluate(() => (
+          window.__manualCodeApplyMock?.applyManualParametersCalls.at(-1)?.input as {
+            parameters?: { width?: number };
+          } | undefined
+        )?.parameters?.width ?? null),
       )
       .toBe(42);
 
@@ -762,28 +922,26 @@ test.describe('Manual code apply/version coverage', () => {
     await page
       .locator('[role="dialog"]')
       .filter({ hasText: 'MACRO INSPECTOR:' })
-      .getByRole('button', { name: 'COMMIT VERSION', exact: true })
+      .getByRole('button', { name: 'APPLY', exact: true })
       .click();
 
     await expect
       .poll(async () =>
         page.evaluate(() => ({
-          addManualVersion: window.__manualCodeApplyMock?.addManualVersionCalls.at(-1) ?? null,
-          renderModel: window.__manualCodeApplyMock?.renderModelCalls.at(-1) ?? null,
+          addManualVersionCount: window.__manualCodeApplyMock?.addManualVersionCalls.length ?? -1,
+          manualCode: window.__manualCodeApplyMock?.applyManualCodeCalls.at(-1) ?? null,
         })),
       )
       .toMatchObject({
-        addManualVersion: {
+        addManualVersionCount: 0,
+        manualCode: {
           input: {
             title: 'Final Bracket',
             versionName: 'V-fit',
-            macroCode: 'print("edited bracket")',
+            source: 'print("edited bracket")',
             parameters: { width: 42 },
+            persist: true,
           },
-        },
-        renderModel: {
-          macroCode: 'print("edited bracket")',
-          parameters: { width: 42 },
         },
       });
   });
@@ -805,21 +963,22 @@ test.describe('Manual code apply/version coverage', () => {
     await modal.getByRole('button', { name: 'INSERT VERIFY' }).click();
     await modal.getByLabel('Version title').fill('Verified Bracket');
     await modal.getByLabel('Version name').fill('V-verify');
-    await modal.getByRole('button', { name: 'COMMIT VERSION', exact: true }).click();
+    await modal.getByRole('button', { name: 'APPLY', exact: true }).click();
 
     await expect
       .poll(async () =>
         page.evaluate(() => ({
-          addManualVersion: window.__manualCodeApplyMock?.addManualVersionCalls.at(-1) ?? null,
-          renderModel: window.__manualCodeApplyMock?.renderModelCalls.at(-1) ?? null,
+          addManualVersionCount: window.__manualCodeApplyMock?.addManualVersionCalls.length ?? -1,
+          manualCode: window.__manualCodeApplyMock?.applyManualCodeCalls.at(-1) ?? null,
         })),
       )
       .toMatchObject({
-        addManualVersion: {
+        addManualVersionCount: 0,
+        manualCode: {
           input: {
             title: 'Verified Bracket',
             versionName: 'V-verify',
-            macroCode:
+            source:
               '(model\n' +
               '  (verify\n' +
               '    (tag body_shell)\n' +
@@ -827,17 +986,8 @@ test.describe('Manual code apply/version coverage', () => {
               '    (expect check (= true)))\n' +
               ')\n',
             parameters: { width: 10 },
+            persist: true,
           },
-        },
-        renderModel: {
-          macroCode:
-            '(model\n' +
-            '  (verify\n' +
-            '    (tag body_shell)\n' +
-            '    (metric check (manifest has-step))\n' +
-            '    (expect check (= true)))\n' +
-            ')\n',
-          parameters: { width: 10 },
         },
       });
   });
@@ -860,11 +1010,11 @@ test.describe('Manual code apply/version coverage', () => {
     await page
       .locator('[role="dialog"]')
       .filter({ hasText: 'MACRO INSPECTOR:' })
-      .getByRole('button', { name: 'COMMIT VERSION', exact: true })
+      .getByRole('button', { name: 'APPLY', exact: true })
       .click();
 
     await expect
-      .poll(async () => page.evaluate(() => window.__manualCodeApplyMock?.addManualVersionCalls.length ?? 0))
+      .poll(async () => page.evaluate(() => window.__manualCodeApplyMock?.applyManualCodeCalls.filter(call => call.input.persist).length ?? 0))
       .toBe(1);
     // Windows stay mounted when closed (visibility:hidden), so assert
     // hidden-ness rather than absence from the DOM.

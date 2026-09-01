@@ -147,6 +147,31 @@ pub struct QueuedAgentPrompt {
     pub message_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmitAgentPromptReplyInput {
+    pub request_id: String,
+    pub thread_id: String,
+    pub prompt_text: String,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(
+    tag = "outcome",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum SubmitAgentPromptReplyResult {
+    Resolved,
+    #[specta(rename_all = "camelCase")]
+    Queued {
+        thread_id: String,
+        message_id: String,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RejectViewportScreenshotInput {

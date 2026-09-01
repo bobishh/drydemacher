@@ -2,28 +2,30 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import {
     formatBackendError,
-    copyInlineComponentImport,
-    getConfig,
-    installComponentPackageArchive,
-    listInstalledComponentPackageHeaders,
-    saveConfig,
-    searchFreecadLibrary,
+    libraryPanelIntent,
   } from './tauri/client';
-  import type { ComponentHeader, ComponentPackageHeader, FreecadLibraryItem } from './tauri/contracts';
+  import type {
+    ComponentHeader,
+    ComponentPackageHeader,
+    FreecadLibraryItem,
+    LibraryPanelProjection,
+  } from './tauri/contracts';
   import { config as sharedConfig } from './stores/domainState';
 
   let {
     onImportFreecadLibraryPart,
-    authoredSource = '',
     onApplyComponentImport,
   }: {
     onImportFreecadLibraryPart?: (item: FreecadLibraryItem) => Promise<void> | void;
-    authoredSource?: string;
-    onApplyComponentImport?: (source: string, label: string) => Promise<void> | void;
+    onApplyComponentImport?: (input: {
+      packageId: string;
+      version: string;
+      componentId: string;
+      label: string;
+    }) => Promise<void> | void;
   } = $props();
 
   type LibraryTab = 'components' | 'freecad';
-  const FREECAD_PAGE_SIZE = 100;
 
   let activeTab = $state<LibraryTab>('components');
   let searchQuery = $state('');
@@ -57,22 +59,10 @@
     loadError = null;
     try {
       if (activeTab === 'components') {
-        packageHeaders = await listInstalledComponentPackageHeaders();
+        projectComponentPackages(await libraryPanelIntent({ kind: 'loadComponents' }));
         packagesLoaded = true;
       } else if (activeTab === 'freecad') {
-        const config = await getConfig();
-        freecadLibraryRoots = config.freecadLibraryRoots ?? [];
-        if (freecadLibraryRoots.length > 0) {
-          const firstPage = await searchFreecadLibrary({
-            query: searchQuery,
-            roots: freecadLibraryRoots,
-            limit: FREECAD_PAGE_SIZE + 1,
-            offset: 0,
-          });
-          freecadLibraryResults = firstPage.slice(0, FREECAD_PAGE_SIZE);
-          freecadHasMore = firstPage.length > FREECAD_PAGE_SIZE;
-          freecadPage = 0;
-        }
+        projectFreecadLibrary(await libraryPanelIntent({ kind: 'loadFreecad', query: searchQuery, page: 0 }));
         freecadLoaded = true;
       }
     } catch (error) {
@@ -118,19 +108,39 @@
     ].join(' / ');
   }
 
+  function projectComponentPackages(projection: LibraryPanelProjection) {
+    if (projection.kind !== 'componentPackages') {
+      throw new Error(`Library backend returned '${projection.kind}' for component packages.`);
+    }
+    packageHeaders = projection.packageHeaders;
+  }
+
+  function projectFreecadLibrary(projection: LibraryPanelProjection) {
+    if (projection.kind !== 'freecadLibrary') {
+      throw new Error(`Library backend returned '${projection.kind}' for FreeCAD library.`);
+    }
+    sharedConfig.update((config) => ({
+      ...config,
+      freecadLibraryRoots: projection.freecadLibraryRoots,
+    }));
+    freecadLibraryRoots = projection.freecadLibraryRoots;
+    freecadLibraryResults = projection.items;
+    freecadHasMore = projection.hasMore;
+    freecadPage = projection.page;
+  }
+
   async function importComponent(pkg: ComponentPackageHeader, component: ComponentHeader) {
     if (importingComponentId || !onApplyComponentImport) return;
     const importId = `${pkg.packageId}@${pkg.version}:${component.componentId}`;
     importingComponentId = importId;
     loadError = null;
     try {
-      const imported = await copyInlineComponentImport({
+      await onApplyComponentImport({
         packageId: pkg.packageId,
         version: pkg.version,
         componentId: component.componentId,
-        authoredSource,
+        label: component.displayName,
       });
-      await onApplyComponentImport(imported.authoredSource, component.displayName);
     } catch (error) {
       loadError = formatBackendError(error);
     } finally {
@@ -149,8 +159,7 @@
 
     packageImportBusy = true;
     try {
-      await installComponentPackageArchive(selected);
-      packageHeaders = await listInstalledComponentPackageHeaders();
+      projectComponentPackages(await libraryPanelIntent({ kind: 'installPackage', archivePath: selected }));
       packagesLoaded = true;
     } catch (error) {
       loadError = formatBackendError(error);
@@ -166,20 +175,11 @@
     try {
       const selected = await open({ directory: true, multiple: false });
       if (typeof selected !== 'string' || !selected.trim()) return;
-      const config = await getConfig();
-      const roots = [selected.trim()];
-      await saveConfig({ ...config, freecadLibraryRoots: roots });
-      sharedConfig.set({ ...config, freecadLibraryRoots: roots });
-      freecadLibraryRoots = roots;
-      const firstPage = await searchFreecadLibrary({
+      projectFreecadLibrary(await libraryPanelIntent({
+        kind: 'setFreecadRoot',
+        root: selected,
         query: searchQuery,
-        roots,
-        limit: FREECAD_PAGE_SIZE + 1,
-        offset: 0,
-      });
-      freecadLibraryResults = firstPage.slice(0, FREECAD_PAGE_SIZE);
-      freecadHasMore = firstPage.length > FREECAD_PAGE_SIZE;
-      freecadPage = 0;
+      }));
     } catch (error) {
       loadError = formatBackendError(error);
     } finally {
@@ -192,15 +192,7 @@
     loadError = null;
     freecadLibrarySearchBusy = true;
     try {
-      freecadLibraryResults = await searchFreecadLibrary({
-        query: searchQuery,
-        roots: freecadLibraryRoots,
-        limit: FREECAD_PAGE_SIZE + 1,
-        offset: 0,
-      });
-      freecadHasMore = freecadLibraryResults.length > FREECAD_PAGE_SIZE;
-      freecadLibraryResults = freecadLibraryResults.slice(0, FREECAD_PAGE_SIZE);
-      freecadPage = 0;
+      projectFreecadLibrary(await libraryPanelIntent({ kind: 'loadFreecad', query: searchQuery, page: 0 }));
     } catch (error) {
       loadError = formatBackendError(error);
       freecadLibraryResults = [];
@@ -214,15 +206,11 @@
     loadError = null;
     freecadLibrarySearchBusy = true;
     try {
-      const pageItems = await searchFreecadLibrary({
+      projectFreecadLibrary(await libraryPanelIntent({
+        kind: 'loadFreecad',
         query: searchQuery,
-        roots: freecadLibraryRoots,
-        limit: FREECAD_PAGE_SIZE + 1,
-        offset: nextPage * FREECAD_PAGE_SIZE,
-      });
-      freecadLibraryResults = pageItems.slice(0, FREECAD_PAGE_SIZE);
-      freecadHasMore = pageItems.length > FREECAD_PAGE_SIZE;
-      freecadPage = nextPage;
+        page: nextPage,
+      }));
     } catch (error) {
       loadError = formatBackendError(error);
     } finally {

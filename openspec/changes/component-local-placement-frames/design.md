@@ -200,6 +200,16 @@ Manufacturing export bakes the solved transform exactly as installed assembly
 export already bakes `placementFrame`; exploded/view offsets apply afterward in
 Viewer metadata only.
 
+### 9. Applied copy-inline import is one Rust transaction
+
+Workbench submits package coordinate, target thread/version ids, and expected
+bound-source digest. Rust loads canonical source and version context, rejects
+stale source, invokes the shared copy-inline AST materializer, renders and
+appends one immutable success/error version through the manual authoring
+service, persists runtime/manifest/source/snapshot, then returns canonical
+source digest and inserted part identity. Frontend does not pass replacement
+source or chain copy, preview render, and watcher persistence.
+
 ## Risks / Trade-offs
 
 - **[Two component systems drift]** → Extract solver and frame validation into one

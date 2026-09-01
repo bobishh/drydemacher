@@ -36,6 +36,9 @@
 
 ## 3. Frontend history projection
 
+- [x] Replace boot config/history/restart-pointer/workspace command choreography
+  with one Rust-owned bounded boot projection; keep slow runtime probing on a
+  separate background Rust projection that owns default-context repair.
 - [ ] Replace `history-updated -> getThread` with revisioned targeted
   invalidation and per-thread singleflight.
 - [ ] Replace follow-up guard full-thread fetch with lightweight summary/current
@@ -48,6 +51,17 @@
   and viewer resources when selection changes.
 - [ ] Add frontend unit tests for stale revision rejection, coalescing, stable
   cursor merge, detail eviction, and UI state preservation.
+- [x] Replace delete/restore command-refresh-latest-page-snapshot chains with
+  atomic Rust intents returning one canonical bounded workspace projection;
+  retain loaded older-page cursors and suppress duplicate projection snapshot
+  writes.
+- [x] Require explicit `savedVersion` or `draft` restart targets from Rust
+  snapshot builders; migrate persisted version intents and prevent untagged
+  preview state from overwriting a durable pointer.
+- [x] Replace thread delete/finalize/reopen mutation-refresh chains with atomic
+  bounded history projections, and replace inventory scan-then-open with one
+  completed-workspace point intent. Preserve loaded timelines for surviving
+  summaries and keep restart-pointer cleanup in Rust.
 
 ## 4. Provider and MCP projections
 

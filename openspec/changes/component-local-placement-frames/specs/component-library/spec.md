@@ -70,3 +70,31 @@ and fit metadata.
 - **WHEN** library search returns its compact header
 - **THEN** the result exposes the port id and compatibility type
 - **AND** does not include component body source
+
+### Requirement: Rust owns applied workbench copy-inline import
+
+The system SHALL apply a workbench copy-inline import through one Rust intent.
+Rust SHALL own canonical source loading, stale-source validation, AST insertion,
+render, immutable version persistence, runtime and manifest persistence, bound
+source update, and snapshot update. Frontend SHALL NOT submit replacement model
+source or chain those operations.
+
+#### Scenario: Copy-inline component import succeeds
+
+- **GIVEN** exact package coordinate and current thread/version/source digest
+- **WHEN** workbench submits component import intent
+- **THEN** Rust inserts self-contained definition and one instance through the shared materializer
+- **AND** appends one successful immutable version with runtime and manifest
+- **AND** returns inserted part identity and canonical source digest
+
+#### Scenario: Bound source changed
+
+- **WHEN** expected source digest differs from bound source
+- **THEN** Rust rejects before package materialization, source write, or version append
+- **AND** raw conflict includes expected and actual digests
+
+#### Scenario: Imported model cannot render
+
+- **WHEN** AST insertion succeeds but complete model render fails
+- **THEN** Rust appends one immutable error version
+- **AND** returns the raw render error without updating bound source

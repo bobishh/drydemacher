@@ -137,3 +137,30 @@ barycentric coordinates.
 
 - **THEN** box crop overlay and transform handles are disabled
 - **AND** Undo, Flip, Apply, and Cancel actions have tooltips
+
+### Requirement: Rust owns applied external-shape edit transaction
+
+The system SHALL apply plane-crop and surface-trim add/edit/remove intents through
+one Rust controller. Rust SHALL own stale checks, source/AST patch, immutable
+version render/persistence, runtime and manifest projection, bound-source update,
+and canonical external-source reread. Frontend SHALL NOT chain those operations.
+
+#### Scenario: Crop or trim succeeds
+
+- **GIVEN** bound source and selected mesh digests still match
+- **WHEN** caller submits tagged apply or remove intent
+- **THEN** Rust patches exact canonical AST node
+- **AND** appends one successful immutable version with runtime and manifest
+- **AND** returns updated external sources from bound source
+
+#### Scenario: Bound source changed
+
+- **WHEN** expected source digest is stale
+- **THEN** Rust rejects before version append or source write
+- **AND** raw conflict identifies expected and actual digest
+
+#### Scenario: Patched source cannot render
+
+- **WHEN** AST patch succeeds but complete model render fails
+- **THEN** Rust records one immutable error version
+- **AND** returns raw render error without manufacturing successful runtime

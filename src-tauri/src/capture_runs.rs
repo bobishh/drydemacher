@@ -34,7 +34,23 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
             guided_request_error TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_capture_runs_thread_updated
-            ON capture_runs(target_thread_id, updated_at DESC);",
+            ON capture_runs(target_thread_id, updated_at DESC);
+        CREATE TABLE IF NOT EXISTS capture_guide_versions (
+            run_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            base_revision INTEGER NOT NULL,
+            client_expected_revision INTEGER NOT NULL,
+            client_expected_mesh_digest TEXT NOT NULL,
+            current_mesh_digest TEXT NOT NULL,
+            guide_json TEXT NOT NULL,
+            guide_state TEXT NOT NULL,
+            raw_evidence_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY(run_id, revision),
+            FOREIGN KEY(run_id) REFERENCES capture_runs(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_capture_guide_versions_run_revision
+            ON capture_guide_versions(run_id, revision DESC);",
     )?;
     ensure_column(conn, "guide_json", "TEXT")?;
     ensure_column(conn, "guide_revision", "INTEGER")?;
@@ -49,6 +65,77 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     ensure_column(conn, "guided_message_id", "TEXT")?;
     ensure_column(conn, "guided_model_id", "TEXT")?;
     Ok(())
+}
+
+pub fn append_capture_guide_version(
+    conn: &Connection,
+    run_id: &str,
+    base_revision: u64,
+    client_expected_revision: u64,
+    client_expected_mesh_digest: &str,
+    current_mesh_digest: &str,
+    guide: &CaptureReconstructionGuide,
+    state: &CaptureReconstructionGuideState,
+    raw_evidence: &[String],
+) -> AppResult<()> {
+    let guide_json = serde_json::to_string(guide).map_err(|error| {
+        AppError::persistence(format!("Capture guide encoding failed: {error}"))
+    })?;
+    let raw_evidence_json = serde_json::to_string(raw_evidence).map_err(|error| {
+        AppError::persistence(format!("Capture guide evidence encoding failed: {error}"))
+    })?;
+    let transaction = conn
+        .unchecked_transaction()
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+    transaction
+        .execute(
+            "INSERT INTO capture_guide_versions (
+                run_id, revision, base_revision, client_expected_revision,
+                client_expected_mesh_digest, current_mesh_digest, guide_json,
+                guide_state, raw_evidence_json, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                run_id,
+                guide.revision as i64,
+                base_revision as i64,
+                client_expected_revision as i64,
+                client_expected_mesh_digest,
+                current_mesh_digest,
+                guide_json,
+                guide_state_text(state),
+                raw_evidence_json,
+                now_secs() as i64,
+            ],
+        )
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+    transaction
+        .execute(
+            "UPDATE capture_runs SET guide_json=?2, guide_revision=?3, guide_mesh_digest=?4,
+             guide_state=?5, guide_stale_reason=?6, updated_at=?7 WHERE id=?1",
+            params![
+                run_id,
+                guide_json,
+                guide.revision as i64,
+                current_mesh_digest,
+                guide_state_text(state),
+                guide_stale_reason(Some(state)),
+                now_secs() as i64,
+            ],
+        )
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+    transaction
+        .commit()
+        .map_err(|error| AppError::persistence(error.to_string()))
+}
+
+pub fn capture_guide_version_count(conn: &Connection, run_id: &str) -> AppResult<u64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM capture_guide_versions WHERE run_id=?1",
+        [run_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|count| count as u64)
+    .map_err(|error| AppError::persistence(error.to_string()))
 }
 
 fn ensure_column(conn: &Connection, name: &str, declaration: &str) -> rusqlite::Result<()> {

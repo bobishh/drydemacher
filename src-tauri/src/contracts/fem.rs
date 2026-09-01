@@ -36,6 +36,14 @@ pub struct FemStudyRequest {
     pub control: FemPipelineControlDto,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FemRunIntentInput {
+    pub model_id: String,
+    pub source: String,
+    pub analysis_name: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FemStudyValidationResponse {
@@ -290,12 +298,33 @@ pub struct FemRunResponse {
     pub acceptance_evaluations: Vec<FemAcceptanceEvaluationDto>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FemRunIntentResponse {
+    pub validation: FemStudyValidationResponse,
+    pub result: FemRunResponse,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FemMeshPreviewIntentResponse {
+    pub validation: FemStudyValidationResponse,
+    pub mesh: FemMeshPreviewResponse,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FemResultReadRequest {
     pub analysis_identity_digest: String,
     pub solution_digest: String,
     pub maximum_result_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FemVtuExportIntentInput {
+    pub analysis_identity_digest: String,
+    pub solution_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
@@ -340,6 +369,15 @@ pub struct FemConvergenceRequest {
     pub mesh_sizes_mm: Vec<f64>,
     pub displacement_relative_tolerance: f64,
     pub stress_relative_tolerance: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FemConvergenceIntentInput {
+    pub model_id: String,
+    pub source: String,
+    pub analysis_name: String,
+    pub mesh_sizes_mm: Vec<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
@@ -489,7 +527,57 @@ pub struct FemTopologyReconstructResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::FemTopologyControlsDto;
+    use super::{
+        FemConvergenceIntentInput, FemRunIntentInput, FemTopologyControlsDto,
+        FemVtuExportIntentInput,
+    };
+
+    #[test]
+    fn run_intent_accepts_only_user_target_inputs() {
+        let input = serde_json::from_value::<FemRunIntentInput>(serde_json::json!({
+            "modelId": "model-current",
+            "source": "(model (analysis bracket-static))",
+            "analysisName": "bracket-static"
+        }))
+        .expect("camelCase intent");
+        assert_eq!(input.model_id, "model-current");
+
+        let error = serde_json::from_value::<FemRunIntentInput>(serde_json::json!({
+            "modelId": "model-current",
+            "source": "(model (analysis bracket-static))",
+            "analysisName": "bracket-static",
+            "jobId": "frontend-owned",
+            "budgets": {},
+            "control": {}
+        }))
+        .expect_err("frontend lifecycle policy must be rejected");
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn convergence_intent_rejects_frontend_job_and_budget_policy() {
+        let error = serde_json::from_value::<FemConvergenceIntentInput>(serde_json::json!({
+            "modelId": "model-current",
+            "source": "(model (analysis bracket-static))",
+            "analysisName": "bracket-static",
+            "meshSizesMm": [4.0, 2.0, 1.0],
+            "jobId": "frontend-owned",
+            "budgets": { "tet4Cells": 10 }
+        }))
+        .expect_err("convergence policy belongs to Rust");
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn vtu_export_intent_rejects_frontend_byte_policy() {
+        let error = serde_json::from_value::<FemVtuExportIntentInput>(serde_json::json!({
+            "analysisIdentityDigest": "analysis",
+            "solutionDigest": "solution",
+            "maximumResultBytes": 1
+        }))
+        .expect_err("export byte policy belongs to Rust");
+        assert!(error.to_string().contains("unknown field"));
+    }
 
     #[test]
     fn topology_controls_admit_explicit_working_memory_bound() {

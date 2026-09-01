@@ -29,6 +29,9 @@ pub fn write_last_snapshot(app: &dyn PathResolver, snapshot: Option<&LastDesignS
     let path = last_snapshot_path(app);
     match snapshot {
         Some(snapshot) => {
+            if snapshot.target_ref.is_none() {
+                return;
+            }
             if let Some(serialized) = serialize_restart_pointer(snapshot) {
                 if fs::write(&path, serialized).is_ok() {
                     let _ = fs::remove_file(legacy_last_snapshot_path(app));
@@ -151,22 +154,49 @@ fn resolve_saved_pointer(
     })
 }
 
-pub fn build_runtime_snapshot(
+pub fn build_saved_version_snapshot(
     design: Option<crate::contracts::DesignOutput>,
-    thread_id: Option<String>,
-    message_id: Option<String>,
+    thread_id: String,
+    message_id: String,
     artifact_bundle: Option<crate::contracts::ArtifactBundle>,
     model_manifest: Option<crate::contracts::ModelManifest>,
     selected_part_id: Option<String>,
 ) -> LastDesignSnapshot {
     LastDesignSnapshot {
         design,
-        thread_id,
-        message_id,
+        thread_id: Some(thread_id.clone()),
+        message_id: Some(message_id.clone()),
         artifact_bundle,
         model_manifest,
         selected_part_id,
-        target_ref: None,
+        target_ref: Some(AuthoringTargetRef::SavedVersion {
+            thread_id,
+            message_id,
+        }),
+    }
+}
+
+pub fn build_draft_snapshot(
+    design: Option<crate::contracts::DesignOutput>,
+    thread_id: String,
+    preview_id: String,
+    session_id: String,
+    artifact_bundle: Option<crate::contracts::ArtifactBundle>,
+    model_manifest: Option<crate::contracts::ModelManifest>,
+    selected_part_id: Option<String>,
+) -> LastDesignSnapshot {
+    LastDesignSnapshot {
+        design,
+        thread_id: Some(thread_id.clone()),
+        message_id: Some(preview_id.clone()),
+        artifact_bundle,
+        model_manifest,
+        selected_part_id,
+        target_ref: Some(AuthoringTargetRef::Draft {
+            thread_id,
+            preview_id,
+            session_id,
+        }),
     }
 }
 
@@ -175,7 +205,8 @@ mod tests {
     use super::*;
     use crate::contracts::{
         AgentDraft, ArtifactBundle, AuthoringTargetRef, DesignOutput, EngineKind, GeometryBackend,
-        InteractionMode, MacroDialect, ModelManifest, SourceLanguage, UiSpec,
+        InteractionMode, MacroDialect, Message, MessageRole, MessageStatus, ModelManifest,
+        SourceLanguage, UiSpec,
     };
 
     struct TestResolver {
@@ -324,34 +355,94 @@ mod tests {
     }
 
     #[test]
+    fn saved_version_builder_always_tags_exact_restart_identity() {
+        let snapshot = build_saved_version_snapshot(
+            Some(design()),
+            "thread-1".to_string(),
+            "message-1".to_string(),
+            Some(bundle()),
+            Some(manifest()),
+            None,
+        );
+
+        assert!(matches!(
+            snapshot.target_ref,
+            Some(AuthoringTargetRef::SavedVersion {
+                ref thread_id,
+                ref message_id,
+            }) if thread_id == "thread-1" && message_id == "message-1"
+        ));
+    }
+
+    #[test]
+    fn untagged_preview_cannot_overwrite_saved_restart_pointer() {
+        let root = std::env::temp_dir().join(format!(
+            "ecky-last-design-untagged-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let resolver = TestResolver { root: root.clone() };
+        let saved = build_saved_version_snapshot(
+            Some(design()),
+            "thread-1".to_string(),
+            "message-1".to_string(),
+            Some(bundle()),
+            Some(manifest()),
+            None,
+        );
+        write_last_snapshot(&resolver, Some(&saved));
+        let before = fs::read(last_snapshot_path(&resolver)).expect("saved pointer");
+        let untagged_preview = LastDesignSnapshot {
+            target_ref: None,
+            message_id: Some("preview-untagged".to_string()),
+            ..saved
+        };
+
+        write_last_snapshot(&resolver, Some(&untagged_preview));
+
+        assert_eq!(
+            fs::read(last_snapshot_path(&resolver)).expect("preserved saved pointer"),
+            before
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn saved_pointer_recovers_from_database_without_payload_cache() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE threads (id TEXT PRIMARY KEY, deleted_at INTEGER);
-             CREATE TABLE messages (
-               id TEXT PRIMARY KEY,
-               thread_id TEXT NOT NULL,
-               status TEXT NOT NULL,
-               output TEXT,
-               artifact_bundle TEXT,
-               model_manifest TEXT,
-               deleted_at INTEGER
-             );",
-        )
-        .unwrap();
-        conn.execute("INSERT INTO threads (id) VALUES ('thread-1')", [])
-            .unwrap();
-        conn.execute(
-            "INSERT INTO messages (
-               id, thread_id, status, output, artifact_bundle, model_manifest
-             ) VALUES (?1, ?2, 'success', ?3, ?4, ?5)",
-            rusqlite::params![
-                "message-1",
-                "thread-1",
-                serde_json::to_string(&design()).unwrap(),
-                serde_json::to_string(&bundle()).unwrap(),
-                serde_json::to_string(&manifest()).unwrap(),
-            ],
+        let root = std::env::temp_dir().join(format!(
+            "ecky-saved-pointer-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let conn = db::init_db(&root.join("history.sqlite")).unwrap();
+        db::create_or_update_thread(&conn, "thread-1", "Recovered", 1, None).unwrap();
+        db::add_message(
+            &conn,
+            "thread-1",
+            &Message {
+                id: "message-1".to_string(),
+                role: MessageRole::Assistant,
+                content: "Recovered".to_string(),
+                status: MessageStatus::Success,
+                output: Some(design()),
+                usage: None,
+                artifact_bundle: Some(bundle()),
+                model_manifest: Some(manifest()),
+                structural_verification: None,
+                agent_origin: None,
+                image_data: None,
+                visual_kind: None,
+                attachment_images: Vec::new(),
+                timestamp: 1,
+            },
         )
         .unwrap();
 
@@ -368,26 +459,22 @@ mod tests {
         assert_eq!(recovered.message_id.as_deref(), Some("message-1"));
         assert_eq!(recovered.design.unwrap().title, "Recovered");
         assert_eq!(recovered.artifact_bundle.unwrap().model_id, "model-1");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn draft_pointer_recovers_from_durable_draft_without_process_cache() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE agent_drafts (
-               preview_id TEXT PRIMARY KEY,
-               session_id TEXT NOT NULL,
-               thread_id TEXT NOT NULL,
-               base_message_id TEXT,
-               design_output TEXT NOT NULL,
-               artifact_bundle TEXT NOT NULL,
-               model_manifest TEXT NOT NULL,
-               draft_feedback TEXT,
-               updated_at INTEGER NOT NULL,
-               UNIQUE(session_id, thread_id)
-             );",
-        )
-        .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "ecky-draft-pointer-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let conn = db::init_db(&root.join("history.sqlite")).unwrap();
+        db::create_or_update_thread(&conn, "thread-1", "Recovered", 1, None).unwrap();
         db::upsert_agent_draft(
             &conn,
             &AgentDraft {
@@ -418,5 +505,6 @@ mod tests {
         assert_eq!(recovered.message_id.as_deref(), Some("preview-1"));
         assert_eq!(recovered.design.unwrap().title, "Recovered");
         assert_eq!(recovered.model_manifest.unwrap().model_id, "model-1");
+        let _ = fs::remove_dir_all(root);
     }
 }

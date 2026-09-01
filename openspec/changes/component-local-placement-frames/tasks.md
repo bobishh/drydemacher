@@ -92,6 +92,12 @@
   compatibility types without returning body source.
 - [x] 7.4 Prove an extracted inline component and the installed package form solve
   byte-equivalent placement evidence through the shared solver.
+- [x] 7.5 Add one Rust intent owning copy-inline AST patch, render, immutable
+  version, runtime/manifest, bound source, and snapshot persistence.
+- [x] 7.6 Add Rust BDD coverage for success, stale digest, raw render failure,
+  and camelCase boundary.
+- [x] 7.7 Wire LibraryPanel to the applied import intent and remove frontend
+  replacement-source/manual-preview chain.
 
 ## 8. Canonical Guidance And Tooling
 

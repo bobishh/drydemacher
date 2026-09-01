@@ -12,9 +12,10 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import { safeSaveDialog } from './lib/safeSaveDialog';
   import { writeTextFile } from '@tauri-apps/plugin-fs';
-  import { onDestroy, onMount, tick } from 'svelte';
-  import { get } from 'svelte/store';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
+  import { get, writable } from 'svelte/store';
   import { buildGenieTraitsFromSeed, buildModelGenieTraits } from './lib/genie/traits';
+  import type { ExplorationCyclePacket } from './lib/explorationCycle';
 
   import CodeModal from './lib/CodeModal.svelte';
   import SessionActivityWindow from './lib/SessionActivityWindow.svelte';
@@ -33,6 +34,11 @@
   import LibraryPanel from './lib/LibraryPanel.svelte';
   import { campaignDefinitionClient, type CampaignCurrentStepPayload, type CampaignDefinitionSummary } from './lib/projects/campaignDefinitionClient';
   import { campaignRunClient, type CampaignRun } from './lib/projects/campaignRunClient';
+  import {
+    createCaptureWorkspaceState,
+    reduceCaptureWorkspace,
+    type CaptureWorkspaceAction,
+  } from './lib/capture/captureWorkspaceState';
   import {
     windowStore,
     windowLayoutRemembered,
@@ -69,8 +75,8 @@
   import { isActiveLongTaskEvent, isLongTaskEvent, longTasksStore } from './lib/stores/longTasks';
   import { localNotificationActionsStore } from './lib/stores/localNotificationActions';
   import { shouldProjectAgentNotification } from './lib/notificationAggregation';
-  import { handleGenerate, isQuestionIntent } from './lib/controllers/requestOrchestrator';
-  import { handleParamChange, commitManualVersion, stageParamChange, applyManualCodeDraft, manualApplyQueueStateStore } from './lib/controllers/manualController';
+  import { handleGenerate } from './lib/controllers/requestOrchestrator';
+  import { handleParamChange, commitManualVersion, stageParamChange, applyManualCodeDraft, projectManualCodeDraftResult, manualApplyBusyStore } from './lib/controllers/manualController';
   import {
     loadFromHistory,
     createNewThread,
@@ -81,6 +87,8 @@
     refreshHistory,
     refreshThreadHistoryProjection,
     loadOlderThreadMessages,
+    rememberCommittedVersionMessage,
+    projectWorkspaceProjection,
     activeThreadMessagesLoading,
     activeThreadVersionLoading,
     threadMessagePageState,
@@ -98,7 +106,6 @@
     runtimeCapabilities,
   } from './lib/stores/domainState';
   import {
-    createSketchPreviewDraftScopeId,
     normalizeSketchPreviewDraftScopeId,
   } from './lib/sketchPreviewDraftStore';
   import { selectedCode, selectedTitle, currentView } from './lib/stores/viewState';
@@ -131,7 +138,7 @@
 } from './lib/agents/state';
   import { resolveRelayPresence } from './lib/agents/relayPresence';
   import { deriveDialogueState, type DialogueState } from './lib/composables/dialogueState';
-  import { projectProviderTurnMessages } from './lib/providerActivity';
+  import { applyProviderDialogueAction, createProviderDialogueState, isProviderResultCurrent, mergeProviderPage, mergeProviderSnapshot, projectProviderDialogue, type ProviderDialogueSnapshot } from './lib/providerDialogueSync';
   import type { ProviderCodeReference } from './lib/providerMessagePresentation';
 import {
     buildOptimisticQueuedDialogueMessage,
@@ -208,10 +215,8 @@ import {
   } from './lib/modelRuntime/previewViews';
   import {
     provenanceOverlayControls,
-    provenanceOverlayPatch,
   } from './lib/modelRuntime/ownershipSections';
   import {
-    buildSemanticPatch,
     ensureSemanticManifest,
     materializeControlViews,
   } from './lib/modelRuntime/semanticControls';
@@ -251,20 +256,10 @@ import {
     resolveActiveAuthoringContext,
   } from './lib/runtimeCapabilities';
   import { isRenderableVersionTimelineMessage } from './lib/threadTimeline';
-  import { buildCaptureSolidifySource } from './lib/capture/captureSolidifySource';
   import {
-    addCaptureLandmark,
     applyCaptureGuideDraftEdit,
-    configureCaptureProfile,
-    createCaptureGuideDraft,
     createCaptureGuideDraftHistory,
-    finalizeMechanicalGuideDraft,
     mechanicalGuideReadiness,
-    moveCaptureProfileLandmark,
-    removeCaptureLandmark,
-    undoCaptureGuideDraftEdit,
-    updateCaptureFeatureExpectation,
-    updateCaptureLandmark,
     type CaptureFeatureExpectationEdit,
     type CaptureGuideDraftHistory,
     type CaptureLandmarkEdit,
@@ -272,10 +267,7 @@ import {
   } from './lib/capture/captureGuideDraft';
   import {
     clearSketchPreviewDraft,
-    dispatchAgyPromptQueue,
-    dispatchCodexPromptQueue,
     saveSketchPreviewDraft,
-    addImportedModelVersion,
     exportFile,
     exportMultipart3mf,
     exportMultipartStlZip,
@@ -286,16 +278,14 @@ import {
     getCodexTakeoverMessages,
     getAgentDraftPreview,
     getActiveAgentSessions,
+    getActiveExplorationCycle,
     getAgentTerminalSnapshots,
     getWebContentRecoveryState,
     acknowledgeWebContentRecovery,
-    getMessageAttachments,
     getThreadMessageVersion,
     getVersionSource,
-    getModelManifest,
-    macroAstSourceMap,
-    importFreecadLibraryPart,
-    importFcstd,
+    applyCapturePreview as applyCapturePreviewCommand,
+    importModelIntent,
     preparePromptAttachments,
     preparePromptWorkspaceCapture,
     projectFolderRenderActivity,
@@ -303,19 +293,17 @@ import {
     adoptLatestCaptureRun,
     listCaptureRuns,
     listExternalShapeSources,
-    applyExternalShapePlaneCrop,
-    removeExternalShapePlaneCrop,
+    applyExternalShapeEdit,
+    applyInlineComponentImport,
+    applySemanticControlValue,
     previewExternalShapeSurfaceTrimPath,
     previewExternalShapeSurfaceTrimLoop,
     previewExternalShapeSurfaceTrimRegion,
-    applyExternalShapeSurfaceTrim,
-    removeExternalShapeSurfaceTrim,
     reopenCaptureRun,
     saveCapturePreviewSettings,
-    getCaptureGuideContext,
-    getCaptureReconstructionGuide,
-    evaluateCaptureReconstructionGuide,
-    saveCaptureReconstructionGuide,
+    ensureCaptureReconstructionGuide,
+    applyCaptureGuideEditIntent,
+    validateCaptureGuideIntent,
     queueCaptureGuidedReconstruction,
     retryCaptureReconstruction,
     resumeCaptureSession,
@@ -323,7 +311,6 @@ import {
     getCaptureSessionStatus as getCaptureSessionStatusCommand,
     cancelCaptureSession as cancelCaptureSessionCommand,
     rejectAgentViewportScreenshot,
-    renderModel,
     resizeAgentTerminal,
     queueAgentPrompt,
     removeAgyQueuedPrompt,
@@ -331,18 +318,18 @@ import {
     retryAgyQueuedPrompt,
     retryCodexQueuedPrompt,
     resolveAgentConfirm,
-    resolveAgentPrompt,
+    submitAgentPromptReply,
     resolveAgentViewportScreenshot,
     saveConfig as persistBackendConfig,
     sendAgentTerminalInput,
     sendAgyProviderPrompt,
     sendCodexTakeoverPrompt,
     steerCodexTakeover,
+    stopExplorationRun,
     stopAgyProvider,
     stopCodexTakeover,
-    repairMissingVersionRuntime,
+    repairVersionRuntime,
     updateVersionPreview,
-    saveModelManifest,
     type PostProcessingSpec,
     type AgyProviderSnapshot,
     type CodexTakeoverSnapshot,
@@ -351,6 +338,7 @@ import {
   import type {
     CaptureCropBounds,
     CaptureGuideResultProvenance,
+    CaptureGuideEditIntent,
     CaptureGuideSourceMesh,
     CaptureLandmarkRole,
     CaptureMeshPreview,
@@ -811,16 +799,10 @@ import {
     codeModalSourceLanguage = nextSourceLanguage;
     if (get(selectedCode) === initialCode) selectedCode.set(nextCode);
     selectedTitle.set(codeInspectorTitle(nextTitle, nextSourceLanguage, nextGeometryBackend));
-    // Layout loading for a newly-created blank thread can finish after the
-    // source lookup above and restore hidden window state. Re-assert visibility
-    // after all async work so dock and docs launches remain observable.
+    // `showWindow` bumps the thread-layout revision, so an older async layout
+    // load cannot overwrite this explicit user action.
     mountedWindows.code = true;
     showWindow('code');
-    // A concurrent layout refresh may complete one tick later.
-    setTimeout(() => {
-      mountedWindows.code = true;
-      showWindow('code');
-    }, 100);
   }
 
   async function refreshOpenCodeModalHead(threadId: string): Promise<void> {
@@ -1049,69 +1031,46 @@ import {
   const visibleAgentTerminal = $derived($visibleAgentTerminalStore);
   const activeAgentTerminalAttention = $derived($agentTerminalAttentionStore);
   const activeThread = $derived($history.find((t) => t.id === $activeThreadId));
-  let codexTakeoverSnapshot = $state<CodexTakeoverSnapshot | null>(null);
-  let agyProviderSnapshot = $state<AgyProviderSnapshot | null>(null);
-  let codexTakeoverLoading = $state(false);
-  let codexTakeoverError = $state<string | null>(null);
-  let codexTakeoverLoadToken = 0;
+  const codexDialogueStateStore = writable(createProviderDialogueState());
+  const agyDialogueStateStore = writable(createProviderDialogueState());
+  const codexDialogueState = $derived($codexDialogueStateStore);
+  const agyDialogueState = $derived($agyDialogueStateStore);
+  const codexTakeoverSnapshot = $derived(codexDialogueState.snapshot as CodexTakeoverSnapshot | null);
+  const agyProviderSnapshot = $derived(agyDialogueState.snapshot as AgyProviderSnapshot | null);
+  const codexTakeoverLoading = $derived($config.connectionType === 'provider:agy' ? agyDialogueState.loading : codexDialogueState.loading);
+  const codexTakeoverError = $derived($config.connectionType === 'provider:agy' ? agyDialogueState.error : codexDialogueState.error);
+  const codexTakeoverLoadToken = $derived(codexDialogueState.loadToken);
   let codexTakeoverRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-  let agyProviderLoadToken = 0;
+  const agyProviderLoadToken = $derived(agyDialogueState.loadToken);
   let agyProviderRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   let optimisticQueuedAgentMessages = $state<Record<string, OptimisticQueuedDialogueMessage>>({});
   const activeProviderSnapshot = $derived.by<CodexTakeoverSnapshot | AgyProviderSnapshot | null>(() =>
     $config.connectionType === 'provider:agy' ? agyProviderSnapshot : codexTakeoverSnapshot,
   );
+  function reduceCodexProvider(action: Parameters<typeof applyProviderDialogueAction>[1]) {
+    codexDialogueStateStore.update((state) => applyProviderDialogueAction(state, action));
+  }
+  function reduceAgyProvider(action: Parameters<typeof applyProviderDialogueAction>[1]) {
+    agyDialogueStateStore.update((state) => applyProviderDialogueAction(state, action));
+  }
+  function setProviderError(error: string | null) {
+    if ($config.connectionType === 'provider:agy') {
+      reduceAgyProvider(error === null ? { type: 'clearError' } : { type: 'error', error });
+      return;
+    }
+    reduceCodexProvider(error === null ? { type: 'clearError' } : { type: 'error', error });
+  }
   const codexDialogueMessages = $derived.by<Message[]>(() =>
-    (() => {
-      const persisted = activeProviderSnapshot?.messages ?? [];
-      const live = activeProviderSnapshot?.liveMessages ?? [];
-      const turnTraces = activeProviderSnapshot?.turnTraces ?? [];
-      const liveIds = new Set(live.map((message) => message.id));
-      const providerId = $config.connectionType === 'provider:agy' ? 'agy' : 'codex';
-      const providerLabel = providerId === 'agy' ? 'Agy' : 'Codex';
-      const externalConversationId = activeProviderSnapshot
-        ? 'agyConversationId' in activeProviderSnapshot.binding
+    activeProviderSnapshot
+      ? projectProviderDialogue({
+        ...activeProviderSnapshot,
+        providerId: $config.connectionType === 'provider:agy' ? 'agy' : 'codex',
+        providerLabel: $config.connectionType === 'provider:agy' ? 'Agy' : 'Codex',
+        externalConversationId: 'agyConversationId' in activeProviderSnapshot.binding
           ? activeProviderSnapshot.binding.agyConversationId
-          : activeProviderSnapshot.binding.codexThreadId
-        : 'unbound';
-      const mappedPersisted = persisted
-        .filter((message) => !liveIds.has(message.id))
-        .map((message, index): Message => ({
-          id: message.id,
-          role: message.role === 'assistant' ? 'assistant' : 'user',
-          content: message.content,
-          status: message.role === 'user'
-            ? 'success'
-            : ['pending', 'working', 'success', 'error', 'discarded'].includes(message.status)
-              ? message.status as Message['status']
-              : 'success',
-          timestamp: message.timestamp,
-          timelineOrder: index,
-        }));
-      const working = projectProviderTurnMessages({
-        providerId,
-        providerLabel,
-        externalConversationId,
-        activeTurnId: activeProviderSnapshot?.runtime.activeTurnId,
-        phase: 'active',
-        messages: live,
-      });
-      const traces = turnTraces.flatMap((trace) => {
-        return projectProviderTurnMessages({
-          providerId,
-          providerLabel,
-          externalConversationId,
-          activeTurnId: trace.turnId,
-          phase: trace.status === 'success'
-            ? 'completed'
-            : trace.status === 'interrupted'
-              ? 'interrupted'
-              : 'error',
-          messages: trace.messages,
-        });
-      });
-      return [...mappedPersisted, ...traces, ...working];
-    })(),
+          : activeProviderSnapshot.binding.codexThreadId,
+      } as ProviderDialogueSnapshot)
+      : [],
   );
   const activeThreadDialogueMessages = $derived.by(() => {
     const eckyMessages = deriveOptimisticDialogueMessages(
@@ -1132,83 +1091,64 @@ import {
       $activeThreadId ?? null,
     );
   });
-
+  let explorationCycle = $state<ExplorationCyclePacket | null>(null);
+  let explorationCycleLoadSequence = 0;
+  $effect(() => {
+    const threadId = $activeThreadId;
+    void activeThreadDialogueMessages.length;
+    void $activeThreadRequests.length;
+    const sequence = ++explorationCycleLoadSequence;
+    if (!threadId) {
+      explorationCycle = null;
+      return;
+    }
+    void getActiveExplorationCycle(threadId)
+      .then((packet) => {
+        if (sequence === explorationCycleLoadSequence) explorationCycle = packet;
+      })
+      .catch(() => {
+        if (sequence === explorationCycleLoadSequence) explorationCycle = null;
+      });
+  });
   $effect(() => {
     const threadId = $activeThreadId;
     const usesCodexProvider = $config.connectionType === 'provider:codex';
     const usesAgyProvider = $config.connectionType === 'provider:agy';
-    codexTakeoverSnapshot = null;
-    agyProviderSnapshot = null;
-    codexTakeoverError = null;
-    if (threadId && usesCodexProvider) void loadCodexTakeover(threadId, false);
-    if (threadId && usesAgyProvider) void loadAgyProvider(threadId, false);
+    untrack(() => {
+      reduceCodexProvider({ type: 'snapshot', snapshot: null, preserveLoadedPages: false });
+      reduceAgyProvider({ type: 'snapshot', snapshot: null, preserveLoadedPages: false });
+      if (threadId && usesCodexProvider) void loadCodexTakeover(threadId, false);
+      if (threadId && usesAgyProvider) void loadAgyProvider(threadId, false);
+    });
   });
 
-  function applyCodexTakeoverSnapshot(next: CodexTakeoverSnapshot, preserveLoadedPages: boolean) {
-    const current = codexTakeoverSnapshot;
-    if (
-      !preserveLoadedPages ||
-      !current ||
-      current.binding.eckyThreadId !== next.binding.eckyThreadId
-    ) {
-      codexTakeoverSnapshot = next;
-      return;
-    }
-    const latestIds = new Set(next.messages.map((message) => message.id));
-    const retainedEarlier = current.messages.filter((message) => !latestIds.has(message.id));
-    codexTakeoverSnapshot = {
-      ...next,
-      messages: [...retainedEarlier, ...next.messages],
-      nextCursor: retainedEarlier.length > 0 ? current.nextCursor : next.nextCursor,
-      backwardsCursor: next.backwardsCursor ?? current.backwardsCursor,
-    };
+  function applyCodexTakeoverSnapshot(next: CodexTakeoverSnapshot, preserveLoadedPages: boolean, authoritative = false) {
+    reduceCodexProvider(authoritative
+      ? { type: 'authoritativeSnapshot', snapshot: next as unknown as ProviderDialogueSnapshot, preserveLoadedPages }
+      : { type: 'snapshot', snapshot: next as unknown as ProviderDialogueSnapshot, preserveLoadedPages });
   }
 
   async function loadCodexTakeover(threadId: string, preserveLoadedPages: boolean) {
-    const token = ++codexTakeoverLoadToken;
-    codexTakeoverLoading = true;
+    const token = codexTakeoverLoadToken + 1;
+    reduceCodexProvider({ type: 'loadStarted', token });
     try {
       const snapshot = await getCodexTakeover(threadId);
       if (token !== codexTakeoverLoadToken || get(activeThreadId) !== threadId) return;
       if (snapshot) applyCodexTakeoverSnapshot(snapshot, preserveLoadedPages);
-      else codexTakeoverSnapshot = null;
-      codexTakeoverError = snapshot?.runtime.error ?? null;
-      if (
-        snapshot?.queue.length &&
-        !snapshot.runtime.activeTurnId &&
-        snapshot.queue[0]?.status === 'queued'
-      ) {
-        void dispatchCodexPromptQueue(threadId)
-          .then((dispatched) => applyCodexTakeoverSnapshot(dispatched, true))
-          .catch((error) => { codexTakeoverError = formatBackendError(error); });
-      }
+      else reduceCodexProvider({ type: 'snapshot', snapshot: null, preserveLoadedPages: false, token });
     } catch (error) {
       if (token === codexTakeoverLoadToken && get(activeThreadId) === threadId) {
-        codexTakeoverError = formatBackendError(error);
+        reduceCodexProvider({ type: 'error', error: formatBackendError(error) });
       }
     } finally {
-      if (token === codexTakeoverLoadToken) codexTakeoverLoading = false;
+      if (token === codexTakeoverLoadToken && !codexDialogueState.snapshot) reduceCodexProvider({ type: 'snapshot', snapshot: null, preserveLoadedPages: false, token });
     }
   }
 
-  function applyAgyProviderSnapshot(next: AgyProviderSnapshot, preserveLoadedPages: boolean) {
-    const current = agyProviderSnapshot;
-    if (
-      !preserveLoadedPages
-      || !current
-      || current.binding.eckyThreadId !== next.binding.eckyThreadId
-    ) {
-      agyProviderSnapshot = next;
-      return;
-    }
-    const latestIds = new Set(next.messages.map((message) => message.id));
-    const retainedEarlier = current.messages.filter((message) => !latestIds.has(message.id));
-    agyProviderSnapshot = {
-      ...next,
-      messages: [...retainedEarlier, ...next.messages],
-      nextCursor: retainedEarlier.length > 0 ? current.nextCursor : next.nextCursor,
-      backwardsCursor: next.backwardsCursor ?? current.backwardsCursor,
-    };
+  function applyAgyProviderSnapshot(next: AgyProviderSnapshot, preserveLoadedPages: boolean, authoritative = false) {
+    reduceAgyProvider(authoritative
+      ? { type: 'authoritativeSnapshot', snapshot: next as unknown as ProviderDialogueSnapshot, preserveLoadedPages }
+      : { type: 'snapshot', snapshot: next as unknown as ProviderDialogueSnapshot, preserveLoadedPages });
   }
 
   function agyProviderError(snapshot: AgyProviderSnapshot | null | undefined): string | null {
@@ -1218,25 +1158,19 @@ import {
   }
 
   async function loadAgyProvider(threadId: string, preserveLoadedPages: boolean) {
-    const token = ++agyProviderLoadToken;
-    codexTakeoverLoading = true;
+    const token = agyProviderLoadToken + 1;
+    reduceAgyProvider({ type: 'loadStarted', token });
     try {
       const snapshot = await getAgyProvider(threadId);
       if (token !== agyProviderLoadToken || get(activeThreadId) !== threadId) return;
       if (snapshot) applyAgyProviderSnapshot(snapshot, preserveLoadedPages);
-      else agyProviderSnapshot = null;
-      codexTakeoverError = agyProviderError(snapshot);
-      if (snapshot?.queue.length && !snapshot.runtime.activeTurnId && snapshot.queue[0]?.status === 'queued') {
-        void dispatchAgyPromptQueue(threadId)
-          .then((dispatched) => applyAgyProviderSnapshot(dispatched, true))
-          .catch((error) => { codexTakeoverError = formatBackendError(error); });
-      }
+      else reduceAgyProvider({ type: 'snapshot', snapshot: null, preserveLoadedPages: false, token });
     } catch (error) {
       if (token === agyProviderLoadToken && get(activeThreadId) === threadId) {
-        codexTakeoverError = formatBackendError(error);
+        reduceAgyProvider({ type: 'error', error: formatBackendError(error) });
       }
     } finally {
-      if (token === agyProviderLoadToken) codexTakeoverLoading = false;
+      // reducer owns loading state; terminal snapshot clears it
     }
   }
 
@@ -1250,15 +1184,9 @@ import {
           cursor: snapshot.nextCursor,
           direction: 'older',
         });
-        const currentIds = new Set(snapshot.messages.map((message) => message.id));
-        agyProviderSnapshot = {
-          ...snapshot,
-          messages: [...page.messages.filter((message) => !currentIds.has(message.id)), ...snapshot.messages],
-          nextCursor: page.nextCursor,
-        };
-        codexTakeoverError = null;
+        reduceAgyProvider({ type: 'page', page, direction: 'older' });
       } catch (error) {
-        codexTakeoverError = formatBackendError(error);
+        setProviderError(formatBackendError(error));
         throw error;
       }
       return;
@@ -1271,16 +1199,9 @@ import {
         cursor: snapshot.nextCursor,
         direction: 'older',
       });
-      const currentIds = new Set(snapshot.messages.map((message) => message.id));
-      const earlier = page.messages.filter((message) => !currentIds.has(message.id));
-      codexTakeoverSnapshot = {
-        ...snapshot,
-        messages: [...earlier, ...snapshot.messages],
-        nextCursor: page.nextCursor,
-      };
-      codexTakeoverError = null;
+      reduceCodexProvider({ type: 'page', page, direction: 'older' });
     } catch (error) {
-      codexTakeoverError = formatBackendError(error);
+      setProviderError(formatBackendError(error));
       throw error;
     }
   }
@@ -1295,10 +1216,9 @@ import {
         promptText: prompt,
         expectedTurnId,
       });
-      applyCodexTakeoverSnapshot(next, true);
-      codexTakeoverError = null;
+      applyCodexTakeoverSnapshot(next, true, true);
     } catch (error) {
-      codexTakeoverError = formatBackendError(error);
+      setProviderError(formatBackendError(error));
       throw error;
     }
   }
@@ -1312,10 +1232,9 @@ import {
         applyAgyProviderSnapshot(await stopAgyProvider({
           eckyThreadId: snapshot.binding.eckyThreadId,
           turnId,
-        }), true);
-        codexTakeoverError = null;
+        }), true, true);
       } catch (error) {
-        codexTakeoverError = formatBackendError(error);
+        setProviderError(formatBackendError(error));
         throw error;
       }
       return;
@@ -1328,10 +1247,9 @@ import {
         eckyThreadId: snapshot.binding.eckyThreadId,
         turnId,
       });
-      applyCodexTakeoverSnapshot(next, true);
-      codexTakeoverError = null;
+      applyCodexTakeoverSnapshot(next, true, true);
     } catch (error) {
-      codexTakeoverError = formatBackendError(error);
+      setProviderError(formatBackendError(error));
       throw error;
     }
   }
@@ -1341,10 +1259,9 @@ import {
       const eckyThreadId = agyProviderSnapshot?.binding.eckyThreadId;
       if (!eckyThreadId) return;
       try {
-        applyAgyProviderSnapshot(await retryAgyQueuedPrompt(eckyThreadId, queueId), true);
-        codexTakeoverError = null;
+        applyAgyProviderSnapshot(await retryAgyQueuedPrompt(eckyThreadId, queueId), true, true);
       } catch (error) {
-        codexTakeoverError = formatBackendError(error);
+        setProviderError(formatBackendError(error));
         throw error;
       }
       return;
@@ -1353,10 +1270,9 @@ import {
     if (!eckyThreadId) return;
     try {
       const next = await retryCodexQueuedPrompt(eckyThreadId, queueId);
-      applyCodexTakeoverSnapshot(next, true);
-      codexTakeoverError = null;
+      applyCodexTakeoverSnapshot(next, true, true);
     } catch (error) {
-      codexTakeoverError = formatBackendError(error);
+      setProviderError(formatBackendError(error));
       throw error;
     }
   }
@@ -1366,10 +1282,9 @@ import {
       const eckyThreadId = agyProviderSnapshot?.binding.eckyThreadId;
       if (!eckyThreadId) return;
       try {
-        applyAgyProviderSnapshot(await removeAgyQueuedPrompt(eckyThreadId, queueId), true);
-        codexTakeoverError = null;
+        applyAgyProviderSnapshot(await removeAgyQueuedPrompt(eckyThreadId, queueId), true, true);
       } catch (error) {
-        codexTakeoverError = formatBackendError(error);
+        setProviderError(formatBackendError(error));
         throw error;
       }
       return;
@@ -1378,10 +1293,9 @@ import {
     if (!eckyThreadId) return;
     try {
       const next = await removeCodexQueuedPrompt(eckyThreadId, queueId);
-      applyCodexTakeoverSnapshot(next, true);
-      codexTakeoverError = null;
+      applyCodexTakeoverSnapshot(next, true, true);
     } catch (error) {
-      codexTakeoverError = formatBackendError(error);
+      setProviderError(formatBackendError(error));
       throw error;
     }
   }
@@ -1398,29 +1312,21 @@ import {
     const terminalEvent = event.method === 'turn/completed'
       || event.method === 'thread/status/changed' && !event.runtime?.activeTurnId;
     if (event.liveMessages && event.runtime) {
-      codexTakeoverSnapshot = {
-        ...snapshot,
-        liveMessages: event.liveMessages,
-        turnTraces: event.turnTraces ?? snapshot.turnTraces,
-        runtime: event.runtime,
-      };
-      codexTakeoverError = event.runtime.error;
+      reduceCodexProvider({ type: 'live', liveMessages: event.liveMessages, turnTraces: event.turnTraces, runtime: event.runtime });
       if (!terminalEvent) return;
     }
     if (codexTakeoverRefreshTimer) clearTimeout(codexTakeoverRefreshTimer);
     codexTakeoverRefreshTimer = setTimeout(() => {
       codexTakeoverRefreshTimer = null;
       const eckyThreadId = snapshot.binding.eckyThreadId;
-      const canAdvanceQueue = terminalEvent;
-      const refresh = canAdvanceQueue
-        ? dispatchCodexPromptQueue(eckyThreadId)
-        : getCodexTakeover(eckyThreadId);
+      const refresh = getCodexTakeover(eckyThreadId);
       void refresh
         .then((next) => {
+          if (!isProviderResultCurrent(codexTakeoverSnapshot, eckyThreadId)) return;
           if (next) applyCodexTakeoverSnapshot(next, true);
-          codexTakeoverError = next?.runtime.error ?? null;
+          setProviderError(next?.runtime.error ?? null);
         })
-        .catch((error) => { codexTakeoverError = formatBackendError(error); });
+        .catch((error) => { setProviderError(formatBackendError(error)); });
     }, terminalEvent ? 40 : 250);
   }
 
@@ -1435,28 +1341,21 @@ import {
     if (!snapshot || event.conversationId !== snapshot.binding.agyConversationId) return;
     const terminalEvent = event.method === 'turn/result' || event.method === 'turn/terminal';
     if (event.liveMessages && event.runtime) {
-      agyProviderSnapshot = {
-        ...snapshot,
-        liveMessages: event.liveMessages,
-        turnTraces: event.turnTraces ?? snapshot.turnTraces,
-        runtime: event.runtime,
-      };
-      codexTakeoverError = event.runtime.error;
+      reduceAgyProvider({ type: 'live', liveMessages: event.liveMessages, turnTraces: event.turnTraces, runtime: event.runtime });
       if (!terminalEvent) return;
     }
     if (agyProviderRefreshTimer) clearTimeout(agyProviderRefreshTimer);
     agyProviderRefreshTimer = setTimeout(() => {
       agyProviderRefreshTimer = null;
       const eckyThreadId = snapshot.binding.eckyThreadId;
-      const refresh = terminalEvent
-        ? dispatchAgyPromptQueue(eckyThreadId)
-        : getAgyProvider(eckyThreadId);
+      const refresh = getAgyProvider(eckyThreadId);
       void refresh
         .then((next) => {
+          if (!isProviderResultCurrent(agyProviderSnapshot, eckyThreadId)) return;
           if (next) applyAgyProviderSnapshot(next, true);
-          codexTakeoverError = agyProviderError(next);
+          setProviderError(agyProviderError(next));
         })
-        .catch((error) => { codexTakeoverError = formatBackendError(error); });
+        .catch((error) => { setProviderError(formatBackendError(error)); });
     }, terminalEvent ? 40 : 250);
   }
 
@@ -1505,8 +1404,6 @@ import {
     reason: string;
   };
   let pendingAgentPrompts = $state<PendingAgentPrompt[]>([]);
-  // Plain Set (non-reactive) — mutations must not re-trigger the drain effect.
-  const autoDrainingPromptRequestIds = new Set<string>();
   let pendingViewportScreenshotChoices = $state<PendingViewportScreenshotChoice[]>([]);
 
   let activeControlViewId = $state<string | null>(null);
@@ -1872,17 +1769,24 @@ import {
       ? femMeshPreview
       : null,
   );
-  let captureSessionState = $state<'pairing' | 'capturing' | 'reconstructing' | 'preview' | 'failed' | 'cancelled'>('pairing');
-  let captureSessionToken = $state('');
-  let captureRunId = $state('');
-  let capturePairingUrl = $state('No pairing session yet');
-  let captureTrustUrl = $state('');
-  let captureGuidance = $state('PAIR PHONE');
-  let captureCameraStatus = $state('Camera permission pending');
-  let captureAcceptedFrameCount = $state(0);
-  let captureMeshPreview = $state<CaptureMeshPreview | null>(null);
-  let capturePreviewBundle = $state<ArtifactBundle | null>(null);
-  let capturePreviewManifest = $state<ModelManifest | null>(null);
+  let captureWorkspaceState = $state(createCaptureWorkspaceState());
+  function transitionCaptureWorkspace(action: CaptureWorkspaceAction) {
+    captureWorkspaceState = reduceCaptureWorkspace(captureWorkspaceState, action);
+  }
+  function patchCaptureWorkspace(patch: NonNullable<Extract<CaptureWorkspaceAction, { type: 'patch' }>['patch']>) {
+    transitionCaptureWorkspace({ type: 'patch', patch });
+  }
+  const captureSessionState = $derived(captureWorkspaceState.phase);
+  const captureSessionToken = $derived(captureWorkspaceState.sessionToken);
+  const captureRunId = $derived(captureWorkspaceState.runId);
+  const capturePairingUrl = $derived('pairingUrl' in captureWorkspaceState ? captureWorkspaceState.pairingUrl : 'No pairing session yet');
+  const captureTrustUrl = $derived('trustUrl' in captureWorkspaceState ? captureWorkspaceState.trustUrl : '');
+  const captureGuidance = $derived(captureWorkspaceState.guidance);
+  const captureCameraStatus = $derived(captureWorkspaceState.cameraStatus);
+  const captureAcceptedFrameCount = $derived(captureWorkspaceState.acceptedFrameCount);
+  const captureMeshPreview = $derived(captureWorkspaceState.meshPreview);
+  const capturePreviewBundle = $derived(captureWorkspaceState.preview?.bundle ?? null);
+  const capturePreviewManifest = $derived(captureWorkspaceState.preview?.manifest ?? null);
   let capturePreviewApplied = $state(false);
   let capturePreviewScale = $state(0.05);
   let captureCropEnabled = $state(false);
@@ -1899,10 +1803,9 @@ import {
   let externalShapeLoadToken = 0;
   let externalShapeRefreshKey = '';
   let captureSolidifySource = $state('');
+  let captureApplyPending = $state(false);
   let captureTargetThreadId = $state('');
   let captureTargetMessageId = $state<string | null>(null);
-  let captureTargetSource = $state('');
-  let captureTargetSourceLanguage = $state('ecky');
   let captureTargetTitle = $state('');
   let captureTargetDraft = $state<WorkingCopyState | null>(null);
   let captureStartedFromUnboundWorkspace = $state(false);
@@ -1939,7 +1842,6 @@ import {
   let captureGeneratedVisible = $state(true);
   let captureGeneratedOpacity = $state(1);
   let captureDeviationVisible = $state(true);
-  let captureGuideSaveChain: Promise<void> = Promise.resolve();
   const captureGuideReadiness = $derived(
     captureGuide ? mechanicalGuideReadiness(captureGuide) : { ready: false, reasons: ['Start guided CAD.'] },
   );
@@ -2133,6 +2035,56 @@ import {
     }
   }
 
+  function projectExternalShapeEdit(
+    threadId: string,
+    result: Awaited<ReturnType<typeof applyExternalShapeEdit>>,
+  ) {
+    const version = result.version;
+    if (
+      version.status === 'error' ||
+      version.error ||
+      !version.messageId ||
+      !version.artifactBundle ||
+      !version.modelManifest ||
+      !version.snapshotId
+    ) {
+      throw version.error ?? new Error('External shape edit returned no persisted runtime.');
+    }
+    rememberCommittedVersionMessage(threadId, version.designOutput.title, {
+      id: version.messageId,
+      role: 'assistant',
+      content: version.designOutput.response,
+      status: version.status,
+      output: version.designOutput,
+      usage: null,
+      artifactBundle: version.artifactBundle,
+      modelManifest: version.modelManifest,
+      agentOrigin: null,
+      imageData: null,
+      visualKind: null,
+      attachmentImages: [],
+      timestamp: Date.now() / 1000,
+    });
+    hydrateActiveRenderSnapshot({
+      snapshotId: version.snapshotId,
+      threadId,
+      messageId: version.messageId,
+      design: version.designOutput,
+      artifactBundle: version.artifactBundle,
+      modelManifest: version.modelManifest,
+      selectedPartId: null,
+      stlUrl: toAssetUrl(version.artifactBundle.modelStlPath),
+      status: 'External shape edit applied.',
+    });
+    externalShapeSources = result.externalSources;
+    if (!externalShapeSources.some(source => source.nodeId === selectedExternalShapeNodeId)) {
+      selectedExternalShapeNodeId = externalShapeSources.length === 1
+        ? externalShapeSources[0].nodeId
+        : null;
+    }
+    externalShapeRefreshKey = `${threadId}:${result.sourceDigest}`;
+  }
+
   async function applySelectedExternalShapePlaneCrop(
     anchors: CaptureSurfaceAnchor[],
     keepPositive: boolean,
@@ -2143,18 +2095,20 @@ import {
     if (!threadId || !selected || !selected.contentDigest) {
       throw new Error('Plane crop requires one readable bound STL source.');
     }
-    const result = await applyExternalShapePlaneCrop({
+    const result = await applyExternalShapeEdit({
       threadId,
-      nodeId: selected.nodeId,
+      baseMessageId: get(activeVersionId),
       expectedSourceDigest: selected.sourceDigest,
-      expectedMeshContentDigest: selected.contentDigest,
-      anchors,
-      keepPositive,
-      replaceCropNodeId,
+      edit: {
+        action: 'applyPlaneCrop',
+        nodeId: selected.nodeId,
+        expectedMeshContentDigest: selected.contentDigest,
+        anchors,
+        keepPositive,
+        replaceCropNodeId,
+      },
     });
-    await applyManualCodeDraft(result.source);
-    externalShapeRefreshKey = '';
-    await refreshExternalShapeSources(threadId, true);
+    projectExternalShapeEdit(threadId, result);
   }
 
   async function removeSelectedExternalShapePlaneCrop(cropNodeId: number) {
@@ -2163,15 +2117,13 @@ import {
     if (!threadId || !selected) {
       throw new Error('Plane crop removal requires one bound STL source.');
     }
-    const result = await removeExternalShapePlaneCrop({
+    const result = await applyExternalShapeEdit({
       threadId,
-      nodeId: selected.nodeId,
-      cropNodeId,
+      baseMessageId: get(activeVersionId),
       expectedSourceDigest: selected.sourceDigest,
+      edit: { action: 'removePlaneCrop', nodeId: selected.nodeId, cropNodeId },
     });
-    await applyManualCodeDraft(result.source);
-    externalShapeRefreshKey = '';
-    await refreshExternalShapeSources(threadId, true);
+    projectExternalShapeEdit(threadId, result);
   }
 
   function requireSelectedExternalShape(operation: string) {
@@ -2258,93 +2210,34 @@ import {
     targetMessageId: string | null,
   ) {
     const { threadId, selected, contentDigest } = requireSelectedExternalShape('Surface trim');
-    const sourceSnapshot = externalShapeSources;
-    const result = await applyExternalShapeSurfaceTrim({
-      schemaVersion: 1,
+    const result = await applyExternalShapeEdit({
       threadId,
-      targetMessageId,
-      nodeId: selected.nodeId,
+      baseMessageId: targetMessageId,
       expectedSourceDigest: selected.sourceDigest,
-      expectedMeshContentDigest: contentDigest,
-      loopAnchors,
-      keepSeed,
-      pathMode,
-      capMode,
-      replaceTrimNodeId,
-    });
-    await applyManualCodeDraft(result.source);
-    externalShapeRefreshKey = '';
-    await refreshExternalShapeSources(threadId, true);
-    if (get(activeThreadId) === threadId) {
-      const appliedTrim = {
-        nodeId: result.trimNodeId,
+      edit: {
+        action: 'applySurfaceTrim',
         schemaVersion: 1,
-        sourceDigest: contentDigest,
-        loopAnchors: loopAnchors.map(({ triangleIndex, barycentric, sourcePosition, sourceNormal }) => ({
-          triangleIndex,
-          barycentric,
-          sourcePosition,
-          sourceNormal,
-        })),
-        keepSeed: {
-          triangleIndex: keepSeed.triangleIndex,
-          barycentric: keepSeed.barycentric,
-          sourcePosition: keepSeed.sourcePosition,
-          sourceNormal: keepSeed.sourceNormal,
-        },
+        nodeId: selected.nodeId,
+        expectedMeshContentDigest: contentDigest,
+        loopAnchors,
+        keepSeed,
         pathMode,
         capMode,
-      } satisfies ExternalShapeSource['surfaceTrims'][number];
-      const refreshedSelected = externalShapeSources.find(source => source.path === selected.path);
-      const refreshedHasAppliedTrim = refreshedSelected?.sourceDigest === result.sourceDigest
-        && refreshedSelected.surfaceTrims.some(trim => trim.nodeId === result.trimNodeId);
-      if (refreshedHasAppliedTrim && refreshedSelected) {
-        selectedExternalShapeNodeId = refreshedSelected.nodeId;
-        return;
-      }
-      const currentSources = refreshedSelected ? externalShapeSources : sourceSnapshot;
-      externalShapeSources = currentSources.map((source) => source.path === selected.path
-        ? {
-            ...source,
-            sourceDigest: result.sourceDigest,
-            surfaceTrims: [appliedTrim],
-          }
-        : source);
-      selectedExternalShapeNodeId = (refreshedSelected ?? selected).nodeId;
-    }
+        replaceTrimNodeId,
+      },
+    });
+    projectExternalShapeEdit(threadId, result);
   }
 
   async function removeSelectedExternalShapeSurfaceTrim(trimNodeId: number) {
     const { threadId, selected } = requireSelectedExternalShape('Surface trim removal');
-    const sourceSnapshot = externalShapeSources;
-    const result = await removeExternalShapeSurfaceTrim({
+    const result = await applyExternalShapeEdit({
       threadId,
-      targetMessageId: get(activeVersionId),
-      nodeId: selected.nodeId,
-      trimNodeId,
+      baseMessageId: get(activeVersionId),
       expectedSourceDigest: selected.sourceDigest,
+      edit: { action: 'removeSurfaceTrim', nodeId: selected.nodeId, trimNodeId },
     });
-    await applyManualCodeDraft(result.source);
-    externalShapeRefreshKey = '';
-    await refreshExternalShapeSources(threadId, true);
-    if (get(activeThreadId) === threadId) {
-      const refreshedSelected = externalShapeSources.find(source => source.path === selected.path);
-      const refreshedHasRemovedTrim = refreshedSelected?.sourceDigest === result.sourceDigest
-        && refreshedSelected.surfaceTrims.every(trim => trim.nodeId !== trimNodeId);
-      if (refreshedHasRemovedTrim && refreshedSelected) {
-        selectedExternalShapeNodeId = refreshedSelected.nodeId;
-        return;
-      }
-      const currentSources = refreshedSelected ? externalShapeSources : sourceSnapshot;
-      externalShapeSources = currentSources.map((source) => source.path === selected.path
-        ? {
-            ...source,
-            sourceDigest: result.sourceDigest,
-            surfaceTrims: [],
-          }
-        : source);
-      selectedExternalShapeNodeId = (refreshedSelected ?? selected).nodeId;
-    }
+    projectExternalShapeEdit(threadId, result);
   }
 
   function syncCaptureGuidedResult(run: CaptureRun) {
@@ -2397,12 +2290,9 @@ import {
 
   async function hydrateReopenedCapture(reopened: ReopenedCaptureRun) {
     const { run, session: reopenedSession } = reopened;
-    captureSessionToken = reopenedSession.pairingToken;
-    captureRunId = run.id;
+    patchCaptureWorkspace({ sessionToken: reopenedSession.pairingToken, runId: run.id });
     captureTargetThreadId = run.targetThreadId;
     captureTargetMessageId = run.targetMessageId ?? null;
-    captureTargetSource = run.targetSource;
-    captureTargetSourceLanguage = run.targetSourceLanguage;
     captureTargetTitle = run.title;
     captureStartedFromUnboundWorkspace = run.startedFromEmpty;
     const currentDraft = get(workingCopy);
@@ -2415,13 +2305,15 @@ import {
       sourceVersionId: run.targetMessageId ?? null,
       dirty: false,
     };
-    capturePairingUrl = reopenedSession.pairingUrl;
-    captureTrustUrl = reopenedSession.trustUrl;
-    captureSessionState = captureSessionStateFromBackend(reopenedSession.state);
-    captureAcceptedFrameCount = reopenedSession.acceptedFrameCount ?? run.acceptedFrameCount;
-    captureMeshPreview = reopenedSession.meshPreview ?? run.meshPreview ?? null;
-    capturePreviewBundle = null;
-    capturePreviewManifest = null;
+    patchCaptureWorkspace({ pairingUrl: reopenedSession.pairingUrl, trustUrl: reopenedSession.trustUrl, acceptedFrameCount: reopenedSession.acceptedFrameCount ?? run.acceptedFrameCount });
+    const reopenedPhase = captureSessionStateFromBackend(reopenedSession.state);
+    patchCaptureWorkspace({
+      phase: reopenedPhase,
+      meshPreview: reopenedSession.meshPreview ?? run.meshPreview ?? null,
+      error: reopenedPhase === 'failed'
+        ? reopenedSession.rawError || 'Capture restore failed'
+        : null,
+    });
     capturePreviewApplied = false;
     capturePreviewScale = run.previewScale;
     capturePreparedCropKey = null;
@@ -2448,8 +2340,7 @@ import {
     } else {
       resetCaptureCropState();
     }
-    captureGuidance = captureMeshPreview ? 'PREPARING PREVIEW' : 'ADD PHOTOS';
-    captureCameraStatus = `${captureAcceptedFrameCount} source frames restored`;
+    patchCaptureWorkspace({ guidance: captureMeshPreview ? 'PREPARING PREVIEW' : 'ADD PHOTOS', cameraStatus: `${captureAcceptedFrameCount} source frames restored`, preview: null });
     showWindow('capture');
     if (capturePollTimer !== null) clearInterval(capturePollTimer);
     capturePollTimer = setInterval(() => void pollCaptureSession(), 1000);
@@ -2461,87 +2352,79 @@ import {
       await hydrateReopenedCapture(await reopenCaptureRun(runId));
     } catch (error) {
       showWindow('capture');
-      captureSessionState = 'failed';
-      captureGuidance = 'CAPTURE RESTORE FAILED';
-      captureCameraStatus = formatBackendError(error);
+      patchCaptureWorkspace({ phase: 'failed', guidance: 'CAPTURE RESTORE FAILED', cameraStatus: formatBackendError(error), error: formatBackendError(error) });
     }
   }
 
   async function openLastStoredCapture() {
     const currentThreadId = get(activeThreadId);
-    const startedFromEmpty = currentThreadId === null;
-    const targetThreadId = currentThreadId ?? crypto.randomUUID();
-    const targetMessageId = get(activeVersionId);
     const draft = get(workingCopy);
-    const title = draft.title || activeThread?.title || `Capture ${targetThreadId.slice(0, 8)}`;
     try {
-      const reopened = await adoptLatestCaptureRun(
-        targetThreadId,
-        targetMessageId,
-        title,
-        draft.macroCode,
-        draft.sourceLanguage,
-        startedFromEmpty,
-      );
+      const reopened = await adoptLatestCaptureRun(currentThreadId ? {
+        threadId: currentThreadId,
+        messageId: get(activeVersionId),
+        source: draft.macroCode,
+        sourceLanguage: draft.sourceLanguage,
+      } : null);
       await hydrateReopenedCapture(reopened);
       await refreshHistory();
       void refreshCaptureHistoryRuns(reopened.run.targetThreadId);
     } catch (error) {
-      captureSessionState = 'failed';
-      captureGuidance = 'CAPTURE RESTORE FAILED';
-      captureCameraStatus = formatBackendError(error);
+      patchCaptureWorkspace({ phase: 'failed', guidance: 'CAPTURE RESTORE FAILED', cameraStatus: formatBackendError(error), error: formatBackendError(error) });
     }
   }
 
   async function startCaptureSession() {
-    captureSessionState = 'capturing';
-    captureGuidance = 'PAIRING';
-    captureCameraStatus = 'Starting capture session...';
+    patchCaptureWorkspace({ phase: 'capturing', guidance: 'PAIRING', cameraStatus: 'Starting capture session...', error: null });
     try {
       const currentThreadId = get(activeThreadId);
-      captureStartedFromUnboundWorkspace = currentThreadId === null;
-      const targetThreadId = currentThreadId ?? crypto.randomUUID();
-      const targetMessageId = get(activeVersionId);
       const draft = get(workingCopy);
-      captureTargetDraft = currentThreadId
+      const existingDraft = currentThreadId
         ? { ...draft, params: { ...draft.params }, uiSpec: { ...draft.uiSpec, fields: [...draft.uiSpec.fields] } }
+        : null;
+      const session = await startCaptureSessionCommand(currentThreadId ? {
+        threadId: currentThreadId,
+        messageId: get(activeVersionId),
+        source: draft.macroCode,
+        sourceLanguage: draft.sourceLanguage,
+      } : null);
+      captureTargetDraft = existingDraft
+        ? {
+            ...existingDraft,
+            title: session.targetTitle,
+            macroCode: session.targetSource,
+            sourceLanguage: session.targetSourceLanguage as WorkingCopyState['sourceLanguage'],
+            sourceVersionId: session.targetMessageId ?? null,
+          }
         : {
-            title: `Capture ${targetThreadId.slice(0, 8)}`,
+            title: session.targetTitle,
             versionName: 'Capture Draft',
-            macroCode: '',
+            macroCode: session.targetSource,
             macroDialect: 'ecky',
             engineKind: 'ecky',
-            sourceLanguage: 'ecky',
+            sourceLanguage: session.targetSourceLanguage as WorkingCopyState['sourceLanguage'],
             geometryBackend: 'mesh',
             uiSpec: { fields: [] },
             params: {},
             postProcessing: null,
             dirty: false,
-            sourceVersionId: null,
+            sourceVersionId: session.targetMessageId ?? null,
           };
-      const captureTitle = captureTargetDraft.title || activeThread?.title || `Capture ${targetThreadId.slice(0, 8)}`;
-      const session = await startCaptureSessionCommand(
-        targetThreadId,
-        targetMessageId,
-        captureTitle,
-        captureTargetDraft.macroCode,
-        captureTargetDraft.sourceLanguage,
-        captureStartedFromUnboundWorkspace,
-      );
-      captureSessionToken = session.pairingToken;
-      captureRunId = session.sessionId;
+      patchCaptureWorkspace({ sessionToken: session.pairingToken, runId: session.sessionId });
       captureTargetThreadId = session.targetThreadId;
       captureTargetMessageId = session.targetMessageId ?? null;
-      captureTargetSource = captureTargetDraft.macroCode;
-      captureTargetSourceLanguage = captureTargetDraft.sourceLanguage;
-      captureTargetTitle = captureTitle;
-      capturePairingUrl = session.pairingUrl;
-      captureTrustUrl = session.trustUrl;
-      captureSessionState = captureSessionStateFromBackend(session.state);
-      captureAcceptedFrameCount = session.acceptedFrameCount ?? 0;
-      captureMeshPreview = null;
-      capturePreviewBundle = null;
-      capturePreviewManifest = null;
+      captureTargetTitle = session.targetTitle;
+      captureStartedFromUnboundWorkspace = session.startedFromEmpty;
+      const startedPhase = captureSessionStateFromBackend(session.state);
+      patchCaptureWorkspace({
+        pairingUrl: session.pairingUrl,
+        trustUrl: session.trustUrl,
+        phase: startedPhase,
+        acceptedFrameCount: session.acceptedFrameCount ?? 0,
+        meshPreview: session.meshPreview ?? null,
+        preview: null,
+        error: startedPhase === 'failed' ? session.rawError || 'Capture failed to start' : null,
+      });
       capturePreviewApplied = false;
       capturePreviewScale = 0.05;
       resetCaptureCropState();
@@ -2565,16 +2448,13 @@ import {
       captureComparisonError = '';
       captureGuidedResult = null;
       captureGuidedDeviation = null;
-      captureGuidance = 'OPEN LINK ON PHONE';
-      captureCameraStatus = 'Waiting for phone camera';
-      void refreshCaptureHistoryRuns(targetThreadId);
+      patchCaptureWorkspace({ guidance: 'OPEN LINK ON PHONE', cameraStatus: 'Waiting for phone camera' });
+      void refreshCaptureHistoryRuns(session.targetThreadId);
       void refreshHistory();
       if (capturePollTimer !== null) clearInterval(capturePollTimer);
       capturePollTimer = setInterval(() => void pollCaptureSession(), 1000);
     } catch (error) {
-      captureSessionState = 'failed';
-      captureGuidance = 'PAIR PHONE';
-      captureCameraStatus = formatBackendError(error);
+      patchCaptureWorkspace({ phase: 'failed', guidance: 'PAIR PHONE', cameraStatus: formatBackendError(error), error: formatBackendError(error) });
     }
   }
 
@@ -2591,15 +2471,13 @@ import {
     capturePreviewPreparePromise = (async () => {
       try {
         const prepared = await prepareCapturePreview(captureSessionToken, capturePreviewCropBounds);
-        capturePreviewBundle = prepared.artifactBundle;
-        capturePreviewManifest = prepared.modelManifest;
+        patchCaptureWorkspace({ preview: { bundle: prepared.artifactBundle, manifest: prepared.modelManifest, applied: false, cropBounds: null } });
         capturePreparedCropKey = requestedCropKey;
-        captureGuidance = 'INSPECT MESH';
-        captureCameraStatus = 'Preview ready inside Capture window';
+        patchCaptureWorkspace({ guidance: 'INSPECT MESH', cameraStatus: 'Preview ready inside Capture window' });
         return true;
       } catch (error) {
         capturePreviewPrepareError = formatBackendError(error);
-        captureCameraStatus = capturePreviewPrepareError;
+        patchCaptureWorkspace({ cameraStatus: capturePreviewPrepareError, error: capturePreviewPrepareError, phase: 'failed' });
         return false;
       } finally {
         capturePreviewPreparePromise = null;
@@ -2613,21 +2491,22 @@ import {
     try {
       const session = await getCaptureSessionStatusCommand(captureSessionToken);
       if (!session) throw new Error('Capture session expired or was revoked.');
-      captureSessionState = captureSessionStateFromBackend(session.state);
-      captureAcceptedFrameCount = session.acceptedFrameCount ?? 0;
-      captureMeshPreview = session.meshPreview ?? null;
-      if (captureSessionState === 'capturing') {
-        captureGuidance = session.guidance || 'CAPTURING';
-        captureCameraStatus = `${captureAcceptedFrameCount} source frames stored`;
-      } else if (captureSessionState === 'reconstructing') {
-        captureGuidance = `RECONSTRUCTING ${Math.round((session.reconstructionProgress ?? 0) * 100)}%`;
-        captureCameraStatus = `${captureAcceptedFrameCount} source frames retained`;
-      } else if (captureSessionState === 'preview') {
-        captureGuidance = capturePreviewBundle ? 'INSPECT MESH' : 'PREPARING PREVIEW';
-        captureCameraStatus = capturePreviewPrepareError
+      const polledPhase = captureSessionStateFromBackend(session.state);
+      patchCaptureWorkspace({
+        phase: polledPhase,
+        acceptedFrameCount: session.acceptedFrameCount ?? 0,
+        meshPreview: session.meshPreview ?? null,
+        error: polledPhase === 'failed' ? session.rawError || 'Capture failed' : null,
+      });
+      if (polledPhase === 'capturing') {
+        patchCaptureWorkspace({ guidance: session.guidance || 'CAPTURING', cameraStatus: `${captureAcceptedFrameCount} source frames stored` });
+      } else if (polledPhase === 'reconstructing') {
+        patchCaptureWorkspace({ guidance: `RECONSTRUCTING ${Math.round((session.reconstructionProgress ?? 0) * 100)}%`, cameraStatus: `${captureAcceptedFrameCount} source frames retained`, progress: session.reconstructionProgress ?? 0 });
+      } else if (polledPhase === 'preview') {
+        patchCaptureWorkspace({ guidance: capturePreviewBundle ? 'INSPECT MESH' : 'PREPARING PREVIEW', cameraStatus: capturePreviewPrepareError
           || (capturePreviewApplied
             ? 'Capture solidify draft applied'
-            : 'Source frames retained; no version committed');
+            : 'Source frames retained; no version created') });
         if (
           captureTargetThreadId &&
           !isCaptureTargetCurrent() &&
@@ -2646,14 +2525,11 @@ import {
         if (captureGuideMode && captureTargetThreadId) {
           void refreshCaptureHistoryRuns(captureTargetThreadId);
         }
-      } else if (captureSessionState === 'failed') {
-        captureGuidance = 'RECONSTRUCTION FAILED';
-        captureCameraStatus = session.rawError || 'Capture failed';
+      } else if (polledPhase === 'failed') {
+        patchCaptureWorkspace({ phase: 'failed', guidance: 'RECONSTRUCTION FAILED', cameraStatus: session.rawError || 'Capture failed', error: session.rawError || 'Capture failed' });
       }
     } catch (error) {
-      captureSessionState = 'failed';
-      captureGuidance = 'CAPTURE FAILED';
-      captureCameraStatus = formatBackendError(error);
+      patchCaptureWorkspace({ phase: 'failed', guidance: 'CAPTURE FAILED', cameraStatus: formatBackendError(error), error: formatBackendError(error) });
       if (capturePollTimer !== null) clearInterval(capturePollTimer);
       capturePollTimer = null;
     }
@@ -2661,21 +2537,13 @@ import {
 
   async function cancelCaptureSession() {
     if (!captureSessionToken) {
-      captureSessionState = 'cancelled';
-      captureGuidance = 'PAIR PHONE';
-      captureCameraStatus = 'Session cancelled';
+      transitionCaptureWorkspace({ type: 'cancel' });
       return;
     }
 
     try {
       const session = await cancelCaptureSessionCommand(captureSessionToken);
-      captureSessionState = captureSessionStateFromBackend(session.state);
-      capturePairingUrl = 'No pairing session yet';
-      captureTrustUrl = '';
-      captureAcceptedFrameCount = 0;
-      captureMeshPreview = null;
-      capturePreviewBundle = null;
-      capturePreviewManifest = null;
+      transitionCaptureWorkspace({ type: 'cancel' });
       capturePreviewApplied = false;
       resetCaptureCropState();
       capturePreviewPrepareError = '';
@@ -2693,12 +2561,9 @@ import {
       captureGuidedDeviation = null;
       if (capturePollTimer !== null) clearInterval(capturePollTimer);
       capturePollTimer = null;
-      captureGuidance = 'PAIR PHONE';
-      captureCameraStatus = 'Session cancelled';
+      patchCaptureWorkspace({ guidance: 'PAIR PHONE', cameraStatus: 'Session cancelled' });
     } catch (error) {
-      captureSessionState = 'failed';
-      captureGuidance = 'PAIR PHONE';
-      captureCameraStatus = formatBackendError(error);
+      patchCaptureWorkspace({ phase: 'failed', guidance: 'PAIR PHONE', cameraStatus: formatBackendError(error), error: formatBackendError(error) });
     }
   }
 
@@ -2708,194 +2573,165 @@ import {
       return;
     }
     try {
-      const context = await getCaptureGuideContext(captureRunId);
-      const restored = await getCaptureReconstructionGuide(captureRunId);
-      if (restored && restored.sourceMesh.contentDigest !== context.sourceMesh.contentDigest) {
-        captureGuideError = 'Guide is stale: selected crop/source mesh digest changed.';
-        captureGuideState = { status: 'stale', reason: captureGuideError };
-        captureGuideMode = true;
-        captureCropEnabled = false;
-        return;
-      }
-      captureGuideSource = context.sourceMesh;
-      captureGuide = restored ?? createCaptureGuideDraft(
-        captureRunId,
-        captureTargetThreadId,
-        captureTargetMessageId,
-        context.targetSourceDigest,
-        context.targetVersionId,
-        context.sourceMesh,
-      );
+      const ensured = await ensureCaptureReconstructionGuide(captureRunId);
+      captureGuideSource = ensured.guide.sourceMesh;
+      captureGuide = ensured.guide;
       captureGuideHistory = createCaptureGuideDraftHistory(captureGuide);
-      captureGuideInstruction = restored?.instruction ?? '';
+      captureGuideInstruction = captureGuide.instruction;
       captureGuideSelectedLandmarkId = null;
       captureGuideBackendRevision = captureGuide.revision;
-      captureGuideState = restored ? (captureGuideState ?? { status: 'draft' }) : { status: 'draft' };
+      captureGuideState = ensured.state;
       captureGuideMode = true;
       captureCropEnabled = false;
       captureGuideError = '';
       captureGuidePickRole = 'calibrationEndpoint';
-      captureCameraStatus = 'Guided CAD: pick digest-bound scan evidence';
+      patchCaptureWorkspace({ cameraStatus: 'Guided CAD: pick digest-bound scan evidence' });
     } catch (error) {
       captureGuideError = formatBackendError(error);
-      captureCameraStatus = captureGuideError;
+      patchCaptureWorkspace({ cameraStatus: captureGuideError });
     }
-  }
-
-  function queueCaptureGuideDraftSave(snapshot: CaptureReconstructionGuide) {
-    captureGuideSaveChain = captureGuideSaveChain.then(async () => {
-      if (!captureGuideSource) return;
-      const guarded = JSON.parse(JSON.stringify(snapshot)) as CaptureReconstructionGuide;
-      guarded.revision = captureGuideBackendRevision;
-      const saved = await saveCaptureReconstructionGuide(
-        captureRunId,
-        captureGuideBackendRevision,
-        captureGuideSource.contentDigest,
-        guarded,
-        { status: 'draft' },
-      );
-      captureGuideBackendRevision = saved.revision;
-      if (captureGuide?.guideId === saved.guideId) {
-        captureGuide = {
-          ...captureGuide,
-          revision: saved.revision,
-          canonicalDigest: saved.canonicalDigest,
-        };
-      }
-      captureGuideState = { status: 'draft' };
-      captureGuideError = '';
-    }).catch((error) => {
-      captureGuideError = formatBackendError(error);
-      captureCameraStatus = captureGuideError;
-    });
   }
 
   function addCaptureGuideAnchor(anchor: CaptureSurfaceAnchor) {
     if (!captureGuide || !captureGuideSource || captureGuideState?.status === 'stale') return;
-    try {
-      applyCaptureGuideEdit(addCaptureLandmark(captureGuide, captureGuidePickRole, anchor));
-      captureGuideSelectedLandmarkId = captureGuide?.landmarks.at(-1)?.landmarkId ?? null;
-      captureCameraStatus = `${captureGuide.landmarks.length} guide landmarks; ${captureGuidePickRole}`;
-    } catch (error) {
-      captureGuideError = formatBackendError(error);
-    }
-  }
-
-  function applyCaptureGuideEdit(next: CaptureReconstructionGuide) {
-    if (!captureGuide) return;
-    const history = captureGuideHistory ?? createCaptureGuideDraftHistory(captureGuide);
-    captureGuideHistory = applyCaptureGuideDraftEdit(history, next);
-    captureGuide = captureGuideHistory.present;
-    captureGuideState = { status: 'draft' };
-    queueCaptureGuideDraftSave(captureGuide);
+    void applyCaptureGuideIntent({ kind: 'addLandmark', role: captureGuidePickRole, anchor })
+      .then(saved => {
+        if (!saved) return;
+        captureGuideSelectedLandmarkId = saved.landmarks.at(-1)?.landmarkId ?? null;
+        patchCaptureWorkspace({ cameraStatus: `${saved.landmarks.length} guide landmarks; ${captureGuidePickRole}` });
+      });
   }
 
   function undoCaptureGuideEdit() {
     if (!captureGuideHistory || captureGuideHistory.past.length === 0) return;
-    captureGuideHistory = undoCaptureGuideDraftEdit(captureGuideHistory);
-    captureGuide = captureGuideHistory.present;
-    if (!captureGuide.landmarks.some(item => item.landmarkId === captureGuideSelectedLandmarkId)) {
-      captureGuideSelectedLandmarkId = null;
+    const previous = captureGuideHistory.past.at(-1);
+    if (!previous) return;
+    void applyCaptureGuideIntent({ kind: 'replaceDraft', guide: previous }, true)
+      .then(saved => {
+        if (saved && !saved.landmarks.some(item => item.landmarkId === captureGuideSelectedLandmarkId)) {
+          captureGuideSelectedLandmarkId = null;
+        }
+      });
+  }
+
+  async function applyCaptureGuideIntent(
+    edit: CaptureGuideEditIntent,
+    undo = false,
+  ): Promise<CaptureReconstructionGuide | null> {
+    if (!captureGuide || !captureGuideSource || captureGuideState?.status === 'stale') return null;
+    try {
+      const previous = captureGuide;
+      const history = captureGuideHistory ?? createCaptureGuideDraftHistory(previous);
+      const result = await applyCaptureGuideEditIntent({
+        runId: captureRunId,
+        expectedRevision: captureGuideBackendRevision,
+        expectedMeshDigest: captureGuideSource.contentDigest,
+        edit,
+      });
+      if (result.guide.revision < captureGuideBackendRevision) return null;
+      captureGuideBackendRevision = result.guide.revision;
+      captureGuideHistory = undo
+        ? { past: history.past.slice(0, -1), present: result.guide }
+        : applyCaptureGuideDraftEdit(history, result.guide);
+      captureGuide = captureGuideHistory.present;
+      captureGuideState = result.state;
+      captureGuideError = result.rawEvidence.join('\n');
+      return result.guide;
+    } catch (error) {
+      captureGuideError = formatBackendError(error);
+      patchCaptureWorkspace({ cameraStatus: captureGuideError });
+      return null;
     }
-    captureGuideState = { status: 'draft' };
-    queueCaptureGuideDraftSave(captureGuide);
   }
 
   function editCaptureGuideLandmark(landmarkId: string, edit: CaptureLandmarkEdit) {
-    if (!captureGuide) return;
-    try {
-      applyCaptureGuideEdit(updateCaptureLandmark(captureGuide, landmarkId, edit));
-    } catch (error) {
-      captureGuideError = formatBackendError(error);
-    }
+    void applyCaptureGuideIntent({
+      kind: 'updateLandmark',
+      landmarkId,
+      label: edit.label,
+      role: edit.role,
+    });
   }
 
   function deleteCaptureGuideLandmark(landmarkId: string) {
-    if (!captureGuide) return;
-    try {
-      applyCaptureGuideEdit(removeCaptureLandmark(captureGuide, landmarkId));
-      if (captureGuideSelectedLandmarkId === landmarkId) captureGuideSelectedLandmarkId = null;
-    } catch (error) {
-      captureGuideError = formatBackendError(error);
-    }
+    void applyCaptureGuideIntent({ kind: 'deleteLandmark', landmarkId });
+    if (captureGuideSelectedLandmarkId === landmarkId) captureGuideSelectedLandmarkId = null;
   }
 
   function editCaptureGuideProfile(profileId: string, edit: CaptureProfileEdit) {
     if (!captureGuide) return;
-    try {
-      applyCaptureGuideEdit(configureCaptureProfile(captureGuide, profileId, edit));
-    } catch (error) {
-      captureGuideError = formatBackendError(error);
-    }
+    const profile = captureGuide.profiles.find(item => item.profileId === profileId);
+    if (!profile) return;
+    const next = { ...profile, ...edit };
+    void applyCaptureGuideIntent({
+      kind: 'configureProfile',
+      profileId,
+      label: next.label,
+      profileKind: next.kind,
+      operationHint: next.operationHint,
+      supportPlaneId: next.supportPlaneId,
+      featureLabel: next.featureLabel ?? null,
+      fitRole: next.fitRole ?? null,
+    });
   }
 
   function reorderCaptureGuideProfile(profileId: string, landmarkId: string, targetIndex: number) {
-    if (!captureGuide) return;
-    try {
-      applyCaptureGuideEdit(moveCaptureProfileLandmark(captureGuide, profileId, landmarkId, targetIndex));
-    } catch (error) {
-      captureGuideError = formatBackendError(error);
-    }
+    void applyCaptureGuideIntent({ kind: 'reorderProfileLandmark', profileId, landmarkId, targetIndex });
   }
 
   function editCaptureGuideExpectation(expectationId: string, edit: CaptureFeatureExpectationEdit) {
     if (!captureGuide) return;
-    try {
-      applyCaptureGuideEdit(updateCaptureFeatureExpectation(captureGuide, expectationId, edit));
-    } catch (error) {
-      captureGuideError = formatBackendError(error);
-    }
+    const expectation = captureGuide.featureExpectations.find(item => item.expectationId === expectationId);
+    if (!expectation) return;
+    const next = { ...expectation, ...edit };
+    void applyCaptureGuideIntent({
+      kind: 'updateFeatureExpectation',
+      expectationId,
+      label: next.label,
+      expectedGeometryKind: next.expectedGeometryKind,
+      requiredBrepTopologyKind: next.requiredBrepTopologyKind,
+      cardinality: next.cardinality,
+      partId: next.partId,
+      instancePath: next.instancePath ?? null,
+      expectedAuthoredSelector: next.expectedAuthoredSelector,
+      requiredForAcceptance: next.requiredForAcceptance,
+      positionToleranceMm: next.positionToleranceMm ?? null,
+      normalToleranceDeg: next.normalToleranceDeg ?? null,
+      radialToleranceMm: next.radialToleranceMm ?? null,
+    });
   }
 
   function selectCaptureFeaturePlan(planId: string) {
-    if (!captureGuide) return;
-    const next = JSON.parse(JSON.stringify(captureGuide)) as CaptureReconstructionGuide;
-    next.selectedFeaturePlanId = planId;
-    applyCaptureGuideEdit(next);
+    void applyCaptureGuideIntent({ kind: 'selectFeaturePlan', planId });
   }
 
   async function validateCaptureGuide() {
     if (!captureGuide || !captureGuideSource) return;
     try {
-      await captureGuideSaveChain;
-      const finalized = finalizeMechanicalGuideDraft(
-        captureGuide,
-        captureGuideKnownDistanceMm,
-        captureGuideInstruction,
-        captureGuideFeatureDepthMm,
-      );
-      finalized.revision = captureGuideBackendRevision;
-      const evaluated = await evaluateCaptureReconstructionGuide(
-        captureRunId,
-        captureGuideSource.contentDigest,
-        finalized,
-      );
-      captureGuide = evaluated;
-      captureGuideHistory = createCaptureGuideDraftHistory(evaluated);
-      if (!evaluated.reconstructionReadiness?.ready) {
-        captureGuideState = { status: 'draft' };
-        captureGuideError = '';
-        captureCameraStatus = evaluated.reconstructionReadiness?.detail
-          ?? 'Deterministic reconstruction needs explicit evidence.';
-        return;
-      }
-      const saved = await saveCaptureReconstructionGuide(
-        captureRunId,
-        captureGuideBackendRevision,
-        captureGuideSource.contentDigest,
-        evaluated,
-        { status: 'ready' },
-      );
-      captureGuide = saved;
-      captureGuideHistory = createCaptureGuideDraftHistory(saved);
-      captureGuideBackendRevision = saved.revision;
-      captureGuideState = { status: 'ready' };
-      captureGuideError = '';
-      captureCameraStatus = `Guide revision ${saved.revision} ready for parametric BRep`;
+      const result = await validateCaptureGuideIntent({
+        runId: captureRunId,
+        expectedRevision: captureGuideBackendRevision,
+        expectedMeshDigest: captureGuideSource.contentDigest,
+        knownDistanceMm: captureGuideKnownDistanceMm,
+        instruction: captureGuideInstruction,
+        featureDepthMm: captureGuideFeatureDepthMm,
+      });
+      if (result.guide.revision < captureGuideBackendRevision) return;
+      captureGuide = result.guide;
+      captureGuideHistory = createCaptureGuideDraftHistory(result.guide);
+      captureGuideBackendRevision = result.guide.revision;
+      captureGuideState = result.state;
+      captureGuideError = result.rawEvidence.join('\n');
+      patchCaptureWorkspace({ cameraStatus: result.state.status === 'ready'
+        ? `Guide revision ${result.guide.revision} ready for parametric BRep`
+        : result.state.status === 'stale'
+          ? result.state.reason
+          : result.guide.reconstructionReadiness?.detail
+            ?? 'Deterministic reconstruction needs explicit evidence.' });
     } catch (error) {
       captureGuideState = { status: 'draft' };
       captureGuideError = formatBackendError(error);
-      captureCameraStatus = captureGuideError;
+      patchCaptureWorkspace({ cameraStatus: captureGuideError });
     }
   }
 
@@ -2908,70 +2744,55 @@ import {
         captureGuide.targetSourceDigest,
       );
       captureGuideError = '';
-      captureCameraStatus = `Guided CAD queued in owning task: ${queued.messageId}`;
+      patchCaptureWorkspace({ cameraStatus: `Guided CAD queued in owning task: ${queued.messageId}` });
       await refreshHistory();
     } catch (error) {
       captureGuideError = formatBackendError(error);
-      captureCameraStatus = captureGuideError;
+      patchCaptureWorkspace({ cameraStatus: captureGuideError });
     }
   }
 
   async function applyCapturePreview() {
-    if (!captureMeshPreview) return;
-    if (captureCropDirty) {
-      if (!captureCropBounds) {
-        captureCameraStatus = 'Crop box is not ready';
+    if (!captureMeshPreview || captureApplyPending) return;
+    captureApplyPending = true;
+    try {
+      if (captureCropDirty) {
+        if (!captureCropBounds) {
+          patchCaptureWorkspace({ cameraStatus: 'Crop box is not ready' });
+          return;
+        }
+        await previewCaptureCrop();
+        if (captureCropDirty) return;
+      }
+      capturePreviewPrepareError = '';
+      if (!await ensureCapturePreviewPrepared()) return;
+      if (!captureTargetThreadId || !isCaptureTargetCurrent()) {
+        pendingCaptureProjectSwitch = {
+          sessionToken: captureSessionToken,
+          targetThreadId: captureTargetThreadId,
+          targetMessageId: captureTargetMessageId,
+          message: `Capture is bound to ${captureTargetTitle || 'another project'}. Switch before Apply.`,
+        };
+        patchCaptureWorkspace({ cameraStatus: 'Switch to bound project before Apply' });
         return;
       }
-      await previewCaptureCrop();
-      if (captureCropDirty) return;
-    }
-    capturePreviewPrepareError = '';
-    if (!await ensureCapturePreviewPrepared()) return;
-    if (!captureTargetThreadId || !isCaptureTargetCurrent()) {
-      pendingCaptureProjectSwitch = {
-        sessionToken: captureSessionToken,
-        targetThreadId: captureTargetThreadId,
-        targetMessageId: captureTargetMessageId,
-        message: `Capture is bound to ${captureTargetTitle || 'another project'}. Switch before Apply.`,
-      };
-      captureCameraStatus = 'Switch to bound project before Apply';
-      return;
-    }
-    if (captureStartedFromUnboundWorkspace && get(activeThreadId) === null) {
-      activeThreadId.set(captureTargetThreadId);
-      activeVersionId.set(null);
-      currentView.set('workbench');
-      await loadLayoutForThread(captureTargetThreadId);
-      showWindow('capture');
-    }
+      if (captureStartedFromUnboundWorkspace && get(activeThreadId) === null) {
+        activeThreadId.set(captureTargetThreadId);
+        activeVersionId.set(null);
+        currentView.set('workbench');
+        await loadLayoutForThread(captureTargetThreadId);
+        showWindow('capture');
+      }
 
-    const currentSource = get(workingCopy).macroCode;
-    if (currentSource !== captureTargetSource) {
-      captureCameraStatus = 'Capture conflict: bound project source changed after capture started.';
-      return;
-    }
-    if (currentSource.trim() && captureTargetSourceLanguage !== 'ecky') {
-      captureCameraStatus = `Capture conflict: source language ${captureTargetSourceLanguage} cannot accept Ecky AST insertion.`;
-      return;
-    }
-
-    try {
-      const sourceNodes = currentSource.trim() ? await macroAstSourceMap(currentSource) : [];
-      const nextSource = buildCaptureSolidifySource(
-        currentSource,
-        sourceNodes,
-        capturePreviewBundle!.modelStlPath,
-        captureSessionToken.slice(0, 8),
-        capturePreviewScale,
-      );
-      const applied = await applyManualCodeDraft(nextSource);
-      if (!applied) return;
-      captureSolidifySource = nextSource;
+      const result = await applyCapturePreviewCommand({ runId: captureRunId });
+      projectManualCodeDraftResult(result.draft, result.source);
+      captureSolidifySource = result.source;
       capturePreviewApplied = true;
-      captureCameraStatus = 'Capture solidify draft applied';
+      patchCaptureWorkspace({ cameraStatus: 'Capture solidify draft applied' });
     } catch (error) {
-      captureCameraStatus = formatBackendError(error);
+      patchCaptureWorkspace({ cameraStatus: formatBackendError(error) });
+    } finally {
+      captureApplyPending = false;
     }
   }
 
@@ -2981,7 +2802,7 @@ import {
     captureSolidifySource = '';
     if (captureRunId) {
       void saveCapturePreviewSettings(captureRunId, capturePreviewCropBounds, scale).catch((error) => {
-        captureCameraStatus = formatBackendError(error);
+        patchCaptureWorkspace({ cameraStatus: formatBackendError(error) });
       });
     }
   }
@@ -3029,24 +2850,22 @@ import {
     const previousPreparedCropKey = capturePreparedCropKey;
     const previousPreviewCropBounds = capturePreviewCropBounds;
     capturePreviewCropBounds = cloneCaptureCropBounds(captureCropBounds);
-    capturePreviewBundle = null;
-    capturePreviewManifest = null;
+    patchCaptureWorkspace({ preview: null });
     capturePreparedCropKey = null;
     capturePreviewApplied = false;
     captureSolidifySource = '';
     capturePreviewPrepareError = '';
-    captureGuidance = 'PREPARING PREVIEW';
+    patchCaptureWorkspace({ guidance: 'PREPARING PREVIEW' });
     if (captureGuide) {
       captureGuideState = { status: 'stale', reason: 'Guide is stale: selected crop/source mesh digest changed.' };
       captureGuideError = captureGuideState.reason;
     }
     if (!await ensureCapturePreviewPrepared()) {
-      capturePreviewBundle = previousBundle;
-      capturePreviewManifest = previousManifest;
+      patchCaptureWorkspace({ preview: previousBundle && previousManifest ? { bundle: previousBundle, manifest: previousManifest, applied: false, cropBounds: null } : null });
       capturePreparedCropKey = previousPreparedCropKey;
       capturePreviewCropBounds = previousPreviewCropBounds;
       captureCropDirty = true;
-      captureGuidance = 'INSPECT MESH';
+      patchCaptureWorkspace({ guidance: 'INSPECT MESH' });
       return;
     }
     captureCropDirty = false;
@@ -3069,18 +2888,16 @@ import {
       captureGuideError = captureGuideState.reason;
     }
     if (capturePreparedCropKey === 'raw') return;
-    capturePreviewBundle = null;
-    capturePreviewManifest = null;
+    patchCaptureWorkspace({ preview: null });
     capturePreparedCropKey = null;
-    captureGuidance = 'PREPARING PREVIEW';
+    patchCaptureWorkspace({ guidance: 'PREPARING PREVIEW' });
     if (!await ensureCapturePreviewPrepared()) {
-      capturePreviewBundle = previousBundle;
-      capturePreviewManifest = previousManifest;
+      patchCaptureWorkspace({ preview: previousBundle && previousManifest ? { bundle: previousBundle, manifest: previousManifest, applied: false, cropBounds: null } : null });
       capturePreparedCropKey = previousPreparedCropKey;
       capturePreviewCropBounds = previousPreviewCropBounds;
       captureCropEnabled = previousPreviewCropBounds !== null;
       captureCropDirty = false;
-      captureGuidance = 'INSPECT MESH';
+      patchCaptureWorkspace({ guidance: 'INSPECT MESH' });
     }
   }
 
@@ -3127,7 +2944,7 @@ import {
       await loadLayoutForThread(pending.targetThreadId);
       showWindow('capture');
     } catch (error) {
-      captureCameraStatus = formatBackendError(error);
+      patchCaptureWorkspace({ cameraStatus: formatBackendError(error) });
     }
   }
 
@@ -3135,9 +2952,12 @@ import {
     if (!captureSessionToken) return;
     try {
       const sessionInfo = await retryCaptureReconstruction(captureSessionToken);
-      captureSessionState = captureSessionStateFromBackend(sessionInfo.state);
-      capturePreviewBundle = null;
-      capturePreviewManifest = null;
+      const retryPhase = captureSessionStateFromBackend(sessionInfo.state);
+      patchCaptureWorkspace({
+        phase: retryPhase,
+        preview: null,
+        error: retryPhase === 'failed' ? sessionInfo.rawError || 'Capture retry failed' : null,
+      });
       capturePreviewApplied = false;
       resetCaptureCropState();
       capturePreviewPrepareError = '';
@@ -3145,11 +2965,10 @@ import {
         captureGuideState = { status: 'stale', reason: 'Guide is stale: capture reconstruction changed.' };
         captureGuideError = captureGuideState.reason;
       }
-      captureGuidance = 'RECONSTRUCTING 0%';
-      captureCameraStatus = `${captureAcceptedFrameCount} source frames retained`;
+      patchCaptureWorkspace({ guidance: 'RECONSTRUCTING 0%', cameraStatus: `${captureAcceptedFrameCount} source frames retained`, progress: 0 });
       if (capturePollTimer === null) capturePollTimer = setInterval(() => void pollCaptureSession(), 1000);
     } catch (error) {
-      captureCameraStatus = formatBackendError(error);
+      patchCaptureWorkspace({ cameraStatus: formatBackendError(error) });
     }
   }
 
@@ -3157,10 +2976,13 @@ import {
     if (!captureSessionToken) return;
     try {
       const sessionInfo = await resumeCaptureSession(captureSessionToken);
-      captureSessionState = captureSessionStateFromBackend(sessionInfo.state);
-      captureMeshPreview = null;
-      capturePreviewBundle = null;
-      capturePreviewManifest = null;
+      const resumedPhase = captureSessionStateFromBackend(sessionInfo.state);
+      patchCaptureWorkspace({
+        phase: resumedPhase,
+        meshPreview: sessionInfo.meshPreview ?? null,
+        preview: null,
+        error: resumedPhase === 'failed' ? sessionInfo.rawError || 'Capture resume failed' : null,
+      });
       capturePreviewApplied = false;
       resetCaptureCropState();
       captureSolidifySource = '';
@@ -3169,18 +2991,17 @@ import {
         captureGuideState = { status: 'stale', reason: 'Guide is stale: capture reconstruction changed.' };
         captureGuideError = captureGuideState.reason;
       }
-      captureGuidance = 'ADD PHOTOS';
-      captureCameraStatus = `${captureAcceptedFrameCount} frames retained; continue on same phone link`;
+      patchCaptureWorkspace({ guidance: 'ADD PHOTOS', cameraStatus: `${captureAcceptedFrameCount} frames retained; continue on same phone link` });
       if (capturePollTimer === null) capturePollTimer = setInterval(() => void pollCaptureSession(), 1000);
     } catch (error) {
-      captureCameraStatus = formatBackendError(error);
+      patchCaptureWorkspace({ cameraStatus: formatBackendError(error) });
     }
   }
 
   async function commitCapturePreview() {
     if (!capturePreviewApplied || !captureSolidifySource || !captureTargetThreadId) return;
     if (get(activeThreadId) !== captureTargetThreadId) {
-      captureCameraStatus = 'Capture conflict: bound project is not active.';
+      patchCaptureWorkspace({ cameraStatus: 'Capture conflict: bound project is not active.' });
       return;
     }
     try {
@@ -3189,89 +3010,11 @@ import {
         title: captureTargetTitle || `Capture ${captureSessionToken.slice(0, 8)}`,
         versionName: 'Capture Mesh',
       });
-      captureCameraStatus = 'Capture model committed';
+      patchCaptureWorkspace({ cameraStatus: 'Capture model committed' });
     } catch (error) {
-      captureCameraStatus = formatBackendError(error);
+      patchCaptureWorkspace({ cameraStatus: formatBackendError(error) });
     }
   }
-
-  async function collectQueuedThreadBatch(threadId: string): Promise<{
-    messageIds: string[];
-    promptText: string;
-    attachments: Attachment[];
-  } | null> {
-    const thread = get(history).find((candidate) => candidate.id === threadId);
-    if (!thread) return null;
-    const queuedMessages = thread.messages
-      .filter((message) => message.role === 'user' && message.status === 'pending')
-      .map((message, index) => ({ message, index }))
-      .sort((left, right) => {
-        if (left.message.timestamp !== right.message.timestamp) {
-          return left.message.timestamp - right.message.timestamp;
-        }
-        return left.index - right.index;
-      })
-      .map(({ message }) => message);
-    if (!queuedMessages.length) return null;
-
-    const attachmentGroups = await Promise.all(
-      queuedMessages.map((message) => getMessageAttachments(message.id).catch(() => [])),
-    );
-    const attachmentMap = new Map<string, Attachment>();
-    for (const attachments of attachmentGroups) {
-      for (const attachment of attachments) {
-        const key = `${attachment.path}::${attachment.dataUrl ?? ''}::${attachment.name}`;
-        if (!attachmentMap.has(key)) {
-          attachmentMap.set(key, attachment);
-        }
-      }
-    }
-
-    return {
-      messageIds: queuedMessages.map((message) => message.id),
-      promptText: queuedMessages.map((message) => message.content).join('\n\n'),
-      attachments: [...attachmentMap.values()],
-    };
-  }
-
-  // Auto-deliver the full queued batch whenever an agent opens a live prompt for that thread.
-  // Also re-runs when $history changes so it can retry if messages arrive after the prompt opened.
-  $effect(() => {
-    void $history; // reactive dep — retriggers when messages arrive
-    // For each threadId, only drain the newest prompt (last in array) to avoid draining stale ones.
-    const newestPerThread = new Map<string, PendingAgentPrompt>();
-    for (const prompt of pendingAgentPrompts) {
-      if (prompt.threadId) {
-        newestPerThread.set(prompt.threadId, prompt);
-      }
-    }
-    const deliverablePrompts = [...newestPerThread.values()].filter(
-      (prompt) => !autoDrainingPromptRequestIds.has(prompt.requestId),
-    );
-    for (const prompt of deliverablePrompts) {
-      autoDrainingPromptRequestIds.add(prompt.requestId);
-      void (async () => {
-        try {
-          const batch = await collectQueuedThreadBatch(prompt.threadId ?? '');
-          if (!batch) return;
-          pendingAgentPrompts = pendingAgentPrompts.filter(
-            (candidate) => candidate.requestId !== prompt.requestId,
-          );
-          await resolveAgentPrompt({
-            requestId: prompt.requestId,
-            promptText: batch.promptText,
-            messageIds: batch.messageIds,
-            messageId: batch.messageIds[0] ?? null,
-            attachments: batch.attachments,
-          });
-        } catch (error) {
-          session.setError(`Agent Prompt Error: ${formatBackendError(error)}`);
-        } finally {
-          autoDrainingPromptRequestIds.delete(prompt.requestId);
-        }
-      })();
-    }
-  });
 
   $effect(() => {
     const nextConnectionState = projectedThreadAgentState.connectionState;
@@ -3432,8 +3175,6 @@ import {
     const threadId = get(activeThreadId);
     const messageId = get(activeVersionId);
     const currentSession = get(session);
-    const panel = get(paramPanelState);
-    const wc = get(workingCopy);
     const bundle = currentSession.artifactBundle;
     const recoveryKey =
       threadId && messageId && bundle
@@ -3442,6 +3183,9 @@ import {
 
     if (
       recoveryKey &&
+      threadId &&
+      messageId &&
+      bundle &&
       isMissingViewerArtifactError(message) &&
       visibleViewerRecoveryKey !== recoveryKey
     ) {
@@ -3449,35 +3193,23 @@ import {
       session.setError(null);
       session.setStatus('Runtime artifact missing. Rebuilding saved model...');
       try {
-        const recoverySource =
-          activeVersionMessage?.id === messageId
-            ? activeVersionMessage.output?.macroCode
-            : wc.sourceVersionId === messageId
-              ? wc.macroCode
-              : '';
-        const recoveryParams =
-          activeVersionMessage?.id === messageId
-            ? activeVersionMessage.output?.initialParams || {}
-            : panel.params;
-        const rebuilt = await handleParamChange(recoveryParams, recoverySource || null, false);
-        const repairedSession = get(session);
-        const repairedBundle = repairedSession.artifactBundle;
-        const repairedManifest = repairedSession.modelManifest;
+        const repaired = await repairVersionRuntime({
+          threadId,
+          messageId,
+          expectedArtifactIdentity: bundle.contentHash || null,
+        });
+        const repairedVersion = await projectWorkspaceProjection(repaired.workspace);
         if (
-          rebuilt &&
-          messageId &&
+          repairedVersion?.id === messageId &&
           get(activeThreadId) === threadId &&
           get(activeVersionId) === messageId &&
-          repairedBundle &&
-          repairedManifest &&
-          repairedBundle.modelId === repairedManifest.modelId
+          repairedVersion.artifactBundle
         ) {
-          await repairMissingVersionRuntime(messageId, repairedBundle, repairedManifest);
-          session.reloadStlUrl(toAssetUrl(repairedBundle.modelStlPath));
+          session.reloadStlUrl(toAssetUrl(repairedVersion.artifactBundle.modelStlPath));
           session.setStatus('Missing runtime rebuilt from saved source.');
-          await refreshHistory();
           return;
         }
+        throw new Error('Runtime repair returned no canonical selected version.');
       } catch (error) {
         session.setError(`Runtime Rebuild Error: ${formatBackendError(error)}`);
         return;
@@ -3485,11 +3217,6 @@ import {
         if (visibleViewerRecoveryKey === recoveryKey) {
           visibleViewerRecoveryKey = null;
         }
-      }
-      const rebuildError = get(session).error;
-      if (rebuildError) {
-        session.setError(`Runtime Rebuild Error: ${formatBackendError(rebuildError)}`);
-        return;
       }
     }
 
@@ -3633,7 +3360,7 @@ import {
     return viewerComponent.captureScreenshot(liveOverlayCanvas(true));
   }
 
-  async function prepareMcpPromptAttachments(
+  async function prepareDialogueAttachments(
     attachments: Attachment[],
     targetThreadId: string | null,
   ): Promise<{ attachments: Attachment[]; clearDrawingAfterSend: boolean }> {
@@ -3686,16 +3413,22 @@ import {
     return preview;
   }
 
-  async function persistSketchPreviewDraft(scopeId: string | null, preview: SketchPreviewState) {
+  async function persistSketchPreviewDraft(
+    scopeId: string | null,
+    preview: SketchPreviewState,
+    newScope = false,
+  ) {
     try {
-      await saveSketchPreviewDraft({
+      return await saveSketchPreviewDraft({
         draftScopeId: scopeId,
+        newScope,
         draftSource: preview.draft,
         artifactBundle: preview.artifactBundle,
         sketchDocument: preview.sketchDocument ?? null,
       });
     } catch (error) {
       console.warn('[Sketch] Failed to persist preview draft:', error);
+      return null;
     }
   }
 
@@ -3710,9 +3443,9 @@ import {
 
   async function saveSketchPreviewDraftAsNewScope() {
     if (!sketchPreview) return;
-    const scopeId = createSketchPreviewDraftScopeId();
-    sketchPreviewDraft = { scopeId, savedAt: Date.now() };
-    await persistSketchPreviewDraft(scopeId, sketchPreview);
+    const saved = await persistSketchPreviewDraft(null, sketchPreview, true);
+    if (!saved?.scopeId) return;
+    sketchPreviewDraft = { scopeId: saved.scopeId, savedAt: Date.now() };
     session.setStatus('Sketch draft saved.');
   }
 
@@ -4181,75 +3914,38 @@ import {
     let preparedAttachments: Attachment[] = attachments;
     let clearDrawingAfterSend = false;
     try {
-      const prepared = await prepareMcpPromptAttachments(
+      const prepared = await prepareDialogueAttachments(
         attachments,
         promptThreadId,
       );
       preparedAttachments = prepared.attachments;
       clearDrawingAfterSend = prepared.clearDrawingAfterSend;
-      await resolveAgentPrompt({
+      const result = await submitAgentPromptReply({
         requestId,
+        threadId: promptThreadId,
         promptText,
-        messageIds: [],
-        messageId: null,
         attachments: preparedAttachments,
       });
       if (clearDrawingAfterSend) {
         clearPromptDrawingOverlay();
       }
-    } catch (e) {
-      const errorText = formatBackendError(e);
-      if (
-        errorText.includes('No pending prompt request') ||
-        errorText.includes('timed out after')
-      ) {
-        let optimisticId: string | null = null;
-        if (promptThreadId) {
-          optimisticId = addOptimisticQueuedAgentMessage(
-            promptThreadId,
-            promptText,
-            preparedAttachments,
-          );
+      if (result.outcome === 'queued') {
+        addOptimisticQueuedAgentMessage(
+          result.threadId,
+          promptText,
+          preparedAttachments,
+          result.messageId,
+        );
+        adoptWorkspaceCapturePreference(result.threadId);
+        if ($activeThreadId !== result.threadId) {
+          activeThreadId.set(result.threadId);
+          activeVersionId.set(null);
         }
-        try {
-          const queuedMessage = await queueAgentPrompt({
-            threadId: promptThreadId,
-            promptText,
-            attachments: preparedAttachments,
-          });
-          if (!optimisticId) {
-            optimisticId = addOptimisticQueuedAgentMessage(
-              queuedMessage.threadId,
-              promptText,
-              preparedAttachments,
-              queuedMessage.messageId,
-            );
-          } else {
-            confirmOptimisticQueuedAgentMessage(
-              optimisticId,
-              queuedMessage.threadId,
-              queuedMessage.messageId,
-            );
-          }
-          adoptWorkspaceCapturePreference(queuedMessage.threadId);
-          if (clearDrawingAfterSend) {
-            clearPromptDrawingOverlay();
-          }
-          if ($activeThreadId !== queuedMessage.threadId) {
-            activeThreadId.set(queuedMessage.threadId);
-            activeVersionId.set(null);
-          }
-          await refreshHistory();
-          session.setStatus(
-            'No pending prompt request. Message queued in the thread for any agent to pick up.',
-          );
-        } catch (queueError) {
-          removeOptimisticQueuedAgentMessage(optimisticId);
-          session.setError(`Agent Queue Error: ${formatBackendError(queueError)}`);
-        }
-      } else {
-        session.setError(`Agent Prompt Error: ${errorText}`);
+        await refreshHistory();
+        session.setStatus('Prompt expired. Message queued in the thread for any agent to pick up.');
       }
+    } catch (e) {
+      session.setError(`Agent Prompt Error: ${formatBackendError(e)}`);
     }
   }
 
@@ -4258,26 +3954,32 @@ import {
       case 'provider': {
         const eckyThreadId = get(activeThreadId);
         if (!eckyThreadId) throw new Error(`Open an Ecky thread before sending to ${dialogueState.label}.`);
-        if (attachments.length > 0) {
-          const error = new Error(`${dialogueState.label} provider currently accepts text only; remove attachments before sending.`);
-          codexTakeoverError = error.message;
-          throw error;
-        }
         try {
+          const prepared = await prepareDialogueAttachments(attachments, eckyThreadId);
           if (dialogueState.providerId === 'agy') {
             applyAgyProviderSnapshot(
-              await sendAgyProviderPrompt({ eckyThreadId, promptText: prompt }),
+              await sendAgyProviderPrompt({
+                eckyThreadId,
+                promptText: prompt,
+                attachments: prepared.attachments,
+              }),
+              true,
               true,
             );
           } else {
             applyCodexTakeoverSnapshot(
-              await sendCodexTakeoverPrompt({ eckyThreadId, promptText: prompt }),
+              await sendCodexTakeoverPrompt({
+                eckyThreadId,
+                promptText: prompt,
+                attachments: prepared.attachments,
+              }),
+              true,
               true,
             );
           }
-          codexTakeoverError = null;
+          if (prepared.clearDrawingAfterSend) clearPromptDrawingOverlay();
         } catch (error) {
-          codexTakeoverError = formatBackendError(error);
+          setProviderError(formatBackendError(error));
           throw error;
         }
         break;
@@ -4288,7 +3990,7 @@ import {
         let preparedAttachments: Attachment[] = attachments;
         let clearDrawingAfterSend = false;
         try {
-          const prepared = await prepareMcpPromptAttachments(
+          const prepared = await prepareDialogueAttachments(
             attachments,
             $activeThreadId ?? null,
           );
@@ -4385,36 +4087,20 @@ import {
     campaignDefinitions = await campaignDefinitionClient.list();
   }
 
-  async function loadCampaignStep(definitionId: string, stepId: string) {
-    campaignStep = await campaignDefinitionClient.getStep(definitionId, stepId);
-  }
-
-  async function checkCampaignSolution(source: string, stepId: string) {
-    if (!campaignStep) {
-      return { ok: false as const, rawError: 'Campaign step is unavailable.' };
-    }
-    return campaignDefinitionClient.checkSolution(campaignStep.definitionId, stepId, source);
-  }
-
   async function startCampaign() {
     const definition = campaignDefinitions[0];
-    if (!definition?.firstStepId) {
+    if (!definition) {
       campaignRunError = 'Campaign definition has no first step.';
       return;
     }
     try {
-      const run = await campaignRunClient.create({
-        title: 'Ecky IR build missions',
-        definitionId: definition.definitionId,
-        definitionVersion: (await campaignDefinitionClient.getStep(definition.definitionId, definition.firstStepId)).definitionVersion,
-        currentStepId: definition.firstStepId,
-      });
+      const opened = await campaignRunClient.open({ kind: 'start', definitionId: definition.definitionId });
+      const run = opened.run as CampaignRun;
       campaignRuns = [run, ...campaignRuns.filter((candidate) => candidate.id !== run.id)];
       activeCampaignRun = run;
-      await loadCampaignStep(definition.definitionId, definition.firstStepId);
+      campaignStep = opened.step as CampaignCurrentStepPayload;
       campaignRunError = null;
       showNewProjectChooser = false;
-      await campaignRunClient.saveActiveProjectNavigation({ kind: 'campaign', id: run.id, view: 'campaign' });
       await loadAppWindowLayout();
       closeWindowStore('projects');
       currentView.set('campaign');
@@ -4424,11 +4110,11 @@ import {
   }
 
   async function openCampaignRun(run: CampaignRun) {
-    activeCampaignRun = run;
-    await loadCampaignStep(run.definitionId, run.currentStepId);
-    campaignRunError = null;
     try {
-      await campaignRunClient.saveActiveProjectNavigation({ kind: 'campaign', id: run.id, view: 'campaign' });
+      const opened = await campaignRunClient.open({ kind: 'resume', runId: run.id });
+      activeCampaignRun = opened.run as CampaignRun;
+      campaignStep = opened.step as CampaignCurrentStepPayload;
+      campaignRunError = null;
       await loadAppWindowLayout();
     } catch (error) {
       campaignRunError = formatBackendError(error);
@@ -4438,14 +4124,14 @@ import {
     currentView.set('campaign');
   }
 
-  async function saveCampaignRun(next: CampaignRun): Promise<CampaignRun> {
-    const saved = await campaignRunClient.save(next);
+  async function transitionCampaignRun(action: import('./lib/tauri/contracts').CampaignRunTransitionAction) {
+    if (!activeCampaignRun) throw new Error('Campaign run is unavailable.');
+    const result = await campaignRunClient.transition({ runId: activeCampaignRun.id, action });
+    const saved = result.run as CampaignRun;
     campaignRuns = campaignRuns.map((run) => run.id === saved.id ? saved : run);
     activeCampaignRun = saved;
-    if (campaignStep?.currentStep?.id !== saved.currentStepId) {
-      await loadCampaignStep(saved.definitionId, saved.currentStepId);
-    }
-    return saved;
+    campaignStep = result.step as CampaignCurrentStepPayload;
+    return result;
   }
 
   async function deleteCampaignRun(run: CampaignRun) {
@@ -4453,7 +4139,6 @@ import {
     campaignRuns = campaignRuns.filter((candidate) => candidate.id !== run.id);
     if (activeCampaignRun?.id === run.id) {
       activeCampaignRun = null;
-      await campaignRunClient.clearActiveProjectNavigation();
       currentView.set('workbench');
       await loadAppWindowLayout();
       showWindow('projects');
@@ -4625,6 +4310,7 @@ import {
           });
           try {
             hydrateActiveRenderSnapshot({
+              snapshotId: preview.previewId,
               threadId: preview.threadId,
               messageId: preview.previewId,
               eventModelId: preview.modelId ?? null,
@@ -5424,8 +5110,17 @@ import {
     requestQueue.remove(req.id);
   }
 
-  function cancelRequest(id: string) {
-    requestQueue.cancel(id);
+  async function cancelRequest(id: string) {
+    const request = get(requestQueue).byId[id];
+    try {
+      if (request?.threadId) {
+        await stopExplorationRun({ requestId: id, threadId: request.threadId });
+      }
+    } catch (error) {
+      session.setError(`Exploration Stop Error: ${formatBackendError(error)}`);
+    } finally {
+      requestQueue.cancel(id);
+    }
   }
 
   function phaseLabel(phase: Request['phase']) {
@@ -5528,17 +5223,56 @@ import {
     return handleParamChange(nextParams, null, true);
   }
 
-  function handleSemanticControlChange(primitiveId: string, value: ParamValue) {
-    const exactPatch = provenanceOverlayPatch(exactProvenanceOverlayControls, primitiveId, value);
-    const nextParams = Object.keys(exactPatch).length > 0
-      ? exactPatch
-      : buildSemanticPatch(activeModelManifest, primitiveId, value, effectiveUiSpec);
-    if (Object.keys(nextParams).length === 0) return;
-    stageParamChange(nextParams);
+  async function handleSemanticControlChange(primitiveId: string, value: ParamValue) {
+    const threadId = $activeThreadId;
+    const targetMessageId = activeVersionMessage?.id ?? $activeVersionId;
+    if (!threadId || !targetMessageId) {
+      session.setError('Semantic Control Error: exact thread and version target required.');
+      return;
+    }
+    try {
+      session.setError(null);
+      const result = await applySemanticControlValue({
+        threadId,
+        targetMessageId,
+        primitiveId,
+        value,
+      });
+      if (Object.keys(result.parameterPatch).length === 0) return;
+      stageParamChange(result.parameterPatch);
+    } catch (error) {
+      session.setError(`Semantic Control Error: ${formatBackendError(error)}`);
+    }
   }
 
   function handleSelectControlView(viewId: string | null) {
     activeControlViewId = viewId;
+  }
+
+  function projectImportedModel(
+    result: Awaited<ReturnType<typeof importModelIntent>>,
+    status: string,
+  ) {
+    if (!result.snapshotId) {
+      throw new Error('Imported model returned no backend snapshotId.');
+    }
+    rememberCommittedVersionMessage(result.threadId, result.title, result.message);
+    activeThreadId.set(result.threadId);
+    hydrateActiveRenderSnapshot({
+      snapshotId: result.snapshotId,
+      threadId: result.threadId,
+      messageId: result.messageId,
+      design: result.designOutput,
+      artifactBundle: result.artifactBundle,
+      modelManifest: result.modelManifest,
+      selectedPartId: null,
+      stlUrl: toAssetUrl(result.artifactBundle.modelStlPath),
+      status,
+    });
+    currentView.set('workbench');
+    if (result.modelManifest.enrichmentState?.status === 'pending') {
+      showEnrichmentModal = true;
+    }
   }
 
   async function handleImportFcstd(sourcePath: string) {
@@ -5549,44 +5283,9 @@ import {
       }
       session.setError(null);
       session.setStatus('Importing FCStd...');
-      const bundle = await importFcstd(sourcePath);
-      const rawManifest = await getModelManifest(bundle.modelId);
-      const importedUiSpec = buildImportedUiSpec(rawManifest);
-      const importedParams = buildImportedParams(rawManifest, {}, importedUiSpec);
-      const manifest = ensureSemanticManifest(rawManifest, importedUiSpec, importedParams) ?? rawManifest;
-      const threadId = crypto.randomUUID();
       const importedName = sourcePath.split(/[\\/]/).pop() || 'model.FCStd';
-      const title =
-        manifest.document.documentLabel ||
-        manifest.document.documentName ||
-        importedName.replace(/\.fcstd$/i, '');
-      const messageId = await addImportedModelVersion({
-        threadId,
-        title,
-        artifactBundle: bundle,
-        modelManifest: manifest,
-      });
-      await saveModelManifest(bundle.modelId, manifest, messageId);
-      activeThreadId.set(threadId);
-      activeVersionId.set(messageId);
-      workingCopy.reset();
-      paramPanelState.reset();
-      session.setStlUrl(toAssetUrl(bundle.modelStlPath));
-      session.setModelRuntime(bundle, manifest);
-      await refreshHistory();
-      await persistLastSessionSnapshot({
-        design: null,
-        threadId,
-        messageId,
-        artifactBundle: bundle,
-        modelManifest: manifest,
-        selectedPartId: null,
-      });
-      session.setStatus(`Imported FCStd: ${importedName}`);
-      currentView.set('workbench');
-      if (manifest.enrichmentState?.status === 'pending') {
-        showEnrichmentModal = true;
-      }
+      const result = await importModelIntent({ source: { kind: 'fcstd', sourcePath } });
+      projectImportedModel(result, `Imported FCStd: ${importedName}`);
     } catch (e: unknown) {
       session.setError(`FCStd Import Error: ${formatBackendError(e)}`);
     }
@@ -5601,53 +5300,75 @@ import {
       }
       session.setError(null);
       session.setStatus(`Importing FreeCAD library part: ${item.name}...`);
-      const bundle = await importFreecadLibraryPart({ item });
-      const rawManifest = await getModelManifest(bundle.modelId);
-      const importedUiSpec = buildImportedUiSpec(rawManifest);
-      const importedParams = buildImportedParams(rawManifest, {}, importedUiSpec);
-      const manifest = ensureSemanticManifest(rawManifest, importedUiSpec, importedParams) ?? rawManifest;
-      const threadId = crypto.randomUUID();
-      const title =
-        manifest.document.documentLabel ||
-        manifest.document.documentName ||
-        item.name ||
-        'FreeCAD Library Part';
-      const messageId = await addImportedModelVersion({
-        threadId,
-        title,
-        artifactBundle: bundle,
-        modelManifest: manifest,
-      });
-      await saveModelManifest(bundle.modelId, manifest, messageId);
-      activeThreadId.set(threadId);
-      activeVersionId.set(messageId);
-      workingCopy.reset();
-      paramPanelState.reset();
-      session.setStlUrl(toAssetUrl(bundle.modelStlPath));
-      session.setModelRuntime(bundle, manifest);
-      await refreshHistory();
-      await persistLastSessionSnapshot({
-        design: null,
-        threadId,
-        messageId,
-        artifactBundle: bundle,
-        modelManifest: manifest,
-        selectedPartId: null,
-      });
-      session.setStatus(`Imported FreeCAD library part: ${item.name}`);
-      currentView.set('workbench');
-      if (manifest.enrichmentState?.status === 'pending') {
-        showEnrichmentModal = true;
-      }
+      const result = await importModelIntent({ source: { kind: 'freecadLibrary', item } });
+      projectImportedModel(result, `Imported FreeCAD library part: ${item.name}`);
     } catch (e: unknown) {
       session.setError(`FreeCAD Library Import Error: ${formatBackendError(e)}`);
       throw e;
     }
   }
 
-  async function handleApplyComponentImport(source: string, label: string) {
-    session.setStatus(`Copy-inlining component: ${label}...`);
-    await applyManualCodeDraft(source);
+  async function handleApplyComponentImport(input: {
+    packageId: string;
+    version: string;
+    componentId: string;
+    label: string;
+  }) {
+    const threadId = get(activeThreadId);
+    const baseMessageId = get(activeVersionId);
+    const expectedSourceDigest =
+      sessionModelManifest?.sourceDigest ?? activeVersionMessage?.modelManifest?.sourceDigest;
+    if (!threadId || !baseMessageId || !expectedSourceDigest) {
+      throw new Error('Component import requires an active persisted design source.');
+    }
+
+    session.setStatus(`Copy-inlining component: ${input.label}...`);
+    const result = await applyInlineComponentImport({
+      threadId,
+      baseMessageId,
+      expectedSourceDigest,
+      packageId: input.packageId,
+      version: input.version,
+      componentId: input.componentId,
+    });
+    const imported = result.version;
+    if (
+      imported.status === 'error' ||
+      imported.error ||
+      !imported.messageId ||
+      !imported.artifactBundle ||
+      !imported.modelManifest ||
+      !imported.snapshotId
+    ) {
+      throw imported.error ?? new Error('Component import returned no persisted runtime.');
+    }
+
+    rememberCommittedVersionMessage(threadId, imported.designOutput.title, {
+      id: imported.messageId,
+      role: 'assistant',
+      content: imported.designOutput.response,
+      status: imported.status,
+      output: imported.designOutput,
+      usage: null,
+      artifactBundle: imported.artifactBundle,
+      modelManifest: imported.modelManifest,
+      agentOrigin: null,
+      imageData: null,
+      visualKind: null,
+      attachmentImages: [],
+      timestamp: Date.now() / 1000,
+    });
+    hydrateActiveRenderSnapshot({
+      snapshotId: imported.snapshotId,
+      threadId,
+      messageId: imported.messageId,
+      design: imported.designOutput,
+      artifactBundle: imported.artifactBundle,
+      modelManifest: imported.modelManifest,
+      selectedPartId: null,
+      stlUrl: toAssetUrl(imported.artifactBundle.modelStlPath),
+      status: `${input.label} imported as a new version.`,
+    });
   }
 
 </script>
@@ -5875,9 +5596,8 @@ import {
       <main class="campaign-project-page" aria-label="Campaign project">
         <CampaignWorkbench
           campaign={campaignStep}
-          onCheckSolution={checkCampaignSolution}
           bind:run={activeCampaignRun}
-          onSaveRun={saveCampaignRun}
+          onTransition={transitionCampaignRun}
           onClose={() => void closeCampaignSurface()}
         />
       </main>
@@ -5970,7 +5690,6 @@ import {
     {#snippet libraryContent()}
       <LibraryPanel
         onImportFreecadLibraryPart={handleImportFreecadLibraryPart}
-        authoredSource={$workingCopy.macroCode || activeVersionMessage?.output?.macroCode || ''}
         onApplyComponentImport={handleApplyComponentImport}
       />
     {/snippet}
@@ -5990,7 +5709,7 @@ import {
         onCommitPreview={commitCapturePreview}
         onRetryReconstruction={retryCaptureReconstructionFromDesktop}
         onAddPhotos={addCapturePhotos}
-        onPreviewLoadError={(message) => captureCameraStatus = message}
+        onPreviewLoadError={(message) => patchCaptureWorkspace({ cameraStatus: message })}
         meshPreview={captureMeshPreview}
         previewModelKey={capturePreviewBundle?.modelId ?? null}
         previewUrl={capturePreviewUrl}
@@ -6010,6 +5729,7 @@ import {
         onApplyExternalSurfaceTrim={applySelectedExternalShapeSurfaceTrim}
         onRemoveExternalSurfaceTrim={removeSelectedExternalShapeSurfaceTrim}
         previewApplied={capturePreviewApplied}
+        applyPending={captureApplyPending}
         previewScale={capturePreviewScale}
         cropEnabled={captureCropEnabled}
         cropMode={captureCropMode}
@@ -6105,8 +5825,7 @@ import {
           onApplyMacroCode={(code) => applyManualCodeDraft(code)}
           onchange={handleParamPanelChange}
           oncommit={handleParamPanelCommit}
-          manualApplyBusy={$manualApplyQueueStateStore.running}
-          manualApplyQueued={$manualApplyQueueStateStore.pending}
+          manualApplyBusy={$manualApplyBusyStore}
           onspecchange={(spec, params) => {
             paramPanelState.setUiSpec(spec);
             workingCopy.patch({ uiSpec: spec });
@@ -6189,6 +5908,7 @@ import {
           messagesHasMore: activeThread ? ($threadMessagePageState[activeThread.id]?.hasMore ?? false) : false,
           messagesPageLoading: activeThread ? ($threadMessagePageState[activeThread.id]?.isLoading ?? false) : false,
           requests: $activeThreadRequests,
+          explorationCycle,
           onLoadOlderMessages: () => activeThread ? loadOlderThreadMessages(activeThread.id) : undefined,
           activeThreadId: $activeThreadId,
           sendWorkspaceCapture: sendWorkspaceCaptureForActiveThread,

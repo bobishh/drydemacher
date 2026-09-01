@@ -90,11 +90,16 @@ pub fn save_sketch_preview_draft(
     app: &dyn PathResolver,
     request: SaveSketchPreviewDraftRequest,
 ) -> AppResult<SketchPreviewDraft> {
-    let path = sketch_preview_draft_path(app, request.scope_id.as_deref());
-    let request_scope = scope_key(request.scope_id.as_deref());
+    let scope_id = if request.new_scope {
+        Some(uuid::Uuid::new_v4().to_string())
+    } else {
+        request.scope_id
+    };
+    let path = sketch_preview_draft_path(app, scope_id.as_deref());
+    let request_scope = scope_key(scope_id.as_deref());
     let draft = persist_sketch_preview_draft(
         &path,
-        request.scope_id.as_deref(),
+        scope_id.as_deref(),
         request.draft_source,
         request.artifact_bundle,
         request.sketch_document,
@@ -232,6 +237,7 @@ mod tests {
         let resolver = test_resolver(&root);
         let request = SaveSketchPreviewDraftRequest {
             scope_id: Some("thread-a".to_string()),
+            new_scope: false,
             draft_source: test_draft_source(),
             artifact_bundle: test_artifact_bundle(),
             sketch_document: None,
@@ -289,6 +295,30 @@ mod tests {
     }
 
     #[test]
+    fn new_scope_id_is_allocated_by_backend() {
+        let root = std::env::temp_dir().join(format!(
+            "ecky-sketch-draft-new-scope-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let resolver = test_resolver(&root);
+        let request: SaveSketchPreviewDraftRequest = serde_json::from_value(serde_json::json!({
+            "scopeId": null,
+            "newScope": true,
+            "draftSource": test_draft_source(),
+            "artifactBundle": test_artifact_bundle(),
+            "sketchDocument": null
+        }))
+        .unwrap();
+
+        let saved = save_sketch_preview_draft(&resolver, request).unwrap();
+        let scope_id = saved.scope_id.expect("backend scope id");
+        assert_ne!(scope_id, GLOBAL_SCOPE_ID);
+        assert!(uuid::Uuid::parse_str(&scope_id).is_ok());
+        assert!(sketch_preview_draft_path(&resolver, Some(&scope_id)).exists());
+    }
+
+    #[test]
     fn raster_trace_state_roundtrips_and_clear_keeps_external_asset() {
         let root =
             std::env::temp_dir().join(format!("ecky-sketch-raster-draft-{}", uuid::Uuid::new_v4()));
@@ -341,6 +371,7 @@ mod tests {
             &resolver,
             SaveSketchPreviewDraftRequest {
                 scope_id: Some("raster-thread".to_string()),
+                new_scope: false,
                 draft_source: test_draft_source(),
                 artifact_bundle: test_artifact_bundle(),
                 sketch_document: Some(sketch_document.clone()),

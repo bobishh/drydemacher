@@ -31,6 +31,8 @@ function request(overrides: Partial<Request> = {}): Request {
     cookingStartTime: null,
     cookingElapsed: 0,
     ...overrides,
+    buildMode: overrides.buildMode ?? 'interactive',
+    buildQueueState: overrides.buildQueueState ?? 'running',
   };
 }
 

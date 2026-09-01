@@ -53,7 +53,8 @@ fn append_draft_version(
     .map_err(|error| AppError::persistence(error.to_string()))?;
 
     let message_id = uuid::Uuid::new_v4().to_string();
-    db::add_message(
+    // MCP preview persists a working output before runtime hydration.
+    db::add_legacy_message(
         conn,
         thread_id,
         &Message {
@@ -460,9 +461,9 @@ pub async fn handle_params_preview_render(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct MacroAuthoringContext {
-    pub(super) source_language: crate::contracts::SourceLanguage,
-    pub(super) geometry_backend: crate::contracts::GeometryBackend,
+pub(crate) struct MacroAuthoringContext {
+    pub(crate) source_language: crate::contracts::SourceLanguage,
+    pub(crate) geometry_backend: crate::contracts::GeometryBackend,
 }
 
 pub(super) fn infer_macro_source_language(
@@ -565,7 +566,7 @@ fn log_macro_backend_resolution(
     );
 }
 
-pub(super) fn resolve_macro_authoring_context(
+pub(crate) fn resolve_macro_authoring_context(
     base_source_language: crate::contracts::SourceLanguage,
     base_geometry_backend: crate::contracts::GeometryBackend,
     macro_dialect: &MacroDialect,

@@ -28,6 +28,11 @@ forms used by the challenge.
 - Version draft overrides by canonical source digest so changed lessons never
   reopen stale text.
 - Restore active campaign, active step, and visible Projects window after reload.
+- Route draft saves, navigation, and challenge checks through one atomic Rust
+  transition intent over canonical run and packaged step state.
+- Route campaign start/resume through one Rust projection intent. Rust selects
+  canonical title, first step, definition version, current step, and active
+  Project navigation from caller-supplied definition/run identity.
 - Rewrite all six missions as worked-example -> explained mechanism -> bounded
   edit -> Core IR acceptance sequences. A challenge may use only forms already
   introduced by an earlier step in that mission or a named prerequisite.
@@ -53,6 +58,8 @@ forms used by the challenge.
   edit returns the verified cache artifact without kernel execution.
 - Reload returns to the same campaign and step. A visible Projects window stays
   visible with its saved geometry.
+- Frontend never submits replacement completion, challenge-pass, current-step,
+  or draft-override collections.
 - Mission 1 teaches `params`, `let*`, `build`, `shape`, `result`, placement,
   `compound`, `union`, multiple `part` forms, shared clearance, and `if` before
   asking for the configurable enclosure joint.

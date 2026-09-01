@@ -3,7 +3,6 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import { historyStore as history, activeThreadIdStore as activeThreadId, activeVersionId } from './domainState';
 import { workingCopy, isDirty } from './workingCopy';
 import { session } from './sessionStore';
-import { commitManualVersion } from '../controllers/manualController';
 import { paramPanelState } from './paramPanelState';
 import { profileLog } from '../debug/profiler';
 import { clearLastSessionSnapshot, persistLastSessionSnapshot } from '../modelRuntime/sessionSnapshot';
@@ -18,23 +17,23 @@ import {
 } from '../threadTimeline';
 import { sameArtifactVersion } from '../versionPreviewPersistence';
 import {
-  addImportedModelVersion,
-  addManualVersion,
-  deleteThread as deleteThreadCommand,
-  deleteVersion as deleteVersionCommand,
-  finalizeThread as finalizeThreadCommand,
-  reopenThread as reopenThreadCommand,
+  deleteThreadIntent,
+  deleteVersionIntent,
+  finalizeThreadIntent,
+  reopenThreadIntent,
   getInventory as getInventoryCommand,
   formatBackendError,
   getHistory,
   getMessStlPath,
-  getModelManifest,
-  openOrCreateBlankDesignThread,
+  createDesignThreadIntent,
   getThreadLatestVersion,
   getThreadMessageVersion,
   getThreadMessagesPage,
+  getWorkspaceProjection,
+  openInventoryThreadIntent,
+  forkDesignIntent,
   renameThread as renameThreadCommand,
-  restoreVersion as restoreVersionCommand,
+  restoreVersionIntent,
 } from '../tauri/client';
 
 type NewThreadPayload = {
@@ -50,6 +49,15 @@ type ThreadMessagePageState = {
   error: string | null;
 };
 
+export function resolveProjectedPageState(
+  existing: ThreadMessagePageState | undefined,
+  incoming: Pick<ThreadMessagePageState, 'hasMore' | 'nextBefore'>,
+): Pick<ThreadMessagePageState, 'hasMore' | 'nextBefore'> {
+  return existing?.nextBefore
+    ? { hasMore: existing.hasMore, nextBefore: existing.nextBefore }
+    : incoming;
+}
+
 let latestLoadVersionToken = 0;
 let latestThreadSwitchToken = 0;
 export const activeThreadMessagesLoading = writable(false);
@@ -60,7 +68,6 @@ export const threadMessagePageState = writable<Record<string, ThreadMessagePageS
 const INITIAL_THREAD_MESSAGE_PAGE_LIMIT = 20;
 const OLDER_THREAD_MESSAGE_PAGE_LIMIT = 50;
 const THREAD_MESSAGES_PAGE_TIMEOUT_MS = 8000;
-const THREAD_LATEST_VERSION_TIMEOUT_MS = 8000;
 const RESTORED_OLDER_PAGE_LIMIT = 10;
 const HISTORY_WINDOW_STORAGE_KEY = 'ecky.historyProjectionWindows.v1';
 const historyProjectionRefreshes = createRevisionedSingleflight<{
@@ -153,6 +160,16 @@ function mergeThreadMessagePayload(existing: Message | undefined, incoming: Mess
   };
 }
 
+export function projectHistorySummaries(freshHistory: Thread[]): void {
+  const loadedMessages = new Map(get(history).map((thread) => [thread.id, thread.messages ?? []]));
+  history.set(
+    freshHistory.map((thread) => ({
+      ...thread,
+      messages: loadedMessages.get(thread.id) ?? [],
+    })),
+  );
+}
+
 export function evictSupersededVersionDetails(
   threads: Thread[],
   selectedThreadId: string,
@@ -240,6 +257,51 @@ function mergeCommittedVersionMessage(
 export function rememberCommittedVersionMessage(threadId: string, title: string, message: Message) {
   history.update((threads) => mergeCommittedVersionMessage(threads, threadId, title, message));
   activeVersionId.set(message.id);
+}
+
+/** Project one canonical backend workspace without follow-up history reads. */
+export async function projectWorkspaceProjection(
+  projection: Awaited<ReturnType<typeof getWorkspaceProjection>>,
+): Promise<Message | null> {
+  const threadId = projection.thread.id;
+  const selectedVersion = projection.selectedVersion;
+  history.update((threads) => {
+    const existing = threads.find((thread) => thread.id === threadId) ?? null;
+    const projectedMessages = selectedVersion
+      ? [...projection.messagesPage.messages, selectedVersion]
+      : projection.messagesPage.messages;
+    const messages = mergeThreadMessages(existing?.messages ?? [], projectedMessages);
+    const projectedThread = { ...projection.thread, messages };
+    return [projectedThread, ...threads.filter((thread) => thread.id !== threadId)];
+  });
+  const existingPageState = get(threadMessagePageState)[threadId];
+  const projectedPageState = resolveProjectedPageState(existingPageState, {
+    hasMore: projection.messagesPage.hasMore,
+    nextBefore: projection.messagesPage.nextBefore,
+  });
+  setThreadPageState(threadId, {
+    isLoading: false,
+    ...projectedPageState,
+    error: null,
+  });
+  if (selectedVersion && get(activeThreadId) === threadId) {
+    await loadVersion(selectedVersion, threadId, { persistSnapshot: false });
+  }
+  return selectedVersion;
+}
+
+/** Activate one canonical workspace returned by a Rust-owned intent. */
+export async function activateWorkspaceProjection(
+  projection: Awaited<ReturnType<typeof getWorkspaceProjection>>,
+): Promise<Message | null> {
+  const threadId = projection.thread.id;
+  latestThreadSwitchToken += 1;
+  latestLoadVersionToken += 1;
+  beginThreadSwitch(threadId);
+  activeThreadLoadingId.set(null);
+  activeThreadMessagesLoading.set(false);
+  activeThreadVersionLoading.set(false);
+  return projectWorkspaceProjection(projection);
 }
 
 export function rememberLatestThreadVersion(threadId: string, message: Message) {
@@ -351,35 +413,10 @@ function resolveVersionRuntimePayload(message: Message): {
   };
 }
 
-async function resolveForkRuntimePayload(message: Message): Promise<{
-  artifactBundle: Message['artifactBundle'] | null;
-  modelManifest: Message['modelManifest'] | null;
-}> {
-  const runtimePayload = resolveVersionRuntimePayload(message);
-  if (hasConsistentRuntimePayload(runtimePayload.artifactBundle, runtimePayload.modelManifest)) {
-    return runtimePayload;
-  }
-
-  if (message.artifactBundle) {
-    try {
-      const refreshedManifest = await getModelManifest(message.artifactBundle.modelId);
-      if (message.artifactBundle.modelId === refreshedManifest.modelId) {
-        return {
-          artifactBundle: message.artifactBundle,
-          modelManifest: refreshedManifest,
-        };
-      }
-    } catch (e) {
-      console.warn('[History] Failed to refresh manifest for fork:', e);
-    }
-  }
-
-  return { artifactBundle: null, modelManifest: null };
-}
-
 export async function loadVersion(
   msg: Message | null | undefined,
   expectedThreadId: string | null = get(activeThreadId),
+  options: { persistSnapshot?: boolean } = {},
 ): Promise<boolean> {
   if (!isVersionCandidate(msg)) return false;
   console.warn('[CAD_FLOW][version.load.start]', {
@@ -463,16 +500,18 @@ export async function loadVersion(
   }
 
   if (isStale()) return false;
-  const persistedBundle = runtime.bundle ?? runtimePayload.artifactBundle ?? versionMessage.artifactBundle ?? null;
-  const persistedManifest = runtimePayload.modelManifest ?? versionMessage.modelManifest ?? null;
-  await persistLastSessionSnapshot({
-    design: versionMessage.output ?? null,
-    threadId: expectedThreadId ?? get(activeThreadId),
-    messageId: versionMessage.id,
-    artifactBundle: persistedBundle,
-    modelManifest: persistedManifest,
-    selectedPartId: null,
-  });
+  if (options.persistSnapshot !== false) {
+    const persistedBundle = runtime.bundle ?? runtimePayload.artifactBundle ?? versionMessage.artifactBundle ?? null;
+    const persistedManifest = runtimePayload.modelManifest ?? versionMessage.modelManifest ?? null;
+    await persistLastSessionSnapshot({
+      design: versionMessage.output ?? null,
+      threadId: expectedThreadId ?? get(activeThreadId),
+      messageId: versionMessage.id,
+      artifactBundle: persistedBundle,
+      modelManifest: persistedManifest,
+      selectedPartId: null,
+    });
+  }
   return Boolean(runtime.bundle);
 }
 
@@ -482,10 +521,6 @@ export async function loadFromHistory(thread: Thread) {
   const existingPageState = get(threadMessagePageState)[targetThreadId];
   const seededMessages = existingThread?.messages ?? thread.messages ?? [];
   const seededLatestVersion = [...seededMessages].reverse().find(isVersionCandidate) ?? null;
-  const skipInitialMessagesFetch =
-    thread.status === 'finalized' &&
-    seededMessages.length > 0 &&
-    seededLatestVersion !== null;
   if (
     shouldSkipThreadSelect(targetThreadId, {
       activeThreadId: get(activeThreadId),
@@ -498,12 +533,12 @@ export async function loadFromHistory(thread: Thread) {
   const switchToken = ++latestThreadSwitchToken;
   beginThreadSwitch(targetThreadId);
   activeThreadLoadingId.set(targetThreadId);
-  activeThreadMessagesLoading.set(!skipInitialMessagesFetch);
+  activeThreadMessagesLoading.set(true);
   activeThreadVersionLoading.set(true);
   setThreadPageState(targetThreadId, {
-    isLoading: !skipInitialMessagesFetch,
-    hasMore: skipInitialMessagesFetch ? false : existingPageState?.hasMore ?? false,
-    nextBefore: skipInitialMessagesFetch ? null : existingPageState?.nextBefore ?? null,
+    isLoading: true,
+    hasMore: existingPageState?.hasMore ?? false,
+    nextBefore: existingPageState?.nextBefore ?? null,
     error: null,
   });
 
@@ -517,23 +552,11 @@ export async function loadFromHistory(thread: Thread) {
       : [summaryThread, ...items];
   });
 
-  const latestVersionPromise = withBackendTimeout(
-    getThreadLatestVersion(targetThreadId),
-    THREAD_LATEST_VERSION_TIMEOUT_MS,
-    'Thread latest version load timed out',
+  const projectionPromise = withBackendTimeout(
+    getWorkspaceProjection(targetThreadId, null, INITIAL_THREAD_MESSAGE_PAGE_LIMIT),
+    THREAD_MESSAGES_PAGE_TIMEOUT_MS,
+    'Thread workspace projection load timed out',
   );
-  const messagesPromise = skipInitialMessagesFetch
-    ? Promise.resolve(null)
-    : withBackendTimeout(
-        getThreadMessagesPage(
-          targetThreadId,
-          null,
-          INITIAL_THREAD_MESSAGE_PAGE_LIMIT,
-          false,
-        ),
-        THREAD_MESSAGES_PAGE_TIMEOUT_MS,
-        'Thread messages load timed out',
-      );
   let bootstrappedVersionId: string | null = null;
 
   try {
@@ -541,17 +564,25 @@ export async function loadFromHistory(thread: Thread) {
       bootstrappedVersionId = seededLatestVersion.id;
       await loadVersion(seededLatestVersion, targetThreadId);
       if (!isCurrentThreadLoad(switchToken, targetThreadId)) {
-        void messagesPromise.catch(() => undefined);
+        void projectionPromise.catch(() => undefined);
         return;
       }
     }
 
-    const latestVersion = await latestVersionPromise;
+    const projection = await projectionPromise;
     if (!isCurrentThreadLoad(switchToken, targetThreadId)) {
-      void messagesPromise.catch(() => undefined);
       return;
     }
 
+    history.update((items) =>
+      items.map((candidate) =>
+        candidate.id === targetThreadId
+          ? { ...candidate, ...projection.thread, messages: candidate.messages ?? [] }
+          : candidate,
+      ),
+    );
+
+    const latestVersion = projection.selectedVersion;
     if (latestVersion) {
       history.update((items) =>
         items.map((candidate) => {
@@ -576,7 +607,6 @@ export async function loadFromHistory(thread: Thread) {
         try {
           const messPath = await getMessStlPath();
           if (!isCurrentThreadLoad(switchToken, targetThreadId)) {
-            void messagesPromise.catch(() => undefined);
             return;
           }
           session.setStlUrl(toAssetUrl(messPath));
@@ -602,17 +632,8 @@ export async function loadFromHistory(thread: Thread) {
 
   void (async () => {
     try {
-      const initialPage = await messagesPromise;
+      const initialPage = (await projectionPromise).messagesPage;
       if (!isCurrentThreadLoad(switchToken, targetThreadId)) return;
-      if (!initialPage) {
-        setThreadPageState(targetThreadId, {
-          isLoading: false,
-          hasMore: false,
-          nextBefore: null,
-          error: null,
-        });
-        return;
-      }
       let page = initialPage;
       let restoredMessages = [...page.messages];
       const restoreCount = storedOlderPageCount(targetThreadId);
@@ -671,17 +692,18 @@ export async function loadFromHistory(thread: Thread) {
 
 export async function deleteThread(id: string): Promise<boolean> {
   try {
-    await deleteThreadCommand(id);
+    const projection = await deleteThreadIntent(
+      id,
+      get(activeThreadId) === id ? get(activeVersionId) : null,
+    );
     if (get(activeThreadId) === id) {
       activeThreadId.set(null);
       activeVersionId.set(null);
       workingCopy.reset();
       paramPanelState.reset();
       session.setStlUrl(null);
-      await clearLastSessionSnapshot();
     }
-    const freshHistory = await getHistory();
-    history.set(freshHistory.filter((thread) => thread.id !== id));
+    projectHistorySummaries(projection.history);
     return true;
   } catch (e) {
     session.setError(`Delete Error: ${formatBackendError(e)}`);
@@ -701,7 +723,6 @@ export async function renameThread(id: string, title: string) {
     history.update((items) =>
       items.map((thread) => (thread.id === id ? { ...thread, title: trimmed } : thread)),
     );
-    await refreshHistory();
     if (get(activeThreadId) === id) {
       session.setStatus(`Thread renamed to ${trimmed}.`);
     }
@@ -716,52 +737,32 @@ export async function deleteVersion(messageId: string) {
     const currentThread = currentThreadId
       ? get(history).find((thread) => thread.id === currentThreadId)
       : null;
-    const wasActiveVersion =
-      get(activeVersionId) === messageId ||
-      effectiveActiveVersionId(currentThread?.messages ?? [], get(activeVersionId)) === messageId;
-    await deleteVersionCommand(messageId);
-    if (!currentThreadId) return;
-    if (wasActiveVersion) {
-      detachActiveVersionRuntime();
-    }
-
-    await refreshHistory();
-
-    // Update active version if we deleted the current one
-    if (wasActiveVersion) {
-      const latestVersion = await getThreadLatestVersion(currentThreadId);
-      if (!latestVersion) {
-        await clearLastSessionSnapshot();
-      } else {
-        await loadVersion(latestVersion, currentThreadId);
-      }
-    }
-    const page = await getThreadMessagesPage(
-      currentThreadId,
-      null,
-      INITIAL_THREAD_MESSAGE_PAGE_LIMIT,
-      false,
+    const selectedMessageId = effectiveActiveVersionId(
+      currentThread?.messages ?? [],
+      get(activeVersionId),
     );
-    history.update((items) =>
-      items.map((thread) =>
-        thread.id === currentThreadId
-          ? {
-              ...thread,
-              messages: mergeActiveThreadMessages(
-                thread.messages ?? [],
-                page.messages,
-                get(activeVersionId),
-              ),
-            }
-          : thread,
-      ),
-    );
-    setThreadPageState(currentThreadId, {
-      isLoading: false,
-      hasMore: page.hasMore,
-      nextBefore: page.nextBefore,
-      error: null,
+    const result = await deleteVersionIntent({
+      messageId,
+      selectedThreadId: currentThreadId,
+      selectedMessageId,
+      messageLimit: INITIAL_THREAD_MESSAGE_PAGE_LIMIT,
     });
+    history.update((items) => items.map((thread) => ({
+      ...thread,
+      messages: (thread.messages ?? []).filter((message) => message.id !== messageId),
+    })));
+    if (result.threadRemoved) {
+      history.update((items) => items.filter((thread) => thread.id !== result.threadId));
+      if (currentThreadId === result.threadId) {
+        activeThreadId.set(null);
+        detachActiveVersionRuntime();
+      }
+    } else if (result.workspace) {
+      if (currentThreadId === result.threadId && !result.workspace.selectedVersion) {
+        detachActiveVersionRuntime();
+      }
+      await projectWorkspaceProjection(result.workspace);
+    }
     session.setStatus('Version removed from the carousel.');
   } catch (e) {
     session.setError(`Failed to delete version: ${formatBackendError(e)}`);
@@ -770,40 +771,21 @@ export async function deleteVersion(messageId: string) {
 
 export async function restoreVersion(messageId: string) {
   try {
-    await restoreVersionCommand(messageId);
-    await refreshHistory();
     const currentThreadId = get(activeThreadId);
-    if (currentThreadId) {
-      const page = await getThreadMessagesPage(
-        currentThreadId,
-        null,
-        INITIAL_THREAD_MESSAGE_PAGE_LIMIT,
-        false,
-      );
-      history.update((items) =>
-        items.map((thread) =>
-          thread.id === currentThreadId
-            ? {
-                ...thread,
-                messages: mergeActiveThreadMessages(
-                  thread.messages ?? [],
-                  page.messages,
-                  get(activeVersionId),
-                ),
-              }
-            : thread,
-        ),
-      );
-      setThreadPageState(currentThreadId, {
-        isLoading: false,
-        hasMore: page.hasMore,
-        nextBefore: page.nextBefore,
-        error: null,
-      });
-      const restored = page.messages.find((message) => message.id === messageId);
-      if (restored) {
-        await loadVersion(restored, currentThreadId);
-      }
+    const currentThread = currentThreadId
+      ? get(history).find((thread) => thread.id === currentThreadId)
+      : null;
+    const result = await restoreVersionIntent({
+      messageId,
+      selectedThreadId: currentThreadId,
+      selectedMessageId: effectiveActiveVersionId(
+        currentThread?.messages ?? [],
+        get(activeVersionId),
+      ),
+      messageLimit: INITIAL_THREAD_MESSAGE_PAGE_LIMIT,
+    });
+    if (result.workspace) {
+      await projectWorkspaceProjection(result.workspace);
     }
     session.setStatus('Version returned to the carousel.');
   } catch (e) {
@@ -814,50 +796,38 @@ export async function restoreVersion(messageId: string) {
 export async function createNewThread(
   payload: NewThreadPayload | null | undefined,
   deps: {
-    openBlank?: typeof openOrCreateBlankDesignThread;
+    createThread?: typeof createDesignThreadIntent;
   } = {},
 ): Promise<string | null> {
-  let document;
+  const mode = payload?.mode === 'macro' ? 'macro' : 'blank';
+  let created: Awaited<ReturnType<typeof createDesignThreadIntent>>;
   try {
-    document = await (deps.openBlank ?? openOrCreateBlankDesignThread)(payload?.title ?? null);
+    created = await (deps.createThread ?? createDesignThreadIntent)({
+      mode,
+      title: payload?.title ?? null,
+      source: mode === 'macro' ? payload?.code ?? null : null,
+    });
   } catch (error) {
     session.setError(`New Thread Error: ${formatBackendError(error)}`);
     return null;
   }
-  const newId = document.threadId;
-  latestThreadSwitchToken += 1;
-  latestLoadVersionToken += 1;
-  beginThreadSwitch(newId);
-  activeThreadLoadingId.set(null);
-  activeThreadMessagesLoading.set(false);
-  activeThreadVersionLoading.set(false);
-  setThreadPageState(newId, {
-    isLoading: false,
-    hasMore: false,
-    nextBefore: null,
-    error: null,
-  });
-  void clearLastSessionSnapshot();
-  
-  if (payload?.mode === 'macro' && payload.code) {
-    session.setStatus(`Initializing thread with macro: ${payload.title}...`);
-    // We'll call a special commit function for the initial macro
-    await commitInitialMacro(payload.code, payload.title);
+
+  const newId = created.threadId;
+  try {
+    await activateWorkspaceProjection(created.workspace);
+  } catch (error) {
+    session.setError(`New Thread Projection Error: ${formatBackendError(error)}`);
+    return newId;
+  }
+
+  if (created.initialVersionError) {
+    session.setError(`Initial Macro Error: ${formatBackendError(created.initialVersionError)}`);
+  } else if (mode === 'macro') {
+    session.setStatus('New design initialized.');
   } else {
     session.setStatus('New design session started.');
   }
   return newId;
-}
-
-async function commitInitialMacro(code: string, title: string | undefined) {
-  try {
-    // Ensure the manual controller knows which thread to commit to
-    // Since activeThreadId was just set, commitManualVersion should pick it up.
-    await commitManualVersion(code, title);
-  } catch (e) {
-    console.error("[History] Failed to commit initial macro:", e);
-    session.setError(`Initial Macro Error: ${e}`);
-  }
 }
 
 async function resolveActiveVersionMessage(): Promise<Message | null> {
@@ -895,53 +865,44 @@ export async function forkDesign() {
     const confirmed = await confirmAction(`Fork "${label}" into a new thread now?`);
     if (!confirmed) return;
 
-    const newThreadId = crypto.randomUUID();
-    let newMessageId = '';
-    const runtimePayload = await resolveForkRuntimePayload(sourceMessage);
-
-    if (sourceMessage.output) {
-      newMessageId = await addManualVersion({
-        threadId: newThreadId,
-        title: sourceMessage.output.title || label,
-        versionName: sourceMessage.output.versionName || 'Forked',
-        macroCode: sourceMessage.output.macroCode,
-        parameters: sourceMessage.output.initialParams || {},
-        uiSpec: sourceMessage.output.uiSpec,
-        artifactBundle: runtimePayload.artifactBundle ?? null,
-        modelManifest: runtimePayload.modelManifest ?? null,
-      });
-    } else if (runtimePayload.artifactBundle && runtimePayload.modelManifest) {
-      newMessageId = await addImportedModelVersion({
-        threadId: newThreadId,
-        title: label,
-        artifactBundle: runtimePayload.artifactBundle,
-        modelManifest: runtimePayload.modelManifest,
-      });
-    } else {
-      session.setError('Fork Error: Active version has no reusable payload to fork.');
+    const sourceThreadId = get(activeThreadId);
+    if (!sourceThreadId) {
+      session.setError('Fork Error: No active thread is loaded.');
       return;
     }
-
-    await refreshHistory();
-    const forkedSummary = get(history).find((thread) => thread.id === newThreadId) ?? null;
-    const forkedMessage = newMessageId
-      ? await getThreadMessageVersion(newThreadId, newMessageId)
-      : await getThreadLatestVersion(newThreadId);
-    if (!forkedSummary || !forkedMessage) {
+    const result = await forkDesignIntent({
+      sourceThreadId,
+      sourceMessageId: sourceMessage.id,
+      title: sourceMessage.output?.title || label,
+      versionName: sourceMessage.output?.versionName || 'Forked',
+      messageLimit: INITIAL_THREAD_MESSAGE_PAGE_LIMIT,
+    });
+    const forkedMessage = result.workspace.selectedVersion;
+    if (!forkedMessage) {
       throw new Error('Forked thread projection is unavailable.');
     }
-    const forkedThread = { ...forkedSummary, messages: [forkedMessage] };
+    const forkedThread = {
+      ...result.workspace.thread,
+      messages: result.workspace.messagesPage.messages,
+    };
     history.update((items) => {
-      const nextItems = items.filter((item) => item.id !== newThreadId);
+      const nextItems = items.filter((item) => item.id !== result.threadId);
       return [forkedThread, ...nextItems];
     });
 
-    activeThreadId.set(newThreadId);
-    await loadVersion(forkedMessage);
+    latestThreadSwitchToken += 1;
+    latestLoadVersionToken += 1;
+    beginThreadSwitch(result.threadId);
+    setThreadPageState(result.threadId, {
+      isLoading: false,
+      hasMore: result.workspace.messagesPage.hasMore,
+      nextBefore: result.workspace.messagesPage.nextBefore,
+      error: null,
+    });
+    await loadVersion(forkedMessage, result.threadId, { persistSnapshot: false });
 
     session.setStatus('Design forked into a new thread.');
-    paramPanelState.setVersionId(newMessageId || null);
-    await refreshHistory();
+    paramPanelState.setVersionId(result.messageId);
   } catch (e) {
     session.setError(`Fork Error: ${formatBackendError(e)}`);
   }
@@ -951,16 +912,15 @@ export async function finalizeThread(id: string) {
   try {
     const selectedMessageId =
       get(activeThreadId) === id ? get(activeVersionId) : null;
-    await finalizeThreadCommand(id, selectedMessageId);
+    const projection = await finalizeThreadIntent(id, selectedMessageId);
     if (get(activeThreadId) === id) {
       activeThreadId.set(null);
       activeVersionId.set(null);
       workingCopy.reset();
       paramPanelState.reset();
       session.setStlUrl(null);
-      await clearLastSessionSnapshot();
     }
-    await refreshHistory();
+    projectHistorySummaries(projection.history);
     session.setStatus('Project completed.');
   } catch (e) {
     session.setError(`Finalize Error: ${formatBackendError(e)}`);
@@ -969,8 +929,8 @@ export async function finalizeThread(id: string) {
 
 export async function reopenThread(id: string) {
   try {
-    await reopenThreadCommand(id);
-    await refreshHistory();
+    const projection = await reopenThreadIntent(id);
+    projectHistorySummaries(projection.history);
     session.setStatus('Project reopened.');
   } catch (e) {
     session.setError(`Reopen Error: ${formatBackendError(e)}`);
@@ -979,9 +939,11 @@ export async function reopenThread(id: string) {
 
 export async function openInventoryThread(id: string): Promise<boolean> {
   try {
-    const thread = (await getInventoryCommand()).find((candidate) => candidate.id === id) ?? null;
-    if (!thread) throw new Error(`Completed project ${id} was not found.`);
-    await loadFromHistory(thread);
+    const projection = await openInventoryThreadIntent(
+      id,
+      INITIAL_THREAD_MESSAGE_PAGE_LIMIT,
+    );
+    await activateWorkspaceProjection(projection);
     session.setStatus('Viewing completed project.');
     return true;
   } catch (e) {
@@ -1034,13 +996,7 @@ export async function loadInventory(): Promise<Thread[]> {
 export async function refreshHistory() {
   try {
     const freshHistory = await getHistory();
-    const loadedMessages = new Map(get(history).map((thread) => [thread.id, thread.messages ?? []]));
-    history.set(
-      freshHistory.map((thread) => ({
-        ...thread,
-        messages: loadedMessages.get(thread.id) ?? [],
-      })),
-    );
+    projectHistorySummaries(freshHistory);
   } catch (e) {
     console.error("[History] Failed to refresh history:", e);
   }

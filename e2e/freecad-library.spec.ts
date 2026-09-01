@@ -106,7 +106,8 @@ const importedMeshManifest = {
 async function installFreecadLibraryMocks(page: Page, mode: FreecadLibraryMockMode) {
   await page.addInitScript(({ mockMode, bundle, manifest, meshBundle, meshManifest }) => {
     const mockWindow = window as any;
-    mockWindow.__SAVED_CONFIG__ = null;
+    mockWindow.__PERSISTED_LIBRARY_ROOTS__ = null;
+    mockWindow.__LIBRARY_PANEL_INTENTS__ = [];
     mockWindow.__IMPORT_CALLS__ = [];
     mockWindow.__ADDED_IMPORTED__ = null;
     mockWindow.__RENDER_CALLS__ = [];
@@ -169,11 +170,6 @@ async function installFreecadLibraryMocks(page: Page, mode: FreecadLibraryMockMo
     window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
     window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
       if (cmd === 'get_config') return mockWindow.__CONFIG__;
-      if (cmd === 'save_config') {
-        mockWindow.__SAVED_CONFIG__ = args?.config ?? null;
-        mockWindow.__CONFIG__ = args?.config ?? mockWindow.__CONFIG__;
-        return null;
-      }
       if (cmd === 'get_runtime_capabilities') {
         return {
           freecad: { available: true, detail: 'Ready', path: '/mock/freecadcmd' },
@@ -217,12 +213,15 @@ async function installFreecadLibraryMocks(page: Page, mode: FreecadLibraryMockMo
           sessionId: null,
         };
       }
-      if (cmd === 'list_installed_component_package_headers') return mockWindow.__PACKAGE_HEADERS__;
-      if (cmd === 'plugin:dialog|open') {
-        if (mockMode === 'pickerError') throw new Error('raw folder picker failure');
-        return '/mock/freecad-library';
-      }
-      if (cmd === 'search_freecad_library') {
+      if (cmd === 'library_panel_intent') {
+        const intent = args?.intent;
+        mockWindow.__LIBRARY_PANEL_INTENTS__.push(intent);
+        if (intent?.kind === 'loadComponents') {
+          return { kind: 'componentPackages', packageHeaders: mockWindow.__PACKAGE_HEADERS__ };
+        }
+        if (intent?.kind !== 'loadFreecad' && intent?.kind !== 'setFreecadRoot') {
+          throw new Error(`unexpected library panel intent: ${intent?.kind}`);
+        }
         if (mockMode === 'searchError') {
           throw {
             code: 'persistence',
@@ -230,10 +229,16 @@ async function installFreecadLibraryMocks(page: Page, mode: FreecadLibraryMockMo
             details: 'raw root missing: /mock/freecad-library',
           };
         }
+        if (intent.kind === 'setFreecadRoot') {
+          mockWindow.__CONFIG__.freecadLibraryRoots = [intent.root];
+          mockWindow.__PERSISTED_LIBRARY_ROOTS__ = [intent.root];
+        }
+        const roots = mockWindow.__CONFIG__.freecadLibraryRoots;
+        const page = intent.kind === 'loadFreecad' ? intent.page : 0;
         if (mockMode === 'paged') {
-          const offset = args?.request?.offset ?? 0;
-          const count = offset === 0 ? 101 : 1;
-          return Array.from({ length: count }, (_, index) => {
+          const offset = page * 100;
+          const count = page === 0 ? 100 : 1;
+          const items = Array.from({ length: count }, (_, index) => {
             const number = offset + index + 1;
             return {
               ...item,
@@ -243,8 +248,83 @@ async function installFreecadLibraryMocks(page: Page, mode: FreecadLibraryMockMo
               importPath: `/mock/freecad-library/Mechanical Parts/Deep/Part-${number}.step`,
             };
           });
+          return {
+            kind: 'freecadLibrary',
+            freecadLibraryRoots: roots,
+            items,
+            page,
+            hasMore: page === 0,
+          };
         }
-        return mockMode === 'mesh' ? [meshItem] : [item];
+        const items = roots.length === 0 ? [] : mockMode === 'mesh' ? [meshItem] : [item];
+        return {
+          kind: 'freecadLibrary',
+          freecadLibraryRoots: roots,
+          items,
+          page,
+          hasMore: false,
+        };
+      }
+      if (cmd === 'plugin:dialog|open') {
+        if (mockMode === 'pickerError') throw new Error('raw folder picker failure');
+        return '/mock/freecad-library';
+      }
+      if (cmd === 'import_model_intent') {
+        const item = args?.input?.source?.item;
+        mockWindow.__IMPORT_CALLS__.push(item?.id ?? null);
+        if (mockMode === 'pending') await delay(600);
+        if (mockMode === 'importError') {
+          throw {
+            code: 'render',
+            message: 'FreeCAD library import failed',
+            details: 'raw FreeCAD import body',
+          };
+        }
+        const artifactBundle = mockMode === 'mesh' ? meshBundle : bundle;
+        const modelManifest = mockMode === 'mesh' ? meshManifest : manifest;
+        const title = item?.name ?? 'Imported model';
+        const designOutput = {
+          title,
+          versionName: 'Imported model',
+          response: `Imported ${title}.`,
+          interactionMode: 'design',
+          macroCode: '',
+          macroDialect: 'ecky',
+          engineKind: modelManifest.engineKind,
+          sourceLanguage: modelManifest.sourceLanguage,
+          geometryBackend: modelManifest.geometryBackend,
+          uiSpec: { fields: [] },
+          initialParams: {},
+          postProcessing: null,
+        };
+        const messageId = 'msg-imported-608';
+        const message = {
+          id: messageId,
+          role: 'assistant',
+          content: designOutput.response,
+          status: 'success',
+          output: designOutput,
+          artifactBundle,
+          modelManifest,
+          usage: null,
+          agentOrigin: null,
+          imageData: null,
+          visualKind: null,
+          attachmentImages: [],
+          timestamp: 1,
+        };
+        const projection = {
+          threadId: 'thread-imported-608',
+          messageId,
+          title,
+          message,
+          designOutput,
+          artifactBundle,
+          modelManifest,
+          snapshotId: 'snapshot-imported-608',
+        };
+        mockWindow.__ADDED_IMPORTED__ = projection;
+        return projection;
       }
       if (cmd === 'import_freecad_library_part') {
         mockWindow.__IMPORT_CALLS__.push(args?.request?.item?.id ?? null);
@@ -265,6 +345,65 @@ async function installFreecadLibraryMocks(page: Page, mode: FreecadLibraryMockMo
       }
       if (cmd === 'save_model_manifest') return null;
       if (cmd === 'save_last_design') return null;
+      if (cmd === 'apply_imported_parameters' || cmd === 'apply_manual_parameters') {
+        mockWindow.__IMPORTED_APPLY_CALLS__.push(args);
+        const input = args?.input;
+        const designOutput = {
+          title: '608 Bearing',
+          versionName: 'Imported model',
+          response: 'Parameter version appended.',
+          interactionMode: 'tune',
+          macroCode: '',
+          macroDialect: 'ecky',
+          engineKind: 'freecad',
+          sourceLanguage: 'legacyPython',
+          geometryBackend: 'freecad',
+          uiSpec: { fields: [] },
+          initialParams: input?.parameters ?? {},
+          postProcessing: null,
+        };
+        return {
+          threadId: input?.threadId,
+          baseMessageId: input?.targetMessageId,
+          messageId: 'msg-imported-608-params',
+          status: 'success',
+          designOutput,
+          artifactBundle: bundle,
+          modelManifest: manifest,
+          snapshotId: 'snapshot-imported-608-params',
+          error: null,
+        };
+      }
+      if (cmd === 'apply_manual_code') {
+        mockWindow.__IMPORTED_APPLY_CALLS__.push(args);
+        const input = args?.input;
+        const designOutput = {
+          title: input?.title ?? '608 Bearing',
+          versionName: input?.versionName ?? 'Imported model',
+          response: 'Code draft applied.',
+          interactionMode: 'design',
+          macroCode: input?.source ?? '',
+          macroDialect: 'ecky',
+          engineKind: 'ecky',
+          sourceLanguage: input?.sourceLanguage ?? 'ecky',
+          geometryBackend: input?.geometryBackend ?? 'mesh',
+          uiSpec: input?.uiSpec ?? { fields: [] },
+          initialParams: input?.parameters ?? {},
+          postProcessing: input?.postProcessing ?? null,
+        };
+        return {
+          threadId: input?.threadId,
+          baseMessageId: input?.baseMessageId,
+          messageId: null,
+          status: 'success',
+          designOutput,
+          artifactBundle: bundle,
+          modelManifest: manifest,
+          snapshotId: 'snapshot-manual-component-608',
+          parserMatched: false,
+          error: null,
+        };
+      }
       if (cmd === 'render_model') {
         mockWindow.__RENDER_CALLS__.push(args);
         return bundle;
@@ -346,9 +485,7 @@ test.describe('FreeCAD library catalog', () => {
     await codeModal.getByRole('button', { name: 'APPLY', exact: true }).click();
     await expect.poll(() => page.evaluate(() => (window as any).__IMPORTED_APPLY_CALLS__.length)).toBe(1);
     await expect(page.evaluate(() => (window as any).__RENDER_CALLS__.length)).resolves.toBe(0);
-    await expect(codeModal).not.toContainText('IMPORTED STEP — READ ONLY');
-    await codeModal.getByRole('tab', { name: 'SUMMARY', exact: true }).click();
-    await expect(codeModal).toContainText('IMPORTED STEP — READ ONLY');
+    await expect(codeModal).not.toBeVisible();
   });
 
   test('Given more than one catalog page When library opens Then next page reaches later nested models', async ({ page }) => {
@@ -392,7 +529,7 @@ test.describe('FreeCAD library catalog', () => {
     await page.getByRole('button', { name: 'FREECAD PARTS' }).click();
     await page.getByRole('button', { name: 'SET FOLDER' }).click();
 
-    await expect(page.evaluate(() => (window as any).__SAVED_CONFIG__?.freecadLibraryRoots)).resolves.toEqual([
+    await expect(page.evaluate(() => (window as any).__PERSISTED_LIBRARY_ROOTS__)).resolves.toEqual([
       '/mock/freecad-library',
     ]);
     await expect(page.getByText('/mock/freecad-library')).toBeVisible();

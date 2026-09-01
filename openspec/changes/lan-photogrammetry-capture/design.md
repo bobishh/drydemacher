@@ -10,6 +10,10 @@ Ecky.
 
 - Ecky backend owns session identity, pairing, source frame storage,
   reconstruction jobs, canonical mesh artifact, validation, and history.
+- Capture start/adoption accepts an optional existing target identity. When no
+  target exists, backend allocates the thread UUID, capture title, empty source
+  defaults, and `startedFromEmpty` state as one authoritative target. Frontend
+  submits intent and projects the returned session/run target.
 - Mobile client owns camera permission, live preview, cheap frame metrics,
   full-resolution frame extraction, and retry queue.
 - Ecky frontend owns session launch, QR presentation, capture progress,
@@ -82,7 +86,8 @@ error and do not mutate DB state.
 
 Pre-durability capture folders can be adopted explicitly through `OPEN LAST
 CAPTURE`. Adoption inspects the newest raw reconstruction STL, binds it to the
-current task (or a new deferred task), inserts one durable run, then uses normal
+current task (or a backend-allocated deferred task), inserts one durable run,
+then uses normal
 reopen behavior. Subsequent opens resolve by run id, not directory scanning.
 
 ## LAN And Pairing
@@ -201,10 +206,15 @@ Session remains bound to thread/version selected at start. If another project is
 visible when preview arrives, existing Ecky bubble-choice UX offers switch or
 stay; no implicit switch occurs. An empty workspace that created the capture
 target remains that target despite its deferred thread id and does not receive a
-false switch prompt. Apply inserts a captured part through the
-parser-reported model AST boundary using `solidify(import-stl(...))`. Apply first
-appends its exact source/draft snapshot; source divergence is raw validation
-evidence, never a version conflict or refusal against current unrelated screen.
+false switch prompt. Apply submits only `runId` to one Rust intent. Rust loads
+the canonical capture run plus bound thread head, validates source digest and
+language, selects the prepared raw/derived STL, inserts a captured part through
+the parser-reported model AST boundary using `solidify(import-stl(...))`, and
+renders the non-persisted draft projection. Frontend owns pending state and
+projects the returned source/render only. It does not derive source conflict,
+language policy, AST ranges, part ids, parameter ids, or render input. Apply
+first appends its exact source/draft snapshot once task 6.16 lands; source
+divergence remains raw validation evidence, never a frontend-authored conflict.
 Commit
 creates a normal version in bound thread. Cancellation removes active
 credentials and transient jobs; source asset retention follows an explicit
@@ -217,6 +227,10 @@ but remains session-adjustable. Apply writes that value as a named Ecky number
 parameter and wraps the captured `solidify(import-stl(...))` part in uniform
 `scale`, so later edits use ordinary parameter controls. Raw reconstruction STL
 remains immutable.
+
+Superseded read/derive/write capture-guide commands are not public Tauri
+boundaries. Guide editing and validation use tagged Rust intents. HTTP phone
+pairing remains separate and continues through capture runtime ownership.
 
 Capture preview exposes an explicit box crop in the mesh viewport. User moves
 and resizes the box, then requests a derived preview. Backend clips triangles

@@ -101,6 +101,14 @@
   stale. Keep capture assets/run metadata outside model version history.
 - [ ] 6.17 Remove capture version-conflict/thread-advanced/force gates while
   preserving geometric validation failures such as bad source digest or crop.
+- [x] 6.18 Move new-capture and legacy-adoption target UUID, title, source
+  defaults, and empty-workspace policy into one Rust-owned optional-target intent.
+- [x] 6.19 Move capture Apply source conflict/language policy, AST insertion,
+  capture part/parameter identity, and non-persisted render draft into one
+  Rust-owned `runId` intent; frontend keeps pending/result projection only.
+- [x] 6.20 Remove superseded public capture-guide read/derive/write Tauri
+  boundaries while preserving tagged ensure/edit/validate intents and HTTP
+  phone pairing runtime.
 
 ## 7. Native Client Extension Boundary
 

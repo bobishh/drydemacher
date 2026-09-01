@@ -3,17 +3,16 @@
   import { onDestroy } from 'svelte';
   import {
     cancelFemStudy,
-    exportFemResultVtu,
+    exportFemResultVtuIntent,
     formatBackendError,
-    getCachedFemConvergence,
-    previewFemMesh,
-    runFemConvergence,
-    runFemStudy,
-    validateFemStudy,
+    getCachedFemConvergenceIntent,
+    previewFemMeshIntent,
+    runFemConvergenceIntent,
+    runFemStudyIntent,
+    validateFemStudyIntent,
     type FemConvergenceResponse,
     type FemMeshPreviewResponse,
     type FemRunResponse,
-    type FemStudyRequest,
     type FemStudyValidationResponse,
   } from './tauri/client';
   import type { FemDisplayOptions, FemFieldKind } from './femDisplay';
@@ -57,6 +56,7 @@
   let errorText = $state('');
   let exportEvidence = $state('');
   let runningJobId = $state<string | null>(null);
+  let runIntentPending = $state(false);
   let field = $state<FemFieldKind>('vonMises');
   let deformationScale = $state(1);
   let showMesh = $state(true);
@@ -66,6 +66,7 @@
   let convergenceRestoreGeneration = 0;
   const resultIsStale = $derived(Boolean(result && resultSource !== source));
   const meshPreviewIsStale = $derived(Boolean(meshPreview && meshPreviewSource !== source));
+  const isRunning = $derived(runIntentPending || Boolean(runningJobId));
 
   $effect(() => {
     if (!analysisNames.includes(selectedAnalysis)) {
@@ -96,16 +97,11 @@
     convergence = null;
     if (!currentModelId || !currentAnalysis) return;
 
-    void getCachedFemConvergence({
-      study: {
-        ...request(nextJobId('convergence-cache')),
-        modelId: currentModelId,
-        source: currentSource,
-        analysisName: currentAnalysis,
-      },
+    void getCachedFemConvergenceIntent({
+      modelId: currentModelId,
+      source: currentSource,
+      analysisName: currentAnalysis,
       meshSizesMm: currentMeshSizes,
-      displacementRelativeTolerance: 0.03,
-      stressRelativeTolerance: 0.05,
     }).then((cached) => {
       if (generation === convergenceRestoreGeneration) convergence = cached;
     }).catch((error) => {
@@ -118,46 +114,27 @@
   });
 
   void listen<{ jobId: string; progress: FemProgress }>('fem-progress', ({ payload }) => {
+    if (runIntentPending && !runningJobId) runningJobId = payload.jobId;
     if (payload.jobId === runningJobId) progress = payload.progress;
   }).then((stop) => { unlisten = stop; });
 
   onDestroy(() => unlisten?.());
 
-  function request(jobId: string): FemStudyRequest {
-    return {
-      jobId,
-      modelId: modelId ?? '',
-      source,
-      analysisName: selectedAnalysis,
-      budgets: {
-        boundaryTriangles: 250_000,
-        tet4Cells: 500_000,
-        nodes: 150_000,
-        dofs: 450_000,
-        sparseNonzeros: 30_000_000,
-        resultBytes: 128 * 1024 * 1024,
-        convergenceLevels: 3,
-      },
-      control: {
-        envelopeMm: 0.1,
-        minimumScaledJacobian: 1.0e-6,
-        maximumRuntimeMs: 10 * 60 * 1000,
-        relativeSolverTolerance: 1.0e-8,
-      },
-    };
-  }
-
-  function nextJobId(kind: string): string {
-    return `fem-${kind}-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
-  }
-
   async function validateStudy() {
     errorText = '';
     validation = null;
+    runningJobId = null;
+    runIntentPending = true;
     try {
-      validation = await validateFemStudy(request(nextJobId('validate')));
+      validation = await validateFemStudyIntent({
+        modelId: modelId ?? '',
+        source,
+        analysisName: selectedAnalysis,
+      });
     } catch (error) {
       errorText = formatBackendError(error);
+    } finally {
+      runIntentPending = false;
     }
   }
 
@@ -165,20 +142,26 @@
     errorText = '';
     result = null;
     onResultChange?.(null);
-    const jobId = nextJobId('solve');
-    runningJobId = jobId;
+    runningJobId = null;
+    runIntentPending = true;
     progress = {
       stage: 'resolve', elapsedMs: 0, nodeCount: null, tet4CellCount: null,
       detail: 'Resolving authored study.', cancellationBoundary: true,
     };
     try {
-      validation = await validateFemStudy(request(jobId));
-      result = await runFemStudy(request(jobId));
+      const completed = await runFemStudyIntent({
+        modelId: modelId ?? '',
+        source,
+        analysisName: selectedAnalysis,
+      });
+      validation = completed.validation;
+      result = completed.result;
       resultSource = source;
       onResultChange?.(result);
     } catch (error) {
       errorText = formatBackendError(error);
     } finally {
+      runIntentPending = false;
       runningJobId = null;
     }
   }
@@ -187,20 +170,26 @@
     errorText = '';
     meshPreview = null;
     onMeshChange?.(null);
-    const jobId = nextJobId('mesh');
-    runningJobId = jobId;
+    runningJobId = null;
+    runIntentPending = true;
     progress = {
       stage: 'resolve', elapsedMs: 0, nodeCount: null, tet4CellCount: null,
       detail: 'Resolving authored study.', cancellationBoundary: true,
     };
     try {
-      validation = await validateFemStudy(request(jobId));
-      meshPreview = await previewFemMesh(request(jobId));
+      const completed = await previewFemMeshIntent({
+        modelId: modelId ?? '',
+        source,
+        analysisName: selectedAnalysis,
+      });
+      validation = completed.validation;
+      meshPreview = completed.mesh;
       meshPreviewSource = source;
       onMeshChange?.(meshPreview);
     } catch (error) {
       errorText = formatBackendError(error);
     } finally {
+      runIntentPending = false;
       runningJobId = null;
     }
   }
@@ -208,22 +197,23 @@
   async function runConvergenceStudy() {
     errorText = '';
     convergence = null;
-    const jobId = nextJobId('convergence');
-    runningJobId = jobId;
+    runningJobId = null;
+    runIntentPending = true;
     progress = {
       stage: 'resolve', elapsedMs: 0, nodeCount: null, tet4CellCount: null,
       detail: 'Starting coarse-to-fine convergence sequence.', cancellationBoundary: true,
     };
     try {
-      convergence = await runFemConvergence({
-        study: request(jobId),
+      convergence = await runFemConvergenceIntent({
+        modelId: modelId ?? '',
+        source,
+        analysisName: selectedAnalysis,
         meshSizesMm: [...meshSizes],
-        displacementRelativeTolerance: 0.03,
-        stressRelativeTolerance: 0.05,
       });
     } catch (error) {
       errorText = formatBackendError(error);
     } finally {
+      runIntentPending = false;
       runningJobId = null;
     }
   }
@@ -251,10 +241,9 @@
         filters: [{ name: 'VTK Unstructured Grid', extensions: ['vtu'] }],
       });
       if (!targetPath) return;
-      const exported = await exportFemResultVtu({
+      const exported = await exportFemResultVtuIntent({
         analysisIdentityDigest: result.analysisIdentityDigest,
         solutionDigest: result.solutionDigest,
-        maximumResultBytes: 512 * 1024 * 1024,
       }, targetPath);
       exportEvidence = `VTU ${exported.byteLength.toLocaleString()} B · ${exported.sha256.slice(0, 20)}…`;
     } catch (error) {
@@ -270,7 +259,7 @@
       <h2>Structural Analysis</h2>
     </div>
     <span class:analysis-panel__state--ready={Boolean((result?.decisionReady && !resultIsStale) || convergence)} class="analysis-panel__state">
-      {runningJobId ? 'RUNNING' : resultIsStale || meshPreviewIsStale ? 'STALE' : result ? (result.decisionReady ? 'READY' : 'REVIEW') : convergence ? 'EVIDENCE' : 'IDLE'}
+      {isRunning ? 'RUNNING' : resultIsStale || meshPreviewIsStale ? 'STALE' : result ? (result.decisionReady ? 'READY' : 'REVIEW') : convergence ? 'EVIDENCE' : 'IDLE'}
     </span>
   </header>
 
@@ -281,16 +270,16 @@
   {:else}
     <label class="analysis-panel__field">
       <span>Study</span>
-      <select bind:value={selectedAnalysis} disabled={Boolean(runningJobId)} aria-label="FEM study">
+      <select bind:value={selectedAnalysis} disabled={isRunning} aria-label="FEM study">
         {#each analysisNames as name}<option value={name}>{name}</option>{/each}
       </select>
     </label>
 
     <div class="analysis-panel__actions">
-      <button type="button" title="Validate units, BRep face tags, domain, loads, supports, and runtime identity without solving" disabled={Boolean(runningJobId)} onclick={validateStudy}>VALIDATE</button>
-      <button type="button" title="Generate and inspect the native Tet4 volume mesh, quality, and face-group coverage without solving" disabled={Boolean(runningJobId)} onclick={previewMesh}>MESH PREVIEW</button>
-      <button type="button" title="Generate native Tet4 mesh, solve linear statics, verify equilibrium, and publish immutable result arrays" disabled={Boolean(runningJobId)} onclick={runStudy}>MESH + SOLVE</button>
-      <button type="button" title="Run three explicit coarse-to-fine meshes and keep displacement and stress convergence decisions separate" disabled={Boolean(runningJobId)} onclick={runConvergenceStudy}>RUN CONVERGENCE</button>
+      <button type="button" title="Validate units, BRep face tags, domain, loads, supports, and runtime identity without solving" disabled={isRunning} onclick={validateStudy}>VALIDATE</button>
+      <button type="button" title="Generate and inspect the native Tet4 volume mesh, quality, and face-group coverage without solving" disabled={isRunning} onclick={previewMesh}>MESH PREVIEW</button>
+      <button type="button" title="Generate native Tet4 mesh, solve linear statics, verify equilibrium, and publish immutable result arrays" disabled={isRunning} onclick={runStudy}>MESH + SOLVE</button>
+      <button type="button" title="Run three explicit coarse-to-fine meshes and keep displacement and stress convergence decisions separate" disabled={isRunning} onclick={runConvergenceStudy}>RUN CONVERGENCE</button>
       {#if runningJobId}<button class="analysis-panel__cancel" type="button" title="Request cancellation at next safe pipeline boundary" onclick={cancelStudy}>CANCEL</button>{/if}
     </div>
 

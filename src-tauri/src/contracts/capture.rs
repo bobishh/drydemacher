@@ -16,6 +16,16 @@ pub enum CaptureSessionState {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExistingCaptureTarget {
+    pub thread_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    pub source: String,
+    pub source_language: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureSessionInfo {
@@ -23,6 +33,10 @@ pub struct CaptureSessionInfo {
     pub target_thread_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_message_id: Option<String>,
+    pub target_title: String,
+    pub target_source: String,
+    pub target_source_language: String,
+    pub started_from_empty: bool,
     pub pairing_token: String,
     pub pairing_url: String,
     pub trust_url: String,

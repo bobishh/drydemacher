@@ -9,7 +9,10 @@ type GuideMockMode = 'happy' | 'degenerate-frame' | 'stale-source' | 'source-div
 
 async function installGuidedCaptureFixture(page: Page, mode: GuideMockMode) {
   await page.addInitScript(({ fixture, mode }) => {
-    const mockWindow = window as typeof window & { __CAPTURE_GUIDE_CALLS__?: unknown[] };
+    const mockWindow = window as typeof window & {
+      __CAPTURE_GUIDE_CALLS__?: unknown[];
+      __CAPTURE_CANONICAL_GUIDE__?: Record<string, any>;
+    };
     mockWindow.__CAPTURE_GUIDE_CALLS__ = [];
     const generatedArtifactBundle = {
       modelId: 'generated-model-1', sourceKind: 'generated', contentHash: 'generated-content', artifactVersion: 1,
@@ -38,6 +41,7 @@ async function installGuidedCaptureFixture(page: Page, mode: GuideMockMode) {
       queuedCount: 0, errorCount: 0, status: 'ready', summary: 'Guided insert', messages: [generatedMessage],
     };
     window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
+    (window.__TAURI_INTERNALS__ as any).convertFileSrc = (path: string) => path;
     window.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: Record<string, unknown>) => {
       mockWindow.__CAPTURE_GUIDE_CALLS__?.push({ cmd, args });
       if (cmd === 'get_config') return {
@@ -123,6 +127,33 @@ async function installGuidedCaptureFixture(page: Page, mode: GuideMockMode) {
         advisories: [], selectionTargets: [], measurementAnnotations: [], warnings: [], enrichmentState: { status: 'none', proposals: [] },
       } };
       if (cmd === 'get_capture_reconstruction_guide') return null;
+      if (cmd === 'ensure_capture_reconstruction_guide') {
+        const created = !mockWindow.__CAPTURE_CANONICAL_GUIDE__;
+        if (created) {
+          mockWindow.__CAPTURE_CANONICAL_GUIDE__ = {
+            schemaVersion: 1, guideId: 'guide-server-1', revision: 1,
+            captureRunId: 'partial-insert-capture', targetThreadId: 'thread-owner', targetMessageId: null,
+            targetSourceDigest: 'sha256:target-source', targetVersionId: null,
+            sourceMesh: {
+              artifactDigest: fixture.artifactDigest, contentDigest: fixture.contentDigest,
+              selection: 'raw', cropDigest: null, triangleCount: fixture.triangles.length,
+              sourceBounds: { min: [0, 0, 0], max: [40, 30, 18] },
+            },
+            calibration: { sourceUnits: 'sourceUnit', millimetresPerSourceUnit: 1, method: { kind: 'knownDistance' }, measurements: [], residualMm: 0 },
+            reconstructionFrame: { originMm: [0, 0, 0], xAxis: [1, 0, 0], yAxis: [0, 1, 0], zAxis: [0, 0, 1], sourceLandmarkIds: [] },
+            landmarks: [], evidenceComputationPolicy: { neighborhoodRadiusMm: 2, maxNeighborhoodTriangles: 64 },
+            surfaceNeighborhoods: [], primitiveCandidates: [], primitiveHypotheses: [], surfaceRegions: [],
+            regionAdjacency: [], reconstructedProfiles: [], authoredConstraints: [],
+            constraintGraph: { dimensions: [], relations: [], contentDigest: '' },
+            featurePlanCandidates: [], selectedFeaturePlanId: null, stageBypasses: [],
+            reconstructionReadiness: { ready: false, stages: [], missingStages: [], ambiguousStages: [], selectedFeaturePlanId: null, detail: '' },
+            featureExpectations: [], measurements: [], axes: [], planes: [], profiles: [], ignoredRegions: [],
+            remapProposals: [], symmetryCompletion: { kind: 'none' }, instruction: '', evidenceViews: [],
+            canonicalDigest: 'sha256:guide-1',
+          };
+        }
+        return { guide: structuredClone(mockWindow.__CAPTURE_CANONICAL_GUIDE__), state: { status: 'draft' }, created };
+      }
       if (cmd === 'get_capture_guide_context') return {
         sourceMesh: {
           artifactDigest: fixture.artifactDigest,
@@ -139,18 +170,139 @@ async function installGuidedCaptureFixture(page: Page, mode: GuideMockMode) {
         const guideState = args?.guideState as { status?: string } | undefined;
         if (guideState?.status === 'ready' && mode === 'degenerate-frame') throw new Error('Frame evidence is degenerate: origin, X, and Y landmarks are collinear.');
         if (guideState?.status === 'ready' && mode === 'stale-source') throw new Error('Guide is stale: selected crop/source mesh digest changed.');
-        const guide = structuredClone(args?.guide as Record<string, unknown>);
-        return {
+        const guide = JSON.parse(JSON.stringify(args?.guide ?? {})) as Record<string, unknown>;
+        const saved = {
           ...guide,
           revision: Number(args?.expectedRevision ?? 0) + 1,
           canonicalDigest: `sha256:guide-${Number(args?.expectedRevision ?? 0) + 1}`,
         };
+        mockWindow.__CAPTURE_CANONICAL_GUIDE__ = JSON.parse(JSON.stringify(saved));
+        return saved;
       }
-      if (cmd === 'evaluate_capture_reconstruction_guide') {
-        if (mode === 'noisy-fit') {
-          throw new Error('Circle fit maximum residual 1.8 mm exceeds tolerance 0.25 mm.');
+      if (cmd === 'apply_capture_guide_edit') {
+        const input = args?.input as {
+          expectedRevision: number;
+          edit: Record<string, any> & { kind: string };
+        };
+        let guide = JSON.parse(JSON.stringify(mockWindow.__CAPTURE_CANONICAL_GUIDE__ ?? {})) as Record<string, any>;
+        const baseRevision = Number(guide.revision ?? 0);
+        if (input.edit.kind === 'addLandmark') {
+          const ordinal = guide.landmarks.length + 1;
+          guide.landmarks.push({
+            landmarkId: `landmark-${ordinal}`, label: `${input.edit.role} ${ordinal}`, role: input.edit.role,
+            anchor: input.edit.anchor, localPositionMm: input.edit.anchor.sourcePosition,
+            localNormal: input.edit.anchor.sourceNormal, uncertaintyMm: null,
+          });
+        } else if (input.edit.kind === 'updateLandmark') {
+          const landmark = guide.landmarks.find((item: any) => item.landmarkId === input.edit.landmarkId);
+          if (!landmark) throw new Error(`Capture landmark '${input.edit.landmarkId}' does not exist.`);
+          landmark.label = input.edit.label;
+          landmark.role = input.edit.role;
+        } else if (input.edit.kind === 'deleteLandmark') {
+          guide.landmarks = guide.landmarks.filter((item: any) => item.landmarkId !== input.edit.landmarkId);
+          for (const profile of guide.profiles) {
+            profile.landmarkIds = profile.landmarkIds.filter((id: string) => id !== input.edit.landmarkId);
+          }
+        } else if (input.edit.kind === 'replaceDraft') {
+          guide = JSON.parse(JSON.stringify(input.edit.guide));
+        } else if (input.edit.kind === 'configureProfile') {
+          const profile = guide.profiles.find((item: any) => item.profileId === input.edit.profileId);
+          Object.assign(profile, {
+            label: input.edit.label, kind: input.edit.profileKind, operationHint: input.edit.operationHint,
+            supportPlaneId: input.edit.supportPlaneId, featureLabel: input.edit.featureLabel, fitRole: input.edit.fitRole,
+          });
+        } else if (input.edit.kind === 'reorderProfileLandmark') {
+          const profile = guide.profiles.find((item: any) => item.profileId === input.edit.profileId);
+          const sourceIndex = profile.landmarkIds.indexOf(input.edit.landmarkId);
+          const [moved] = profile.landmarkIds.splice(sourceIndex, 1);
+          profile.landmarkIds.splice(input.edit.targetIndex, 0, moved);
+        } else if (input.edit.kind === 'updateFeatureExpectation') {
+          const expectation = guide.featureExpectations.find((item: any) => item.expectationId === input.edit.expectationId);
+          Object.assign(expectation, input.edit);
+          delete expectation.kind;
+        } else if (input.edit.kind === 'selectFeaturePlan') {
+          guide.selectedFeaturePlanId = input.edit.planId;
         }
-        const guide = structuredClone(args?.guide as Record<string, unknown>) as Record<string, any>;
+        guide.revision = baseRevision + 1;
+        guide.canonicalDigest = `sha256:guide-${guide.revision}`;
+        mockWindow.__CAPTURE_CANONICAL_GUIDE__ = JSON.parse(JSON.stringify(guide));
+        return {
+          guide,
+          state: { status: 'draft' },
+          baseRevision,
+          expectedRevisionMatched: input.expectedRevision === baseRevision,
+          sourceDigestMatched: true,
+          rawEvidence: [],
+        };
+      }
+      if (cmd === 'validate_capture_guide_intent') {
+        const input = args?.input as Record<string, any>;
+        const guide = JSON.parse(JSON.stringify(mockWindow.__CAPTURE_CANONICAL_GUIDE__ ?? {})) as Record<string, any>;
+        const baseRevision = Number(guide.revision ?? 0);
+        const byRole = (role: string) => guide.landmarks.filter((landmark: any) => landmark.role === role);
+        const calibration = byRole('calibrationEndpoint').slice(0, 2);
+        const frameDirections = byRole('frameDirection').slice(0, 2);
+        const frameOrigin = byRole('frameOrigin')[0];
+        const symmetrySamples = byRole('symmetrySample');
+        const profileVertices = byRole('profileVertex');
+        const existingProfile = guide.profiles.find((profile: any) => profile.profileId === 'profile-1');
+        const profileIds = profileVertices.map((landmark: any) => landmark.landmarkId);
+        const orderedProfileIds = [
+          ...(existingProfile?.landmarkIds ?? []).filter((id: string) => profileIds.includes(id)),
+          ...profileIds.filter((id: string) => !existingProfile?.landmarkIds.includes(id)),
+        ];
+        guide.calibration = {
+          sourceUnits: 'sourceUnit',
+          millimetresPerSourceUnit: guide.calibration.millimetresPerSourceUnit || 1,
+          method: { kind: 'knownDistance' },
+          measurements: [{
+            measurementId: 'calibration-1', label: 'Known calibration distance',
+            firstLandmarkId: calibration[0].landmarkId, secondLandmarkId: calibration[1].landmarkId,
+            knownDistanceMm: input.knownDistanceMm, fittedDistanceMm: 0, residualMm: 0,
+            acceptedToleranceMm: 0.1,
+          }],
+          residualMm: 0,
+        };
+        guide.reconstructionFrame.sourceLandmarkIds = [
+          frameOrigin.landmarkId,
+          frameDirections[0].landmarkId,
+          frameDirections[1].landmarkId,
+        ];
+        guide.planes = [{
+          planeId: 'symmetry-plane-1', label: 'Primary symmetry plane', role: 'symmetry',
+          landmarkIds: symmetrySamples.map((landmark: any) => landmark.landmarkId),
+          originMm: [0, 0, 0], normal: [1, 0, 0],
+          fit: { rmsMm: 0, maxMm: 0, toleranceMm: 0.25 },
+        }];
+        guide.profiles = [{
+          profileId: 'profile-1', label: existingProfile?.label ?? 'Ordered reconstruction profile',
+          kind: existingProfile?.kind ?? 'closed', supportPlaneId: existingProfile?.supportPlaneId ?? 'symmetry-plane-1',
+          landmarkIds: orderedProfileIds, operationHint: existingProfile?.operationHint ?? 'extrude',
+          featureLabel: existingProfile?.featureLabel ?? 'insert-body', fitRole: existingProfile?.fitRole ?? 'outer-envelope',
+        }];
+        const existingExpectation = (id: string) => guide.featureExpectations.find((item: any) => item.expectationId === id);
+        guide.featureExpectations = [
+          existingExpectation('expectation-symmetry-face') ?? {
+            expectationId: 'expectation-symmetry-face', guideItemIds: ['symmetry-plane-1'],
+            label: 'Exact symmetry support face', expectedGeometryKind: 'plane', requiredBrepTopologyKind: 'face',
+            cardinality: 'one', partId: 'insert-body', instancePath: null,
+            expectedAuthoredSelector: { kind: 'tag', name: 'symmetry-face' }, requiredForAcceptance: true,
+            positionToleranceMm: 0.25, normalToleranceDeg: 1, radialToleranceMm: null,
+          },
+          existingExpectation('expectation-profile-edges') ?? {
+            expectationId: 'expectation-profile-edges', guideItemIds: ['profile-1'],
+            label: 'Exact ordered profile edges', expectedGeometryKind: 'profile', requiredBrepTopologyKind: 'orderedEdges',
+            cardinality: 'oneOrMore', partId: 'insert-body', instancePath: null,
+            expectedAuthoredSelector: { kind: 'tag', name: 'profile-edges' }, requiredForAcceptance: true,
+            positionToleranceMm: 0.25, normalToleranceDeg: null, radialToleranceMm: null,
+          },
+        ];
+        guide.symmetryCompletion = { kind: 'half', planeId: 'symmetry-plane-1' };
+        guide.measurements = [{
+          measurementId: 'feature-depth', label: 'Feature depth', landmarkIds: [], value: input.featureDepthMm,
+          unit: 'mm', fitCritical: true, authoredParameterName: 'feature-depth', constraintKind: 'extent',
+        }];
+        guide.instruction = String(input.instruction ?? '').trim();
         const selected = guide.selectedFeaturePlanId as string | null | undefined;
         const ambiguous = mode === 'ambiguous-plan' && !selected;
         const unsupported = mode === 'unsupported-primitive';
@@ -167,7 +319,7 @@ async function installGuidedCaptureFixture(page: Page, mode: GuideMockMode) {
           fit: { rmsMm: 0.9, maxMm: 1.7, toleranceMm: 0.25 }, reason: 'Cylinder evidence is degenerate and over tolerance.',
         }] : [];
         const ready = !ambiguous && !unsupported;
-        return {
+        const evaluated: Record<string, any> = {
           ...guide,
           primitiveHypotheses,
           featurePlanCandidates: plans,
@@ -186,6 +338,31 @@ async function installGuidedCaptureFixture(page: Page, mode: GuideMockMode) {
             detail: ready ? 'Deterministic reconstruction stack is ready.' : 'Explicit resolution required.',
           },
         };
+        const rawEvidence = mode === 'noisy-fit'
+          ? ['Circle fit maximum residual 1.8 mm exceeds tolerance 0.25 mm.']
+          : mode === 'degenerate-frame'
+            ? ['Frame evidence is degenerate: origin, X, and Y landmarks are collinear.']
+            : [];
+        if (rawEvidence.length > 0) {
+          evaluated.reconstructionReadiness.ready = false;
+          evaluated.reconstructionReadiness.detail = rawEvidence[0];
+        }
+        evaluated.revision = baseRevision + 1;
+        evaluated.canonicalDigest = `sha256:guide-${evaluated.revision}`;
+        mockWindow.__CAPTURE_CANONICAL_GUIDE__ = JSON.parse(JSON.stringify(evaluated));
+        const state = mode === 'stale-source'
+          ? { status: 'stale', reason: 'Guide is stale: selected crop/source mesh digest changed.' }
+          : evaluated.reconstructionReadiness.ready && rawEvidence.length === 0
+            ? { status: 'ready' }
+            : { status: 'draft' };
+        return {
+          guide: evaluated,
+          state,
+          baseRevision,
+          expectedRevisionMatched: input.expectedRevision === baseRevision,
+          sourceDigestMatched: mode !== 'stale-source',
+          rawEvidence: mode === 'stale-source' ? [state.reason] : rawEvidence,
+        };
       }
       if (cmd === 'queue_capture_guided_reconstruction') {
         if (mode === 'source-divergence') {
@@ -201,6 +378,9 @@ async function installGuidedCaptureFixture(page: Page, mode: GuideMockMode) {
     };
   }, { fixture: partialSymmetricMechanicalInsert, mode });
   await page.route('**/partial-symmetric-mechanical-insert.stl*', route => route.fulfill({
+    status: 200, contentType: 'model/stl', body: partialSymmetricMechanicalInsertStl(),
+  }));
+  await page.route('**/fixtures/model.stl*', route => route.fulfill({
     status: 200, contentType: 'model/stl', body: partialSymmetricMechanicalInsertStl(),
   }));
   await page.route('**/generated-brep.stl*', route => route.fulfill({
@@ -262,10 +442,31 @@ test('Given a partial symmetric insert capture When calibration frame symmetry a
   await page.getByLabel('Landmark 1 label').blur();
   await page.getByRole('button', { name: 'Delete landmark 11' }).click();
   await expect(page.locator('.capture-panel__guide-point')).toHaveCount(10);
+  await expect.poll(async () => page.evaluate(() => (
+    window as typeof window & { __CAPTURE_GUIDE_CALLS__?: Array<{ cmd: string; args?: any }> }
+  ).__CAPTURE_GUIDE_CALLS__?.filter(call =>
+    call.cmd === 'apply_capture_guide_edit' &&
+    ['updateLandmark', 'deleteLandmark'].includes(call.args?.input?.edit?.kind)
+  ).length ?? 0)).toBe(2);
   await page.getByRole('button', { name: 'UNDO GUIDE EDIT' }).click();
+  await expect.poll(async () => page.evaluate(() => (
+    window as typeof window & { __CAPTURE_GUIDE_CALLS__?: Array<{ cmd: string; args?: any }> }
+  ).__CAPTURE_GUIDE_CALLS__?.filter(call =>
+    call.cmd === 'apply_capture_guide_edit' && call.args?.input?.edit?.kind === 'replaceDraft'
+  ).length ?? 0)).toBe(1);
+  expect(await page.evaluate(() => {
+    const calls = (window as typeof window & { __CAPTURE_GUIDE_CALLS__?: Array<{ cmd: string; args?: any }> }).__CAPTURE_GUIDE_CALLS__ ?? [];
+    const undo = calls.find(call => call.cmd === 'apply_capture_guide_edit' && call.args?.input?.edit?.kind === 'replaceDraft');
+    return undo?.args?.input?.edit?.guide?.landmarks?.length ?? -1;
+  })).toBe(11);
   await expect(page.locator('.capture-panel__guide-point')).toHaveCount(11);
   await expect(page.getByLabel('Landmark 1 label')).toHaveValue('calibration datum A');
   await page.getByRole('button', { name: 'VALIDATE GUIDE' }).click();
+  await expect.poll(async () => page.evaluate(() => (
+    window as typeof window & { __CAPTURE_GUIDE_CALLS__?: Array<{ cmd: string }> }
+  ).__CAPTURE_GUIDE_CALLS__?.filter(
+    call => call.cmd === 'validate_capture_guide_intent',
+  ).length ?? 0)).toBe(1);
 
   // Ordered profile and exact BRep target contract remain editable, then require revalidation.
   await page.getByText('PROFILE · 3 POINTS', { exact: true }).click();
@@ -285,13 +486,9 @@ test('Given a partial symmetric insert capture When calibration frame symmetry a
   await expect.poll(async () => page.evaluate(() => (window as typeof window & { __CAPTURE_GUIDE_CALLS__?: Array<{ cmd: string }> }).__CAPTURE_GUIDE_CALLS__?.filter(call => call.cmd === 'queue_capture_guided_reconstruction').length ?? 0)).toBe(1);
   await expect.poll(async () => page.evaluate(() => (window as typeof window & { __CAPTURE_GUIDE_CALLS__?: Array<{ cmd: string }> }).__CAPTURE_GUIDE_CALLS__?.filter(call => call.cmd === 'add_manual_version').length ?? 0)).toBe(0);
   const readyGuide = await page.evaluate(() => {
-    const calls = (window as typeof window & {
-      __CAPTURE_GUIDE_CALLS__?: Array<{ cmd: string; args?: Record<string, unknown> }>;
-    }).__CAPTURE_GUIDE_CALLS__ ?? [];
-    return calls
-      .filter(call => call.cmd === 'save_capture_reconstruction_guide'
-        && (call.args?.guideState as { status?: string } | undefined)?.status === 'ready')
-      .at(-1)?.args?.guide as {
+    return (window as typeof window & {
+      __CAPTURE_CANONICAL_GUIDE__?: Record<string, unknown>;
+    }).__CAPTURE_CANONICAL_GUIDE__ as {
         profiles: Array<{ kind: string; landmarkIds: string[] }>;
         featureExpectations: Array<{
           expectationId: string;

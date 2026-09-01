@@ -18,6 +18,7 @@
 
 pub mod agent_prompt;
 pub mod bindings;
+pub mod build_queue;
 pub mod cad_source_adapters;
 pub mod cad_transpile;
 pub mod campaign_definition;
@@ -47,6 +48,12 @@ pub mod ecky_ir;
 pub mod ecky_ir_patterns;
 pub mod ecky_language_surface;
 pub mod ecky_scheme;
+pub mod exploration_cycle;
+pub mod exploration_eval;
+pub mod exploration_prompt;
+pub mod exploration_run_registry;
+pub mod exploration_scheduler;
+pub mod exploration_store;
 pub mod external_shapes;
 pub mod fem_engineering;
 pub mod fem_topology_reconstruction;
@@ -79,6 +86,7 @@ pub mod surface_trim_external_shapes;
 pub mod surface_trim_mesh;
 pub mod surface_trim_runtime;
 pub mod surface_trim_source;
+pub mod thread_lifecycle;
 pub mod thread_source_binding;
 pub mod topology_target_ids;
 pub mod transport_budget;
@@ -527,6 +535,20 @@ pub(crate) const TECHNICAL_SYSTEM_PROMPT: &str = r#"Return a JSON object with:
 6. "ui_spec": { "fields": [ { "key": string, "label": string, "type": "range"|"number"|"select"|"checkbox"|"image" } ] }
 7. "initial_params": { "key": value }
 8. "post_processing": { "displacement": { "image_param": string, "projection": "planar"|"cylindrical"|"spherical", "depth_mm": number, "invert": bool } } (Optional)
+9. "next_action": { "action": "BUILD"|"ASK"|"STOP", "source_version_id": string, "hypothesis": string, "change_scope": string, "expected_evidence": string, "budget_cost": non-negative integer, "question": string|null, "blocked_decision": string|null }
+
+The `next_action` object is transient controller input. When an exploration
+cycle envelope is present, return it in this same authoring response; do not
+nest it inside the design and do not put lifecycle fields in `macro_code`.
+BUILD, ASK, and STOP are the only valid actions. Use the exact current version
+identity from the context. BUILD requires non-empty hypothesis, change_scope,
+and expected_evidence. ASK requires a concrete question and blocked_decision;
+its BUILD-only fields may be empty strings. STOP may also leave BUILD-only
+fields empty and explains why no bounded action is justified in response. For legacy
+non-cycle/question calls, this field may be omitted.
+ASK and STOP still return the complete existing design object (use the exact
+unchanged source when no geometry change is requested); the controller ignores
+that object and does not persist it as a new version.
 
 CRITICAL RULES:
 - UNITS: ALL dimensions are in MILLIMETERS (mm).
@@ -560,6 +582,10 @@ CRITICAL RULES:
 - If USER_INTENT_MODE is "DESIGN_EDIT":
   - Set "interaction_mode" to "design".
   - Use "response" as a short summary of what changed.
+- When an exploration cycle is active, always return `next_action`, even when
+  PLAN and BUILD happen in this same provider turn. Do not emit a second
+  executable plan or require another model call just to restate the action. For
+  QUESTION_ONLY outside a cycle, the field may be omitted.
 "#;
 
 pub fn run() {
@@ -633,6 +659,17 @@ pub fn run() {
                         interrupted
                     );
                 }
+            }
+            let recovery_now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if let Err(error) =
+                crate::exploration_store::mark_in_flight_interrupted(&conn, recovery_now)
+            {
+                eprintln!(
+                    "[BOOT] failed to mark in-flight exploration cycles interrupted: {error}"
+                );
             }
             let startup_now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

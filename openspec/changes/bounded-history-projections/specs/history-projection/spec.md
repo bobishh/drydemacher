@@ -116,6 +116,38 @@ flight per thread and SHALL reject stale responses.
 - **AND** expansion, scroll anchor, search, filter, and loaded older pages remain
   unchanged.
 
+#### Scenario: User deletes or restores a version
+
+- **WHEN** the user invokes delete or restore for one version identity
+- **THEN** one Rust intent atomically mutates the tombstone and returns the
+  affected thread summary, bounded newest page, and canonical selected version
+- **AND** Rust updates or clears the durable restart pointer for the active
+  affected thread
+- **AND** frontend performs no global-history, latest-version, page, or snapshot
+  follow-up command
+- **AND** an already-loaded older-page cursor remains unchanged.
+
+#### Scenario: User changes thread lifecycle state
+
+- **WHEN** the user deletes, finalizes, or reopens one thread
+- **THEN** one Rust intent mutates lifecycle state and returns the bounded
+  canonical active-thread summary projection from the same transaction
+- **AND** Rust clears restart authority only when it targets the removed active
+  workspace
+- **AND** frontend preserves loaded messages for surviving summaries and issues
+  no global history refresh
+- **AND** the local intent does not emit an invalidation echo that triggers a
+  second IPC refresh.
+
+#### Scenario: User opens a completed project
+
+- **WHEN** the user chooses one completed thread identity
+- **THEN** one Rust point intent validates completed status and returns its
+  bounded workspace projection
+- **AND** it does not scan the inventory collection before a second workspace
+  read
+- **AND** Rust persists the exact selected-version restart target.
+
 ### Requirement: Projection transport has explicit budgets
 
 The system SHALL count serialized bytes before IPC and enforce versioned limits
@@ -147,7 +179,10 @@ selected version reference, and last good render snapshot reference.
 
 - **GIVEN** native backend and durable history remain alive
 - **WHEN** WebContent terminates
-- **THEN** the UI reloads and restores bounded durable projections
+- **THEN** the UI reloads and requests one Rust-owned bounded boot projection
+- **AND** config normalization, restart-pointer resolution, fallback-thread
+  selection, thread summaries, and selected workspace reads are not composed in
+  frontend code
 - **AND** it does not replay a provider message, queue delivery, or render job.
 
 #### Scenario: Recovery terminates again

@@ -16,13 +16,18 @@ type MockOptions = {
   messagesPageFails?: boolean;
   latestVersionDelayMs?: number;
   projectSourceDelayMs?: number;
+  submitReplyOutcome?: 'resolved' | 'queued';
+  submitReplyDelayMs?: number;
+  submitReplyError?: string;
 };
 
 async function installPassiveThreadAgentMock(page: Page, options: MockOptions = {}) {
   await page.addInitScript((mockOptions: MockOptions) => {
+    const mockWindow = window as any;
     const now = Math.floor(Date.now() / 1000);
-    const calls = { queue: 0, generate: 0 };
+    const calls = { queue: 0, generate: 0, submitReply: 0 };
     const invokeCalls: Array<{ cmd: string; args: unknown }> = [];
+    const eventHandlerIds = new Map<string, number>();
     let mockMessages = [...(mockOptions.messages ?? [])];
     const latestAuthoredVersion = () =>
       [...mockMessages]
@@ -69,6 +74,12 @@ async function installPassiveThreadAgentMock(page: Page, options: MockOptions = 
     (window as Window & typeof globalThis & {
       __MOCK_AGENT_INVOKE_CALLS__?: typeof invokeCalls;
     }).__MOCK_AGENT_INVOKE_CALLS__ = invokeCalls;
+    mockWindow.__EMIT_AGENT_PROMPT__ = (payload: Record<string, unknown>) => {
+      const handlerId = eventHandlerIds.get('agent-prompt-request');
+      if (!handlerId) throw new Error('agent-prompt-request listener is not registered');
+      const callback = mockWindow[`_${handlerId}`];
+      callback({ event: 'agent-prompt-request', id: 1, payload });
+    };
 
     const currentThread = () => ({
       ...thread,
@@ -89,7 +100,12 @@ async function installPassiveThreadAgentMock(page: Page, options: MockOptions = 
     };
     window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
       invokeCalls.push({ cmd, args });
-      if (cmd === 'plugin:event|listen') return args?.handler ?? 1;
+      if (cmd === 'plugin:event|listen') {
+        if (typeof args?.event === 'string' && typeof args?.handler === 'number') {
+          eventHandlerIds.set(args.event, args.handler);
+        }
+        return args?.handler ?? 1;
+      }
       if (cmd === 'plugin:event|unlisten') return null;
       if (cmd === 'get_config') {
         return {
@@ -269,6 +285,16 @@ async function installPassiveThreadAgentMock(page: Page, options: MockOptions = 
         }
         return { threadId: 'thread-1', messageId: 'queued-1' };
       }
+      if (cmd === 'submit_agent_prompt_reply') {
+        calls.submitReply += 1;
+        if (mockOptions.submitReplyDelayMs) {
+          await new Promise((resolve) => setTimeout(resolve, mockOptions.submitReplyDelayMs));
+        }
+        if (mockOptions.submitReplyError) throw new Error(mockOptions.submitReplyError);
+        return mockOptions.submitReplyOutcome === 'queued'
+          ? { outcome: 'queued', threadId: 'thread-1', messageId: 'queued-reply-1' }
+          : { outcome: 'resolved' };
+      }
       if (cmd === 'generate_design') {
         calls.generate += 1;
         throw new Error('generate path should stay unused');
@@ -347,6 +373,28 @@ async function drawViewportAnnotation(page: Page) {
   await page.mouse.down();
   await page.mouse.move(endX, endY);
   await page.mouse.up();
+}
+
+async function openPassiveThreadDialogue(page: Page) {
+  await page.goto('/');
+  await expect(page.locator('.boot-overlay')).toHaveCount(0);
+  await page.waitForSelector('.workbench');
+  await page.getByRole('button', { name: 'PROJECTS' }).click();
+  await page.getByRole('button', { name: 'OPEN', exact: true }).click();
+  await page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Dialogue' }).click();
+}
+
+async function emitAgentPrompt(page: Page, requestId: string) {
+  await expect.poll(() => page.evaluate(() => typeof (window as any).__EMIT_AGENT_PROMPT__)).toBe('function');
+  await page.evaluate((id) => (window as any).__EMIT_AGENT_PROMPT__({
+    requestId: id,
+    message: 'Need one decision.',
+    agentLabel: 'Gemini',
+    sessionId: 'sess-1',
+    threadId: 'thread-1',
+    messageId: null,
+    modelId: null,
+  }), requestId);
 }
 
 test.describe('Dialogue routes passive thread-owned MCP threads through queue mode', () => {
@@ -1727,6 +1775,57 @@ test.describe('Dialogue routes passive thread-owned MCP threads through queue mo
           }).__MOCK_AGENT_DIALOGUE_CALLS__,
       ),
     ).toMatchObject({ queue: 1, generate: 0 });
+  });
+
+  test('Given live agent prompt When user replies Then one Rust resolve-or-queue intent resolves it', async ({ page }) => {
+    await installPassiveThreadAgentMock(page, { submitReplyOutcome: 'resolved' });
+    await openPassiveThreadDialogue(page);
+    await emitAgentPrompt(page, 'live-request-1');
+
+    await expect(page.getByRole('button', { name: 'SEND TO AGENT' })).toBeVisible();
+    await page.locator('.prompt-input').fill('Use the wider flange.');
+    await page.getByRole('button', { name: 'SEND TO AGENT' }).click();
+
+    await expect.poll(() => page.evaluate(() => (window as any).__MOCK_AGENT_DIALOGUE_CALLS__.submitReply)).toBe(1);
+    const calls = await page.evaluate(() => (window as any).__MOCK_AGENT_INVOKE_CALLS__);
+    const submit = calls.find((call: { cmd: string }) => call.cmd === 'submit_agent_prompt_reply');
+    expect(submit.args.input).toMatchObject({
+      requestId: 'live-request-1',
+      threadId: 'thread-1',
+      promptText: 'Use the wider flange.',
+    });
+    expect(calls.map((call: { cmd: string }) => call.cmd)).not.toContain('resolve_agent_prompt');
+  });
+
+  test('Given expired agent prompt When user replies Then Rust queued projection appears in dialogue', async ({ page }) => {
+    await installPassiveThreadAgentMock(page, { submitReplyOutcome: 'queued' });
+    await openPassiveThreadDialogue(page);
+    await emitAgentPrompt(page, 'expired-request-1');
+
+    await page.locator('.prompt-input').fill('Queue this after expiry.');
+    await page.getByRole('button', { name: 'SEND TO AGENT' }).click();
+
+    await expect(page.locator('.trail-user')).toContainText('Queue this after expiry.');
+    await expect.poll(() => page.evaluate(() => (window as any).__MOCK_AGENT_DIALOGUE_CALLS__.submitReply)).toBe(1);
+    const commands = await page.evaluate(() => (window as any).__MOCK_AGENT_INVOKE_CALLS__
+      .map((call: { cmd: string }) => call.cmd));
+    expect(commands).not.toContain('queue_agent_prompt');
+  });
+
+  test('Given agent reply intent pending When send is clicked twice Then duplicate submission stays blocked', async ({ page }) => {
+    await installPassiveThreadAgentMock(page, { submitReplyOutcome: 'resolved', submitReplyDelayMs: 800 });
+    await openPassiveThreadDialogue(page);
+    await emitAgentPrompt(page, 'pending-request-1');
+
+    await page.locator('.prompt-input').fill('One reply only.');
+    const send = page.getByRole('button', { name: 'SEND TO AGENT' });
+    await send.evaluate((button: HTMLButtonElement) => {
+      button.click();
+      button.click();
+    });
+
+    await expect(page.getByRole('button', { name: 'SENDING...' })).toBeDisabled();
+    await expect.poll(() => page.evaluate(() => (window as any).__MOCK_AGENT_DIALOGUE_CALLS__.submitReply)).toBe(1);
   });
 
   test('Given passive queue is slow When sending message Then user bubble appears before backend refresh', async ({ page }) => {

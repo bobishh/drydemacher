@@ -14,7 +14,7 @@ use crate::contracts::{
 };
 use crate::models::AppState;
 use crate::services::design::{auto_heal_legacy_params, is_param_schema_mismatch};
-use crate::services::session::{build_runtime_snapshot, write_last_snapshot};
+use crate::services::session::{build_saved_version_snapshot, write_last_snapshot};
 use crate::{
     db, fallback_intent, freecad, llm, persist_thread_summary, persist_user_prompt_references,
     TECHNICAL_SYSTEM_PROMPT,
@@ -70,8 +70,9 @@ pub fn design_system_prompt(
         })
         .unwrap_or_default();
     format!(
-        "{}\n\nTARGET LANGUAGE GUIDE (AUTHORITATIVE FOR `macro_code`)\n{}{}",
+        "{}\n\n{}\n\nTARGET LANGUAGE GUIDE (AUTHORITATIVE FOR `macro_code`)\n{}{}",
         TECHNICAL_SYSTEM_PROMPT,
+        crate::exploration_prompt::STATIC_GUIDANCE,
         language_guide_text(source_language, geometry_backend),
         framework_block
     )
@@ -316,7 +317,7 @@ pub fn ecky_source_guide_text() -> String {
     crate::agent_prompt::agent_language_reference(crate::contracts::GeometryBackend::EckyRust)
 }
 
-fn selected_engine(state: &State<'_, AppState>) -> AppResult<crate::contracts::Engine> {
+fn selected_engine_core(state: &AppState) -> AppResult<crate::contracts::Engine> {
     let config = state.config.lock().unwrap();
     let engine = config
         .engines
@@ -333,6 +334,10 @@ fn selected_engine(state: &State<'_, AppState>) -> AppResult<crate::contracts::E
     }
 
     Ok(engine)
+}
+
+fn selected_engine(state: &State<'_, AppState>) -> AppResult<crate::contracts::Engine> {
+    selected_engine_core(state.inner())
 }
 
 fn default_engine_kind(app_state: &AppState) -> crate::contracts::EngineKind {
@@ -551,7 +556,7 @@ fn build_visual_input_notes(
     }
 }
 
-fn build_available_assets_block(state: &State<'_, AppState>, app: &AppHandle) -> String {
+fn build_available_assets_block(state: &AppState, app: &dyn crate::models::PathResolver) -> String {
     let mut by_path = BTreeMap::new();
     {
         let config = state.config.lock().unwrap();
@@ -582,7 +587,7 @@ fn build_available_assets_block(state: &State<'_, AppState>, app: &AppHandle) ->
         .join("\n")
 }
 
-fn load_framework_contract(app: &AppHandle) -> Option<String> {
+fn load_framework_contract(app: &dyn crate::models::PathResolver) -> Option<String> {
     let path = freecad::resolve_resource_path(
         app,
         "model-runtime/cad_framework_contract.md",
@@ -628,6 +633,201 @@ fn prepend_follow_up_context(prompt: String, follow_up_question: Option<&str>) -
     )
 }
 
+fn exploration_phase(
+    phase: crate::contracts::exploration_cycle::CyclePhase,
+) -> crate::exploration_prompt::CyclePhase {
+    use crate::contracts::exploration_cycle::CyclePhase as Stored;
+    use crate::exploration_prompt::CyclePhase as Prompt;
+    match phase {
+        Stored::Planning | Stored::AwaitingInput | Stored::Idle => Prompt::Plan,
+        Stored::Building => Prompt::Build,
+        Stored::Verifying => Prompt::Verify,
+        Stored::Deciding => Prompt::Decide,
+    }
+}
+
+fn cycle_required_output(phase: crate::contracts::exploration_cycle::CyclePhase) -> &'static str {
+    use crate::contracts::exploration_cycle::CyclePhase;
+    match phase {
+        CyclePhase::Planning => "exactly one typed PLAN action; no executable plan tail",
+        CyclePhase::Building => "one bounded source change derived from the exact current version",
+        CyclePhase::Verifying => "no authored source; wait for deterministic verification evidence",
+        CyclePhase::Deciding => "one typed COMPLETE, REPLAN, ASK, STOP, or COMPARE decision",
+        CyclePhase::AwaitingInput => "one concise clarification answer from the user",
+        CyclePhase::Idle => "no next output; cycle is not running",
+    }
+}
+
+fn active_cycle_envelope(
+    conn: &rusqlite::Connection,
+    thread_id: &str,
+) -> AppResult<Option<String>> {
+    let Some((packet, _)) =
+        crate::exploration_store::load_latest_active_cycle_for_thread(conn, thread_id)
+            .map_err(|error| AppError::persistence(error.to_string()))?
+    else {
+        return Ok(None);
+    };
+    let (input_digest, status): (Option<String>, String) = conn
+        .query_row(
+            "SELECT version_input_digest, status FROM messages
+             WHERE id = ?1 AND thread_id = ?2 AND output IS NOT NULL AND deleted_at IS NULL",
+            rusqlite::params![packet.state.current_version_id, thread_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+    let deterministic_failed = packet
+        .last_verification
+        .as_ref()
+        .is_some_and(|verification| {
+            verification.deterministic
+                == crate::contracts::exploration_cycle::VerificationVerdict::Red
+        });
+    let evidence_items = packet
+        .last_verification
+        .as_ref()
+        .map(|verification| {
+            vec![crate::exploration_prompt::VerificationEvidence {
+                kind: crate::exploration_prompt::EvidenceKind::RedVerification,
+                severity: if deterministic_failed {
+                    crate::exploration_prompt::EvidenceSeverity::Error
+                } else {
+                    crate::exploration_prompt::EvidenceSeverity::Info
+                },
+                code: verification.evidence_ref.clone(),
+                raw: format!(
+                    "versionId={} inputDigest={} evidenceRef={} deterministic={:?}",
+                    verification.version_id,
+                    verification.input_digest,
+                    verification.evidence_ref,
+                    verification.deterministic
+                ),
+            }]
+        })
+        .unwrap_or_default();
+    let context = crate::exploration_prompt::ExplorationCycleContext {
+        cycle_id: packet.state.cycle_id,
+        goal: packet.definition.objective,
+        acceptance_criteria: packet.definition.acceptance_criteria,
+        hard_constraints: packet.definition.hard_constraints,
+        soft_preferences: packet.definition.soft_preferences,
+        current_version_id: packet.state.current_version_id,
+        current_version_input_digest: input_digest.unwrap_or_else(|| "unavailable".to_string()),
+        current_version_status: status,
+        last_verification_evidence: crate::exploration_prompt::EvidenceState {
+            items: evidence_items,
+            consecutive_red_verifications: u32::from(deterministic_failed),
+            deterministic_failed,
+        },
+        last_answer: packet.state.last_answer,
+        remaining_budget: crate::exploration_prompt::CycleBudget {
+            remaining_actions: packet.state.budget.saturating_sub(packet.state.budget_used),
+            remaining_seconds: None,
+            remaining_tokens: None,
+        },
+        current_phase: exploration_phase(packet.state.phase),
+        required_next_output: cycle_required_output(packet.state.phase).to_string(),
+        prompt_version: packet.prompt_version,
+    };
+    crate::exploration_prompt::render_cycle_envelope(&context)
+        .map(Some)
+        .map_err(|error| validation_prompt_error(error.to_string()))
+}
+
+fn validation_prompt_error(message: String) -> AppError {
+    AppError::with_details(
+        AppErrorCode::Validation,
+        "Exploration prompt assembly failed.",
+        message,
+    )
+}
+
+fn enforce_final_generation_budget(prompt: String) -> AppResult<String> {
+    let observed = prompt.chars().count();
+    let allowed = crate::context_envelope::GENERATION_CEILING_CHARS;
+    if observed > allowed {
+        return Err(AppError::with_details(
+            AppErrorCode::Validation,
+            "Context budget overflow after cycle/follow-up/visual context; refusing to dispatch a lossy request.",
+            format!("observedChars={observed}; allowedChars={allowed}"),
+        ));
+    }
+    Ok(prompt)
+}
+
+fn record_cycle_model_event(
+    conn: &rusqlite::Connection,
+    thread_id: &str,
+    engine: &crate::contracts::Engine,
+    usage: Option<&UsageSummary>,
+    latency_ms: u64,
+    raw_error: Option<String>,
+) -> AppResult<()> {
+    let Some((mut packet, mut build_started)) =
+        crate::exploration_store::load_latest_active_cycle_for_thread(conn, thread_id)
+            .map_err(|error| AppError::persistence(error.to_string()))?
+    else {
+        return Ok(());
+    };
+    packet.event_count += 1;
+    let route = crate::contracts::exploration_cycle::CycleRouteMetadata {
+        prompt_version: packet.prompt_version.clone(),
+        provider: engine.provider.clone(),
+        model: engine.model.clone(),
+        reasoning_effort: None,
+        latency_ms: Some(latency_ms),
+        input_tokens: usage.map(|value| value.input_tokens),
+        output_tokens: usage.map(|value| value.output_tokens),
+        estimated_cost_usd: usage.and_then(|value| value.estimated_cost_usd),
+    };
+    packet.last_route = Some(route.clone());
+    let failed = raw_error.is_some();
+    if failed {
+        let mut reducer = crate::exploration_cycle::CycleReducer::restore(
+            packet.state.clone(),
+            packet.last_verification.clone(),
+            build_started,
+        );
+        reducer
+            .apply(crate::exploration_cycle::Transition::ProviderFailed)
+            .map_err(|error| {
+                AppError::validation(format!(
+                    "Invalid provider failure transition while recording model route: {error:?}"
+                ))
+            })?;
+        packet.state = reducer.state().clone();
+        build_started = reducer.build_started();
+    }
+    let event = crate::contracts::exploration_cycle::CycleEvent {
+        event_id: Uuid::new_v4().to_string(),
+        cycle_id: packet.state.cycle_id.clone(),
+        sequence: packet.event_count,
+        event_type: if failed {
+            crate::contracts::exploration_cycle::CycleEventType::ProviderFailed
+        } else {
+            crate::contracts::exploration_cycle::CycleEventType::ModelCallRecorded
+        },
+        phase: packet.state.phase,
+        source_version_id: Some(packet.state.current_version_id.clone()),
+        result_version_id: None,
+        evidence_ref: None,
+        raw_error,
+        render_snapshot_id: None,
+        artifact_digest: None,
+        route: Some(route),
+        plan: None,
+        question: None,
+        blocked_decision: None,
+        answer: None,
+        timestamp: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    };
+    crate::exploration_store::save_transition(conn, &packet, build_started, &event)
+        .map_err(|error| AppError::persistence(error.to_string()))
+}
+
 #[tauri::command]
 #[specta::specta]
 #[allow(clippy::too_many_arguments)]
@@ -643,41 +843,88 @@ pub async fn generate_design(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<GenerateOutput> {
+    generate_design_core(
+        GenerateDesignCoreInput {
+            prompt,
+            thread_id,
+            parent_macro_code,
+            working_design,
+            is_retry: _is_retry,
+            image_data,
+            attachments,
+            options,
+        },
+        state.inner(),
+        &app,
+    )
+    .await
+}
+
+/// Inputs for one provider authoring call.
+///
+/// The Tauri command is only a boundary adapter. Keeping this input separate
+/// lets a Rust-owned exploration actor invoke the exact same generation path
+/// without reconstructing frontend state or calling a command through Tauri.
+#[derive(Debug, Clone)]
+pub(crate) struct GenerateDesignCoreInput {
+    pub prompt: String,
+    pub thread_id: Option<String>,
+    pub parent_macro_code: Option<String>,
+    pub working_design: Option<DesignOutput>,
+    pub is_retry: bool,
+    pub image_data: Option<String>,
+    pub attachments: Option<Vec<Attachment>>,
+    pub options: Option<GenerateDesignOptions>,
+}
+
+pub(crate) async fn generate_design_core(
+    input: GenerateDesignCoreInput,
+    state: &AppState,
+    app: &dyn crate::models::PathResolver,
+) -> AppResult<GenerateOutput> {
+    let GenerateDesignCoreInput {
+        prompt,
+        thread_id,
+        parent_macro_code,
+        working_design,
+        is_retry: _is_retry,
+        image_data,
+        attachments,
+        options,
+    } = input;
     {
-        let (explicit_mcp, no_enabled_engine) = {
+        let no_enabled_engine = {
             let config = state.config.lock().unwrap();
-            let explicit_mcp = config.connection_type.as_deref() == Some("mcp");
-            let no_enabled_engine = !config.engines.iter().any(|e| e.enabled);
-            (explicit_mcp, no_enabled_engine)
+            !config.engines.iter().any(|e| e.enabled)
         };
 
-        if explicit_mcp || no_enabled_engine {
-            let sessions = state.mcp_sessions.lock().await;
-            if sessions.is_empty() && no_enabled_engine {
+        if no_enabled_engine {
+            let sessions = state.mcp_session_registry.with_sessions().lock().await;
+            if sessions.is_empty() {
                 return Err(AppError::validation(
                     "No active engine or MCP agent found. Switch to API Key mode in Settings → Agents, or connect an agent.",
                 ));
             }
-            // In MCP mode the frontend routes user input through request_user_prompt,
-            // not through generate. If we somehow get here, do nothing.
             return Err(AppError::validation(
-                "In MCP mode, generation is driven by your external agent.",
+                "A Rust-owned exploration run requires an enabled API engine. An active external MCP agent cannot be invoked recursively from its own tool call.",
             ));
         }
     }
-    let engine = selected_engine(&state)?;
+    let engine = selected_engine_core(state)?;
     let options = options.unwrap_or_default();
-    let mut ctx = {
+    let (mut ctx, cycle_envelope) = {
         let db = state.db.lock().await;
-        crate::context::assemble_context(
+        let ctx = crate::context::assemble_context(
             &db,
             thread_id.clone(),
             working_design.clone(),
             parent_macro_code.clone(),
-        )
+        );
+        let cycle_envelope = active_cycle_envelope(&db, &ctx.thread_id)?;
+        (ctx, cycle_envelope)
     };
     let engine_kind = resolve_generation_engine_kind(
-        state.inner(),
+        state,
         thread_id.as_deref(),
         options.engine_kind,
         working_design.as_ref(),
@@ -685,7 +932,7 @@ pub async fn generate_design(
     )
     .await?;
     let source_language = resolve_generation_source_language(
-        state.inner(),
+        state,
         thread_id.as_deref(),
         options.source_language,
         working_design.as_ref(),
@@ -693,7 +940,7 @@ pub async fn generate_design(
     )
     .await?;
     let geometry_backend = resolve_generation_geometry_backend(
-        state.inner(),
+        state,
         thread_id.as_deref(),
         options.geometry_backend,
         working_design.as_ref(),
@@ -702,7 +949,7 @@ pub async fn generate_design(
     .await?;
     let question_mode = options.question_mode.unwrap_or(false);
     let follow_up_question = options.follow_up_question;
-    ctx.available_assets = build_available_assets_block(&state, &app);
+    ctx.available_assets = build_available_assets_block(state, app);
     let intent_mode = if question_mode {
         "QUESTION_ONLY"
     } else {
@@ -711,7 +958,7 @@ pub async fn generate_design(
     let framework_enabled = should_use_framework_for_generation(&ctx)
         && source_language == crate::contracts::SourceLanguage::LegacyPython;
     let framework_contract = if framework_enabled {
-        load_framework_contract(&app)
+        load_framework_contract(app)
     } else {
         None
     };
@@ -744,7 +991,11 @@ pub async fn generate_design(
             serde_json::to_string(&budget_err).unwrap_or_else(|_| budget_err.to_string()),
         )
     })?;
-    let contextual_prompt = generation_payload.user_content;
+    let contextual_prompt = if let Some(ref envelope) = cycle_envelope {
+        format!("{}\n\n{}", generation_payload.user_content, envelope)
+    } else {
+        generation_payload.user_content
+    };
     let contextual_prompt =
         prepend_follow_up_context(contextual_prompt, follow_up_question.as_deref());
     let contextual_prompt =
@@ -753,6 +1004,7 @@ pub async fn generate_design(
         } else {
             contextual_prompt
         };
+    let contextual_prompt = enforce_final_generation_budget(contextual_prompt)?;
     let images = prepare_images(image_data, attachments);
 
     let system_prompt = design_system_prompt(
@@ -760,15 +1012,47 @@ pub async fn generate_design(
         geometry_backend,
         framework_contract.as_deref(),
     );
-    let mut output = llm::generate_design(&engine, &system_prompt, &contextual_prompt, images)
-        .await
-        .map_err(|raw_body| {
-            AppError::with_details(
-                AppErrorCode::Provider,
-                "LLM response could not be parsed into a design output.",
-                raw_body,
-            )
-        })?;
+    let model_started = std::time::Instant::now();
+    let output =
+        match llm::generate_design(&engine, &system_prompt, &contextual_prompt, images).await {
+            Ok(output) => output,
+            Err(raw_body) => {
+                let db = state.db.lock().await;
+                record_cycle_model_event(
+                    &db,
+                    &ctx.thread_id,
+                    &engine,
+                    None,
+                    model_started.elapsed().as_millis() as u64,
+                    Some(raw_body.clone()),
+                )?;
+                return Err(AppError::with_details(
+                    AppErrorCode::Provider,
+                    "LLM response could not be parsed into a design output.",
+                    raw_body,
+                ));
+            }
+        };
+    let next_action = output.data.next_action.clone();
+    let mut design = output.data.design;
+    if cycle_envelope.is_some() && next_action.is_none() {
+        return Err(AppError::with_details(
+            AppErrorCode::Validation,
+            "Active exploration cycle requires a typed PLAN next_action.",
+            "Provider response must include next_action.action as BUILD, ASK, or STOP with exact sourceVersionId, hypothesis, changeScope, expectedEvidence, and budgetCost.".to_string(),
+        ));
+    }
+    {
+        let db = state.db.lock().await;
+        record_cycle_model_event(
+            &db,
+            &ctx.thread_id,
+            &engine,
+            output.usage.as_ref(),
+            model_started.elapsed().as_millis() as u64,
+            None,
+        )?;
+    }
 
     // 4.2: emit content-free context telemetry (envelope shape plus provider
     // cache/input/output usage) through the existing profiler/session-activity
@@ -781,70 +1065,70 @@ pub async fn generate_design(
     if !question_mode {
         if framework_enabled {
             if engine_kind == crate::contracts::EngineKind::EckyIrV0 {
-                output.data.macro_dialect = MacroDialect::EckyIrV0;
+                design.macro_dialect = MacroDialect::EckyIrV0;
             } else if let Some(parsed) =
-                crate::commands::design::derive_framework_controls(&output.data.macro_code)?
+                crate::commands::design::derive_framework_controls(&design.macro_code)?
             {
-                output.data.ui_spec = UiSpec {
+                design.ui_spec = UiSpec {
                     fields: parsed.fields.clone(),
                 };
-                output.data.initial_params = parsed.params;
-                output.data.macro_dialect = MacroDialect::CadFrameworkV1;
+                design.initial_params = parsed.params;
+                design.macro_dialect = MacroDialect::CadFrameworkV1;
             } else {
-                output.data.macro_dialect = MacroDialect::Legacy;
+                design.macro_dialect = MacroDialect::Legacy;
             }
         } else {
-            output.data.macro_dialect =
-                if source_language == crate::contracts::SourceLanguage::EckyIrV0 {
-                    MacroDialect::EckyIrV0
-                } else if source_language == crate::contracts::SourceLanguage::Build123d {
-                    MacroDialect::Build123d
-                } else {
-                    MacroDialect::Legacy
-                };
+            design.macro_dialect = if source_language == crate::contracts::SourceLanguage::EckyIrV0
+            {
+                MacroDialect::EckyIrV0
+            } else if source_language == crate::contracts::SourceLanguage::Build123d {
+                MacroDialect::Build123d
+            } else {
+                MacroDialect::Legacy
+            };
         }
-        output.data.engine_kind = engine_kind;
-        output.data.source_language = source_language;
-        output.data.geometry_backend = geometry_backend;
+        design.engine_kind = engine_kind;
+        design.source_language = source_language;
+        design.geometry_backend = geometry_backend;
     }
 
     if question_mode {
-        output.data.interaction_mode = InteractionMode::Question;
+        design.interaction_mode = InteractionMode::Question;
         if let Some(previous) = &ctx.last_output {
-            output.data.title = previous.title.clone();
-            output.data.version_name = previous.version_name.clone();
-            output.data.macro_code = previous.macro_code.clone();
-            output.data.ui_spec = previous.ui_spec.clone();
-            output.data.initial_params = previous.initial_params.clone();
-            output.data.macro_dialect = previous.macro_dialect.clone();
-            output.data.engine_kind = previous.engine_kind;
-            output.data.source_language = previous.source_language;
-            output.data.geometry_backend = previous.geometry_backend;
+            design.title = previous.title.clone();
+            design.version_name = previous.version_name.clone();
+            design.macro_code = previous.macro_code.clone();
+            design.ui_spec = previous.ui_spec.clone();
+            design.initial_params = previous.initial_params.clone();
+            design.macro_dialect = previous.macro_dialect.clone();
+            design.engine_kind = previous.engine_kind;
+            design.source_language = previous.source_language;
+            design.geometry_backend = previous.geometry_backend;
         }
-        if output.data.version_name.trim().is_empty() {
-            output.data.version_name = "Q&A".to_string();
+        if design.version_name.trim().is_empty() {
+            design.version_name = "Q&A".to_string();
         }
-        if output.data.response.trim().is_empty() {
-            output.data.response = "Question answered. Geometry unchanged.".to_string();
+        if design.response.trim().is_empty() {
+            design.response = "Question answered. Geometry unchanged.".to_string();
         }
     }
 
-    if let Err(err) = validate_design_output(&output.data) {
+    if let Err(err) = validate_design_output(&design) {
         if !question_mode
-            && output.data.macro_dialect == MacroDialect::Legacy
+            && design.macro_dialect == MacroDialect::Legacy
             && is_param_schema_mismatch(&err)
         {
             if let Some((ui_spec, initial_params, _heal_report)) = auto_heal_legacy_params(
-                &output.data.macro_code,
-                &output.data.ui_spec,
-                &output.data.initial_params,
+                &design.macro_code,
+                &design.ui_spec,
+                &design.initial_params,
                 ctx.last_output
                     .as_ref()
                     .map(|design| &design.initial_params),
             )? {
-                output.data.ui_spec = ui_spec;
-                output.data.initial_params = initial_params;
-                validate_design_output(&output.data)?;
+                design.ui_spec = ui_spec;
+                design.initial_params = initial_params;
+                validate_design_output(&design)?;
             } else {
                 return Err(AppError::with_details(
                     AppErrorCode::Validation,
@@ -858,9 +1142,10 @@ pub async fn generate_design(
     }
 
     Ok(GenerateOutput {
-        design: output.data,
+        design,
         thread_id: ctx.thread_id,
         message_id: Uuid::new_v4().to_string(),
+        next_action,
         usage: output.usage,
     })
 }
@@ -875,6 +1160,38 @@ pub async fn init_generation_attempt(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<String> {
+    init_generation_core(
+        InitGenerationCoreInput {
+            thread_id,
+            prompt,
+            attachments,
+            image_data,
+        },
+        state.inner(),
+        &app,
+    )
+    .await
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct InitGenerationCoreInput {
+    pub thread_id: String,
+    pub prompt: String,
+    pub attachments: Option<Vec<Attachment>>,
+    pub image_data: Option<String>,
+}
+
+pub(crate) async fn init_generation_core(
+    input: InitGenerationCoreInput,
+    state: &AppState,
+    app: &dyn crate::models::PathResolver,
+) -> AppResult<String> {
+    let InitGenerationCoreInput {
+        thread_id,
+        prompt,
+        attachments,
+        image_data,
+    } = input;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -887,7 +1204,7 @@ pub async fn init_generation_attempt(
         let db = state.db.lock().await;
         ensure_generation_thread_binding(
             &db,
-            &app,
+            app,
             configured_root.as_deref(),
             &thread_id,
             &prompt,
@@ -911,7 +1228,7 @@ pub async fn init_generation_attempt(
             attachment_images,
             timestamp: now,
         };
-        db::add_message(&db, &thread_id, &user_msg)
+        db::add_message_checked(&db, &thread_id, &user_msg)
             .map_err(|err| AppError::persistence(err.to_string()))?;
         persist_user_prompt_references(
             &db,
@@ -939,11 +1256,164 @@ pub async fn init_generation_attempt(
             attachment_images: Vec::new(),
             timestamp: now + 1,
         };
-        db::add_message(&db, &thread_id, &assistant_msg)
+        db::add_message_checked(&db, &thread_id, &assistant_msg)
             .map_err(|err| AppError::persistence(err.to_string()))?;
     }
 
     Ok(assistant_message_id)
+}
+
+/// Persist model-authored source before render or verification. The initial
+/// pending row becomes the first immutable version. A later repair appends a
+/// new version instead of overwriting the prior source.
+#[tauri::command]
+#[specta::specta]
+pub async fn persist_generation_draft(
+    message_id: String,
+    design: DesignOutput,
+    usage: Option<UsageSummary>,
+    state: State<'_, AppState>,
+) -> AppResult<String> {
+    let db = state.db.lock().await;
+    persist_generation_draft_in_db(&db, message_id, design, usage)
+}
+
+pub(crate) fn persist_generation_draft_in_db(
+    db: &rusqlite::Connection,
+    message_id: String,
+    design: DesignOutput,
+    usage: Option<UsageSummary>,
+) -> AppResult<String> {
+    // Reads normalize legacy projections before returning them. Normalize the
+    // incoming snapshot before calculating identity too, otherwise a source
+    // that infers Ecky dialect on read appears different from its own stored
+    // legacy-labelled input and creates a duplicate immutable version.
+    let design = crate::contracts::normalize_design_output(design);
+    let thread_id = db::get_message_thread_id(&db, &message_id)
+        .map_err(|error| AppError::persistence(error.to_string()))?
+        .ok_or_else(|| {
+            AppError::validation(format!("Generation message '{message_id}' was not found."))
+        })?;
+    let already_has_source: bool = db
+        .query_row(
+            "SELECT output IS NOT NULL FROM messages WHERE id = ?1 AND deleted_at IS NULL",
+            [&message_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+
+    if !already_has_source {
+        // `init_generation_core` creates a pending assistant placeholder before
+        // the provider responds. If the provider returns the current source
+        // unchanged, that placeholder must not become a second version. Hide
+        // the non-version placeholder and keep the existing immutable head.
+        let next_digest = crate::services::render_snapshot::canonical_version_input_digest(
+            &design,
+            &design.initial_params,
+        )?;
+        let latest_version = db::get_thread_latest_version(&db, &thread_id)
+            .map_err(|error| AppError::persistence(error.to_string()))?;
+        if let Some(existing) = latest_version {
+            let identical = existing
+                .output
+                .as_ref()
+                .map(|output| {
+                    crate::services::render_snapshot::canonical_version_input_digest(
+                        output,
+                        &output.initial_params,
+                    )
+                })
+                .transpose()?
+                .is_some_and(|digest| digest == next_digest);
+            let is_pending_placeholder: bool = db
+                .query_row(
+                    "SELECT role = 'assistant' AND status = 'pending'
+                     FROM messages WHERE id = ?1 AND deleted_at IS NULL",
+                    [&message_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| AppError::persistence(error.to_string()))?;
+            if identical && is_pending_placeholder && existing.id != message_id {
+                db::update_message_status_and_output(
+                    &db,
+                    &message_id,
+                    db::MessageStatusUpdate {
+                        status: &MessageStatus::Discarded,
+                        output: None,
+                        usage: None,
+                        artifact_bundle: None,
+                        model_manifest: None,
+                        structural_verification: None,
+                        visual_kind: None,
+                        content: None,
+                    },
+                )
+                .map_err(|error| AppError::persistence(error.to_string()))?;
+                return Ok(existing.id);
+            }
+        }
+        db::update_message_status_and_output(
+            &db,
+            &message_id,
+            db::MessageStatusUpdate {
+                status: &MessageStatus::Working,
+                output: Some(&design),
+                usage: usage.as_ref(),
+                artifact_bundle: None,
+                model_manifest: None,
+                structural_verification: None,
+                visual_kind: None,
+                content: Some(&design.response),
+            },
+        )
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+        return Ok(message_id);
+    }
+
+    if let Some((existing, _)) = db::get_message_output_and_thread(&db, &message_id)
+        .map_err(|error| AppError::persistence(error.to_string()))?
+    {
+        let existing_digest = crate::services::render_snapshot::canonical_version_input_digest(
+            &existing,
+            &existing.initial_params,
+        )?;
+        let next_digest = crate::services::render_snapshot::canonical_version_input_digest(
+            &design,
+            &design.initial_params,
+        )?;
+        if existing_digest == next_digest {
+            return Ok(message_id);
+        }
+    }
+
+    let next_id = Uuid::new_v4().to_string();
+    let next_timestamp: u64 = db
+        .query_row(
+            "SELECT COALESCE(MAX(timestamp), 0) + 1 FROM messages WHERE thread_id = ?1",
+            [&thread_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| AppError::persistence(error.to_string()))?
+        .max(0) as u64;
+    let message = Message {
+        id: next_id.clone(),
+        role: MessageRole::Assistant,
+        content: design.response.clone(),
+        status: MessageStatus::Working,
+        output: Some(design),
+        usage,
+        artifact_bundle: None,
+        model_manifest: None,
+        structural_verification: None,
+        agent_origin: None,
+        image_data: None,
+        visual_kind: None,
+        attachment_images: Vec::new(),
+        timestamp: next_timestamp,
+    };
+    db::add_legacy_message(&db, &thread_id, &message)
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+    Ok(next_id)
 }
 
 fn ensure_generation_thread_binding(
@@ -994,6 +1464,50 @@ pub async fn finalize_generation_attempt(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<()> {
+    finalize_generation_core(
+        FinalizeGenerationCoreInput {
+            message_id,
+            status,
+            design,
+            usage,
+            artifact_bundle,
+            model_manifest,
+            error_message,
+            response_text,
+        },
+        state.inner(),
+        &app,
+    )
+    .await
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FinalizeGenerationCoreInput {
+    pub message_id: String,
+    pub status: FinalizeStatus,
+    pub design: Option<DesignOutput>,
+    pub usage: Option<UsageSummary>,
+    pub artifact_bundle: Option<ArtifactBundle>,
+    pub model_manifest: Option<ModelManifest>,
+    pub error_message: Option<String>,
+    pub response_text: Option<String>,
+}
+
+pub(crate) async fn finalize_generation_core(
+    input: FinalizeGenerationCoreInput,
+    state: &AppState,
+    app: &dyn crate::models::PathResolver,
+) -> AppResult<()> {
+    let FinalizeGenerationCoreInput {
+        message_id,
+        status,
+        design,
+        usage,
+        artifact_bundle,
+        model_manifest,
+        error_message,
+        response_text,
+    } = input;
     if let Some(design) = design.as_ref() {
         validate_design_output(design)?;
     }
@@ -1066,10 +1580,10 @@ pub async fn finalize_generation_attempt(
                 .map(|design| (design.title.clone(), design.macro_code.clone()));
 
             if design.is_some() || artifact_bundle.is_some() || model_manifest.is_some() {
-                let snapshot = build_runtime_snapshot(
+                let snapshot = build_saved_version_snapshot(
                     design,
-                    Some(thread_id.clone()),
-                    Some(message_id.clone()),
+                    thread_id.clone(),
+                    message_id.clone(),
                     artifact_bundle,
                     model_manifest,
                     None,
@@ -1078,11 +1592,11 @@ pub async fn finalize_generation_attempt(
                     let mut last = state.last_snapshot.lock().unwrap();
                     *last = Some(snapshot.clone());
                 }
-                write_last_snapshot(&app, Some(&snapshot));
+                write_last_snapshot(app, Some(&snapshot));
             }
             if let Some((design_title, macro_code)) = appended_source {
                 crate::thread_source_binding::refresh_on_version_append(
-                    &app,
+                    app,
                     &db,
                     configured_root.as_deref(),
                     &thread_id,
@@ -1107,9 +1621,16 @@ pub async fn persist_structural_verification(
     state: State<'_, AppState>,
 ) -> AppResult<()> {
     let db = state.db.lock().await;
-    db::update_message_structural_verification(&db, &message_id, Some(&structural_verification))
-        .map_err(|err| AppError::persistence(err.to_string()))?;
-    Ok(())
+    persist_structural_verification_core(&db, &message_id, &structural_verification)
+}
+
+pub(crate) fn persist_structural_verification_core(
+    db: &rusqlite::Connection,
+    message_id: &str,
+    structural_verification: &StructuralVerificationResult,
+) -> AppResult<()> {
+    db::update_message_structural_verification(db, message_id, Some(structural_verification))
+        .map_err(|err| AppError::persistence(err.to_string()))
 }
 
 #[tauri::command]
@@ -1122,7 +1643,40 @@ pub async fn classify_intent(
     attachments: Option<Vec<Attachment>>,
     state: State<'_, AppState>,
 ) -> AppResult<IntentDecision> {
-    let engine = selected_engine(&state)?;
+    classify_intent_core(
+        ClassifyIntentCoreInput {
+            prompt,
+            thread_id,
+            context,
+            image_data,
+            attachments,
+        },
+        state.inner(),
+    )
+    .await
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ClassifyIntentCoreInput {
+    pub prompt: String,
+    pub thread_id: Option<String>,
+    pub context: Option<String>,
+    pub image_data: Option<String>,
+    pub attachments: Option<Vec<Attachment>>,
+}
+
+pub(crate) async fn classify_intent_core(
+    input: ClassifyIntentCoreInput,
+    state: &AppState,
+) -> AppResult<IntentDecision> {
+    let ClassifyIntentCoreInput {
+        prompt,
+        thread_id,
+        context,
+        image_data,
+        attachments,
+    } = input;
+    let engine = selected_engine_core(state)?;
     let explicit_question_only = crate::is_explicit_question_only_request(&prompt);
     let backend_context = if thread_id.is_some() {
         let ctx = {
@@ -1441,6 +1995,35 @@ mod tests {
     }
 
     #[test]
+    fn api_system_prompt_contains_exploration_invariants_exactly_once() {
+        let prompt =
+            design_system_prompt(SourceLanguage::EckyIrV0, GeometryBackend::EckyRust, None);
+        assert_eq!(
+            prompt
+                .matches(crate::exploration_prompt::STATIC_GUIDANCE)
+                .count(),
+            1
+        );
+        assert_eq!(prompt.matches("PLAN, BUILD, VERIFY, DECIDE").count(), 1);
+    }
+
+    #[test]
+    fn api_system_prompt_contains_one_transient_typed_next_action_contract() {
+        let prompt =
+            design_system_prompt(SourceLanguage::EckyIrV0, GeometryBackend::EckyRust, None);
+        assert_eq!(prompt.matches("\"next_action\": {").count(), 1);
+        assert!(prompt.contains("\"action\": \"BUILD\"|\"ASK\"|\"STOP\""));
+        assert!(prompt.contains("\"source_version_id\": string"));
+        assert!(prompt.contains("\"hypothesis\": string"));
+        assert!(prompt.contains("\"change_scope\": string"));
+        assert!(prompt.contains("\"expected_evidence\": string"));
+        assert!(prompt.contains("\"budget_cost\": non-negative integer"));
+        assert!(prompt.contains("transient controller input"));
+        assert!(prompt.contains("same authoring response"));
+        assert!(prompt.contains("ASK and STOP still return the complete existing design object"));
+    }
+
+    #[test]
     #[ignore = "superseded by canonical agent-language source contracts"]
     fn guide_texts_use_file_hints_and_backend_truth() {
         let build123d = build123d_guide_text();
@@ -1687,12 +2270,14 @@ mod tests {
 // only the smallest protocol/payload assertions at the assembly seam.
 #[cfg(test)]
 mod agent_context_budget_outer_red {
-    use super::{design_system_prompt, ensure_generation_thread_binding};
+    use super::{
+        design_system_prompt, ensure_generation_thread_binding, persist_generation_draft_in_db,
+    };
     use crate::context::{assemble_generation_payload, PromptContext, ResolvedAuthoringContext};
     use crate::context_envelope::GENERATION_CEILING_CHARS;
     use crate::contracts::{
-        DesignOutput, EngineKind, GeometryBackend, InteractionMode, MacroDialect, SourceLanguage,
-        UiSpec,
+        DesignOutput, EngineKind, GeometryBackend, InteractionMode, MacroDialect, Message,
+        MessageRole, MessageStatus, SourceLanguage, UiSpec,
     };
     use crate::models::PathResolver;
     use std::path::PathBuf;
@@ -1911,5 +2496,131 @@ mod agent_context_budget_outer_red {
         assert!(PathBuf::from(binding.folder_path)
             .join(crate::project_mirror::PROJECT_MANIFEST_FILE_NAME)
             .is_file());
+    }
+
+    #[test]
+    fn generated_source_is_persisted_before_checks_and_repairs_append() {
+        let root =
+            std::env::temp_dir().join(format!("ecky-generation-version-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = crate::db::init_db(&root.join("history.sqlite")).expect("db");
+        crate::db::create_or_update_thread(&conn, "thread-1", "Bracket", 1, None).unwrap();
+        let pending = Message {
+            id: "pending-1".into(),
+            role: MessageRole::Assistant,
+            content: "Generating...".into(),
+            status: MessageStatus::Pending,
+            output: None,
+            usage: None,
+            artifact_bundle: None,
+            model_manifest: None,
+            structural_verification: None,
+            agent_origin: None,
+            image_data: None,
+            visual_kind: None,
+            attachment_images: Vec::new(),
+            timestamp: 2,
+        };
+        crate::db::add_message_checked(&conn, "thread-1", &pending).unwrap();
+
+        let first = legacy_design_output("(model (part body (box 1 1 1)))");
+        let first_id =
+            persist_generation_draft_in_db(&conn, pending.id.clone(), first.clone(), None).unwrap();
+        assert_eq!(first_id, pending.id);
+        assert_eq!(
+            crate::db::get_thread_head_version_id(&conn, "thread-1")
+                .unwrap()
+                .as_deref(),
+            Some("pending-1")
+        );
+
+        let second = legacy_design_output("(model (part body (box 2 1 1)))");
+        let second_id =
+            persist_generation_draft_in_db(&conn, first_id, second.clone(), None).unwrap();
+        assert_ne!(second_id, "pending-1");
+        let identical_id =
+            persist_generation_draft_in_db(&conn, second_id.clone(), second, None).unwrap();
+        assert_eq!(identical_id, second_id);
+        let version_count = crate::db::get_thread_messages_for_thread_view(&conn, "thread-1")
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.output.is_some())
+            .count();
+        assert_eq!(version_count, 2);
+    }
+
+    #[test]
+    fn pending_placeholder_does_not_become_duplicate_version_for_identical_source() {
+        let root = std::env::temp_dir().join(format!(
+            "ecky-generation-identical-pending-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = crate::db::init_db(&root.join("history.sqlite")).expect("db");
+        crate::db::create_or_update_thread(&conn, "thread-1", "Bracket", 1, None).unwrap();
+
+        let existing = legacy_design_output("(model (part body (box 1 1 1)))");
+        let existing_message = Message {
+            id: "version-a".into(),
+            role: MessageRole::Assistant,
+            content: existing.response.clone(),
+            status: MessageStatus::Success,
+            output: Some(existing.clone()),
+            usage: None,
+            artifact_bundle: None,
+            model_manifest: None,
+            structural_verification: None,
+            agent_origin: None,
+            image_data: None,
+            visual_kind: None,
+            attachment_images: Vec::new(),
+            timestamp: 2,
+        };
+        crate::db::add_legacy_message(&conn, "thread-1", &existing_message).unwrap();
+
+        let pending = Message {
+            id: "pending-1".into(),
+            role: MessageRole::Assistant,
+            content: "Generating...".into(),
+            status: MessageStatus::Pending,
+            output: None,
+            usage: None,
+            artifact_bundle: None,
+            model_manifest: None,
+            structural_verification: None,
+            agent_origin: None,
+            image_data: None,
+            visual_kind: None,
+            attachment_images: Vec::new(),
+            timestamp: 3,
+        };
+        crate::db::add_message_checked(&conn, "thread-1", &pending).unwrap();
+
+        let version_id =
+            persist_generation_draft_in_db(&conn, pending.id.clone(), existing.clone(), None)
+                .unwrap();
+
+        assert_eq!(version_id, "version-a");
+        assert_eq!(
+            crate::db::get_thread_head_version_id(&conn, "thread-1")
+                .unwrap()
+                .as_deref(),
+            Some("version-a")
+        );
+        let version_count = crate::db::get_thread_messages_for_thread_view(&conn, "thread-1")
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.output.is_some())
+            .count();
+        assert_eq!(version_count, 1);
+        let (pending_status, pending_output): (MessageStatus, Option<String>) = conn
+            .query_row(
+                "SELECT status, output FROM messages WHERE id = 'pending-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(pending_status, MessageStatus::Discarded);
+        assert!(pending_output.is_none());
     }
 }

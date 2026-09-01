@@ -30,6 +30,14 @@ history authority.
 - **THEN** session records target thread and source-version identity
 - **AND** later preview cannot patch whichever thread happens to be visible
 
+#### Scenario: Capture starts from empty workspace
+
+- **GIVEN** no project thread is active
+- **WHEN** frontend submits capture intent without an existing target
+- **THEN** Ecky backend allocates target thread identity, title, and source defaults
+- **AND** session returns that authoritative target with `startedFromEmpty`
+- **AND** frontend does not manufacture target identity or empty-workspace policy
+
 ### Requirement: Lossless Capture Mutation Versions
 
 The system SHALL append one immutable model version for every distinct generated
@@ -263,7 +271,19 @@ editor or claim source-backed BRep parameters for reconstructed faces.
   `solidify(import-stl(...))` part through parser-derived AST range
 - **AND** empty target becomes a minimal model containing only captured
   solidified part
+- **AND** frontend submits only capture `runId` to one Rust Apply intent
+- **AND** Rust loads canonical run/head, validates source digest/language,
+  derives AST patch identities, and returns rendered draft projection
+- **AND** frontend does not call AST-source-map or manual-code Apply commands
 - **AND** commit creates a normal version in bound thread
+
+#### Scenario: Bound source changes before reconstructed Apply
+
+- **GIVEN** capture run recorded an earlier canonical target source
+- **WHEN** bound thread head changes before user applies reconstructed preview
+- **THEN** Rust Apply intent rejects stale source with exact digest evidence
+- **AND** frontend displays raw error and leaves Commit disabled
+- **AND** no frontend source comparison or language policy decides outcome
 
 #### Scenario: Preview completes while another project is active
 

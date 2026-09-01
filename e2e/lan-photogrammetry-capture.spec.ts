@@ -116,7 +116,9 @@ async function installCaptureShellMocks(page: Page, config: MockConfig = {}) {
     const mockWindow = window as any;
     mockWindow.__CAPTURE_CALLS__ = [];
     let externalShapeSources = structuredClone((config.externalShapeSources ?? []) as Array<Record<string, any>>);
+    let preparedCaptureStlPath = '/tmp/capture-model.stl';
     window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
+    (window.__TAURI_INTERNALS__ as any).convertFileSrc = (path: string) => path;
     window.__TAURI_INTERNALS__.invoke = async (cmd: string, args?: Record<string, unknown>) => {
       mockWindow.__CAPTURE_CALLS__.push({ cmd, args });
       if (cmd === 'get_config') {
@@ -157,17 +159,48 @@ async function installCaptureShellMocks(page: Page, config: MockConfig = {}) {
       }
       if (cmd === 'get_last_design') return null;
       if (cmd === 'list_external_shape_sources') return structuredClone(externalShapeSources);
-      if (cmd === 'remove_external_shape_plane_crop') {
-        const cropNodeId = Number((args?.request as Record<string, unknown>)?.cropNodeId ?? -1);
+      if (cmd === 'apply_external_shape_edit') {
+        const input = (args?.input ?? {}) as Record<string, any>;
+        const edit = (input.edit ?? {}) as Record<string, any>;
+        const cropNodeId = Number(edit.cropNodeId ?? -1);
         externalShapeSources = externalShapeSources.map(source => ({
           ...source,
           sourceDigest: 'sha256:source-after-remove',
           planeCrops: (source.planeCrops ?? []).filter((crop: Record<string, unknown>) => crop.nodeId !== cropNodeId),
         }));
         return {
-          source: '(model (part head_only (solidify (import-stl "/tmp/rocksteady.stl"))))',
+          version: {
+            threadId: input.threadId,
+            baseMessageId: input.baseMessageId ?? null,
+            messageId: 'external-plane-remove-version',
+            status: 'success',
+            designOutput: {
+              title: 'Finger fixture', versionName: 'Plane crop removed', response: 'Plane crop removed.',
+              interactionMode: 'design', macroCode: '(model (part head_only (solidify (import-stl "/tmp/rocksteady.stl"))))',
+              macroDialect: 'ecky', sourceLanguage: 'ecky', geometryBackend: 'mesh', engineKind: 'ecky',
+              uiSpec: { fields: [] }, initialParams: {}, postProcessing: null,
+            },
+            artifactBundle: {
+              modelId: 'external-plane-remove-model', sourceKind: 'generated', sourceLanguage: 'ecky',
+              geometryBackend: 'mesh', engineKind: 'ecky', contentHash: 'sha256:source-after-remove', artifactVersion: 1,
+              fcstdPath: null, manifestPath: '/tmp/external-plane-remove.json',
+              modelStlPath: '/Users/bogdan/Downloads/rocksteady-1.stl', viewerAssets: [], exportArtifacts: [],
+              edgeTargets: [], faceTargets: [], calloutAnchors: [], measurementGuides: [],
+            },
+            modelManifest: {
+              schemaVersion: 1, modelId: 'external-plane-remove-model', sourceKind: 'generated', sourceLanguage: 'ecky',
+              geometryBackend: 'mesh', engineKind: 'ecky', sourceDigest: 'sha256:source-after-remove',
+              document: { documentName: 'Finger fixture', documentLabel: 'Finger fixture', objectCount: 1, warnings: [] },
+              parts: [], parameterGroups: [], controlPrimitives: [], controlRelations: [], controlViews: [], previewViews: [],
+              advisories: [], selectionTargets: [], measurementAnnotations: [], taggedAnchors: {}, analysisDeclarations: [], warnings: [],
+              enrichmentState: { status: 'none', proposals: [] },
+            },
+            snapshotId: 'snapshot-external-plane-remove',
+            parserMatched: true,
+            error: null,
+          },
           sourceDigest: 'sha256:source-after-remove',
-          removedCropNodeId: cropNodeId,
+          externalSources: structuredClone(externalShapeSources),
         };
       }
       if (cmd === 'get_default_macro') return '(solid blank)';
@@ -188,10 +221,16 @@ async function installCaptureShellMocks(page: Page, config: MockConfig = {}) {
       }
       if (cmd === 'start_capture_session') {
         if (typeof config.captureStartError === 'string') throw new Error(config.captureStartError);
+        const target = (args?.target ?? null) as Record<string, unknown> | null;
+        const targetThreadId = String(target?.threadId ?? 'rust-capture-thread');
         return {
           sessionId: 'abc123',
-          targetThreadId: String(args?.threadId ?? ''),
-          targetMessageId: args?.messageId ?? null,
+          targetThreadId,
+          targetMessageId: target?.messageId ?? null,
+          targetTitle: target ? 'Finger fixture' : `Capture ${targetThreadId.slice(0, 8)}`,
+          targetSource: String(target?.source ?? ''),
+          targetSourceLanguage: String(target?.sourceLanguage ?? 'ecky'),
+          startedFromEmpty: target === null,
           pairingToken: 'abc123',
           pairingUrl: 'https://192.0.2.10:44000/capture/abc123',
           trustUrl: 'http://192.0.2.10:44001/trust',
@@ -222,9 +261,10 @@ async function installCaptureShellMocks(page: Page, config: MockConfig = {}) {
       if (cmd === 'list_capture_runs') return config.captureHistoryRun ? [durableCaptureRun] : [];
       if (cmd === 'reopen_capture_run') return { run: durableCaptureRun, session: reopenedCaptureSession };
       if (cmd === 'adopt_latest_capture_run') return {
-        run: { ...durableCaptureRun, targetThreadId: String(args?.threadId ?? 'capture-thread'),
-          targetSource: String(args?.targetSource ?? ''), startedFromEmpty: Boolean(args?.startedFromEmpty) },
-        session: { ...reopenedCaptureSession, targetThreadId: String(args?.threadId ?? 'capture-thread') },
+        run: { ...durableCaptureRun, targetThreadId: String((args?.target as any)?.threadId ?? 'rust-capture-thread'),
+          title: (args?.target as any)?.threadId ? 'Finger fixture' : 'Capture rust-cap',
+          targetSource: String((args?.target as any)?.source ?? ''), startedFromEmpty: args?.target == null },
+        session: { ...reopenedCaptureSession, targetThreadId: String((args?.target as any)?.threadId ?? 'rust-capture-thread') },
       };
       if (cmd === 'save_capture_preview_settings') return null;
       if (cmd === 'get_thread_latest_version') return null;
@@ -293,9 +333,35 @@ async function installCaptureShellMocks(page: Page, config: MockConfig = {}) {
         fcstdPath: '', manifestPath: '/tmp/capture-manifest.json', modelStlPath: '/tmp/capture-model.stl',
         viewerAssets: [], exportArtifacts: [], geometryBackend: 'mesh', sourceLanguage: 'ecky', engineKind: 'ecky',
       };
-      if (cmd === 'add_manual_version') return 'capture-version';
+      if (cmd === 'apply_manual_code') {
+        const input = args?.input as Record<string, any>;
+        return {
+          threadId: input.threadId, baseMessageId: input.baseMessageId ?? null,
+          messageId: input.persist ? 'capture-version' : null, status: 'success',
+          designOutput: {
+            title: input.title ?? 'Capture', versionName: input.versionName ?? 'Capture', response: 'Capture committed.',
+            interactionMode: 'design', macroCode: input.source, macroDialect: 'ecky', engineKind: 'ecky',
+            sourceLanguage: 'ecky', geometryBackend: 'mesh', uiSpec: input.uiSpec, initialParams: input.parameters,
+            postProcessing: input.postProcessing ?? null,
+          },
+          artifactBundle: {
+            modelId: 'capture-solidified', sourceKind: 'generated', contentHash: 'capture-solidified', artifactVersion: 1,
+            fcstdPath: '', manifestPath: '/tmp/capture-manifest.json', modelStlPath: '/tmp/capture-model.stl',
+            viewerAssets: [], exportArtifacts: [], geometryBackend: 'mesh', sourceLanguage: 'ecky', engineKind: 'ecky',
+          },
+          modelManifest: {
+            schemaVersion: 1, modelId: 'capture-solidified', sourceKind: 'generated', engineKind: 'ecky',
+            sourceLanguage: 'ecky', geometryBackend: 'mesh',
+            document: { documentName: 'Capture', documentLabel: 'Capture', objectCount: 1, warnings: [] },
+            parts: [], parameterGroups: [], controlPrimitives: [], controlRelations: [], controlViews: [], advisories: [],
+            selectionTargets: [], measurementAnnotations: [], warnings: [], enrichmentState: { status: 'none', proposals: [] },
+          },
+          snapshotId: 'capture-commit-snapshot', parserMatched: true, error: null,
+        };
+      }
       if (cmd === 'prepare_capture_preview') {
         if (args?.cropBounds && config.cropError) throw new Error(String(config.cropError));
+        preparedCaptureStlPath = args?.cropBounds ? '/tmp/capture-box-crop.stl' : '/tmp/capture-model.stl';
         return { artifactBundle: {
           modelId: 'capture-mesh', sourceKind: 'generated', contentHash: 'capture', artifactVersion: 1,
           fcstdPath: '', manifestPath: '/tmp/capture-manifest.json',
@@ -311,6 +377,39 @@ async function installCaptureShellMocks(page: Page, config: MockConfig = {}) {
           enrichmentState: { status: 'none', proposals: [] },
         } };
       }
+      if (cmd === 'apply_capture_preview') {
+        if (config.captureApplyError) throw new Error(String(config.captureApplyError));
+        if (config.captureApplyPending) {
+          await new Promise<void>((resolve) => {
+            (window as any).__RESOLVE_CAPTURE_APPLY__ = resolve;
+          });
+        }
+        const source = `(model (params (number capture_scale_abc123 0.05)) (part capture_abc123 (scale capture_scale_abc123 capture_scale_abc123 capture_scale_abc123 (solidify (import-stl "${preparedCaptureStlPath}")))))`;
+        return {
+          source,
+          draft: {
+            threadId: 'rust-capture-thread', baseMessageId: null, messageId: null, status: 'success',
+            designOutput: {
+              title: 'Capture rust-cap', versionName: 'Capture Draft', response: 'Code draft applied.',
+              interactionMode: 'design', macroCode: source, macroDialect: 'ecky', engineKind: 'ecky',
+              sourceLanguage: 'ecky', geometryBackend: 'mesh', uiSpec: { fields: [] }, initialParams: {}, postProcessing: null,
+            },
+            artifactBundle: {
+              modelId: 'capture-solidified', sourceKind: 'generated', contentHash: 'capture-solidified', artifactVersion: 1,
+              fcstdPath: '', manifestPath: '/tmp/capture-manifest.json', modelStlPath: '/tmp/capture-model.stl',
+              viewerAssets: [], exportArtifacts: [], geometryBackend: 'mesh', sourceLanguage: 'ecky', engineKind: 'ecky',
+            },
+            modelManifest: {
+              schemaVersion: 1, modelId: 'capture-solidified', sourceKind: 'generated', engineKind: 'ecky',
+              sourceLanguage: 'ecky', geometryBackend: 'mesh',
+              document: { documentName: 'Capture', documentLabel: 'Capture', objectCount: 1, warnings: [] },
+              parts: [], parameterGroups: [], controlPrimitives: [], controlRelations: [], controlViews: [], advisories: [],
+              selectionTargets: [], measurementAnnotations: [], warnings: [], enrichmentState: { status: 'none', proposals: [] },
+            },
+            snapshotId: 'capture-apply-snapshot', parserMatched: true, error: null,
+          },
+        };
+      }
       if (cmd === 'retry_capture_reconstruction') return {
         sessionId: 'abc123', pairingToken: 'abc123', pairingUrl: '', trustUrl: '', protocolVersion: 1,
         clientCapabilities: {}, state: 'reconstructing', createdAt: 1, expiresAt: 999999,
@@ -322,7 +421,7 @@ async function installCaptureShellMocks(page: Page, config: MockConfig = {}) {
   }, { config });
 }
 
-async function routeRestoredCaptureStl(page: Page, urlPattern = '**/*capture-model.stl*') {
+async function routeRestoredCaptureStl(page: Page, urlPattern = '**/*model.stl*') {
   const previewStl = Buffer.alloc(84 + 50);
   previewStl.writeUInt32LE(1, 80);
   [[0, 0, 0], [40, 0, 0], [0, 30, 10]].forEach((vertex, vertexIndex) => {
@@ -363,6 +462,9 @@ test('Given External Shapes opens When Capture is active Then pairing stays scop
   await expect(page.getByRole('button', { name: 'START CAPTURE' })).toBeVisible();
 
   await page.getByRole('button', { name: 'START CAPTURE' }).click();
+  const startIntent = await page.evaluate(() => (window as any).__CAPTURE_CALLS__
+    .find((call: { cmd: string }) => call.cmd === 'start_capture_session'));
+  expect(startIntent.args).toEqual({ target: null });
   await expect(page.getByText('OPEN LINK ON PHONE')).toBeVisible();
   await expect(page.getByText('Waiting for phone camera')).toBeVisible();
   await expect(urlText).toHaveText('https://192.0.2.10:44000/capture/abc123');
@@ -447,7 +549,7 @@ test('Given Rocksteady source contains one import STL When Import opens Then raw
   await expect(page.getByRole('region', { name: 'Existing plane crops' })).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => (window as any).__CAPTURE_CALLS__.some(
     (call: { cmd: string; args?: Record<string, any> }) =>
-      call.cmd === 'remove_external_shape_plane_crop' && call.args?.request?.cropNodeId === 19,
+      call.cmd === 'apply_external_shape_edit' && call.args?.input?.edit?.action === 'removePlaneCrop' && call.args?.input?.edit?.cropNodeId === 19,
   ))).toBe(true);
 });
 
@@ -501,6 +603,9 @@ test('Given LAN service fails When capture starts Then raw backend error remains
 
   await expect(page.getByText('bind failed: address already in use')).toBeVisible();
   await expect(page.locator('[data-testid="capture-panel"]')).toHaveAttribute('data-session-state', 'failed');
+  const startIntent = await page.evaluate(() => (window as any).__CAPTURE_CALLS__
+    .find((call: { cmd: string }) => call.cmd === 'start_capture_session'));
+  expect(startIntent.args).toEqual({ target: null });
 });
 
 test('Given reconstruction completes When desktop polls Then preview exposes inspect Apply and Commit', async ({ page }) => {
@@ -521,15 +626,12 @@ test('Given reconstruction completes When desktop polls Then preview exposes ins
       ));
     });
   });
-  await page.route('**/*capture-model.stl*', async (route) => {
+  await page.route('**/*model.stl*', async (route) => {
     await route.fulfill({
       status: 200,
       contentType: 'model/stl',
       body: previewStl,
     });
-  });
-  await page.route('**/*capture-box-crop.stl*', async (route) => {
-    await route.fulfill({ status: 200, contentType: 'model/stl', body: previewStl });
   });
   await page.goto('/');
   await expect(page.locator('.boot-overlay')).toHaveCount(0);
@@ -573,6 +675,7 @@ test('Given reconstruction completes When desktop polls Then preview exposes ins
   await expect(page.getByRole('button', { name: 'RESIZE BOX' })).toHaveAttribute('aria-pressed', 'true');
   await page.getByRole('button', { name: 'MOVE BOX' }).click();
   await expect(page.getByRole('button', { name: 'MOVE BOX' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('button', { name: 'PREVIEW CROP' })).toBeEnabled();
   await expect(page.getByRole('button', { name: 'APPLY' })).toBeEnabled();
   await page.getByRole('button', { name: 'APPLY' }).click();
   await expect.poll(() => page.evaluate(() => (window as any).__CAPTURE_CALLS__
@@ -580,13 +683,23 @@ test('Given reconstruction completes When desktop polls Then preview exposes ins
       call.cmd === 'prepare_capture_preview' && call.args?.cropBounds).length)).toBe(1);
   await expect(page.locator('[data-testid="capture-preview-viewport"]')).toHaveAttribute('data-preview-status', 'loaded');
   await expect(page.getByText('Capture solidify draft applied')).toBeVisible();
+  const captureApply = await page.evaluate(() => (window as any).__CAPTURE_CALLS__
+    .filter((call: { cmd: string }) => call.cmd === 'apply_capture_preview'));
+  expect(captureApply).toHaveLength(1);
+  expect(captureApply[0].args).toEqual({ input: { runId: 'abc123' } });
+  const applyCommands = await page.evaluate(() => (window as any).__CAPTURE_CALLS__
+    .map((call: { cmd: string }) => call.cmd));
+  expect(applyCommands).not.toContain('macro_ast_source_map');
+  expect(applyCommands).not.toContain('apply_manual_code');
   await expect(page.getByRole('button', { name: 'COMMIT' })).toBeEnabled();
   await page.getByRole('button', { name: 'COMMIT' }).click();
   await expect.poll(() => page.evaluate(() => (window as any).__CAPTURE_CALLS__
-    .filter((call: { cmd: string }) => call.cmd === 'add_manual_version').length)).toBe(1);
+    .filter((call: { cmd: string; args?: Record<string, any> }) =>
+      call.cmd === 'apply_manual_code' && call.args?.input?.persist === true).length)).toBe(1);
   const commit = await page.evaluate(() => (window as any).__CAPTURE_CALLS__
-    .find((call: { cmd: string }) => call.cmd === 'add_manual_version'));
-  expect(commit.args.input.macroCode).toContain(
+    .find((call: { cmd: string; args?: Record<string, any> }) =>
+      call.cmd === 'apply_manual_code' && call.args?.input?.persist === true));
+  expect(commit.args.input.source).toContain(
     '(scale capture_scale_abc123 capture_scale_abc123 capture_scale_abc123 (solidify (import-stl "/tmp/capture-box-crop.stl")))',
   );
 });
@@ -603,6 +716,46 @@ test('Given reconstruction fails When desktop polls Then raw error remains and n
   await page.getByRole('button', { name: 'RETRY RECONSTRUCTION' }).click();
   await expect.poll(() => page.evaluate(() => (window as any).__CAPTURE_CALLS__
     .filter((call: { cmd: string }) => call.cmd === 'retry_capture_reconstruction').length)).toBe(1);
+});
+
+test('Given capture target advanced When Apply runs Then raw Rust stale error remains visible', async ({ page }) => {
+  await installCaptureShellMocks(page, {
+    captureStatus: 'preview',
+    captureApplyError: 'Capture target source diverged: expected sha256:old, found sha256:new.',
+  });
+  await routeRestoredCaptureStl(page);
+  await page.goto('/');
+  await expect(page.locator('.boot-overlay')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Work with external shapes' }).click();
+  await page.getByRole('button', { name: 'START CAPTURE' }).click();
+  await expect(page.getByRole('button', { name: 'APPLY' })).toBeVisible({ timeout: 3000 });
+
+  await page.getByRole('button', { name: 'APPLY' }).click();
+
+  await expect(page.getByText('Capture target source diverged: expected sha256:old, found sha256:new.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'COMMIT' })).toBeDisabled();
+});
+
+test('Given Rust capture apply remains pending When Apply is clicked twice Then one intent stays disabled', async ({ page }) => {
+  await installCaptureShellMocks(page, { captureStatus: 'preview', captureApplyPending: true });
+  await routeRestoredCaptureStl(page);
+  await page.goto('/');
+  await expect(page.locator('.boot-overlay')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Work with external shapes' }).click();
+  await page.getByRole('button', { name: 'START CAPTURE' }).click();
+
+  const apply = page.getByRole('button', { name: 'APPLY' });
+  await expect(apply).toBeVisible({ timeout: 3000 });
+  await apply.evaluate((button: HTMLButtonElement) => {
+    button.click();
+    button.click();
+  });
+  await expect(page.getByRole('button', { name: 'APPLYING' })).toBeDisabled();
+  await expect.poll(() => page.evaluate(() => (window as any).__CAPTURE_CALLS__
+    .filter((call: { cmd: string }) => call.cmd === 'apply_capture_preview').length)).toBe(1);
+
+  await page.evaluate(() => (window as any).__RESOLVE_CAPTURE_APPLY__());
+  await expect(page.getByText('Capture solidify draft applied')).toBeVisible();
 });
 
 test('Given crop excludes the mesh When Apply runs Then raw preview and backend error remain', async ({ page }) => {

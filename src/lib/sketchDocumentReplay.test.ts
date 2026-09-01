@@ -6,6 +6,7 @@ import {
   parseSketchDocumentImportSource,
   parseSketchDocumentJson,
   parseSketchDocumentSource,
+  replayValidatedSketchDocument,
   sketchDocumentJsonToStrokes,
   sketchDocumentToStrokes,
 } from './sketchDocumentReplay';
@@ -285,9 +286,8 @@ test('sketchDocumentToStrokes replays dimension locks from dimension constraints
   assert.deepEqual(result.strokes[0]?.dimensionLocks, { width: true, height: true });
 });
 
-test('sketchDocumentToStrokes rejects dimension constraints that do not match primitive bounds', () => {
-  assert.deepEqual(
-    sketchDocumentToStrokes({
+test('replayValidatedSketchDocument rejects dimension issues returned by Rust', async () => {
+  const mismatchedDocument: SketchDocument = {
       documentId: 'doc-dimension-mismatch',
       sketches: [
         {
@@ -320,11 +320,53 @@ test('sketchDocumentToStrokes rejects dimension constraints that do not match pr
       ],
       activeSketchId: 'sketch-front',
       units: 'mm',
-    }),
-    {
+  };
+
+  const result = await replayValidatedSketchDocument(mismatchedDocument, async ({ document: requestDocument }) => {
+    assert.equal(requestDocument, mismatchedDocument);
+    return {
+      kind: 'validation',
+      passed: false,
+      evidence: [],
+      issues: ["sketch 'sketch-front' primitive 'primitive-front-46' width dimension expected 99mm but measured 46mm."],
+    };
+  });
+
+  assert.deepEqual(result, {
       error: "sketch 'sketch-front' primitive 'primitive-front-46' width dimension expected 99mm but measured 46mm.",
-    },
-  );
+  });
+});
+
+test('replayValidatedSketchDocument rejects Rust-reported constraint issues before projection', async () => {
+  const evaluatedRequests: unknown[] = [];
+
+  const result = await replayValidatedSketchDocument(document, async (request) => {
+    evaluatedRequests.push(request);
+    return {
+      kind: 'validation',
+      passed: false,
+      evidence: [],
+      issues: ["sketch 'sketch-front' failed Rust constraint validation."],
+    };
+  });
+
+  assert.deepEqual(evaluatedRequests, [{ document, mode: 'validate', maxDelta: null }]);
+  assert.deepEqual(result, {
+    error: "sketch 'sketch-front' failed Rust constraint validation.",
+  });
+});
+
+test('replayValidatedSketchDocument projects strokes after Rust validation passes', async () => {
+  const result = await replayValidatedSketchDocument(document, async () => ({
+    kind: 'validation',
+    passed: true,
+    evidence: ['Rust constraint validation passed.'],
+    issues: [],
+  }));
+
+  assert.ok(!('error' in result));
+  assert.equal(result.strokes.length, 2);
+  assert.equal(result.strokes[0]?.primitiveId, 'primitive-front-7');
 });
 
 test('nextPrimitiveSequenceFromStrokes returns highest primitive suffix', () => {

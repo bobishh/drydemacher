@@ -17,9 +17,8 @@ use crate::contracts::{
     InstalledAssemblyComponentControls, InstalledAssemblyComponentSource,
     InstalledAssemblyControls, InstalledAssemblyMateResult, InstalledAssemblyOperationResult,
     InstalledAssemblyOutputRuntime, InstalledAssemblyRuntime, InstalledAssemblySource,
-    InstalledComponentControls, InstalledComponentPackage, InstalledComponentRuntime,
-    InstalledComponentSource, MacroDialect, ModelManifest, OperationKind, PortFrame, PortReference,
-    SourceLanguage,
+    InstalledComponentControls, InstalledComponentRuntime, InstalledComponentSource, MacroDialect,
+    ModelManifest, OperationKind, PortFrame, PortReference, SourceLanguage,
 };
 use crate::models::{AppState, PathResolver};
 use crate::topology_target_ids::{is_stable_topology_target_id, portable_topology_target_id};
@@ -684,29 +683,6 @@ pub async fn extract_component_package_archive(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn install_component_package_archive(
-    archive_path: String,
-    app: AppHandle,
-) -> AppResult<InstalledComponentPackage> {
-    let archive = Path::new(&archive_path);
-    let header = component_package_runtime::read_component_package_header_from_archive(archive)?;
-    let installed = component_package_runtime::install_component_package_to_store(&app, archive)?;
-    Ok(InstalledComponentPackage {
-        header,
-        package_dir: installed.store_dir.to_string_lossy().to_string(),
-    })
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn list_installed_component_package_headers(
-    app: AppHandle,
-) -> AppResult<Vec<ComponentPackageHeader>> {
-    component_package_runtime::list_installed_component_package_headers(&app)
-}
-
-#[tauri::command]
-#[specta::specta]
 pub async fn uninstall_component_package_coordinate(
     package_id: String,
     version: String,
@@ -750,20 +726,6 @@ pub async fn resolve_installed_component_source(
         &package_id,
         &version,
         &component_id,
-    )
-}
-
-/// Workbench entry point for the same copy-inline materializer used by the
-/// MCP `component_import` tool. Do not replace this with a live import.
-#[tauri::command]
-#[specta::specta]
-pub async fn component_import_copy_inline(
-    request: crate::component_import_runtime::CopyInlineComponentImportRequest,
-    app: AppHandle,
-) -> AppResult<crate::component_import_runtime::CopyInlineComponentImportResponse> {
-    crate::component_import_runtime::copy_inline_component_import(
-        request,
-        &crate::component_import_runtime::InstalledLibraryComponentResolver { app: &app },
     )
 }
 

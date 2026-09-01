@@ -148,6 +148,83 @@ async function installBaseBootMock(page: Page, options: BootMockOptions = {}) {
       (window as any).__BOOT_CALLS__.push({ cmd, args });
       if (cmd === 'plugin:event|listen') return Number(args?.handler ?? 0);
       if (cmd === 'plugin:event|unlisten') return null;
+      if (cmd === 'get_boot_runtime_projection') {
+        if (runtimeDelayMs) {
+          await new Promise((resolve) => setTimeout(resolve, runtimeDelayMs));
+        }
+        (window as any).__BOOT_CAPABILITIES_RESOLVED__ = true;
+        return { config, capabilities: runtimeCapabilities };
+      }
+      if (cmd === 'get_boot_projection') {
+        const bootHistory = history ?? [
+          {
+            id: 'thread-boot',
+            title: 'Cached Thread',
+            summary: 'cached summary',
+            messages: [],
+            updatedAt: 100,
+            versionCount: 1,
+            pendingCount: 0,
+            queuedCount: 0,
+            errorCount: 0,
+            isBlank: false,
+            status: 'active',
+            engineKind: 'freecad',
+            sourceLanguage: 'legacyPython',
+            geometryBackend: 'freecad',
+          },
+        ];
+        const selectedVersion = {
+          id: 'msg-cached',
+          role: 'assistant',
+          content: 'Cached Boot Model',
+          status: 'success',
+          output: design,
+          artifactBundle,
+          modelManifest,
+          timestamp: 100,
+        };
+        const pageMessage = messagesPageMode === 'skinny-active'
+          ? {
+              ...selectedVersion,
+              content: 'Cached Boot Model skinny',
+              output: null,
+              artifactBundle: null,
+              modelManifest: null,
+            }
+          : messagesPageMode === 'omits-active'
+            ? {
+                ...selectedVersion,
+                id: 'msg-older',
+                content: 'Older Boot Model',
+                output: null,
+                artifactBundle: null,
+                modelManifest: null,
+                timestamp: 90,
+              }
+            : selectedVersion;
+        const thread = bootHistory.find((entry: any) => entry.id === 'thread-boot') ?? bootHistory[0];
+        const workspace = thread
+          ? {
+              thread: { ...thread, messages: [] },
+              messagesPage: {
+                messages: [pageMessage],
+                nextBefore: null,
+                hasMore: false,
+                observedBytes: 0,
+                truncatedFields: [],
+              },
+              selectedVersion,
+              requestedMessageFound: pointedMessageMode !== 'missing',
+            }
+          : null;
+        return {
+          config,
+          history: bootHistory,
+          workspace,
+          selectedPartId: null,
+        };
+      }
       if (cmd === 'get_config') return config;
       if (cmd === 'save_config') return null;
       if (cmd === 'get_runtime_capabilities') {
@@ -185,6 +262,63 @@ async function installBaseBootMock(page: Page, options: BootMockOptions = {}) {
           artifactBundle,
           modelManifest: lastSnapshotMode === 'missing-manifest' ? null : modelManifest,
           selectedPartId: null,
+        };
+      }
+      if (cmd === 'get_workspace_projection') {
+        const selectedVersion = {
+          id: 'msg-cached',
+          role: 'assistant',
+          content: 'Cached Boot Model',
+          status: 'success',
+          output: design,
+          artifactBundle,
+          modelManifest,
+          timestamp: 100,
+        };
+        const pageMessage = messagesPageMode === 'skinny-active'
+          ? {
+              ...selectedVersion,
+              content: 'Cached Boot Model skinny',
+              output: null,
+              artifactBundle: null,
+              modelManifest: null,
+            }
+          : messagesPageMode === 'omits-active'
+            ? {
+                ...selectedVersion,
+                id: 'msg-older',
+                content: 'Older Boot Model',
+                output: null,
+                artifactBundle: null,
+                modelManifest: null,
+                timestamp: 90,
+              }
+            : selectedVersion;
+        const thread = (history ?? []).find((entry: any) => entry.id === args?.threadId) ?? {
+          id: 'thread-boot',
+          title: 'Cached Thread',
+          summary: 'cached summary',
+          messages: [],
+          updatedAt: 100,
+          versionCount: 1,
+          pendingCount: 0,
+          queuedCount: 0,
+          errorCount: 0,
+          status: 'active',
+          engineKind: 'freecad',
+          sourceLanguage: 'legacyPython',
+          geometryBackend: 'freecad',
+        };
+        return {
+          thread: { ...thread, messages: [] },
+          messagesPage: {
+            messages: [pageMessage],
+            nextBefore: null,
+            hasMore: false,
+            truncatedFields: [],
+          },
+          selectedVersion,
+          requestedMessageFound: pointedMessageMode !== 'missing',
         };
       }
       if (cmd === 'get_thread_latest_version') {
@@ -280,19 +414,35 @@ async function installBaseBootMock(page: Page, options: BootMockOptions = {}) {
       if (cmd === 'get_agent_activity') return { events: [], latestCursor: 0 };
       if (cmd === 'plugin:fs|exists') return runtimeFilesExist;
       if (cmd === 'plugin:fs|size') return runtimeSizeBytes;
-      if (cmd === 'render_model' && allowBootRebuild) {
+      if (cmd === 'repair_version_runtime' && allowBootRebuild) {
         if (renderDelayMs) {
           await new Promise((resolve) => setTimeout(resolve, renderDelayMs));
         }
         if (rebuildError) throw new Error(rebuildError);
-        if (rebuildSameArtifact) {
-          return artifactBundle;
-        }
-        return {
+        const repairedBundle = rebuildSameArtifact ? artifactBundle : {
           ...artifactBundle,
           modelId: 'cached-model-rebuilt',
           contentHash: 'cached-hash-rebuilt',
           modelStlPath: '/mock/cache/rebuilt-model.stl',
+        };
+        const repairedManifest = { ...modelManifest, modelId: repairedBundle.modelId };
+        const selectedVersion = {
+          id: 'msg-cached', role: 'assistant', content: 'Cached Boot Model', status: 'success',
+          output: design, artifactBundle: repairedBundle, modelManifest: repairedManifest, timestamp: 100,
+        };
+        return {
+          snapshotId: 'snapshot-repaired',
+          artifactIdentity: repairedBundle.contentHash,
+          workspace: {
+            thread: {
+              id: 'thread-boot', title: 'Cached Thread', summary: 'cached summary', messages: [], updatedAt: 100,
+              versionCount: 1, pendingCount: 0, queuedCount: 0, errorCount: 0, status: 'active',
+              engineKind: 'freecad', sourceLanguage: 'legacyPython', geometryBackend: 'freecad',
+            },
+            messagesPage: { messages: [selectedVersion], nextBefore: null, hasMore: false, truncatedFields: [] },
+            selectedVersion,
+            requestedMessageFound: true,
+          },
         };
       }
       if (cmd === 'get_model_manifest') return {
@@ -300,7 +450,6 @@ async function installBaseBootMock(page: Page, options: BootMockOptions = {}) {
         modelId: args?.modelId ?? 'cached-model-rebuilt',
       };
       if (cmd === 'save_model_manifest') return null;
-      if (cmd === 'repair_missing_version_runtime') return null;
       if (cmd === 'render_model') throw new Error('render_model must not run during cached boot restore');
       if (cmd === 'get_thread') throw new Error('full get_thread must not run during cached boot restore');
       return null;
@@ -355,8 +504,9 @@ test.describe('Boot restore', () => {
     const calls = await page.evaluate(() =>
       (window as any).__BOOT_CALLS__.map((entry: { cmd: string }) => entry.cmd),
     );
-    expect(calls).toContain('get_last_design');
-    expect(calls).toContain('get_thread_message_version');
+    expect(calls).toContain('get_boot_projection');
+    expect(calls).not.toContain('get_last_design');
+    expect(calls).not.toContain('get_workspace_projection');
     expect(calls).not.toContain('get_thread');
     expect(calls).not.toContain('render_model');
     expect(calls).not.toContain('queue_agent_prompt');
@@ -399,15 +549,9 @@ test.describe('Boot restore', () => {
 
     await page.goto('/');
     await expect(page.locator('.viewer-shell canvas')).toBeVisible({ timeout: 5000 });
-    await expect
-      .poll(() =>
-        page.evaluate(() =>
-          ((window as any).__BOOT_CALLS__ as Array<{ cmd: string; args?: Record<string, unknown> }>).some(
-            (entry) => entry.cmd === 'get_thread_latest_version' && entry.args?.threadId === 'thread-boot',
-          ),
-        ),
-      )
-      .toBe(true);
+    const calls = await page.evaluate(() => (window as any).__BOOT_CALLS__.map((entry: { cmd: string }) => entry.cmd));
+    expect(calls).toContain('get_boot_projection');
+    expect(calls).not.toContain('get_workspace_projection');
   });
 
   test('Given a campaign was active before restart When app boots Then campaign is not auto-restored', async ({ page }) => {
@@ -461,11 +605,12 @@ test.describe('Boot restore', () => {
     await expect(page.getByRole('button', { name: 'Dismiss error' })).toHaveCount(0);
 
     await expect.poll(() => page.evaluate(() =>
-      (window as any).__BOOT_CALLS__.some((entry: { cmd: string }) => entry.cmd === 'repair_missing_version_runtime'),
+      (window as any).__BOOT_CALLS__.some((entry: { cmd: string }) => entry.cmd === 'repair_version_runtime'),
     )).toBe(true);
     const calls = await page.evaluate(() => (window as any).__BOOT_CALLS__.map((entry: { cmd: string }) => entry.cmd));
-    expect(calls).toContain('render_model');
-    expect(calls).toContain('repair_missing_version_runtime');
+    expect(calls).toContain('repair_version_runtime');
+    expect(calls).not.toContain('render_model');
+    expect(calls).not.toContain('repair_missing_version_runtime');
   });
 
   test('Given last snapshot points to a cached artifact When app boots Then it restores the pointed DB version without full thread load or rerender', async ({ page }) => {
@@ -476,9 +621,11 @@ test.describe('Boot restore', () => {
     await expect(page.locator('.viewer-shell canvas')).toBeVisible();
 
     const calls = await page.evaluate(() => (window as any).__BOOT_CALLS__.map((entry: { cmd: string }) => entry.cmd));
-    expect(calls).toContain('get_last_design');
-    expect(calls).toContain('get_thread_message_version');
-    expect(calls).toContain('get_thread_messages_page');
+    expect(calls).toContain('get_boot_projection');
+    expect(calls).not.toContain('get_last_design');
+    expect(calls).not.toContain('get_workspace_projection');
+    expect(calls).not.toContain('get_thread_message_version');
+    expect(calls).not.toContain('get_thread_messages_page');
     expect(calls).not.toContain('get_thread_latest_version');
     expect(calls).not.toContain('get_thread');
     expect(calls).not.toContain('render_model');
@@ -542,8 +689,10 @@ test.describe('Boot restore', () => {
     await expect(page.getByRole('alert')).toContainText('FreeCAD exited 1: missing Part workbench');
 
     const calls = await page.evaluate(() => (window as any).__BOOT_CALLS__.map((entry: { cmd: string }) => entry.cmd));
-    expect(calls).toContain('get_thread_message_version');
-    expect(calls).toContain('render_model');
+    expect(calls).toContain('get_boot_projection');
+    expect(calls).not.toContain('get_workspace_projection');
+    expect(calls).toContain('repair_version_runtime');
+    expect(calls).not.toContain('render_model');
     expect(calls).not.toContain('repair_missing_version_runtime');
     expect(calls).not.toContain('get_thread');
   });
@@ -562,13 +711,14 @@ test.describe('Boot restore', () => {
     await page.goto('/');
     await expect(page.locator('.boot-overlay')).toHaveCount(0, { timeout: 5000 });
     await expect.poll(() => page.evaluate(() =>
-      (window as any).__BOOT_CALLS__.some((entry: { cmd: string }) => entry.cmd === 'repair_missing_version_runtime'),
+      (window as any).__BOOT_CALLS__.some((entry: { cmd: string }) => entry.cmd === 'repair_version_runtime'),
     )).toBe(true);
     await expect(page.getByRole('button', { name: 'Dismiss error' })).toHaveCount(0);
 
     const calls = await page.evaluate(() => (window as any).__BOOT_CALLS__.map((entry: { cmd: string }) => entry.cmd));
-    expect(calls).toContain('render_model');
-    expect(calls).toContain('repair_missing_version_runtime');
+    expect(calls).toContain('repair_version_runtime');
+    expect(calls).not.toContain('render_model');
+    expect(calls).not.toContain('repair_missing_version_runtime');
     expect(previewRequests).toBeGreaterThan(1);
   });
 
@@ -583,15 +733,17 @@ test.describe('Boot restore', () => {
     await expect(page.locator('.boot-overlay')).toHaveCount(0, { timeout: 5000 });
     await expect(page.getByRole('button', { name: /Code inspector/i })).toBeEnabled();
     await expect.poll(() => page.evaluate(() =>
-      (window as any).__BOOT_CALLS__.some((entry: { cmd: string }) => entry.cmd === 'repair_missing_version_runtime'),
+      (window as any).__BOOT_CALLS__.some((entry: { cmd: string }) => entry.cmd === 'repair_version_runtime'),
     )).toBe(true);
     await expect(page.getByRole('button', { name: 'Dismiss error' })).toHaveCount(0);
 
     const calls = await page.evaluate(() => (window as any).__BOOT_CALLS__.map((entry: { cmd: string }) => entry.cmd));
-    expect(calls).toContain('get_thread_message_version');
+    expect(calls).toContain('get_boot_projection');
+    expect(calls).not.toContain('get_workspace_projection');
     expect(calls).not.toContain('get_thread_latest_version');
-    expect(calls).toContain('render_model');
-    expect(calls).toContain('repair_missing_version_runtime');
+    expect(calls).toContain('repair_version_runtime');
+    expect(calls).not.toContain('render_model');
+    expect(calls).not.toContain('repair_missing_version_runtime');
     expect(calls).not.toContain('get_thread');
   });
 
@@ -603,8 +755,10 @@ test.describe('Boot restore', () => {
     await expect(page.locator('.viewer-shell canvas')).toBeVisible();
 
     const calls = await page.evaluate(() => (window as any).__BOOT_CALLS__.map((entry: { cmd: string }) => entry.cmd));
-    expect(calls).toContain('get_thread_message_version');
-    expect(calls).toContain('get_thread_latest_version');
+    expect(calls).toContain('get_boot_projection');
+    expect(calls).not.toContain('get_workspace_projection');
+    expect(calls).not.toContain('get_thread_message_version');
+    expect(calls).not.toContain('get_thread_latest_version');
     expect(calls).not.toContain('get_thread');
     expect(calls).not.toContain('render_model');
   });
@@ -617,7 +771,8 @@ test.describe('Boot restore', () => {
     await expect(page.locator('.viewer-shell canvas')).toBeVisible();
 
     const calls = await page.evaluate(() => (window as any).__BOOT_CALLS__.map((entry: { cmd: string }) => entry.cmd));
-    expect(calls).toContain('get_thread_message_version');
+    expect(calls).toContain('get_boot_projection');
+    expect(calls).not.toContain('get_workspace_projection');
     expect(calls).not.toContain('get_thread_latest_version');
     expect(calls).not.toContain('get_thread');
     expect(calls).not.toContain('render_model');
@@ -667,8 +822,11 @@ test.describe('Boot restore', () => {
     await expect(page.getByRole('button', { name: 'Dismiss error' })).toHaveCount(0);
 
     const calls = await page.evaluate(() => (window as any).__BOOT_CALLS__.map((entry: { cmd: string }) => entry.cmd));
-    expect(calls).toContain('get_thread_latest_version');
-    expect(calls).toContain('render_model');
-    expect(calls).toContain('repair_missing_version_runtime');
+    expect(calls).toContain('get_boot_projection');
+    expect(calls).not.toContain('get_workspace_projection');
+    expect(calls).not.toContain('get_thread_latest_version');
+    expect(calls).toContain('repair_version_runtime');
+    expect(calls).not.toContain('render_model');
+    expect(calls).not.toContain('repair_missing_version_runtime');
   });
 });

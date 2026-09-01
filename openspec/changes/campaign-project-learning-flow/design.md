@@ -115,6 +115,18 @@ localStorage, or project folder. Boot loads campaign runs, resolves the saved
 active reference, then restores the campaign surface and current step. Missing
 or deleted runs fall back to Projects with a raw actionable message.
 
+Progress mutations use one tagged transition intent. Callers send only run
+identity plus `saveDraft`, `continue`, `back`, or `checkSolution` and current
+source where needed. Rust reloads canonical run and packaged step, validates
+definition identity and legal navigation, derives digest-bound draft keys,
+performs Core IR acceptance, persists once, and returns canonical run plus step.
+
+Campaign start/resume uses one tagged identity intent: `start(definitionId)` or
+`resume(runId)`. Rust derives canonical title, first/current step, definition
+version, persists matching active navigation in the same transaction, and
+returns run plus step. Deleting an active run clears matching navigation in the
+same transaction. Frontend owns only window layout and visible view projection.
+
 Projects remains a registered app window. Its visibility and rectangle use the
 existing window-layout persistence. Campaign navigation must not close Projects
 unless the user explicitly opens/resumes a campaign from it; reload restores the

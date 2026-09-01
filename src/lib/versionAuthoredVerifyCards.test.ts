@@ -103,6 +103,8 @@ function request(messageId: string, result: StructuralVerificationResult): Reque
     lightResponse: '',
     screenshot: null,
     threadId: 'thread-1',
+    buildMode: 'interactive',
+    buildQueueState: 'finished',
     result: {
       design: versionMessage(messageId).output ?? null,
       threadId: 'thread-1',

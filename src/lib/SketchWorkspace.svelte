@@ -6,11 +6,10 @@
   import {
     acceptSketchBrepCandidateSolution,
     acceptedBrepCandidateToComponentPackage,
-    analyzeSketchBrepCandidates,
-    extractBrepHiddenLineProjections,
+    evaluateSketchDocumentConstraints,
     formatBackendError,
     generateSketchDraftPreview,
-    generateSketchPreviewHull,
+    submitSketchPreview,
     suggestSketchFeatures,
     traceRasterReference,
   } from './tauri/client';
@@ -55,7 +54,12 @@
   import { parseSketchDocumentEnvelope } from './sketchDocumentEnvelope';
   import { buildSketchSuggestionDocument, buildSketchSuggestionRequest } from './sketchSuggestionDocument';
   import { buildDraftRequestFromSuggestion } from './sketchSuggestionAccept';
-  import { nextPrimitiveSequenceFromStrokes, parseSketchDocumentImportSource, sketchDocumentToStrokes } from './sketchDocumentReplay';
+  import {
+    nextPrimitiveSequenceFromStrokes,
+    parseSketchDocumentImportSource,
+    replayValidatedSketchDocument,
+    sketchDocumentToStrokes,
+  } from './sketchDocumentReplay';
   import {
     assertLockedDimensionsPreserved,
     closedStrokeBounds,
@@ -79,7 +83,6 @@
     buildSketchBrepProjectionValidationSummary,
   } from './sketchBrepProjectionValidation';
   import { findSketchIssueMatch } from './sketchIssueLocator';
-  import { autoRepairSketchDocumentFromBrepProjection } from './sketchBrepAutoRepair';
   import { buildSketchDocumentFromBrepProjection } from './sketchBrepDerivedSketch';
   import {
     applySketchTopologyRepairProposal,
@@ -94,12 +97,6 @@
   } from './sketchHiddenLineWarnings';
   import { cleanupSketchStrokes } from './sketchCleanup';
   import { repairSketchDocumentEndpointGaps } from './sketchEndpointRepair';
-  import { autoRepairOrthographicSketchStrokes } from './sketchOrthographicRepair';
-  import {
-    autoRepairSketchDocumentDimensionConstraintGeometry,
-    repairSketchDocumentDimensionConstraints,
-  } from './sketchConstraintValidation';
-  import { buildSketchPreviewHullRequest, shouldUseSketchPreviewHull } from './sketchPreviewHull';
   import {
     appendSketchSourcePatch,
     compactRepairDetail,
@@ -120,7 +117,6 @@
   } | null;
   type ProjectionRect = { x: number; y: number; width: number; height: number };
   type PreviewMode = 'manual' | 'auto';
-  type GenerateDraftOptions = { preserveBrepAutoRepairAttempts?: boolean };
   type PointDragState = {
     primitiveId: string;
     pointIndex: number;
@@ -170,7 +166,6 @@
   };
 
   const EXTRUDE_AMOUNT = 12;
-  const AUTO_PREVIEW_DEBOUNCE_MS = 650;
   const DEFAULT_SNAP_GRID_SIZE = '10';
   const DEFAULT_PANE_ZOOM = 1;
   const POINT_DRAG_THRESHOLD_PX = 6;
@@ -271,7 +266,6 @@
   let hiddenLineResponse = $state<BrepHiddenLineProjectionResponse | null>(null);
   let hiddenLineErrorText = $state('');
   let hiddenLineLoading = $state(false);
-  let brepAutoRepairAttempts = $state(0);
   const frontHiddenLineOverlay = $derived(hiddenLineResponse?.views?.find((view) => view.view === 'front') ?? null);
   const topHiddenLineOverlay = $derived(hiddenLineResponse?.views?.find((view) => view.view === 'top') ?? null);
   const sideHiddenLineOverlay = $derived(hiddenLineResponse?.views?.find((view) => view.view === 'side') ?? null);
@@ -287,16 +281,24 @@
       return 'error' in envelope ? null : envelope.document;
     })();
     if (!restoredDocument) return;
-    const replay = sketchDocumentToStrokes(restoredDocument);
-    if ('error' in replay) return;
-    strokes = replay.strokes;
-    primitiveSequence = nextPrimitiveSequenceFromStrokes(replay.strokes);
-    sketchDocumentSnapshot = restoredDocument;
-    sketchDocumentImportText = formatSketchDocumentSource(restoredDocument);
-    restoreRasterReferencesFromStrokes(replay.strokes);
+    void replaySketchDocument(restoredDocument).then((replay) => {
+      if ('error' in replay) return;
+      strokes = replay.strokes;
+      primitiveSequence = nextPrimitiveSequenceFromStrokes(replay.strokes);
+      sketchDocumentSnapshot = restoredDocument;
+      sketchDocumentImportText = formatSketchDocumentSource(restoredDocument);
+      restoreRasterReferencesFromStrokes(replay.strokes);
+    });
   });
-  let autoPreviewTimer: ReturnType<typeof setTimeout> | null = null;
   let autoPreviewRunId = 0;
+
+  async function replaySketchDocument(document: SketchDocument) {
+    try {
+      return await replayValidatedSketchDocument(document, evaluateSketchDocumentConstraints);
+    } catch (error) {
+      return { error: formatBackendError(error) };
+    }
+  }
 
   function createRasterReferenceState(): RasterReferenceState {
     return {
@@ -1419,7 +1421,7 @@
     clearSourcePatchLedger();
   }
 
-  function replaySketchDocumentSnapshot() {
+  async function replaySketchDocumentSnapshot() {
     clearAutoPreviewQueue();
     clearFeatureSuggestions();
     clearAcceptedSuggestion();
@@ -1433,7 +1435,7 @@
       return;
     }
 
-    const replay = sketchDocumentToStrokes(sketchDocumentSnapshot);
+    const replay = await replaySketchDocument(sketchDocumentSnapshot);
     if ('error' in replay) {
       errorText = replay.error;
       cleanupEvidenceText = '';
@@ -1455,7 +1457,7 @@
     void generateDraft('auto', replay.strokes);
   }
 
-  function importSketchDocumentSource() {
+  async function importSketchDocumentSource() {
     clearAutoPreviewQueue();
     clearFeatureSuggestions();
     clearAcceptedSuggestion();
@@ -1471,13 +1473,37 @@
     }
 
     const endpointRepair = repairSketchDocumentEndpointGaps(parsed.document);
-    const dimensionRepair = autoRepairSketchDocumentDimensionConstraintGeometry(endpointRepair.document);
+    let dimensionRepair: Extract<
+      Awaited<ReturnType<typeof evaluateSketchDocumentConstraints>>,
+      { kind: 'geometryRepaired' }
+    >;
+    try {
+      const evaluated = await evaluateSketchDocumentConstraints({
+        document: endpointRepair.document,
+        mode: 'autoRepairGeometry',
+        maxDelta: 1,
+      });
+      if (evaluated.kind !== 'geometryRepaired') {
+        errorText = evaluated.kind === 'error'
+          ? evaluated.error
+          : `Unexpected sketch constraint response: ${evaluated.kind}`;
+        cleanupEvidenceText = '';
+        clearPreviewResult();
+        return;
+      }
+      dimensionRepair = evaluated;
+    } catch (error) {
+      errorText = formatBackendError(error);
+      cleanupEvidenceText = '';
+      clearPreviewResult();
+      return;
+    }
     const autoRepairEvidence = [...endpointRepair.evidence, ...dimensionRepair.evidence];
-    const replay = sketchDocumentToStrokes(dimensionRepair.document);
+    const replay = await replaySketchDocument(dimensionRepair.document);
     if ('error' in replay) {
       errorText = replay.error;
       cleanupEvidenceText = '';
-      primeImportRepair(dimensionRepair.document);
+      await primeImportRepair(dimensionRepair.document);
       clearPreviewResult();
       return;
     }
@@ -1512,7 +1538,7 @@
     void generateDraft('auto', replay.strokes);
   }
 
-  function repairSketchDocumentImport() {
+  async function repairSketchDocumentImport() {
     clearAutoPreviewQueue();
     clearFeatureSuggestions();
     clearAcceptedSuggestion();
@@ -1524,7 +1550,7 @@
       return;
     }
 
-    const replay = sketchDocumentToStrokes(importRepairDocument);
+    const replay = await replaySketchDocument(importRepairDocument);
     if ('error' in replay) {
       errorText = replay.error;
       cleanupEvidenceText = '';
@@ -1563,13 +1589,9 @@
   async function generateDraft(
     mode: PreviewMode = 'manual',
     currentStrokes: SketchStroke[] = strokes,
-    options: GenerateDraftOptions = {},
   ) {
     clearAutoPreviewQueue();
     clearAcceptedSuggestion();
-    if (!options.preserveBrepAutoRepairAttempts) {
-      brepAutoRepairAttempts = 0;
-    }
     const openError = currentStrokes.some((stroke) => !stroke.closed) || (activeStroke && !activeStroke.closed) ? 'Close profile before preview.' : '';
     if (openError) {
       errorText = openError;
@@ -1578,65 +1600,92 @@
       return;
     }
 
-    let draftStrokes = currentStrokes;
-    const repairResult = autoRepairOrthographicSketchStrokes(draftStrokes);
-    if (repairResult.repairs.length) {
-      draftStrokes = repairResult.strokes;
-      strokes = repairResult.strokes;
-      activeStroke = null;
-      clearSelectedPoint();
-      cleanupEvidenceText = `AUTO SNAP ORTHOGRAPHIC / ${repairResult.repairs.map((repair) => repair.detail).join(' / ')}`;
-      sourcePatchEntries = repairResult.repairs.reduce(
-        (entries, repair) =>
-          appendSketchSourcePatch(entries, {
-            action: 'AUTO SNAP',
-            primitiveId: repair.primitiveId,
-            detail: repair.detail,
-          }),
-        sourcePatchEntries,
-      );
-    }
-
-    const request = buildSketchDraftRequest(draftStrokes);
-    if ('error' in request) {
-      errorText = request.error;
+    const document = buildSketchSuggestionDocument(currentStrokes);
+    if (!document) {
+      errorText = 'Close profile before preview.';
       cleanupEvidenceText = '';
       clearPreviewResult();
       return;
     }
 
     if (!suggestingFeatures && !suggestionResponse) {
-      requestFeatureSuggestions(draftStrokes);
+      requestFeatureSuggestions(currentStrokes);
     }
     generating = true;
     autoQueued = mode === 'auto';
-    autoPreviewPrimitiveId = request.sketch.primitives?.[0]?.primitiveId ?? null;
+    autoPreviewPrimitiveId = document.sketches?.[0]?.primitives?.[0]?.primitiveId ?? null;
     errorText = '';
     clearPreviewResult();
     const runId = ++autoPreviewRunId;
     try {
-      const usePreviewHull = shouldUseSketchPreviewHull(draftStrokes);
-      const previewHullRequest = usePreviewHull ? assertPreviewHullRequest(draftStrokes) : null;
-      const result = previewHullRequest
-        ? await generateSketchPreviewHull(previewHullRequest)
-        : await generateSketchDraftPreview(request);
+      const packet = await submitSketchPreview({
+        target: { targetId: 'sketch-workspace-preview', partId: 'sketch-preview' },
+        document,
+        mode,
+      });
       if (runId !== autoPreviewRunId) return;
-      draft = result.draft;
-      artifactBundle = result.artifactBundle;
-      previewProfile = previewProfileFor(request.sketch.view, draftStrokes);
-      syncSketchDocumentEnvelope(result.draft.source);
-      draftSceneSignature = sceneSignatureFromStrokes(draftStrokes);
+      if (packet.status === 'superseded') return;
+
+      const packetError = packet.error ? formatBackendError(packet.error) : '';
+      if (packet.status === 'failed') {
+        errorText = packetError || `Sketch preview failed during ${packet.failureStage ?? 'pipeline'}.`;
+        if (packet.failureStage === 'candidateAnalysis') brepCandidateErrorText = errorText;
+        if (packet.failureStage === 'hiddenLineProjection') hiddenLineErrorText = errorText;
+      }
+      if (!packet.draftSource || !packet.artifactBundle) return;
+
+      let projectedStrokes = currentStrokes;
+      if (packet.repairEvidence.length) {
+        const replay = sketchDocumentToStrokes(packet.document);
+        if (!('error' in replay)) {
+          projectedStrokes = replay.strokes;
+          strokes = replay.strokes;
+          activeStroke = null;
+          clearSelectedPoint();
+          primitiveSequence = nextPrimitiveSequenceFromStrokes(replay.strokes);
+        }
+        const orthographicEvidence = packet.repairEvidence.filter((entry) =>
+          /^(FRONT|TOP|SIDE) [XY](?: |$)/.test(entry.detail),
+        );
+        const projectionEvidence = packet.repairEvidence.filter((entry) =>
+          !orthographicEvidence.includes(entry),
+        );
+        cleanupEvidenceText = [
+          orthographicEvidence.length
+            ? `AUTO SNAP ORTHOGRAPHIC / ${orthographicEvidence.map((entry) => entry.detail).join(' / ')}`
+            : '',
+          ...projectionEvidence.map((entry) => entry.detail),
+        ].filter(Boolean).join(' / ');
+        sourcePatchEntries = packet.repairEvidence.reduce(
+          (entries, entry) => appendSketchSourcePatch(entries, {
+            action: 'AUTO SNAP',
+            primitiveId: entry.primitiveId,
+            detail: entry.detail,
+          }),
+          sourcePatchEntries,
+        );
+      }
+
+      draft = packet.draftSource;
+      artifactBundle = packet.artifactBundle;
+      previewProfile = previewProfileFor(packet.document.sketches?.[0]?.view ?? 'front', projectedStrokes);
+      sketchDocumentSnapshot = packet.document;
+      sketchDocumentImportText = formatSketchDocumentSource(packet.document);
+      draftSceneSignature = sceneSignatureFromStrokes(projectedStrokes);
       autoQueued = false;
+      brepCandidateResponse = packet.candidateResponse ?? null;
+      brepCandidateDocument = packet.renderer === 'previewHull' ? packet.document : null;
+      brepCandidateLoading = false;
+      hiddenLineResponse = packet.hiddenLineResponse ?? null;
+      hiddenLineLoading = false;
+      const result = {
+        draft: packet.draftSource,
+        artifactBundle: packet.artifactBundle,
+        sketchDocument: packet.document,
+      };
       publishPreviewResult(result);
       if (mode === 'manual') {
         onManualPreviewResult?.(result);
-      }
-      if (previewHullRequest) {
-        void loadBrepCandidateGraph(previewHullRequest.document, runId);
-        void loadHiddenLineProjection(result.artifactBundle, previewHullRequest.document, runId);
-      } else {
-        clearBrepCandidateGraph();
-        clearHiddenLineProjection();
       }
     } catch (error) {
       if (runId !== autoPreviewRunId) return;
@@ -1645,39 +1694,6 @@
     } finally {
       if (runId === autoPreviewRunId) {
         generating = false;
-      }
-    }
-  }
-
-  function assertPreviewHullRequest(currentStrokes: SketchStroke[]) {
-    const request = buildSketchPreviewHullRequest(currentStrokes);
-    if ('error' in request) {
-      throw new Error(request.error);
-    }
-    return request;
-  }
-
-  async function loadBrepCandidateGraph(document: SketchDocument, runId: number) {
-    brepCandidateLoading = true;
-    brepCandidateErrorText = '';
-    brepCandidateResponse = null;
-    brepCandidateDocument = document;
-    brepCandidateAcceptedSolutionId = null;
-    brepCandidateAcceptErrorText = '';
-    brepCandidateAcceptEvidence = [];
-    brepComponentPackage = null;
-    brepComponentPackageErrorText = '';
-    brepComponentPackageLoading = false;
-    try {
-      const response = await analyzeSketchBrepCandidates({ document });
-      if (runId !== autoPreviewRunId) return;
-      brepCandidateResponse = response;
-    } catch (error) {
-      if (runId !== autoPreviewRunId) return;
-      brepCandidateErrorText = formatBackendError(error);
-    } finally {
-      if (runId === autoPreviewRunId) {
-        brepCandidateLoading = false;
       }
     }
   }
@@ -1842,77 +1858,7 @@
     }
   }
 
-  async function loadHiddenLineProjection(bundle: ArtifactBundle, document: SketchDocument, runId: number) {
-    hiddenLineResponse = null;
-    hiddenLineErrorText = '';
-    if (!hasBrepProjectionArtifact(bundle)) {
-      hiddenLineLoading = false;
-      return;
-    }
-
-    hiddenLineLoading = true;
-    try {
-      const response = await extractBrepHiddenLineProjections({
-        artifactBundle: bundle,
-        sketchDocument: document,
-        views: ['front', 'top', 'side'],
-        tolerance: 0.1,
-      });
-      if (runId !== autoPreviewRunId) return;
-      if (!response.validation?.passed && applyBrepAutoRepairProjection(document, response)) {
-        return;
-      }
-      hiddenLineResponse = response;
-    } catch (error) {
-      if (runId !== autoPreviewRunId) return;
-      hiddenLineErrorText = formatBackendError(error);
-    } finally {
-      if (runId === autoPreviewRunId) {
-        hiddenLineLoading = false;
-      }
-    }
-  }
-
-  function applyBrepAutoRepairProjection(
-    document: SketchDocument,
-    response: BrepHiddenLineProjectionResponse,
-  ): boolean {
-    if (brepAutoRepairAttempts >= 1) return false;
-
-    const repair = autoRepairSketchDocumentFromBrepProjection(document, response);
-    if (!repair.repaired || repair.evidence.length === 0) return false;
-
-    const replay = sketchDocumentToStrokes(repair.document);
-    if ('error' in replay) return false;
-
-    brepAutoRepairAttempts += 1;
-    strokes = replay.strokes;
-    activeStroke = null;
-    clearSelectedPoint();
-    primitiveSequence = nextPrimitiveSequenceFromStrokes(replay.strokes);
-    sketchDocumentSnapshot = repair.document;
-    sketchDocumentImportText = formatSketchDocumentSource(repair.document);
-    errorText = '';
-    cleanupEvidenceText = repair.evidence.map((entry) => entry.detail).join(' / ');
-    sourcePatchEntries = repair.evidence.reduce(
-      (entries, entry) =>
-        appendSketchSourcePatch(entries, {
-          action: 'AUTO SNAP',
-          primitiveId: entry.primitiveId,
-          detail: entry.detail,
-        }),
-      sourcePatchEntries,
-    );
-    clearFeatureSuggestions();
-    hiddenLineResponse = null;
-    hiddenLineErrorText = '';
-    hiddenLineLoading = false;
-
-    void generateDraft('auto', replay.strokes, { preserveBrepAutoRepairAttempts: true });
-    return true;
-  }
-
-  function convertDerivedBrepSketches() {
+  async function convertDerivedBrepSketches() {
     if (!brepDerivedSketch) {
       errorText = 'BRep derived sketch unavailable.';
       return;
@@ -1922,7 +1868,7 @@
       return;
     }
 
-    const replay = sketchDocumentToStrokes(brepDerivedSketch.document);
+    const replay = await replaySketchDocument(brepDerivedSketch.document);
     if ('error' in replay) {
       errorText = replay.error;
       return;
@@ -1953,7 +1899,7 @@
     void generateDraft('auto', replay.strokes);
   }
 
-  function applyBrepTopologyRepair(proposal: SketchTopologyRepairProposal) {
+  async function applyBrepTopologyRepair(proposal: SketchTopologyRepairProposal) {
     if (!sketchDocumentSource || !hiddenLineResponse) {
       errorText = 'Topology repair source unavailable.';
       return;
@@ -1965,7 +1911,7 @@
       return;
     }
 
-    const replay = sketchDocumentToStrokes(repair.document);
+    const replay = await replaySketchDocument(repair.document);
     if ('error' in replay) {
       errorText = replay.error;
       return;
@@ -1995,11 +1941,6 @@
     void generateDraft('auto', replay.strokes);
   }
 
-  function hasBrepProjectionArtifact(bundle: ArtifactBundle): boolean {
-    if (bundle.fcstdPath) return true;
-    return Boolean(bundle.exportArtifacts?.some((artifact) => artifact.format === 'step' && artifact.path));
-  }
-
   function clearHiddenLineProjection() {
     hiddenLineResponse = null;
     hiddenLineErrorText = '';
@@ -2014,16 +1955,10 @@
 
     autoQueued = true;
     autoPreviewPrimitiveId = stroke.primitiveId;
-    autoPreviewTimer = setTimeout(() => {
-      autoPreviewTimer = null;
-      void generateDraft('auto');
-    }, AUTO_PREVIEW_DEBOUNCE_MS);
+    void generateDraft('auto');
   }
 
   function clearAutoPreviewQueue() {
-    if (!autoPreviewTimer) return;
-    clearTimeout(autoPreviewTimer);
-    autoPreviewTimer = null;
     autoQueued = false;
   }
 
@@ -2132,9 +2067,20 @@
     sourcePatchEntries = [];
   }
 
-  function primeImportRepair(document: SketchDocument) {
-    const repair = repairSketchDocumentDimensionConstraints(document);
-    if ('error' in repair) {
+  async function primeImportRepair(document: SketchDocument) {
+    let repair: Awaited<ReturnType<typeof evaluateSketchDocumentConstraints>>;
+    try {
+      repair = await evaluateSketchDocumentConstraints({
+        document,
+        mode: 'repairConstraintValues',
+        maxDelta: null,
+      });
+    } catch {
+      clearImportRepair();
+      return;
+    }
+
+    if (repair.kind !== 'constraintValuesRepaired') {
       clearImportRepair();
       return;
     }

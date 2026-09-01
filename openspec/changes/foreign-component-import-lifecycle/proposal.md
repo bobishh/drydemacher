@@ -23,8 +23,9 @@ authoring source. A later verified Ecky rewrite is a new ordinary Ecky version.
 - Persist the calculated STL and native donor/runtime files as version-owned,
   content-addressed assets referenced by one imported-component record.
 - Display read-only evidence beside a typed `(freecad-component ...)` descriptor.
-- Route descriptor Apply/Commit through `apply_imported_model`; never through
-  macro rendering.
+- Route descriptor Apply/Commit through one Rust imported-parameter intent that
+  owns `apply_imported_model`, semantic carry-forward, optional immutable version
+  append, and runtime snapshot projection; never through macro rendering.
 - Load cached runtime directly by content identity. Project reopen does not render
   or reopen FCStd/STEP when persisted runtime files exist.
 - Keep the previous model visible until the target artifact is ready or loading

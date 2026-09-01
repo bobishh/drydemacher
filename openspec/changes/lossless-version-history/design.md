@@ -62,6 +62,18 @@ commit, or finalize command exists. A failed validation/render marks the
 appended version `error` with the raw diagnostic. A later repair appends a new
 snapshot. No caller may roll back an append because a check failed.
 
+After the append boundary, sketch preview enters one Rust intent with canonical
+target identity, document, and manual/automatic mode. Rust generates preview
+identity and owns latest-wins admission, automatic delay, renderer selection,
+validation, render, candidate analysis, hidden-line projection, and one bounded
+projection repair/rebuild. The returned packet projects every stage result or
+the raw structured failure; frontend code does not coordinate those stages.
+The submitted `SketchDocument` remains raw user state. Before validation and
+render, Rust owns deterministic orthographic size/range auto-snap across Front,
+Top, and Side closed profiles, reconciles affected dimension constraints, and
+returns the repaired document plus `AUTO SNAP` evidence in the same packet.
+Frontend never mutates orthographic geometry before submission.
+
 Runtime cache ownership is `(durableVersionId, versionInputDigest)`. A worker
 must receive the already-appended version ID and its digest; it may attach a
 result only when both still match that version. The underlying immutable

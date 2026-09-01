@@ -42,9 +42,29 @@ the complete aggregate by default.
 - **THEN** it hydrates one coherent bounded snapshot projection by identity
 - **AND** it does not send the same aggregate back to backend persistence.
 
+#### Scenario: Backend intent publishes restart authority
+
+- **WHEN** a persisted version intent selects an immutable thread/message pair
+- **THEN** Rust writes an explicit `savedVersion` restart target for that exact
+  pair before returning its workspace projection
+- **AND** a durable draft writes an explicit `draft` target containing thread,
+  preview, and session identity
+- **AND** an untagged runtime snapshot cannot replace or delete an existing
+  durable restart target.
+
 #### Scenario: Dense topology is inspected
 
 - **GIVEN** a snapshot contains anonymous dense edge, face, or triangle targets
 - **WHEN** core preview detail is hydrated
 - **THEN** core detail contains explicit counts and a dense-topology reference
 - **AND** dense targets are returned only through bounded indexed pages on demand.
+
+#### Scenario: Missing current-version runtime is repaired
+
+- **GIVEN** the current durable version retains exact source and effective parameters
+- **AND** its runtime artifact is unavailable
+- **WHEN** a client submits only thread/version identity and an optional observed artifact content hash
+- **THEN** the backend rebuilds and validates one coherent snapshot from stored inputs
+- **AND** atomically attaches runtime metadata to that durable version
+- **AND** returns one bounded workspace projection with that version selected
+- **AND** the client does not send source, parameters, artifact bundle, or model manifest.

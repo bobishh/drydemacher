@@ -1,6 +1,12 @@
-import type { SketchPreviewHullRequest } from './tauri/contracts';
+import type { SketchDocument } from './tauri/contracts';
 import { buildSketchSuggestionDocument } from './sketchSuggestionDocument';
 import { buildSketchDraftRequest, type SketchStroke } from './sketchWorkspaceState';
+
+type SketchPreviewHullRequest = {
+  partId: string;
+  document: SketchDocument;
+  fallbackDepth: number;
+};
 
 export type SketchPreviewHullRequestResult = SketchPreviewHullRequest | { error: string };
 

@@ -74,6 +74,55 @@ erase the version or move head to an older successful preview.
 - AND successful-preview filtering may return an earlier version without
   relabeling it as head.
 
+### Requirement: Backend owns the sketch preview pipeline
+
+After changed sketch content is persisted, the system SHALL submit preview through
+one backend intent. The caller SHALL provide only canonical target identity, sketch
+document, and manual or automatic mode. The backend SHALL own preview identity,
+renderer selection, document and constraint validation, render, BRep candidate
+analysis, hidden-line projection, latest-wins admission, automatic-preview delay,
+deterministic orthographic size/range auto-snap, and at most one
+projection-driven repair and rebuild. The caller SHALL submit the raw sketch
+document and project any repaired document and evidence returned by Rust.
+
+#### Scenario: Orthographic mismatch is repaired before render
+
+- **GIVEN** raw Front, Top, or Side closed profiles have repairable size or range mismatch
+- **WHEN** caller submits one preview intent
+- **THEN** Rust snaps dependent view axes to the authoritative orthographic ranges
+- **AND** returns repaired document plus AUTO SNAP evidence
+- **AND** frontend does not repair or replace the document before submission
+
+#### Scenario: Orthographic preview returns one canonical packet
+
+- GIVEN a persisted sketch document has Front and Top or Side closed profiles
+- WHEN the caller submits one sketch preview intent
+- THEN the backend selects preview-hull rendering
+- AND runs candidate analysis and hidden-line projection
+- AND returns their results under one backend-generated preview identity.
+
+#### Scenario: Projection mismatch receives one bounded repair
+
+- GIVEN hidden-line validation reports a supported bounds or containment mismatch
+- WHEN the backend can locate one closed polyline from structured issue identity
+- THEN the backend repairs the canonical sketch document
+- AND rebuilds render, candidate analysis, and hidden-line projection exactly once
+- AND returns repair evidence and the repaired document in the packet.
+
+#### Scenario: Newer automatic preview supersedes older work
+
+- GIVEN an automatic sketch preview is delayed or waiting for rendering
+- WHEN a newer preview for the same target is submitted
+- THEN the older preview returns `superseded`
+- AND the caller does not manufacture preview IDs, retry counts, or lifecycle facts.
+
+#### Scenario: Backend failure stays raw
+
+- GIVEN render, candidate analysis, or hidden-line projection fails
+- WHEN the backend returns the preview packet
+- THEN status is `failed`
+- AND failure stage and raw structured backend error are preserved.
+
 ### Requirement: Raster references share the stable sketch draft
 
 Raster reference work SHALL retain the active sketch scope while appending every

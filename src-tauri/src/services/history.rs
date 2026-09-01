@@ -1,7 +1,9 @@
 use crate::contracts::{AppError, AppResult, MessageRole, MessageStatus, Thread, ThreadStatus};
 use crate::db;
 use crate::persist_thread_summary;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use specta::Type;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn get_history(conn: &rusqlite::Connection) -> AppResult<Vec<Thread>> {
@@ -57,11 +59,7 @@ pub fn get_thread(conn: &rusqlite::Connection, id: &str) -> AppResult<Thread> {
 
     let lifecycle = db::get_thread_lifecycle(conn, id)
         .map_err(|err| AppError::persistence(err.to_string()))?
-        .unwrap_or(db::ThreadLifecycle {
-            status: ThreadStatus::Active,
-            finalized_at: None,
-            pending_confirm: None,
-        });
+        .unwrap_or_else(db::ThreadLifecycle::active);
 
     Ok(Thread {
         id: id.to_string(),
@@ -75,9 +73,9 @@ pub fn get_thread(conn: &rusqlite::Connection, id: &str) -> AppResult<Thread> {
         queued_count,
         error_count,
         is_blank,
-        status: lifecycle.status,
-        finalized_at: lifecycle.finalized_at,
-        pending_confirm: lifecycle.pending_confirm,
+        status: lifecycle.status(),
+        finalized_at: lifecycle.finalized_at(),
+        pending_confirm: lifecycle.pending_confirm().map(str::to_string),
     })
 }
 
@@ -281,6 +279,238 @@ pub fn get_thread_messages_page(
     .map_err(|err| AppError::persistence(err.to_string()))
 }
 
+/// Loads the bounded timeline and its selected full version from one SQLite
+/// read transaction. A stale persisted pointer falls back to the current head.
+pub fn get_workspace_projection(
+    conn: &rusqlite::Connection,
+    thread_id: &str,
+    preferred_message_id: Option<&str>,
+    message_limit: Option<usize>,
+) -> AppResult<crate::contracts::WorkspaceProjection> {
+    let transaction = conn
+        .unchecked_transaction()
+        .map_err(|err| AppError::persistence(err.to_string()))?;
+    let projection = get_workspace_projection_read(
+        &transaction,
+        thread_id,
+        preferred_message_id,
+        message_limit,
+    )?;
+    transaction
+        .commit()
+        .map_err(|err| AppError::persistence(err.to_string()))?;
+    Ok(projection)
+}
+
+pub(crate) fn get_workspace_projection_read(
+    conn: &rusqlite::Connection,
+    thread_id: &str,
+    preferred_message_id: Option<&str>,
+    message_limit: Option<usize>,
+) -> AppResult<crate::contracts::WorkspaceProjection> {
+    let thread = get_thread_summary(conn, thread_id)?;
+    let messages_page = get_thread_messages_page(conn, thread_id, None, message_limit, false)?;
+    let preferred_version = match preferred_message_id {
+        Some(message_id) => get_thread_message_version(conn, thread_id, message_id)?,
+        None => None,
+    };
+    let requested_message_found = preferred_version.is_some();
+    let selected_version = match preferred_version {
+        Some(version) => Some(version),
+        None => get_thread_latest_version(conn, thread_id)?,
+    };
+
+    let projection = crate::contracts::WorkspaceProjection {
+        thread,
+        messages_page,
+        selected_version,
+        requested_message_found,
+    };
+    crate::transport_budget::require_serialized_budget(
+        "workspaceProjection",
+        &projection,
+        crate::transport_budget::ORDINARY_JSON_MAX_BYTES,
+        "get_thread_messages_page and get_version_detail",
+    )?;
+    Ok(projection)
+}
+
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForkDesignRequest {
+    pub source_thread_id: String,
+    pub source_message_id: String,
+    pub title: Option<String>,
+    pub version_name: Option<String>,
+    pub message_limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkDesignResponse {
+    pub thread_id: String,
+    pub message_id: String,
+    pub workspace: crate::contracts::WorkspaceProjection,
+}
+
+fn fork_title(source: &crate::contracts::Message) -> String {
+    source
+        .output
+        .as_ref()
+        .map(|output| output.title.trim())
+        .filter(|title| !title.is_empty())
+        .or_else(|| {
+            source
+                .model_manifest
+                .as_ref()
+                .map(|manifest| manifest.document.document_label.trim())
+                .filter(|title| !title.is_empty())
+        })
+        .or_else(|| {
+            source
+                .model_manifest
+                .as_ref()
+                .map(|manifest| manifest.document.document_name.trim())
+                .filter(|title| !title.is_empty())
+        })
+        .or_else(|| {
+            source
+                .artifact_bundle
+                .as_ref()
+                .map(|bundle| bundle.model_id.trim())
+                .filter(|title| !title.is_empty())
+        })
+        .unwrap_or("Imported Model")
+        .to_string()
+}
+
+/// Forks one exact immutable version into a new thread and returns the full
+/// first-load projection. Callers choose the source; Rust owns payload kind,
+/// new identities, append semantics, source binding, and canonical hydration.
+pub async fn fork_design(
+    request: ForkDesignRequest,
+    state: &crate::models::AppState,
+    app: &dyn crate::models::PathResolver,
+) -> AppResult<ForkDesignResponse> {
+    let source = {
+        let conn = state.db.lock().await;
+        db::get_thread_message_version(&conn, &request.source_thread_id, &request.source_message_id)
+            .map_err(|error| AppError::persistence(error.to_string()))?
+            .ok_or_else(|| {
+                AppError::not_found(format!(
+                    "Fork source version '{}' was not found in thread '{}'.",
+                    request.source_message_id, request.source_thread_id
+                ))
+            })?
+    };
+    let title = request
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| fork_title(&source));
+    let new_thread_id = uuid::Uuid::new_v4().to_string();
+
+    let message_id = if let Some(output) = source.output.as_ref() {
+        let version_name = request
+            .version_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                (!output.version_name.trim().is_empty()).then(|| output.version_name.clone())
+            })
+            .unwrap_or_else(|| "Forked".to_string());
+        crate::services::design::add_manual_version(
+            crate::services::design::AddManualVersionRequest {
+                thread_id: new_thread_id.clone(),
+                title: title.clone(),
+                version_name,
+                macro_code: output.macro_code.clone(),
+                source_language: Some(output.source_language.clone()),
+                geometry_backend: Some(output.geometry_backend.clone()),
+                parameters: output.initial_params.clone(),
+                ui_spec: output.ui_spec.clone(),
+                post_processing: output.post_processing.clone(),
+                artifact_bundle: source.artifact_bundle.clone(),
+                model_manifest: source.model_manifest.clone(),
+                response_text: Some("Design forked into a new thread.".to_string()),
+                agent_origin: None,
+                status: Some(source.status.clone()),
+                error_message: (source.status == crate::contracts::MessageStatus::Error)
+                    .then(|| source.content.clone()),
+            },
+            state,
+            app,
+        )
+        .await?
+    } else {
+        let artifact_bundle = source
+            .artifact_bundle
+            .clone()
+            .ok_or_else(|| AppError::validation("Fork source has no reusable payload."))?;
+        let model_manifest = match source.model_manifest.clone() {
+            Some(manifest) => manifest,
+            None => crate::model_runtime::read_model_manifest(app, &artifact_bundle.model_id)
+                .map_err(|error| {
+                    AppError::validation(format!(
+                        "Fork source runtime manifest is unavailable: {error}"
+                    ))
+                })?,
+        };
+        crate::services::imported_model::persist_imported_runtime(
+            Some(new_thread_id.clone()),
+            Some(title.clone()),
+            artifact_bundle,
+            model_manifest,
+            state,
+            app,
+        )
+        .await?
+        .message_id
+    };
+
+    let workspace = {
+        let conn = state.db.lock().await;
+        get_workspace_projection(
+            &conn,
+            &new_thread_id,
+            Some(&message_id),
+            request.message_limit,
+        )?
+    };
+    let selected = workspace
+        .selected_version
+        .as_ref()
+        .ok_or_else(|| AppError::persistence("Forked version projection is unavailable."))?;
+    let snapshot = crate::services::session::build_saved_version_snapshot(
+        selected.output.clone(),
+        new_thread_id.clone(),
+        message_id.clone(),
+        selected.artifact_bundle.clone(),
+        selected.model_manifest.clone(),
+        None,
+    );
+    {
+        let mut last = state.last_snapshot.lock().unwrap();
+        *last = Some(snapshot.clone());
+    }
+    crate::services::session::write_last_snapshot(app, Some(&snapshot));
+    state.emit_history_changed(
+        Some(new_thread_id.clone()),
+        Some(message_id.clone()),
+        "threadForked",
+    );
+
+    Ok(ForkDesignResponse {
+        thread_id: new_thread_id,
+        message_id,
+        workspace,
+    })
+}
+
 pub fn get_thread_messages_page_filtered(
     conn: &rusqlite::Connection,
     id: &str,
@@ -393,14 +623,323 @@ pub fn restore_version(conn: &rusqlite::Connection, message_id: &str) -> AppResu
     Ok(())
 }
 
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VersionHistoryIntent {
+    pub message_id: String,
+    pub selected_thread_id: Option<String>,
+    pub selected_message_id: Option<String>,
+    pub message_limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionHistoryIntentResponse {
+    pub thread_id: String,
+    pub workspace: Option<crate::contracts::WorkspaceProjection>,
+    pub thread_removed: bool,
+}
+
+fn persist_intent_workspace_selection(
+    selected_thread_id: Option<&str>,
+    thread_id: &str,
+    workspace: Option<&crate::contracts::WorkspaceProjection>,
+    state: &crate::models::AppState,
+    app: &dyn crate::models::PathResolver,
+) {
+    if selected_thread_id != Some(thread_id) {
+        return;
+    }
+
+    let snapshot = workspace
+        .and_then(|projection| projection.selected_version.as_ref())
+        .map(|message| crate::contracts::LastDesignSnapshot {
+            design: message.output.clone(),
+            thread_id: Some(thread_id.to_string()),
+            message_id: Some(message.id.clone()),
+            artifact_bundle: message.artifact_bundle.clone(),
+            model_manifest: message.model_manifest.clone(),
+            selected_part_id: None,
+            target_ref: Some(crate::contracts::AuthoringTargetRef::SavedVersion {
+                thread_id: thread_id.to_string(),
+                message_id: message.id.clone(),
+            }),
+        });
+    *state.last_snapshot.lock().unwrap() = snapshot.clone();
+    crate::services::session::write_last_snapshot(app, snapshot.as_ref());
+}
+
+pub async fn delete_version_intent(
+    input: VersionHistoryIntent,
+    state: &crate::models::AppState,
+    app: &dyn crate::models::PathResolver,
+) -> AppResult<VersionHistoryIntentResponse> {
+    let (thread_id, workspace, thread_removed) = {
+        let mut conn = state.db.lock().await;
+        let transaction = conn
+            .transaction()
+            .map_err(|error| AppError::persistence(error.to_string()))?;
+        let thread_id = db::get_message_thread_id(&transaction, &input.message_id)
+            .map_err(|error| AppError::persistence(error.to_string()))?
+            .ok_or_else(|| AppError::not_found("Version not found."))?;
+        delete_version(&transaction, &input.message_id)?;
+        let thread_removed = db::get_visible_thread_title(&transaction, &thread_id)
+            .map_err(|error| AppError::persistence(error.to_string()))?
+            .is_none();
+        let preferred_message_id = (input.selected_thread_id.as_deref() == Some(&thread_id)
+            && input.selected_message_id.as_deref() != Some(input.message_id.as_str()))
+        .then_some(input.selected_message_id.as_deref())
+        .flatten();
+        let workspace = (!thread_removed)
+            .then(|| {
+                get_workspace_projection_read(
+                    &transaction,
+                    &thread_id,
+                    preferred_message_id,
+                    input.message_limit,
+                )
+            })
+            .transpose()?;
+        transaction
+            .commit()
+            .map_err(|error| AppError::persistence(error.to_string()))?;
+        (thread_id, workspace, thread_removed)
+    };
+
+    persist_intent_workspace_selection(
+        input.selected_thread_id.as_deref(),
+        &thread_id,
+        workspace.as_ref(),
+        state,
+        app,
+    );
+    Ok(VersionHistoryIntentResponse {
+        thread_id,
+        workspace,
+        thread_removed,
+    })
+}
+
+pub async fn restore_version_intent(
+    input: VersionHistoryIntent,
+    state: &crate::models::AppState,
+    app: &dyn crate::models::PathResolver,
+) -> AppResult<VersionHistoryIntentResponse> {
+    let (thread_id, workspace) = {
+        let mut conn = state.db.lock().await;
+        let transaction = conn
+            .transaction()
+            .map_err(|error| AppError::persistence(error.to_string()))?;
+        let thread_id = db::get_message_thread_id(&transaction, &input.message_id)
+            .map_err(|error| AppError::persistence(error.to_string()))?
+            .ok_or_else(|| AppError::not_found("Version not found."))?;
+        restore_version(&transaction, &input.message_id)?;
+        let preferred_message_id = (input.selected_thread_id.as_deref() == Some(&thread_id))
+            .then_some(input.message_id.as_str());
+        let workspace = get_workspace_projection_read(
+            &transaction,
+            &thread_id,
+            preferred_message_id,
+            input.message_limit,
+        )?;
+        transaction
+            .commit()
+            .map_err(|error| AppError::persistence(error.to_string()))?;
+        (thread_id, workspace)
+    };
+
+    persist_intent_workspace_selection(
+        input.selected_thread_id.as_deref(),
+        &thread_id,
+        Some(&workspace),
+        state,
+        app,
+    );
+    Ok(VersionHistoryIntentResponse {
+        thread_id,
+        workspace: Some(workspace),
+        thread_removed: false,
+    })
+}
+
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadLifecycleIntent {
+    pub thread_id: String,
+    pub selected_message_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadLifecycleProjection {
+    pub thread_id: String,
+    pub history: Vec<Thread>,
+}
+
+#[derive(Debug, Clone, Deserialize, Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OpenInventoryThreadIntent {
+    pub thread_id: String,
+    pub message_limit: Option<usize>,
+}
+
+fn clear_restart_pointer_if_targeted(
+    thread_id: &str,
+    state: &crate::models::AppState,
+    app: &dyn crate::models::PathResolver,
+) {
+    let mut last = state.last_snapshot.lock().unwrap();
+    if last
+        .as_ref()
+        .and_then(|snapshot| snapshot.thread_id.as_deref())
+        != Some(thread_id)
+    {
+        return;
+    }
+    *last = None;
+    drop(last);
+    crate::services::session::write_last_snapshot(app, None);
+}
+
+pub async fn delete_thread_intent(
+    input: ThreadLifecycleIntent,
+    state: &crate::models::AppState,
+    app: &dyn crate::models::PathResolver,
+) -> AppResult<ThreadLifecycleProjection> {
+    let history = {
+        let mut conn = state.db.lock().await;
+        let transaction = conn
+            .transaction()
+            .map_err(|error| AppError::persistence(error.to_string()))?;
+        let changed = db::delete_thread(&transaction, &input.thread_id)
+            .map_err(|error| AppError::persistence(error.to_string()))?;
+        if !changed {
+            return Err(AppError::not_found("Thread not found."));
+        }
+        let history = get_history(&transaction)?;
+        transaction
+            .commit()
+            .map_err(|error| AppError::persistence(error.to_string()))?;
+        history
+    };
+    clear_restart_pointer_if_targeted(&input.thread_id, state, app);
+    Ok(ThreadLifecycleProjection {
+        thread_id: input.thread_id,
+        history,
+    })
+}
+
+pub async fn finalize_thread_intent(
+    input: ThreadLifecycleIntent,
+    state: &crate::models::AppState,
+    app: &dyn crate::models::PathResolver,
+) -> AppResult<ThreadLifecycleProjection> {
+    let history = {
+        let mut conn = state.db.lock().await;
+        let transaction = conn
+            .transaction()
+            .map_err(|error| AppError::persistence(error.to_string()))?;
+        finalize_thread(
+            &transaction,
+            &input.thread_id,
+            input.selected_message_id.as_deref(),
+        )?;
+        let history = get_history(&transaction)?;
+        transaction
+            .commit()
+            .map_err(|error| AppError::persistence(error.to_string()))?;
+        history
+    };
+    clear_restart_pointer_if_targeted(&input.thread_id, state, app);
+    Ok(ThreadLifecycleProjection {
+        thread_id: input.thread_id,
+        history,
+    })
+}
+
+pub async fn reopen_thread_intent(
+    input: ThreadLifecycleIntent,
+    state: &crate::models::AppState,
+) -> AppResult<ThreadLifecycleProjection> {
+    let history = {
+        let mut conn = state.db.lock().await;
+        let transaction = conn
+            .transaction()
+            .map_err(|error| AppError::persistence(error.to_string()))?;
+        reopen_thread(&transaction, &input.thread_id)?;
+        let history = get_history(&transaction)?;
+        transaction
+            .commit()
+            .map_err(|error| AppError::persistence(error.to_string()))?;
+        history
+    };
+    Ok(ThreadLifecycleProjection {
+        thread_id: input.thread_id,
+        history,
+    })
+}
+
+pub async fn open_inventory_thread_intent(
+    input: OpenInventoryThreadIntent,
+    state: &crate::models::AppState,
+    app: &dyn crate::models::PathResolver,
+) -> AppResult<crate::contracts::WorkspaceProjection> {
+    let workspace = {
+        let conn = state.db.lock().await;
+        let thread = get_thread_summary(&conn, &input.thread_id)?;
+        if thread.status != ThreadStatus::Finalized {
+            return Err(AppError::validation("Thread is not a completed project."));
+        }
+        get_workspace_projection(&conn, &input.thread_id, None, input.message_limit)?
+    };
+    persist_intent_workspace_selection(
+        Some(&input.thread_id),
+        &input.thread_id,
+        Some(&workspace),
+        state,
+        app,
+    );
+    Ok(workspace)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contracts::ThreadStatus;
     use crate::contracts::{
         DesignOutput, GenieTraits, InteractionMode, MacroDialect, Message, UiSpec,
     };
     use crate::db;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn version_history_intent_accepts_only_camel_case_boundary_fields() {
+        serde_json::from_value::<VersionHistoryIntent>(serde_json::json!({
+            "messageId": "version-1",
+            "selectedThreadId": "thread-1",
+            "selectedMessageId": "version-1",
+            "messageLimit": 20
+        }))
+        .expect("camelCase intent");
+        assert!(
+            serde_json::from_value::<VersionHistoryIntent>(serde_json::json!({
+                "message_id": "version-1"
+            }))
+            .is_err()
+        );
+
+        serde_json::from_value::<ThreadLifecycleIntent>(serde_json::json!({
+            "threadId": "thread-1",
+            "selectedMessageId": "version-1"
+        }))
+        .expect("camelCase lifecycle intent");
+        assert!(
+            serde_json::from_value::<OpenInventoryThreadIntent>(serde_json::json!({
+                "thread_id": "thread-1"
+            }))
+            .is_err()
+        );
+    }
 
     fn sample_output(version_name: &str) -> DesignOutput {
         DesignOutput {

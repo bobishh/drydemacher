@@ -143,7 +143,7 @@ fn build_agent_scene_packet(
         allowed_patch_targets.push("semanticManifestPatch".to_string());
     }
     if has_draft {
-        allowed_patch_targets.push("commitPreviewVersion".to_string());
+        allowed_patch_targets.push("appendPreviewVersion".to_string());
     }
 
     crate::contracts::AgentScenePacket {

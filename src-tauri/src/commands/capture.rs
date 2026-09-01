@@ -2,7 +2,7 @@ use tauri::{AppHandle, State};
 
 use crate::contracts::{
     AppError, AppResult, CaptureCropBounds, CaptureFrameManifest, CaptureMeshPreview,
-    CaptureReconstructionGuide, CaptureReconstructionGuideState, CaptureRun, CaptureSessionState,
+    CaptureReconstructionGuideState, CaptureRun, CaptureSessionState, ExistingCaptureTarget,
     ReopenedCaptureRun,
 };
 use crate::models::{AppState, PathResolver};
@@ -11,23 +11,40 @@ const CAPTURE_SESSION_TTL_SECS: u64 = 60 * 60;
 
 #[tauri::command]
 #[specta::specta]
+pub async fn apply_capture_preview(
+    input: crate::services::capture_preview_apply::ApplyCapturePreviewInput,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<crate::services::capture_preview_apply::ApplyCapturePreviewResult> {
+    crate::services::capture_preview_apply::apply_capture_preview(input, &state, &app).await
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn start_capture_session(
-    thread_id: String,
-    message_id: Option<String>,
-    title: String,
-    target_source: String,
-    target_source_language: String,
-    started_from_empty: bool,
+    target: Option<ExistingCaptureTarget>,
     state: State<'_, AppState>,
 ) -> AppResult<crate::contracts::CaptureSessionInfo> {
-    let session = state
-        .start_capture_session(CAPTURE_SESSION_TTL_SECS, thread_id, message_id)
+    let target = {
+        let db = state.db.lock().await;
+        resolve_capture_target(&db, target)?
+    };
+    let mut session = state
+        .start_capture_session(
+            CAPTURE_SESSION_TTL_SECS,
+            target.thread_id.clone(),
+            target.message_id.clone(),
+        )
         .await?;
+    session.target_title = target.title.clone();
+    session.target_source = target.source.clone();
+    session.target_source_language = target.source_language.clone();
+    session.started_from_empty = target.started_from_empty;
     let run = CaptureRun {
         id: session.session_id.clone(),
         target_thread_id: session.target_thread_id.clone(),
         target_message_id: session.target_message_id.clone(),
-        title: title.clone(),
+        title: target.title.clone(),
         state: session.state.clone(),
         created_at: session.created_at,
         updated_at: session.created_at,
@@ -36,9 +53,9 @@ pub async fn start_capture_session(
         derived_stl_path: None,
         crop_bounds: None,
         preview_scale: 0.05,
-        target_source,
-        target_source_language,
-        started_from_empty,
+        target_source: target.source,
+        target_source_language: target.source_language,
+        started_from_empty: target.started_from_empty,
         raw_error: None,
         reconstruction_guide: None,
         reconstruction_guide_state: None,
@@ -48,8 +65,14 @@ pub async fn start_capture_session(
         guided_reconstruction_deviation: None,
     };
     let db = state.db.lock().await;
-    crate::db::create_or_update_thread(&db, &run.target_thread_id, &title, run.created_at, None)
-        .map_err(|error| AppError::persistence(error.to_string()))?;
+    crate::db::create_or_update_thread(
+        &db,
+        &run.target_thread_id,
+        &run.title,
+        run.created_at,
+        None,
+    )
+    .map_err(|error| AppError::persistence(error.to_string()))?;
     crate::capture_runs::insert(&db, &run)
         .map_err(|error| AppError::persistence(error.to_string()))?;
     Ok(session)
@@ -85,12 +108,7 @@ pub async fn reopen_capture_run(
 #[tauri::command]
 #[specta::specta]
 pub async fn adopt_latest_capture_run(
-    thread_id: String,
-    message_id: Option<String>,
-    title: String,
-    target_source: String,
-    target_source_language: String,
-    started_from_empty: bool,
+    target: Option<ExistingCaptureTarget>,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<ReopenedCaptureRun> {
@@ -112,6 +130,10 @@ pub async fn adopt_latest_capture_run(
     let run = if let Some(existing) = existing {
         existing
     } else {
+        let target = {
+            let db = state.db.lock().await;
+            resolve_capture_target(&db, target)?
+        };
         let preview = inspect_capture_stl(&raw_stl)?;
         let updated_at = raw_stl
             .metadata()
@@ -122,9 +144,9 @@ pub async fn adopt_latest_capture_run(
             .unwrap_or_else(now_secs);
         let run = CaptureRun {
             id: run_id,
-            target_thread_id: thread_id,
-            target_message_id: message_id,
-            title: title.clone(),
+            target_thread_id: target.thread_id,
+            target_message_id: target.message_id,
+            title: target.title,
             state: CaptureSessionState::Preview,
             created_at: updated_at,
             updated_at,
@@ -135,9 +157,9 @@ pub async fn adopt_latest_capture_run(
             derived_stl_path: None,
             crop_bounds: None,
             preview_scale: 0.05,
-            target_source,
-            target_source_language,
-            started_from_empty,
+            target_source: target.source,
+            target_source_language: target.source_language,
+            started_from_empty: target.started_from_empty,
             raw_error: None,
             reconstruction_guide: None,
             reconstruction_guide_state: None,
@@ -147,8 +169,14 @@ pub async fn adopt_latest_capture_run(
             guided_reconstruction_deviation: None,
         };
         let db = state.db.lock().await;
-        crate::db::create_or_update_thread(&db, &run.target_thread_id, &title, updated_at, None)
-            .map_err(|error| AppError::persistence(error.to_string()))?;
+        crate::db::create_or_update_thread(
+            &db,
+            &run.target_thread_id,
+            &run.title,
+            updated_at,
+            None,
+        )
+        .map_err(|error| AppError::persistence(error.to_string()))?;
         crate::capture_runs::insert(&db, &run)
             .map_err(|error| AppError::persistence(error.to_string()))?;
         run
@@ -185,67 +213,32 @@ pub async fn save_capture_preview_settings(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn get_capture_reconstruction_guide(
+pub async fn ensure_capture_reconstruction_guide(
     run_id: String,
     state: State<'_, AppState>,
-) -> AppResult<Option<CaptureReconstructionGuide>> {
+) -> AppResult<crate::contracts::EnsureCaptureReconstructionGuideResult> {
     let db = state.db.lock().await;
-    Ok(crate::capture_runs::get(&db, &run_id)
-        .map_err(|error| AppError::persistence(error.to_string()))?
-        .and_then(|run| run.reconstruction_guide))
+    crate::services::capture_guide_edit::ensure_capture_reconstruction_guide(&db, &run_id)
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn get_capture_guide_source_identity(
-    run_id: String,
+pub async fn apply_capture_guide_edit(
+    input: crate::contracts::ApplyCaptureGuideEditInput,
     state: State<'_, AppState>,
-) -> AppResult<crate::contracts::CaptureGuideSourceMesh> {
+) -> AppResult<crate::contracts::ApplyCaptureGuideEditResult> {
     let db = state.db.lock().await;
-    crate::capture_runs::selected_source_identity(&db, &run_id)
+    crate::services::capture_guide_edit::apply_capture_guide_edit(&db, input)
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn get_capture_guide_context(
-    run_id: String,
+pub async fn validate_capture_guide_intent(
+    input: crate::contracts::ValidateCaptureGuideIntentInput,
     state: State<'_, AppState>,
-) -> AppResult<crate::contracts::CaptureGuideContext> {
+) -> AppResult<crate::contracts::ValidateCaptureGuideIntentResult> {
     let db = state.db.lock().await;
-    crate::capture_runs::guide_context(&db, &run_id)
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn save_capture_reconstruction_guide(
-    run_id: String,
-    expected_revision: u64,
-    expected_mesh_digest: String,
-    guide: CaptureReconstructionGuide,
-    guide_state: CaptureReconstructionGuideState,
-    state: State<'_, AppState>,
-) -> AppResult<CaptureReconstructionGuide> {
-    let db = state.db.lock().await;
-    crate::capture_runs::save_reconstruction_guide(
-        &db,
-        &run_id,
-        expected_revision,
-        &expected_mesh_digest,
-        guide,
-        guide_state,
-    )
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn evaluate_capture_reconstruction_guide(
-    run_id: String,
-    expected_mesh_digest: String,
-    guide: CaptureReconstructionGuide,
-    state: State<'_, AppState>,
-) -> AppResult<CaptureReconstructionGuide> {
-    let db = state.db.lock().await;
-    crate::capture_runs::evaluate_reconstruction_guide(&db, &run_id, &expected_mesh_digest, guide)
+    crate::services::capture_guide_edit::validate_capture_guide_intent(&db, input)
 }
 
 pub(crate) async fn queue_capture_guided_reconstruction_impl(
@@ -375,17 +368,6 @@ pub async fn get_capture_session_status(
     state: State<'_, AppState>,
 ) -> AppResult<Option<crate::contracts::CaptureSessionInfo>> {
     Ok(state.get_capture_session(&token).await)
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn pair_capture_session(
-    token: String,
-    state: State<'_, AppState>,
-) -> AppResult<crate::contracts::CaptureSessionInfo> {
-    state
-        .pair_capture_session(&token, 0, Default::default())
-        .await
 }
 
 #[tauri::command]
@@ -590,9 +572,114 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedCaptureTarget {
+    thread_id: String,
+    message_id: Option<String>,
+    title: String,
+    source: String,
+    source_language: String,
+    started_from_empty: bool,
+}
+
+fn resolve_capture_target(
+    db: &rusqlite::Connection,
+    target: Option<ExistingCaptureTarget>,
+) -> AppResult<ResolvedCaptureTarget> {
+    match target {
+        Some(target) => {
+            if target.thread_id.trim().is_empty() {
+                return Err(AppError::validation(
+                    "Capture target thread id is required.",
+                ));
+            }
+            if target.source_language.trim().is_empty() {
+                return Err(AppError::validation(
+                    "Capture target source language is required.",
+                ));
+            }
+            let title = crate::db::get_visible_thread_title(db, &target.thread_id)
+                .map_err(|error| AppError::persistence(error.to_string()))?
+                .ok_or_else(|| AppError::not_found("Capture target thread not found."))?;
+            Ok(ResolvedCaptureTarget {
+                thread_id: target.thread_id,
+                message_id: target.message_id,
+                title,
+                source: target.source,
+                source_language: target.source_language,
+                started_from_empty: false,
+            })
+        }
+        None => {
+            let thread_id = uuid::Uuid::new_v4().to_string();
+            Ok(ResolvedCaptureTarget {
+                title: format!("Capture {}", &thread_id[..8]),
+                thread_id,
+                message_id: None,
+                source: String::new(),
+                source_language: "ecky".into(),
+                started_from_empty: true,
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod capture_target_tests {
+    use super::*;
+
+    fn test_db() -> rusqlite::Connection {
+        let path = std::env::temp_dir().join(format!(
+            "ecky-capture-target-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        crate::db::init_db(&path).unwrap()
+    }
+
+    #[test]
+    fn empty_capture_intent_allocates_authoritative_target_defaults() {
+        let db = test_db();
+
+        let target = resolve_capture_target(&db, None).unwrap();
+
+        uuid::Uuid::parse_str(&target.thread_id).unwrap();
+        assert_eq!(target.title, format!("Capture {}", &target.thread_id[..8]));
+        assert_eq!(target.message_id, None);
+        assert_eq!(target.source, "");
+        assert_eq!(target.source_language, "ecky");
+        assert!(target.started_from_empty);
+    }
+
+    #[test]
+    fn existing_capture_intent_preserves_identity_and_uses_canonical_thread_title() {
+        let db = test_db();
+        crate::db::create_or_update_thread(&db, "thread-existing", "Existing fixture", 1, None)
+            .unwrap();
+
+        let target = resolve_capture_target(
+            &db,
+            Some(crate::contracts::ExistingCaptureTarget {
+                thread_id: "thread-existing".into(),
+                message_id: Some("message-existing".into()),
+                source: "(solid existing)".into(),
+                source_language: "ecky".into(),
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(target.thread_id, "thread-existing");
+        assert_eq!(target.message_id.as_deref(), Some("message-existing"));
+        assert_eq!(target.title, "Existing fixture");
+        assert_eq!(target.source, "(solid existing)");
+        assert_eq!(target.source_language, "ecky");
+        assert!(!target.started_from_empty);
+    }
+}
+
 #[cfg(test)]
 mod guided_tests {
     use super::*;
+    use crate::contracts::CaptureReconstructionGuide;
 
     fn write_triangle_stl() -> std::path::PathBuf {
         let root =

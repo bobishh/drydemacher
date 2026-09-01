@@ -39,6 +39,9 @@
 - [x] 4.7 Expose each applied cut with Edit and Remove controls.
 - [x] 4.8 Replace/remove the selected nested `clip-plane` through exact AST paths.
 - [x] 4.9 Label kept side Above/Below Plane and show the positive-normal arrow.
+- [x] 4.10 Add one tagged Rust intent for plane-crop and surface-trim apply/remove.
+- [x] 4.11 Move AST patch, immutable render/version, runtime/manifest, and source reread into Rust.
+- [ ] 4.12 Wire External Shapes UI to returned canonical projection and remove frontend chaining.
 
 ## 5. Verification
 

@@ -71,6 +71,37 @@ Live OCCT proof:
 - Deviation samples report `observedRegionOnly`.
 - Model STL bytes, STEP bytes, and artifact-bundle digest remain unchanged after diagnostics.
 
+Backend-owned mechanical guide preparation proof:
+
+```sh
+cd src-tauri
+cargo test backend_finalizes_mechanical_draft_and_invalidates_computed_evidence --lib
+cargo test backend_mechanical_readiness_and_finalization_reject_missing_or_invalid_input --lib
+cargo test capture_guidance::tests --lib
+cargo check
+```
+
+Results: both focused authority tests passed; all 18 capture-guidance unit tests
+passed; `cargo check` passed. The registered intent command performs canonical
+mechanical draft preparation and selected-STL deterministic evaluation in Rust.
+
+Backend-owned capture-guide draft mutation proof:
+
+```sh
+cd src-tauri
+cargo test capture_guide_edit --lib -- --nocapture
+cargo check
+```
+
+Results: 15 focused tests passed; `cargo check` passed. Idempotent Rust ensure
+derives first canonical guide from run/source and appends revision one; existing
+head returns without append and missing source returns raw error. One camelCase tagged
+intent boundary owns landmark add/update/delete, identity-checked draft restore,
+profile configure/reorder, feature-expectation edit, feature-plan selection,
+computed-evidence invalidation, stale evidence, and append-only head revision.
+Scalar-only validation/finalization tests prove ready success, ambiguous draft,
+raw finalization failure retention, and stale-source append.
+
 ## Change integrity
 
 Commands:

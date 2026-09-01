@@ -3,12 +3,13 @@ import type {
   SketchDocument,
   SketchPrimitive,
   SketchPrimitiveTopology,
+  SketchConstraintEvaluationRequest,
+  SketchConstraintEvaluationResponse,
   SketchSuggestionRequest,
   SketchView,
 } from './tauri/contracts';
 import type { SketchPoint, SketchStroke } from './sketchWorkspaceState';
 import { parseSketchDocumentEnvelope } from './sketchDocumentEnvelope';
-import { validateSketchDocumentConstraints } from './sketchConstraintValidation';
 
 export const EMPTY_SKETCH_DOCUMENT_REPLAY_ERROR = 'Sketch document unavailable.';
 
@@ -17,6 +18,10 @@ export type SketchDocumentSourceInput = SketchDocument | SketchSuggestionRequest
 export type SketchDocumentParseResult = { document: SketchDocument } | { error: string };
 
 export type SketchDocumentReplayResult = { strokes: SketchStroke[] } | { error: string };
+
+export type SketchConstraintEvaluator = (
+  request: SketchConstraintEvaluationRequest,
+) => Promise<SketchConstraintEvaluationResponse>;
 
 const EMPTY_SKETCH_DOCUMENT_JSON_ERROR = 'Sketch document JSON is empty.';
 const MISSING_SKETCH_DOCUMENT_JSON_ERROR = 'Sketch document JSON missing document/sketches.';
@@ -65,6 +70,27 @@ export function sketchDocumentJsonToStrokes(source: string): SketchDocumentRepla
   return sketchDocumentToStrokes(parsed.document);
 }
 
+export async function replayValidatedSketchDocument(
+  source: SketchDocumentSourceInput,
+  evaluateConstraints: SketchConstraintEvaluator,
+): Promise<SketchDocumentReplayResult> {
+  const parsed = parseSketchDocumentSource(source);
+  if ('error' in parsed) return parsed;
+
+  const evaluation = await evaluateConstraints({
+    document: parsed.document,
+    mode: 'validate',
+    maxDelta: null,
+  });
+  if (evaluation.kind === 'error') return { error: evaluation.error };
+  if (evaluation.kind !== 'validation') {
+    return { error: `Unexpected sketch constraint response: ${evaluation.kind}` };
+  }
+  if (!evaluation.passed) return { error: evaluation.issues.join(' ') };
+
+  return sketchDocumentToStrokes(parsed.document);
+}
+
 export function sketchDocumentToStrokes(source: SketchDocumentSourceInput): SketchDocumentReplayResult {
   const parsed = parseSketchDocumentSource(source);
   if ('error' in parsed) return parsed;
@@ -72,11 +98,6 @@ export function sketchDocumentToStrokes(source: SketchDocumentSourceInput): Sket
   const sketches = parsed.document.sketches;
   if (!sketches || sketches.length === 0) {
     return { error: 'Sketch document has no sketches.' };
-  }
-
-  const constraintValidation = validateSketchDocumentConstraints(parsed.document);
-  if (!constraintValidation.passed) {
-    return { error: constraintValidation.issues.join(' ') };
   }
 
   const strokes: SketchStroke[] = [];

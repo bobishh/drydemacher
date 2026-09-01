@@ -1,8 +1,8 @@
 use crate::contracts::{
-    normalize_design_output, upgraded_or_default_genie_traits, AgentDraft, ArtifactBundle,
-    DeletedMessage, DeletedThreadSummary, DeletedThreadsPage, DesignOutput, DesignParams,
-    GenieTraits, Message, MessageRole, MessageStatus, ModelManifest, TargetLeaseInfo, Thread,
-    ThreadMessagesPage, ThreadReference, ThreadStatus, UiSpec,
+    normalize_design_output, upgraded_or_default_genie_traits, AgentDraft, AppError,
+    ArtifactBundle, DeletedMessage, DeletedThreadSummary, DeletedThreadsPage, DesignOutput,
+    DesignParams, GenieTraits, Message, MessageRole, MessageStatus, ModelManifest, TargetLeaseInfo,
+    Thread, ThreadMessagesPage, ThreadReference, ThreadStatus, UiSpec,
 };
 use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
 use serde::de::{DeserializeOwned, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -1606,6 +1606,8 @@ fn init_db_with_payload_mode(
     )?;
     crate::thread_source_binding::ensure_schema(&conn)?;
 
+    crate::exploration_store::ensure_schema(&conn)?;
+
     crate::services::codex_takeover::ensure_schema(&conn)?;
 
     crate::capture_runs::ensure_schema(&conn)?;
@@ -1695,6 +1697,7 @@ fn init_db_with_payload_mode(
     let _ = conn.execute("ALTER TABLE threads ADD COLUMN finalized_at INTEGER", []);
     let _ = conn.execute("ALTER TABLE threads ADD COLUMN pending_confirm TEXT", []);
     migrate_threads_drop_authoring_columns(&conn)?;
+    normalize_thread_lifecycle_rows(&conn)?;
     let _ = conn.execute(
         "ALTER TABLE agent_sessions ADD COLUMN host_label TEXT NOT NULL DEFAULT ''",
         [],
@@ -1872,6 +1875,20 @@ fn migrate_threads_drop_authoring_columns(conn: &Connection) -> SqlResult<()> {
         ALTER TABLE threads_new RENAME TO threads;
         PRAGMA foreign_keys = ON;
         ",
+    )?;
+    Ok(())
+}
+
+/// Repair rows written before lifecycle fields were treated as one aggregate.
+/// Keep columns for transport compatibility, but make stored combinations canonical.
+fn normalize_thread_lifecycle_rows(conn: &Connection) -> SqlResult<()> {
+    conn.execute(
+        "UPDATE threads SET status = 'active', finalized_at = NULL WHERE finalized_at IS NULL AND COALESCE(status, 'active') = 'finalized'",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE threads SET status = 'finalized', pending_confirm = NULL WHERE finalized_at IS NOT NULL",
+        [],
     )?;
     Ok(())
 }
@@ -2258,11 +2275,7 @@ pub fn get_legacy_user_prompt_rows(
     rows.collect()
 }
 
-pub struct ThreadLifecycle {
-    pub status: crate::contracts::ThreadStatus,
-    pub finalized_at: Option<u64>,
-    pub pending_confirm: Option<String>,
-}
+pub use crate::thread_lifecycle::ThreadLifecycle;
 
 pub fn get_thread_lifecycle(
     conn: &Connection,
@@ -2273,11 +2286,12 @@ pub fn get_thread_lifecycle(
         [thread_id],
         |row| {
             let status_str: String = row.get::<_, String>(0).unwrap_or_else(|_| "active".to_string());
-            Ok(ThreadLifecycle {
-                status: status_str.parse().unwrap_or(crate::contracts::ThreadStatus::Active),
-                finalized_at: row.get::<_, Option<i64>>(1)?.map(|v| v as u64),
-                pending_confirm: row.get(2)?,
-            })
+            let lifecycle = crate::thread_lifecycle::ThreadLifecycle::from_legacy(
+                status_str.parse().unwrap_or(crate::contracts::ThreadStatus::Active),
+                row.get::<_, Option<i64>>(1)?.map(|v| v as u64),
+                row.get(2)?,
+            );
+            Ok(lifecycle)
         },
     )
     .optional()
@@ -2285,7 +2299,7 @@ pub fn get_thread_lifecycle(
 
 pub fn finalize_thread(conn: &Connection, thread_id: &str, now: i64) -> SqlResult<bool> {
     let changed = conn.execute(
-        "UPDATE threads SET status = 'finalized', finalized_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+        "UPDATE threads SET status = 'finalized', finalized_at = ?1, pending_confirm = NULL WHERE id = ?2 AND deleted_at IS NULL",
         params![now, thread_id],
     )?;
     Ok(changed > 0)
@@ -2293,7 +2307,7 @@ pub fn finalize_thread(conn: &Connection, thread_id: &str, now: i64) -> SqlResul
 
 pub fn reopen_thread(conn: &Connection, thread_id: &str) -> SqlResult<bool> {
     let changed = conn.execute(
-        "UPDATE threads SET status = 'active', finalized_at = NULL WHERE id = ?1 AND deleted_at IS NULL",
+        "UPDATE threads SET status = 'active', finalized_at = NULL, pending_confirm = NULL WHERE id = ?1 AND deleted_at IS NULL",
         [thread_id],
     )?;
     Ok(changed > 0)
@@ -2364,9 +2378,18 @@ pub fn set_thread_pending_confirm(
     thread_id: &str,
     pending_confirm: Option<&str>,
 ) -> SqlResult<()> {
+    let Some(raw) = get_thread_lifecycle(conn, thread_id)? else {
+        return Ok(());
+    };
+    let canonical = raw.with_pending_confirm(pending_confirm.map(str::to_string));
     conn.execute(
-        "UPDATE threads SET pending_confirm = ?1 WHERE id = ?2",
-        params![pending_confirm, thread_id],
+        "UPDATE threads SET status = ?1, finalized_at = ?2, pending_confirm = ?3 WHERE id = ?4",
+        params![
+            canonical.status().as_str(),
+            canonical.finalized_at().map(|value| value as i64),
+            canonical.pending_confirm(),
+            thread_id
+        ],
     )?;
     Ok(())
 }
@@ -2395,6 +2418,77 @@ fn version_runtime_binding(
         .transpose()
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     Ok((Some(version_input_digest), runtime_cache_key))
+}
+
+/// Validate the legacy column projection before a new message is persisted.
+/// The projection remains nullable for old rows, but new version payloads are
+/// assembled as one coherent aggregate by callers.
+pub fn validate_message_payload(msg: &Message) -> Result<(), AppError> {
+    let has_version_fields = msg.output.is_some()
+        || msg.artifact_bundle.is_some()
+        || msg.model_manifest.is_some()
+        || msg.structural_verification.is_some();
+    if msg.role == MessageRole::User && has_version_fields {
+        return Err(AppError::validation(
+            "User message cannot carry version payload.",
+        ));
+    }
+    if let (Some(bundle), Some(manifest)) = (&msg.artifact_bundle, &msg.model_manifest) {
+        if bundle.model_id != manifest.model_id {
+            return Err(AppError::validation(format!(
+                "Artifact model '{}' does not match manifest model '{}'.",
+                bundle.model_id, manifest.model_id
+            )));
+        }
+    }
+    if msg.artifact_bundle.is_some() || msg.model_manifest.is_some() {
+        if msg.output.is_none() {
+            return Err(AppError::validation(
+                "Runtime payload requires design output.",
+            ));
+        }
+        if msg.artifact_bundle.is_none() || msg.model_manifest.is_none() {
+            return Err(AppError::validation(
+                "Runtime payload requires artifact bundle and model manifest.",
+            ));
+        }
+    }
+    if msg.structural_verification.is_some() && msg.output.is_none() {
+        return Err(AppError::validation(
+            "Structural verification requires design output.",
+        ));
+    }
+    Ok(())
+}
+
+/// Translate nullable legacy columns into the atomic domain representation.
+/// This is the sole adapter new writers should use before persistence.
+pub fn message_payload_from_legacy(
+    msg: &Message,
+) -> Result<crate::contracts::MessagePayload, AppError> {
+    validate_message_payload(msg)?;
+    match (
+        msg.output.clone(),
+        msg.artifact_bundle.clone(),
+        msg.model_manifest.clone(),
+        msg.structural_verification.clone(),
+    ) {
+        (Some(output), Some(artifact_bundle), Some(model_manifest), structural_verification) => {
+            Ok(crate::contracts::MessagePayload::Version {
+                output,
+                artifact_bundle,
+                model_manifest,
+                structural_verification,
+            })
+        }
+        (None, None, None, None) if msg.status == MessageStatus::Error => {
+            Ok(crate::contracts::MessagePayload::Error)
+        }
+        (None, None, None, None) => Ok(crate::contracts::MessagePayload::Conversation),
+        _ => Err(AppError::validation(
+            "Message contains incomplete version payload.",
+        )),
+    }
 }
 
 fn is_managed_runtime_stl(path: &std::path::Path) -> bool {
@@ -2534,6 +2628,22 @@ pub fn add_message(conn: &Connection, thread_id: &str, msg: &Message) -> SqlResu
         }
     }
     Ok(())
+}
+
+/// Transitional writer for nullable historical projections. Keep new
+/// conversation/version writes on `add_message_checked`; use this only where
+/// an upstream provider still emits output-only or artifact-only rows.
+pub fn add_legacy_message(conn: &Connection, thread_id: &str, msg: &Message) -> SqlResult<()> {
+    add_message(conn, thread_id, msg)
+}
+
+/// Persist a newly assembled atomic payload. `add_message` remains the
+/// compatibility path for historical callers and fixtures that still emit
+/// nullable legacy projections.
+pub fn add_message_checked(conn: &Connection, thread_id: &str, msg: &Message) -> SqlResult<()> {
+    message_payload_from_legacy(msg)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    add_message(conn, thread_id, msg)
 }
 
 pub fn add_thread_reference(conn: &Connection, reference: &ThreadReference) -> SqlResult<()> {
@@ -5312,6 +5422,7 @@ mod tests {
         );
         let _ = conn.execute("ALTER TABLE threads ADD COLUMN finalized_at INTEGER", []);
         let _ = conn.execute("ALTER TABLE threads ADD COLUMN pending_confirm TEXT", []);
+        normalize_thread_lifecycle_rows(&conn)?;
         Ok(())
     }
 
@@ -5358,6 +5469,103 @@ mod tests {
             measurement_guides: Vec::new(),
             export_artifacts: Vec::new(),
         }
+    }
+
+    fn sample_manifest(model_id: &str) -> ModelManifest {
+        serde_json::from_value(serde_json::json!({
+            "schemaVersion": 1,
+            "modelId": model_id,
+            "sourceKind": "generated",
+            "engineKind": "freecad",
+            "sourceLanguage": "legacyPython",
+            "geometryBackend": "freecad",
+            "document": { "documentName": "test", "documentLabel": "Test" }
+        }))
+        .expect("minimal manifest")
+    }
+
+    #[test]
+    fn new_message_payload_rejects_artifact_manifest_model_mismatch() {
+        let mut message = sample_version_message("mismatch", 1, sample_artifact_bundle("artifact"));
+        message.model_manifest = Some(sample_manifest("manifest"));
+        assert!(validate_message_payload(&message).is_err());
+    }
+
+    #[test]
+    fn new_message_payload_rejects_runtime_without_output_or_manifest() {
+        let mut message = sample_version_message("runtime", 1, sample_artifact_bundle("model"));
+        message.output = None;
+        assert!(validate_message_payload(&message).is_err());
+
+        message.output = Some(sample_output());
+        message.model_manifest = None;
+        assert!(validate_message_payload(&message).is_err());
+    }
+
+    #[test]
+    fn new_message_payload_rejects_user_version_payload() {
+        let mut message =
+            sample_version_message("user-version", 1, sample_artifact_bundle("model"));
+        message.role = MessageRole::User;
+        assert!(validate_message_payload(&message).is_err());
+    }
+
+    #[test]
+    fn legacy_error_row_remains_valid_without_version_payload() {
+        let message = Message {
+            id: "legacy-error".to_string(),
+            role: MessageRole::Assistant,
+            content: "provider failed".to_string(),
+            status: MessageStatus::Error,
+            output: None,
+            usage: None,
+            artifact_bundle: None,
+            model_manifest: None,
+            structural_verification: None,
+            agent_origin: None,
+            timestamp: 1,
+            image_data: None,
+            visual_kind: None,
+            attachment_images: Vec::new(),
+        };
+        assert!(validate_message_payload(&message).is_ok());
+    }
+
+    #[test]
+    fn atomic_payload_adapter_accepts_conversation_and_complete_version() {
+        let conversation = Message {
+            id: "conversation".to_string(),
+            role: MessageRole::User,
+            content: "hello".to_string(),
+            status: MessageStatus::Success,
+            output: None,
+            usage: None,
+            artifact_bundle: None,
+            model_manifest: None,
+            structural_verification: None,
+            agent_origin: None,
+            timestamp: 1,
+            image_data: None,
+            visual_kind: None,
+            attachment_images: Vec::new(),
+        };
+        assert!(matches!(
+            message_payload_from_legacy(&conversation),
+            Ok(crate::contracts::MessagePayload::Conversation)
+        ));
+
+        let mut version = sample_version_message("complete", 1, sample_artifact_bundle("model"));
+        version.model_manifest = Some(sample_manifest("model"));
+        assert!(matches!(
+            message_payload_from_legacy(&version),
+            Ok(crate::contracts::MessagePayload::Version { .. })
+        ));
+    }
+
+    #[test]
+    fn atomic_payload_adapter_rejects_incomplete_version() {
+        let message = sample_version_message("incomplete", 1, sample_artifact_bundle("model"));
+        assert!(message_payload_from_legacy(&message).is_err());
     }
 
     fn sample_version_message(id: &str, timestamp: u64, bundle: ArtifactBundle) -> Message {

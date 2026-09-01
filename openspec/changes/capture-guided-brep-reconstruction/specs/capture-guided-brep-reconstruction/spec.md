@@ -137,6 +137,24 @@ constraint.
 - **THEN** guide records explicit planes and intended completion
 - **AND** system does not mirror reference triangles into manufacturing output
 
+#### Scenario: User prepares mechanical guide for deterministic evaluation
+
+- **WHEN** user supplies known distance, feature depth, and reconstruction
+  instruction for a role-complete guide draft
+- **THEN** Rust validates mechanical role readiness and input bounds
+- **AND** Rust assembles canonical calibration, frame, plane, profile,
+  expectation, and fit-critical measurement records
+- **AND** all derived neighborhoods, primitive candidates, regions, reconstructed
+  profiles, constraint graph, feature plans, readiness, views, uncertainty, and
+  canonical digest are invalidated before deterministic recomputation
+- **AND** Rust loads canonical current head and accepts only run/revision/mesh
+  guards plus known-distance, instruction, and feature-depth evidence
+- **AND** Rust appends next candidate as ready, draft, or stale with raw evidence
+- **AND** failed finalization/evaluation remains appended draft head with exact
+  backend reason
+- **AND** frontend does not manufacture those lifecycle facts
+- **AND** frontend does not send full guide or issue a second persistence call
+
 ### Requirement: Semantic Mechanical Evidence
 
 The system SHALL let each landmark participate in a named mechanical role,
@@ -242,12 +260,35 @@ Frontend and agents SHALL NOT write SQLite directly.
   profiles, and overlays restore
 - **AND** rotated pairing credentials do not change guide identity
 
+#### Scenario: First guided edit initializes canonical guide
+
+- **GIVEN** durable capture run has selected source mesh but no reconstruction
+  guide
+- **WHEN** frontend enters guided editing
+- **THEN** frontend submits run identity only to idempotent Rust ensure command
+- **AND** Rust derives guide/run/thread/target/source identity and bounded defaults
+- **AND** Rust assigns canonical digest and appends revision one as draft head
+- **AND** repeated ensure returns same head without another append
+- **AND** frontend does not create or send `CaptureReconstructionGuide`
+
 #### Scenario: Concurrent guide edit occurs
 
 - **WHEN** append carries stale expected revision
 - **THEN** backend serializes and appends the candidate as a new version
 - **AND** `head` advances to that version
 - **AND** no version conflict or refusal is returned
+
+#### Scenario: User edits or undoes capture guide draft
+
+- **WHEN** user adds, updates, or deletes a landmark, configures or reorders a
+  profile, edits a feature expectation, selects a feature plan, or restores a
+  previous draft for undo
+- **THEN** frontend submits one typed edit intent to Rust
+- **AND** Rust mutates current canonical head, assigns next revision, invalidates
+  affected computed evidence, and appends returned candidate
+- **AND** draft replacement must match current guide, capture-run, target, and
+  source-mesh identity before any caller-supplied fields are accepted
+- **AND** frontend does not maintain an authoritative persistence queue
 
 #### Scenario: Failed candidate is retained
 

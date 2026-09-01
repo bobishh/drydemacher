@@ -92,6 +92,7 @@
     onApplyExternalSurfaceTrim = async () => {},
     onRemoveExternalSurfaceTrim = async () => {},
     previewApplied = false,
+    applyPending = false,
     previewScale = 0.05,
     cropEnabled = false,
     cropMode = 'scale',
@@ -210,6 +211,7 @@
     ) => Promise<void>;
     onRemoveExternalSurfaceTrim?: (trimNodeId: number) => Promise<void>;
     previewApplied?: boolean;
+    applyPending?: boolean;
     previewScale?: number;
     cropEnabled?: boolean;
     cropMode?: 'translate' | 'scale';
@@ -845,7 +847,7 @@
           modelKey={activePreviewModelKey}
           stlUrl={activePreviewUrl}
           showContextOverlay={false}
-          cropBoxEnabled={workflowStep === 'crop' && cropEnabled && !guideMode && !planePickerActive && !surfaceTrimActive}
+          cropBoxEnabled={captureScanActive && cropEnabled && !guideMode && !planePickerActive && !surfaceTrimActive}
           cropBoxMode={cropMode}
           {cropBounds}
           {onCropBoundsChange}
@@ -1119,7 +1121,7 @@
       <div class="capture-panel__preview" data-testid="capture-mesh-preview">
         <strong>{meshPreview.triangleCount.toLocaleString()} triangles</strong>
         <span>{scaledBoundsMm.join(' x ')} mm</span>
-        {#if workflowStep === 'crop' && !guideMode && !planePickerActive && !surfaceTrimActive}
+        {#if captureScanActive && !guideMode && !planePickerActive && !surfaceTrimActive}
         <label class="capture-panel__scale">
           <span>Capture scale</span>
           <input
@@ -1580,7 +1582,7 @@
       >CANCEL</button>
       {#if meshPreview}
         <button type="button" class="capture-panel__secondary" title="Return to phone capture and add more source photos." onclick={onAddPhotos}>ADD PHOTOS</button>
-        <button type="button" class="capture-panel__primary" title="Apply the prepared scan preview to the capture draft." onclick={onApplyPreview}>APPLY</button>
+        <button type="button" class="capture-panel__primary" title="Apply the prepared scan preview to the capture draft." onclick={onApplyPreview} disabled={applyPending}>{applyPending ? 'APPLYING' : 'APPLY'}</button>
         <button type="button" class="capture-panel__primary" title="Commit the applied capture preview to model history." onclick={onCommitPreview} disabled={!previewApplied}>COMMIT</button>
       {/if}
       {#if sessionState === 'failed'}

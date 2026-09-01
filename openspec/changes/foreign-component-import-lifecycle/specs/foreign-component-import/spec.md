@@ -79,7 +79,8 @@ the typed imported-component descriptor under an editable `COMPONENT` tab.
 - **THEN** Code opens `SUMMARY` and shows the evidence passed to the agent
 - **AND** `COMPONENT` shows `(freecad-component ...)` with identity, bindings, and parameters
 - **AND** Apply and Commit Version are absent from `SUMMARY`
-- **AND** Apply and Commit Version use `apply_imported_model` in `COMPONENT`
+- **AND** Apply and Commit Version submit one imported-parameter intent in `COMPONENT`
+- **AND** Rust owns `apply_imported_model`, semantic carry-forward, optional immutable version append, and runtime snapshot projection
 - **AND** no binary dump or source lookup through a message output is required
 
 #### Scenario: Imported source action stays unambiguous

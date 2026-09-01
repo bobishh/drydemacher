@@ -1,21 +1,17 @@
 use rustpython_ast::Visitor;
 use rustpython_parser::ast::{self, Constant, Expr, Stmt};
 use rustpython_parser::{parse, Mode};
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, State};
-use uuid::Uuid;
 
 use crate::contracts::{
     validate_artifact_bundle, validate_design_output, validate_design_params, validate_ui_spec,
-    AppError, AppResult, ArtifactBundle, DesignParams, GeometryBackend, Message, MessageRole,
-    MessageStatus, ModelManifest, ParamValue, ParsedParamsResult, SelectOption, SelectValue,
-    SourceLanguage, UiField, UiSpec,
+    AppError, AppResult, ArtifactBundle, DesignParams, GeometryBackend, MessageStatus,
+    ModelManifest, ParamValue, ParsedParamsResult, SelectOption, SelectValue, SourceLanguage,
+    UiField, UiSpec,
 };
+use crate::db;
 use crate::models::AppState;
-use crate::services::session::{build_runtime_snapshot, write_last_snapshot};
-use crate::{db, persist_thread_summary};
+use crate::services::session::{build_saved_version_snapshot, write_last_snapshot};
 
 #[derive(Debug, Clone, serde::Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +31,97 @@ pub struct AddManualVersionInput {
     pub status: Option<MessageStatus>,
     #[serde(default)]
     pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, specta::Type)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "action",
+    deny_unknown_fields
+)]
+pub enum PersistControlDefaultsMutation {
+    #[specta(rename_all = "camelCase")]
+    ReadFromMacro,
+    #[specta(rename_all = "camelCase")]
+    SaveSchema {
+        ui_spec: UiSpec,
+        parameters: DesignParams,
+    },
+    #[specta(rename_all = "camelCase")]
+    SaveValues { parameters: DesignParams },
+}
+
+#[derive(Debug, Clone, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PersistControlDefaultsInput {
+    pub message_id: String,
+    pub mutation: PersistControlDefaultsMutation,
+}
+
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistControlDefaultsResult {
+    pub ui_spec: UiSpec,
+    pub parameters: DesignParams,
+    pub workspace: crate::contracts::WorkspaceProjection,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ResolvedControlDefaults {
+    ui_spec: UiSpec,
+    parameters: DesignParams,
+}
+
+fn resolve_control_defaults_mutation(
+    macro_code: &str,
+    current_ui_spec: &UiSpec,
+    current_parameters: &DesignParams,
+    mutation: PersistControlDefaultsMutation,
+) -> AppResult<ResolvedControlDefaults> {
+    let (ui_spec, parameters) = match mutation {
+        PersistControlDefaultsMutation::ReadFromMacro => {
+            let parsed = parse_macro_params(macro_code.to_string());
+            let mut fields = current_ui_spec.fields.clone();
+            let mut seen_keys = fields
+                .iter()
+                .map(|field| field.key().trim().to_string())
+                .filter(|key| !key.is_empty())
+                .collect::<std::collections::HashSet<_>>();
+            for field in parsed.fields {
+                let key = field.key().trim().to_string();
+                if !key.is_empty() && seen_keys.insert(key) {
+                    fields.push(field);
+                }
+            }
+            let mut parameters = parsed.params;
+            parameters.extend(current_parameters.clone());
+            (UiSpec { fields }, parameters)
+        }
+        PersistControlDefaultsMutation::SaveSchema {
+            ui_spec,
+            parameters,
+        } => (ui_spec, parameters),
+        PersistControlDefaultsMutation::SaveValues { parameters } => {
+            (current_ui_spec.clone(), parameters)
+        }
+    };
+    validate_ui_spec(&ui_spec)?;
+    if let Some(parsed) = derive_framework_controls(macro_code)? {
+        let derived = UiSpec {
+            fields: parsed.fields,
+        };
+        if derived != ui_spec {
+            return Err(AppError::validation(
+                "uiSpec is derived from CONTROLS for framework macros. Edit CONTROLS in the macro instead.",
+            ));
+        }
+    }
+    validate_design_params(&parameters, &ui_spec)?;
+    Ok(ResolvedControlDefaults {
+        ui_spec,
+        parameters,
+    })
 }
 
 fn field_label(key: &str) -> String {
@@ -900,6 +987,46 @@ pub async fn add_manual_version(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn apply_manual_parameters(
+    input: crate::services::manual_parameters::ManualParameterApplyRequest,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<crate::services::manual_parameters::ManualParameterApplyResponse> {
+    crate::services::manual_parameters::apply_manual_parameters(input, &state, &app).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn apply_imported_parameters(
+    input: crate::services::imported_model::ImportedParameterApplyRequest,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<crate::services::manual_parameters::ManualParameterApplyResponse> {
+    crate::services::imported_model::apply_imported_parameters(input, &state, &app).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn apply_manual_code(
+    input: crate::services::manual_code::ManualCodeApplyRequest,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<crate::services::manual_code::ManualCodeApplyResponse> {
+    crate::services::manual_code::apply_manual_code(input, &state, &app).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn import_model_intent(
+    input: crate::services::imported_model::ImportModelIntent,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<crate::services::imported_model::ImportedModelProjection> {
+    crate::services::imported_model::import_model_intent(input, &state, &app).await
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn add_imported_model_version(
     thread_id: String,
     title: String,
@@ -908,348 +1035,111 @@ pub async fn add_imported_model_version(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<String> {
-    crate::contracts::validate_model_runtime_bundle(&model_manifest, &artifact_bundle)?;
+    Ok(crate::services::imported_model::persist_imported_runtime(
+        Some(thread_id),
+        Some(title),
+        artifact_bundle,
+        model_manifest,
+        &state,
+        &app,
+    )
+    .await?
+    .message_id)
+}
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let projects_root = state.config.lock().unwrap().projects_root.clone();
-    let db = state.db.lock().await;
-
-    let thread_traits = if db::get_thread_title(&db, &thread_id)
-        .map_err(|err| AppError::persistence(err.to_string()))?
-        .is_none()
-    {
-        Some(crate::generate_genie_traits())
-    } else {
-        None
-    };
-    db::create_or_update_thread(&db, &thread_id, &title, now, thread_traits.as_ref())
-        .map_err(|err| AppError::persistence(err.to_string()))?;
-
-    if matches!(
-        model_manifest.source_kind,
-        crate::contracts::ModelSourceKind::ImportedFcstd
-            | crate::contracts::ModelSourceKind::ImportedStep
-    ) {
-        let binding = crate::thread_source_binding::bind_new_thread(
-            &app,
-            &db,
-            projects_root.as_deref(),
-            &thread_id,
-            &title,
+#[tauri::command]
+#[specta::specta]
+pub async fn persist_control_defaults(
+    input: PersistControlDefaultsInput,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> AppResult<PersistControlDefaultsResult> {
+    let (updated_output, updated_thread_id, artifact_bundle, model_manifest, resolved) = {
+        let db = state.db.lock().await;
+        let transaction = db
+            .unchecked_transaction()
+            .map_err(|error| AppError::persistence(error.to_string()))?;
+        let (mut current_output, current_thread_id) =
+            db::get_message_output_and_thread(&transaction, &input.message_id)
+                .map_err(|error| AppError::persistence(error.to_string()))?
+                .ok_or_else(|| {
+                    AppError::not_found("Message output not found for control defaults update.")
+                })?;
+        let resolved = resolve_control_defaults_mutation(
+            &current_output.macro_code,
+            &current_output.ui_spec,
+            &current_output.initial_params,
+            input.mutation,
         )?;
-        let source_path = model_manifest
-            .document
-            .source_path
-            .as_deref()
-            .ok_or_else(|| AppError::validation("Imported CAD manifest has no source path."))?;
-        materialize_imported_cad_source(Path::new(&binding.folder_path), Path::new(source_path))?;
-    }
-
-    let msg_id = Uuid::new_v4().to_string();
-    let label = model_manifest.document.document_label.trim();
-    let content = if label.is_empty() {
-        "Imported FreeCAD model.".to_string()
-    } else {
-        format!("Imported FreeCAD model: {}.", label)
+        current_output.ui_spec = resolved.ui_spec.clone();
+        current_output.initial_params = resolved.parameters.clone();
+        validate_design_output(&current_output)?;
+        db::update_message_ui_spec(&transaction, &input.message_id, &current_output.ui_spec)
+            .map_err(|error| AppError::persistence(error.to_string()))?;
+        db::update_message_parameters(
+            &transaction,
+            &input.message_id,
+            &current_output.initial_params,
+        )
+        .map_err(|error| AppError::persistence(error.to_string()))?;
+        let (artifact_bundle, model_manifest, _) =
+            db::get_message_runtime_and_thread(&transaction, &input.message_id)
+                .map_err(|error| AppError::persistence(error.to_string()))?
+                .unwrap_or((None, None, current_thread_id.clone()));
+        transaction
+            .commit()
+            .map_err(|error| AppError::persistence(error.to_string()))?;
+        (
+            current_output,
+            current_thread_id,
+            artifact_bundle,
+            model_manifest,
+            resolved,
+        )
     };
-    let msg = Message {
-        id: msg_id.clone(),
-        role: MessageRole::Assistant,
-        content,
-        status: MessageStatus::Success,
-        output: None,
-        usage: None,
-        artifact_bundle: Some(artifact_bundle.clone()),
-        model_manifest: Some(model_manifest.clone()),
-        structural_verification: None,
-        agent_origin: None,
-        image_data: None,
-        visual_kind: None,
-        attachment_images: Vec::new(),
-        timestamp: now,
-    };
-
-    db::add_message(&db, &thread_id, &msg).map_err(|err| AppError::persistence(err.to_string()))?;
-    let _ = persist_thread_summary(&db, &thread_id, &title);
-    drop(db);
     state
         .authoring_actor_registry
-        .invalidate_authoring_actors_for_thread(&thread_id)
+        .invalidate_authoring_actors_for_thread(&updated_thread_id)
         .await;
-    let snapshot = build_runtime_snapshot(
-        None,
-        Some(thread_id.clone()),
-        Some(msg_id.clone()),
-        Some(artifact_bundle),
-        Some(model_manifest),
+
+    let snapshot = build_saved_version_snapshot(
+        Some(updated_output),
+        updated_thread_id.clone(),
+        input.message_id.clone(),
+        artifact_bundle,
+        model_manifest,
         None,
     );
     {
         let mut last = state.last_snapshot.lock().unwrap();
         *last = Some(snapshot.clone());
-    }
-    write_last_snapshot(&app, Some(&snapshot));
-
-    Ok(msg_id)
-}
-
-fn materialize_imported_cad_source(folder: &Path, source: &Path) -> AppResult<PathBuf> {
-    let file_name = source.file_name().ok_or_else(|| {
-        AppError::validation(format!(
-            "Imported CAD source '{}' has no file name.",
-            source.display()
-        ))
-    })?;
-    let extension = source
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_default();
-    if !matches!(extension.as_str(), "fcstd" | "step" | "stp") {
-        return Err(AppError::validation(format!(
-            "Imported CAD source '{}' is not FCStd or STEP.",
-            source.display()
-        )));
-    }
-    fs::create_dir_all(folder).map_err(|error| AppError::persistence(error.to_string()))?;
-    let destination = folder.join(file_name);
-    fs::copy(source, &destination).map_err(|error| {
-        AppError::persistence(format!(
-            "Failed to copy imported CAD source '{}' to '{}': {}",
-            source.display(),
-            destination.display(),
-            error
-        ))
-    })?;
-    Ok(destination)
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn update_ui_spec(
-    message_id: String,
-    ui_spec: UiSpec,
-    state: State<'_, AppState>,
-    app: AppHandle,
-) -> AppResult<()> {
-    validate_ui_spec(&ui_spec)?;
-
-    let (updated_output, updated_thread_id, artifact_bundle, model_manifest) = {
-        let db = state.db.lock().await;
-        let (mut current_output, current_thread_id) =
-            db::get_message_output_and_thread(&db, &message_id)
-                .map_err(|err| AppError::persistence(err.to_string()))?
-                .ok_or_else(|| {
-                    AppError::not_found("Message output not found for uiSpec update.")
-                })?;
-        if let Some(parsed) = derive_framework_controls(&current_output.macro_code)? {
-            let derived = UiSpec {
-                fields: parsed.fields.clone(),
-            };
-            if derived != ui_spec {
-                return Err(AppError::validation(
-                    "uiSpec is derived from CONTROLS for framework macros. Edit CONTROLS in the macro instead.",
-                ));
-            }
-        }
-        current_output.ui_spec = ui_spec;
-        validate_design_output(&current_output)?;
-        db::update_message_ui_spec(&db, &message_id, &current_output.ui_spec)
-            .map_err(|err| AppError::persistence(err.to_string()))?;
-        let (artifact_bundle, model_manifest, _) =
-            db::get_message_runtime_and_thread(&db, &message_id)
-                .map_err(|err| AppError::persistence(err.to_string()))?
-                .unwrap_or((None, None, current_thread_id.clone()));
-        (
-            current_output,
-            current_thread_id,
-            artifact_bundle,
-            model_manifest,
-        )
-    };
-    state
-        .authoring_actor_registry
-        .invalidate_authoring_actors_for_thread(&updated_thread_id)
-        .await;
-
-    {
-        let snapshot = build_runtime_snapshot(
-            Some(updated_output.clone()),
-            Some(updated_thread_id.clone()),
-            Some(message_id.clone()),
-            artifact_bundle,
-            model_manifest,
-            None,
-        );
-        let mut last = state.last_snapshot.lock().unwrap();
-        *last = Some(snapshot.clone());
         write_last_snapshot(&app, Some(&snapshot));
     }
-    Ok(())
+
+    let workspace = {
+        let db = state.db.lock().await;
+        crate::services::history::get_workspace_projection(
+            &db,
+            &updated_thread_id,
+            Some(&input.message_id),
+            Some(20),
+        )?
+    };
+    Ok(PersistControlDefaultsResult {
+        ui_spec: resolved.ui_spec,
+        parameters: resolved.parameters,
+        workspace,
+    })
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn update_parameters(
-    message_id: String,
-    parameters: DesignParams,
+pub async fn repair_version_runtime(
+    input: crate::services::version_runtime_repair::RepairVersionRuntimeIntent,
     state: State<'_, AppState>,
     app: AppHandle,
-) -> AppResult<()> {
-    let (updated_output, updated_thread_id, artifact_bundle, model_manifest) = {
-        let db = state.db.lock().await;
-        let (mut current_output, current_thread_id) =
-            db::get_message_output_and_thread(&db, &message_id)
-                .map_err(|err| AppError::persistence(err.to_string()))?
-                .ok_or_else(|| {
-                    AppError::not_found("Message output not found for parameter update.")
-                })?;
-        validate_design_params(&parameters, &current_output.ui_spec)?;
-        current_output.initial_params = parameters;
-        validate_design_output(&current_output)?;
-        db::update_message_parameters(&db, &message_id, &current_output.initial_params)
-            .map_err(|err| AppError::persistence(err.to_string()))?;
-        let (artifact_bundle, model_manifest, _) =
-            db::get_message_runtime_and_thread(&db, &message_id)
-                .map_err(|err| AppError::persistence(err.to_string()))?
-                .unwrap_or((None, None, current_thread_id.clone()));
-        (
-            current_output,
-            current_thread_id,
-            artifact_bundle,
-            model_manifest,
-        )
-    };
-    state
-        .authoring_actor_registry
-        .invalidate_authoring_actors_for_thread(&updated_thread_id)
-        .await;
-
-    {
-        let snapshot = build_runtime_snapshot(
-            Some(updated_output.clone()),
-            Some(updated_thread_id.clone()),
-            Some(message_id.clone()),
-            artifact_bundle,
-            model_manifest,
-            None,
-        );
-        let mut last = state.last_snapshot.lock().unwrap();
-        *last = Some(snapshot.clone());
-        write_last_snapshot(&app, Some(&snapshot));
-    }
-    Ok(())
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn update_post_processing(
-    message_id: String,
-    post_processing: Option<crate::contracts::PostProcessingSpec>,
-    state: State<'_, AppState>,
-    app: AppHandle,
-) -> AppResult<()> {
-    let (updated_output, updated_thread_id, artifact_bundle, model_manifest) = {
-        let db = state.db.lock().await;
-        let (mut current_output, current_thread_id) =
-            db::get_message_output_and_thread(&db, &message_id)
-                .map_err(|err| AppError::persistence(err.to_string()))?
-                .ok_or_else(|| {
-                    AppError::not_found("Message output not found for postProcessing update.")
-                })?;
-        current_output.post_processing = post_processing;
-        validate_design_output(&current_output)?;
-        db::update_message_output(&db, &message_id, &current_output)
-            .map_err(|err| AppError::persistence(err.to_string()))?;
-        let (artifact_bundle, model_manifest, _) =
-            db::get_message_runtime_and_thread(&db, &message_id)
-                .map_err(|err| AppError::persistence(err.to_string()))?
-                .unwrap_or((None, None, current_thread_id.clone()));
-        (
-            current_output,
-            current_thread_id,
-            artifact_bundle,
-            model_manifest,
-        )
-    };
-    state
-        .authoring_actor_registry
-        .invalidate_authoring_actors_for_thread(&updated_thread_id)
-        .await;
-
-    {
-        let snapshot = build_runtime_snapshot(
-            Some(updated_output.clone()),
-            Some(updated_thread_id.clone()),
-            Some(message_id.clone()),
-            artifact_bundle,
-            model_manifest,
-            None,
-        );
-        let mut last = state.last_snapshot.lock().unwrap();
-        *last = Some(snapshot.clone());
-        write_last_snapshot(&app, Some(&snapshot));
-    }
-    Ok(())
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn repair_missing_version_runtime(
-    message_id: String,
-    artifact_bundle: ArtifactBundle,
-    model_manifest: ModelManifest,
-    state: State<'_, AppState>,
-    app: AppHandle,
-) -> AppResult<()> {
-    crate::contracts::validate_model_runtime_bundle(&model_manifest, &artifact_bundle)?;
-
-    let (current_output, current_thread_id) = {
-        let db = state.db.lock().await;
-        let current_runtime = db::get_message_runtime_and_thread(&db, &message_id)
-            .map_err(|err| AppError::persistence(err.to_string()))?
-            .ok_or_else(|| AppError::not_found("Message runtime not found for repair."))?;
-        let current_thread_id = current_runtime.2;
-        let latest = db::get_thread_latest_version(&db, &current_thread_id)
-            .map_err(|err| AppError::persistence(err.to_string()))?
-            .ok_or_else(|| AppError::not_found("Thread has no latest version to repair."))?;
-        if latest.id != message_id {
-            return Err(AppError::conflict(
-                "Only the latest version in a thread may retain repaired STL runtime.",
-            ));
-        }
-        db::update_message_artifact_bundle(&db, &message_id, &artifact_bundle)
-            .map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))?;
-        db::update_message_model_manifest(&db, &message_id, &model_manifest)
-            .map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))?;
-        db::update_message_structural_verification(&db, &message_id, None)
-            .map_err(|err: rusqlite::Error| AppError::persistence(err.to_string()))?;
-
-        let current_output = db::get_message_output_and_thread(&db, &message_id)
-            .map_err(|err| AppError::persistence(err.to_string()))?
-            .map(|(output, _)| output);
-        (current_output, current_thread_id)
-    };
-    state
-        .authoring_actor_registry
-        .invalidate_authoring_actors_for_thread(&current_thread_id)
-        .await;
-
-    let snapshot = build_runtime_snapshot(
-        current_output,
-        Some(current_thread_id),
-        Some(message_id),
-        Some(artifact_bundle),
-        Some(model_manifest),
-        None,
-    );
-    let mut last = state.last_snapshot.lock().unwrap();
-    *last = Some(snapshot.clone());
-    write_last_snapshot(&app, Some(&snapshot));
-    Ok(())
+) -> AppResult<crate::services::version_runtime_repair::RepairVersionRuntimeResponse> {
+    crate::services::version_runtime_repair::repair_version_runtime(input, &state, &app).await
 }
 
 #[tauri::command]
@@ -1531,5 +1421,86 @@ CONTROLS = [
 
         let err = derive_framework_controls(macro_code).expect_err("should require bind");
         assert!(err.message.contains("registry.bind(params)"));
+    }
+
+    fn width_spec(label: &str) -> UiSpec {
+        UiSpec {
+            fields: vec![UiField::Number {
+                key: "width".into(),
+                label: label.into(),
+                min: None,
+                max: None,
+                step: None,
+                min_from: None,
+                max_from: None,
+                frozen: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn save_schema_resolves_schema_and_defaults_as_one_canonical_mutation() {
+        let current = width_spec("Old Width");
+        let next = width_spec("Canonical Width");
+        let parameters = DesignParams::from([("width".into(), ParamValue::Number(73.0))]);
+
+        let resolved = resolve_control_defaults_mutation(
+            "width = params.get('width', 10.0)",
+            &current,
+            &DesignParams::new(),
+            PersistControlDefaultsMutation::SaveSchema {
+                ui_spec: next.clone(),
+                parameters: parameters.clone(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(resolved.ui_spec, next);
+        assert_eq!(resolved.parameters, parameters);
+    }
+
+    #[test]
+    fn save_values_preserves_canonical_schema() {
+        let current = width_spec("Canonical Width");
+        let parameters = DesignParams::from([("width".into(), ParamValue::Number(88.0))]);
+
+        let resolved = resolve_control_defaults_mutation(
+            "width = params.get('width', 10.0)",
+            &current,
+            &DesignParams::new(),
+            PersistControlDefaultsMutation::SaveValues {
+                parameters: parameters.clone(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(resolved.ui_spec, current);
+        assert_eq!(resolved.parameters, parameters);
+    }
+
+    #[test]
+    fn read_from_macro_merges_and_persists_canonical_schema_and_defaults() {
+        let current = width_spec("Canonical Width");
+        let current_parameters = DesignParams::from([("width".into(), ParamValue::Number(73.0))]);
+
+        let resolved = resolve_control_defaults_mutation(
+            "height = params.get('height', 25.0)\nwidth = params.get('width', 10.0)",
+            &current,
+            &current_parameters,
+            PersistControlDefaultsMutation::ReadFromMacro,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.ui_spec.fields.len(), 2);
+        assert_eq!(resolved.ui_spec.fields[0].key(), "width");
+        assert_eq!(resolved.ui_spec.fields[1].key(), "height");
+        assert_eq!(
+            resolved.parameters.get("width"),
+            Some(&ParamValue::Number(73.0))
+        );
+        assert_eq!(
+            resolved.parameters.get("height"),
+            Some(&ParamValue::Number(25.0))
+        );
     }
 }

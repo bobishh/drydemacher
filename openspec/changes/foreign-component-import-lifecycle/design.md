@@ -69,8 +69,11 @@ appear in Code.
 Code exposes two tabs while foreign provenance remains active. `SUMMARY` contains
 complete read-only evidence. `COMPONENT` shows the typed
 `(freecad-component ...)` descriptor with source identity, bindings, and editable
-parameters. `APPLY` and `COMMIT VERSION` use `apply_imported_model`. `OPEN CAD`
-opens the copied donor. No macro-source lookup runs for this mode.
+parameters. `APPLY` and `COMMIT VERSION` submit one imported-parameter intent by
+canonical thread and message identity. Rust resolves the stored runtime, calls
+`apply_imported_model`, carries semantic bindings, optionally appends the immutable
+success/error version, and writes the canonical runtime snapshot. `OPEN CAD` opens
+the copied donor. No macro-source lookup runs for this mode.
 
 Evidence storage is complete. Token bounds apply only to each agent response,
 never to stored evidence or the user-visible report. Agent access has three

@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::Write;
@@ -9,8 +8,7 @@ use tauri::{AppHandle, State};
 use crate::contracts::{
     AppError, AppResult, ArtifactBundle, BrepHiddenLineProjectionRequest,
     BrepHiddenLineProjectionResponse, DesignOutput, DesignParams, ExportPartInput,
-    FreecadLibraryImportRequest, FreecadLibraryItem, FreecadLibrarySearchRequest, InteractionMode,
-    MacroDialect, ManifestBounds, ModelManifest, ModelSourceKind, ParamValue, UiField, UiSpec,
+    FreecadLibraryImportRequest, MacroDialect, ModelManifest, ModelSourceKind,
 };
 use crate::db;
 use crate::freecad;
@@ -24,140 +22,6 @@ const ECKY_IR_BOOK_FALLBACK_PATHS: &[&str] = &[
     "../dist/docs/ecky-ir-field-guide.epub",
     "dist/docs/ecky-ir-field-guide.epub",
 ];
-
-fn humanize_parameter_key(key: &str) -> String {
-    key.split(['_', '-', '.'])
-        .filter(|token| !token.is_empty())
-        .map(|token| {
-            let mut chars = token.chars();
-            match chars.next() {
-                Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn infer_imported_dimension_value(key: &str, bounds: Option<&ManifestBounds>) -> f64 {
-    let Some(bounds) = bounds else {
-        return 0.0;
-    };
-
-    if key.ends_with("_height") {
-        (bounds.z_max - bounds.z_min).max(0.0)
-    } else if key.ends_with("_depth") {
-        (bounds.y_max - bounds.y_min).max(0.0)
-    } else {
-        (bounds.x_max - bounds.x_min).max(0.0)
-    }
-}
-
-fn build_imported_ui_spec(manifest: &ModelManifest) -> UiSpec {
-    let mut keys = BTreeSet::new();
-
-    for group in &manifest.parameter_groups {
-        if !group.editable {
-            continue;
-        }
-        for key in &group.parameter_keys {
-            keys.insert(key.clone());
-        }
-    }
-
-    for part in &manifest.parts {
-        if !part.editable {
-            continue;
-        }
-        for key in &part.parameter_keys {
-            keys.insert(key.clone());
-        }
-    }
-
-    UiSpec {
-        fields: keys
-            .into_iter()
-            .map(|key| UiField::Number {
-                label: humanize_parameter_key(&key),
-                key,
-                min: Some(0.0),
-                max: None,
-                step: Some(1.0),
-                min_from: None,
-                max_from: None,
-                frozen: false,
-            })
-            .collect(),
-    }
-}
-
-fn build_imported_params(
-    manifest: &ModelManifest,
-    existing_params: &DesignParams,
-    ui_spec: &UiSpec,
-) -> DesignParams {
-    let mut next = DesignParams::new();
-
-    for field in &ui_spec.fields {
-        let key = field.key().to_string();
-        if let Some(value) = existing_params.get(&key) {
-            next.insert(key, value.clone());
-            continue;
-        }
-
-        let source_part = manifest.parts.iter().find(|part| {
-            part.parameter_keys
-                .iter()
-                .any(|part_key| part_key == field.key())
-        });
-        next.insert(
-            key,
-            ParamValue::Number(infer_imported_dimension_value(
-                field.key(),
-                source_part.and_then(|part| part.bounds.as_ref()),
-            )),
-        );
-    }
-
-    next
-}
-
-fn build_imported_output(
-    manifest: &ModelManifest,
-    existing_output: Option<&DesignOutput>,
-) -> DesignOutput {
-    let ui_spec = build_imported_ui_spec(manifest);
-    let existing_params = existing_output
-        .map(|output| output.initial_params.clone())
-        .unwrap_or_default();
-    let initial_params = build_imported_params(manifest, &existing_params, &ui_spec);
-    let title = if manifest.document.document_label.trim().is_empty() {
-        if manifest.document.document_name.trim().is_empty() {
-            "Imported FreeCAD Model".to_string()
-        } else {
-            manifest.document.document_name.clone()
-        }
-    } else {
-        manifest.document.document_label.clone()
-    };
-
-    DesignOutput {
-        title,
-        version_name: existing_output
-            .map(|output| output.version_name.clone())
-            .unwrap_or_else(|| "Imported".to_string()),
-        response: "Imported FreeCAD model.".to_string(),
-        interaction_mode: InteractionMode::Design,
-        macro_code: String::new(),
-        macro_dialect: MacroDialect::Legacy,
-        engine_kind: crate::contracts::EngineKind::Freecad,
-        source_language: crate::contracts::SourceLanguage::LegacyPython,
-        geometry_backend: crate::contracts::GeometryBackend::Freecad,
-        ui_spec,
-        initial_params,
-        post_processing: None,
-    }
-}
 
 fn export_part_label(part: &ExportPartInput) -> String {
     let label = part.label.trim();
@@ -1189,19 +1053,6 @@ pub async fn import_fcstd(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn search_freecad_library(
-    request: FreecadLibrarySearchRequest,
-    state: State<'_, AppState>,
-) -> AppResult<Vec<FreecadLibraryItem>> {
-    let configured_roots = {
-        let config = state.config.lock().unwrap();
-        config.freecad_library_roots.clone()
-    };
-    crate::freecad_library::search_freecad_library(&request, &configured_roots)
-}
-
-#[tauri::command]
-#[specta::specta]
 pub async fn import_freecad_library_part(
     request: FreecadLibraryImportRequest,
     state: State<'_, AppState>,
@@ -1283,7 +1134,10 @@ pub async fn apply_imported_model(
                 crate::contracts::AppError::persistence(err.to_string())
             })?
             .map(|(output, _)| output);
-        let mut imported_output = build_imported_output(&next_manifest, existing_output.as_ref());
+        let mut imported_output = crate::services::imported_model::build_imported_output(
+            &next_manifest,
+            existing_output.as_ref(),
+        );
         imported_output.initial_params = parameters.clone();
         db::update_message_output(&db, message_id, &imported_output)
             .map_err(|err| crate::contracts::AppError::persistence(err.to_string()))?;
@@ -1352,17 +1206,15 @@ pub async fn extract_brep_hidden_line_projections(
     )
 }
 
-#[tauri::command]
-#[specta::specta]
-pub async fn save_model_manifest(
-    model_id: String,
+pub(crate) async fn persist_model_manifest(
+    model_id: &str,
     manifest: ModelManifest,
     message_id: Option<String>,
-    state: State<'_, AppState>,
-    app: AppHandle,
-) -> AppResult<()> {
-    let manifest = crate::model_runtime::write_model_manifest(&app, &model_id, &manifest)?;
-    let refreshed_bundle = crate::model_runtime::read_artifact_bundle(&app, &model_id).ok();
+    state: &AppState,
+    app: &dyn crate::models::PathResolver,
+) -> AppResult<ModelManifest> {
+    let manifest = crate::model_runtime::write_model_manifest(app, model_id, &manifest)?;
+    let refreshed_bundle = crate::model_runtime::read_artifact_bundle(app, model_id).ok();
 
     let mut persisted_output: Option<DesignOutput> = None;
 
@@ -1388,7 +1240,10 @@ pub async fn save_model_manifest(
                     crate::contracts::AppError::persistence(err.to_string())
                 })?
                 .map(|(output, _)| output);
-            let imported_output = build_imported_output(&manifest, existing_output.as_ref());
+            let imported_output = crate::services::imported_model::build_imported_output(
+                &manifest,
+                existing_output.as_ref(),
+            );
             db::update_message_output(&db, message_id, &imported_output)
                 .map_err(|err| crate::contracts::AppError::persistence(err.to_string()))?;
             persisted_output = Some(imported_output);
@@ -1398,18 +1253,18 @@ pub async fn save_model_manifest(
     let snapshot_to_write = {
         let mut last = state.last_snapshot.lock().unwrap();
         let Some(snapshot) = last.as_mut() else {
-            return Ok(());
+            return Ok(manifest);
         };
 
         let snapshot_matches_model = snapshot
             .model_manifest
             .as_ref()
-            .map(|current| current.model_id.as_str() == model_id.as_str())
+            .map(|current| current.model_id.as_str() == model_id)
             .unwrap_or(false)
             || snapshot
                 .artifact_bundle
                 .as_ref()
-                .map(|bundle| bundle.model_id.as_str() == model_id.as_str())
+                .map(|bundle| bundle.model_id.as_str() == model_id)
                 .unwrap_or(false);
         let snapshot_matches_message = message_id
             .as_deref()
@@ -1431,10 +1286,39 @@ pub async fn save_model_manifest(
     };
 
     if let Some(snapshot) = snapshot_to_write.as_ref() {
-        write_last_snapshot(&app, Some(snapshot));
+        write_last_snapshot(app, Some(snapshot));
     }
 
-    Ok(())
+    Ok(manifest)
+}
+
+pub(crate) async fn load_control_view_target_manifest(
+    model_id: &str,
+    message_id: Option<&str>,
+    state: &AppState,
+    app: &dyn crate::models::PathResolver,
+) -> AppResult<ModelManifest> {
+    let Some(message_id) = message_id else {
+        return crate::model_runtime::read_model_manifest(app, model_id);
+    };
+
+    let db = state.db.lock().await;
+    let (artifact_bundle, model_manifest, _) = db::get_message_runtime_and_thread(&db, message_id)
+        .map_err(|error| AppError::persistence(error.to_string()))?
+        .ok_or_else(|| AppError::not_found(format!("Message {} not found.", message_id)))?;
+    let manifest = model_manifest.ok_or_else(|| {
+        AppError::validation(format!("Message {} has no model manifest.", message_id))
+    })?;
+    if manifest.model_id != model_id {
+        return Err(AppError::validation(format!(
+            "Message {} manifest modelId '{}' does not match requested model id '{}'.",
+            message_id, manifest.model_id, model_id
+        )));
+    }
+    if let Some(bundle) = artifact_bundle.as_ref() {
+        crate::contracts::validate_model_runtime_bundle(&manifest, bundle)?;
+    }
+    Ok(manifest)
 }
 
 #[tauri::command]
@@ -1516,8 +1400,9 @@ mod tests {
     use crate::contracts::{
         Advisory, AdvisoryCondition, AdvisorySeverity, ControlPrimitive, ControlPrimitiveKind,
         ControlView, ControlViewScope, ControlViewSection, ControlViewSource, DocumentMetadata,
-        EnrichmentStatus, ManifestEnrichmentState, ParameterGroup, PartBinding, PrimitiveBinding,
-        SelectionTarget, SelectionTargetKind, MODEL_RUNTIME_SCHEMA_VERSION,
+        EnrichmentStatus, ManifestBounds, ManifestEnrichmentState, ParamValue, ParameterGroup,
+        PartBinding, PrimitiveBinding, SelectionTarget, SelectionTargetKind, UiField,
+        MODEL_RUNTIME_SCHEMA_VERSION,
     };
     use zip::ZipArchive;
 
@@ -1698,7 +1583,10 @@ mod tests {
 
     #[test]
     fn build_imported_output_synthesizes_numeric_controls_from_manifest() {
-        let output = build_imported_output(&sample_imported_manifest(), None);
+        let output = crate::services::imported_model::build_imported_output(
+            &sample_imported_manifest(),
+            None,
+        );
 
         assert_eq!(output.title, "Imported Shell");
         assert_eq!(output.macro_code, "");

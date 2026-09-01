@@ -196,6 +196,14 @@ failing mathematical or boundary test.
   job; warm exact identity performs zero mesh/assembly/solve; failures are not
   cached.
 - [x] 9.8 Implement bounded immutable cache and subscriber-aware cancellation.
+- [x] 9.9 Add one workbench run intent that accepts only current target inputs;
+  Rust owns job identity, configured validation/compute policy, validate-run
+  sequencing, progress, cancellation registration, and result publication.
+- [x] 9.10 Replace workbench validate, mesh preview, convergence run/cache, and
+  VTU export chains with action-specific intents. Rust owns job identities,
+  configured budgets/control/tolerances, preview validation sequencing, and the
+  export byte cap; frontend keeps only user inputs, projection, raw errors, and
+  cancellation from Rust-emitted identity.
 
 ## 10. Verification And MCP Surface
 

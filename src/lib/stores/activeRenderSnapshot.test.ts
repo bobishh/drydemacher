@@ -6,6 +6,7 @@ import type { ActiveRenderSnapshotInput } from './activeRenderSnapshot';
 
 function input(): ActiveRenderSnapshotInput {
   return {
+    snapshotId: 'snapshot-1',
     threadId: 'thread-1',
     messageId: 'preview-1',
     design: {
@@ -81,7 +82,7 @@ test('Given artifact and manifest identities differ When snapshot builds Then mi
   );
 });
 
-test('canonical parameter order produces one frontend projection identity', () => {
+test('backend snapshot identity is preserved across projection shape changes', () => {
   const first = buildActiveRenderSnapshot(input());
   const base = input();
   const reordered = {
@@ -93,4 +94,11 @@ test('canonical parameter order produces one frontend projection identity', () =
   };
 
   assert.equal(buildActiveRenderSnapshot(reordered).snapshotId, first.snapshotId);
+});
+
+test('missing backend snapshot identity is rejected', () => {
+  assert.throws(
+    () => buildActiveRenderSnapshot({ ...input(), snapshotId: '' }),
+    /snapshotId is required/,
+  );
 });

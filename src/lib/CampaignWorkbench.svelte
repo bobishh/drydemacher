@@ -6,23 +6,22 @@
   import { renderMarkdownFragment } from './docs/eckyIrGuide';
   import type { ArtifactBundle } from './types/domain';
   import type { CampaignRun } from './projects/campaignRunClient';
-  import type { CampaignCheckOutcome, CampaignCurrentStepPayload } from './projects/campaignDefinitionClient';
+  import type { CampaignCurrentStepPayload } from './projects/campaignDefinitionClient';
+  import type { CampaignRunTransitionAction, TransitionCampaignRunResult } from './tauri/contracts';
   import { createCampaignPreviewCache } from './projects/campaignPreviewCache';
 
   let {
     campaign,
-    onCheckSolution,
     render = renderModel,
     run = $bindable(),
-    onSaveRun,
+    onTransition,
     onClose,
   }: {
     /** Backend-projected current step. No campaign corpus is imported by this component. */
     campaign: CampaignCurrentStepPayload;
-    onCheckSolution: (source: string, stepId: string) => Promise<CampaignCheckOutcome>;
     render?: typeof renderModel;
     run: CampaignRun;
-    onSaveRun: (next: CampaignRun) => Promise<CampaignRun>;
+    onTransition: (action: CampaignRunTransitionAction) => Promise<TransitionCampaignRunResult>;
     onClose?: () => void;
   } = $props();
 
@@ -37,6 +36,8 @@
   let renderError = $state('');
   let checkState = $state<'idle' | 'checking' | 'pass' | 'fail' | 'error'>('idle');
   let checkDetail = $state('');
+  let transitionPending = $state(false);
+  let transitionError = $state('');
 
   const active = $derived(campaign.currentStep);
   const activeSource = $derived(active?.source ?? null);
@@ -116,10 +117,11 @@
     }
   }
 
-  async function persist(next: Pick<CampaignRun, 'currentStepId' | 'completedStepIds' | 'passedChallengeIds'>, draftOverride?: string) {
-    const draftOverridesByStepId = { ...run.draftOverridesByStepId };
-    if (activeDraftKey && draftOverride !== undefined) draftOverridesByStepId[activeDraftKey] = draftOverride;
-    run = await onSaveRun({ ...run, ...next, draftOverridesByStepId });
+  async function transition(action: CampaignRunTransitionAction) {
+    transitionError = '';
+    const result = await onTransition(action);
+    run = result.run as CampaignRun;
+    return result;
   }
 
   function saveDraft(nextDraft: string) {
@@ -127,26 +129,38 @@
     if (draftSaveTimer) clearTimeout(draftSaveTimer);
     draftSaveTimer = setTimeout(() => {
       draftSaveTimer = null;
-      void persist({ currentStepId: run.currentStepId, completedStepIds: run.completedStepIds, passedChallengeIds: run.passedChallengeIds }, nextDraft);
+      void transition({ action: 'saveDraft', draft: nextDraft }).catch((error) => {
+        transitionError = formatBackendError(error);
+      });
     }, 350);
   }
 
-  function continueStep() {
-    if (!active?.nextStepId) return;
-    void persist({
-      currentStepId: active.nextStepId,
-      completedStepIds: [...new Set([...run.completedStepIds, active.id])],
-      passedChallengeIds: run.passedChallengeIds,
-    }, draft);
+  async function continueStep() {
+    if (!active?.nextStepId || transitionPending) return;
+    if (draftSaveTimer) clearTimeout(draftSaveTimer);
+    draftSaveTimer = null;
+    transitionPending = true;
+    try {
+      await transition({ action: 'continue', draft: activeSource ? draft : null });
+    } catch (error) {
+      transitionError = formatBackendError(error);
+    } finally {
+      transitionPending = false;
+    }
   }
 
-  function goBack() {
-    if (!active?.previousStep || !canGoBack) return;
-    void persist({
-      currentStepId: active.previousStep.id,
-      completedStepIds: run.completedStepIds,
-      passedChallengeIds: run.passedChallengeIds,
-    }, draft);
+  async function goBack() {
+    if (!active?.previousStep || !canGoBack || transitionPending) return;
+    if (draftSaveTimer) clearTimeout(draftSaveTimer);
+    draftSaveTimer = null;
+    transitionPending = true;
+    try {
+      await transition({ action: 'back', draft: activeSource ? draft : null });
+    } catch (error) {
+      transitionError = formatBackendError(error);
+    } finally {
+      transitionPending = false;
+    }
   }
 
   async function checkSolution() {
@@ -154,24 +168,20 @@
     checkState = 'checking';
     checkDetail = '';
     // Backend owns reference source and Core IR evaluation.
-    const outcome = await onCheckSolution(draft, active.id);
-    if (!outcome.ok) {
+    try {
+      const result = await transition({ action: 'checkSolution', candidateSource: draft });
+      if (!result.check) throw new Error('Campaign check outcome is missing.');
+      if (!result.check.matched) {
+        checkState = 'fail';
+        checkDetail = 'Not the same Core IR yet.';
+        return;
+      }
+      checkState = 'pass';
+      checkDetail = 'Core IR matches.';
+    } catch (error) {
       checkState = 'error';
-      checkDetail = outcome.rawError;
-      return;
+      checkDetail = formatBackendError(error);
     }
-    if (!outcome.matched) {
-      checkState = 'fail';
-      checkDetail = 'Not the same Core IR yet.';
-      return;
-    }
-    checkState = 'pass';
-    checkDetail = 'Core IR matches.';
-    if (active.nextStepId) await persist({
-      currentStepId: active.nextStepId,
-      completedStepIds: [...new Set([...run.completedStepIds, active.id])],
-      passedChallengeIds: [...new Set([...run.passedChallengeIds, active.id])],
-    }, draft);
   }
 </script>
 
@@ -198,16 +208,17 @@
         </div>
 
         <div class="campaign-workbench__actions">
-          {#if canGoBack}<button type="button" class="campaign-workbench__quiet" onclick={goBack}>BACK</button>{/if}
+          {#if canGoBack}<button type="button" class="campaign-workbench__quiet" onclick={() => void goBack()} disabled={transitionPending}>BACK</button>{/if}
           {#if activeSource}<button type="button" class="campaign-workbench__quiet" onclick={() => void renderActive()} disabled={renderState === 'rendering' || !needsRender}>{renderState === 'rendering' ? 'RENDERING…' : needsRender ? 'RENDER' : 'UP TO DATE'}</button>{/if}
           {#if active.kind === 'challenge'}
             <button type="button" class="campaign-workbench__primary" onclick={() => void checkSolution()} disabled={checkState === 'checking'}>{checkState === 'checking' ? 'CHECKING…' : 'CHECK SOLUTION'}</button>
           {:else if active.nextStepId}
-            <button type="button" class="campaign-workbench__primary" onclick={continueStep}>CONTINUE</button>
+            <button type="button" class="campaign-workbench__primary" onclick={() => void continueStep()} disabled={transitionPending}>{transitionPending ? 'CONTINUING…' : 'CONTINUE'}</button>
           {/if}
         </div>
         {#if active.kind === 'challenge'}<p class:campaign-workbench__result--pass={checkState === 'pass'} class:campaign-workbench__result--fail={checkState === 'fail' || checkState === 'error'} class="campaign-workbench__result" data-testid="mission-acceptance">{checkState === 'idle' ? 'Edit the source, then check its Core IR.' : checkDetail}</p>{/if}
         {#if renderState === 'error'}<pre class="campaign-workbench__error" role="alert">{renderError}</pre>{/if}
+        {#if transitionError}<pre class="campaign-workbench__error" role="alert">{transitionError}</pre>{/if}
       </div>
 
       {#if active.kind !== 'explain'}

@@ -508,6 +508,62 @@ async fn get_message_attachments_impl(
     Ok(attachments)
 }
 
+#[derive(Debug)]
+struct QueuedPromptBatch {
+    message_ids: Vec<String>,
+    prompt_text: String,
+    attachments: Vec<crate::contracts::Attachment>,
+}
+
+async fn collect_queued_prompt_batch(
+    thread_id: &str,
+    state: &AppState,
+) -> AppResult<Option<QueuedPromptBatch>> {
+    let queued_messages = {
+        let conn = state.db.lock().await;
+        crate::db::get_thread_messages(&conn, thread_id)
+            .map_err(|error| AppError::persistence(error.to_string()))?
+            .into_iter()
+            .filter(|message| {
+                message.role == crate::contracts::MessageRole::User
+                    && message.status == crate::contracts::MessageStatus::Pending
+            })
+            .collect::<Vec<_>>()
+    };
+    if queued_messages.is_empty() {
+        return Ok(None);
+    }
+
+    let mut attachment_keys = std::collections::HashSet::new();
+    let mut attachments = Vec::new();
+    for message in &queued_messages {
+        for attachment in get_message_attachments_impl(&message.id, state).await? {
+            let key = format!(
+                "{}\u{0}{}\u{0}{}",
+                attachment.path,
+                attachment.data_url.as_deref().unwrap_or_default(),
+                attachment.name
+            );
+            if attachment_keys.insert(key) {
+                attachments.push(attachment);
+            }
+        }
+    }
+
+    Ok(Some(QueuedPromptBatch {
+        message_ids: queued_messages
+            .iter()
+            .map(|message| message.id.clone())
+            .collect(),
+        prompt_text: queued_messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        attachments,
+    }))
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn prepare_prompt_attachments(
@@ -598,7 +654,7 @@ pub(crate) async fn queue_agent_prompt_impl(
             }
         }
 
-        crate::db::add_message(
+        crate::db::add_message_checked(
             &conn,
             &thread_id,
             &crate::contracts::Message {
@@ -649,15 +705,6 @@ pub async fn queue_agent_prompt(
     state: State<'_, AppState>,
 ) -> AppResult<crate::contracts::QueuedAgentPrompt> {
     queue_agent_prompt_impl(input, &state).await
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn get_message_attachments(
-    message_id: String,
-    state: State<'_, AppState>,
-) -> AppResult<Vec<crate::contracts::Attachment>> {
-    get_message_attachments_impl(&message_id, &state).await
 }
 
 #[tauri::command]
@@ -884,7 +931,7 @@ async fn resolve_agent_prompt_impl(
                 Some("Working through the queued message.".to_string()),
             );
         }
-        let mut sessions = state.mcp_sessions.lock().await;
+        let mut sessions = state.mcp_session_registry.with_sessions().lock().await;
         if let Some(session) = sessions.get_mut(&control.session_id) {
             session.current_turn_id = Some(uuid::Uuid::new_v4().to_string());
             session.current_turn_thread_id = control.thread_id.clone();
@@ -1012,7 +1059,7 @@ async fn resolve_agent_prompt_impl(
 
     if let Some(control) = prompt_control.as_ref() {
         if !working_message_ids.is_empty() {
-            let mut sessions = state.mcp_sessions.lock().await;
+            let mut sessions = state.mcp_session_registry.with_sessions().lock().await;
             if let Some(session) = sessions.get_mut(&control.session_id) {
                 session.current_turn_working_message_ids = working_message_ids;
             }
@@ -1021,15 +1068,85 @@ async fn resolve_agent_prompt_impl(
     Ok(())
 }
 
-/// Called by the frontend when the user submits a prompt in MCP mode.
-/// Resolves the pending oneshot channel so the MCP handler can return the text and attachments.
+pub(crate) async fn auto_deliver_queued_prompt_batch(
+    request_id: &str,
+    thread_id: &str,
+    state: &AppState,
+) -> AppResult<bool> {
+    let Some(batch) = collect_queued_prompt_batch(thread_id, state).await? else {
+        return Ok(false);
+    };
+    let delivered = resolve_agent_prompt_impl(
+        crate::contracts::ResolveAgentPromptInput {
+            request_id: request_id.to_string(),
+            prompt_text: batch.prompt_text,
+            message_ids: batch.message_ids.clone(),
+            message_id: batch.message_ids.first().cloned(),
+            attachments: batch.attachments,
+        },
+        state,
+    )
+    .await;
+    match delivered {
+        Ok(()) => Ok(true),
+        Err(error) => {
+            let channel_still_pending = state.prompt_channels.lock().await.contains_key(request_id);
+            if channel_still_pending {
+                Err(error)
+            } else {
+                eprintln!(
+                    "[MCP] queued prompt batch reached agent but post-delivery projection failed: {}",
+                    error.message
+                );
+                Ok(true)
+            }
+        }
+    }
+}
+
 #[tauri::command]
 #[specta::specta]
-pub async fn resolve_agent_prompt(
-    input: crate::contracts::ResolveAgentPromptInput,
+pub async fn submit_agent_prompt_reply(
+    input: crate::contracts::SubmitAgentPromptReplyInput,
     state: State<'_, AppState>,
-) -> AppResult<()> {
-    resolve_agent_prompt_impl(input, &state).await
+) -> AppResult<crate::contracts::SubmitAgentPromptReplyResult> {
+    submit_agent_prompt_reply_impl(input, &state).await
+}
+
+pub(crate) async fn submit_agent_prompt_reply_impl(
+    input: crate::contracts::SubmitAgentPromptReplyInput,
+    state: &AppState,
+) -> AppResult<crate::contracts::SubmitAgentPromptReplyResult> {
+    let resolved = resolve_agent_prompt_impl(
+        crate::contracts::ResolveAgentPromptInput {
+            request_id: input.request_id,
+            prompt_text: input.prompt_text.clone(),
+            message_ids: Vec::new(),
+            message_id: None,
+            attachments: input.attachments.clone(),
+        },
+        state,
+    )
+    .await;
+    match resolved {
+        Ok(()) => Ok(crate::contracts::SubmitAgentPromptReplyResult::Resolved),
+        Err(error) if error.code == crate::contracts::AppErrorCode::NotFound => {
+            let queued = queue_agent_prompt_impl(
+                crate::contracts::QueueAgentPromptInput {
+                    thread_id: Some(input.thread_id),
+                    prompt_text: input.prompt_text,
+                    attachments: input.attachments,
+                },
+                state,
+            )
+            .await?;
+            Ok(crate::contracts::SubmitAgentPromptReplyResult::Queued {
+                thread_id: queued.thread_id,
+                message_id: queued.message_id,
+            })
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Called by the frontend when the user clicks a confirmation button.
@@ -1132,6 +1249,217 @@ mod tests {
             max_verify_attempts: 0,
             projects_root: None,
         }
+    }
+
+    #[tokio::test]
+    async fn submit_agent_prompt_reply_resolves_live_request_without_queueing() {
+        let conn = crate::db::init_db(&test_db_path("submit-agent-prompt-resolve")).expect("db");
+        let state = AppState::new(test_config(), None, conn);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state
+            .prompt_channels
+            .lock()
+            .await
+            .insert("request-live".to_string(), tx);
+
+        let result = submit_agent_prompt_reply_impl(
+            crate::contracts::SubmitAgentPromptReplyInput {
+                request_id: "request-live".to_string(),
+                thread_id: "thread-live".to_string(),
+                prompt_text: "Continue.".to_string(),
+                attachments: Vec::new(),
+            },
+            &state,
+        )
+        .await
+        .expect("reply");
+
+        assert_eq!(
+            result,
+            crate::contracts::SubmitAgentPromptReplyResult::Resolved
+        );
+        assert_eq!(
+            rx.await.expect("channel").expect("reply").prompt_text,
+            "Continue."
+        );
+        let conn = state.db.lock().await;
+        assert!(crate::services::history::get_thread(&conn, "thread-live").is_err());
+    }
+
+    #[tokio::test]
+    async fn submit_agent_prompt_reply_queues_when_request_expired() {
+        let conn = crate::db::init_db(&test_db_path("submit-agent-prompt-queue")).expect("db");
+        let state = AppState::new(test_config(), None, conn);
+
+        let result = submit_agent_prompt_reply_impl(
+            crate::contracts::SubmitAgentPromptReplyInput {
+                request_id: "request-expired".to_string(),
+                thread_id: "thread-queued".to_string(),
+                prompt_text: "Keep this message.".to_string(),
+                attachments: Vec::new(),
+            },
+            &state,
+        )
+        .await
+        .expect("queued fallback");
+
+        let crate::contracts::SubmitAgentPromptReplyResult::Queued {
+            thread_id,
+            message_id,
+        } = result
+        else {
+            panic!("expected queued result");
+        };
+        assert_eq!(thread_id, "thread-queued");
+        let conn = state.db.lock().await;
+        let thread = crate::services::history::get_thread(&conn, &thread_id).expect("thread");
+        assert!(thread
+            .messages
+            .iter()
+            .any(|message| message.id == message_id));
+    }
+
+    #[tokio::test]
+    async fn queued_batch_auto_delivery_owns_order_attachments_and_working_status() {
+        let conn = crate::db::init_db(&test_db_path("queued-batch-auto-delivery")).expect("db");
+        let state = AppState::new(test_config(), None, conn);
+        let attachment = crate::contracts::Attachment {
+            path: String::new(),
+            name: "reference.png".to_string(),
+            explanation: "Shared reference".to_string(),
+            data_url: Some("data:image/png;base64,AA==".to_string()),
+            kind: crate::contracts::AttachmentKind::Image,
+        };
+        let first = queue_agent_prompt_impl(
+            crate::contracts::QueueAgentPromptInput {
+                thread_id: Some("thread-batch".to_string()),
+                prompt_text: "First instruction.".to_string(),
+                attachments: vec![attachment.clone()],
+            },
+            &state,
+        )
+        .await
+        .expect("first queue");
+        let second = queue_agent_prompt_impl(
+            crate::contracts::QueueAgentPromptInput {
+                thread_id: Some("thread-batch".to_string()),
+                prompt_text: "Second instruction.".to_string(),
+                attachments: vec![attachment],
+            },
+            &state,
+        )
+        .await
+        .expect("second queue");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state
+            .prompt_channels
+            .lock()
+            .await
+            .insert("request-batch".to_string(), tx);
+
+        assert!(
+            auto_deliver_queued_prompt_batch("request-batch", "thread-batch", &state)
+                .await
+                .expect("auto delivery")
+        );
+        let delivered = rx.await.expect("channel").expect("reply");
+        assert_eq!(
+            delivered.message_ids,
+            vec![first.message_id, second.message_id]
+        );
+        assert!(delivered.prompt_text.contains("First instruction."));
+        assert!(delivered.prompt_text.contains("Second instruction."));
+        assert_eq!(delivered.attachments.len(), 1);
+
+        let conn = state.db.lock().await;
+        let messages = crate::db::get_thread_messages(&conn, "thread-batch").expect("messages");
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.role == crate::contracts::MessageRole::User)
+                .map(|message| message.status.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                crate::contracts::MessageStatus::Working,
+                crate::contracts::MessageStatus::Working,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_batch_auto_delivery_keeps_live_channel_when_no_batch_exists() {
+        let conn = crate::db::init_db(&test_db_path("queued-batch-none")).expect("db");
+        let state = AppState::new(test_config(), None, conn);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        state
+            .prompt_channels
+            .lock()
+            .await
+            .insert("request-empty".to_string(), tx);
+
+        assert!(
+            !auto_deliver_queued_prompt_batch("request-empty", "thread-empty", &state)
+                .await
+                .expect("no batch")
+        );
+        assert!(state
+            .prompt_channels
+            .lock()
+            .await
+            .contains_key("request-empty"));
+    }
+
+    #[tokio::test]
+    async fn queued_batch_attachment_load_failure_preserves_prompt_channel_and_wait() {
+        let conn =
+            crate::db::init_db(&test_db_path("queued-batch-attachment-failure")).expect("db");
+        let state = AppState::new(test_config(), None, conn);
+        queue_agent_prompt_impl(
+            crate::contracts::QueueAgentPromptInput {
+                thread_id: Some("thread-failure".to_string()),
+                prompt_text: "Keep this queued.".to_string(),
+                attachments: Vec::new(),
+            },
+            &state,
+        )
+        .await
+        .expect("queue");
+        {
+            let conn = state.db.lock().await;
+            conn.execute("DROP TABLE thread_references", [])
+                .expect("break attachment lookup");
+        }
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        state
+            .prompt_channels
+            .lock()
+            .await
+            .insert("request-failure".to_string(), tx);
+        state.prompt_waits.lock().unwrap().insert(
+            "request-failure".to_string(),
+            crate::models::PromptResumeState {
+                pgid: None,
+                agent_label: "Claude".to_string(),
+                session_id: "session-failure".to_string(),
+                thread_id: Some("thread-failure".to_string()),
+            },
+        );
+
+        let error = auto_deliver_queued_prompt_batch("request-failure", "thread-failure", &state)
+            .await
+            .expect_err("attachment failure");
+
+        assert!(error.message.contains("thread_references"));
+        assert!(state
+            .prompt_channels
+            .lock()
+            .await
+            .contains_key("request-failure"));
+        assert!(state
+            .prompt_waits
+            .lock()
+            .unwrap()
+            .contains_key("request-failure"));
     }
 
     #[test]

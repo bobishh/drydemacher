@@ -63,13 +63,15 @@ endsolid heightfield
         };
       }
       if (cmd === 'check_freecad') return false;
-      if (cmd === 'open_or_create_blank_design_thread') {
+      if (cmd === 'create_design_thread') {
         return {
           threadId: 'heightfield-thread',
-          slug: 'protruded-relief',
-          folder: '/mock/protruded-relief',
-          file: '/mock/protruded-relief/model.ecky',
-          source: '(model)',
+          sourceDocument: { folder: '/mock/protruded-relief', file: '/mock/protruded-relief/model.ecky', source: '(model)' },
+          initialVersionId: null, snapshotId: null, parserMatched: null, initialVersionError: null,
+          workspace: {
+            thread: { id: 'heightfield-thread', title: 'Untitled design', summary: '', updatedAt: 1, versionCount: 0, pendingCount: 0, queuedCount: 0, errorCount: 0, status: 'active', engineKind: 'ecky', sourceLanguage: 'ecky', geometryBackend: 'mesh' },
+            messagesPage: { messages: [], nextBefore: null, hasMore: false }, selectedVersion: null, requestedMessageFound: false,
+          },
         };
       }
       if (cmd === 'get_history') return [];

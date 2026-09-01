@@ -10,6 +10,8 @@ pub use error::{
 };
 mod authoring_graph;
 pub use authoring_graph::*;
+mod boot_projection;
+pub use boot_projection::*;
 mod config;
 mod config_edn;
 pub use config::{
@@ -21,6 +23,8 @@ pub use config_edn::{
     decode_config, encode_config, normalize_legacy_config_for_edn, ConfigNormalizationWarning,
     CONFIG_DEPRECATED_START_ON_DEMAND_DROPPED, CONFIG_NONCANONICAL_DEPRECATED_FIELD,
 };
+pub mod exploration_cycle;
+pub mod exploration_run;
 mod geometry;
 pub use geometry::{
     EngineKind, GeometryBackend, MacroDialect, RuntimeAuthoringContext, RuntimeBackendCapability,
@@ -39,6 +43,8 @@ mod render;
 pub use render::*;
 mod manifest;
 pub use manifest::*;
+mod semantic_manifest;
+pub use semantic_manifest::*;
 mod capture;
 pub use capture::*;
 mod capture_reconstruction;
@@ -1163,6 +1169,23 @@ pub struct Message {
     pub timestamp: u64,
 }
 
+/// Atomic payload used by new message writers. Legacy database rows still
+/// hydrate through the nullable columns on `Message` and are normalized at the
+/// database boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum MessagePayload {
+    Conversation,
+    Version {
+        output: DesignOutput,
+        artifact_bundle: ArtifactBundle,
+        model_manifest: ModelManifest,
+        #[serde(default)]
+        structural_verification: Option<StructuralVerificationResult>,
+    },
+    Error,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ThreadStatus {
@@ -1321,6 +1344,17 @@ pub struct ThreadMessagesPage {
     pub truncated_fields: Vec<String>,
 }
 
+/// Coherent first-load projection for one design thread. Timeline rows stay
+/// bounded while exactly one selected version carries full runtime payloads.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceProjection {
+    pub thread: Thread,
+    pub messages_page: ThreadMessagesPage,
+    pub selected_version: Option<Message>,
+    pub requested_message_found: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryChangedEvent {
@@ -1474,7 +1508,7 @@ impl std::str::FromStr for AttachmentKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Attachment {
     pub path: String,
@@ -1492,6 +1526,13 @@ pub struct GenerateOutput {
     pub design: DesignOutput,
     pub thread_id: String,
     pub message_id: String,
+    /// The provider's transient PLAN result for this authoring turn.
+    ///
+    /// This is deliberately carried on the command response rather than on
+    /// `DesignOutput`: a plan authorizes controller work, while a design is
+    /// the immutable authoring snapshot that may be persisted in history.
+    #[serde(default)]
+    pub next_action: Option<exploration_cycle::PlanProposal>,
     #[serde(default)]
     pub usage: Option<UsageSummary>,
 }

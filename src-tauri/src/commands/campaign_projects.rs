@@ -4,6 +4,30 @@ use crate::contracts::{
 };
 use crate::models::AppState;
 use tauri::State;
+
+#[tauri::command]
+#[specta::specta]
+pub async fn transition_campaign_run(
+    input: crate::services::campaign_transition::TransitionCampaignRunInput,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> AppResult<crate::services::campaign_transition::TransitionCampaignRunResult> {
+    let root = crate::campaign_definition::packaged_root(&app)?;
+    let mut db = state.db.lock().await;
+    crate::services::campaign_transition::transition_campaign_run(&mut db, &root, input)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn open_campaign_project(
+    intent: crate::services::campaign_project_open::OpenCampaignProjectIntent,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> AppResult<crate::services::campaign_project_open::OpenCampaignProjectResult> {
+    let root = crate::campaign_definition::packaged_root(&app)?;
+    let mut db = state.db.lock().await;
+    crate::services::campaign_project_open::open_campaign_project(&mut db, &root, intent)
+}
 #[tauri::command]
 #[specta::specta]
 pub async fn create_campaign_run(
@@ -38,7 +62,7 @@ pub async fn save_campaign_run(
 #[specta::specta]
 pub async fn delete_campaign_run(id: String, state: State<'_, AppState>) -> AppResult<()> {
     let mut db = state.db.lock().await;
-    campaign_projects::delete(&mut db, &id)
+    campaign_projects::delete_with_navigation(&mut db, &id)
 }
 
 #[tauri::command]
