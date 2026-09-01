@@ -209,25 +209,6 @@ pub async fn handle_request_user_prompt(
     )
     .await;
 
-    handle
-        .emit(
-            "agent-prompt-request",
-            AgentPromptEvent {
-                request_id: request_id.clone(),
-                message: prompt_message.clone(),
-                agent_label: ctx.agent_label.clone(),
-                session_id: ctx.session_id.clone(),
-                thread_id: response_thread_id.clone(),
-                message_id: prompt_target
-                    .as_ref()
-                    .and_then(|target| target.message_id.clone()),
-                model_id: prompt_target
-                    .as_ref()
-                    .and_then(|target| target.model_id.clone()),
-            },
-        )
-        .map_err(|e| AppError::internal(format!("Failed to emit prompt event: {}", e)))?;
-
     // For active-mode auto-agents: freeze the process group while waiting.
     // The supervisor registered the pgid; we stash it so resolve can SIGCONT.
     #[cfg(unix)]
@@ -254,7 +235,7 @@ pub async fn handle_request_user_prompt(
             pgid,
             agent_label: ctx.agent_label.clone(),
             session_id: ctx.session_id.clone(),
-            thread_id: prompt_target.map(|target| target.thread_id),
+            thread_id: response_thread_id.clone(),
         },
     );
     if has_managed_runtime_session(state, &ctx.session_id) {
@@ -266,6 +247,47 @@ pub async fn handle_request_user_prompt(
                 .clone()
                 .or_else(|| Some("Waiting for your next queued message.".to_string())),
         );
+    }
+
+    let auto_delivered = if let Some(thread_id) = response_thread_id.as_deref() {
+        match crate::commands::session::auto_deliver_queued_prompt_batch(
+            &request_id,
+            thread_id,
+            state,
+        )
+        .await
+        {
+            Ok(delivered) => delivered,
+            Err(error) => {
+                eprintln!(
+                    "[MCP] queued prompt auto-delivery failed; preserving live prompt {}: {}",
+                    request_id, error.message
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
+    if !auto_delivered {
+        handle
+            .emit(
+                "agent-prompt-request",
+                AgentPromptEvent {
+                    request_id: request_id.clone(),
+                    message: prompt_message.clone(),
+                    agent_label: ctx.agent_label.clone(),
+                    session_id: ctx.session_id.clone(),
+                    thread_id: response_thread_id.clone(),
+                    message_id: prompt_target
+                        .as_ref()
+                        .and_then(|target| target.message_id.clone()),
+                    model_id: prompt_target
+                        .as_ref()
+                        .and_then(|target| target.model_id.clone()),
+                },
+            )
+            .map_err(|e| AppError::internal(format!("Failed to emit prompt event: {}", e)))?;
     }
 
     let prompt_input = match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx)
@@ -811,15 +833,19 @@ pub async fn handle_session_activity_set(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    let target = agent_dialogue::resolve_session_thread_target(state, &ctx.session_id).await?;
-    let target_ref = target.as_ref().and_then(|target| {
-        target.message_id.clone().map(|message_id| {
-            session_target_ref(
-                target.thread_id.clone(),
-                message_id,
-                target.model_id.clone(),
+    let target = agent_dialogue::resolve_session_thread_target(state, &ctx.session_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::validation(
+                "session_activity_set requires an active session target. Call thread_borrow or thread_create first.",
             )
-        })
+        })?;
+    let target_ref = target.message_id.clone().map(|message_id| {
+        session_target_ref(
+            target.thread_id.clone(),
+            message_id,
+            target.model_id.clone(),
+        )
     });
     let activity_started_at = now_secs();
     let attention_kind = req
@@ -850,9 +876,9 @@ pub async fn handle_session_activity_set(
     persist_agent_session(
         &conn,
         &ctx,
-        target.as_ref().map(|target| target.thread_id.clone()),
-        target.as_ref().and_then(|target| target.message_id.clone()),
-        target.as_ref().and_then(|target| target.model_id.clone()),
+        Some(target.thread_id.clone()),
+        target.message_id.clone(),
+        target.model_id.clone(),
         &phase,
         label
             .clone()
@@ -864,9 +890,9 @@ pub async fn handle_session_activity_set(
         state,
         &ctx,
         TraceEvent {
-            thread_id: target.as_ref().map(|target| target.thread_id.clone()),
-            message_id: target.as_ref().and_then(|target| target.message_id.clone()),
-            model_id: target.as_ref().and_then(|target| target.model_id.clone()),
+            thread_id: Some(target.thread_id.clone()),
+            message_id: target.message_id.clone(),
+            model_id: target.model_id.clone(),
             phase: &phase,
             kind: "session_activity_set",
             summary: label
@@ -933,15 +959,19 @@ pub async fn handle_session_activity_clear(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    let target = agent_dialogue::resolve_session_thread_target(state, &ctx.session_id).await?;
-    let target_ref = target.as_ref().and_then(|target| {
-        target.message_id.clone().map(|message_id| {
-            session_target_ref(
-                target.thread_id.clone(),
-                message_id,
-                target.model_id.clone(),
+    let target = agent_dialogue::resolve_session_thread_target(state, &ctx.session_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::validation(
+                "session_activity_clear requires an active session target. Call thread_borrow or thread_create first.",
             )
-        })
+        })?;
+    let target_ref = target.message_id.clone().map(|message_id| {
+        session_target_ref(
+            target.thread_id.clone(),
+            message_id,
+            target.model_id.clone(),
+        )
     });
 
     mark_live_session_idle(state, &ctx, target_ref, phase.clone(), status_text.clone()).await;
@@ -950,9 +980,9 @@ pub async fn handle_session_activity_clear(
     persist_agent_session(
         &conn,
         &ctx,
-        target.as_ref().map(|target| target.thread_id.clone()),
-        target.as_ref().and_then(|target| target.message_id.clone()),
-        target.as_ref().and_then(|target| target.model_id.clone()),
+        Some(target.thread_id.clone()),
+        target.message_id.clone(),
+        target.model_id.clone(),
         &phase,
         status_text
             .clone()
@@ -964,9 +994,9 @@ pub async fn handle_session_activity_clear(
         state,
         &ctx,
         TraceEvent {
-            thread_id: target.as_ref().map(|target| target.thread_id.clone()),
-            message_id: target.as_ref().and_then(|target| target.message_id.clone()),
-            model_id: target.as_ref().and_then(|target| target.model_id.clone()),
+            thread_id: Some(target.thread_id.clone()),
+            message_id: target.message_id.clone(),
+            model_id: target.model_id.clone(),
             phase: &phase,
             kind: "session_activity_clear",
             summary: status_text

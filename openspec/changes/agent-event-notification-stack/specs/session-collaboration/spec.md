@@ -84,3 +84,10 @@ style but SHALL NOT suppress another distinct event.
 - AND active-thread events are visually emphasized rather than exclusively
   filtered
 - AND the user can inspect event detail without losing current viewport state.
+
+#### Scenario: Agent reports activity without a bound thread
+
+- GIVEN an MCP agent session has no bound thread target
+- WHEN the agent calls `session_activity_set` or `session_activity_clear`
+- THEN the call fails with a validation error
+- AND no app-global activity event is created from the thread-scoped call.

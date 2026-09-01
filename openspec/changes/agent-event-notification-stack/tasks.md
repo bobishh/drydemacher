@@ -106,3 +106,4 @@
 - [x] 8.4 Run `cd src-tauri && cargo check` and focused Rust tests.
 - [x] 8.5 Run `openspec validate agent-event-notification-stack --strict`.
 - [x] 8.6 Confirm no source-control stage or commit occurred without request.
+- [x] 8.7 Reject targetless MCP session activity and preserve bound thread attribution.

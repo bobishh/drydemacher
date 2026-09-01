@@ -1019,34 +1019,39 @@ async fn health_check_includes_runtime_capabilities() {
 }
 
 async fn seed_live_session(state: &AppState) {
-    state.mcp_sessions.lock().await.insert(
-        test_session_id(),
-        crate::models::McpSessionState {
-            client_kind: "mcp-http".to_string(),
-            host_label: "Claude Code".to_string(),
-            agent_label: "claude".to_string(),
-            llm_model_id: None,
-            llm_model_label: Some("Claude Sonnet".to_string()),
-            bound_thread_id: None,
-            last_target: Some(session_target_ref(
-                "thread-1".to_string(),
-                "msg-1".to_string(),
-                Some("model-base".to_string()),
-            )),
-            phase: Some("idle".to_string()),
-            status_text: Some("Agent joined the workspace.".to_string()),
-            busy: false,
-            activity_label: None,
-            activity_started_at: None,
-            attention_kind: None,
-            waiting_on_prompt: false,
-            current_turn_id: None,
-            current_turn_thread_id: None,
-            current_turn_working_message_ids: Vec::new(),
-            current_turn_working_version_message_id: None,
-            updated_at: now_secs(),
-        },
-    );
+    state
+        .mcp_session_registry
+        .with_sessions()
+        .lock()
+        .await
+        .insert(
+            test_session_id(),
+            crate::models::McpSessionState {
+                client_kind: "mcp-http".to_string(),
+                host_label: "Claude Code".to_string(),
+                agent_label: "claude".to_string(),
+                llm_model_id: None,
+                llm_model_label: Some("Claude Sonnet".to_string()),
+                bound_thread_id: None,
+                last_target: Some(session_target_ref(
+                    "thread-1".to_string(),
+                    "msg-1".to_string(),
+                    Some("model-base".to_string()),
+                )),
+                phase: Some("idle".to_string()),
+                status_text: Some("Agent joined the workspace.".to_string()),
+                busy: false,
+                activity_label: None,
+                activity_started_at: None,
+                attention_kind: None,
+                waiting_on_prompt: false,
+                current_turn_id: None,
+                current_turn_thread_id: None,
+                current_turn_working_message_ids: Vec::new(),
+                current_turn_working_version_message_id: None,
+                updated_at: now_secs(),
+            },
+        );
 }
 
 #[tokio::test]
@@ -1094,7 +1099,8 @@ async fn thread_create_creates_visible_named_thread_and_binds_session() {
     drop(conn);
 
     let live_session = state
-        .mcp_sessions
+        .mcp_session_registry
+        .with_sessions()
         .lock()
         .await
         .get(&test_session_id())
@@ -1136,7 +1142,8 @@ async fn thread_borrow_switches_current_session_target_without_logout() {
     assert_eq!(response.message_id, None);
 
     let live_session = state
-        .mcp_sessions
+        .mcp_session_registry
+        .with_sessions()
         .lock()
         .await
         .get(&test_session_id())
@@ -1158,10 +1165,15 @@ async fn thread_borrow_switches_current_session_target_without_logout() {
 #[tokio::test]
 async fn thread_borrow_message_target_sets_last_target() {
     let (state, _resolver) = seed_target().await;
-    state.mcp_sessions.lock().await.insert(
-        test_session_id(),
-        crate::models::McpSessionState::new("mcp-http".to_string(), "Claude Code".to_string()),
-    );
+    state
+        .mcp_session_registry
+        .with_sessions()
+        .lock()
+        .await
+        .insert(
+            test_session_id(),
+            crate::models::McpSessionState::new("mcp-http".to_string(), "Claude Code".to_string()),
+        );
 
     let response = handle_thread_borrow(
         &state,
@@ -1182,7 +1194,8 @@ async fn thread_borrow_message_target_sets_last_target() {
     assert_eq!(response.model_id.as_deref(), Some("model-base"));
 
     let live_session = state
-        .mcp_sessions
+        .mcp_session_registry
+        .with_sessions()
         .lock()
         .await
         .get(&test_session_id())
@@ -1504,10 +1517,15 @@ async fn managed_session_log_in_allows_no_bound_target() {
         &test_session_id(),
         Some("Connected to Ecky.".to_string()),
     );
-    state.mcp_sessions.lock().await.insert(
-        test_session_id(),
-        crate::models::McpSessionState::new("mcp-http".to_string(), "Claude Code".to_string()),
-    );
+    state
+        .mcp_session_registry
+        .with_sessions()
+        .lock()
+        .await
+        .insert(
+            test_session_id(),
+            crate::models::McpSessionState::new("mcp-http".to_string(), "Claude Code".to_string()),
+        );
 
     let response = handle_session_log_in(
         &state,
@@ -1538,7 +1556,8 @@ async fn managed_session_log_in_allows_no_bound_target() {
     drop(conn);
 
     let live_session = state
-        .mcp_sessions
+        .mcp_session_registry
+        .with_sessions()
         .lock()
         .await
         .get(&test_session_id())
@@ -1709,10 +1728,15 @@ async fn session_log_in_with_steal_transfers_thread_claim() {
         .unwrap();
     }
 
-    state.mcp_sessions.lock().await.insert(
-        test_session_id_other(),
-        crate::models::McpSessionState::new("http".to_string(), "Codex".to_string()),
-    );
+    state
+        .mcp_session_registry
+        .with_sessions()
+        .lock()
+        .await
+        .insert(
+            test_session_id_other(),
+            crate::models::McpSessionState::new("http".to_string(), "Codex".to_string()),
+        );
 
     let response = handle_session_log_in(
         &state,
@@ -1729,7 +1753,7 @@ async fn session_log_in_with_steal_transfers_thread_claim() {
     .expect("steal should transfer thread claim");
 
     assert_eq!(response.thread_id.as_deref(), Some("thread-1"));
-    let sessions = state.mcp_sessions.lock().await;
+    let sessions = state.mcp_session_registry.with_sessions().lock().await;
     let prior_owner = sessions.get(&test_session_id()).expect("prior owner");
     assert_eq!(prior_owner.bound_thread_id, None);
     assert!(prior_owner.last_target.is_none());
@@ -1755,34 +1779,39 @@ async fn session_log_in_with_steal_transfers_thread_claim() {
 #[tokio::test]
 async fn session_resume_blocks_claimed_thread_without_explicit_steal_path() {
     let (state, _resolver) = seed_target().await;
-    state.mcp_sessions.lock().await.insert(
-        test_session_id_other(),
-        crate::models::McpSessionState {
-            client_kind: "mcp-http".to_string(),
-            host_label: "Codex".to_string(),
-            agent_label: "codex".to_string(),
-            llm_model_id: None,
-            llm_model_label: Some("GPT-5".to_string()),
-            bound_thread_id: None,
-            last_target: Some(session_target_ref(
-                "thread-1".to_string(),
-                "msg-1".to_string(),
-                Some("model-base".to_string()),
-            )),
-            phase: Some("idle".to_string()),
-            status_text: Some("Agent joined the workspace.".to_string()),
-            busy: false,
-            activity_label: None,
-            activity_started_at: None,
-            attention_kind: None,
-            waiting_on_prompt: false,
-            current_turn_id: None,
-            current_turn_thread_id: None,
-            current_turn_working_message_ids: Vec::new(),
-            current_turn_working_version_message_id: None,
-            updated_at: now_secs(),
-        },
-    );
+    state
+        .mcp_session_registry
+        .with_sessions()
+        .lock()
+        .await
+        .insert(
+            test_session_id_other(),
+            crate::models::McpSessionState {
+                client_kind: "mcp-http".to_string(),
+                host_label: "Codex".to_string(),
+                agent_label: "codex".to_string(),
+                llm_model_id: None,
+                llm_model_label: Some("GPT-5".to_string()),
+                bound_thread_id: None,
+                last_target: Some(session_target_ref(
+                    "thread-1".to_string(),
+                    "msg-1".to_string(),
+                    Some("model-base".to_string()),
+                )),
+                phase: Some("idle".to_string()),
+                status_text: Some("Agent joined the workspace.".to_string()),
+                busy: false,
+                activity_label: None,
+                activity_started_at: None,
+                attention_kind: None,
+                waiting_on_prompt: false,
+                current_turn_id: None,
+                current_turn_thread_id: None,
+                current_turn_working_message_ids: Vec::new(),
+                current_turn_working_version_message_id: None,
+                updated_at: now_secs(),
+            },
+        );
     {
         let conn = state.db.lock().await;
         persist_agent_session(
@@ -8561,7 +8590,7 @@ async fn session_reply_save_persists_final_reply_to_thread_history_and_logs() {
         .unwrap();
     }
     {
-        let mut sessions = state.mcp_sessions.lock().await;
+        let mut sessions = state.mcp_session_registry.with_sessions().lock().await;
         let session = sessions.get_mut(&test_session_id()).expect("live session");
         session.current_turn_id = Some("turn-1".to_string());
         session.current_turn_thread_id = Some("thread-1".to_string());
@@ -8608,7 +8637,8 @@ async fn session_reply_save_persists_final_reply_to_thread_history_and_logs() {
         .expect("working user message");
     assert_eq!(working_message.status, MessageStatus::Success);
     let live_session = state
-        .mcp_sessions
+        .mcp_session_registry
+        .with_sessions()
         .lock()
         .await
         .get(&test_session_id())
@@ -8647,7 +8677,8 @@ async fn long_action_notice_updates_live_session_and_logs() {
     assert_eq!(response.activity_label, "Developing the next iteration");
 
     let live_session = state
-        .mcp_sessions
+        .mcp_session_registry
+        .with_sessions()
         .lock()
         .await
         .get(&test_session_id())
@@ -8660,10 +8691,36 @@ async fn long_action_notice_updates_live_session_and_logs() {
     );
     assert_eq!(live_session.phase.as_deref(), Some("working"));
 
-    let logs = state.app_logs.lock().unwrap();
-    let last = logs.back().expect("log entry");
-    assert!(last.message.contains("kind=session_activity_set"));
-    assert!(last.message.contains("connector placement pass"));
+    {
+        let logs = state.app_logs.lock().unwrap();
+        let last = logs.back().expect("log entry");
+        assert!(last.message.contains("kind=session_activity_set"));
+        assert!(last.message.contains("connector placement pass"));
+    }
+    let activity = state.get_agent_activity(None);
+    let event = activity
+        .events
+        .iter()
+        .find(|event| event.summary == "Developing the next iteration")
+        .expect("session activity event");
+    assert_eq!(event.thread_id.as_deref(), Some("thread-1"));
+
+    let error = handle_long_action_notice(
+        &state,
+        LongActionNoticeRequest {
+            identity: AgentIdentityOverride::default(),
+            message: "Threadless work".to_string(),
+            phase: Some("working".to_string()),
+            details: Some("Must not become global activity.".to_string()),
+        },
+        &test_ctx_other(),
+    )
+    .await
+    .expect_err("threadless activity must be rejected");
+    assert_eq!(error.code, AppErrorCode::Validation);
+    assert!(error
+        .message
+        .contains("session_activity_set requires an active session target"));
 }
 
 #[tokio::test]
@@ -8699,7 +8756,8 @@ async fn long_action_clear_resets_live_session_busy_state() {
     assert!(!response.busy);
 
     let live_session = state
-        .mcp_sessions
+        .mcp_session_registry
+        .with_sessions()
         .lock()
         .await
         .get(&test_session_id())
@@ -8712,6 +8770,22 @@ async fn long_action_clear_resets_live_session_busy_state() {
         live_session.status_text.as_deref(),
         Some("Ready for the next queued message.")
     );
+
+    let error = handle_long_action_clear(
+        &state,
+        LongActionClearRequest {
+            identity: AgentIdentityOverride::default(),
+            phase: Some("idle".to_string()),
+            status_text: None,
+        },
+        &test_ctx_other(),
+    )
+    .await
+    .expect_err("threadless activity clear must be rejected");
+    assert_eq!(error.code, AppErrorCode::Validation);
+    assert!(error
+        .message
+        .contains("session_activity_clear requires an active session target"));
 }
 
 #[tokio::test]
@@ -8846,7 +8920,8 @@ async fn session_log_out_removes_live_session_and_hides_it_from_active_sessions(
     .expect("session_log_out");
 
     assert!(state
-        .mcp_sessions
+        .mcp_session_registry
+        .with_sessions()
         .lock()
         .await
         .get(&test_session_id())

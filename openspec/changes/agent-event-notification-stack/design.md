@@ -212,6 +212,10 @@ Mascot mode may still derive from current state priority outside
   already received events; retry with bounded backoff.
 - Missing thread association: retain under session activity and mark thread as
   null; do not silently discard.
+- Explicit MCP `session_activity_set` and `session_activity_clear` calls are
+  thread-scoped and resolve their thread from the current bound session target.
+  Reject targetless calls with a validation error. App-global system events use
+  the backend journal boundary directly instead of masquerading as agent work.
 
 ## Migration
 

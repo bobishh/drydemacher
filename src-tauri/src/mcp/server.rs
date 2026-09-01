@@ -1,7 +1,6 @@
 use crate::contracts::{
     AppError, AppErrorCode, AppResult, ArtifactBundle, AuthoringTargetRef, Config,
-    FreecadLibraryImportRequest, FreecadLibrarySearchRequest, Message, MessageRole, MessageStatus,
-    ModelManifest, TargetLeaseInfo,
+    FreecadLibraryImportRequest, FreecadLibrarySearchRequest, ModelManifest, TargetLeaseInfo,
 };
 use crate::db;
 use crate::mcp::authoring::authoring_card_text;
@@ -851,11 +850,13 @@ fn validate_modern_request(
 
 async fn create_session(state: &AppState, host_label: String, client_kind: String) -> String {
     let session_id = format!("mcp-http-{}", Uuid::new_v4());
-    let mut sessions = state.mcp_sessions.lock().await;
-    sessions.insert(
-        session_id.clone(),
-        McpSessionState::new(client_kind, host_label),
-    );
+    state
+        .mcp_session_registry
+        .insert(
+            session_id.clone(),
+            McpSessionState::new(client_kind, host_label),
+        )
+        .await;
     session_id
 }
 
@@ -981,17 +982,20 @@ async fn resolve_modern_context(
     }
 
     let context_id = format!("ecky-context-{}", Uuid::new_v4());
-    state.mcp_sessions.lock().await.insert(
-        context_id.clone(),
-        McpSessionState::new(
-            if managed {
-                "managed-mcp-http".to_string()
-            } else {
-                "mcp-http".to_string()
-            },
-            metadata.client_name.clone(),
-        ),
-    );
+    state
+        .mcp_session_registry
+        .insert(
+            context_id.clone(),
+            McpSessionState::new(
+                if managed {
+                    "managed-mcp-http".to_string()
+                } else {
+                    "mcp-http".to_string()
+                },
+                metadata.client_name.clone(),
+            ),
+        )
+        .await;
     Ok(context_id)
 }
 
@@ -1020,27 +1024,27 @@ fn managed_agent_id_from_uri(uri: &axum::http::Uri) -> Option<String> {
 }
 
 async fn get_session(state: &AppState, session_id: &str) -> Option<McpSessionState> {
-    state.mcp_sessions.lock().await.get(session_id).cloned()
+    state.mcp_session_registry.get(session_id).await
 }
 
 async fn update_session_state<F>(state: &AppState, session_id: &str, f: F) -> AppResult<()>
 where
     F: FnOnce(&mut McpSessionState),
 {
-    let mut sessions = state.mcp_sessions.lock().await;
-    let session = sessions
-        .get_mut(session_id)
-        .ok_or_else(|| AppError::not_found("MCP session not found."))?;
-    f(session);
-    Ok(())
+    if state.mcp_session_registry.update(session_id, f).await {
+        Ok(())
+    } else {
+        Err(AppError::not_found("MCP session not found."))
+    }
 }
 
 async fn set_session_target(state: &AppState, session_id: &str, target: Option<McpTargetRef>) {
-    let mut sessions = state.mcp_sessions.lock().await;
-    if let Some(session) = sessions.get_mut(session_id) {
-        session.last_target = target.clone();
-    }
-    drop(sessions);
+    state
+        .mcp_session_registry
+        .update(session_id, |session| {
+            session.last_target = target.clone();
+        })
+        .await;
     crate::mcp::runtime::associate_session_target(state, session_id, target.as_ref());
 }
 
@@ -1049,7 +1053,7 @@ async fn remove_session(state: &AppState, session_id: &str) -> AppResult<()> {
     state
         .close_prompts_for_session(session_id, "session_disconnected")
         .await;
-    state.mcp_sessions.lock().await.remove(session_id);
+    state.mcp_session_registry.remove(session_id).await;
     if crate::mcp::runtime::runtime_snapshot_by_session_id(state, session_id).is_some() {
         crate::mcp::runtime::mark_agent_disconnected_for_session(
             state,
@@ -1057,11 +1061,6 @@ async fn remove_session(state: &AppState, session_id: &str) -> AppResult<()> {
             Some("Agent disconnected from Ecky's MCP server.".to_string()),
         );
     }
-    state
-        .mcp_session_read_resources
-        .lock()
-        .await
-        .remove(session_id);
     let conn = state.db.lock().await;
     db::delete_target_leases_for_session(&conn, session_id)
         .map_err(|e| AppError::persistence(e.to_string()))?;
@@ -1071,11 +1070,17 @@ async fn remove_session(state: &AppState, session_id: &str) -> AppResult<()> {
 }
 
 /// Emit the current live session list to the frontend so it can update without polling.
-/// Uses the in-memory mcp_sessions map as authoritative source of live connections,
+/// Uses the in-memory MCP session registry as authoritative source of live connections,
 /// then fetches full DB records for those IDs.
 async fn emit_sessions_changed(state: &AppState, handle: &tauri::AppHandle) {
     use tauri::Emitter;
-    let live_ids: Vec<String> = state.mcp_sessions.lock().await.keys().cloned().collect();
+    let live_ids: Vec<String> = state
+        .mcp_session_registry
+        .list()
+        .await
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
     let conn = state.db.lock().await;
     let sessions = db::get_sessions_by_ids(&conn, &live_ids).unwrap_or_default();
     drop(conn);
@@ -1324,7 +1329,7 @@ async fn resolve_authoring_target_for_session(
     }
 
     let (cached_target, live_bound_thread_id) = {
-        let sessions = state.mcp_sessions.lock().await;
+        let sessions = state.mcp_session_registry.with_sessions().lock().await;
         let session = sessions.get(session_id);
         (
             session.and_then(|session| session.last_target.clone()),
@@ -1492,7 +1497,8 @@ async fn resolve_authoring_target_for_session(
 
 async fn bound_thread_id_for_session(state: &AppState, session_id: &str) -> Option<String> {
     if let Some(thread_id) = state
-        .mcp_sessions
+        .mcp_session_registry
+        .with_sessions()
         .lock()
         .await
         .get(session_id)
@@ -2448,8 +2454,10 @@ fn canonical_mcp_resource_uri(uri: &str) -> &str {
 
 async fn mark_session_resource_read(state: &AppState, session_id: &str, uri: &str) {
     let uri = canonical_mcp_resource_uri(uri).to_string();
-    let mut reads = state.mcp_session_read_resources.lock().await;
-    reads.entry(session_id.to_string()).or_default().insert(uri);
+    state
+        .mcp_session_registry
+        .mark_resource_read(session_id, uri)
+        .await;
 }
 
 fn required_authoring_guide_uris(
@@ -2474,10 +2482,7 @@ async fn missing_authoring_guide_uris(
         return required;
     }
 
-    let reads = state.mcp_session_read_resources.lock().await;
-    let Some(read_uris) = reads.get(session_id) else {
-        return required;
-    };
+    let read_uris = state.mcp_session_registry.read_resources(session_id).await;
 
     required
         .into_iter()
@@ -2486,7 +2491,7 @@ async fn missing_authoring_guide_uris(
 }
 
 async fn session_bypasses_resource_read_guard(state: &AppState, session_id: &str) -> bool {
-    let sessions = state.mcp_sessions.lock().await;
+    let sessions = state.mcp_session_registry.with_sessions().lock().await;
     let Some(session) = sessions.get(session_id) else {
         return false;
     };
@@ -2734,6 +2739,12 @@ pub(crate) fn tool_capability_group(name: &str) -> Option<CapabilityGroup> {
     let group = match name {
         // ── Core session & workspace (+ capability discovery controls) ──────
         "health_check"
+        | "exploration_run_start"
+        | "exploration_cycle_get"
+        | "exploration_cycle_active_get"
+        | "exploration_cycle_events"
+        | "exploration_cycle_answer"
+        | "exploration_run_stop"
         | "workspace_overview"
         | "agent_identity_set"
         | "session_log_in"
@@ -2989,13 +3000,7 @@ async fn resolve_tools_list(
     });
 
     if profile == MCP_PROFILE_COMPACT_MANAGED {
-        let enabled = state
-            .mcp_session_enabled_groups
-            .lock()
-            .await
-            .get(session_id)
-            .cloned()
-            .unwrap_or_default();
+        let enabled = state.mcp_session_registry.enabled_groups(session_id).await;
         let tools = compact_managed_tool_definitions(&enabled, ecky_ast_authoring);
         // Compact discovery normally fits one page; honor an explicit pageSize
         // for clients that still want to page core + enabled groups.
@@ -3013,6 +3018,50 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
             "name": "health_check",
             "description": "Confirm server is alive and can reach storage/runtime.",
             "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "exploration_run_start",
+            "description": "Submit an exploration objective to the shared Rust PLAN/BUILD/VERIFY/DECIDE controller. The controller owns provider calls, immutable version append, verification, retries, budget, queueing, and terminal decisions.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "requestId": { "type": "string" },
+                    "threadId": { "type": "string" },
+                    "prompt": { "type": "string" },
+                    "baseVersionId": { "type": "string" },
+                    "attachments": { "type": "array", "items": { "type": "object" } },
+                    "options": { "type": "object" },
+                    "acceptanceCriteria": { "type": "array", "items": { "type": "string" } },
+                    "hardConstraints": { "type": "array", "items": { "type": "string" } },
+                    "softPreferences": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["requestId", "threadId", "prompt"]
+            }
+        }),
+        json!({
+            "name": "exploration_cycle_get",
+            "description": "Read one compact durable exploration-cycle packet.",
+            "inputSchema": { "type": "object", "properties": { "cycleId": { "type": "string" } }, "required": ["cycleId"] }
+        }),
+        json!({
+            "name": "exploration_cycle_active_get",
+            "description": "Read the compact active exploration-cycle projection for one thread. Returns null when no cycle is active.",
+            "inputSchema": { "type": "object", "properties": { "threadId": { "type": "string" } }, "required": ["threadId"] }
+        }),
+        json!({
+            "name": "exploration_cycle_events",
+            "description": "Read a bounded page of detailed exploration events and raw evidence.",
+            "inputSchema": { "type": "object", "properties": { "cycleId": { "type": "string" }, "afterSequence": { "type": "integer" }, "limit": { "type": "integer", "maximum": 200 } }, "required": ["cycleId"] }
+        }),
+        json!({
+            "name": "exploration_cycle_answer",
+            "description": "Submit user input for the persisted ASK blocking this cycle. The Rust controller validates and owns the resulting transition.",
+            "inputSchema": { "type": "object", "properties": { "cycleId": { "type": "string" }, "answer": { "type": "string" } }, "required": ["cycleId", "answer"] }
+        }),
+        json!({
+            "name": "exploration_run_stop",
+            "description": "Request cancellation of backend-owned work for one request and stop its active durable cycle without changing version identity.",
+            "inputSchema": { "type": "object", "properties": { "requestId": { "type": "string" }, "threadId": { "type": "string" } }, "required": ["requestId", "threadId"] }
         }),
         json!({
             "name": "workspace_overview",
@@ -3952,7 +4001,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "session_activity_set",
-            "description": "Set the current MCP session activity state so Ecky can drive bubble, microwave, and timer UX without scraping terminal text. Use this for any long or meaningful step.",
+            "description": "Set thread-scoped activity for the current bound MCP target so Ecky can drive bubble, microwave, and timer UX without scraping terminal text. Requires thread_borrow, thread_create, or another bound target first; targetless calls fail validation.",
             "inputSchema": with_identity(
                 &[
                     ("phase", json!({ "type": "string" })),
@@ -3965,7 +4014,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "session_activity_clear",
-            "description": "Clear the current explicit MCP session activity state after a step finishes. Optionally set the next phase or idle status text.",
+            "description": "Clear thread-scoped activity for the current bound MCP target after a step finishes. Optionally set the next phase or idle status text. Targetless calls fail validation.",
             "inputSchema": with_identity(
                 &[
                     ("phase", json!({ "type": "string" })),
@@ -3976,7 +4025,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "long_action_notice",
-            "description": "Compatibility alias for session_activity_set. Prefer session_activity_set for new agents.",
+            "description": "Compatibility alias for thread-scoped session_activity_set. Requires a bound target. Prefer session_activity_set for new agents.",
             "inputSchema": with_identity(
                 &[
                     ("message", json!({ "type": "string" })),
@@ -3988,7 +4037,7 @@ fn tool_definitions_with_ast_enabled(ecky_ast_authoring: bool) -> Vec<Value> {
         }),
         json!({
             "name": "long_action_clear",
-            "description": "Compatibility alias for session_activity_clear. Prefer session_activity_clear for new agents.",
+            "description": "Compatibility alias for thread-scoped session_activity_clear. Requires a bound target. Prefer session_activity_clear for new agents.",
             "inputSchema": with_identity(
                 &[
                     ("phase", json!({ "type": "string" })),
@@ -4810,7 +4859,7 @@ async fn handle_http_post(
         )
         .await
         {
-            server.state.mcp_sessions.lock().await.remove(&session_id);
+            server.state.mcp_session_registry.remove(&session_id).await;
             let payload = json_rpc_error(req.id, -32002, error.message);
             return json_http_response(StatusCode::NOT_FOUND, &payload, None);
         }
@@ -4853,7 +4902,12 @@ async fn handle_http_post(
     if get_session(&server.state, &session_id).await.is_none() {
         // Auto-resurrect: server may have restarted and lost in-memory session state.
         // Re-create the session so the client can continue without re-initializing.
-        let mut sessions = server.state.mcp_sessions.lock().await;
+        let mut sessions = server
+            .state
+            .mcp_session_registry
+            .with_sessions()
+            .lock()
+            .await;
         sessions.insert(
             session_id.clone(),
             McpSessionState::new("mcp-http".to_string(), String::new()),
@@ -4866,7 +4920,7 @@ async fn handle_http_post(
         )
         .await
         {
-            server.state.mcp_sessions.lock().await.remove(&session_id);
+            server.state.mcp_session_registry.remove(&session_id).await;
             let payload = json_rpc_error(req.id, -32002, error.message);
             return json_http_response(StatusCode::NOT_FOUND, &payload, None);
         }
@@ -5093,7 +5147,8 @@ async fn dispatch_workspace_overview(
     );
     let live_bound_thread_id = server
         .state
-        .mcp_sessions
+        .mcp_session_registry
+        .with_sessions()
         .lock()
         .await
         .get(session_id)
@@ -5349,13 +5404,17 @@ async fn dispatch_capability_enable(
         ))
     })?;
 
-    let mut enabled_groups = state.mcp_session_enabled_groups.lock().await;
-    let session_groups = enabled_groups.entry(session_id.to_string()).or_default();
-    let already_enabled = session_groups.contains(group.id());
+    let already_enabled = state
+        .mcp_session_registry
+        .enabled_groups(session_id)
+        .await
+        .contains(group.id());
     if !already_enabled {
-        session_groups.insert(group.id().to_string());
+        state
+            .mcp_session_registry
+            .enable_group(session_id, group.id())
+            .await;
     }
-    drop(enabled_groups);
 
     // Emit standard `notifications/tools/list_changed` for this session. This
     // Streamable-HTTP server answers each request with one JSON-RPC object, so
@@ -5366,32 +5425,24 @@ async fn dispatch_capability_enable(
         "method": "notifications/tools/list_changed"
     });
     state
-        .mcp_session_pending_notifications
-        .lock()
-        .await
-        .entry(session_id.to_string())
-        .or_default()
-        .push(notification);
+        .mcp_session_registry
+        .enqueue_notification(session_id, notification)
+        .await;
 
-    let enabled: Vec<String> = state
-        .mcp_session_enabled_groups
-        .lock()
-        .await
-        .get(session_id)
-        .map(|set| {
-            let mut ids: Vec<String> = set.iter().cloned().collect();
-            ids.sort_by_key(|id| {
-                CapabilityGroup::from_id(id)
-                    .and_then(|group| {
-                        CapabilityGroup::all()
-                            .iter()
-                            .position(|candidate| candidate == &group)
-                    })
-                    .unwrap_or(usize::MAX)
-            });
-            ids
-        })
-        .unwrap_or_default();
+    let enabled: Vec<String> = {
+        let set = state.mcp_session_registry.enabled_groups(session_id).await;
+        let mut ids: Vec<String> = set.iter().cloned().collect();
+        ids.sort_by_key(|id| {
+            CapabilityGroup::from_id(id)
+                .and_then(|group| {
+                    CapabilityGroup::all()
+                        .iter()
+                        .position(|candidate| candidate == &group)
+                })
+                .unwrap_or(usize::MAX)
+        });
+        ids
+    };
 
     Ok((
         json!({
@@ -5412,8 +5463,10 @@ pub(crate) async fn drain_pending_mcp_notifications(
     state: &AppState,
     session_id: &str,
 ) -> Vec<Value> {
-    let mut notifications = state.mcp_session_pending_notifications.lock().await;
-    notifications.remove(session_id).unwrap_or_default()
+    state
+        .mcp_session_registry
+        .drain_notifications(session_id)
+        .await
 }
 
 fn default_fem_budgets() -> crate::contracts::FemBudgetLimitsDto {
@@ -5509,6 +5562,78 @@ async fn dispatch_tool_call(
         "health_check" => {
             let response =
                 handlers::handle_health_check(&server.state, server.app.as_ref()).await?;
+            Ok((serde_json::to_value(response).unwrap(), None))
+        }
+        "exploration_run_start" => {
+            let mut args = args;
+            args.as_object_mut()
+                .ok_or_else(|| AppError::validation("exploration_run_start requires an object."))?
+                .insert("kind".to_string(), json!("controller"));
+            let input: crate::contracts::exploration_run::StartExplorationRunInput =
+                serde_json::from_value(args)
+                    .map_err(|error| AppError::validation(error.to_string()))?;
+            let response =
+                handlers::handle_exploration_run_start(&server.state, server.app.as_ref(), input)
+                    .await?;
+            Ok((serde_json::to_value(response).unwrap(), None))
+        }
+        "exploration_cycle_get" => {
+            let cycle_id = args
+                .get("cycleId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| AppError::validation("exploration_cycle_get requires cycleId."))?;
+            let response =
+                handlers::handle_exploration_cycle_get(&server.state, cycle_id.to_string()).await?;
+            Ok((serde_json::to_value(response).unwrap(), None))
+        }
+        "exploration_cycle_active_get" => {
+            let thread_id = args
+                .get("threadId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    AppError::validation("exploration_cycle_active_get requires threadId.")
+                })?;
+            let response =
+                handlers::handle_active_exploration_cycle_get(&server.state, thread_id.to_string())
+                    .await?;
+            Ok((serde_json::to_value(response).unwrap(), None))
+        }
+        "exploration_cycle_events" => {
+            let cycle_id = args.get("cycleId").and_then(Value::as_str).ok_or_else(|| {
+                AppError::validation("exploration_cycle_events requires cycleId.")
+            })?;
+            let response = handlers::handle_exploration_cycle_events(
+                &server.state,
+                cycle_id.to_string(),
+                args.get("afterSequence").and_then(Value::as_u64),
+                args.get("limit")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize),
+            )
+            .await?;
+            Ok((serde_json::to_value(response).unwrap(), None))
+        }
+        "exploration_cycle_answer" => {
+            let cycle_id = args.get("cycleId").and_then(Value::as_str).ok_or_else(|| {
+                AppError::validation("exploration_cycle_answer requires cycleId.")
+            })?;
+            let answer = args
+                .get("answer")
+                .and_then(Value::as_str)
+                .ok_or_else(|| AppError::validation("exploration_cycle_answer requires answer."))?;
+            let response = handlers::handle_exploration_cycle_answer(
+                &server.state,
+                cycle_id.to_string(),
+                answer.to_string(),
+            )
+            .await?;
+            Ok((serde_json::to_value(response).unwrap(), None))
+        }
+        "exploration_run_stop" => {
+            let input: crate::contracts::exploration_run::StopExplorationRunInput =
+                serde_json::from_value(args)
+                    .map_err(|error| AppError::validation(error.to_string()))?;
+            let response = handlers::handle_exploration_run_stop(&server.state, input).await?;
             Ok((serde_json::to_value(response).unwrap(), None))
         }
         "session_log_in" => {
@@ -7672,20 +7797,18 @@ async fn persist_freecad_library_import_version(
     model_manifest: ModelManifest,
     current_thread_id: Option<&str>,
 ) -> AppResult<(Value, McpTargetRef)> {
-    crate::contracts::validate_model_runtime_bundle(&model_manifest, &artifact_bundle)?;
-
     let label = model_manifest.document.document_label.trim();
     let document_name = model_manifest.document.document_name.trim();
-    let title = request
+    let requested_title = request
         .title
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .or_else(|| (!label.is_empty()).then_some(label))
-        .or_else(|| (!document_name.is_empty()).then_some(document_name))
-        .or_else(|| (!request.item.name.trim().is_empty()).then_some(request.item.name.trim()))
-        .unwrap_or("FreeCAD Library Part")
-        .to_string();
+        .map(str::to_string)
+        .or_else(|| {
+            (label.is_empty() && document_name.is_empty() && !request.item.name.trim().is_empty())
+                .then(|| request.item.name.trim().to_string())
+        });
     let thread_id = request
         .thread_id
         .as_deref()
@@ -7694,73 +7817,28 @@ async fn persist_freecad_library_import_version(
         .map(str::to_string)
         .or_else(|| current_thread_id.map(str::to_string))
         .unwrap_or_else(|| Uuid::new_v4().to_string());
-
-    let now = now_secs();
-    let db = state.db.lock().await;
-    let existing_title = db::get_thread_title(&db, &thread_id)
-        .map_err(|err| AppError::persistence(err.to_string()))?;
-    let thread_traits = if existing_title.is_none() {
-        Some(crate::generate_genie_traits())
-    } else {
-        None
-    };
-    let thread_title = existing_title.as_deref().unwrap_or(&title);
-    db::create_or_update_thread(&db, &thread_id, thread_title, now, thread_traits.as_ref())
-        .map_err(|err| AppError::persistence(err.to_string()))?;
-
-    let message_id = Uuid::new_v4().to_string();
-    let content = if label.is_empty() {
-        format!("Imported FreeCAD library part: {}.", request.item.name)
-    } else {
-        format!("Imported FreeCAD library part: {}.", label)
-    };
-    let message = Message {
-        id: message_id.clone(),
-        role: MessageRole::Assistant,
-        content,
-        status: MessageStatus::Success,
-        output: None,
-        usage: None,
-        artifact_bundle: Some(artifact_bundle.clone()),
-        model_manifest: Some(model_manifest.clone()),
-        structural_verification: None,
-        agent_origin: None,
-        image_data: None,
-        visual_kind: None,
-        attachment_images: Vec::new(),
-        timestamp: now,
-    };
-    db::add_message(&db, &thread_id, &message)
-        .map_err(|err| AppError::persistence(err.to_string()))?;
-    let _ = crate::persist_thread_summary(&db, &thread_id, thread_title);
-    drop(db);
-
-    let snapshot = crate::services::session::build_runtime_snapshot(
-        None,
-        Some(thread_id.clone()),
-        Some(message_id.clone()),
-        Some(artifact_bundle.clone()),
-        Some(model_manifest.clone()),
-        None,
-    );
-    {
-        let mut last = state.last_snapshot.lock().unwrap();
-        *last = Some(snapshot.clone());
-    }
-    crate::services::session::write_last_snapshot(app, Some(&snapshot));
+    let projection = crate::services::imported_model::persist_imported_runtime(
+        Some(thread_id),
+        requested_title,
+        artifact_bundle,
+        model_manifest,
+        state,
+        app,
+    )
+    .await?;
 
     let target = McpTargetRef {
-        thread_id: thread_id.clone(),
-        message_id: message_id.clone(),
-        model_id: Some(artifact_bundle.model_id.clone()),
+        thread_id: projection.thread_id.clone(),
+        message_id: projection.message_id.clone(),
+        model_id: Some(projection.artifact_bundle.model_id.clone()),
     };
     Ok((
         json!({
-            "threadId": thread_id,
-            "messageId": message_id,
-            "title": thread_title,
-            "artifactBundle": artifact_bundle,
-            "modelManifest": model_manifest
+            "threadId": projection.thread_id,
+            "messageId": projection.message_id,
+            "title": projection.title,
+            "artifactBundle": projection.artifact_bundle,
+            "modelManifest": projection.model_manifest
         }),
         target,
     ))
@@ -8109,34 +8187,39 @@ mod tests {
 
     async fn test_dispatch_server(macro_code: &str, session_id: &str) -> HttpServerState {
         let (state, resolver) = seed_dispatch_ecky_target(macro_code).await;
-        state.mcp_sessions.lock().await.insert(
-            session_id.to_string(),
-            McpSessionState {
-                client_kind: "mcp-http".to_string(),
-                host_label: "Codex".to_string(),
-                agent_label: "codex".to_string(),
-                llm_model_id: None,
-                llm_model_label: Some("gpt-5.4".to_string()),
-                bound_thread_id: Some("thread-1".to_string()),
-                last_target: Some(McpTargetRef {
-                    thread_id: "thread-1".to_string(),
-                    message_id: "msg-1".to_string(),
-                    model_id: Some("model-base".to_string()),
-                }),
-                phase: Some("idle".to_string()),
-                status_text: Some("ready".to_string()),
-                busy: false,
-                activity_label: None,
-                activity_started_at: None,
-                attention_kind: None,
-                waiting_on_prompt: false,
-                current_turn_id: None,
-                current_turn_thread_id: None,
-                current_turn_working_message_ids: Vec::new(),
-                current_turn_working_version_message_id: None,
-                updated_at: now_secs(),
-            },
-        );
+        state
+            .mcp_session_registry
+            .with_sessions()
+            .lock()
+            .await
+            .insert(
+                session_id.to_string(),
+                McpSessionState {
+                    client_kind: "mcp-http".to_string(),
+                    host_label: "Codex".to_string(),
+                    agent_label: "codex".to_string(),
+                    llm_model_id: None,
+                    llm_model_label: Some("gpt-5.4".to_string()),
+                    bound_thread_id: Some("thread-1".to_string()),
+                    last_target: Some(McpTargetRef {
+                        thread_id: "thread-1".to_string(),
+                        message_id: "msg-1".to_string(),
+                        model_id: Some("model-base".to_string()),
+                    }),
+                    phase: Some("idle".to_string()),
+                    status_text: Some("ready".to_string()),
+                    busy: false,
+                    activity_label: None,
+                    activity_started_at: None,
+                    attention_kind: None,
+                    waiting_on_prompt: false,
+                    current_turn_id: None,
+                    current_turn_thread_id: None,
+                    current_turn_working_message_ids: Vec::new(),
+                    current_turn_working_version_message_id: None,
+                    updated_at: now_secs(),
+                },
+            );
 
         HttpServerState {
             state,
@@ -8164,30 +8247,35 @@ mod tests {
                 .expect("create empty thread");
         }
 
-        state.mcp_sessions.lock().await.insert(
-            session_id.to_string(),
-            McpSessionState {
-                client_kind: "mcp-http".to_string(),
-                host_label: "Codex".to_string(),
-                agent_label: "codex".to_string(),
-                llm_model_id: None,
-                llm_model_label: Some("gpt-5.4".to_string()),
-                bound_thread_id: Some("thread-empty".to_string()),
-                last_target: None,
-                phase: Some("idle".to_string()),
-                status_text: Some("ready".to_string()),
-                busy: false,
-                activity_label: None,
-                activity_started_at: None,
-                attention_kind: None,
-                waiting_on_prompt: false,
-                current_turn_id: None,
-                current_turn_thread_id: None,
-                current_turn_working_message_ids: Vec::new(),
-                current_turn_working_version_message_id: None,
-                updated_at: now,
-            },
-        );
+        state
+            .mcp_session_registry
+            .with_sessions()
+            .lock()
+            .await
+            .insert(
+                session_id.to_string(),
+                McpSessionState {
+                    client_kind: "mcp-http".to_string(),
+                    host_label: "Codex".to_string(),
+                    agent_label: "codex".to_string(),
+                    llm_model_id: None,
+                    llm_model_label: Some("gpt-5.4".to_string()),
+                    bound_thread_id: Some("thread-empty".to_string()),
+                    last_target: None,
+                    phase: Some("idle".to_string()),
+                    status_text: Some("ready".to_string()),
+                    busy: false,
+                    activity_label: None,
+                    activity_started_at: None,
+                    attention_kind: None,
+                    waiting_on_prompt: false,
+                    current_turn_id: None,
+                    current_turn_thread_id: None,
+                    current_turn_working_message_ids: Vec::new(),
+                    current_turn_working_version_message_id: None,
+                    updated_at: now,
+                },
+            );
 
         HttpServerState {
             state,
@@ -8234,11 +8322,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exploration_stop_dispatches_cancellation_intent_to_shared_registry() {
+        let session_id = "session-exploration-stop";
+        let server = test_blank_dispatch_server(session_id).await;
+
+        let response = dispatch_tool_call_jsonrpc(
+            &server,
+            session_id,
+            "exploration_run_stop",
+            json!({
+                "requestId": "request-stop-1",
+                "threadId": "thread-empty"
+            }),
+        )
+        .await;
+
+        assert!(response.error.is_none(), "{response:#?}");
+        assert!(
+            server
+                .state
+                .exploration_run_registry
+                .is_cancelled("request-stop-1")
+                .await,
+            "MCP stop must reach the shared Rust run registry"
+        );
+    }
+
+    #[tokio::test]
     async fn provider_prebind_resolves_workspace_without_thread_borrow() {
         let (state, resolver) = seed_dispatch_ecky_target("(model)").await;
         let session_id = "provider-prebound-session";
         {
-            let mut sessions = state.mcp_sessions.lock().await;
+            let mut sessions = state.mcp_session_registry.with_sessions().lock().await;
             let mut old = McpSessionState::new("mcp-http".to_string(), "Old Agy".to_string());
             old.bound_thread_id = Some("thread-1".to_string());
             sessions.insert("old-provider-session".to_string(), old);
@@ -8265,7 +8380,8 @@ mod tests {
         );
         let session = server
             .state
-            .mcp_sessions
+            .mcp_session_registry
+            .with_sessions()
             .lock()
             .await
             .get(session_id)
@@ -8275,7 +8391,8 @@ mod tests {
         assert_eq!(session.bound_thread_id.as_deref(), Some("thread-1"));
         assert!(server
             .state
-            .mcp_sessions
+            .mcp_session_registry
+            .with_sessions()
             .lock()
             .await
             .get("old-provider-session")
@@ -8482,7 +8599,12 @@ mod tests {
             let session_id = "session-workspace-overview-stack";
             let server = test_dispatch_server("(model)", session_id).await;
             {
-                let mut sessions = server.state.mcp_sessions.lock().await;
+                let mut sessions = server
+                    .state
+                    .mcp_session_registry
+                    .with_sessions()
+                    .lock()
+                    .await;
                 let session = sessions.get_mut(session_id).expect("session");
                 session.bound_thread_id = None;
                 session.last_target = None;
@@ -9089,6 +9211,63 @@ mod tests {
     }
 
     #[test]
+    fn exploration_tools_submit_intent_without_caller_authored_lifecycle_facts() {
+        let tools = tool_definitions();
+        let names = tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        for expected in [
+            "exploration_run_start",
+            "exploration_cycle_get",
+            "exploration_cycle_active_get",
+            "exploration_cycle_events",
+            "exploration_cycle_answer",
+            "exploration_run_stop",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "missing exploration tool {expected}"
+            );
+        }
+        for forbidden in [
+            "exploration_cycle_start",
+            "exploration_cycle_next",
+            "exploration_cycle_stop",
+        ] {
+            assert!(
+                !names.contains(&forbidden),
+                "MCP must not expose lifecycle-authoring tool {forbidden}"
+            );
+        }
+
+        let start = tools
+            .iter()
+            .find(|tool| tool["name"] == "exploration_run_start")
+            .expect("run start tool");
+        let properties = start["inputSchema"]["properties"]
+            .as_object()
+            .expect("start properties");
+        assert!(properties.contains_key("requestId"));
+        assert!(properties.contains_key("threadId"));
+        assert!(properties.contains_key("prompt"));
+        for forbidden in [
+            "action",
+            "phase",
+            "buildStarted",
+            "resultVersionId",
+            "verification",
+            "decision",
+        ] {
+            assert!(
+                !properties.contains_key(forbidden),
+                "caller must not submit lifecycle fact {forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn tool_definitions_include_target_read_split_tools() {
         let tool_names = tool_definitions()
             .into_iter()
@@ -9338,34 +9517,39 @@ mod tests {
             )
             .unwrap();
         }
-        state.mcp_sessions.lock().await.insert(
-            "session-1".to_string(),
-            McpSessionState {
-                client_kind: "mcp-http".to_string(),
-                host_label: "Codex".to_string(),
-                agent_label: "codex".to_string(),
-                llm_model_id: None,
-                llm_model_label: None,
-                bound_thread_id: Some("thread-1".to_string()),
-                last_target: Some(McpTargetRef {
-                    thread_id: "thread-1".to_string(),
-                    message_id: "user-1".to_string(),
-                    model_id: None,
-                }),
-                phase: Some("working".to_string()),
-                status_text: None,
-                busy: true,
-                activity_label: None,
-                activity_started_at: None,
-                attention_kind: None,
-                waiting_on_prompt: false,
-                current_turn_id: None,
-                current_turn_thread_id: Some("thread-1".to_string()),
-                current_turn_working_message_ids: vec!["user-1".to_string()],
-                current_turn_working_version_message_id: None,
-                updated_at: now,
-            },
-        );
+        state
+            .mcp_session_registry
+            .with_sessions()
+            .lock()
+            .await
+            .insert(
+                "session-1".to_string(),
+                McpSessionState {
+                    client_kind: "mcp-http".to_string(),
+                    host_label: "Codex".to_string(),
+                    agent_label: "codex".to_string(),
+                    llm_model_id: None,
+                    llm_model_label: None,
+                    bound_thread_id: Some("thread-1".to_string()),
+                    last_target: Some(McpTargetRef {
+                        thread_id: "thread-1".to_string(),
+                        message_id: "user-1".to_string(),
+                        model_id: None,
+                    }),
+                    phase: Some("working".to_string()),
+                    status_text: None,
+                    busy: true,
+                    activity_label: None,
+                    activity_started_at: None,
+                    attention_kind: None,
+                    waiting_on_prompt: false,
+                    current_turn_id: None,
+                    current_turn_thread_id: Some("thread-1".to_string()),
+                    current_turn_working_message_ids: vec!["user-1".to_string()],
+                    current_turn_working_version_message_id: None,
+                    updated_at: now,
+                },
+            );
 
         let err = resolve_target_for_session(&state, &resolver, "session-1", None, None)
             .await
@@ -9382,7 +9566,8 @@ mod tests {
         let server = test_dispatch_server("(model (part body (box 1 2 3)))", session_id).await;
         let session = server
             .state
-            .mcp_sessions
+            .mcp_session_registry
+            .with_sessions()
             .lock()
             .await
             .get(session_id)
@@ -9442,7 +9627,8 @@ mod tests {
         let server = test_dispatch_server("(model (part body (box 1 2 3)))", session_id).await;
         let session = server
             .state
-            .mcp_sessions
+            .mcp_session_registry
+            .with_sessions()
             .lock()
             .await
             .get(session_id)
@@ -9980,10 +10166,15 @@ mod tests {
     #[tokio::test]
     async fn mcp_http_sessions_bypass_resource_read_guard_for_ecky_authoring_tools() {
         let state = test_mcp_engine_state("openai", "gpt-5.4");
-        state.mcp_sessions.lock().await.insert(
-            "session-http".to_string(),
-            McpSessionState::new("mcp-http".to_string(), "Codex".to_string()),
-        );
+        state
+            .mcp_session_registry
+            .with_sessions()
+            .lock()
+            .await
+            .insert(
+                "session-http".to_string(),
+                McpSessionState::new("mcp-http".to_string(), "Codex".to_string()),
+            );
 
         ensure_authoring_guides_read(
             &state,
@@ -11357,7 +11548,7 @@ mod tests {
         // Override the seed: mark this session as a managed-mcp-http session so
         // tools/list defaults to compact-managed without an explicit profile.
         {
-            let mut sessions = state.mcp_sessions.lock().await;
+            let mut sessions = state.mcp_session_registry.with_sessions().lock().await;
             sessions.insert(
                 "session-managed-default".to_string(),
                 McpSessionState {
