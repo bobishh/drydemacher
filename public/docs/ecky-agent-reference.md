@@ -145,12 +145,15 @@ Write top-level `verify` clauses from measurable requirements. Keep them during 
     (expect preview (= true)))
   (verify
     (tag body-grounded)
+    (intent "Printed body needs broad bed contact")
+    (severity warning)
+    (when (not assembly-preview))
     (metric contact (stl bed-contact-area-ratio body))
     (expect contact (>= 0.75)))
   (part body (box 30 20 10)))
 ```
 
-Use `manifest` metrics for artifact and part claims, `stl` metrics for mesh structure, `clearance` for physical gaps, `selector` for measured placement, and `relation` for comparisons between named targets. A failing clause means repair geometry or parameters; never weaken the requirement to manufacture green output.
+Use `manifest` metrics for artifact and part claims, `stl` metrics for mesh structure, `clearance` for physical gaps, `selector` for measured placement, and `relation` for comparisons between named targets. `error` is default and blocks. `warning` failures remain amber/non-blocking. False `when` conditions return explicit skipped evidence. A failing clause means repair geometry or parameters; never weaken the requirement to manufacture green output.
 
 Use `bed-contact-area-ratio`, `bed-contact-x-span-ratio`, and
 `bed-contact-y-span-ratio` for print-bed grounding. Optional part id scopes the

@@ -163,10 +163,21 @@ Write top-level `verify` clauses from measurable requirements. Keep them during 
     (tag preview-exists)
     (metric preview (manifest has-model-stl))
     (expect preview (= true)))
+  (verify
+    (tag body-grounded)
+    (intent "Printed body needs broad bed contact")
+    (severity warning)
+    (when (not assembly-preview))
+    (metric contact (stl bed-contact-area-ratio body))
+    (expect contact (>= 0.75)))
   (part body (box 30 20 10)))
 ```
 
-Use `manifest` metrics for artifact and part claims, `stl` metrics for mesh structure, `clearance` for physical gaps, `selector` for measured placement, and `relation` for comparisons between named targets. A failing clause means repair geometry or parameters; never weaken the requirement to manufacture green output.
+Use `manifest` metrics for artifact and part claims, `stl` metrics for mesh structure, `clearance` for physical gaps, `selector` for measured placement, and `relation` for comparisons between named targets. `error` is default and blocks. `warning` failures remain amber/non-blocking. False `when` conditions return explicit skipped evidence. A failing clause means repair geometry or parameters; never weaken the requirement to manufacture green output.
+
+Use `bed-contact-area-ratio`, `bed-contact-x-span-ratio`, and
+`bed-contact-y-span-ratio` for print-bed grounding. Optional part id scopes the
+metric to one part STL; omit it for the combined model STL.
 
 For a separated print layout, set the model's `assembly-preview` control false.
 Disconnected parts are then expected layout evidence. Non-manifold edges, invalid
@@ -201,7 +212,7 @@ a `[...]` note marks a backend restriction.
 
 ```scheme
 (params (number radius 20 :label "Radius" :min 5 :max 80))  ; Declares user-visible controls and default parameter values for the model.
-(verify (tag mesh-clean) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= 0)))  ; Declares one runtime-checked requirement and its metric evidence.
+(verify (tag mesh-clean) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= 0)))  ; Declares one conditional runtime check with intent, severity, and typed evidence.
 (part body (cylinder radius height 48))  ; Declares a named renderable part from a solid, sketch, path, or compound expression.
 (feature shell :role enclosure :params (width wall) (box width 40 wall))  ; Declares renderable geometry plus semantic role and primary control metadata.
 (meta :title "Bottle cage")  ; Stores model metadata such as labels, intent, or semantic hints.
@@ -316,7 +327,7 @@ a `[...]` note marks a backend restriction.
 (polygon ((0 0) (40 0) (40 20) (0 20)))  ; Creates a closed polygon sketch from 2D points.
 (profile :outer (circle 20) :holes (circle 6))  ; Builds a face profile from an outer loop and optional hole loops.
 (make-face (polygon points))  ; Turns a closed sketch into a face-like profile for downstream ops.
-(text "A" 12)  ; Creates text geometry where backend lowering supports it.
+(extrude (text "A" 12 :font "Arial") 2)  ; Creates a text profile. `:font` selects the face for this call before downstream extrusion.
 (svg iconData)  ; Imports SVG profile/path data where backend lowering supports it.
 (import-stl "/tmp/part.stl" :target-triangles 4000 :max-error 0.05 :preserve-boundaries #t)  ; Imports an STL file as geometry. Optional preparation keywords keep the raw source and derive a bounded indexed mesh.
 (path (polyline points))  ; Builds a path from path segments.

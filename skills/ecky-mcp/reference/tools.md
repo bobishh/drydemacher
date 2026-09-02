@@ -8,6 +8,42 @@ Confirm server is alive and can reach storage/runtime.
 
 Arguments: none
 
+## exploration_run_start
+
+Submit an exploration objective to the shared Rust PLAN/BUILD/VERIFY/DECIDE controller. The controller owns provider calls, immutable version append, verification, retries, budget, queueing, and terminal decisions.
+
+Arguments: `acceptanceCriteria`, `attachments`, `baseVersionId`, `hardConstraints`, `options`, `prompt` (required), `requestId` (required), `softPreferences`, `threadId` (required)
+
+## exploration_cycle_get
+
+Read one compact durable exploration-cycle packet.
+
+Arguments: `cycleId` (required)
+
+## exploration_cycle_active_get
+
+Read the compact active exploration-cycle projection for one thread. Returns null when no cycle is active.
+
+Arguments: `threadId` (required)
+
+## exploration_cycle_events
+
+Read a bounded page of detailed exploration events and raw evidence.
+
+Arguments: `afterSequence`, `cycleId` (required), `limit`
+
+## exploration_cycle_answer
+
+Submit user input for the persisted ASK blocking this cycle. The Rust controller validates and owns the resulting transition.
+
+Arguments: `answer` (required), `cycleId` (required)
+
+## exploration_run_stop
+
+Request cancellation of backend-owned work for one request and stop its active durable cycle without changing version identity.
+
+Arguments: `requestId` (required), `threadId` (required)
+
 ## workspace_overview
 
 Fast entrypoint: resolve the default editable target, list recent threads, and report any conflicting lease.
@@ -370,25 +406,25 @@ Arguments: `agentLabel`, `body` (required), `fatal`, `llmModelId`, `llmModelLabe
 
 ## session_activity_set
 
-Set the current MCP session activity state so Ecky can drive bubble, microwave, and timer UX without scraping terminal text. Use this for any long or meaningful step.
+Set thread-scoped activity for the current bound MCP target so Ecky can drive bubble, microwave, and timer UX without scraping terminal text. Requires thread_borrow, thread_create, or another bound target first; targetless calls fail validation.
 
 Arguments: `agentLabel`, `attentionKind`, `detail`, `label`, `llmModelId`, `llmModelLabel`, `phase` (required)
 
 ## session_activity_clear
 
-Clear the current explicit MCP session activity state after a step finishes. Optionally set the next phase or idle status text.
+Clear thread-scoped activity for the current bound MCP target after a step finishes. Optionally set the next phase or idle status text. Targetless calls fail validation.
 
 Arguments: `agentLabel`, `llmModelId`, `llmModelLabel`, `phase`, `statusText`
 
 ## long_action_notice
 
-Compatibility alias for session_activity_set. Prefer session_activity_set for new agents.
+Compatibility alias for thread-scoped session_activity_set. Requires a bound target. Prefer session_activity_set for new agents.
 
 Arguments: `agentLabel`, `details`, `llmModelId`, `llmModelLabel`, `message` (required), `phase`
 
 ## long_action_clear
 
-Compatibility alias for session_activity_clear. Prefer session_activity_clear for new agents.
+Compatibility alias for thread-scoped session_activity_clear. Requires a bound target. Prefer session_activity_clear for new agents.
 
 Arguments: `agentLabel`, `llmModelId`, `llmModelLabel`, `phase`, `statusText`
 

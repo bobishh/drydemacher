@@ -363,6 +363,9 @@ Use `verify` when source should declare structural expectations explicitly.
 (model
   (verify
     (tag front_gap body.front_window_1)
+    (intent "Keep lid clearance printable")
+    (severity error)
+    (when assembly-preview)
     (metric gap (clearance min-distance body lid))
     (expect gap (>= 3)))
   (part body (box 10 10 10))
@@ -373,10 +376,10 @@ Use `verify` when source should declare structural expectations explicitly.
 - component-owned verification is the one exception: a `verify` clause may
   sit directly inside `define-component`, before its geometry expression, and
   expands once per instance
-- one verify clause requires three sections in order:
-  - `tag`
-  - `metric`
-  - `expect`
+- one verify clause requires exactly one `tag`, `metric`, and `expect`
+- optional `intent`, `severity`, and `when` sections may each appear once
+- sections may be authored in any order; emitted source uses `tag`, `intent`,
+  `severity`, `when`, `metric`, `expect`
 - nested `verify` inside geometry or helper expressions is rejected
 - empty `(verify)` is rejected
 
@@ -389,6 +392,40 @@ Use `verify` when source should declare structural expectations explicitly.
 - carries authored labels, ids, or references
 - payload stays opaque to compiler/core IR
 - useful for human grouping and later diagnostics
+
+### `intent`
+
+```scheme
+(intent "Assembly must remain connected")
+```
+
+- optional human explanation of the invariant
+- does not create a second requirement id; `tag` remains stable identity
+
+### `severity`
+
+```scheme
+(severity error)
+(severity warning)
+```
+
+- omission means `error`
+- a failed `error` expectation blocks structural verification
+- a failed `warning` expectation stays visible but does not make the model red
+- invalid syntax, invalid conditions, and evaluation errors always block;
+  `warning` cannot hide a broken check
+
+### `when`
+
+```scheme
+(when assembly-preview)
+(when (and assembly-preview (not print-layout)))
+```
+
+- optional boolean gate evaluated from effective render parameters
+- accepts booleans, boolean parameter names, and nested `not`, `and`, `or`
+- false returns explicit `skipped` evidence; metric and expectation do not run
+- unknown/non-boolean parameters, bad arity, and unknown operators are errors
 
 ### `metric`
 
@@ -930,14 +967,37 @@ Rules:
 
 ### `text`
 
-- signature: `text string size`
+- signature: `text string size [:font selector]`
 - result: `Sketch`
 - normal use: feed into `extrude`
+- `:font` belongs to `text`, not `extrude`
+- `selector` accepts an installed font family name or an absolute `.ttf`/`.otf` path
+- a literal selector changes one call; a shared `select` parameter can drive several calls
 
 Example:
 
 ```scheme
-(extrude (text "HELLO" 12) 2)
+(extrude (text "HELLO" 12 :font "Arial") 2)
+```
+
+One label only:
+
+```scheme
+(union
+  (extrude (text "MORNING" 12 :font "Arial") 2)
+  (translate 0 20 0
+    (extrude (text "EVENING" 12 :font "Impact") 2)))
+```
+
+Shared parameter:
+
+```scheme
+(model
+  (params
+    (select label-font "Arial" :label "Label Font"
+      :options (("Arial" "Arial") ("Impact" "Impact"))))
+  (part labels
+    (extrude (text "HELLO" 12 :font label-font) 2)))
 ```
 
 ### `svg`
@@ -1680,7 +1740,7 @@ Do not edit rows by hand; run `npm run generate:prompt`.
 | `taper` | cadOp | `(taper height scale sketch) or (taper height scale-x scale-y sketch)` | freecad, legacy-build123d, mesh/native | Extrudes a sketch while scaling the top section. | `(taper 30 0.7 0.7 (circle 12 32))` |
 | `tapped-hole` | cadOp | `(tapped-hole :iso "M8" :length len [:radius r] [:pitch p] [:depth d] [:base-width w] [:crest-width w] [:lefthand #t])` | freecad, legacy-build123d, mesh/native | A tapped (internal female) thread cut as a positive cavity: a named-radius bore cylinder at the ISO minor diameter unioned with a helical relief ridge whose crest reaches the major diameter. \`:iso "M8"\` decodes a metric designation; an equal-nominal \`thread\` mates with it. | `(tapped-hole :iso "M8" :length 14)` |
 | `tau` | numericConstant | `tau` | freecad, legacy-build123d, mesh/native | Built-in circle constant. | `(* radius tau)` |
-| `text` | cadOp | `(text value size)` | freecad, legacy-build123d, mesh/native | Creates text geometry where backend lowering supports it. | `(text "A" 12)` |
+| `text` | cadOp | `(text value size [:font selector])` | freecad, legacy-build123d, mesh/native | Creates a text profile. \`:font\` selects the face for this call before downstream extrusion. | `(extrude (text "A" 12 :font "Arial") 2)` |
 | `thread` | cadOp | `(thread :radius r :pitch p :length len :depth d [:base-width w] [:crest-width w] [:female #t] [:clearance c] [:lefthand #t] [:iso "M4"])` | freecad, legacy-build123d, mesh/native | Parametric helical thread: a core cylinder plus a \`helical-ridge\` (male), or a ridge cutter (\`:female\`). \`:iso "M4"\` decodes a metric designation into pitch/radius. | `(thread :radius 8 :pitch 2 :length 16 :depth 1)` |
 | `torus` | cadOp | `(torus major minor)` | freecad, legacy-build123d, mesh/native | Creates a ring torus: tube of radius \`minor\` swept at distance \`major\` from the Z axis. | `(torus 20 5)` |
 | `translate` | cadOp | `(translate x y z geometry)` | freecad, legacy-build123d, mesh/native | Moves geometry by XYZ offset. | `(translate 10 0 0 body)` |
@@ -1690,7 +1750,7 @@ Do not edit rows by hand; run `npm run generate:prompt`.
 | `union` | cadOp | `(union solid...)` | freecad, legacy-build123d, mesh/native | Boolean union/fuse of solids. | `(union a b c)` |
 | `vec2` | pointListHelper | `(vec2 x y)` | freecad, legacy-build123d, mesh/native | Constructs a two-coordinate point list. | `(vec2 10 20)` |
 | `vec3` | pointListHelper | `(vec3 x y z)` | freecad, legacy-build123d, mesh/native | Constructs a three-coordinate point list. | `(vec3 10 20 30)` |
-| `verify` | modelClause | `(verify (tag id) (metric id metric-expr) (expect id predicate))` | freecad, legacy-build123d, mesh/native | Declares one runtime-checked requirement and its metric evidence. | `(verify (tag mesh-clean) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= 0)))` |
+| `verify` | modelClause | `(verify (tag id) [(intent text)] [(severity error\|warning)] [(when bool-expr)] (metric id metric-expr) (expect id predicate))` | freecad, legacy-build123d, mesh/native | Declares one conditional runtime check with intent, severity, and typed evidence. | `(verify (tag mesh-clean) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= 0)))` |
 | `view` | modelClause | `(view id (offset-part part dx dy dz)...) ` | freecad, legacy-build123d, mesh/native | Declares a preview-only exploded or print-layout view without changing export geometry. | `(view print-layout (offset-part lid 90 0 0) (offset-part body 0 0 0))` |
 | `voronoi-cell` | cadOp | `(voronoi-cell sites index width height inset)` | mesh/native | Creates one exact bounded Voronoi polygon, uniformly inset and expressed relative to its selected site. | `(voronoi-cell (voronoi-cells 3 3 12 12 1.5 23) 4 40 40 1.2)` |
 | `voronoi-cells` | pointListHelper | `(voronoi-cells rows cols dx dy amount seed)` | freecad, legacy-build123d, mesh/native | Builds jittered grid points suitable as Voronoi-ish perforation centers. | `(voronoi-cells 4 6 14 12 2 seed)` |
