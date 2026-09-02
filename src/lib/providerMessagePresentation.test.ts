@@ -34,3 +34,23 @@ test('providerMessageText keeps diagnostic prose that merely mentions modelId', 
     'Validation failed: modelId mismatch.',
   );
 });
+
+test('providerMessagePresentation segments supported LaTeX delimiters and leaves an incomplete formula as text', () => {
+  const presentation = providerMessagePresentation([
+    'Inline $50^\\circ$ and \\(30\\text{ см}\\).',
+    'Display: $$A/B \\approx 0.884$$ and \\[x^2 + y^2\\].',
+    'Incomplete $formula',
+  ].join('\n'));
+
+  assert.deepEqual(presentation.segments, [
+    { kind: 'text', text: 'Inline ' },
+    { kind: 'math', latex: '50^\\circ', displayMode: false },
+    { kind: 'text', text: ' and ' },
+    { kind: 'math', latex: '30\\text{ см}', displayMode: false },
+    { kind: 'text', text: '.\nDisplay: ' },
+    { kind: 'math', latex: 'A/B \\approx 0.884', displayMode: true },
+    { kind: 'text', text: ' and ' },
+    { kind: 'math', latex: 'x^2 + y^2', displayMode: true },
+    { kind: 'text', text: '.\nIncomplete $formula' },
+  ]);
+});
