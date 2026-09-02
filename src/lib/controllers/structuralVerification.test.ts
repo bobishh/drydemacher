@@ -14,6 +14,7 @@ const RESULT: StructuralVerificationResult = {
     {
       tag: 'step_export',
       status: 'passed',
+      severity: 'error',
       message: 'true = true',
       stableNodeId: 'verify:step_export',
       metricSource: 'manifest',
@@ -25,6 +26,7 @@ const RESULT: StructuralVerificationResult = {
     {
       tag: 'bad_clearance',
       status: 'failed',
+      severity: 'error',
       message: '0.12 is below 0.3',
       stableNodeId: null,
       metricSource: 'clearance',
@@ -59,4 +61,50 @@ test('projects backend authored checks into stable UI chips', () => {
 
 test('projects no chips when backend evidence is absent', () => {
   assert.deepEqual(deriveAuthoredVerifyChips(null), []);
+});
+
+test('projects warning failures amber and skipped checks neutral with intent evidence', () => {
+  const result: StructuralVerificationResult = {
+    ...RESULT,
+    passed: true,
+    authoredVerifyChecks: [
+      {
+        tag: 'triangle-budget',
+        status: 'failed',
+        severity: 'warning',
+        intent: 'Keep preview responsive',
+        message: '12000 > 10000',
+      },
+      {
+        tag: 'assembly-connected',
+        status: 'skipped',
+        severity: 'error',
+        intent: 'Assembly must be connected',
+        condition: 'assembly-preview',
+        conditionResult: false,
+        skipReason: 'Authored `when` condition resolved false.',
+        message: 'Skipped.',
+      },
+    ],
+  };
+
+  assert.deepEqual(deriveAuthoredVerifyChips(result), [
+    {
+      id: 'authored-verify:triangle-budget',
+      label: 'triangle-budget',
+      status: 'failed',
+      tone: 'amber',
+      message: 'Keep preview responsive — 12000 > 10000',
+      stableNodeId: null,
+    },
+    {
+      id: 'authored-verify:assembly-connected',
+      label: 'assembly-connected',
+      status: 'skipped',
+      tone: 'neutral',
+      message:
+        'Assembly must be connected — when assembly-preview: false — Authored `when` condition resolved false.',
+      stableNodeId: null,
+    },
+  ]);
 });

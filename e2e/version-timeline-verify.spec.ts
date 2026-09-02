@@ -44,6 +44,7 @@ function installVersionTimelineMocks(options?: { includeFailedHead?: boolean }) 
             {
               tag: 'rib_clearance',
               status: 'failed',
+              severity: 'error',
               message: 'Gap below minimum.',
               stableNodeId: 'verify:rib_clearance',
               metricSource: 'clearance',
@@ -55,6 +56,7 @@ function installVersionTimelineMocks(options?: { includeFailedHead?: boolean }) 
             {
               tag: 'step_export',
               status: 'passed',
+              severity: 'error',
               message: 'STEP export present.',
               stableNodeId: null,
               metricSource: 'manifest',
@@ -62,6 +64,25 @@ function installVersionTimelineMocks(options?: { includeFailedHead?: boolean }) 
               comparator: '==',
               expected: { kind: 'boolean', value: true },
               actual: { kind: 'boolean', value: true },
+            },
+            {
+              tag: 'triangle_budget',
+              status: 'failed',
+              severity: 'warning',
+              intent: 'Keep preview responsive',
+              message: 'Triangle budget exceeded.',
+              stableNodeId: null,
+            },
+            {
+              tag: 'assembly_connected',
+              status: 'skipped',
+              severity: 'error',
+              intent: 'Assembly must remain connected',
+              condition: 'assembly-preview',
+              conditionResult: false,
+              skipReason: 'Authored `when` condition resolved false.',
+              message: 'Skipped.',
+              stableNodeId: null,
             },
           ],
           metrics: {
@@ -370,9 +391,19 @@ test('Given persisted authored verify chips When opening version thread Then chi
     'button',
     { name: /Authored verify step_export: manifest has-step expected == true; actual true/i },
   );
+  const warningChip = page.getByRole('button', {
+    name: /Authored verify triangle_budget: Keep preview responsive — Triangle budget exceeded\./i,
+  });
+  const skippedChip = page.getByRole('button', {
+    name: /Authored verify assembly_connected: Assembly must remain connected — when assembly-preview: false/i,
+  });
 
   await expect(failedChip).toBeVisible();
   await expect(passedChip).toBeDisabled();
+  await expect(warningChip).toHaveClass(/trail-authored-verify__chip--amber/);
+  await expect(skippedChip).toHaveClass(/trail-authored-verify__chip--neutral/);
+  await expect(warningChip).toBeDisabled();
+  await expect(skippedChip).toBeDisabled();
 
   await failedChip.click();
 

@@ -35,6 +35,15 @@ pub enum AuthoredVerifyCheckStatus {
     Passed,
     Failed,
     Error,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum AuthoredVerifySeverity {
+    #[default]
+    Error,
+    Warning,
 }
 
 /// A resolved verify value (expected or actual). Boundary-typed so MCP agents
@@ -52,7 +61,17 @@ pub enum AuthoredVerifyValue {
 pub struct AuthoredVerifyCheck {
     pub tag: String,
     pub status: AuthoredVerifyCheckStatus,
+    #[serde(default)]
+    pub severity: AuthoredVerifySeverity,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition_result: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stable_node_id: Option<String>,
     /// Machine-readable delta: where the metric came from, the comparator, and

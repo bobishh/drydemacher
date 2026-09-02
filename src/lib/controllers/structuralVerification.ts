@@ -7,7 +7,7 @@ import type {
   StructuralVerificationResult,
 } from '../types/domain';
 
-export type AuthoredVerifyChipTone = 'green' | 'red';
+export type AuthoredVerifyChipTone = 'green' | 'red' | 'amber' | 'neutral';
 
 export type AuthoredVerifyChip = {
   id: string;
@@ -28,11 +28,18 @@ export function deriveAuthoredVerifyChips(
       id: stableNodeId ?? `authored-verify:${label}`,
       label,
       status: check.status,
-      tone: check.status === 'passed' ? 'green' : 'red',
+      tone: authoredVerifyTone(check),
       message: formatAuthoredVerifyChipMessage(check),
       stableNodeId,
     };
   });
+}
+
+function authoredVerifyTone(check: AuthoredVerifyCheck): AuthoredVerifyChipTone {
+  if (check.status === 'passed') return 'green';
+  if (check.status === 'skipped') return 'neutral';
+  if (check.status === 'failed' && check.severity === 'warning') return 'amber';
+  return 'red';
 }
 
 function normalizeAuthoredVerifyTag(check: AuthoredVerifyCheck): string {
@@ -40,15 +47,24 @@ function normalizeAuthoredVerifyTag(check: AuthoredVerifyCheck): string {
 }
 
 function formatAuthoredVerifyChipMessage(check: AuthoredVerifyCheck): string {
+  const intent = `${check.intent ?? ''}`.trim();
+  if (check.status === 'skipped') {
+    const reason = `${check.skipReason ?? check.message}`.trim();
+    const condition = `${check.condition ?? ''}`.trim();
+    return [intent, condition ? `when ${condition}: false` : '', reason].filter(Boolean).join(' — ');
+  }
   const expected = formatAuthoredVerifyValue(check.expected);
   const actual = formatAuthoredVerifyValue(check.actual);
   const comparator = `${check.comparator ?? ''}`.trim();
-  if (!expected || !actual || !comparator) return check.message;
+  if (!expected || !actual || !comparator) {
+    return [intent, check.message].filter(Boolean).join(' — ');
+  }
 
   const metric = [`${check.metricSource ?? ''}`.trim(), `${check.metricKey ?? ''}`.trim()]
     .filter(Boolean)
     .join(' ');
-  return `${metric ? `${metric} ` : ''}expected ${comparator} ${expected}; actual ${actual}`;
+  const evidence = `${metric ? `${metric} ` : ''}expected ${comparator} ${expected}; actual ${actual}`;
+  return [intent, evidence].filter(Boolean).join(' — ');
 }
 
 function formatAuthoredVerifyValue(value: AuthoredVerifyValue | null | undefined): string | null {

@@ -17,20 +17,30 @@ pub async fn handle_verify_generated_model(
     _original_prompt: &str,
 ) -> AppResult<VerifyGeneratedModelResponse> {
     let snapshot = load_draft_render_snapshot(state, message_id, model_id).await?;
-    let (bundle, manifest) = match &snapshot {
+    let (bundle, manifest, effective_params) = match &snapshot {
         Some(snapshot) => (
             snapshot.artifact_bundle.clone(),
             snapshot.model_manifest.clone(),
+            snapshot.effective_params.clone(),
         ),
-        None => (
-            crate::model_runtime::read_artifact_bundle(app, model_id)?,
-            crate::model_runtime::read_model_manifest(app, model_id)?,
-        ),
+        None => {
+            let bundle = crate::model_runtime::read_artifact_bundle(app, model_id)?;
+            let params = resolved_verify_diagnostic_params(state, message_id, &bundle)
+                .await?
+                .into_iter()
+                .map(|entry| (entry.key, entry.value))
+                .collect();
+            (
+                bundle,
+                crate::model_runtime::read_model_manifest(app, model_id)?,
+                params,
+            )
+        }
     };
     let artifact_digest = artifact_bundle_digest(&bundle);
     let result = enrich_verify_result_with_diagnostic_context(
-        crate::services::author_verification_foundation::verify_structure_with_author_verification(
-            &bundle, &manifest,
+        crate::services::author_verification_foundation::verify_structure_with_author_verification_and_params(
+            &bundle, &manifest, &effective_params,
         ),
         state,
         message_id,
@@ -157,10 +167,15 @@ pub async fn handle_structural_verification_summary(
 ) -> AppResult<StructuralVerificationSummaryResponse> {
     let bundle = crate::model_runtime::read_artifact_bundle(app, model_id)?;
     let manifest = crate::model_runtime::read_model_manifest(app, model_id)?;
+    let effective_params = resolved_verify_diagnostic_params(state, message_id, &bundle)
+        .await?
+        .into_iter()
+        .map(|entry| (entry.key, entry.value))
+        .collect();
     let artifact_digest = artifact_bundle_digest(&bundle);
     let result = enrich_verify_result_with_diagnostic_context(
-        crate::services::author_verification_foundation::verify_structure_with_author_verification(
-            &bundle, &manifest,
+        crate::services::author_verification_foundation::verify_structure_with_author_verification_and_params(
+            &bundle, &manifest, &effective_params,
         ),
         state,
         message_id,
@@ -304,7 +319,12 @@ async fn enrich_verify_result_with_diagnostic_context(
             resolved_params: resolved_params.clone(),
         };
         check.diagnostic_context = Some(context.clone());
-        failing_contexts.push(context);
+        if check.status == crate::contracts::AuthoredVerifyCheckStatus::Error
+            || (check.status == crate::contracts::AuthoredVerifyCheckStatus::Failed
+                && check.severity == crate::contracts::AuthoredVerifySeverity::Error)
+        {
+            failing_contexts.push(context);
+        }
     }
 
     let mut failing_index = 0usize;

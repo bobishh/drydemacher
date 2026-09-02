@@ -6733,6 +6733,66 @@ async fn verify_generated_model_merges_authored_verify_failure_into_structural_r
 }
 
 #[tokio::test]
+async fn verify_generated_model_returns_warning_and_skipped_evidence_without_blocking() {
+    let source = r#"
+            (model
+              (params (toggle assembly-preview #t))
+              (verify
+                (tag triangle-budget)
+                (intent "Keep preview responsive")
+                (severity warning)
+                (metric triangles (stl triangle-count))
+                (expect triangles (> 999999)))
+              (verify
+                (tag assembly-connected)
+                (when assembly-preview)
+                (metric impossible (unsupported never-run))
+                (expect impossible (= 1)))
+              (part body (box 10 10 10)))
+        "#;
+    let model_id = "generated-authored-verify-nonblocking";
+    let (state, resolver) =
+        seed_ecky_verify_target(source, model_id, "authored-verify-nonblocking.stl", false).await;
+    {
+        let conn = state.db.lock().await;
+        let (mut saved, _) = db::get_message_output_and_thread(&conn, "msg-1")
+            .expect("saved output lookup")
+            .expect("saved output");
+        saved
+            .initial_params
+            .insert("assembly-preview".to_string(), ParamValue::Boolean(false));
+        db::update_message_output(&conn, "msg-1", &saved).expect("saved params update");
+    }
+
+    let response =
+        handle_verify_generated_model(&state, &resolver, "thread-1", "msg-1", model_id, "")
+            .await
+            .expect("verification response");
+
+    assert!(response.result.passed, "{}", response.result.summary);
+    assert!(response.result.issues.is_empty());
+    assert_eq!(response.result.authored_verify_checks.len(), 2);
+    let warning = &response.result.authored_verify_checks[0];
+    assert_eq!(
+        warning.status,
+        crate::contracts::AuthoredVerifyCheckStatus::Failed
+    );
+    assert_eq!(
+        warning.severity,
+        crate::contracts::AuthoredVerifySeverity::Warning
+    );
+    assert_eq!(warning.intent.as_deref(), Some("Keep preview responsive"));
+    let skipped = &response.result.authored_verify_checks[1];
+    assert_eq!(
+        skipped.status,
+        crate::contracts::AuthoredVerifyCheckStatus::Skipped
+    );
+    assert_eq!(skipped.condition.as_deref(), Some("assembly-preview"));
+    assert_eq!(skipped.condition_result, Some(false));
+    assert!(skipped.skip_reason.is_some());
+}
+
+#[tokio::test]
 async fn verify_generated_model_uses_matching_draft_preview_params() {
     // Given a preview whose rendered model uses a non-default clearance.
     let source = r#"
@@ -7779,6 +7839,26 @@ async fn given_preview_render_when_verified_then_history_keeps_the_same_single_v
     .await
     .expect("store preview");
 
+    assert_eq!(
+        preview.preview_id,
+        preview.base_message_id.clone().expect("durable version id"),
+        "runtime preview must use the immutable version identity"
+    );
+    let restart_target = state
+        .last_snapshot
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|snapshot| snapshot.target_ref.clone())
+        .expect("restart target");
+    assert_eq!(
+        restart_target,
+        crate::contracts::AuthoringTargetRef::SavedVersion {
+            thread_id: preview.thread_id.clone(),
+            message_id: preview.preview_id.clone(),
+        }
+    );
+
     {
         let conn = state.db.lock().await;
         assert_eq!(
@@ -7886,6 +7966,47 @@ async fn given_unverified_preview_then_version_remains_working_without_extra_com
     )
     .unwrap()
     .unwrap();
+    assert_eq!(version.status, MessageStatus::Working);
+}
+
+#[tokio::test]
+async fn given_watcher_version_is_working_when_process_restarts_then_version_remains_in_history() {
+    let (state, resolver) = seed_target().await;
+    let watcher_ctx = project_folder_watcher_context();
+    let preview = store_session_render_preview(
+        &state,
+        &resolver,
+        &watcher_ctx,
+        StoreSessionRenderPreviewRequest {
+            thread_id: "thread-1".to_string(),
+            base_message_id: Some("msg-1".to_string()),
+            design_output: sample_design("Restart-safe", "", "restart_safe_macro()"),
+            artifact_bundle: sample_bundle("model-restart-safe", "restart-safe.stl"),
+            model_manifest: sample_manifest("model-restart-safe"),
+            draft_feedback: None,
+        },
+    )
+    .await
+    .expect("store working watcher version");
+    let version_id = preview.preview_id.clone();
+    {
+        let conn = state.db.lock().await;
+        conn.execute(
+            "UPDATE messages SET agent_origin = json_set(coalesce(agent_origin, '{}'), '$.clientKind', 'watcher') WHERE id = ?1",
+            [&version_id],
+        )
+        .expect("mark watcher origin");
+    }
+
+    let mut restarted_watcher = ProjectFolderWatcher::with_debounce(std::time::Duration::ZERO);
+    let _ = restarted_watcher
+        .tick(&state, &resolver, &watcher_ctx)
+        .await;
+
+    let conn = state.db.lock().await;
+    let version = db::get_thread_message_version(&conn, "thread-1", &version_id)
+        .expect("version query")
+        .expect("restart must preserve working version");
     assert_eq!(version.status, MessageStatus::Working);
 }
 

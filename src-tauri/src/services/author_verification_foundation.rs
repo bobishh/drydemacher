@@ -6,8 +6,9 @@ use std::{
 
 use crate::contracts::{
     ArtifactBundle, AuthoredVerifyCheck,
-    AuthoredVerifyCheckStatus as PublicAuthorVerifyCheckStatus, AuthoredVerifyValue,
-    ManifestBounds, ModelManifest, StructuralIssue, StructuralVerificationResult,
+    AuthoredVerifyCheckStatus as PublicAuthorVerifyCheckStatus, AuthoredVerifySeverity,
+    AuthoredVerifyValue, DesignParams, ManifestBounds, ModelManifest, ParamValue, StructuralIssue,
+    StructuralVerificationResult,
 };
 use crate::ecky_core_ir::{CoreVerifyClause, CoreVerifyValue};
 
@@ -128,12 +129,18 @@ pub(crate) enum AuthorVerifyCheckStatus {
     Passed,
     Failed,
     Error,
+    Skipped,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AuthorVerifyCheckResult {
     pub clause_index: usize,
     pub status: AuthorVerifyCheckStatus,
+    pub severity: AuthoredVerifySeverity,
+    pub intent: Option<String>,
+    pub condition: Option<String>,
+    pub condition_result: Option<bool>,
+    pub skip_reason: Option<String>,
     pub metric_alias: Option<String>,
     pub metric_source: Option<String>,
     pub metric_key: Option<String>,
@@ -180,6 +187,9 @@ pub(crate) fn printed_thread_verify_clauses(
             tag: crate::ecky_core_ir::CoreVerifySection {
                 items: vec![CoreVerifyValue::Symbol(tag.to_string())],
             },
+            intent: None,
+            severity: None,
+            when: None,
             metric: crate::ecky_core_ir::CoreVerifySection {
                 items: vec![CoreVerifyValue::Symbol(alias.to_string()), metric],
             },
@@ -288,11 +298,23 @@ fn expand_printed_thread_verify_sets(
     Ok(expanded)
 }
 
+#[cfg(test)]
 pub(crate) fn evaluate_author_verify_clauses(
     clauses: &[CoreVerifyClause],
     bundle: &ArtifactBundle,
     manifest: &ModelManifest,
     structural: Option<&StructuralVerificationResult>,
+) -> AuthorVerifyEvaluation {
+    let params = default_verify_params(bundle);
+    evaluate_author_verify_clauses_with_params(clauses, bundle, manifest, structural, &params)
+}
+
+pub(crate) fn evaluate_author_verify_clauses_with_params(
+    clauses: &[CoreVerifyClause],
+    bundle: &ArtifactBundle,
+    manifest: &ModelManifest,
+    structural: Option<&StructuralVerificationResult>,
+    effective_params: &DesignParams,
 ) -> AuthorVerifyEvaluation {
     if clauses.is_empty() {
         return AuthorVerifyEvaluation {
@@ -306,29 +328,47 @@ pub(crate) fn evaluate_author_verify_clauses(
     let checks = clauses
         .iter()
         .enumerate()
-        .map(|(index, clause)| evaluate_verify_clause(index, clause, bundle, manifest, &metrics))
+        .map(|(index, clause)| {
+            evaluate_verify_clause(index, clause, bundle, manifest, &metrics, effective_params)
+        })
         .collect::<Vec<_>>();
-    let failed = checks
+    let failed_errors = checks
         .iter()
-        .filter(|check| check.status == AuthorVerifyCheckStatus::Failed)
+        .filter(|check| {
+            check.status == AuthorVerifyCheckStatus::Failed
+                && check.severity == AuthoredVerifySeverity::Error
+        })
+        .count();
+    let failed_warnings = checks
+        .iter()
+        .filter(|check| {
+            check.status == AuthorVerifyCheckStatus::Failed
+                && check.severity == AuthoredVerifySeverity::Warning
+        })
         .count();
     let errored = checks
         .iter()
         .filter(|check| check.status == AuthorVerifyCheckStatus::Error)
         .count();
+    let skipped = checks
+        .iter()
+        .filter(|check| check.status == AuthorVerifyCheckStatus::Skipped)
+        .count();
 
-    let summary = if failed == 0 && errored == 0 {
-        "All authored verify checks passed.".to_string()
-    } else if failed > 0 && errored == 0 {
-        format!("{failed} authored verify check(s) failed.")
-    } else if failed == 0 {
+    let summary = if failed_errors == 0 && errored == 0 {
+        format!(
+            "Authored verify passed with {failed_warnings} warning(s) and {skipped} skipped check(s)."
+        )
+    } else if failed_errors > 0 && errored == 0 {
+        format!("{failed_errors} authored verify error-severity check(s) failed.")
+    } else if failed_errors == 0 {
         format!("{errored} authored verify check(s) errored.")
     } else {
-        format!("{failed} authored verify check(s) failed; {errored} errored.")
+        format!("{failed_errors} authored verify check(s) failed; {errored} errored.")
     };
 
     AuthorVerifyEvaluation {
-        passed: failed == 0 && errored == 0,
+        passed: failed_errors == 0 && errored == 0,
         summary,
         checks,
     }
@@ -337,6 +377,15 @@ pub(crate) fn evaluate_author_verify_clauses(
 pub(crate) fn verify_structure_with_author_verification(
     bundle: &ArtifactBundle,
     manifest: &ModelManifest,
+) -> StructuralVerificationResult {
+    let params = default_verify_params(bundle);
+    verify_structure_with_author_verification_and_params(bundle, manifest, &params)
+}
+
+pub(crate) fn verify_structure_with_author_verification_and_params(
+    bundle: &ArtifactBundle,
+    manifest: &ModelManifest,
+    effective_params: &DesignParams,
 ) -> StructuralVerificationResult {
     match load_authored_verify_clauses(bundle) {
         LoadedAuthoredVerifyClauses::Unavailable => {
@@ -360,6 +409,7 @@ pub(crate) fn verify_structure_with_author_verification(
                 manifest,
                 result,
                 &verify_clauses,
+                effective_params,
             )
         }
     }
@@ -384,6 +434,7 @@ pub(crate) fn merge_author_verification_into_structural_result(
                 manifest,
                 result,
                 &verify_clauses,
+                &default_verify_params(bundle),
             )
         }
     }
@@ -428,9 +479,52 @@ fn load_authored_verify_clauses(bundle: &ArtifactBundle) -> LoadedAuthoredVerify
     }
 }
 
+fn default_verify_params(bundle: &ArtifactBundle) -> DesignParams {
+    let Some(source_path) = bundle
+        .macro_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return DesignParams::new();
+    };
+    let Ok(source) = fs::read_to_string(source_path) else {
+        return DesignParams::new();
+    };
+    let Ok(program) = crate::ecky_scheme::compile_to_core_program(&source) else {
+        return DesignParams::new();
+    };
+    program
+        .parameters
+        .into_iter()
+        .map(|parameter| {
+            let value = match parameter.default_value {
+                crate::ecky_core_ir::CoreParameterValue::Number(value) => ParamValue::Number(value),
+                crate::ecky_core_ir::CoreParameterValue::Boolean(value) => {
+                    ParamValue::Boolean(value)
+                }
+                crate::ecky_core_ir::CoreParameterValue::Text(value)
+                | crate::ecky_core_ir::CoreParameterValue::Choice(value)
+                | crate::ecky_core_ir::CoreParameterValue::Image(value) => {
+                    ParamValue::String(value)
+                }
+            };
+            (parameter.key, value)
+        })
+        .collect()
+}
+
 fn exact_stl_component_count_contract(clauses: &[CoreVerifyClause]) -> Option<usize> {
     let mut declared = None;
     for clause in clauses {
+        if clause.when.is_some()
+            || matches!(
+                verify_severity(clause),
+                Ok(AuthoredVerifySeverity::Warning) | Err(_)
+            )
+        {
+            continue;
+        }
         let metric = parse_metric_ref(clause.metric.items.get(1)?).ok()?;
         if metric.source != "stl" || metric.key != "connected-component-count" {
             continue;
@@ -472,9 +566,15 @@ fn merge_loaded_author_verification_into_structural_result(
     manifest: &ModelManifest,
     mut result: StructuralVerificationResult,
     verify_clauses: &[CoreVerifyClause],
+    effective_params: &DesignParams,
 ) -> StructuralVerificationResult {
-    let evaluation =
-        evaluate_author_verify_clauses(verify_clauses, bundle, manifest, Some(&result));
+    let evaluation = evaluate_author_verify_clauses_with_params(
+        verify_clauses,
+        bundle,
+        manifest,
+        Some(&result),
+        effective_params,
+    );
     result.authored_verify_checks = evaluation
         .checks
         .iter()
@@ -488,7 +588,12 @@ fn merge_loaded_author_verification_into_structural_result(
     }
 
     for check in evaluation.checks {
-        if check.status == AuthorVerifyCheckStatus::Passed {
+        if matches!(
+            check.status,
+            AuthorVerifyCheckStatus::Passed | AuthorVerifyCheckStatus::Skipped
+        ) || (check.status == AuthorVerifyCheckStatus::Failed
+            && check.severity == AuthoredVerifySeverity::Warning)
+        {
             continue;
         }
         result.issues.push(StructuralIssue {
@@ -496,6 +601,7 @@ fn merge_loaded_author_verification_into_structural_result(
                 AuthorVerifyCheckStatus::Passed => "AUTHORED_VERIFY_PASSED".to_string(),
                 AuthorVerifyCheckStatus::Failed => "AUTHORED_VERIFY_FAILED".to_string(),
                 AuthorVerifyCheckStatus::Error => "AUTHORED_VERIFY_ERROR".to_string(),
+                AuthorVerifyCheckStatus::Skipped => "AUTHORED_VERIFY_SKIPPED".to_string(),
             },
             message: check.message,
             part_id: None,
@@ -526,9 +632,15 @@ fn authored_verify_check_contract(
             AuthorVerifyCheckStatus::Passed => PublicAuthorVerifyCheckStatus::Passed,
             AuthorVerifyCheckStatus::Failed => PublicAuthorVerifyCheckStatus::Failed,
             AuthorVerifyCheckStatus::Error => PublicAuthorVerifyCheckStatus::Error,
+            AuthorVerifyCheckStatus::Skipped => PublicAuthorVerifyCheckStatus::Skipped,
         },
+        severity: check.severity,
         tag,
         message: check.message.clone(),
+        intent: check.intent.clone(),
+        condition: check.condition.clone(),
+        condition_result: check.condition_result,
+        skip_reason: check.skip_reason.clone(),
         metric_source: check.metric_source.clone(),
         metric_key: check.metric_key.clone(),
         comparator: check.comparator.clone(),
@@ -658,13 +770,163 @@ fn collect_structural_author_metrics(
     }
 }
 
+fn verify_intent(clause: &CoreVerifyClause) -> Result<Option<String>, String> {
+    let Some(section) = &clause.intent else {
+        return Ok(None);
+    };
+    match section.items.as_slice() {
+        [CoreVerifyValue::Text(value) | CoreVerifyValue::Symbol(value)]
+            if !value.trim().is_empty() =>
+        {
+            Ok(Some(value.clone()))
+        }
+        _ => Err("Verify intent expects exactly one non-empty text or symbol value.".to_string()),
+    }
+}
+
+fn verify_severity(clause: &CoreVerifyClause) -> Result<AuthoredVerifySeverity, String> {
+    let Some(section) = &clause.severity else {
+        return Ok(AuthoredVerifySeverity::Error);
+    };
+    match section.items.as_slice() {
+        [value] => match verify_symbol_like(value) {
+            Some("error") => Ok(AuthoredVerifySeverity::Error),
+            Some("warning") => Ok(AuthoredVerifySeverity::Warning),
+            Some(other) => Err(format!(
+                "Unsupported verify severity `{other}`; expected `error` or `warning`."
+            )),
+            None => Err("Verify severity expects `error` or `warning`.".to_string()),
+        },
+        _ => Err("Verify severity expects exactly one value.".to_string()),
+    }
+}
+
+fn verify_condition(
+    clause: &CoreVerifyClause,
+    effective_params: &DesignParams,
+) -> Result<(Option<String>, Option<bool>), String> {
+    let Some(section) = &clause.when else {
+        return Ok((None, None));
+    };
+    let [expression] = section.items.as_slice() else {
+        return Err("Verify when expects exactly one boolean expression.".to_string());
+    };
+    Ok((
+        Some(format_verify_value(expression)),
+        Some(evaluate_verify_condition(expression, effective_params)?),
+    ))
+}
+
+fn evaluate_verify_condition(
+    value: &CoreVerifyValue,
+    effective_params: &DesignParams,
+) -> Result<bool, String> {
+    match value {
+        CoreVerifyValue::Boolean(value) => Ok(*value),
+        CoreVerifyValue::Symbol(symbol) if symbol == "true" => Ok(true),
+        CoreVerifyValue::Symbol(symbol) if symbol == "false" => Ok(false),
+        CoreVerifyValue::Symbol(symbol) => match effective_params.get(symbol) {
+            Some(ParamValue::Boolean(value)) => Ok(*value),
+            Some(value) => Err(format!(
+                "Verify when parameter `{symbol}` must be boolean, found {}.",
+                value.kind()
+            )),
+            None => Err(format!(
+                "Verify when references unknown parameter `{symbol}`."
+            )),
+        },
+        CoreVerifyValue::List(items) => {
+            let Some(operator) = items.first().and_then(verify_symbol_like) else {
+                return Err("Verify when list needs a boolean operator.".to_string());
+            };
+            match (operator, &items[1..]) {
+                ("not", [operand]) => Ok(!evaluate_verify_condition(operand, effective_params)?),
+                ("not", _) => Err("Verify when `not` expects exactly one operand.".to_string()),
+                ("and", []) => Err("Verify when `and` expects at least one operand.".to_string()),
+                ("and", operands) => {
+                    for operand in operands {
+                        if !evaluate_verify_condition(operand, effective_params)? {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(true)
+                }
+                ("or", []) => Err("Verify when `or` expects at least one operand.".to_string()),
+                ("or", operands) => {
+                    for operand in operands {
+                        if evaluate_verify_condition(operand, effective_params)? {
+                            return Ok(true);
+                        }
+                    }
+                    Ok(false)
+                }
+                (other, _) => Err(format!("Unsupported verify when operator `{other}`.")),
+            }
+        }
+        _ => Err("Verify when operands must be booleans or boolean parameter names.".to_string()),
+    }
+}
+
+fn format_verify_value(value: &CoreVerifyValue) -> String {
+    match value {
+        CoreVerifyValue::Symbol(value) => value.clone(),
+        CoreVerifyValue::Number(value) => value.to_string(),
+        CoreVerifyValue::Boolean(value) => if *value { "#t" } else { "#f" }.to_string(),
+        CoreVerifyValue::Text(value) => format!("\"{}\"", value.replace('"', "\\\"")),
+        CoreVerifyValue::List(items) => format!(
+            "({})",
+            items
+                .iter()
+                .map(format_verify_value)
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+    }
+}
+
 fn evaluate_verify_clause(
     clause_index: usize,
     clause: &CoreVerifyClause,
     bundle: &ArtifactBundle,
     manifest: &ModelManifest,
     metrics: &AuthorVerificationMetrics,
+    effective_params: &DesignParams,
 ) -> AuthorVerifyCheckResult {
+    let intent = match verify_intent(clause) {
+        Ok(intent) => intent,
+        Err(message) => return verify_error(clause_index, None, &message),
+    };
+    let severity = match verify_severity(clause) {
+        Ok(severity) => severity,
+        Err(message) => return verify_error(clause_index, None, &message),
+    };
+    let (condition, condition_result) = match verify_condition(clause, effective_params) {
+        Ok(result) => result,
+        Err(message) => {
+            let mut result = verify_error(clause_index, None, &message);
+            result.intent = intent;
+            result.severity = severity;
+            return result;
+        }
+    };
+    if condition_result == Some(false) {
+        return AuthorVerifyCheckResult {
+            clause_index,
+            status: AuthorVerifyCheckStatus::Skipped,
+            severity,
+            intent,
+            condition,
+            condition_result,
+            skip_reason: Some("Authored `when` condition resolved false.".to_string()),
+            metric_alias: None,
+            metric_source: None,
+            metric_key: None,
+            comparator: None,
+            expected: None,
+            actual: None,
+            message: "Skipped because authored `when` condition resolved false.".to_string(),
+        };
+    }
     let alias = clause
         .metric
         .items
@@ -722,6 +984,11 @@ fn evaluate_verify_clause(
             return AuthorVerifyCheckResult {
                 clause_index,
                 status: AuthorVerifyCheckStatus::Error,
+                severity,
+                intent,
+                condition,
+                condition_result,
+                skip_reason: None,
                 metric_alias: alias,
                 metric_source: Some(metric_ref.source.to_string()),
                 metric_key: Some(metric_ref.key.to_string()),
@@ -741,6 +1008,11 @@ fn evaluate_verify_clause(
         } else {
             AuthorVerifyCheckStatus::Failed
         },
+        severity,
+        intent,
+        condition,
+        condition_result,
+        skip_reason: None,
         metric_alias: alias,
         metric_source: Some(metric_ref.source.to_string()),
         metric_key: Some(metric_ref.key.to_string()),
@@ -1894,6 +2166,11 @@ fn verify_error(
     AuthorVerifyCheckResult {
         clause_index,
         status: AuthorVerifyCheckStatus::Error,
+        severity: AuthoredVerifySeverity::Error,
+        intent: None,
+        condition: None,
+        condition_result: None,
+        skip_reason: None,
         metric_alias,
         metric_source: None,
         metric_key: None,
@@ -2165,6 +2442,9 @@ mod tests {
                     CoreVerifyValue::Symbol("body.front_window_1".to_string()),
                 ],
             },
+            intent: None,
+            severity: None,
+            when: None,
             metric: CoreVerifySection {
                 items: vec![CoreVerifyValue::Symbol("check".to_string()), metric_expr],
             },
@@ -3016,6 +3296,99 @@ mod tests {
         );
 
         assert!(!result.passed);
+        assert!(result
+            .issues
+            .iter()
+            .any(|issue| issue.code == "AUTHORED_VERIFY_ERROR"));
+    }
+
+    #[test]
+    fn warning_failure_and_false_condition_are_visible_but_nonblocking() {
+        let source = r#"
+            (model
+              (params (toggle assembly-preview #f))
+              (verify
+                (tag advisory-triangles)
+                (intent "Triangle budget advisory")
+                (severity warning)
+                (metric triangles (stl triangle-count))
+                (expect triangles (> 999999)))
+              (verify
+                (tag assembly-only)
+                (when assembly-preview)
+                (metric impossible (unsupported never-run))
+                (expect impossible (= 1)))
+              (part body (box 10 10 10)))
+        "#;
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("compile");
+        let params =
+            DesignParams::from([("assembly-preview".to_string(), ParamValue::Boolean(false))]);
+        let result = merge_loaded_author_verification_into_structural_result(
+            &authored_bundle_with_source(source),
+            &sample_manifest(),
+            sample_structural_result(true),
+            &program.constraints.verify_clauses,
+            &params,
+        );
+
+        assert!(result.passed, "{}", result.summary);
+        assert!(result.issues.is_empty());
+        assert_eq!(
+            result.authored_verify_checks[0].status,
+            PublicAuthorVerifyCheckStatus::Failed
+        );
+        assert_eq!(
+            result.authored_verify_checks[0].severity,
+            AuthoredVerifySeverity::Warning
+        );
+        assert_eq!(
+            result.authored_verify_checks[0].intent.as_deref(),
+            Some("Triangle budget advisory")
+        );
+        assert_eq!(
+            result.authored_verify_checks[1].status,
+            PublicAuthorVerifyCheckStatus::Skipped
+        );
+        assert_eq!(
+            result.authored_verify_checks[1].condition.as_deref(),
+            Some("assembly-preview")
+        );
+        assert_eq!(
+            result.authored_verify_checks[1].condition_result,
+            Some(false)
+        );
+        assert!(result.authored_verify_checks[1].skip_reason.is_some());
+    }
+
+    #[test]
+    fn invalid_warning_condition_remains_blocking_error() {
+        let source = r#"
+            (model
+              (verify
+                (tag invalid-condition)
+                (severity warning)
+                (when missing-toggle)
+                (metric triangles (stl triangle-count))
+                (expect triangles (> 0)))
+              (part body (box 10 10 10)))
+        "#;
+        let program = crate::ecky_scheme::compile_to_core_program(source).expect("compile");
+        let result = merge_loaded_author_verification_into_structural_result(
+            &authored_bundle_with_source(source),
+            &sample_manifest(),
+            sample_structural_result(true),
+            &program.constraints.verify_clauses,
+            &DesignParams::new(),
+        );
+
+        assert!(!result.passed);
+        assert_eq!(
+            result.authored_verify_checks[0].status,
+            PublicAuthorVerifyCheckStatus::Error
+        );
+        assert!(result.authored_verify_checks[0]
+            .message
+            .contains("unknown parameter"));
         assert!(result
             .issues
             .iter()
