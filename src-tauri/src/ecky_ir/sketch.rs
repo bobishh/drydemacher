@@ -10,6 +10,7 @@ use geo::{
     Coord, Geometry as GeoGeometry, GeometryCollection, LineString, MultiPolygon,
     Polygon as GeoPolygon,
 };
+use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation as _};
 
 use crate::contracts::{AppResult, ParamValue};
 use crate::ecky_ir_patterns::ContourSweepSlice;
@@ -838,15 +839,21 @@ pub(super) fn append_cap_polygons(
     flip: bool,
 ) {
     for polygon in &contours.polygons {
-        let holes = polygon
-            .holes
-            .iter()
-            .map(|hole| hole.as_slice())
-            .collect::<Vec<_>>();
-        for triangle in IrSketch::triangulate_2d(&polygon.outer, &holes) {
+        let triangles = triangulate_contour_polygon(polygon).unwrap_or_else(|| {
+            let holes = polygon
+                .holes
+                .iter()
+                .map(|hole| hole.as_slice())
+                .collect::<Vec<_>>();
+            IrSketch::triangulate_2d(&polygon.outer, &holes)
+                .into_iter()
+                .map(|triangle| triangle.map(|point| [point.x, point.y]))
+                .collect()
+        });
+        for triangle in triangles {
             let verts = triangle
                 .into_iter()
-                .map(|point| IrVertex::new(Point3::new(point.x, point.y, z), Vector3::zeros()))
+                .map(|point| IrVertex::new(Point3::new(point[0], point[1], z), Vector3::zeros()))
                 .collect::<Vec<_>>();
             let mut poly = IrPolygon::new(verts, None);
             if flip {
@@ -855,6 +862,49 @@ pub(super) fn append_cap_polygons(
             polygons.push(poly);
         }
     }
+}
+
+fn triangulate_contour_polygon(polygon: &ContourPolygon2d) -> Option<Vec<[[f64; 2]; 3]>> {
+    let mut vertices = Vec::<Point2<f64>>::new();
+    let mut constraints = Vec::<[usize; 2]>::new();
+    let mut append_loop = |points: &[[f64; 2]]| {
+        let start = vertices.len();
+        vertices.extend(points.iter().map(|point| Point2::new(point[0], point[1])));
+        for index in 0..points.len() {
+            constraints.push([start + index, start + (index + 1) % points.len()]);
+        }
+    };
+    append_loop(&polygon.outer);
+    for hole in &polygon.holes {
+        append_loop(hole);
+    }
+
+    let triangulation =
+        ConstrainedDelaunayTriangulation::<Point2<f64>>::bulk_load_cdt(vertices, constraints)
+            .ok()?;
+    let region = GeoPolygon::new(
+        build_ring(&polygon.outer),
+        polygon.holes.iter().map(|hole| build_ring(hole)).collect(),
+    );
+    let mut triangles = Vec::new();
+    for face in triangulation.inner_faces() {
+        let positions = face.positions();
+        let centroid = Coord {
+            x: positions.iter().map(|point| point.x).sum::<f64>() / 3.0,
+            y: positions.iter().map(|point| point.y).sum::<f64>() / 3.0,
+        };
+        if !region.contains(&centroid) {
+            continue;
+        }
+        let mut triangle = positions.map(|point| [point.x, point.y]);
+        let cross = (triangle[1][0] - triangle[0][0]) * (triangle[2][1] - triangle[0][1])
+            - (triangle[1][1] - triangle[0][1]) * (triangle[2][0] - triangle[0][0]);
+        if cross < 0.0 {
+            triangle.swap(1, 2);
+        }
+        triangles.push(triangle);
+    }
+    (!triangles.is_empty()).then_some(triangles)
 }
 
 pub(super) fn append_loop_side_polygons(
@@ -909,7 +959,7 @@ pub(super) fn append_contour_side_polygons(
             flip,
         );
         for (bottom_hole, top_hole) in bottom_polygon.holes.iter().zip(&top_polygon.holes) {
-            append_loop_side_polygons(polygons, bottom_hole, bottom_z, top_hole, top_z, !flip);
+            append_loop_side_polygons(polygons, bottom_hole, bottom_z, top_hole, top_z, flip);
         }
     }
 }

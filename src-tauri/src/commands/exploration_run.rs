@@ -480,7 +480,11 @@ async fn run_admitted(
             artifact_bundle: &bundle,
             model_manifest: &manifest,
         })?;
-        let verification = crate::services::author_verification_foundation::verify_structure_with_author_verification(&bundle, &manifest);
+        let verification = crate::services::author_verification_foundation::verify_structure_with_author_verification_and_params(
+            &bundle,
+            &manifest,
+            &generated.design.initial_params,
+        );
         let raw_verification = if verification.passed {
             None
         } else {
@@ -1099,9 +1103,10 @@ async fn run_cycle_admitted(
             model_manifest: &manifest,
         })?;
         let verification =
-            crate::services::author_verification_foundation::verify_structure_with_author_verification(
+            crate::services::author_verification_foundation::verify_structure_with_author_verification_and_params(
                 &bundle,
                 &manifest,
+                &generated.design.initial_params,
             );
         let raw_verification = (!verification.passed).then(|| format_issues(&verification));
         {

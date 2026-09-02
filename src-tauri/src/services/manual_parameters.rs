@@ -106,30 +106,37 @@ async fn stored_design(state: &AppState, message_id: &str) -> AppResult<DesignOu
 
 async fn persist_failure(
     request: &ManualParameterApplyRequest,
+    message_id: Option<String>,
     attempted_design: DesignOutput,
     error: AppError,
     state: &AppState,
-    app: &dyn PathResolver,
+    _app: &dyn PathResolver,
 ) -> AppResult<ManualParameterApplyResponse> {
-    let message_id = if request.persist {
-        Some(
-            add_manual_version(
-                version_request(
-                    &request.thread_id,
-                    &attempted_design,
-                    None,
-                    None,
-                    MessageStatus::Error,
-                    Some(error.to_string()),
-                ),
-                state,
-                app,
-            )
-            .await?,
+    if let Some(message_id) = message_id.as_deref() {
+        let error_text = error.to_string();
+        let conn = state.db.lock().await;
+        crate::db::update_message_status_and_output(
+            &conn,
+            message_id,
+            crate::db::MessageStatusUpdate {
+                status: &MessageStatus::Error,
+                output: Some(&attempted_design),
+                usage: None,
+                artifact_bundle: None,
+                model_manifest: None,
+                structural_verification: None,
+                visual_kind: None,
+                content: Some(&error_text),
+            },
         )
-    } else {
-        None
-    };
+        .map_err(|db_error| AppError::persistence(db_error.to_string()))?;
+        drop(conn);
+        state.emit_history_changed(
+            Some(request.thread_id.clone()),
+            Some(message_id.to_string()),
+            "parameterVersionFailed",
+        );
+    }
     let design_output = if let Some(message_id) = message_id.as_deref() {
         stored_design(state, message_id).await?
     } else {
@@ -146,6 +153,52 @@ async fn persist_failure(
         snapshot_id: None,
         error: Some(error),
     })
+}
+
+async fn persist_success(
+    request: &ManualParameterApplyRequest,
+    message_id: &str,
+    design: &DesignOutput,
+    artifact_bundle: &ArtifactBundle,
+    model_manifest: &ModelManifest,
+    state: &AppState,
+    app: &dyn PathResolver,
+) -> AppResult<()> {
+    let configured_root = state.config.lock().unwrap().projects_root.clone();
+    let conn = state.db.lock().await;
+    crate::db::update_message_status_and_output(
+        &conn,
+        message_id,
+        crate::db::MessageStatusUpdate {
+            status: &MessageStatus::Success,
+            output: Some(design),
+            usage: None,
+            artifact_bundle: Some(artifact_bundle),
+            model_manifest: Some(model_manifest),
+            structural_verification: None,
+            visual_kind: None,
+            content: Some("Parameter version appended."),
+        },
+    )
+    .map_err(|error| AppError::persistence(error.to_string()))?;
+    crate::thread_source_binding::refresh_on_version_append(
+        app,
+        &conn,
+        configured_root.as_deref(),
+        &request.thread_id,
+        &design.title,
+        &design.macro_code,
+        message_id,
+        Some(&artifact_bundle.model_id),
+        Some(message_id),
+    )?;
+    drop(conn);
+    state.emit_history_changed(
+        Some(request.thread_id.clone()),
+        Some(message_id.to_string()),
+        "parameterVersionRendered",
+    );
+    Ok(())
 }
 
 async fn render_parameters(
@@ -221,11 +274,19 @@ async fn render_parameters(
     Ok((artifact_bundle, model_manifest))
 }
 
-pub async fn apply_manual_parameters(
+pub struct PendingManualParameterApply {
+    request: ManualParameterApplyRequest,
+    attempted_design: DesignOutput,
+    previous_bundle: Option<ArtifactBundle>,
+    previous_manifest: Option<ModelManifest>,
+    message_id: Option<String>,
+}
+
+pub async fn begin_manual_parameter_apply(
     request: ManualParameterApplyRequest,
     state: &AppState,
     app: &dyn PathResolver,
-) -> AppResult<ManualParameterApplyResponse> {
+) -> AppResult<(ManualParameterApplyResponse, PendingManualParameterApply)> {
     let target = {
         let conn = state.db.lock().await;
         crate::services::target::resolve_target(
@@ -245,10 +306,82 @@ pub async fn apply_manual_parameters(
         request.version_name.as_deref(),
     );
 
+    let message_id = if request.persist {
+        Some(
+            add_manual_version(
+                version_request(
+                    &request.thread_id,
+                    &attempted_design,
+                    None,
+                    None,
+                    MessageStatus::Working,
+                    Some("Parameter version pending render.".to_string()),
+                ),
+                state,
+                app,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    if let Some(message_id) = message_id.as_deref() {
+        let snapshot = build_saved_version_snapshot(
+            Some(attempted_design.clone()),
+            request.thread_id.clone(),
+            message_id.to_string(),
+            None,
+            None,
+            None,
+        );
+        *state.last_snapshot.lock().unwrap() = Some(snapshot.clone());
+        write_last_snapshot(app, Some(&snapshot));
+        state.emit_history_changed(
+            Some(request.thread_id.clone()),
+            Some(message_id.to_string()),
+            "parameterVersionAppended",
+        );
+    }
+
+    let response = ManualParameterApplyResponse {
+        thread_id: request.thread_id.clone(),
+        base_message_id: request.target_message_id.clone(),
+        message_id: message_id.clone(),
+        status: MessageStatus::Working,
+        design_output: attempted_design.clone(),
+        artifact_bundle: None,
+        model_manifest: None,
+        snapshot_id: None,
+        error: None,
+    };
+    let pending = PendingManualParameterApply {
+        request,
+        attempted_design,
+        previous_bundle: target.artifact_bundle,
+        previous_manifest: target.model_manifest,
+        message_id,
+    };
+    Ok((response, pending))
+}
+
+pub async fn finish_manual_parameter_apply(
+    pending: PendingManualParameterApply,
+    state: &AppState,
+    app: &dyn PathResolver,
+) -> AppResult<ManualParameterApplyResponse> {
+    let PendingManualParameterApply {
+        request,
+        attempted_design,
+        previous_bundle,
+        previous_manifest,
+        message_id,
+    } = pending;
+
     let (artifact_bundle, model_manifest) = match render_parameters(
         &attempted_design,
-        target.artifact_bundle.as_ref(),
-        target.model_manifest.as_ref(),
+        previous_bundle.as_ref(),
+        previous_manifest.as_ref(),
         state,
         app,
     )
@@ -256,7 +389,15 @@ pub async fn apply_manual_parameters(
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            return persist_failure(&request, attempted_design, error, state, app).await;
+            return persist_failure(
+                &request,
+                message_id,
+                attempted_design,
+                error,
+                state,
+                app,
+            )
+            .await;
         }
     };
     let snapshot_id = match build_render_snapshot(RenderSnapshotInput {
@@ -267,29 +408,29 @@ pub async fn apply_manual_parameters(
     }) {
         Ok(snapshot) => snapshot.snapshot_id,
         Err(error) => {
-            return persist_failure(&request, attempted_design, error, state, app).await;
-        }
-    };
-
-    let message_id = if request.persist {
-        Some(
-            add_manual_version(
-                version_request(
-                    &request.thread_id,
-                    &attempted_design,
-                    Some(artifact_bundle.clone()),
-                    Some(model_manifest.clone()),
-                    MessageStatus::Success,
-                    None,
-                ),
+            return persist_failure(
+                &request,
+                message_id,
+                attempted_design,
+                error,
                 state,
                 app,
             )
-            .await?,
-        )
-    } else {
-        None
+            .await;
+        }
     };
+    if let Some(message_id) = message_id.as_deref() {
+        persist_success(
+            &request,
+            message_id,
+            &attempted_design,
+            &artifact_bundle,
+            &model_manifest,
+            state,
+            app,
+        )
+        .await?;
+    }
     let design_output = if let Some(message_id) = message_id.as_deref() {
         stored_design(state, message_id).await?
     } else {
@@ -319,4 +460,13 @@ pub async fn apply_manual_parameters(
         snapshot_id: Some(snapshot_id),
         error: None,
     })
+}
+
+pub async fn apply_manual_parameters(
+    request: ManualParameterApplyRequest,
+    state: &AppState,
+    app: &dyn PathResolver,
+) -> AppResult<ManualParameterApplyResponse> {
+    let (_, pending) = begin_manual_parameter_apply(request, state, app).await?;
+    finish_manual_parameter_apply(pending, state, app).await
 }

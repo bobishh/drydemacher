@@ -142,143 +142,144 @@ fn ecky_backend_guide_text(
 
     format!(
         "Return canonical Ecky source in `macro_code`.\n\
-Current fileExtension: `.ecky`.\n\
-Current sourceLanguage: `ecky`.\n\
-{target_line}\
-Start every renderable answer with `(model ...)`.\n\n\
-API MODE ONE-PROMPT WORKFLOW\n\
-- Treat this target-language guide as the complete source of truth for `.ecky`; API mode cannot call MCP tools, fetch web docs, or inspect external resources.\n\
-- First derive named params and fit-critical bindings from the request; then write geometry; then write top-level verification clauses for measurable promises.\n\
-- Author verification clauses, but do not claim you ran them. The app runs compile, render, structural verification, and authored verify after `macro_code` returns.\n\
-- If repairing a failed generation, keep existing verify intent and strengthen geometry/params until checks pass; never delete the check to hide failure.\n\
-- Return JSON only per the outer contract, with complete Ecky source in `macro_code`.\n\n\
-AUTHORING RULES\n\
-- Output finished renderable geometry unless user explicitly asks for a placeholder. {typed_hole_policy}\n\
-- Direct model clauses: {model_clauses}. Put them directly under `model` or inside a supported model wrapper.\n\
+    Current fileExtension: `.ecky`.\n\
+    Current sourceLanguage: `ecky`.\n\
+    {target_line}\
+    Start every renderable answer with `(model ...)`.\n\n\
+    API MODE ONE-PROMPT WORKFLOW\n\
+    - Treat this target-language guide as the complete source of truth for `.ecky`; API mode cannot call MCP tools, fetch web docs, or inspect external resources.\n\
+    - First derive named params and fit-critical bindings from the request; then write geometry; then write top-level verification clauses for measurable promises.\n\
+    - Author verification clauses, but do not claim you ran them. The app runs compile, render, structural verification, and authored verify after `macro_code` returns.\n\
+    - If repairing a failed generation, keep existing verify intent and strengthen geometry/params until checks pass; never delete the check to hide failure.\n\
+    - Return JSON only per the outer contract, with complete Ecky source in `macro_code`.\n\n\
+    AUTHORING RULES\n\
+    - Output finished renderable geometry unless user explicitly asks for a placeholder. {typed_hole_policy}\n\
+    - Direct model clauses: {model_clauses}. Put them directly under `model` or inside a supported model wrapper.\n\
 - Supported expression forms: {expression_forms}. Use `let*` when later bindings depend on earlier ones.
 \
 - Component placement forms: {component_placement_forms}. Author reusable bodies in local coordinates; mate them with `place-component` and named ports instead of deriving Euler angles.
 \
-- Never use `(define ...)` inside `(model ...)`. Steel evaluates it eagerly before params have values, producing a misleading TypeMismatch. Use `let*` inside `(part ...)` for computed values from params: `(part body (let* ((half (/ width 2))) (box half 10 10)))`. Top-level `(define (fn args) ...)` helper functions outside `(model ...)` are allowed for reusable pure functions.\n\
-- Use `map`, `range`, `repeat-union`, and `repeat-compound` inside geometry, not to generate top-level clauses.\n\
-- Static tuple destructuring is supported only for `zip` and `enumerate` static sources: `(map (lambda ((x y)) ...) (zip xs ys))`. Zip destructuring of a dynamic source rejects with a clear error.\n\
-- Supported CAD ops for this backend: {supported_ops}.\n\
-- Core constants: {core_constants}. Numeric helpers: {numeric_helpers}. Point/list helpers: {point_helpers}. Bounded literal counts/steps only. Seeded helpers are deterministic for a given seed.\n\
-- Keywords are not callable nodes: write `(box 10 10 2 :align '(center center min))`, never `(align ...)`.\n\
-- Name fit-critical bindings before use: `wall`, `clearance`, `bore-r`, `top-z`. No anonymous offsets for fit-critical geometry.\n\
-- For generated Ecky models, write direct `(verify ...)` clauses under the top-level `(model ...)` from the user's measurable requirements before trusting geometry; a red first render is expected repair input.\n\
-- Verify with typed/static errors and structural verification first, screenshots last.\n\
-{backend_note}{wall_patterns}\n\
-PARAMS\n\
-- `(number key default :label \"...\" :min n :max n :step n)`\n\
-- `(select key \"default\" :label \"...\" :options ((\"Label\" \"value\") ...))`\n\
-- `(toggle key #t :label \"...\")`\n\
-- `(image key \"\" :label \"...\")`\n\n\
-VERIFY CLAUSES\n\
-- Purpose: make source carry machine-checkable intent. The model writes `(verify ...)`; app verification evaluates it later.\n\
-- Put model verification directly under `model`, before or after `part` clauses. Never nest it inside geometry, params, `build`, or `let`. A `define-component` may carry its own verification clauses before its single geometry body; they travel with each instance.\n\
-- Clause grammar: `(verify (tag stable-name optional.selector ...) (metric alias (namespace key optional.args ...)) (expect alias (operator literal)))`.\n\
-- Required section order: `tag`, then `metric`, then `expect`. Empty `(verify)` is invalid.\n\
-- `tag` carries authored labels or selectors for diagnostics; use stable names like `mesh_clean`, `lid_gap`, `preview_exists`.\n\
-- `metric` first item is a local alias; second item is a metric expression. `expect` alias must match the metric alias exactly.\n\
-- Metric namespaces: `manifest`, `stl`, `clearance`, `selector`, `relation`.\n\
-- Manifest metrics: `(manifest has-step)`, `(manifest has-model-stl)`, `(manifest edge-target-count)`, `(manifest face-target-count)`, `(manifest export-format-count)`, `(manifest part-count)`.\n\
-- STL metrics: `(stl triangle-count)`, `(stl connected-component-count)`, `(stl non-manifold-edge-count)`, `(stl overhang-face-count)`, `(stl bed-contact-area-ratio [part-id])`, `(stl bed-contact-x-span-ratio [part-id])`, `(stl bed-contact-y-span-ratio [part-id])`. Bed-contact metrics compare downward planar faces touching the lowest Z plane against all downward planar faces; use them when print-bed grounding matters.\n\
-- Clearance metric: `(clearance min-distance selector-a selector-b)`. Selectors may be part names such as `body` and `lid`, or stable target ids when known.\n\
-- Selector metrics: `(selector axis selector)`, `(selector extent-x selector)`, `(selector extent-y selector)`, `(selector extent-z selector)`, `(selector center-x selector)`, `(selector center-y selector)`, `(selector center-z selector)`. Axis returns text: `x`, `y`, or `z`; extents and centers are millimeters.\n\
-- Relation metrics: `(relation axis-angle selector-a selector-b)`, `(relation center-delta-x selector-a selector-b)`, `(relation center-delta-y selector-a selector-b)`, `(relation center-delta-z selector-a selector-b)`. Axis angle is unsigned degrees; center deltas are signed millimeters: selector-a center minus selector-b center.\n\
-- Operators: `=`, `!=`, `>`, `>=`, `<`, `<=`. Literals may be boolean, number, or text; do not use params or computed expressions in `expect` literals.\n\
-- Good default checks for generated `.ecky`: model STL exists, part count is positive, STL triangle count is positive, non-manifold edge count is zero.\n\
-- Use clearance verification when the request names a fit/gap/clearance. Use numeric literals matching the promised clearance.\n\
-- Use selector/relation verification when the request names orientation, fit axis, length, width, thickness, center offset, or perpendicular/parallel relation.\n\
-- Do not remove or weaken existing `(verify ...)` clauses during repair; change geometry or params until they pass.\n\
-```ecky\n\
-(model\n\
-  (verify\n\
+    - Never use `(define ...)` inside `(model ...)`. Steel evaluates it eagerly before params have values, producing a misleading TypeMismatch. Use `let*` inside `(part ...)` for computed values from params: `(part body (let* ((half (/ width 2))) (box half 10 10)))`. Top-level `(define (fn args) ...)` helper functions outside `(model ...)` are allowed for reusable pure functions.\n\
+    - Use `map`, `range`, `repeat-union`, and `repeat-compound` inside geometry, not to generate top-level clauses.\n\
+    - Static tuple destructuring is supported only for `zip` and `enumerate` static sources: `(map (lambda ((x y)) ...) (zip xs ys))`. Zip destructuring of a dynamic source rejects with a clear error.\n\
+    - Supported CAD ops for this backend: {supported_ops}.\n\
+    - Core constants: {core_constants}. Numeric helpers: {numeric_helpers}. Point/list helpers: {point_helpers}. Bounded literal counts/steps only. Seeded helpers are deterministic for a given seed.\n\
+    - Keywords are not callable nodes: write `(box 10 10 2 :align '(center center min))`, never `(align ...)`.\n\
+    - Name fit-critical bindings before use: `wall`, `clearance`, `bore-r`, `top-z`. No anonymous offsets for fit-critical geometry.\n\
+    - For generated Ecky models, write direct `(verify ...)` clauses under the top-level `(model ...)` from the user's measurable requirements before trusting geometry; a red first render is expected repair input.\n\
+    - Verify with typed/static errors and structural verification first, screenshots last.\n\
+    {backend_note}{wall_patterns}\n\
+    PARAMS\n\
+    - `(number key default :label \"...\" :min n :max n :step n)`\n\
+    - `(select key \"default\" :label \"...\" :options ((\"Label\" \"value\") ...))`\n\
+    - `(toggle key #t :label \"...\")`\n\
+    - `(image key \"\" :label \"...\")`\n\n\
+    VERIFY CLAUSES\n\
+    - Purpose: make source carry machine-checkable intent. The model writes `(verify ...)`; app verification evaluates it later.\n\
+    - Put model verification directly under `model`, before or after `part` clauses. Never nest it inside geometry, params, `build`, or `let`. A `define-component` may carry its own verification clauses before its single geometry body; they travel with each instance.\n\
+    - Clause grammar: `(verify (tag stable-name optional.selector ...) [(intent \"why\")] [(severity error|warning)] [(when bool-expr)] (metric alias (namespace key optional.args ...)) (expect alias (operator literal)))`.\n\
+    - `tag`, `metric`, and `expect` are required exactly once. Optional `intent`, `severity`, and `when` may each appear once. Section order is free; emitted source is canonical. Empty `(verify)` is invalid.\n\
+    - Severity defaults to `error`. A failed `warning` expectation stays visible but does not block; invalid syntax/evaluation still blocks. `when` accepts boolean literals/params and nested `not`, `and`, `or`; false emits `skipped` without evaluating metric/expect.\n\
+    - `tag` carries authored labels or selectors for diagnostics; use stable names like `mesh_clean`, `lid_gap`, `preview_exists`.\n\
+    - `metric` first item is a local alias; second item is a metric expression. `expect` alias must match the metric alias exactly.\n\
+    - Metric namespaces: `manifest`, `stl`, `clearance`, `selector`, `relation`.\n\
+    - Manifest metrics: `(manifest has-step)`, `(manifest has-model-stl)`, `(manifest edge-target-count)`, `(manifest face-target-count)`, `(manifest export-format-count)`, `(manifest part-count)`.\n\
+    - STL metrics: `(stl triangle-count)`, `(stl connected-component-count)`, `(stl non-manifold-edge-count)`, `(stl overhang-face-count)`, `(stl bed-contact-area-ratio [part-id])`, `(stl bed-contact-x-span-ratio [part-id])`, `(stl bed-contact-y-span-ratio [part-id])`. Bed-contact metrics compare downward planar faces touching the lowest Z plane against all downward planar faces; use them when print-bed grounding matters.\n\
+    - Clearance metric: `(clearance min-distance selector-a selector-b)`. Selectors may be part names such as `body` and `lid`, or stable target ids when known.\n\
+    - Selector metrics: `(selector axis selector)`, `(selector extent-x selector)`, `(selector extent-y selector)`, `(selector extent-z selector)`, `(selector center-x selector)`, `(selector center-y selector)`, `(selector center-z selector)`. Axis returns text: `x`, `y`, or `z`; extents and centers are millimeters.\n\
+    - Relation metrics: `(relation axis-angle selector-a selector-b)`, `(relation center-delta-x selector-a selector-b)`, `(relation center-delta-y selector-a selector-b)`, `(relation center-delta-z selector-a selector-b)`. Axis angle is unsigned degrees; center deltas are signed millimeters: selector-a center minus selector-b center.\n\
+    - Operators: `=`, `!=`, `>`, `>=`, `<`, `<=`. Literals may be boolean, number, or text; do not use params or computed expressions in `expect` literals.\n\
+    - Good default checks for generated `.ecky`: model STL exists, part count is positive, STL triangle count is positive, non-manifold edge count is zero.\n\
+    - Use clearance verification when the request names a fit/gap/clearance. Use numeric literals matching the promised clearance.\n\
+    - Use selector/relation verification when the request names orientation, fit axis, length, width, thickness, center offset, or perpendicular/parallel relation.\n\
+    - Do not remove or weaken existing `(verify ...)` clauses during repair; change geometry or params until they pass.\n\
+    ```ecky\n\
+    (model\n\
+    (verify\n\
     (tag preview_exists)\n\
     (metric check (manifest has-model-stl))\n\
     (expect check (= true)))\n\
-  (verify\n\
+    (verify\n\
     (tag mesh_clean)\n\
     (metric bad_edges (stl non-manifold-edge-count))\n\
     (expect bad_edges (= 0)))\n\
-  (verify\n\
+    (verify\n\
     (tag lid_clearance body lid)\n\
     (metric gap (clearance min-distance body lid))\n\
     (expect gap (>= 0.3)))\n\
-  (verify\n\
+    (verify\n\
     (tag part_count)\n\
     (metric parts (manifest part-count))\n\
     (expect parts (>= 2)))\n\
-  (verify\n\
+    (verify\n\
     (tag joint_axis joint_tongue)\n\
     (metric axis (selector axis joint_tongue))\n\
     (expect axis (= \"y\")))\n\
-  (verify\n\
+    (verify\n\
     (tag joint_width joint_tongue)\n\
     (metric width (selector extent-x joint_tongue))\n\
     (expect width (>= 11.8)))\n\
-  (verify\n\
+    (verify\n\
     (tag tube_joint_perpendicular tube_axis joint_tongue)\n\
     (metric angle (relation axis-angle tube_axis joint_tongue))\n\
     (expect angle (>= 85)))\n\
-  (part body (box 30 20 10))\n\
-  (part lid (translate 0 0 10.4 (box 30 20 2))))\n\
-```\n\n\
-PROGRESSIVE ECKY EXAMPLES\n\n\
-1. First solid:\n\
-```ecky\n\
-(model\n\
-  (part marker\n\
+    (part body (box 30 20 10))\n\
+    (part lid (translate 0 0 10.4 (box 30 20 2))))\n\
+    ```\n\n\
+    PROGRESSIVE ECKY EXAMPLES\n\n\
+    1. First solid:\n\
+    ```ecky\n\
+    (model\n\
+    (part marker\n\
     (sphere 10)))\n\
-```\n\n\
-2. Sketch then extrude:\n\
-```ecky\n\
-(model\n\
-  (part plate\n\
+    ```\n\n\
+    2. Sketch then extrude:\n\
+    ```ecky\n\
+    (model\n\
+    (part plate\n\
     (extrude (rounded-rect 70 42 5) 4)))\n\
-```\n\n\
-3. Sketch with a hole:\n\
-```ecky\n\
-(model\n\
-  (part washer\n\
+    ```\n\n\
+    3. Sketch with a hole:\n\
+    ```ecky\n\
+    (model\n\
+    (part washer\n\
     (extrude\n\
       (profile :outer (rounded-rect 70 42 5)\n\
                :holes (circle 9 64))\n\
       4)))\n\
-```\n\n\
-4. Parameters, named stages, and cuts:\n\
-```ecky\n\
-(model\n\
-  (params\n\
+    ```\n\n\
+    4. Parameters, named stages, and cuts:\n\
+    ```ecky\n\
+    (model\n\
+    (params\n\
     (number plate-w 80 :label \"Plate width\" :min 40 :max 120)\n\
     (number plate-h 48 :label \"Plate height\" :min 20 :max 80)\n\
     (number hole-r 4 :label \"Hole radius\" :min 2 :max 8))\n\
-  (part mount\n\
+    (part mount\n\
     (build\n\
       (shape blank (extrude (rounded-rect plate-w plate-h 4) 5))\n\
       (shape left-hole (translate -24 0 -0.5 (cylinder hole-r 6)))\n\
       (shape right-hole (translate 24 0 -0.5 (cylinder hole-r 6)))\n\
       (result (difference blank left-hole right-hole)))))\n\
-```\n\n\
-5. Repetition instead of copy-paste:\n\
-```ecky\n\
-(model\n\
-  (part ribbed-plate\n\
+    ```\n\n\
+    5. Repetition instead of copy-paste:\n\
+    ```ecky\n\
+    (model\n\
+    (part ribbed-plate\n\
     (build\n\
       (shape base (box 90 40 4))\n\
       (shape ribs\n\
         (repeat-union i 5\n\
           (translate (- (* i 18) 36) 0 5 (box 4 34 6))))\n\
       (result (union base ribs)))))\n\
-```\n\n\
-6. Final-pattern model: plate + bore + clipped thread + repeated features:\n\
-```ecky\n\
-(model\n\
-  (params\n\
+    ```\n\n\
+    6. Final-pattern model: plate + bore + clipped thread + repeated features:\n\
+    ```ecky\n\
+    (model\n\
+    (params\n\
     (number lens-bore-d 59.6 :label \"Lens bore D\" :min 50 :max 68)\n\
     (number clearance 0.25 :label \"Thread clearance\" :min 0.1 :max 0.6))\n\
-  (part adapter\n\
+    (part adapter\n\
     (build\n\
       (shape bore-r (/ lens-bore-d 2))\n\
       (shape carrier\n\
@@ -302,9 +303,9 @@ PROGRESSIVE ECKY EXAMPLES\n\n\
         (repeat-union i 5\n\
           (translate (- (* i 18) 36) 31 6 (box 5 8 8))))\n\
       (result (union carrier socket thread-a thread-b ribs)))))\n\
-```\n\n\
-READING ORDER FOR GENERATED CODE\n\
-Start primitive or sketch. Add params. Add named `build` stages. Add booleans. Add repetition/placement. Add verification clauses for measurable model invariants before final JSON.\n",
+    ```\n\n\
+    READING ORDER FOR GENERATED CODE\n\
+    Start primitive or sketch. Add params. Add named `build` stages. Add booleans. Add repetition/placement. Add verification clauses for measurable model invariants before final JSON.\n",
         typed_hole_policy = surface.typed_hole_policy,
     )
 }

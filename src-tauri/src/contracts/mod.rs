@@ -32,9 +32,9 @@ pub use geometry::{
 };
 mod verify;
 pub use verify::{
-    AuthoredVerifyCheck, AuthoredVerifyCheckStatus, AuthoredVerifyValue, RenderVerification,
-    StructuralIssue, StructuralMetrics, StructuralVerificationResult, VerifierSource,
-    VerifierStatus, VisualIssue, VisualIssueCategory, VisualVerificationResult,
+    AuthoredVerifyCheck, AuthoredVerifyCheckStatus, AuthoredVerifySeverity, AuthoredVerifyValue,
+    RenderVerification, StructuralIssue, StructuralMetrics, StructuralVerificationResult,
+    VerifierSource, VerifierStatus, VisualIssue, VisualIssueCategory, VisualVerificationResult,
 };
 
 mod component;

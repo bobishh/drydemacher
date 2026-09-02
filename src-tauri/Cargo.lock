@@ -1402,6 +1402,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "spade",
  "specta",
  "specta-typescript",
  "steel-core",

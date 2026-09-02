@@ -3797,26 +3797,6 @@ pub fn delete_message(conn: &Connection, id: &str) -> SqlResult<()> {
     Ok(())
 }
 
-pub fn discard_orphaned_project_folder_working_versions(conn: &Connection) -> SqlResult<usize> {
-    let ids = {
-        let mut stmt = conn.prepare(
-            "SELECT id
-             FROM messages
-             WHERE deleted_at IS NULL
-               AND status = 'working'
-               AND json_extract(agent_origin, '$.clientKind') = 'watcher'",
-        )?;
-        let ids = stmt
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        ids
-    };
-    for id in &ids {
-        delete_message(conn, id)?;
-    }
-    Ok(ids.len())
-}
-
 pub fn restore_message(conn: &Connection, id: &str) -> SqlResult<()> {
     conn.execute("UPDATE messages SET deleted_at = NULL WHERE id = ?", [id])?;
     Ok(())

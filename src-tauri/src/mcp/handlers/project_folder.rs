@@ -85,10 +85,14 @@ fn only_nonblocking_disconnected_issues(
     only_nonblocking_disconnected_codes(
         result.issues.iter().map(|issue| issue.code.as_str()),
         separated_print_layout,
-    ) && result
-        .authored_verify_checks
-        .iter()
-        .all(|check| check.status == crate::contracts::AuthoredVerifyCheckStatus::Passed)
+    ) && result.authored_verify_checks.iter().all(|check| {
+        matches!(
+            check.status,
+            crate::contracts::AuthoredVerifyCheckStatus::Passed
+                | crate::contracts::AuthoredVerifyCheckStatus::Skipped
+        ) || (check.status == crate::contracts::AuthoredVerifyCheckStatus::Failed
+            && check.severity == crate::contracts::AuthoredVerifySeverity::Warning)
+    })
 }
 
 fn only_nonblocking_disconnected_codes<'a>(
@@ -901,18 +905,9 @@ impl ProjectFolderWatcher {
     ) -> Vec<ProjectFolderWatchEvent> {
         let mut events = Vec::new();
         if !self.recovered_orphans {
-            let recovery = {
-                let conn = state.db.lock().await;
-                db::discard_orphaned_project_folder_working_versions(&conn)
-            };
-            match recovery {
-                Ok(_) => self.recovered_orphans = true,
-                Err(error) => {
-                    state.push_log(format!(
-                        "[PROJECT] orphaned watcher version recovery failed: {error}"
-                    ));
-                }
-            }
+            // Working versions are immutable authoring history. A process restart
+            // may interrupt their build, but must never hide or delete them.
+            self.recovered_orphans = true;
         }
         let active_thread_id = state
             .last_snapshot

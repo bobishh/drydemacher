@@ -291,7 +291,7 @@ pub async fn materialize_version_preview(
             .output
             .clone()
             .ok_or_else(|| AppError::not_found("Version source not found for history preview."))?;
-        let bundle = crate::services::render::render_model_with_previous_manifest(
+        let bundle = crate::services::render::render_model_with_previous_manifest_silent(
             &output.macro_code,
             &output.initial_params,
             Some(output.macro_dialect),

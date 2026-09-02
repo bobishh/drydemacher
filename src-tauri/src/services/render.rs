@@ -1710,11 +1710,61 @@ pub async fn render_model_with_previous_manifest(
     state: &AppState,
     app: &dyn PathResolver,
 ) -> AppResult<ArtifactBundle> {
+    render_model_with_previous_manifest_internal(
+        macro_code,
+        parameters,
+        macro_dialect,
+        geometry_backend,
+        post_processing,
+        previous_manifest,
+        false,
+        state,
+        app,
+    )
+    .await
+}
+
+pub async fn render_model_with_previous_manifest_silent(
+    macro_code: &str,
+    parameters: &DesignParams,
+    macro_dialect: Option<MacroDialect>,
+    geometry_backend: Option<GeometryBackend>,
+    post_processing: Option<&crate::contracts::PostProcessingSpec>,
+    previous_manifest: Option<&ModelManifest>,
+    state: &AppState,
+    app: &dyn PathResolver,
+) -> AppResult<ArtifactBundle> {
+    render_model_with_previous_manifest_internal(
+        macro_code,
+        parameters,
+        macro_dialect,
+        geometry_backend,
+        post_processing,
+        previous_manifest,
+        true,
+        state,
+        app,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn render_model_with_previous_manifest_internal(
+    macro_code: &str,
+    parameters: &DesignParams,
+    macro_dialect: Option<MacroDialect>,
+    geometry_backend: Option<GeometryBackend>,
+    post_processing: Option<&crate::contracts::PostProcessingSpec>,
+    previous_manifest: Option<&ModelManifest>,
+    silent: bool,
+    state: &AppState,
+    app: &dyn PathResolver,
+) -> AppResult<ArtifactBundle> {
     if crate::component_import_runtime::source_has_live_component_import(macro_code) {
         let previous_bundle = previous_manifest
             .map(|manifest| crate::model_runtime::read_artifact_bundle(app, &manifest.model_id))
             .transpose()?;
-        return render_model_with_component_lock(
+        return render_model_with_component_lock_internal(
             macro_code,
             parameters,
             macro_dialect,
@@ -1724,6 +1774,7 @@ pub async fn render_model_with_previous_manifest(
             previous_bundle
                 .as_ref()
                 .and_then(|bundle| bundle.component_dependency_lock.as_ref()),
+            silent,
             state,
             app,
         )
@@ -1736,6 +1787,7 @@ pub async fn render_model_with_previous_manifest(
         geometry_backend,
         post_processing,
         previous_manifest,
+        silent,
         state,
         app,
     )
@@ -1754,6 +1806,34 @@ pub async fn render_model_with_component_lock(
     post_processing: Option<&crate::contracts::PostProcessingSpec>,
     previous_manifest: Option<&ModelManifest>,
     expected_lock: Option<&crate::contracts::ComponentDependencyLock>,
+    state: &AppState,
+    app: &dyn PathResolver,
+) -> AppResult<ArtifactBundle> {
+    render_model_with_component_lock_internal(
+        authored_source,
+        parameters,
+        macro_dialect,
+        geometry_backend,
+        post_processing,
+        previous_manifest,
+        expected_lock,
+        false,
+        state,
+        app,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn render_model_with_component_lock_internal(
+    authored_source: &str,
+    parameters: &DesignParams,
+    macro_dialect: Option<MacroDialect>,
+    geometry_backend: Option<GeometryBackend>,
+    post_processing: Option<&crate::contracts::PostProcessingSpec>,
+    previous_manifest: Option<&ModelManifest>,
+    expected_lock: Option<&crate::contracts::ComponentDependencyLock>,
+    silent: bool,
     state: &AppState,
     app: &dyn PathResolver,
 ) -> AppResult<ArtifactBundle> {
@@ -1789,6 +1869,7 @@ pub async fn render_model_with_component_lock(
         geometry_backend,
         post_processing,
         previous_manifest,
+        silent,
         state,
         app,
     )
@@ -1844,6 +1925,7 @@ pub async fn render_model_with_dependency_upgrade(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn render_model_with_previous_manifest_resolved(
     macro_code: &str,
     parameters: &DesignParams,
@@ -1851,6 +1933,7 @@ async fn render_model_with_previous_manifest_resolved(
     geometry_backend: Option<GeometryBackend>,
     post_processing: Option<&crate::contracts::PostProcessingSpec>,
     previous_manifest: Option<&ModelManifest>,
+    silent: bool,
     state: &AppState,
     app: &dyn PathResolver,
 ) -> AppResult<ArtifactBundle> {
@@ -1880,7 +1963,11 @@ async fn render_model_with_previous_manifest_resolved(
     let cache_source = cache_salted_render_source(macro_code, &effective_dialect, &flight_key);
     let source_cancellation = source_render_cancellation(macro_code);
 
-    let _guard = state.acquire_geometry_render().await;
+    let _guard = if silent {
+        state.acquire_geometry_render_silent().await
+    } else {
+        state.acquire_geometry_render().await
+    };
     let first_attempt = render_model_unlocked(
         &cache_source,
         parameters,
@@ -5363,6 +5450,223 @@ exit 5
                 .iter()
                 .map(|a| &a.format)
                 .collect::<Vec<_>>()
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A dense raster relief is a mesh Boolean operand, even when authored as
+    /// the second input to a multi-operand union. It must stay in the in-memory
+    /// Manifold domain instead of taking the mesh -> STL -> OCCT solidify path.
+    #[tokio::test]
+    async fn dense_raster_tool_uses_manifold_batch_union_without_non_manifold_edges() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root =
+            crate::ecky_cad_host::direct_occt_sdk::bundled_occt_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+        let root = temp_root("dense-raster-manifold-union");
+        let resolver = TestResolver { root: root.clone() };
+        let image_path = root.join("dense-raster.png");
+        let mut image = image::GrayImage::from_pixel(160, 120, image::Luma([255]));
+        for row in 0..8 {
+            for column in 0..12 {
+                let origin_x = 5 + column * 13;
+                let origin_y = 5 + row * 14;
+                for y in origin_y..origin_y + 5 {
+                    for x in origin_x..origin_x + 5 {
+                        image.put_pixel(x, y, image::Luma([0]));
+                    }
+                }
+            }
+        }
+        image.save(&image_path).expect("dense raster fixture");
+        let source = format!(
+            r#"(model
+  (part cliche
+    (union
+      (translate 20 15 0
+        (extrude (rounded-rect 40 30 3) 2.4))
+      (translate 0 0 2.2
+        (extrude "{}" 1.6
+          :width 40
+          :depth 30
+          :threshold 0.5
+          :foreground dark)))))"#,
+            image_path.display()
+        );
+
+        let bundle = render_model(
+            &source,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &test_state(&root),
+            &resolver,
+        )
+        .await
+        .expect("dense raster tool must render through Manifold");
+
+        assert_eq!(
+            bundle
+                .geometry_provenance
+                .as_ref()
+                .map(|provenance| &provenance.representation),
+            Some(&GeometryRepresentation::MeshNative)
+        );
+        assert_eq!(
+            crate::services::structural_verification::model_stl_non_manifold_edge_count(
+                std::path::Path::new(&bundle.model_stl_path),
+            )
+            .expect("dense raster topology"),
+            0
+        );
+        assert!(
+            !bundle
+                .export_artifacts
+                .iter()
+                .any(|artifact| artifact.format.eq_ignore_ascii_case("step")),
+            "single mesh-domain part must not fabricate STEP"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stamp_dense_raster_tpu_part_has_zero_non_manifold_edges() {
+        use base64::Engine as _;
+
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root =
+            crate::ecky_cad_host::direct_occt_sdk::bundled_occt_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+
+        let root = temp_root("stamp-dense-raster-tpu");
+        let resolver = TestResolver { root: root.clone() };
+        let image_path = root.join("stamp-artwork-gimp-levels-nozzle-06.png");
+        let encoded = include_str!(
+            "../../tests/fixtures/cad/raster/stamp-artwork-gimp-levels-nozzle-06.png.base64"
+        )
+        .split_whitespace()
+        .collect::<String>();
+        let image_bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("exact stamp raster fixture");
+        std::fs::write(&image_path, image_bytes).expect("write exact stamp raster fixture");
+        let source = format!(
+            r#"(model
+  (part tpu_cliche
+    (union
+      (translate 30 22.5 0
+        (extrude (rounded-rect 60 45 5) 2.4))
+      (translate 0 0 2.2
+        (extrude "{}" 1.6
+          :width 60
+          :depth 45
+          :threshold 0.5
+          :foreground dark)))))"#,
+            image_path.display()
+        );
+
+        let bundle = render_model(
+            &source,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &test_state(&root),
+            &resolver,
+        )
+        .await
+        .expect("exact TPU raster part must render through Manifold");
+        assert_eq!(
+            crate::services::structural_verification::model_stl_non_manifold_edge_count(
+                std::path::Path::new(&bundle.model_stl_path),
+            )
+            .expect("exact TPU topology"),
+            0
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Regression for the production stamp project that exposed 4,508
+    /// non-manifold edges after the raster relief crossed the hybrid bridge.
+    #[tokio::test]
+    async fn stamp_dense_raster_project_has_zero_non_manifold_edges() {
+        use base64::Engine as _;
+
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let runtime_root =
+            crate::ecky_cad_host::direct_occt_sdk::bundled_occt_runtime_root_from_repo(repo_root);
+        if !runtime_root.exists() {
+            return;
+        }
+
+        let root = temp_root("stamp-dense-raster-project");
+        let resolver = TestResolver { root: root.clone() };
+        let image_path = root.join("stamp-artwork-gimp-levels-nozzle-06.png");
+        let encoded = include_str!(
+            "../../tests/fixtures/cad/raster/stamp-artwork-gimp-levels-nozzle-06.png.base64"
+        )
+        .split_whitespace()
+        .collect::<String>();
+        let image_bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("exact stamp raster fixture");
+        std::fs::write(&image_path, image_bytes).expect("write exact stamp raster fixture");
+        let source = include_str!("../../tests/fixtures/cad/raster/stamp_dense_raster.ecky")
+            .replace("__STAMP_RASTER_PATH__", &image_path.to_string_lossy());
+
+        let program = crate::ecky_scheme::compile_to_core_program(&source)
+            .expect("compile exact stamp raster fixture");
+        let partitions = crate::ecky_ir::poly_partition::analyze_program(&program);
+        assert_eq!(
+            partitions[0].strategy,
+            crate::ecky_ir::poly_partition::PartRenderStrategy::Hybrid,
+            "TPU raster relief must remain a mesh island below its union"
+        );
+
+        let bundle = render_model(
+            &source,
+            &DesignParams::new(),
+            Some(MacroDialect::EckyIrV0),
+            Some(GeometryBackend::EckyRust),
+            None,
+            &test_state(&root),
+            &resolver,
+        )
+        .await
+        .expect("exact stamp raster project must render through Manifold");
+
+        for asset in &bundle.viewer_assets {
+            assert_eq!(
+                crate::services::structural_verification::model_stl_non_manifold_edge_count(
+                    std::path::Path::new(&asset.path),
+                )
+                .expect("exact stamp part topology"),
+                0,
+                "part '{}' must be manifold",
+                asset.part_id
+            );
+        }
+
+        assert_eq!(
+            crate::services::structural_verification::model_stl_non_manifold_edge_count(
+                std::path::Path::new(&bundle.model_stl_path),
+            )
+            .expect("exact stamp topology"),
+            0
         );
 
         std::fs::remove_dir_all(root).unwrap();

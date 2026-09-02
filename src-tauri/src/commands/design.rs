@@ -992,7 +992,30 @@ pub async fn apply_manual_parameters(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> AppResult<crate::services::manual_parameters::ManualParameterApplyResponse> {
-    crate::services::manual_parameters::apply_manual_parameters(input, &state, &app).await
+    if !input.persist {
+        return crate::services::manual_parameters::apply_manual_parameters(input, &state, &app)
+            .await;
+    }
+    let (accepted, pending) =
+        crate::services::manual_parameters::begin_manual_parameter_apply(input, &state, &app)
+            .await?;
+    let background_state = state.inner().clone();
+    let background_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = crate::services::manual_parameters::finish_manual_parameter_apply(
+            pending,
+            &background_state,
+            &background_app,
+        )
+        .await
+        {
+            background_state.push_log(format!(
+                "[PARAMS] background version build failed: {}",
+                error
+            ));
+        }
+    });
+    Ok(accepted)
 }
 
 #[tauri::command]

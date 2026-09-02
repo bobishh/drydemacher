@@ -419,7 +419,7 @@ pub struct ConfigPersistenceStatus {
 
 pub struct GeometryRenderGuard {
     _lock: tokio::sync::OwnedMutexGuard<()>,
-    _activity: GeometryRenderActivityGuard,
+    _activity: Option<GeometryRenderActivityGuard>,
 }
 
 struct GeometryRenderActivityGuard {
@@ -614,7 +614,15 @@ impl AppState {
         let lock = self.render_lock.clone().lock_owned().await;
         GeometryRenderGuard {
             _lock: lock,
-            _activity: activity,
+            _activity: Some(activity),
+        }
+    }
+
+    pub async fn acquire_geometry_render_silent(&self) -> GeometryRenderGuard {
+        let lock = self.render_lock.clone().lock_owned().await;
+        GeometryRenderGuard {
+            _lock: lock,
+            _activity: None,
         }
     }
 

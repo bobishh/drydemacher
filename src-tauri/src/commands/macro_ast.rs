@@ -87,8 +87,12 @@ fn collect_clause_nodes(source: &str, clauses: &[ExprKind], nodes: &mut Vec<Macr
             }
             "verify" => {
                 let label = items
-                    .get(1)
-                    .and_then(|section| expr_list_items(section, "verify section").ok())
+                    .iter()
+                    .skip(1)
+                    .filter_map(|section| expr_list_items(section, "verify section").ok())
+                    .find(|section| {
+                        section.first().and_then(expr_identifier).as_deref() == Some("tag")
+                    })
                     .and_then(|section| section.get(1).and_then(expr_identifier))
                     .unwrap_or_else(|| "verify".to_string());
                 let index = nodes.iter().filter(|node| node.kind == "verify").count();
@@ -242,6 +246,19 @@ mod tests {
         assert_eq!(verify.label, "wall_ok");
         assert!(slice(verify).starts_with("(verify"));
         assert!(slice(verify).ends_with(")"));
+    }
+
+    #[test]
+    fn maps_verify_tag_when_optional_sections_come_first() {
+        let source = r#"(model
+  (verify (severity warning) (intent "advisory") (tag wall_ok) (metric wall (stl triangle-count)) (expect wall (> 0)))
+  (part body (box 1 1 1)))"#;
+        let nodes = macro_ast_source_map_impl(source).expect("map");
+        let verify = nodes
+            .iter()
+            .find(|node| node.kind == "verify")
+            .expect("verify node");
+        assert_eq!(verify.label, "wall_ok");
     }
 
     #[test]

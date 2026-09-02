@@ -481,9 +481,9 @@ fn model_clause_reference(name: &str) -> SurfaceReferenceEntry {
         "verify" => ref_entry(
             name,
             "modelClause",
-            "(verify (tag id) (metric id metric-expr) (expect id predicate))",
+            "(verify (tag id) [(intent text)] [(severity error|warning)] [(when bool-expr)] (metric id metric-expr) (expect id predicate))",
             "model clause",
-            "Declares one runtime-checked requirement and its metric evidence.",
+            "Declares one conditional runtime check with intent, severity, and typed evidence.",
             true,
             "all .ecky backends",
             "(verify (tag mesh-clean) (metric bad-edges (stl non-manifold-edge-count)) (expect bad-edges (= 0)))",
@@ -1368,7 +1368,20 @@ fn cad_op_reference(name: &str, backend: GeometryBackend) -> SurfaceReferenceEnt
         "polygon" => ref_entry(name, "cadOp", "(polygon ((x y)...))", "sketch", "Creates a closed polygon sketch from 2D points.", true, support, "(polygon ((0 0) (40 0) (40 20) (0 20)))", &[]),
         "profile" => ref_entry(name, "cadOp", "(profile :outer sketch :holes sketch-or-list)", "sketch", "Builds a face profile from an outer loop and optional hole loops.", true, support, "(profile :outer (circle 20) :holes (circle 6))", &[]),
         "make-face" => ref_entry(name, "cadOp", "(make-face sketch)", "face/sketch", "Turns a closed sketch into a face-like profile for downstream ops.", true, support, "(make-face (polygon points))", &[]),
-        "text" => ref_entry(name, "cadOp", "(text value size)", "sketch/solid", "Creates text geometry where backend lowering supports it.", true, support, "(text \"A\" 12)", &[]),
+        "text" => ref_entry(
+            name,
+            "cadOp",
+            "(text value size [:font selector])",
+            "sketch/solid",
+            "Creates a text profile. `:font` selects the face for this call before downstream extrusion.",
+            true,
+            support,
+            "(extrude (text \"A\" 12 :font \"Arial\") 2)",
+            &[
+                "The selector accepts an installed font family name or an absolute font-file path.",
+                "Put `:font` on the single `text` call that should change; it is not an `extrude` keyword.",
+            ],
+        ),
         "svg" => ref_entry(name, "cadOp", "(svg path-or-data)", "sketch/solid", "Imports SVG profile/path data where backend lowering supports it.", true, support, "(svg iconData)", &[]),
         "import-stl" => ref_entry(name, "cadOp", "(import-stl path [:target-triangles n :max-error d [:preserve-boundaries #t|#f]])", "mesh/solid", "Imports an STL file as geometry. Optional preparation keywords keep the raw source and derive a bounded indexed mesh.", true, support, "(import-stl \"/tmp/part.stl\" :target-triangles 4000 :max-error 0.05 :preserve-boundaries #t)", &["Use absolute paths from attachments or app artifacts.", "Preparation keywords require both `:target-triangles` and `:max-error`."]),
         "import-step" => ref_entry(name, "cadOp", "(import-step path)", "solid/BRep", "Imports an exact STEP payload through native Direct OCCT.", true, support, "(import-step \"/absolute/path/component.step\")", &["Prefer locked `import-component` packages; raw paths are not portable dependencies."]),
@@ -1537,6 +1550,20 @@ mod tests {
         assert!(mesh_manifest.cad_ops.contains(&"wall-pattern"));
         assert!(mesh_manifest.cad_ops.contains(&"hull"));
         assert_eq!(mesh_manifest.wall_pattern_modes, WALL_PATTERN_MODES);
+    }
+
+    #[test]
+    fn text_reference_exposes_per_call_font_selector() {
+        let reference = supported_surface_reference(GeometryBackend::EckyRust)
+            .entries
+            .into_iter()
+            .find(|entry| entry.name == "text")
+            .expect("text reference");
+
+        assert!(reference.signature.contains(":font selector"));
+        assert!(reference.example.contains(":font \"Arial\""));
+        assert!(reference.notes.iter().any(|note| note.contains("family name")));
+        assert!(reference.notes.iter().any(|note| note.contains("single `text` call")));
     }
 
     #[test]

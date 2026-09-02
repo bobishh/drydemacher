@@ -1701,7 +1701,7 @@ async fn store_session_render_preview_unchecked(
 
     let preview = SessionRenderPreview {
         session_id: ctx.session_id.clone(),
-        preview_id: Uuid::new_v4().to_string(),
+        preview_id: saved_draft_message_id.clone(),
         thread_id: req.thread_id,
         base_message_id: Some(saved_draft_message_id),
         design_output: req.design_output,
@@ -1770,11 +1770,10 @@ async fn store_session_render_preview_unchecked(
     );
 
     let snapshot_started = Instant::now();
-    let snapshot = crate::services::session::build_draft_snapshot(
+    let snapshot = crate::services::session::build_saved_version_snapshot(
         Some(preview.design_output.clone()),
         preview.thread_id.clone(),
         preview.preview_id.clone(),
-        preview.session_id.clone(),
         Some(preview.artifact_bundle.clone()),
         Some(preview.model_manifest.clone()),
         None,
