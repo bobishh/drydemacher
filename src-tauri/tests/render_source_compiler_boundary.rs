@@ -17,3 +17,22 @@ fn native_source_compiler_implements_the_render_crate_port() {
         }
     ));
 }
+
+#[test]
+fn text_renders_with_futura_collection() {
+    let components = ecky_cad_lib::ecky_cad_host::text_profile::parse_text_profile(
+        "Понедельник",
+        10.0,
+        Some("/System/Library/Fonts/Supplemental/Futura.ttc"),
+    )
+    .expect("Futura Cyrillic text profile compiles by path");
+    assert!(!components.is_empty());
+
+    let family_components = ecky_cad_lib::ecky_cad_host::text_profile::parse_text_profile(
+        "Понедельник",
+        10.0,
+        Some("Futura"),
+    )
+    .expect("Futura Cyrillic text profile compiles by family name");
+    assert!(!family_components.is_empty());
+}

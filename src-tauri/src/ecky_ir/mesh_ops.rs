@@ -594,6 +594,12 @@ fn extrude_sketch(sketch: &IrSketch, height: f64, symmetric: bool) -> IrMesh {
     }
 }
 
+fn extrude_raster_sketch(sketch: &IrSketch, height: f64, symmetric: bool) -> AppResult<IrMesh> {
+    let bottom_z = if symmetric { -height * 0.5 } else { 0.0 };
+    let top_z = bottom_z + height;
+    loft_between_sketches(sketch, bottom_z, sketch, top_z, "raster extrude")
+}
+
 fn raster_foreground(
     value: Option<&&IrExpr>,
     env: &BTreeMap<String, ParamValue>,
@@ -667,7 +673,6 @@ fn raster_sketch(
         },
         threshold: (threshold * 255.0).round() as u8,
         invert: foreground == RasterForeground::Light,
-        max_contours: None,
     })?;
     let mut contours = SketchContours {
         outer_loops: Vec::new(),
@@ -1897,7 +1902,8 @@ pub(super) fn eval_geometry_with_bindings(
                 .map(|value| eval_bool(value, env))
                 .transpose()?
                 .unwrap_or(false);
-            let sketch = if is_raster_source(positional[0], env) {
+            let raster_source = is_raster_source(positional[0], env);
+            let sketch = if raster_source {
                 let dimension = |name: &str| -> AppResult<Option<f64>> {
                     keywords
                         .get(name)
@@ -1928,7 +1934,15 @@ pub(super) fn eval_geometry_with_bindings(
                 eval_geometry_with_bindings(positional[0], env, bindings)?
                     .into_sketch("extrude")?
             };
-            Ok(Geometry::Mesh(extrude_sketch(&sketch, height, symmetric)))
+            let mesh = if raster_source {
+                // csgrs Sketch::extrude can stitch separate raster islands
+                // through shared cap vertices. Build caps and side walls from
+                // the classified contour set so every island/hole stays closed.
+                extrude_raster_sketch(&sketch, height, symmetric)?
+            } else {
+                extrude_sketch(&sketch, height, symmetric)
+            };
+            Ok(Geometry::Mesh(mesh))
         }
         "protrude" => {
             let (positional, keywords) =

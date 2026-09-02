@@ -138,7 +138,7 @@ pub fn analyze_part(root: &CoreNode) -> PartPartition {
     let mut mesh_boolean_boundaries = Vec::new();
     collect_mesh_boolean_boundaries(
         root,
-        &std::collections::HashMap::new(),
+        &MeshFlowBindings::default(),
         &mut mesh_boolean_boundaries,
     );
     PartPartition {
@@ -157,7 +157,7 @@ pub fn mesh_origin_surface_op_admission_issues(
     for (part_index, part) in program.parts.iter().enumerate() {
         collect_mesh_origin_surface_op_admission_issues(
             &part.root,
-            &std::collections::HashMap::new(),
+            &MeshFlowBindings::default(),
             part_index,
             &mut issues,
         );
@@ -183,41 +183,44 @@ struct NodeAnalysis {
     has_mesh_op: bool,
 }
 
-fn analyze_node(node: &CoreNode) -> NodeAnalysis {
-    analyze_node_with_bindings(node, &std::collections::HashMap::new())
+#[derive(Clone, Default)]
+struct PostBoundaryBindings<'a> {
+    names: std::collections::HashMap<&'a str, bool>,
+    nodes: std::collections::HashMap<NodeId, bool>,
 }
 
-/// Analyze a node with a map of known binding names that are post-boundary
-/// (mesh-displaced). Used to resolve `Reference::Local` inside Build/Let so
-/// that a chamfer referencing a wall-pattern binding is correctly classified.
+fn analyze_node(node: &CoreNode) -> NodeAnalysis {
+    analyze_node_with_bindings(node, &PostBoundaryBindings::default())
+}
+
+/// Analyze a node with known bindings that are post-boundary. The compiler
+/// emits both name references and direct node references for Build/Let values.
 fn analyze_node_with_bindings(
     node: &CoreNode,
-    post_boundary_names: &std::collections::HashMap<&str, bool>,
+    post_boundary_bindings: &PostBoundaryBindings<'_>,
 ) -> NodeAnalysis {
     match &node.kind {
         // Leaf-like nodes: no ops, no children.
         CoreNodeKind::Literal(_) | CoreNodeKind::Range { .. } => NodeAnalysis::default(),
 
         CoreNodeKind::Reference(reference) => {
-            // Resolve local bindings — if this reference points to a binding
-            // that is post-boundary, the consumer is post-boundary too.
-            match reference {
-                CoreReference::Local(name) => {
-                    if post_boundary_names
-                        .get(name.as_str())
-                        .copied()
-                        .unwrap_or(false)
-                    {
-                        NodeAnalysis {
-                            post_boundary: true,
-                            has_mesh_op: false,
-                            ..Default::default()
-                        }
-                    } else {
-                        NodeAnalysis::default()
-                    }
-                }
-                _ => NodeAnalysis::default(),
+            let post_boundary = match reference {
+                CoreReference::Local(name) => post_boundary_bindings
+                    .names
+                    .get(name.as_str())
+                    .copied()
+                    .unwrap_or(false),
+                CoreReference::Node(node_id) => post_boundary_bindings
+                    .nodes
+                    .get(node_id)
+                    .copied()
+                    .unwrap_or(false),
+                _ => false,
+            };
+            NodeAnalysis {
+                post_boundary,
+                has_mesh_op: false,
+                ..Default::default()
             }
         }
 
@@ -225,13 +228,17 @@ fn analyze_node_with_bindings(
             // Two-pass: analyze each binding in order, tracking which names
             // are post-boundary, so later bindings and the result can resolve
             // references to earlier bindings.
-            let mut local_post_boundary: std::collections::HashMap<&str, bool> =
-                post_boundary_names.clone();
+            let mut local_post_boundary = post_boundary_bindings.clone();
             let mut combined = NodeAnalysis::default();
 
             for binding in bindings.iter() {
                 let ba = analyze_node_with_bindings(&binding.value, &local_post_boundary);
-                local_post_boundary.insert(binding.name.as_str(), ba.post_boundary);
+                local_post_boundary
+                    .names
+                    .insert(binding.name.as_str(), ba.post_boundary);
+                local_post_boundary
+                    .nodes
+                    .insert(binding.value.id, ba.post_boundary);
                 combined.boundary_node_ids.extend(ba.boundary_node_ids);
                 combined.has_post_boundary_brep_op |= ba.has_post_boundary_brep_op;
                 combined.post_boundary |= ba.post_boundary;
@@ -249,13 +256,17 @@ fn analyze_node_with_bindings(
         }
 
         CoreNodeKind::Let { bindings, body } => {
-            let mut local_post_boundary: std::collections::HashMap<&str, bool> =
-                post_boundary_names.clone();
+            let mut local_post_boundary = post_boundary_bindings.clone();
             let mut combined = NodeAnalysis::default();
 
             for binding in bindings.iter() {
                 let ba = analyze_node_with_bindings(&binding.value, &local_post_boundary);
-                local_post_boundary.insert(binding.name.as_str(), ba.post_boundary);
+                local_post_boundary
+                    .names
+                    .insert(binding.name.as_str(), ba.post_boundary);
+                local_post_boundary
+                    .nodes
+                    .insert(binding.value.id, ba.post_boundary);
                 combined.boundary_node_ids.extend(ba.boundary_node_ids);
                 combined.has_post_boundary_brep_op |= ba.has_post_boundary_brep_op;
                 combined.post_boundary |= ba.post_boundary;
@@ -283,7 +294,7 @@ fn analyze_node_with_bindings(
                     then_branch.as_ref(),
                     else_branch.as_ref(),
                 ],
-                post_boundary_names,
+                post_boundary_bindings,
             );
             apply_op_post_boundary(node, None, &mut combined);
             combined
@@ -292,7 +303,7 @@ fn analyze_node_with_bindings(
         CoreNodeKind::Call { op, args, keywords } => {
             let kw_nodes = keywords.iter().map(|kw| kw.source_node());
             let mut combined =
-                collect_children_with_bindings(args.iter().chain(kw_nodes), post_boundary_names);
+                collect_children_with_bindings(args.iter().chain(kw_nodes), post_boundary_bindings);
             apply_op_post_boundary(node, Some(op), &mut combined);
             combined
         }
@@ -300,7 +311,7 @@ fn analyze_node_with_bindings(
         CoreNodeKind::Map { sources, body, .. } => {
             let mut combined = collect_children_with_bindings(
                 sources.iter().chain(std::iter::once(body.as_ref())),
-                post_boundary_names,
+                post_boundary_bindings,
             );
             apply_op_post_boundary(node, None, &mut combined);
             combined
@@ -309,14 +320,14 @@ fn analyze_node_with_bindings(
         CoreNodeKind::Apply { op, args, list } => {
             let mut combined = collect_children_with_bindings(
                 args.iter().chain(std::iter::once(list.as_ref())),
-                post_boundary_names,
+                post_boundary_bindings,
             );
             apply_op_post_boundary(node, Some(op), &mut combined);
             combined
         }
 
         CoreNodeKind::List(items) | CoreNodeKind::Group(items) => {
-            let mut combined = collect_children_with_bindings(items.iter(), post_boundary_names);
+            let mut combined = collect_children_with_bindings(items.iter(), post_boundary_bindings);
             apply_op_post_boundary(node, None, &mut combined);
             combined
         }
@@ -327,11 +338,11 @@ fn analyze_node_with_bindings(
 /// references through the provided binding map.
 fn collect_children_with_bindings<'a>(
     children: impl IntoIterator<Item = &'a CoreNode>,
-    post_boundary_names: &std::collections::HashMap<&str, bool>,
+    post_boundary_bindings: &PostBoundaryBindings<'_>,
 ) -> NodeAnalysis {
     let mut combined = NodeAnalysis::default();
     for child in children {
-        let ca = analyze_node_with_bindings(child, post_boundary_names);
+        let ca = analyze_node_with_bindings(child, post_boundary_bindings);
         combined.boundary_node_ids.extend(ca.boundary_node_ids);
         combined.has_post_boundary_brep_op |= ca.has_post_boundary_brep_op;
         combined.post_boundary |= ca.post_boundary;
@@ -428,22 +439,30 @@ struct MeshPhaseFlow {
     output_node_ids: Vec<NodeId>,
 }
 
+#[derive(Clone, Default)]
+struct MeshFlowBindings<'a> {
+    names: std::collections::HashMap<&'a str, MeshPhaseFlow>,
+    nodes: std::collections::HashMap<NodeId, MeshPhaseFlow>,
+}
+
 fn mesh_phase_output_node_ids(root: &CoreNode) -> Vec<NodeId> {
-    let flow = mesh_phase_flow(root, &std::collections::HashMap::new());
+    let flow = mesh_phase_flow(root, &MeshFlowBindings::default());
     let mut ids = flow.output_node_ids;
     ids.sort_by_key(|id| id.raw());
     ids.dedup();
     ids
 }
 
-fn mesh_phase_flow(
-    node: &CoreNode,
-    bindings: &std::collections::HashMap<&str, MeshPhaseFlow>,
-) -> MeshPhaseFlow {
+fn mesh_phase_flow(node: &CoreNode, bindings: &MeshFlowBindings<'_>) -> MeshPhaseFlow {
     match &node.kind {
         CoreNodeKind::Literal(_) | CoreNodeKind::Range { .. } => MeshPhaseFlow::default(),
-        CoreNodeKind::Reference(CoreReference::Local(name)) => {
-            bindings.get(name.as_str()).cloned().unwrap_or_default()
+        CoreNodeKind::Reference(CoreReference::Local(name)) => bindings
+            .names
+            .get(name.as_str())
+            .cloned()
+            .unwrap_or_default(),
+        CoreNodeKind::Reference(CoreReference::Node(node_id)) => {
+            bindings.nodes.get(node_id).cloned().unwrap_or_default()
         }
         CoreNodeKind::Reference(_) => MeshPhaseFlow::default(),
         CoreNodeKind::Build {
@@ -453,7 +472,8 @@ fn mesh_phase_flow(
             let mut local = bindings.clone();
             for binding in local_bindings {
                 let flow = mesh_phase_flow(&binding.value, &local);
-                local.insert(binding.name.as_str(), flow);
+                local.names.insert(binding.name.as_str(), flow.clone());
+                local.nodes.insert(binding.value.id, flow);
             }
             mesh_phase_flow(result, &local)
         }
@@ -464,7 +484,8 @@ fn mesh_phase_flow(
             let mut local = bindings.clone();
             for binding in local_bindings {
                 let flow = mesh_phase_flow(&binding.value, &local);
-                local.insert(binding.name.as_str(), flow);
+                local.names.insert(binding.name.as_str(), flow.clone());
+                local.nodes.insert(binding.value.id, flow);
             }
             mesh_phase_flow(body, &local)
         }
@@ -556,7 +577,7 @@ fn extend_mesh_phase_node(
 
 fn collect_mesh_origin_surface_op_admission_issues<'a>(
     node: &'a CoreNode,
-    bindings: &std::collections::HashMap<&'a str, MeshPhaseFlow>,
+    bindings: &MeshFlowBindings<'a>,
     part_index: usize,
     issues: &mut Vec<MeshOriginSurfaceOpAdmissionIssue>,
 ) {
@@ -575,7 +596,8 @@ fn collect_mesh_origin_surface_op_admission_issues<'a>(
                     issues,
                 );
                 let flow = mesh_phase_flow(&binding.value, &local);
-                local.insert(binding.name.as_str(), flow);
+                local.names.insert(binding.name.as_str(), flow.clone());
+                local.nodes.insert(binding.value.id, flow);
             }
             collect_mesh_origin_surface_op_admission_issues(result, &local, part_index, issues);
         }
@@ -592,7 +614,8 @@ fn collect_mesh_origin_surface_op_admission_issues<'a>(
                     issues,
                 );
                 let flow = mesh_phase_flow(&binding.value, &local);
-                local.insert(binding.name.as_str(), flow);
+                local.names.insert(binding.name.as_str(), flow.clone());
+                local.nodes.insert(binding.value.id, flow);
             }
             collect_mesh_origin_surface_op_admission_issues(body, &local, part_index, issues);
         }
@@ -722,7 +745,7 @@ fn operation_stops_mesh_phase(op: &CoreOperation) -> bool {
 
 fn collect_mesh_boolean_boundaries<'a>(
     node: &'a CoreNode,
-    bindings: &std::collections::HashMap<&'a str, MeshPhaseFlow>,
+    bindings: &MeshFlowBindings<'a>,
     boundaries: &mut Vec<MeshBooleanBoundary>,
 ) {
     match &node.kind {
@@ -734,7 +757,8 @@ fn collect_mesh_boolean_boundaries<'a>(
             for binding in local_bindings {
                 collect_mesh_boolean_boundaries(&binding.value, &local, boundaries);
                 let flow = mesh_phase_flow(&binding.value, &local);
-                local.insert(binding.name.as_str(), flow);
+                local.names.insert(binding.name.as_str(), flow.clone());
+                local.nodes.insert(binding.value.id, flow);
             }
             collect_mesh_boolean_boundaries(result, &local, boundaries);
         }
@@ -746,7 +770,8 @@ fn collect_mesh_boolean_boundaries<'a>(
             for binding in local_bindings {
                 collect_mesh_boolean_boundaries(&binding.value, &local, boundaries);
                 let flow = mesh_phase_flow(&binding.value, &local);
-                local.insert(binding.name.as_str(), flow);
+                local.names.insert(binding.name.as_str(), flow.clone());
+                local.nodes.insert(binding.value.id, flow);
             }
             collect_mesh_boolean_boundaries(body, &local, boundaries);
         }

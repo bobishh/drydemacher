@@ -1,0 +1,195 @@
+(define (stamp-thread-nozzle-value nozzle-profile)
+  (if (= nozzle-profile "0.6") 0.6 0.4))
+
+(define (stamp-thread-pitch nozzle-diameter)
+  (* nozzle-diameter 5))
+
+(define (stamp-thread-base-width nozzle-diameter)
+  (* nozzle-diameter 4))
+
+(define (stamp-thread-crest-width nozzle-diameter)
+  nozzle-diameter)
+
+(define (stamp-thread-depth nozzle-diameter)
+  (* nozzle-diameter 1.5))
+
+(model
+  (params
+    (number stamp_width 60 :label "TPU width" :min 40 :max 90 :step 1 :unit length)
+    (number stamp_height 45 :label "TPU height" :min 30 :max 70 :step 1 :unit length)
+    (number cliche_corner_r 5 :label "TPU corner radius" :min 2 :max 10 :step 0.5 :unit length)
+    (number tpu_base_h 2.4 :label "TPU base thickness" :min 1.6 :max 4 :step 0.2 :unit length)
+    (number relief_h 1.4 :label "Relief height" :min 0.8 :max 2.0 :step 0.1 :unit length)
+    (number tpu_fit_clearance 0.35 :label "TPU/rim clearance per side" :min 0.15 :max 0.8 :step 0.05 :unit length)
+    (number rim_wall 2.0 :label "Backing rim wall" :min 1.2 :max 3.5 :step 0.2 :unit length)
+    (number rim_h 1.4 :label "Backing rim height" :min 0.8 :max 2.2 :step 0.2 :unit length)
+    (number backing_h 8.0 :label "PLA backing thickness" :min 6 :max 12 :step 0.5 :unit length)
+    (number backing_base_chamfer 0.8 :label "PLA backing base chamfer" :min 0.4 :max 1.5 :step 0.1 :unit length)
+    (number solid_overlap 0.2 :label "Solid overlap" :min 0.1 :max 0.4 :step 0.1 :unit length)
+
+    (select thread_nozzle "0.6"
+      :label "Thread nozzle diameter"
+      :unit length
+      :options
+        (list
+          (option "0.4 mm" "0.4")
+          (option "0.6 mm" "0.6")))
+    (number thread_core_r 6.0 :label "Thread core radius" :min 4.5 :max 8 :step 0.25 :unit length)
+    (number thread_radial_clearance 0.35 :label "Thread radial clearance" :min 0.2 :max 0.6 :step 0.05 :unit length)
+    (number thread_axial_clearance 0.35 :label "Thread axial clearance" :min 0.2 :max 0.6 :step 0.05 :unit length)
+    (number thread_engagement 7.2 :label "Thread engagement" :min 5 :max 10 :step 0.2 :unit length)
+
+    (number grip_bottom_r 16 :label "Handle bottom radius" :min 12 :max 22 :step 0.5 :unit length)
+    (number grip_top_r 9.5 :label "Handle top radius" :min 8 :max 13 :step 0.5 :unit length)
+    (number grip_h 32 :label "Handle height" :min 25 :max 48 :step 1 :unit length)
+    (number grip_base_chamfer 1.5 :label "Handle base chamfer" :min 0.5 :max 3 :step 0.25 :unit length)
+    (number layout_gap 18 :label "Print layout gap" :min 10 :max 30 :step 1 :unit length)
+    :relations '
+      ((< rim_h tpu_base_h)
+       (< thread_engagement backing_h)
+       (> grip_bottom_r grip_top_r)
+       (> grip_top_r thread_core_r)))
+
+  ;; TPU artwork: raster mask. Dense islands stay in one Manifold mesh boolean.
+  (part tpu_cliche
+    (let*
+      ((clip_center_x (/ stamp_width 2))
+       (clip_center_y (/ stamp_height 2))
+       (relief_overlap solid_overlap))
+      (build
+        (shape cliche_base
+          (translate clip_center_x clip_center_y 0
+            (extrude
+              (rounded-rect stamp_width stamp_height cliche_corner_r)
+              tpu_base_h)))
+        (shape artwork_relief
+          (translate 0 0 (- tpu_base_h relief_overlap)
+            (extrude
+              "__STAMP_RASTER_PATH__"
+              (+ relief_h relief_overlap)
+              :width stamp_width
+              :depth stamp_height
+              :threshold 0.5
+              :foreground dark)))
+        (shape finished
+          (union cliche_base artwork_relief))
+        (result finished))))
+
+  ;; PLA backing prints rim upward. Female thread is a supportless through-hole.
+  (part pla_backing
+    (let*
+      ((cliche_rim_clearance tpu_fit_clearance)
+       (rim_inner_w (+ stamp_width (* 2 cliche_rim_clearance)))
+       (rim_inner_h (+ stamp_height (* 2 cliche_rim_clearance)))
+       (rim_outer_w (+ rim_inner_w (* 2 rim_wall)))
+       (rim_outer_h (+ rim_inner_h (* 2 rim_wall)))
+       (rim_inner_r (+ 3 cliche_rim_clearance))
+       (rim_outer_r (+ rim_inner_r rim_wall))
+       (thread_nozzle_d (stamp-thread-nozzle-value thread_nozzle))
+       (thread_pitch (stamp-thread-pitch thread_nozzle_d))
+       (thread_base_width (stamp-thread-base-width thread_nozzle_d))
+       (thread_crest_width (stamp-thread-crest-width thread_nozzle_d))
+       (thread_depth (stamp-thread-depth thread_nozzle_d))
+       (tap_base_width (+ thread_base_width thread_axial_clearance))
+       (tap_crest_width (+ thread_crest_width thread_axial_clearance))
+       (female_thread_r (+ thread_core_r thread_radial_clearance))
+       (thread_cutter_overrun 0.3)
+       (backing_layout_x (+ (/ stamp_width 2) layout_gap (/ rim_outer_w 2))))
+      (build
+        (shape plate
+          (chamfer backing_base_chamfer :edges "bottom"
+            (extrude
+              (rounded-rect rim_outer_w rim_outer_h rim_outer_r)
+              backing_h)))
+        (shape rim_outer
+          (translate 0 0 (- backing_h solid_overlap)
+            (extrude
+              (rounded-rect rim_outer_w rim_outer_h rim_outer_r)
+              (+ rim_h solid_overlap))))
+        (shape rim_void
+          (translate 0 0 (- backing_h (* 2 solid_overlap))
+            (extrude
+              (rounded-rect rim_inner_w rim_inner_h rim_inner_r)
+              (+ rim_h (* 3 solid_overlap)))))
+        (shape locating_rim
+          (difference rim_outer rim_void))
+        (shape backing_positive
+          (union plate locating_rim))
+        (shape female_thread_cutter
+          (translate 0 0 (- thread_cutter_overrun)
+            (tapped-hole
+              :radius female_thread_r
+              :pitch thread_pitch
+              :length (+ backing_h (* 2 thread_cutter_overrun))
+              :depth thread_depth
+              :base-width tap_base_width
+              :crest-width tap_crest_width)))
+        (shape finished
+          (difference backing_positive female_thread_cutter))
+        (result
+          (translate backing_layout_x 0 0 finished)))))
+
+  ;; PLA handle prints wide end down. Male thread points upward.
+  (part pla_handle
+    (let*
+      ((cliche_rim_clearance tpu_fit_clearance)
+       (rim_outer_w (+ stamp_width (* 2 (+ cliche_rim_clearance rim_wall))))
+       (backing_layout_x (+ (/ stamp_width 2) layout_gap (/ rim_outer_w 2)))
+       (handle_layout_x
+         (+ backing_layout_x (/ rim_outer_w 2) layout_gap grip_bottom_r))
+       (thread_nozzle_d (stamp-thread-nozzle-value thread_nozzle))
+       (thread_pitch (stamp-thread-pitch thread_nozzle_d))
+       (thread_base_width (stamp-thread-base-width thread_nozzle_d))
+       (thread_crest_width (stamp-thread-crest-width thread_nozzle_d))
+       (thread_depth (stamp-thread-depth thread_nozzle_d))
+       (thread_root_overlap 0.3)
+       (thread_ridge_r (- thread_core_r thread_root_overlap))
+       (thread_ridge_depth (+ thread_depth thread_root_overlap))
+       (thread_total_l (+ thread_engagement solid_overlap))
+       (thread_origin_z (- grip_h solid_overlap))
+       (thread_major_r (+ thread_core_r thread_depth)))
+      (build
+        (shape tapered_grip
+          (chamfer grip_base_chamfer :edges "bottom"
+            (cone grip_bottom_r grip_top_r grip_h 64)))
+        (shape male_thread_core
+          (translate 0 0 thread_origin_z
+            (cylinder thread_core_r thread_total_l 64)))
+        (shape male_thread_ridge
+          (translate 0 0 thread_origin_z
+            (helical-ridge
+              :radius thread_ridge_r
+              :pitch thread_pitch
+              :height thread_total_l
+              :depth thread_ridge_depth
+              :base-width thread_base_width
+              :crest-width thread_crest_width)))
+        (shape male_thread_unclipped
+          (union male_thread_core male_thread_ridge))
+        (shape male_thread_envelope
+          (translate 0 0 thread_origin_z
+            (cylinder thread_major_r thread_total_l 96)))
+        (shape male_thread
+          (intersection male_thread_unclipped male_thread_envelope))
+        (shape finished
+          (union tapered_grip male_thread))
+        (result
+          (translate handle_layout_x 0 0 finished)))))
+
+  (view print_layout
+    (offset-part tpu_cliche 0 0 0)
+    (offset-part pla_backing 0 0 0)
+    (offset-part pla_handle 0 0 0))
+
+  (verify
+    (tag stamp-preview-exists)
+    (metric preview (manifest has-preview-stl))
+    (expect preview (= true)))
+  (verify
+    (tag stamp-print-layout-components)
+    (metric components (stl connected-component-count))
+    (expect components (= 3)))
+  (verify
+    (tag stamp-mesh-manifold)
+    (metric bad-edges (stl non-manifold-edge-count))
+    (expect bad-edges (= 0))))

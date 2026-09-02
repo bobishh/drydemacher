@@ -881,42 +881,17 @@ fn indexed_mesh_imports_for_root_boolean(
             _ => continue,
         };
         let preparation_policy = indexed_mesh_preparation_policy(command)?;
-        let Some([first_consumer]) = consumers.get(&command.output.0).map(Vec::as_slice) else {
-            continue;
-        };
-        let mut current = if first_consumer.op == OcctOp::Solidify
-            && first_consumer.args.as_slice() == [OcctArg::Ref(command.output)]
+        if preparation_policy.is_none()
+            && !consumers.get(&command.output.0).is_some_and(|items| {
+                items.iter().any(|consumer| {
+                    consumer.op == OcctOp::Solidify
+                        && consumer.args.as_slice() == [OcctArg::Ref(command.output)]
+                })
+            })
         {
-            first_consumer.output
-        } else if preparation_policy.is_some() {
-            command.output
-        } else {
             continue;
-        };
-        let boolean = loop {
-            let Some([consumer]) = consumers.get(&current.0).map(Vec::as_slice) else {
-                break None;
-            };
-            if runner_manifold_transform(consumer, current) {
-                current = consumer.output;
-                continue;
-            }
-            break Some(*consumer);
-        };
-        let Some(boolean) = boolean else { continue };
-        let binary_root_chain = matches!(
-            boolean.op,
-            OcctOp::Union | OcctOp::Difference | OcctOp::Intersection
-        ) && boolean.args.len() == 2
-            && boolean.args.first() == Some(&OcctArg::Ref(current))
-            && binary_boolean_chain_reaches_root(boolean.output, part.root, &consumers);
-        let decorated_root_union = boolean.output == part.root
-            && boolean.op == OcctOp::Union
-            && boolean.args.len() == 4
-            && boolean.args[2..4].contains(&OcctArg::Ref(current))
-            && decorated_dome_pair(boolean, &part.commands)
-            && !consumers.contains_key(&part.root.0);
-        if !binary_root_chain && !decorated_root_union {
+        }
+        if !mesh_boolean_closure_reaches_root(command.output, part.root, &consumers) {
             continue;
         }
 
@@ -1002,37 +977,51 @@ fn indexed_mesh_preparation_policy(
     .map(Some)
 }
 
-/// Imported indexed meshes remain on the Manifold path when their first root
-/// Boolean is the first link of a binary Boolean chain. The optimizer emits
-/// `Difference(import, tool-a) -> fresh` then consumes that fresh output as the
-/// BASE of each later link, ending at `part.root`. Do not admit a mesh used as a
-/// tool, branched result, or with a non-Boolean post-consumer.
-fn binary_boolean_chain_reaches_root(
-    mut current: super::direct_occt::OcctSlot,
+/// Admit an indexed mesh whenever every path from the import reaches the part
+/// root through Manifold-capable operations. Operand position and Boolean
+/// arity do not matter: the native runner converts analytic peers once and
+/// executes n-ary union through `Manifold::BatchBoolean`.
+fn mesh_boolean_closure_reaches_root(
+    start: super::direct_occt::OcctSlot,
     root: super::direct_occt::OcctSlot,
     consumers: &HashMap<u64, Vec<&OcctCommand>>,
 ) -> bool {
+    let mut pending = vec![start];
     let mut visited = HashSet::new();
-    loop {
+    let mut reached_root = start == root;
+    while let Some(current) = pending.pop() {
         if current == root {
-            return !consumers.contains_key(&root.0);
+            if consumers.contains_key(&root.0) {
+                return false;
+            }
+            reached_root = true;
+            continue;
         }
         if !visited.insert(current.0) {
-            return false;
+            continue;
         }
-        let Some([consumer]) = consumers.get(&current.0).map(Vec::as_slice) else {
+        let Some(next_consumers) = consumers.get(&current.0) else {
             return false;
         };
-        if !matches!(
-            consumer.op,
-            OcctOp::Union | OcctOp::Difference | OcctOp::Intersection
-        ) || consumer.args.len() != 2
-            || consumer.args.first() != Some(&OcctArg::Ref(current))
-        {
-            return false;
+        for consumer in next_consumers {
+            let solidify_passthrough = consumer.op == OcctOp::Solidify
+                && consumer.args.as_slice() == [OcctArg::Ref(current)];
+            let boolean = matches!(
+                consumer.op,
+                OcctOp::Union | OcctOp::Difference | OcctOp::Intersection
+            ) && consumer.args.len() >= 2
+                && consumer
+                    .args
+                    .iter()
+                    .all(|arg| matches!(arg, OcctArg::Ref(_)))
+                && consumer.args.contains(&OcctArg::Ref(current));
+            if !solidify_passthrough && !runner_manifold_transform(consumer, current) && !boolean {
+                return false;
+            }
+            pending.push(consumer.output);
         }
-        current = consumer.output;
     }
+    reached_root
 }
 
 fn runner_manifold_transform(command: &OcctCommand, input: super::direct_occt::OcctSlot) -> bool {
@@ -4425,6 +4414,66 @@ mod tests {
     }
 
     #[test]
+    fn runner_plan_admits_indexed_mesh_as_multi_union_tool() {
+        let root = temp_root("indexed-mesh-multi-union-tool");
+        fs::create_dir_all(&root).expect("fixture dir");
+        let stl_path = root.join("island.stl");
+        write_indexed_cube_sidecar(&stl_path);
+        let command = |output, op, args| OcctCommand {
+            output: OcctSlot(output),
+            op,
+            args,
+            keywords: Vec::new(),
+        };
+        let source = sample_plan_for_commands(
+            OcctSlot(5),
+            vec![
+                command(
+                    1,
+                    OcctOp::ImportStl,
+                    vec![OcctArg::Text(stl_path.to_string_lossy().to_string())],
+                ),
+                command(2, OcctOp::Solidify, vec![OcctArg::Ref(OcctSlot(1))]),
+                command(
+                    3,
+                    OcctOp::Box,
+                    vec![
+                        OcctArg::Number(8.0),
+                        OcctArg::Number(8.0),
+                        OcctArg::Number(2.0),
+                    ],
+                ),
+                command(
+                    4,
+                    OcctOp::Cylinder,
+                    vec![OcctArg::Number(2.0), OcctArg::Number(2.0)],
+                ),
+                command(
+                    5,
+                    OcctOp::Union,
+                    vec![
+                        OcctArg::Ref(OcctSlot(3)),
+                        OcctArg::Ref(OcctSlot(2)),
+                        OcctArg::Ref(OcctSlot(4)),
+                    ],
+                ),
+            ],
+        );
+
+        let plan = runner_plan(&source)
+            .expect("runner plan")
+            .expect("supported runner plan");
+
+        assert_eq!(plan.parts[0].commands[0].op, "import-indexed-mesh");
+        assert_eq!(
+            plan.parts[0].representation,
+            KernelRepresentation::MeshDomain
+        );
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn runner_plan_admits_indexed_root_booleans_per_part() {
         let root = temp_root("indexed-mesh-multipart-runner-plan");
         fs::create_dir_all(&root).expect("fixture dir");
@@ -4653,7 +4702,7 @@ mod tests {
     }
 
     #[test]
-    fn indexed_mesh_import_rejects_authored_3mf_used_as_first_boolean_tool() {
+    fn indexed_mesh_import_admits_authored_3mf_used_as_first_boolean_tool() {
         let root = temp_root("indexed-mesh-authored-3mf-tool");
         fs::create_dir_all(&root).expect("fixture dir");
         let path = root.join("tool.3mf");
@@ -4669,8 +4718,8 @@ mod tests {
         let admitted = indexed_mesh_imports_for_root_boolean(&source.parts[0])
             .expect("indexed mesh admission");
         assert!(
-            admitted.is_empty(),
-            "an imported 3MF used as Boolean tool must not enter indexed-mesh path"
+            admitted.contains_key(&1),
+            "an imported 3MF Boolean tool must enter the in-memory Manifold path"
         );
 
         fs::remove_dir_all(root).expect("cleanup");

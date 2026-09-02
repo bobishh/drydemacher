@@ -9,12 +9,9 @@ use std::io::Cursor;
 
 use crate::image_sampling::{raster_coverage_image, RasterForeground};
 
-pub const RASTER_TRACE_EXTRACTOR_VERSION: &str = "raster-trace-v1";
+pub const RASTER_TRACE_EXTRACTOR_VERSION: &str = "raster-trace-v3";
 pub const MAX_RASTER_TRACE_PIXELS: u64 = 40_000_000;
 const MAX_RASTER_TRACE_FILE_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_RASTER_TRACE_CONTOURS: usize = 256;
-const DEFAULT_MAX_RASTER_TRACE_CONTOURS: usize = 64;
-const MIN_COMPONENT_PIXELS: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct GridPoint {
@@ -83,7 +80,6 @@ pub fn extract_raster_contours(request: RasterTraceRequest) -> AppResult<RasterT
     let connected_component_count = components.len();
     let mut loops = components
         .iter()
-        .filter(|component| component.pixels.len() >= MIN_COMPONENT_PIXELS)
         .flat_map(|component| trace_component_loops(component, width, height))
         .filter(|pixel_loop| pixel_loop.points.len() >= 3)
         .collect::<Vec<_>>();
@@ -94,10 +90,6 @@ pub fn extract_raster_contours(request: RasterTraceRequest) -> AppResult<RasterT
             .then_with(|| left.points.cmp(&right.points))
     });
 
-    let max_contours = request
-        .max_contours
-        .unwrap_or(DEFAULT_MAX_RASTER_TRACE_CONTOURS);
-    loops.truncate(max_contours);
     if loops.is_empty() {
         return Err(raster_error(
             &request,
@@ -105,6 +97,7 @@ pub fn extract_raster_contours(request: RasterTraceRequest) -> AppResult<RasterT
         ));
     }
 
+    let shared_grid_vertices = shared_grid_vertices(&loops);
     let asset = RasterTraceAssetIdentity {
         image_path: request.image_path.clone(),
         digest: format!("sha256:{:x}", Sha256::digest(&bytes)),
@@ -116,17 +109,14 @@ pub fn extract_raster_contours(request: RasterTraceRequest) -> AppResult<RasterT
         .enumerate()
         .map(|(index, pixel_loop)| {
             let contour_id = format!("raster-{}-{index}", sketch_view_label(&request.view));
-            let points = pixel_loop
-                .points
-                .iter()
-                .map(|point| {
-                    [
-                        point.x as f64 / width as f64 * request.calibration.physical_width,
-                        request.calibration.physical_height
-                            - point.y as f64 / height as f64 * request.calibration.physical_height,
-                    ]
-                })
-                .collect::<Vec<_>>();
+            let points = bevel_shared_grid_vertices(
+                &pixel_loop.points,
+                &shared_grid_vertices,
+                width,
+                height,
+                request.calibration.physical_width,
+                request.calibration.physical_height,
+            );
             let provenance = RasterTraceProvenance {
                 kind: "rasterTrace".to_string(),
                 asset: asset.clone(),
@@ -157,11 +147,64 @@ pub fn extract_raster_contours(request: RasterTraceRequest) -> AppResult<RasterT
                 "connectedComponents={connected_component_count} closedContours={}",
                 contours.len()
             ),
+            format!("beveledSharedGridVertices={}", shared_grid_vertices.len()),
         ],
         contours,
         connected_component_count,
         extractor_version: RASTER_TRACE_EXTRACTOR_VERSION.to_string(),
     })
+}
+
+fn shared_grid_vertices(loops: &[PixelLoop]) -> BTreeSet<GridPoint> {
+    let mut occurrences = BTreeMap::<GridPoint, usize>::new();
+    for pixel_loop in loops {
+        for point in &pixel_loop.points {
+            *occurrences.entry(*point).or_default() += 1;
+        }
+    }
+    occurrences
+        .into_iter()
+        .filter_map(|(point, count)| (count > 1).then_some(point))
+        .collect()
+}
+
+fn bevel_shared_grid_vertices(
+    points: &[GridPoint],
+    shared: &BTreeSet<GridPoint>,
+    width: u32,
+    height: u32,
+    physical_width: f64,
+    physical_height: f64,
+) -> Vec<[f64; 2]> {
+    const BEVEL_FRACTION: f64 = 0.125;
+
+    let physical_point = |point: GridPoint| {
+        [
+            point.x as f64 / width as f64 * physical_width,
+            physical_height - point.y as f64 / height as f64 * physical_height,
+        ]
+    };
+    let lerp = |from: [f64; 2], to: [f64; 2]| {
+        [
+            from[0] + (to[0] - from[0]) * BEVEL_FRACTION,
+            from[1] + (to[1] - from[1]) * BEVEL_FRACTION,
+        ]
+    };
+
+    let mut beveled = Vec::with_capacity(points.len() + shared.len());
+    for index in 0..points.len() {
+        let current = points[index];
+        let current_physical = physical_point(current);
+        if shared.contains(&current) {
+            let previous = physical_point(points[(index + points.len() - 1) % points.len()]);
+            let next = physical_point(points[(index + 1) % points.len()]);
+            beveled.push(lerp(current_physical, previous));
+            beveled.push(lerp(current_physical, next));
+        } else {
+            beveled.push(current_physical);
+        }
+    }
+    beveled
 }
 
 fn validate_request(request: &RasterTraceRequest) -> AppResult<()> {
@@ -181,16 +224,6 @@ fn validate_request(request: &RasterTraceRequest) -> AppResult<()> {
         return Err(raster_error(
             request,
             "physicalHeight must be finite and greater than zero",
-        ));
-    }
-    if request.max_contours == Some(0)
-        || request
-            .max_contours
-            .is_some_and(|count| count > MAX_RASTER_TRACE_CONTOURS)
-    {
-        return Err(raster_error(
-            request,
-            format!("maxContours must be within 1..={MAX_RASTER_TRACE_CONTOURS}"),
         ));
     }
     Ok(())
@@ -387,6 +420,7 @@ fn raster_error(request: &RasterTraceRequest, detail: impl AsRef<str>) -> AppErr
 mod tests {
     use super::*;
     use crate::contracts::{RasterTraceCalibration, SketchView};
+    use base64::Engine as _;
     use image::{GrayImage, Luma};
     use std::path::{Path, PathBuf};
 
@@ -422,7 +456,6 @@ mod tests {
             },
             threshold: 127,
             invert: false,
-            max_contours: Some(8),
         }
     }
 
@@ -447,6 +480,74 @@ mod tests {
         assert_eq!(first.asset.width_pixels, 32);
         assert_eq!(first.asset.height_pixels, 24);
         assert!(first.contours[0].signed_area.abs() > first.contours[1].signed_area.abs());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn bevels_diagonal_component_contacts_without_merging_islands() {
+        let path = fixture_path("diagonal-contact");
+        let mut image = GrayImage::from_pixel(6, 6, Luma([255]));
+        for y in 1..3 {
+            for x in 1..3 {
+                image.put_pixel(x, y, Luma([0]));
+            }
+        }
+        for y in 3..5 {
+            for x in 3..5 {
+                image.put_pixel(x, y, Luma([0]));
+            }
+        }
+        image.save(&path).expect("save diagonal raster fixture");
+
+        let traced = extract_raster_contours(request(&path)).expect("trace diagonal islands");
+        assert_eq!(traced.connected_component_count, 2);
+        assert_eq!(traced.contours.len(), 2);
+        let first = traced.contours[0]
+            .points
+            .iter()
+            .map(|point| [point[0].to_bits(), point[1].to_bits()])
+            .collect::<BTreeSet<_>>();
+        let second = traced.contours[1]
+            .points
+            .iter()
+            .map(|point| [point[0].to_bits(), point[1].to_bits()])
+            .collect::<BTreeSet<_>>();
+        assert!(first.is_disjoint(&second));
+        assert!(traced
+            .evidence
+            .iter()
+            .any(|entry| entry == "beveledSharedGridVertices=1"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn exact_stamp_mask_keeps_all_503_foreground_islands() {
+        let path = fixture_path("exact-stamp-mask");
+        let encoded = include_str!(
+            "../tests/fixtures/cad/raster/stamp-artwork-gimp-levels-nozzle-06.png.base64"
+        )
+        .split_whitespace()
+        .collect::<String>();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("decode exact stamp mask");
+        std::fs::write(&path, bytes).expect("write exact stamp mask");
+
+        let mut exact_request = request(&path);
+        exact_request.calibration.physical_width = 60.0;
+        exact_request.calibration.physical_height = 45.0;
+        let traced = extract_raster_contours(exact_request).expect("trace complete stamp mask");
+        let foreground_islands = traced
+            .contours
+            .iter()
+            .filter(|contour| contour.signed_area < 0.0)
+            .count();
+
+        assert_eq!(traced.connected_component_count, 503);
+        assert_eq!(foreground_islands, 503);
+        assert!(traced.contours.len() >= foreground_islands);
 
         let _ = std::fs::remove_file(path);
     }

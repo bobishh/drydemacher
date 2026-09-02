@@ -276,6 +276,9 @@ pub struct CoreProgramConstraints {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CoreVerifyClause {
     pub tag: CoreVerifySection,
+    pub intent: Option<CoreVerifySection>,
+    pub severity: Option<CoreVerifySection>,
+    pub when: Option<CoreVerifySection>,
     pub metric: CoreVerifySection,
     pub expect: CoreVerifySection,
 }
@@ -975,6 +978,9 @@ mod tests {
                 tag: CoreVerifySection {
                     items: vec![CoreVerifyValue::Symbol("body".into())],
                 },
+                intent: None,
+                severity: None,
+                when: None,
                 metric: CoreVerifySection {
                     items: vec![
                         CoreVerifyValue::Symbol("clearance".into()),

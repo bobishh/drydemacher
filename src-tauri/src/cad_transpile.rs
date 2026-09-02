@@ -396,7 +396,11 @@ fn structural_verification_diagnostic(
         verification
             .authored_verify_checks
             .iter()
-            .filter(|check| check.status != crate::contracts::AuthoredVerifyCheckStatus::Passed)
+            .filter(|check| {
+                check.status == crate::contracts::AuthoredVerifyCheckStatus::Error
+                    || (check.status == crate::contracts::AuthoredVerifyCheckStatus::Failed
+                        && check.severity == crate::contracts::AuthoredVerifySeverity::Error)
+            })
             .map(|check| format!("authored verify {}: {}", check.tag, check.message)),
     );
     if lines.is_empty() {

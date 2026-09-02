@@ -36,3 +36,14 @@
 - [x] 5.1 Green focused compiler/runtime/raster tests.
 - [x] 5.2 Green pending happy/failure Playwright on an alternate port.
 - [x] 5.3 Green `cargo check`, formatting, and strict OpenSpec validation.
+
+## 6. Dense mixed-Boolean repair
+
+- [x] 6.1 Cover dense raster as a non-leading operand of an n-ary union.
+- [x] 6.2 Admit every transform/Boolean-only import path into the in-memory Manifold closure.
+- [x] 6.3 Preserve rejection for cycles, post-root consumers, and non-Boolean topology consumers.
+- [x] 6.4 Prove zero non-manifold edges without fabricating STEP for a mesh-only part.
+- [x] 6.5 Resolve compiler `Reference::Node` dependencies in hybrid partition analysis.
+- [x] 6.6 Bevel shared raster grid corners and triangulate caps with constrained Delaunay edges.
+- [x] 6.7 Prove constrained raster caps survive the canonical evaluated-mesh weld.
+- [x] 6.8 Add the exact 600x450 stamp PNG and complete three-part model as regression fixtures.

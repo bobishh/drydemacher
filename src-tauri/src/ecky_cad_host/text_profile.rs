@@ -239,7 +239,7 @@ pub fn parse_text_profile(
         ));
     }
 
-    let resolved_font = resolve_font(explicit_font_selector)?;
+    let resolved_font = resolve_font(explicit_font_selector, value)?;
     let face = Face::parse(&resolved_font.bytes, resolved_font.face_index)
         .map_err(|_| AppError::validation("Failed to parse font face for `text`."))?;
     let shape_face = rustybuzz::Face::from_slice(&resolved_font.bytes, resolved_font.face_index)
@@ -289,12 +289,12 @@ pub fn parse_text_profile(
     Ok(components)
 }
 
-fn resolve_font(explicit_font_selector: Option<&str>) -> AppResult<ResolvedFont> {
+fn resolve_font(explicit_font_selector: Option<&str>, text: &str) -> AppResult<ResolvedFont> {
     if let Some(selector) = explicit_font_selector
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        return load_font_selector(selector).ok_or_else(|| {
+        return load_font_selector(selector, text).ok_or_else(|| {
             AppError::validation(format!(
                 "No usable font found for `text` selector `{selector}`."
             ))
@@ -304,19 +304,19 @@ fn resolve_font(explicit_font_selector: Option<&str>) -> AppResult<ResolvedFont>
     if let Ok(selector) = std::env::var("ECKYCAD_FONT_PATH") {
         let selector = selector.trim().to_string();
         if !selector.is_empty() {
-            if let Some(font) = load_font_selector(&selector) {
+            if let Some(font) = load_font_selector(&selector, text) {
                 return Ok(font);
             }
         }
     }
 
     for candidate in DEFAULT_FONT_PATHS {
-        if let Some(font) = load_font_selector(candidate) {
+        if let Some(font) = load_font_selector(candidate, text) {
             return Ok(font);
         }
     }
     for family in DEFAULT_FONT_FAMILIES {
-        if let Some(font) = load_font_selector(family) {
+        if let Some(font) = load_font_selector(family, text) {
             return Ok(font);
         }
     }
@@ -326,24 +326,88 @@ fn resolve_font(explicit_font_selector: Option<&str>) -> AppResult<ResolvedFont>
     ))
 }
 
-fn load_font_selector(selector: &str) -> Option<ResolvedFont> {
+fn load_font_selector(selector: &str, text: &str) -> Option<ResolvedFont> {
     if Path::new(selector).is_file() {
         let bytes = fs::read(selector).ok()?;
+        let face_count = ttf_parser::fonts_in_collection(&bytes).unwrap_or(1);
+        let mut chosen_face = 0;
+        let non_ascii_chars: Vec<char> = text.chars().filter(|c| !c.is_ascii()).collect();
+        if face_count > 1 && !non_ascii_chars.is_empty() {
+            for index in 0..face_count {
+                if let Ok(face) = Face::parse(&bytes, index) {
+                    if non_ascii_chars.iter().all(|&c| face.glyph_index(c).is_some()) {
+                        chosen_face = index;
+                        break;
+                    }
+                }
+            }
+        }
+        if !non_ascii_chars.is_empty() {
+            if let Ok(face) = Face::parse(&bytes, chosen_face) {
+                if non_ascii_chars.iter().any(|&c| face.glyph_index(c).is_none()) {
+                    return None;
+                }
+            }
+        }
         return Some(ResolvedFont {
             bytes,
-            face_index: 0,
+            face_index: chosen_face,
         });
     }
 
     let mut db = fontdb::Database::new();
     db.load_system_fonts();
-    let id = db.query(&Query {
-        families: &[Family::Name(selector)],
-        weight: Weight::NORMAL,
-        stretch: Stretch::Normal,
-        style: Style::Normal,
-    })?;
-    let face = db.face(id)?;
+    if Path::new(selector).is_dir() {
+        db.load_fonts_dir(selector);
+    }
+    let non_ascii_chars: Vec<char> = text.chars().filter(|c| !c.is_ascii()).collect();
+    let candidate_ids: Vec<_> = db
+        .faces()
+        .filter(|f| {
+            f.families
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(selector))
+        })
+        .map(|f| f.id)
+        .collect();
+
+    let chosen_id = if !candidate_ids.is_empty() && !non_ascii_chars.is_empty() {
+        candidate_ids
+            .iter()
+            .copied()
+            .find(|&id| {
+                if let Some(face) = db.face(id) {
+                    if let Some(resolved) = resolve_db_face(face) {
+                        if let Ok(ttf_face) = Face::parse(&resolved.bytes, resolved.face_index) {
+                            return non_ascii_chars
+                                .iter()
+                                .all(|&c| ttf_face.glyph_index(c).is_some());
+                        }
+                    }
+                }
+                false
+            })
+            .or_else(|| {
+                db.query(&Query {
+                    families: &[Family::Name(selector)],
+                    weight: Weight::NORMAL,
+                    stretch: Stretch::Normal,
+                    style: Style::Normal,
+                })
+            })
+    } else {
+        db.query(&Query {
+            families: &[Family::Name(selector)],
+            weight: Weight::NORMAL,
+            stretch: Stretch::Normal,
+            style: Style::Normal,
+        })
+    }?;
+    let face = db.face(chosen_id)?;
+    resolve_db_face(face)
+}
+
+fn resolve_db_face(face: &fontdb::FaceInfo) -> Option<ResolvedFont> {
     match &face.source {
         Source::Binary(data) => Some(ResolvedFont {
             bytes: data.as_ref().as_ref().to_vec(),

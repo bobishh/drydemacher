@@ -76,6 +76,25 @@ profile. `protrude` SHALL interpret raster coverage as continuous local elevatio
 - **WHEN** raster extrusion or protrusion renders twice
 - **THEN** both geometry digests match.
 
+#### Scenario: Dense raster is a mixed Boolean tool
+
+- **GIVEN** a closed raster extrusion used in any operand position of a
+  multi-operand Boolean whose consumers reach the part root
+- **WHEN** the native runtime combines it with analytic geometry
+- **THEN** the indexed raster remains in memory
+- **AND** analytic peers enter one mesh-domain Boolean closure
+- **AND** no STL-to-OCCT solidification seam is introduced
+- **AND** the resulting mesh has zero boundary or non-manifold edges.
+
+#### Scenario: Diagonal raster contacts remain manifold
+
+- **GIVEN** foreground regions that meet only at one pixel corner and contours
+  containing holes or long stair-step boundaries
+- **WHEN** raster extrusion builds its indexed mesh
+- **THEN** point contacts receive a sub-pixel bevel without merging the islands
+- **AND** cap triangulation preserves every outer and hole boundary edge
+- **AND** the indexed mesh has zero boundary, non-manifold, or winding-mismatch edges.
+
 #### Scenario: Invalid raster options fail before geometry replacement
 
 - **GIVEN** non-positive width/depth/height, threshold outside zero through one, or an

@@ -67,6 +67,23 @@ syntax.
   from portable operation manifests, agent prompts, generated public references, and
   editor completions.
 
+### Mixed Boolean execution
+
+Closed raster-extrusion meshes used by `union`, `difference`, or `intersection`
+remain indexed in memory. Operand position and Boolean arity do not force an STL
+round trip: when every consumer path reaches the part root through transforms or
+Boolean operations, the native runner converts analytic peers once and evaluates the
+mixed closure in the Manifold domain. N-ary union uses one batch Boolean. A
+non-Boolean topology consumer still blocks this route and retains the explicit OCCT
+solidification fallback.
+
+Raster contour extrusion resolves diagonal pixel contacts without changing the
+threshold mask into a filled morphology: repeated grid corners receive a bounded
+one-eighth-pixel bevel. Caps use constrained Delaunay triangulation with authored
+outer and hole rings as hard edges. Together these rules make the pre-Boolean raster
+asset survive the canonical evaluated-mesh weld while remaining closed, consistently wound, and
+admissible to Manifold.
+
 ## Asset and UI behavior
 
 Empty image parameters referenced by `extrude` or `protrude` remain pending and block

@@ -4161,17 +4161,52 @@ fn parse_expanded_model(value: &ExprKind, helpers: &ExpandedHelperMap) -> CoreRe
 }
 
 fn parse_expanded_verify_clause(items: &[ExprKind]) -> CoreResult<CoreVerifyClause> {
-    if items.len() != 4 {
-        return Err(CompilerError::new(
-            CompilerErrorKind::Parse,
-            "Verify clause expects `(tag ...)`, `(metric ...)`, and `(expect ...)`.",
-        ));
+    let mut sections = BTreeMap::new();
+    for value in &items[1..] {
+        let section_items = expr_list_items(value, "verify section")?;
+        let name = expr_name(section_items.first().ok_or_else(|| {
+            CompilerError::new(CompilerErrorKind::Parse, "Verify section is empty.")
+        })?)?;
+        if !matches!(
+            name.as_str(),
+            "tag" | "intent" | "severity" | "when" | "metric" | "expect"
+        ) {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Parse,
+                format!("Unknown verify section `{name}`."),
+            ));
+        }
+        if sections.insert(name.clone(), value).is_some() {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Parse,
+                format!("Duplicate verify section `{name}`."),
+            ));
+        }
     }
-
+    let required = |name: &str| {
+        sections.get(name).copied().ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                format!("Verify clause requires `({name} ...)`."),
+            )
+        })
+    };
     Ok(CoreVerifyClause {
-        tag: parse_expanded_verify_section(&items[1], "tag")?,
-        metric: parse_expanded_verify_section(&items[2], "metric")?,
-        expect: parse_expanded_verify_section(&items[3], "expect")?,
+        tag: parse_expanded_verify_section(required("tag")?, "tag")?,
+        intent: sections
+            .get("intent")
+            .map(|value| parse_expanded_verify_section(value, "intent"))
+            .transpose()?,
+        severity: sections
+            .get("severity")
+            .map(|value| parse_expanded_verify_section(value, "severity"))
+            .transpose()?,
+        when: sections
+            .get("when")
+            .map(|value| parse_expanded_verify_section(value, "when"))
+            .transpose()?,
+        metric: parse_expanded_verify_section(required("metric")?, "metric")?,
+        expect: parse_expanded_verify_section(required("expect")?, "expect")?,
     })
 }
 
@@ -9622,17 +9657,52 @@ fn parse_program(value: &SteelVal) -> CoreResult<CoreProgram> {
 }
 
 fn parse_verify_clause(items: &[SteelVal]) -> CoreResult<CoreVerifyClause> {
-    if items.len() != 4 {
-        return Err(CompilerError::new(
-            CompilerErrorKind::Parse,
-            "Verify clause expects `(tag ...)`, `(metric ...)`, and `(expect ...)`.",
-        ));
+    let mut sections = BTreeMap::new();
+    for value in &items[1..] {
+        let section_items = list_items(value, "verify section")?;
+        let name = symbol_name(section_items.first().ok_or_else(|| {
+            CompilerError::new(CompilerErrorKind::Parse, "Verify section is empty.")
+        })?)?;
+        if !matches!(
+            name.as_str(),
+            "tag" | "intent" | "severity" | "when" | "metric" | "expect"
+        ) {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Parse,
+                format!("Unknown verify section `{name}`."),
+            ));
+        }
+        if sections.insert(name.clone(), value).is_some() {
+            return Err(CompilerError::new(
+                CompilerErrorKind::Parse,
+                format!("Duplicate verify section `{name}`."),
+            ));
+        }
     }
-
+    let required = |name: &str| {
+        sections.get(name).copied().ok_or_else(|| {
+            CompilerError::new(
+                CompilerErrorKind::Parse,
+                format!("Verify clause requires `({name} ...)`."),
+            )
+        })
+    };
     Ok(CoreVerifyClause {
-        tag: parse_verify_section(&items[1], "tag")?,
-        metric: parse_verify_section(&items[2], "metric")?,
-        expect: parse_verify_section(&items[3], "expect")?,
+        tag: parse_verify_section(required("tag")?, "tag")?,
+        intent: sections
+            .get("intent")
+            .map(|value| parse_verify_section(value, "intent"))
+            .transpose()?,
+        severity: sections
+            .get("severity")
+            .map(|value| parse_verify_section(value, "severity"))
+            .transpose()?,
+        when: sections
+            .get("when")
+            .map(|value| parse_verify_section(value, "when"))
+            .transpose()?,
+        metric: parse_verify_section(required("metric")?, "metric")?,
+        expect: parse_verify_section(required("expect")?, "expect")?,
     })
 }
 
@@ -11535,12 +11605,19 @@ fn emit_program(program: &CoreProgram) -> String {
 }
 
 fn emit_verify_clause(clause: &CoreVerifyClause) -> String {
-    format!(
-        "(verify {} {} {})",
-        emit_verify_section("tag", &clause.tag),
-        emit_verify_section("metric", &clause.metric),
-        emit_verify_section("expect", &clause.expect)
-    )
+    let mut sections = vec![emit_verify_section("tag", &clause.tag)];
+    if let Some(intent) = &clause.intent {
+        sections.push(emit_verify_section("intent", intent));
+    }
+    if let Some(severity) = &clause.severity {
+        sections.push(emit_verify_section("severity", severity));
+    }
+    if let Some(condition) = &clause.when {
+        sections.push(emit_verify_section("when", condition));
+    }
+    sections.push(emit_verify_section("metric", &clause.metric));
+    sections.push(emit_verify_section("expect", &clause.expect));
+    format!("(verify {})", sections.join(" "))
 }
 
 fn emit_verify_section(name: &str, section: &CoreVerifySection) -> String {
@@ -13183,6 +13260,9 @@ mod tests {
                 tag: CoreVerifySection {
                     items: vec![CoreVerifyValue::Symbol("body_shell".into())],
                 },
+                intent: None,
+                severity: None,
+                when: None,
                 metric: CoreVerifySection {
                     items: vec![
                         CoreVerifyValue::Symbol("min_wall_thickness".into()),
@@ -13270,6 +13350,56 @@ mod tests {
                 CoreVerifyValue::Number(2.0),
             ])]
         );
+    }
+
+    #[test]
+    fn roundtrips_extended_verify_sections_in_canonical_order() {
+        let source = compile_to_legacy_source(
+            r#"
+            (model
+              (params (toggle assembly-preview #f))
+              (verify
+                (expect connected (= 1))
+                (when (and assembly-preview (not #f)))
+                (severity warning)
+                (metric connected (stl connected-component-count))
+                (intent "Assembly must remain connected")
+                (tag assembly-connected))
+              (part body (box 10 10 10)))
+            "#,
+        )
+        .expect("compile extended verify");
+
+        assert!(source.contains(
+            "(verify (tag assembly-connected) (intent \"Assembly must remain connected\") (severity warning) (when (and assembly-preview (not #f))) (metric connected (stl connected-component-count)) (expect connected (= 1)))"
+        ), "{source}");
+        let reparsed = compile_to_core_program(&source).expect("reparse extended verify");
+        let clause = &reparsed.constraints.verify_clauses[0];
+        assert_eq!(
+            clause.intent.as_ref().unwrap().items,
+            vec![CoreVerifyValue::Text(
+                "Assembly must remain connected".into()
+            )]
+        );
+        assert_eq!(
+            clause.severity.as_ref().unwrap().items,
+            vec![CoreVerifyValue::Symbol("warning".into())]
+        );
+        assert!(clause.when.is_some());
+    }
+
+    #[test]
+    fn rejects_duplicate_and_unknown_verify_sections() {
+        for (section, expected) in [
+            ("(tag duplicate)", "Duplicate verify section `tag`."),
+            ("(manual nope)", "Unknown verify section `manual`."),
+        ] {
+            let source = format!(
+                "(model (verify (tag check) {section} (metric value (stl connected-component-count)) (expect value (= 1))) (part body (box 1 1 1)))"
+            );
+            let error = compile_to_core_program(&source).expect_err("invalid verify rejected");
+            assert!(error.to_string().contains(expected), "{error}");
+        }
     }
 
     #[test]
@@ -13423,7 +13553,7 @@ mod tests {
 
         assert!(err
             .to_string()
-            .contains("Verify clause expects `(tag ...)`, `(metric ...)`, and `(expect ...)`."));
+            .contains("Verify clause requires `(tag ...)`."));
     }
 
     #[test]
