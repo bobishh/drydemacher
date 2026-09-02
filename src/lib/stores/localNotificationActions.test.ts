@@ -92,3 +92,58 @@ test('same local event refresh updates copy without restarting its ttl', () => {
   assert.equal(scheduled.length, 1);
   assert.equal(scheduled[0]?.callback, originalExpiry);
 });
+
+test('dismissed or expired local notification does not immediately reappear when passed again', () => {
+  const scheduled: Array<{ callback: () => void; delayMs: number }> = [];
+  const store = createLocalNotificationStore({
+    setTimeout: (callback, delayMs) => {
+      scheduled.push({ callback, delayMs });
+      return 1;
+    },
+    clearTimeout: () => {
+      scheduled.length = 0;
+    },
+  });
+
+  const notification = card('resolved');
+  store.set(notification);
+  assert.equal(get(store)?.eventId, 'local-resolved');
+
+  // Timer expires (after 8s)
+  scheduled.shift()?.callback();
+  assert.equal(get(store), null);
+
+  // App effect re-runs and calls store.set with the identical notification
+  store.set(notification);
+  // It MUST stay dismissed and not resurrect!
+  assert.equal(get(store), null);
+  assert.equal(scheduled.length, 0);
+});
+
+test('manually dismissed local notification does not immediately reappear when effect re-runs', () => {
+  const scheduled: Array<{ callback: () => void; delayMs: number }> = [];
+  const store = createLocalNotificationStore({
+    setTimeout: (callback, delayMs) => {
+      scheduled.push({ callback, delayMs });
+      return 1;
+    },
+    clearTimeout: () => {
+      scheduled.length = 0;
+    },
+  });
+
+  const notification = card('resolved');
+  store.set(notification);
+  assert.equal(get(store)?.eventId, 'local-resolved');
+
+  // User clicks DISMISS (store.set(null))
+  store.set(null);
+  assert.equal(get(store), null);
+
+  // App effect re-runs with the same notification
+  store.set(notification);
+  // It MUST stay dismissed and not resurrect!
+  assert.equal(get(store), null);
+  assert.equal(scheduled.length, 0);
+});
+

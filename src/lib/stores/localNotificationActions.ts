@@ -7,11 +7,12 @@ export type LocalNotificationAction = {
 
 export type LocalNotificationCard = {
   eventId: string;
+  activityEventId?: string | null;
   threadId: string | null;
   actorLabel: string;
   summary: string;
   detail: string | null;
-  severity: 'info' | 'warning' | 'error' | 'question';
+  severity: 'info' | 'success' | 'warning' | 'error' | 'question';
   state: 'active' | 'resolved' | 'failed';
   requiresAttention: boolean;
   actions: LocalNotificationAction[];
@@ -38,33 +39,85 @@ function notificationDurationMs(card: LocalNotificationCard): number | null {
   return 8_000;
 }
 
+function cardFingerprint(card: LocalNotificationCard): string {
+  return `${card.eventId}:${card.state}:${card.severity}:${card.summary}:${card.detail ?? ''}`;
+}
+
 export function createLocalNotificationStore(clock: LocalNotificationClock = systemClock) {
   const store = writable<LocalNotificationCard | null>(null);
   let timer: LocalNotificationTimerHandle | null = null;
   let currentEventId: string | null = null;
+  let currentFingerprint: string | null = null;
+  const dismissedFingerprints = new Set<string>();
 
   function set(card: LocalNotificationCard | null) {
-    if (card && card.eventId === currentEventId) {
+    if (!card) {
+      if (timer !== null) {
+        clock.clearTimeout(timer);
+        timer = null;
+      }
+      if (currentFingerprint !== null) {
+        dismissedFingerprints.add(currentFingerprint);
+      }
+      currentEventId = null;
+      currentFingerprint = null;
+      store.set(null);
+      return;
+    }
+
+    const fingerprint = cardFingerprint(card);
+    if (dismissedFingerprints.has(fingerprint)) {
+      return;
+    }
+
+    if (card.eventId === currentEventId) {
+      currentFingerprint = fingerprint;
       store.set(card);
       return;
     }
+
     if (timer !== null) {
       clock.clearTimeout(timer);
       timer = null;
     }
-    currentEventId = card?.eventId ?? null;
+
+    currentEventId = card.eventId;
+    currentFingerprint = fingerprint;
     store.set(card);
-    if (!card) return;
+
     const ttlMs = notificationDurationMs(card);
     if (ttlMs === null) return;
+
     timer = clock.setTimeout(() => {
       timer = null;
+      if (currentFingerprint !== null) {
+        dismissedFingerprints.add(currentFingerprint);
+      }
       currentEventId = null;
+      currentFingerprint = null;
       store.set(null);
     }, ttlMs);
   }
 
-  return { subscribe: store.subscribe, set };
+  function dismiss(eventId?: string) {
+    if (!eventId || eventId === currentEventId) {
+      set(null);
+    }
+  }
+
+  function clear() {
+    if (timer !== null) {
+      clock.clearTimeout(timer);
+      timer = null;
+    }
+    currentEventId = null;
+    currentFingerprint = null;
+    dismissedFingerprints.clear();
+    store.set(null);
+  }
+
+  return { subscribe: store.subscribe, set, dismiss, clear };
 }
 
 export const localNotificationActionsStore = createLocalNotificationStore();
+

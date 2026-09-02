@@ -24,11 +24,17 @@ export type VisualVerificationResult = Contract.VisualVerificationResult;
 export type VisualIssue = Contract.VisualIssue;
 export type VisualIssueCategory = Contract.VisualIssueCategory;
 export type AuthoredVerifyValue = Contract.AuthoredVerifyValue;
-export type AuthoredVerifyCheckStatus = "passed" | "failed" | "error";
+export type AuthoredVerifyCheckStatus = Contract.AuthoredVerifyCheckStatus;
+export type AuthoredVerifySeverity = Contract.AuthoredVerifySeverity;
 export type AuthoredVerifyCheck = {
   tag: string;
   status: AuthoredVerifyCheckStatus;
+  severity?: AuthoredVerifySeverity;
   message: string;
+  intent?: string | null;
+  condition?: string | null;
+  conditionResult?: boolean | null;
+  skipReason?: string | null;
   stableNodeId?: string | null;
   metricSource?: string | null;
   metricKey?: string | null;
@@ -438,12 +444,24 @@ function normalizeAuthoredVerifyCheck(
   if (!check || typeof check !== "object") return null;
   const raw = check as Record<string, unknown>;
   const status = raw.status;
-  if (status !== "passed" && status !== "failed" && status !== "error")
+  if (
+    status !== "passed" &&
+    status !== "failed" &&
+    status !== "error" &&
+    status !== "skipped"
+  )
     return null;
+  const severity = raw.severity === "warning" ? "warning" : "error";
   return {
     tag: typeof raw.tag === "string" ? raw.tag : "",
     status,
+    severity,
     message: typeof raw.message === "string" ? raw.message : "",
+    intent: typeof raw.intent === "string" ? raw.intent : null,
+    condition: typeof raw.condition === "string" ? raw.condition : null,
+    conditionResult:
+      typeof raw.conditionResult === "boolean" ? raw.conditionResult : null,
+    skipReason: typeof raw.skipReason === "string" ? raw.skipReason : null,
     stableNodeId:
       typeof raw.stableNodeId === "string"
         ? raw.stableNodeId

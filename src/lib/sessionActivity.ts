@@ -175,6 +175,35 @@ export function relatedSessionEvents(
   );
 }
 
+export function findNotificationActivityEvent(
+  events: SessionEvent[],
+  input: {
+    threadId: string | null;
+    versionId?: string | null;
+    summary: string;
+  },
+): SessionEvent | null {
+  const candidates = sortSessionEvents(events).filter(
+    (event) => event.threadId === input.threadId,
+  );
+  if (input.versionId) {
+    const exactVersion = [...candidates].reverse().find(
+      (event) => event.versionId === input.versionId && event.kind === 'validation_reported',
+    );
+    if (exactVersion) return exactVersion;
+  }
+
+  const summary = normalizeText(input.summary);
+  return [...candidates].reverse().find((event) => {
+    const eventText = [event.title, event.summary, event.detail]
+      .map(normalizeText)
+      .filter(Boolean);
+    return eventText.some(
+      (value) => value === summary || summary.startsWith(value) || value.startsWith(summary),
+    );
+  }) ?? null;
+}
+
 export function appendSessionEvent(
   events: SessionEvent[],
   event: SessionEvent,

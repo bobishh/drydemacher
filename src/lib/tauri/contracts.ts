@@ -1635,14 +1635,15 @@ export type AssemblyOutputMode = "separateParts" | "joinedAssembly" | "fusedSoli
 export type Asset = { id: string; name: string; path: string; format: string }
 export type Attachment = { path: string; name: string; explanation: string; dataUrl?: string | null; kind: AttachmentKind }
 export type AttachmentKind = "image" | "cad"
-export type AuthoredVerifyCheck = { tag: string; status: AuthoredVerifyCheckStatus; message: string; stableNodeId?: string | null;
+export type AuthoredVerifyCheck = { tag: string; status: AuthoredVerifyCheckStatus; severity?: AuthoredVerifySeverity; message: string; intent?: string | null; condition?: string | null; conditionResult?: boolean | null; skipReason?: string | null; stableNodeId?: string | null;
 /**
  * Machine-readable delta: where the metric came from, the comparator, and
  * the expected vs actual values. Lets the agent fix a red check without
  * re-parsing `message`.
  */
 metricSource?: string | null; metricKey?: string | null; comparator?: string | null; expected?: AuthoredVerifyValue | null; actual?: AuthoredVerifyValue | null; diagnosticContext?: DiagnosticContext | null }
-export type AuthoredVerifyCheckStatus = "passed" | "failed" | "error"
+export type AuthoredVerifyCheckStatus = "passed" | "failed" | "error" | "skipped"
+export type AuthoredVerifySeverity = "error" | "warning"
 /**
  * A resolved verify value (expected or actual). Boundary-typed so MCP agents
  * and UI chips read machine values instead of parsing the message string.
@@ -1773,7 +1774,7 @@ export type CaptureSurfaceRegion = { regionId: string; sourceMeshContentDigest: 
 export type CaptureSurfaceRegionKind = "plane" | "cylinder" | "cone" | "sphere" | "freeform" | "ignoredDamage"
 export type CaptureSymmetryCompletion = { kind: "none" } | { kind: "half"; planeId: string } | { kind: "quarter"; firstPlaneId: string; secondPlaneId: string }
 export type ClearSketchPreviewDraftRequest = { scopeId?: string | null }
-export type CodexDialogueMessage = { id: string; role: string; content: string; status: string; timestamp: number; attachments: Attachment[]; providerEventKind?: ProviderEventKind | null }
+export type CodexDialogueMessage = { id: string; role: string; content: string; status: string; timestamp: number; attachments?: Attachment[]; providerEventKind?: ProviderEventKind | null }
 export type CodexMessagePage = { messages: CodexDialogueMessage[]; nextCursor: string | null; backwardsCursor: string | null }
 export type CodexMessagePageInput = { eckyThreadId: string; cursor: string | null; direction: string | null }
 export type CodexPromptInput = { eckyThreadId: string; promptText: string; attachments?: Attachment[] }
@@ -2188,7 +2189,7 @@ export type RasterTraceAssetIdentity = { imagePath: string; digest: string; widt
 export type RasterTraceCalibration = { physicalWidth: number; physicalHeight: number }
 export type RasterTraceContour = { contourId: string; points: ([number, number])[]; closed: boolean; foregroundPixelCount: number; signedArea: number; provenance: RasterTraceProvenance }
 export type RasterTraceProvenance = { kind: string; asset: RasterTraceAssetIdentity; view: SketchView; calibration: RasterTraceCalibration; threshold: number; invert: boolean; contourId: string; extractorVersion: string }
-export type RasterTraceRequest = { imagePath: string; view: SketchView; calibration: RasterTraceCalibration; threshold: number; invert?: boolean; maxContours?: number | null }
+export type RasterTraceRequest = { imagePath: string; view: SketchView; calibration: RasterTraceCalibration; threshold: number; invert?: boolean }
 export type RasterTraceResponse = { asset: RasterTraceAssetIdentity; contours: RasterTraceContour[]; connectedComponentCount: number; extractorVersion: string; evidence?: string[] }
 export type RejectViewportScreenshotInput = { requestId: string; error: string }
 export type ReopenedCaptureRun = { run: CaptureRun; session: CaptureSessionInfo }

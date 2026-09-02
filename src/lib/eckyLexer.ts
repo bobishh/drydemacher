@@ -1,6 +1,6 @@
 /** Structural authoring forms. */
 const ECKY_FORMS = new Set([
-  'model', 'part', 'feature', 'params', 'build', 'shape', 'result', 'verify', 'tag', 'metric', 'expect',
+  'model', 'part', 'feature', 'params', 'build', 'shape', 'result', 'verify', 'tag', 'intent', 'severity', 'metric', 'expect',
   'define', 'define-component', 'define-syntax', 'let', 'let*', 'lambda', 'if', 'cond', 'when', 'unless',
   'begin', 'quote', 'meta', 'ports', 'port', 'frame', 'place-component', 'port-ref',
 ]);

@@ -580,7 +580,7 @@ endsolid mock
           return nodes;
         }
         if (cmd === 'apply_manual_parameters') {
-          if ((window as any).__PARAM_DELAY_APPLY__) {
+          if ((window as any).__PARAM_DELAY_APPLY__ && !args?.input?.persist) {
             await new Promise((resolve) => setTimeout(resolve, 250));
           }
           const storedSnapshot = JSON.parse(sessionStorage.getItem('param-last-design') || 'null');
@@ -603,11 +603,19 @@ endsolid mock
             threadId: args?.input?.threadId,
             baseMessageId: args?.input?.targetMessageId,
             messageId,
-            status: 'success',
+            status: (window as any).__PARAM_DELAY_APPLY__ && args?.input?.persist
+              ? 'working'
+              : 'success',
             designOutput,
-            artifactBundle: storedSnapshot?.artifactBundle ?? (window as any).__PARAM_LAST_BUNDLE__,
-            modelManifest: storedSnapshot?.modelManifest,
-            snapshotId: `snapshot-${messageId ?? args?.input?.targetMessageId}`,
+            artifactBundle: (window as any).__PARAM_DELAY_APPLY__ && args?.input?.persist
+              ? null
+              : storedSnapshot?.artifactBundle ?? (window as any).__PARAM_LAST_BUNDLE__,
+            modelManifest: (window as any).__PARAM_DELAY_APPLY__ && args?.input?.persist
+              ? null
+              : storedSnapshot?.modelManifest,
+            snapshotId: (window as any).__PARAM_DELAY_APPLY__ && args?.input?.persist
+              ? null
+              : `snapshot-${messageId ?? args?.input?.targetMessageId}`,
             error: null,
           };
         }
@@ -1660,7 +1668,7 @@ endsolid mock
     expect(lastRenderCall?.args?.parameters?.p600).toBe(987);
   });
 
-  test('Given non-live params When Apply renders Then draft changes but history does not grow', async ({ page }) => {
+  test('Given edited params When Apply runs Then one Rust intent appends an immutable version', async ({ page }) => {
     await page.getByRole('button', { name: 'DIALOGUE' }).click();
     await page.fill('textarea.prompt-input', 'make a param box');
     await page
@@ -1688,7 +1696,7 @@ endsolid mock
     const calls = await page.evaluate(() => (window as any).__PARAM_CALLS__);
     const applyCall = calls.filter((entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters').at(-1);
     expect(applyCall?.args?.input?.parameters?.width).toBe(42);
-    expect(applyCall?.args?.input?.persist).toBe(false);
+    expect(applyCall?.args?.input?.persist).toBe(true);
     expect(calls.filter((entry: { cmd: string }) => entry.cmd === 'render_model')).toHaveLength(
       renderCountBeforeApply,
     );
@@ -1755,7 +1763,7 @@ endsolid mock
     expect(calls.filter((entry: { cmd: string }) => entry.cmd === 'update_parameters')).toHaveLength(legacyCallsBefore.values);
   });
 
-  test('Given Rust parameter apply is pending When Apply is clicked Then duplicate apply is disabled', async ({ page }) => {
+  test('Given parameter rendering is pending When Apply is clicked Then version append returns without render delay', async ({ page }) => {
     await page.getByRole('button', { name: 'DIALOGUE' }).click();
     await page.fill('textarea.prompt-input', 'make a param box');
     await page.locator('textarea.prompt-input').press(
@@ -1767,9 +1775,12 @@ endsolid mock
     await page.locator('.param-panel input.param-input').first().fill('42');
     await page.getByRole('button', { name: 'APPLY' }).click();
 
-    await expect(page.getByRole('button', { name: 'APPLYING...' })).toBeDisabled();
+    await expect.poll(() => page.evaluate(() => (window as any).__PARAM_CALLS__.some(
+      (entry: { cmd: string; args?: { input?: { persist?: boolean } } }) =>
+        entry.cmd === 'apply_manual_parameters' && entry.args?.input?.persist === true,
+    ))).toBe(true);
     await expect(page.getByText(/APPLY QUEUED/)).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'APPLY' })).toBeEnabled();
+    await expect(page.getByRole('button', { name: 'APPLY' })).toBeEnabled({ timeout: 150 });
   });
 
   test('Given text font select When font changes Then UI stages it and Apply rerenders with the family', async ({ page }) => {
@@ -1861,85 +1872,6 @@ endsolid mock
     const renderCall = calls.filter((entry: { cmd: string }) => entry.cmd === 'render_model').at(-1);
     expect(renderCall?.args?.parameters?.width).toBe(10);
     await expect(page.getByRole('button', { name: 'UNDO' })).toBeDisabled();
-  });
-
-  test('Given staged params When Commit is clicked Then one immutable version is saved', async ({ page }) => {
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
-    await page.fill('textarea.prompt-input', 'make a param box');
-    await page
-      .locator('textarea.prompt-input')
-      .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
-
-    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
-    await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
-    await page.locator('.param-panel input.param-input').first().fill('42');
-    await page.getByRole('button', { name: 'COMMIT' }).click();
-
-    await expect
-      .poll(async () =>
-        page.evaluate(
-          () => (window as any).__PARAM_CALLS__.some(
-            (entry: { cmd: string; args?: { input?: { persist?: boolean } } }) =>
-              entry.cmd === 'apply_manual_parameters' && entry.args?.input?.persist === true,
-          ),
-        ),
-      )
-      .toBe(true);
-
-    const calls = await page.evaluate(() => (window as any).__PARAM_CALLS__);
-    const commitCall = calls.find(
-      (entry: { cmd: string; args?: { input?: { persist?: boolean } } }) =>
-        entry.cmd === 'apply_manual_parameters' && entry.args?.input?.persist === true,
-    );
-    expect(commitCall?.args?.input?.targetMessageId).toBe('mock-msg-1');
-    expect(commitCall?.args?.input?.parameters?.width).toBe(42);
-    expect(calls.map((entry: { cmd: string }) => entry.cmd)).not.toContain('add_manual_version');
-  });
-
-  test('Given params were applied When Commit is clicked Then both actions stay Rust-owned intents', async ({ page }) => {
-    await page.getByRole('button', { name: 'DIALOGUE' }).click();
-    await page.fill('textarea.prompt-input', 'make a param box');
-    await page
-      .locator('textarea.prompt-input')
-      .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
-
-    await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
-    await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
-    const width = page.locator('.param-panel input.param-input').first();
-    await width.fill('42');
-
-    await page.getByRole('button', { name: 'APPLY' }).click();
-    await expect
-      .poll(async () =>
-        page.evaluate(
-          () => (window as any).__PARAM_CALLS__.filter(
-            (entry: { cmd: string; args?: { input?: { persist?: boolean } } }) =>
-              entry.cmd === 'apply_manual_parameters' && entry.args?.input?.persist === false,
-          ).length,
-        ),
-      )
-      .toBe(1);
-
-    await page.getByRole('button', { name: 'COMMIT' }).click();
-    await expect
-      .poll(async () =>
-        page.evaluate(
-          () => (window as any).__PARAM_CALLS__.filter(
-            (entry: { cmd: string; args?: { input?: { persist?: boolean } } }) =>
-              entry.cmd === 'apply_manual_parameters' && entry.args?.input?.persist === true,
-          ).length,
-        ),
-      )
-      .toBe(1);
-
-    const calls = await page.evaluate(() => (window as any).__PARAM_CALLS__);
-    const applyCalls = calls.filter(
-      (entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters',
-    );
-    expect(applyCalls.map((entry: { args?: { input?: { persist?: boolean } } }) => entry.args?.input?.persist))
-      .toEqual([false, true]);
-    expect(applyCalls.at(-1)?.args?.input?.parameters?.width).toBe(42);
-    expect(calls.map((entry: { cmd: string }) => entry.cmd)).not.toContain('add_manual_version');
   });
 
   test('Given editable macro When part node source is edited in place Then the edit renders', async ({

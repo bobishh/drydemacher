@@ -200,6 +200,36 @@ async function applyStoredTargetParameters(input: {
       get(activeThreadId) === input.threadId;
     if (!isCurrent) return false;
 
+    if (result.status === 'working' && result.messageId) {
+      rememberCommittedVersionMessage(input.threadId, result.designOutput.title, {
+        id: result.messageId,
+        role: 'assistant',
+        content: 'Parameter version pending render.',
+        status: 'working',
+        output: result.designOutput,
+        usage: null,
+        artifactBundle: null,
+        modelManifest: null,
+        agentOrigin: null,
+        imageData: null,
+        visualKind: null,
+        attachmentImages: [],
+        timestamp: Date.now() / 1000,
+      });
+      workingCopy.loadVersion(result.designOutput, result.messageId);
+      paramPanelState.hydrateFromVersion(result.designOutput, result.messageId);
+      session.setStatus('Parameter version appended. Rendering...');
+      recordSessionActivityEvent({
+        threadId: input.threadId,
+        versionId: result.messageId,
+        kind: 'version_committed',
+        title: 'Parameter version appended',
+        summary: 'Render continues in background.',
+        severity: 'info',
+      });
+      return true;
+    }
+
     if (result.status === 'error' || result.error) {
       if (input.persist && result.messageId) {
         rememberCommittedVersionMessage(input.threadId, result.designOutput.title, {
@@ -513,59 +543,11 @@ export function projectManualCodeDraftResult(
 
 export async function applyManualCodeDraft(editedCode: string) {
   const wc = get(workingCopy);
-  const panel = get(paramPanelState);
-  const snapshotThreadId = get(activeThreadId);
-  const targetVersionId = panel.versionId || wc.sourceVersionId || get(activeVersionId);
-
-  session.setStatus('Applying code draft...');
-  session.setError(null);
-  try {
-    if (!snapshotThreadId) {
-      throw new Error('Code Apply requires a bound design thread.');
-    }
-    const currentConfig = get(config);
-    startMicrowaveHum('__manual__', currentConfig, snapshotThreadId);
-
-    recordRenderEvent({
-      threadId: snapshotThreadId,
-      versionId: targetVersionId,
-      kind: 'render_started',
-      title: 'Code draft render started',
-      summary: 'Rendering edited macro draft.',
-      severity: 'info',
-    });
-    const result = await applyManualCode({
-      threadId: snapshotThreadId,
-      baseMessageId: targetVersionId,
-      source: editedCode,
-      persist: false,
-      title: wc.title || 'Manual Edit',
-      versionName: wc.versionName || 'Draft',
-      uiSpec: panel.uiSpec,
-      parameters: panel.params,
-      postProcessing: wc.postProcessing ?? null,
-      sourceLanguage: wc.sourceLanguage ?? null,
-      geometryBackend: wc.geometryBackend ?? null,
-    });
-    return projectManualCodeDraftResult(result, editedCode, wc.macroCode);
-  } catch (e) {
-    console.error('[ManualController] applyManualCodeDraft error:', formatBackendError(e), e);
-    if (get(activeThreadId) === snapshotThreadId) {
-      recordRenderEvent({
-        threadId: snapshotThreadId,
-        versionId: targetVersionId,
-        kind: 'render_failed',
-        title: 'Code draft render failed',
-        summary: formatBackendError(e),
-        severity: 'error',
-        raw: e,
-      });
-      session.setError(`Apply Failed: ${formatBackendError(e)}`);
-    }
-    throw e;
-  } finally {
-    stopMicrowaveHum('__manual__');
-  }
+  return commitManualVersion({
+    code: editedCode,
+    title: wc.title || 'Manual Edit',
+    versionName: wc.versionName || 'Manual edit',
+  });
 }
 
 export async function commitManualVersion(

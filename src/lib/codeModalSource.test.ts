@@ -3,12 +3,12 @@ import test from 'node:test';
 
 import { resolveCodeModalSource } from './codeModalSource';
 
-test('active render draft source wins over bound project source', () => {
+test('active viewport render source wins over bound project source', () => {
   assert.deepEqual(
     resolveCodeModalSource({
       activeRenderSource: 'print("agent draft")',
       boundSource: 'print("committed")',
-      isActiveRenderDraft: true,
+      activeRenderMatchesViewport: true,
     }),
     {
       source: 'print("agent draft")',
@@ -22,7 +22,7 @@ test('bound project source remains authoritative without an active render draft'
     resolveCodeModalSource({
       activeRenderSource: 'print("working copy")',
       boundSource: 'print("committed")',
-      isActiveRenderDraft: false,
+      activeRenderMatchesViewport: false,
     }),
     {
       source: 'print("committed")',

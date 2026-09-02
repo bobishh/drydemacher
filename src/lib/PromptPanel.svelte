@@ -1,4 +1,5 @@
 <script lang="ts">
+  import 'katex/dist/katex.min.css';
   import { convertFileSrc } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
   import { readFile } from '@tauri-apps/plugin-fs';
@@ -6,9 +7,10 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import Modal from './Modal.svelte';
   import AsyncActionButton from './components/AsyncActionButton.svelte';
+  import ProviderMarkdown from './ProviderMarkdown.svelte';
   import Viewer from './Viewer.svelte';
   import { appendTranscriptToPrompt, createPromptAudioRecorder, type PromptAudioRecorder } from './audio/pushToTalk';
-  import { formatBackendError, releaseVersionPreview, transcribePromptAudio } from './tauri/client';
+  import { formatBackendError, getThreadMessageVersion, releaseVersionPreview, transcribePromptAudio } from './tauri/client';
   import { resolveVersionLoupeRuntime } from './versionLoupeRuntime';
   import type {
     Attachment,
@@ -660,8 +662,21 @@
     onRestoreVersion?.(messageId);
   }
 
-  function showCode(message: VersionMessage) {
-    if (message.output) onShowCode(message as CodeVersionMessage);
+  async function showCode(message: VersionMessage) {
+    if (message.output) {
+      onShowCode(message as CodeVersionMessage);
+      return;
+    }
+    if (activeThreadId) {
+      try {
+        const hydrated = await getThreadMessageVersion(activeThreadId, message.id);
+        if (hydrated?.output) {
+          onShowCode(hydrated as CodeVersionMessage);
+        }
+      } catch (e) {
+        console.error('Failed to load version code:', e);
+      }
+    }
   }
 
   async function openVersionLoupe(message: VersionMessage) {
@@ -1093,8 +1108,8 @@
       </div>
       <div class="version-info">
         <div class="version-title">{versionTimelineTitle(activeVersion)}</div>
-        {#if activeVersion?.output?.versionName}
-          <div class="version-subtitle">{activeVersion.output.versionName}</div>
+        {#if activeVersion?.output?.versionName || activeVersion?.versionSummary?.versionName}
+          <div class="version-subtitle">{activeVersion.output?.versionName || activeVersion.versionSummary?.versionName}</div>
         {/if}
         {#if activeVersion}
           <div class="version-engine">{modelEngineLabel(activeVersion)}</div>
@@ -1194,8 +1209,8 @@
             {#if msg.role === 'assistant' && msg.agentOrigin}
               <span class="trail-agent-origin">{formatTimelineAgentOrigin(msg.agentOrigin)}</span>
             {/if}
-            {#if isVersion && msg.output?.versionName}
-              <span class="version-name">{msg.output.versionName}</span>
+            {#if isVersion && (msg.output?.versionName || msg.versionSummary?.versionName)}
+              <span class="version-name">{msg.output?.versionName || msg.versionSummary?.versionName}</span>
             {/if}
             {#if statusLabel}
               <span class="trail-status trail-status--{msg.status}">{statusLabel}</span>
@@ -1222,7 +1237,7 @@
                   </button>
                 {/if}
               {/if}
-              {#if msg.output}
+              {#if msg.output || msg.versionSummary?.hasOutput}
                 <button class="trail-copy-btn" type="button" onclick={() => showCode(msg)}>
                   CODE
                 </button>
@@ -1287,13 +1302,13 @@
                 </ol>
               </details>
             </section>
-          {:else if isVersion && msg.output}
+          {:else if isVersion && (msg.output || msg.versionSummary)}
             <div class="trail-version-title">
               <span>{isTuneVersion ? 'TUNING NOTE' : 'IMMUTABLE VERSION'}</span>
               <strong>{versionTimelineTitle(msg)}</strong>
             </div>
-            {msg.output.response || msg.content}
-            {#if msg.status === 'error' && msg.content && msg.content !== msg.output.response}
+            {msg.output?.response || msg.content}
+            {#if msg.status === 'error' && msg.content && msg.content !== msg.output?.response}
               <details class="trail-raw-evidence">
                 <summary>RAW FAILURE</summary>
                 <pre>{msg.content}</pre>
@@ -1301,19 +1316,10 @@
             {/if}
           {:else}
             {#if providerPresentation}
-              {#each providerPresentation.segments as segment, index (`${msg.id}-provider-segment-${index}`)}
-                {#if segment.kind === 'codeReference'}
-                  <button
-                    type="button"
-                    class="provider-code-reference"
-                    aria-label={`Open ${segment.label} at line ${segment.line}`}
-                    onclick={() => void openProviderCodeReference(msg.id, segment)}
-                  >
-                    <span>{segment.label}</span>
-                    <small>LINE {segment.line}</small>
-                  </button>
-                {:else}{segment.text}{/if}
-              {/each}
+              <ProviderMarkdown
+                content={providerPresentation.text}
+                onOpenCodeReference={(reference) => openProviderCodeReference(msg.id, reference)}
+              />
             {:else}
               {msg.content}
             {/if}
@@ -2234,41 +2240,6 @@
     user-select: text;
   }
 
-  .provider-code-reference {
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    max-width: 100%;
-    overflow: hidden;
-    border: 1px solid var(--primary);
-    border-radius: 0;
-    padding: 2px 6px;
-    background: color-mix(in srgb, var(--primary) 12%, var(--bg-100));
-    color: var(--primary);
-    font: inherit;
-    font-family: var(--font-mono);
-    cursor: pointer;
-    vertical-align: baseline;
-  }
-
-  .provider-code-reference:hover,
-  .provider-code-reference:focus-visible {
-    background: color-mix(in srgb, var(--primary) 22%, var(--bg-100));
-    outline: 1px solid var(--secondary);
-    outline-offset: 1px;
-  }
-
-  .provider-code-reference span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .provider-code-reference small {
-    color: var(--text-dim);
-    font-size: 0.52rem;
-    white-space: nowrap;
-  }
-
   .provider-code-reference-error {
     max-width: 100%;
     overflow: hidden;
@@ -2416,6 +2387,18 @@
     border-color: color-mix(in srgb, var(--danger) 45%, var(--bg-400));
     background: color-mix(in srgb, var(--danger) 10%, var(--bg-100));
     color: var(--danger);
+  }
+
+  .trail-authored-verify__chip--amber {
+    border-color: color-mix(in srgb, var(--primary) 55%, var(--bg-400));
+    background: color-mix(in srgb, var(--primary) 12%, var(--bg-100));
+    color: var(--primary);
+  }
+
+  .trail-authored-verify__chip--neutral {
+    border-color: var(--bg-400);
+    background: var(--bg-200);
+    color: var(--text-dim);
   }
 
   .trail-authored-verify__chip--clickable {

@@ -144,7 +144,12 @@ test("normalizeMessage preserves structural verification authored checks from ca
   assert.deepEqual(message.structuralVerification?.authoredVerifyChecks?.[0], {
     tag: "rib_clearance",
     status: "failed",
+    severity: "error",
     message: "Gap below minimum.",
+    intent: null,
+    condition: null,
+    conditionResult: null,
+    skipReason: null,
     stableNodeId: "part:rib",
     metricSource: "clearance",
     metricKey: "min-distance",

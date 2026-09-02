@@ -132,7 +132,6 @@
     onSemanticChange,
     onControlFocusChange,
     onchange,
-    oncommit,
     onspecchange,
     onpostprocessingchange,
     onShowCode = undefined,
@@ -166,7 +165,6 @@
     onSemanticChange?: (primitiveId: string, value: ParamValue) => Promise<void> | void;
     onControlFocusChange?: (focus: MeasurementControlFocus | null) => void;
     onchange?: (params: DesignParams) => Promise<boolean | void> | boolean | void;
-    oncommit?: (params: DesignParams) => Promise<boolean | void> | boolean | void;
     onspecchange?: (uiSpec: UiSpec, params: DesignParams) => void;
     onpostprocessingchange?: (postProcessing: PostProcessingSpec | null) => void;
     onShowCode?: () => void;
@@ -690,7 +688,6 @@
 
   let reading = $state(false);
   let applying = $state(false);
-  let committing = $state(false);
 
   const filteredFields = $derived.by(() => {
     return filterFieldsBySearch(mergedFields, searchQuery);
@@ -1236,28 +1233,6 @@
     } else {
       console.warn('ParamPanel: onchange prop is missing!');
       session.setError('Apply Failed: parameter change handler is missing.');
-    }
-  }
-
-  async function commitChanges() {
-    if (committing) return;
-    const paramsToCommit = cloneParams(effectiveLocalParams);
-    if (!oncommit) {
-      session.setError('Commit Failed: parameter commit handler is missing.');
-      return;
-    }
-    committing = true;
-    session.setError(null);
-    try {
-      const committed = await oncommit(paramsToCommit);
-      if (committed === false) return;
-      localParams = paramsToCommit;
-      pendingParamDrafts = {};
-    } catch (error: unknown) {
-      session.setError(`Commit Failed: ${formatBackendError(error)}`);
-      focusDiagnosticMacroNode(error);
-    } finally {
-      committing = false;
     }
   }
 
@@ -2380,14 +2355,12 @@
       <ParamPanelToolbar
         editing={false}
         applying={applying}
-        committing={committing}
         manualApplyBusy={manualApplyBusy}
         undoDepth={paramUndoDepth}
         saveValuesState={saveValuesState}
         activeVersionId={activeVersionId}
         onApplyChanges={applyChanges}
         onUndoParams={undoParams}
-        onCommitChanges={commitChanges}
         onSaveValues={saveValues}
       />
     </div>

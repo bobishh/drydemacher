@@ -7,6 +7,7 @@ import {
   composeBubbleEvent,
   composeCodeDiffView,
   composeSessionActivity,
+  findNotificationActivityEvent,
   mapAgentActivityEventToSessionEvent,
   relatedSessionEvents,
   type SessionEvent,
@@ -325,6 +326,33 @@ test('relatedSessionEvents links render, validation, and preview for one version
     related.map((event) => event.id),
     ['render-start', 'render-ok', 'validation'],
   );
+});
+
+test('Given preview warning projection When opening notification Then exact version validation event wins', () => {
+  const events = [
+    makeEvent({
+      id: 'validation-v1',
+      threadId: 'thread-1',
+      versionId: 'version-1',
+      kind: 'validation_reported',
+      severity: 'warning',
+      summary: 'Model STL contains 25 disconnected triangle components.',
+    }),
+    makeEvent({
+      id: 'newer-chat',
+      threadId: 'thread-1',
+      versionId: null,
+      kind: 'agent_action_finished',
+      severity: 'info',
+      summary: 'Unrelated reply',
+    }),
+  ];
+
+  assert.equal(findNotificationActivityEvent(events, {
+    threadId: 'thread-1',
+    versionId: 'version-1',
+    summary: 'Model STL contains 25 disconnected triangle components. Authoring…',
+  })?.id, 'validation-v1');
 });
 
 test('relatedSessionEvents excludes self and unrelated kinds', () => {

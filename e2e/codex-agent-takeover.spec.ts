@@ -373,6 +373,89 @@ test.describe('Codex provider integration', () => {
     await expect(page.locator('.trail-assistant').filter({ hasText: 'Current model inspected through Ecky MCP.' })).toBeVisible();
   });
 
+  test('Given Codex and AGY return LaTeX When Dialogue renders each answer Then complete formulas use math layout and an incomplete formula stays readable', async ({ page }) => {
+    await installProviderMocks(page, 'happy', true);
+    await page.goto('/');
+    await page.evaluate(() => {
+      const content = [
+        'Углы от $50^\\circ$ до $75^\\circ$.',
+        'Сторона $30\\text{ см}$, диаметр $\\approx 2.4\\text{ м}$.',
+        'Незакрытая $формула',
+      ].join('\n');
+      (window as any).__CODEX_SNAPSHOT__.messages[1].content = content;
+      (window as any).__AGY_SNAPSHOT__.messages[1].content = content;
+    });
+
+    await selectCodexProvider(page);
+    await openDialogue(page);
+    let answer = page.locator('.trail-assistant').filter({ hasText: 'Углы от' });
+    await expect(answer.locator('.provider-math')).toHaveCount(4);
+    await expect(answer.locator('.provider-math .katex')).toHaveCount(4);
+    await expect(answer).toContainText('Незакрытая $формула');
+
+    await page.getByRole('button', { name: 'Settings' }).click();
+    const settings = page.locator('[data-window-id="settings"]');
+    await settings.getByRole('button', { name: 'PROVIDER', exact: true }).click();
+    await settings.getByRole('button', { name: 'AGY' }).click();
+    await settings.getByRole('button', { name: 'SAVE REGISTRY' }).click();
+
+    answer = page.locator('.trail-assistant').filter({ hasText: 'Углы от' });
+    await expect(answer.locator('.provider-math')).toHaveCount(4);
+    await expect(answer.locator('.provider-math .katex')).toHaveCount(4);
+    await expect(answer).toContainText('Незакрытая $формула');
+  });
+
+  test('Given Codex and AGY return Markdown with Mermaid When Dialogue renders each answer Then rich content and diagrams appear and invalid Mermaid exposes its error', async ({ page }) => {
+    await installProviderMocks(page, 'happy', true);
+    await page.goto('/');
+    await page.evaluate(() => {
+      const content = [
+        '## Геометрия',
+        '',
+        '**Частота:** `3V`',
+        '',
+        '- PLAN',
+        '- BUILD',
+        '',
+        'Угол $60^\\circ$.',
+        '',
+        '```mermaid',
+        'flowchart LR',
+        '  PLAN --> BUILD',
+        '```',
+        '',
+        '```mermaid',
+        'flowchart LR',
+        '  BROKEN -->',
+        '```',
+      ].join('\n');
+      (window as any).__CODEX_SNAPSHOT__.messages[1].content = content;
+      (window as any).__AGY_SNAPSHOT__.messages[1].content = content;
+    });
+
+    const assertRichAnswer = async () => {
+      const answer = page.locator('.trail-assistant').filter({ hasText: 'Геометрия' });
+      await expect(answer.getByRole('heading', { name: 'Геометрия', level: 2 })).toBeVisible();
+      await expect(answer.locator('strong')).toContainText('Частота:');
+      await expect(answer.locator('code')).toContainText('3V');
+      await expect(answer.getByRole('listitem')).toHaveCount(2);
+      await expect(answer.locator('.provider-math .katex')).toHaveCount(1);
+      await expect(answer.locator('.provider-mermaid svg')).toHaveCount(1, { timeout: 10_000 });
+      await expect(answer.locator('.provider-mermaid-error')).toContainText(/Parse error|Syntax error/i);
+    };
+
+    await selectCodexProvider(page);
+    await openDialogue(page);
+    await assertRichAnswer();
+
+    await page.getByRole('button', { name: 'Settings' }).click();
+    const settings = page.locator('[data-window-id="settings"]');
+    await settings.getByRole('button', { name: 'PROVIDER', exact: true }).click();
+    await settings.getByRole('button', { name: 'AGY' }).click();
+    await settings.getByRole('button', { name: 'SAVE REGISTRY' }).click();
+    await assertRichAnswer();
+  });
+
   test('Given provider history contains an image When dialogue reloads Then the original attachment remains visible', async ({ page }) => {
     await installProviderMocks(page, 'happy', true, true);
     await bootProviderDialogue(page);

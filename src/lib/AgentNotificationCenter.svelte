@@ -9,6 +9,7 @@
 
   type DisplayCard = {
     eventId: string;
+    activityEventId: string | null;
     threadId: string | null;
     actorKind: string;
     actorLabel: string;
@@ -113,6 +114,10 @@
 
   function dismissCard(card: DisplayCard, event: MouseEvent) {
     event.stopPropagation();
+    removeCard(card);
+  }
+
+  function removeCard(card: DisplayCard) {
     if (card.local) localNotificationActionsStore.set(null);
     else agentNotificationsStore.dismiss(card.eventId);
   }
@@ -133,6 +138,7 @@
 
   function cardDestination(card: DisplayCard): 'activity' | 'dialogue' {
     if (card.severity === 'error' || card.state === 'failed') return 'activity';
+    if (card.local && card.activityEventId) return 'activity';
     if (card.local) return 'dialogue';
     if (card.requiresAttention || card.severity === 'question') return 'dialogue';
     if (card.activityKind === 'request_user_prompt' || card.activityKind === 'final_reply_save') {
@@ -143,9 +149,11 @@
 
   function openCard(card: DisplayCard) {
     if (cardDestination(card) === 'activity') {
-      onOpenActivityEvent?.(card.eventId, card.threadId, card.local);
+      removeCard(card);
+      onOpenActivityEvent?.(card.activityEventId ?? card.eventId, card.threadId, card.local);
       return;
     }
+    removeCard(card);
     void onOpenThreadDialogue?.(card.threadId);
   }
 
@@ -196,6 +204,7 @@
   const visibleCards = $derived.by<DisplayCard[]>(() => {
     const activityCards = $agentNotificationsStore.visibleCards.map((card) => ({
       eventId: card.eventId,
+      activityEventId: card.eventId,
       threadId: card.threadId,
       actorKind: card.actorKind,
       actorLabel: card.actorLabel,
@@ -211,6 +220,9 @@
     const local = $localNotificationActionsStore;
     if (!local) return activityCards;
     const collapsedActivityCards = collapseProjectFolderRenderCards(activityCards, local.threadId);
+    if (local.activityEventId && collapsedActivityCards.some((card) => card.eventId === local.activityEventId)) {
+      return collapsedActivityCards;
+    }
     const localDetail = local.detail?.replace(/\s+/g, ' ').trim() ?? '';
     const duplicatedByActivity = Boolean(localDetail) && collapsedActivityCards.some((card) => {
       const summary = card.summary.replace(/\s+/g, ' ').trim();
@@ -220,6 +232,7 @@
     if (duplicatedByActivity) return collapsedActivityCards;
     return [...collapsedActivityCards, {
       ...local,
+      activityEventId: local.activityEventId ?? null,
       actorKind: 'agent',
       local: true,
       activityKind: null,
@@ -288,7 +301,8 @@
         class="agent-card"
         class:agent-card--active={card.threadId === activeThreadId}
         class:agent-card--muted={card.threadId !== activeThreadId}
-        class:agent-card--error={card.severity === 'error' || card.state === 'failed'}
+        class:agent-card--error={(card.severity === 'error' || card.state === 'failed') && card.state !== 'resolved'}
+        class:agent-card--resolved={card.state === 'resolved'}
         tabindex="0"
         role="button"
         aria-label={cardAriaLabel(card)}
@@ -307,6 +321,9 @@
         >
         <div class="agent-card__header">
           <span class="agent-card__thread">{threadLabel(card.threadId)}</span>
+          <span class="agent-card__severity" data-severity={card.state === 'resolved' ? 'resolved' : card.severity}>
+            {card.state === 'resolved' ? 'RESOLVED' : card.severity}
+          </span>
           {#if actorLabel(card) !== 'ECKY'}
             <span class="agent-card__actor">via {actorLabel(card)}</span>
           {/if}
@@ -521,6 +538,11 @@
     border-color: color-mix(in srgb, var(--red) 72%, var(--bg-300));
   }
 
+  .agent-card--resolved {
+    border-color: color-mix(in srgb, var(--primary) 50%, var(--bg-300));
+    opacity: 0.88;
+  }
+
   .agent-card:first-child::before {
     content: '';
     position: absolute;
@@ -552,7 +574,8 @@
   }
 
   .agent-card__thread,
-  .agent-card__actor {
+  .agent-card__actor,
+  .agent-card__severity {
     padding: 2px 6px;
     border: 1px solid var(--bg-300);
     background: color-mix(in srgb, var(--bg) 72%, transparent);
@@ -571,26 +594,30 @@
     color: var(--text-dim);
   }
 
+  .agent-card__severity {
+    color: var(--primary);
+  }
+
+  .agent-card__severity[data-severity='warning'] { color: var(--secondary); }
+  .agent-card__severity[data-severity='error'] { color: var(--red); }
+  .agent-card__severity[data-severity='resolved'] { color: var(--primary); }
+
   .agent-card__summary {
     font-size: 0.74rem;
     line-height: 1.42;
     font-weight: 400;
-    overflow: hidden;
-    line-clamp: 2;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
+    max-height: 12em;
+    overflow: auto;
+    overflow-wrap: anywhere;
   }
 
   .agent-card__detail {
     font-size: 0.68rem;
     line-height: 1.38;
     color: var(--text-dim);
-    overflow: hidden;
-    line-clamp: 2;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
+    max-height: 9em;
+    overflow: auto;
+    overflow-wrap: anywhere;
   }
 
   .agent-card__footer {

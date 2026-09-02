@@ -238,12 +238,13 @@ import {
   import { deriveAgentOpsState, type PendingViewportScreenshotChoice } from './lib/composables/agentOps';
   import { createAgentRuntime } from './lib/composables/agentRuntime';
   import { createModelIo } from './lib/composables/modelIo';
-  import { createViewerLoadRuntime, isMissingViewerArtifactError } from './lib/composables/viewerRuntime';
+  import { canRepairSavedVersionRuntime, createViewerLoadRuntime, isMissingViewerArtifactError } from './lib/composables/viewerRuntime';
   import { deriveExportState } from './lib/composables/exportOps';
   import {
     composeBubbleEvent,
     composeCodeDiffView,
     composeSessionActivity,
+    findNotificationActivityEvent,
     type SessionEvent,
   } from './lib/sessionActivity';
   import {
@@ -621,6 +622,7 @@ import {
     highlightLine?: number | null;
     throwSourceError?: boolean;
   }) {
+    const openRequest = ++codeModalOpenRequest;
     codeModalHighlightLine = seed?.highlightLine ?? null;
     const shouldReopenDocs = $windowStore.docs.visible;
     if (!$activeThreadId) {
@@ -706,18 +708,21 @@ import {
       return;
     }
 
-    let initialCode = seed?.code ?? current.macroCode;
-    if (seed?.messageId && seed.code && !seed.expectedSourcePath) {
-      try {
-        initialCode = await getVersionSource(sourceThreadId, seed.messageId) ?? initialCode;
-      } catch (error) {
-        session.setError(`Source Error: ${formatBackendError(error)}`);
-        return;
-      }
-    }
+    const renderSnapshot = get(activeRenderSnapshot);
+    const loadedModelId = get(session).artifactBundle?.modelId ?? null;
+    const activeRenderMatchesViewport = Boolean(
+      renderSnapshot &&
+        renderSnapshot.threadId === sourceThreadId &&
+        renderSnapshot.artifactBundle.modelId === loadedModelId,
+    );
+    let initialCode = seed?.code ?? (
+      activeRenderMatchesViewport
+        ? renderSnapshot?.design.macroCode ?? current.macroCode
+        : current.macroCode
+    );
     codeModalEvidence = '';
     codeModalMode = 'version';
-    codeModalSourceAuthority = 'draft';
+    codeModalSourceAuthority = activeRenderMatchesViewport ? 'draft' : 'bound';
     codeModalSourceThreadId = sourceThreadId;
     codeModalSourceLanguage = nextSourceLanguage;
     codeModalDraftSerial += 1;
@@ -729,23 +734,37 @@ import {
     ].join(':');
     selectedCode.set(initialCode);
     selectedTitle.set(codeInspectorTitle(nextTitle, nextSourceLanguage, nextGeometryBackend));
-    const openedFromSavedVersion = Boolean(seed?.code && !seed.expectedSourcePath);
-    if (openedFromSavedVersion) {
-      mountedWindows.code = true;
-      showWindow('code');
+    // Backend source reads may wait behind a render. The inspector must open
+    // immediately from the exact source already associated with the viewport.
+    mountedWindows.code = true;
+    showWindow('code');
+    codeModalSourceMessageId = null;
+    if (seed?.messageId && !seed.expectedSourcePath) {
+      try {
+        initialCode = await getVersionSource(sourceThreadId, seed.messageId) ?? seed.code ?? initialCode;
+        if (openRequest !== codeModalOpenRequest || !$windowStore.code.visible) return;
+        codeModalMode = 'version';
+        codeModalSourceAuthority = 'draft';
+        codeModalSourceThreadId = sourceThreadId;
+        codeModalSourceMessageId = seed.messageId;
+        codeModalSourceLanguage = nextSourceLanguage;
+        selectedCode.set(initialCode);
+        selectedTitle.set(codeInspectorTitle(nextTitle, nextSourceLanguage, nextGeometryBackend));
+        return;
+      } catch (error) {
+        session.setError(`Source Error: ${formatBackendError(error)}`);
+        return;
+      }
     }
 
     let boundSource;
     try {
       boundSource = await getProjectSource(sourceThreadId);
+      if (openRequest !== codeModalOpenRequest || !$windowStore.code.visible) return;
     } catch (error) {
       const message = `Source Error: ${formatBackendError(error)}`;
       if (seed?.throwSourceError) throw new Error(message);
       session.setError(message);
-      // A blank/manual thread may not have a mirrored source file yet. Keep
-      // the inspector usable with its draft (including docs-provided code).
-      mountedWindows.code = true;
-      showWindow('code');
       return;
     }
 
@@ -756,20 +775,12 @@ import {
       return;
     }
 
-    const renderSnapshot = get(activeRenderSnapshot);
-    const loadedModelId = get(session).artifactBundle?.modelId ?? null;
-    const isActiveRenderDraft = Boolean(
-      renderSnapshot &&
-        renderSnapshot.threadId === sourceThreadId &&
-        renderSnapshot.targetRef?.kind === 'draft' &&
-        renderSnapshot.artifactBundle.modelId === loadedModelId,
-    );
     const codeSource = seed?.expectedSourcePath
       ? { source: boundSource.source, authority: 'bound' as const }
       : resolveCodeModalSource({
           activeRenderSource: renderSnapshot?.design.macroCode ?? seed?.code,
           boundSource: boundSource.source,
-          isActiveRenderDraft,
+          activeRenderMatchesViewport,
         });
     const nextCode = codeSource.source;
     codeModalSourceAuthority = codeSource.authority;
@@ -799,15 +810,12 @@ import {
     codeModalSourceLanguage = nextSourceLanguage;
     if (get(selectedCode) === initialCode) selectedCode.set(nextCode);
     selectedTitle.set(codeInspectorTitle(nextTitle, nextSourceLanguage, nextGeometryBackend));
-    // `showWindow` bumps the thread-layout revision, so an older async layout
-    // load cannot overwrite this explicit user action.
-    mountedWindows.code = true;
-    showWindow('code');
   }
 
   async function refreshOpenCodeModalHead(threadId: string): Promise<void> {
     if (!$windowStore.code.visible || codeModalMode !== 'version') return;
     if (threadId !== get(activeThreadId)) return;
+    if (codeModalSourceAuthority !== 'bound' || codeModalSourceMessageId !== null) return;
 
     try {
       const head = await getProjectSource(threadId);
@@ -838,6 +846,7 @@ import {
   }
 
   function closeCodeModal() {
+    codeModalOpenRequest += 1;
     closeWindowStore('code');
   }
 
@@ -1004,12 +1013,14 @@ import {
   const sketchWorkspaceAvailable = false;
   let codeModalMode = $state<'version' | 'foreign-evidence' | 'sketch-preview' | 'docs-snippet'>('version');
   let codeModalSourceThreadId = $state<string | null>(null);
+  let codeModalSourceMessageId = $state<string | null>(null);
   let codeModalSourceLanguage = $state<SourceLanguage | null>(null);
   let codeModalEvidence = $state('');
   let codeModalSourceAuthority = $state<CodeModalSourceAuthority>('bound');
   let codeModalHighlightLine = $state<number | null>(null);
   let codeModalDraftSerial = $state(0);
   let codeModalDraftScopeKey = $state('');
+  let codeModalOpenRequest = 0;
   let activeDraftFeedback = $state<AgentDraftFeedback | null>(null);
 
   const isBooting = $derived(phase === 'booting');
@@ -3175,6 +3186,7 @@ import {
     const threadId = get(activeThreadId);
     const messageId = get(activeVersionId);
     const currentSession = get(session);
+    const runtimeTarget = get(activeRenderSnapshot)?.targetRef;
     const bundle = currentSession.artifactBundle;
     const recoveryKey =
       threadId && messageId && bundle
@@ -3186,6 +3198,7 @@ import {
       threadId &&
       messageId &&
       bundle &&
+      canRepairSavedVersionRuntime(runtimeTarget, threadId, messageId) &&
       isMissingViewerArtifactError(message) &&
       visibleViewerRecoveryKey !== recoveryKey
     ) {
@@ -4321,10 +4334,9 @@ import {
               stlUrl: toAssetUrl(preview.artifactBundle.modelStlPath),
               status: preview.feedback?.summary || 'Preview rendered.',
               targetRef: {
-                kind: 'draft',
+                kind: 'savedVersion',
                 threadId: preview.threadId,
-                previewId: preview.previewId,
-                sessionId: preview.sessionId,
+                messageId: preview.previewId,
               },
             });
             activeDraftFeedback = preview.feedback
@@ -5022,14 +5034,28 @@ import {
     if (folderNotice) {
       const isError = folderNotice.tone === 'error';
       const isPending = folderNotice.tone === 'pending';
+      const activityEvent = findNotificationActivityEvent(sessionActivityEvents, {
+        threadId: folderNotice.threadId,
+        versionId: folderNotice.messageId,
+        summary: folderNotice.body,
+      });
       localNotificationActionsStore.set({
-        eventId: `local-ui:project-folder:${folderNotice.tone}:${folderNotice.threadId}:${folderNotice.messageId ?? folderNotice.body}`,
+        eventId: activityEvent?.id ?? `local-ui:project-folder:${folderNotice.tone}:${folderNotice.threadId}:${folderNotice.messageId ?? folderNotice.body}`,
+        activityEventId: activityEvent?.id ?? null,
         threadId: folderNotice.threadId,
         actorLabel: 'ECKY',
-        summary: folderNotice.title,
-        detail: folderNotice.body,
-        severity: isError ? 'error' : 'info',
-        state: isError ? 'failed' : isPending ? 'active' : 'resolved',
+        summary: activityEvent?.summary ?? folderNotice.title,
+        detail: activityEvent?.detail ?? folderNotice.body,
+        severity: activityEvent?.severity ?? (isError ? 'error' : 'info'),
+        state: activityEvent?.state === 'failed'
+          ? 'failed'
+          : activityEvent?.state === 'active'
+            ? 'active'
+            : isError
+              ? 'failed'
+              : isPending
+                ? 'active'
+                : 'resolved',
         requiresAttention: isError,
         actions: [],
       });
@@ -5047,14 +5073,35 @@ import {
     const eventId = `local-ui:${source}:${bubbleActivityTimestamp}`;
     const isError = source === 'sessionError' || source === 'threadError';
     const needsAnswer = actions.length > 0 || source === 'pendingPrompt' || source === 'terminalAttention';
+    const linkToActivity = source === 'draftFeedback' || source === 'sessionError' || source === 'threadError' || source === 'repair';
+    const activityEvent = linkToActivity
+      ? findNotificationActivityEvent(sessionActivityEvents, {
+          threadId: $activeThreadId ?? null,
+          versionId: source === 'draftFeedback'
+            ? activeDraftFeedback?.previewId ?? $activeVersionId
+            : $activeVersionId,
+          summary: text,
+        })
+      : null;
     localNotificationActionsStore.set({
-      eventId,
+      eventId: activityEvent?.id ?? eventId,
+      activityEventId: activityEvent?.id ?? null,
       threadId: $activeThreadId ?? null,
       actorLabel: 'ECKY',
-      summary: text,
-      detail: [genieBubbleState.badge, genieBubbleState.layer, genieBubbleState.fix].filter(Boolean).join(' · ') || null,
-      severity: isError ? 'error' : needsAnswer ? 'question' : 'info',
-      state: isError ? 'failed' : needsAnswer ? 'active' : 'resolved',
+      summary: activityEvent?.summary ?? text,
+      detail: activityEvent?.detail ?? (
+        [genieBubbleState.badge, genieBubbleState.layer, genieBubbleState.fix].filter(Boolean).join(' · ') || null
+      ),
+      severity: activityEvent?.severity ?? (isError ? 'error' : needsAnswer ? 'question' : 'info'),
+      state: activityEvent?.state === 'failed'
+        ? 'failed'
+        : activityEvent?.state === 'active'
+          ? 'active'
+          : isError
+            ? 'failed'
+            : needsAnswer
+              ? 'active'
+              : 'resolved',
       requiresAttention: isError || needsAnswer,
       actions,
     });
@@ -5216,10 +5263,6 @@ import {
   }
 
   function handleParamPanelChange(nextParams: DesignParams) {
-    return handleParamChange(nextParams, null, false);
-  }
-
-  function handleParamPanelCommit(nextParams: DesignParams) {
     return handleParamChange(nextParams, null, true);
   }
 
@@ -5824,7 +5867,6 @@ import {
           onSemanticChange={handleSemanticControlChange}
           onApplyMacroCode={(code) => applyManualCodeDraft(code)}
           onchange={handleParamPanelChange}
-          oncommit={handleParamPanelCommit}
           manualApplyBusy={$manualApplyBusyStore}
           onspecchange={(spec, params) => {
             paramPanelState.setUiSpec(spec);
@@ -6037,7 +6079,7 @@ import {
       defaultTitle={$workingCopy.title}
       defaultVersionName={$workingCopy.versionName || 'V-manual'}
       sourceThreadId={codeModalSourceThreadId}
-      sourceMessageId={$activeVersionId}
+      sourceMessageId={codeModalSourceMessageId ?? $activeVersionId}
       sourceAuthority={codeModalSourceAuthority}
       highlightLine={codeModalHighlightLine}
       onApplyVersion={codeModalMode === 'version' || codeModalMode === 'foreign-evidence' ? applyCodeModalSource : undefined}

@@ -1,6 +1,29 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createViewerLoadRuntime } from './viewerRuntime';
+import { canRepairSavedVersionRuntime, createViewerLoadRuntime } from './viewerRuntime';
+
+test('Given a runtime target When repair is considered Then only the exact saved version is eligible', () => {
+  assert.equal(canRepairSavedVersionRuntime(
+    { kind: 'savedVersion', threadId: 'thread-1', messageId: 'version-1' },
+    'thread-1',
+    'version-1',
+  ), true);
+  assert.equal(canRepairSavedVersionRuntime(
+    null,
+    'thread-1',
+    'version-1',
+  ), true);
+  assert.equal(canRepairSavedVersionRuntime(
+    { kind: 'savedVersion', threadId: 'other-thread', messageId: 'version-x' },
+    'thread-1',
+    'version-1',
+  ), true);
+  assert.equal(canRepairSavedVersionRuntime(
+    { kind: 'draft', threadId: 'thread-1', previewId: 'version-1', sessionId: 'session-1' },
+    'thread-1',
+    'version-1',
+  ), false);
+});
 
 test('Given a pending visible viewer load When the viewer reports loaded Then the waiter resolves', async () => {
   const runtime = createViewerLoadRuntime();

@@ -1,3 +1,5 @@
+import type { AuthoringTargetRef } from '../types/domain';
+
 export type ViewerKind = 'visible' | 'hidden';
 
 type ViewerLoadWaiter = {
@@ -72,4 +74,14 @@ export function createViewerLoadRuntime() {
 export function isMissingViewerArtifactError(message: string): boolean {
   const normalized = message.toLowerCase();
   return normalized.includes('responded with 404') || normalized.includes('not found') || normalized.includes('status 404');
+}
+
+export function canRepairSavedVersionRuntime(
+  targetRef: AuthoringTargetRef | null | undefined,
+  threadId: string | null,
+  messageId: string | null,
+): boolean {
+  if (!threadId || !messageId) return false;
+  if (!targetRef || targetRef.threadId !== threadId) return true;
+  return targetRef.kind === 'savedVersion' && targetRef.messageId === messageId;
 }

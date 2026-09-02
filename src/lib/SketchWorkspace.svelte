@@ -352,7 +352,6 @@
         calibration: { physicalWidth, physicalHeight },
         threshold: reference.threshold,
         invert: reference.invert,
-        maxContours: 32,
       });
       patchRasterReference(view, {
         response,

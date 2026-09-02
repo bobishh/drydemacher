@@ -4,7 +4,6 @@
   let {
     editing = false,
     applying = false,
-    committing = false,
     manualApplyBusy = false,
     reading = false,
     undoDepth = 0,
@@ -12,7 +11,6 @@
     activeVersionId = null,
     onApplyChanges,
     onUndoParams,
-    onCommitChanges,
     onSaveValues,
     onSaveFields,
     onCancelEditing,
@@ -20,7 +18,6 @@
   }: {
     editing?: boolean;
     applying?: boolean;
-    committing?: boolean;
     reading?: boolean;
     undoDepth?: number;
     saveValuesState?: SaveValuesState;
@@ -28,7 +25,6 @@
     activeVersionId?: string | null;
     onApplyChanges?: () => void;
     onUndoParams?: () => void;
-    onCommitChanges?: () => void;
     onSaveValues?: () => void;
     onSaveFields?: () => void;
     onCancelEditing?: () => void;
@@ -60,18 +56,6 @@
         title="Undo last parameter change and rerender"
       >
         UNDO
-      </button>
-      <button
-        class="btn btn-xs btn-primary"
-        onclick={onCommitChanges}
-        disabled={!activeVersionId || committing || applying || manualApplyBusy}
-        title={activeVersionId ? 'Save current draft as immutable history version' : 'Generate first to commit a version'}
-      >
-        {#if committing}
-          COMMITTING...
-        {:else}
-          COMMIT
-        {/if}
       </button>
       <button
         class="btn btn-xs btn-ghost"

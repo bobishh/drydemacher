@@ -294,7 +294,7 @@
     <div class="code-editor-area">
       {#if sourceAuthority === 'draft' && mode === 'version'}
         <div class="draft-source-notice" data-testid="code-draft-source-notice">
-          ACTIVE VERSION SOURCE — APPLY CREATES THE NEXT VERSION IMMEDIATELY.
+          RENDERED VIEWPORT SOURCE — APPLY CREATES THE NEXT VERSION IMMEDIATELY.
         </div>
       {/if}
       {#if mode === 'foreign-evidence' && foreignTab === 'summary'}
