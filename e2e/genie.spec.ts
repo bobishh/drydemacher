@@ -209,7 +209,7 @@ test.describe('VertexGenie', () => {
     await expect(mascot).toHaveAttribute('data-poke-state', 'calm');
 
     for (let index = 0; index < 5; index++) {
-      await mascot.click();
+      await mascot.dispatchEvent('click');
       await page.waitForTimeout(150);
     }
 

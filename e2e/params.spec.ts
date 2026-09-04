@@ -1164,7 +1164,7 @@ endsolid mock
   test('toolbar and mode tabs stay wired after the split', async ({ page }) => {
     await page.getByRole('button', { name: 'DIALOGUE' }).click();
     await page.fill('textarea.prompt-input', 'make a lithophane (mock)');
-    await page.locator('textarea.prompt-input').press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
+    await page.locator('textarea.prompt-input').press('Control+Enter');
 
     await page.getByRole('button', { name: /(PARAMS|Parameters)/i }).click();
     await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
