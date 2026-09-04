@@ -29,7 +29,7 @@ const docsMarkdown = [
 
 const book = buildEckyIrBook({
   docsMarkdown,
-  assetSourceRoot: 'public/docs',
+  assetSourceRoot: 'docs/books/ecky-ir',
 });
 
 fs.mkdirSync(outputDir, { recursive: true });
