@@ -256,9 +256,11 @@ test.describe('Configuration Panel', () => {
       };
 
       window.__TAURI_INTERNALS__ = window.__TAURI_INTERNALS__ || {};
+      window.__TAURI_INTERNALS__.transformCallback = () => 1;
       window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
         if (cmd === 'get_config') return structuredClone(config);
         if (cmd === 'save_config') return null;
+        if (cmd === 'get_app_logs') return [];
         if (cmd === 'get_runtime_capabilities') {
           return {
             freecad: { available: true, detail: 'Ready at /mock/freecadcmd', path: '/mock/freecadcmd' },
@@ -296,10 +298,15 @@ test.describe('Configuration Panel', () => {
     await page.goto('/');
     await page.waitForSelector('.workbench');
     await page.locator('button[title="Settings"], button[title="Configuration"]').click();
-    await page.getByRole('button', { name: 'APP', exact: true }).click();
+    const settings = page.locator('[data-window-id="settings"]');
+    await expect(settings).toBeVisible();
+    await expect(settings.getByText('CONNECTION TYPE')).toBeVisible();
+    await settings.getByRole('button', { name: 'APP', exact: true }).click();
+    await expect(settings.getByLabel('Ecky settings preview')).toBeVisible();
 
-    const verifyAttemptsField = page.locator('.field').filter({ has: page.locator('#max-verify-attempts') });
-    await expect(page.locator('#max-verify-attempts')).toHaveValue('2');
+    const verifyAttempts = settings.locator('#max-verify-attempts');
+    const verifyAttemptsField = verifyAttempts.locator('..');
+    await expect(verifyAttempts).toHaveValue('2');
     await expect(verifyAttemptsField).toContainText('Default: 2');
     await expect(verifyAttemptsField).toContainText('structural verification still runs');
   });

@@ -1174,6 +1174,7 @@ pub struct Message {
 /// database boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 #[serde(rename_all = "camelCase", tag = "kind")]
+#[allow(clippy::large_enum_variant)]
 pub enum MessagePayload {
     Conversation,
     Version {

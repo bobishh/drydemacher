@@ -1,0 +1,13 @@
+{
+  "sourcePath": "docs/books/ecky-ir/examples/corner-bracket.ecky",
+  "sourceSha256": "4aec5c650f87b3451540a976f479375467675e0b138c3d9c63d00ec724c67256",
+  "eckyContentHash": "b9fb366d664f11d2f9d2504c16aa7ce3fb318cc5ec19071d2c2270fa50e4920a",
+  "stlBytes": 2284,
+  "pngPath": "public/docs/assets/corner-bracket.png",
+  "pngWidth": 720,
+  "pngHeight": 720,
+  "nonBackgroundCoverage": 1,
+  "renderer": "three-webgl-swiftshader",
+  "backend": "direct-occt",
+  "generatedBy": "scripts/render_ecky_preview_png.mjs"
+}

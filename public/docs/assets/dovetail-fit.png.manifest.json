@@ -1,0 +1,13 @@
+{
+  "sourcePath": "docs/books/ecky-ir/examples/dovetail-fit.ecky",
+  "sourceSha256": "8e39d6e782ca443f1511285406a237c01693498a6eac079618db465fab5de9ca",
+  "eckyContentHash": "97ddba1771f196a4811218e37ea42c001bba9df8a182337b3f72f700b67670f0",
+  "stlBytes": 1484,
+  "pngPath": "public/docs/assets/dovetail-fit.png",
+  "pngWidth": 720,
+  "pngHeight": 720,
+  "nonBackgroundCoverage": 0.07918981481481481,
+  "renderer": "three-webgl-swiftshader",
+  "backend": "direct-occt",
+  "generatedBy": "scripts/render_ecky_preview_png.mjs"
+}

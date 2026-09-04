@@ -389,15 +389,8 @@ pub async fn finish_manual_parameter_apply(
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            return persist_failure(
-                &request,
-                message_id,
-                attempted_design,
-                error,
-                state,
-                app,
-            )
-            .await;
+            return persist_failure(&request, message_id, attempted_design, error, state, app)
+                .await;
         }
     };
     let snapshot_id = match build_render_snapshot(RenderSnapshotInput {
@@ -408,15 +401,8 @@ pub async fn finish_manual_parameter_apply(
     }) {
         Ok(snapshot) => snapshot.snapshot_id,
         Err(error) => {
-            return persist_failure(
-                &request,
-                message_id,
-                attempted_design,
-                error,
-                state,
-                app,
-            )
-            .await;
+            return persist_failure(&request, message_id, attempted_design, error, state, app)
+                .await;
         }
     };
     if let Some(message_id) = message_id.as_deref() {

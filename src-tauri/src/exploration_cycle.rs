@@ -261,10 +261,9 @@ impl CycleReducer {
             .verification
             .as_ref()
             .ok_or(CycleError::MissingVerification)?;
-        if verification.deterministic == VerificationVerdict::Red {
-            if decision == Decision::Complete {
-                return Err(CycleError::DeterministicFailure);
-            }
+        if verification.deterministic == VerificationVerdict::Red && decision == Decision::Complete
+        {
+            return Err(CycleError::DeterministicFailure);
         }
         match decision {
             Decision::Complete => {

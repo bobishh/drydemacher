@@ -300,7 +300,7 @@ mod tests {
         submit(&mut queue, "thread-a", "b", BuildKind::Interactive, "B");
         assert!(!queue.publication_allowed("thread-a", &running.request_id));
         assert!(queue.finish("thread-a", "wrong").is_none());
-        assert!(queue.publication_allowed("thread-a", &running.request_id) == false);
+        assert!(!queue.publication_allowed("thread-a", &running.request_id));
     }
 
     #[test]

@@ -138,10 +138,8 @@ jobs:
         working-directory: sites/landing
 
       - name: Run landing e2e
-        # The landing is a separate Vite project. Run from repo root so it
-        # reuses the root @playwright/test install, pointing at the landing
-        # config (webServer spins up the landing dev server on port 4243).
-        run: npx playwright test --config=sites/landing/playwright.config.ts
+        run: npm run test:e2e
+        working-directory: sites/landing
 
   test-docs:
     name: Docs Site (build + e2e)

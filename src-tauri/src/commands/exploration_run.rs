@@ -399,7 +399,7 @@ async fn run_admitted(
             &generated.design.macro_code,
             &generated.design.initial_params,
             Some(generated.design.macro_dialect.clone()),
-            Some(generated.design.geometry_backend.clone()),
+            Some(generated.design.geometry_backend),
             generated.design.post_processing.as_ref(),
             last_manifest.as_ref(),
             state,
@@ -553,9 +553,7 @@ async fn run_admitted(
                 model_manifest: Some(manifest),
                 structural_verification: Some(verification),
                 usage: last_usage,
-                response_text: current_design
-                    .as_ref()
-                    .and_then(|d| Some(d.response.clone())),
+                response_text: current_design.as_ref().map(|d| d.response.clone()),
                 raw_error: None,
                 publication_allowed,
             });
@@ -1043,7 +1041,7 @@ async fn run_cycle_admitted(
             &generated.design.macro_code,
             &generated.design.initial_params,
             Some(generated.design.macro_dialect.clone()),
-            Some(generated.design.geometry_backend.clone()),
+            Some(generated.design.geometry_backend),
             generated.design.post_processing.as_ref(),
             last_manifest.as_ref(),
             state,

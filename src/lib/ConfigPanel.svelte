@@ -366,7 +366,9 @@
     }
     return config.microwave;
   }
-  const microwave = $derived.by(() => getMicrowaveConfig());
+  const microwave = $derived(
+    config.microwave ?? { humId: null, dingId: null, muted: false },
+  );
 
   function getVoiceConfig(): AppConfig['voice'] {
     if (!config.voice || !config.voice.sttLanguageCode?.trim()) {
@@ -374,7 +376,7 @@
     }
     return config.voice;
   }
-  const voice = $derived.by(() => getVoiceConfig());
+  const voice = $derived(config.voice ?? { sttLanguageCode: 'en-US' });
 
   if (typeof config.freecadCmd !== 'string') {
     config.freecadCmd = '';

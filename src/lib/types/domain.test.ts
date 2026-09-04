@@ -478,6 +478,20 @@ test("normalizeConfig defaults STT language to en-US when voice config is missin
   assert.equal(config.voice.sttLanguageCode, "en-US");
 });
 
+test("normalizeConfig materializes muted audio defaults when microwave config is missing", () => {
+  const config = normalizeConfig({
+    engines: [],
+    selectedEngineId: "",
+    microwave: null,
+  } as any);
+
+  assert.deepEqual(config.microwave, {
+    humId: null,
+    dingId: null,
+    muted: false,
+  });
+});
+
 test("normalizeConfig preserves configured STT language code", () => {
   const config = normalizeConfig({
     engines: [],

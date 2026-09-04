@@ -160,7 +160,7 @@ async fn fork_design_clones_exact_selected_version_and_returns_canonical_project
             .map(|message| message.id.as_str()),
         Some(response.message_id.as_str())
     );
-    assert_eq!(response.workspace.requested_message_found, true);
+    assert!(response.workspace.requested_message_found);
     let forked = response
         .workspace
         .selected_version

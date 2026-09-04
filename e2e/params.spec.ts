@@ -3,20 +3,10 @@ import { test, expect, type Page } from '@playwright/test';
 async function openSeededMacroMap(page: Page) {
   await page.getByRole('button', { name: 'Dialogue', exact: true }).click();
   await page.fill('textarea.prompt-input', 'make a seeded macro');
-  await page
-    .locator('textarea.prompt-input')
-    .press(process.platform === 'darwin' ? 'Meta+Enter' : 'Control+Enter');
-  await expect
-    .poll(
-      () => page.evaluate(() =>
-        (window as any).__PARAM_CALLS__.some(
-          (entry: { cmd: string; args?: { status?: string } }) =>
-            entry.cmd === 'finalize_generation_attempt' && entry.args?.status === 'success',
-        ),
-      ),
-      { timeout: 15000 },
-    )
-    .toBe(true);
+  await page.getByRole('button', { name: 'PROCESS', exact: true }).click();
+  await expect(page.getByText('Generated: Seeded Macro', { exact: false }).first()).toBeVisible({
+    timeout: 15000,
+  });
   await page.getByRole('button', { name: /(PARAMS|Parameters)/i, exact: true }).click();
   await expect(page.locator('.param-panel')).toBeVisible({ timeout: 10000 });
   await page.getByRole('button', { name: 'new params', exact: true }).click();
@@ -578,6 +568,62 @@ endsolid mock
             }
           }
           return nodes;
+        }
+        if (cmd === 'apply_manual_code') {
+          const storedSnapshot = JSON.parse(sessionStorage.getItem('param-last-design') || 'null');
+          const source = String(args?.input?.source ?? '');
+          const messageId = args?.input?.persist ? 'mock-code-version-1' : null;
+          const designOutput = {
+            ...storedSnapshot.design,
+            macroCode: source,
+            response: source.includes('boom')
+              ? 'Manual code failed validation.'
+              : 'Manual code version appended.',
+          };
+          if (source.includes('boom')) {
+            return {
+              threadId: args?.input?.threadId,
+              baseMessageId: args?.input?.baseMessageId,
+              messageId,
+              status: 'error',
+              designOutput,
+              artifactBundle: null,
+              modelManifest: null,
+              snapshotId: null,
+              parserMatched: true,
+              error: {
+                code: 'validation',
+                message: 'mock render exploded: boom op unsupported',
+                details: 'mock kernel body mismatch\npart=body op=boom width=12 depth=20',
+                stableNodeKey: 'part:body',
+                startLine: 2,
+                endLine: 2,
+                operation: 'boom',
+              },
+            };
+          }
+          sessionStorage.setItem('param-last-design', JSON.stringify({
+            ...storedSnapshot,
+            design: designOutput,
+            messageId: messageId ?? args?.input?.baseMessageId,
+          }));
+          const artifactBundle = storedSnapshot.artifactBundle ?? (window as any).__PARAM_LAST_BUNDLE__;
+          const modelManifest = storedSnapshot.modelManifest ?? await window.__TAURI_INTERNALS__.invoke(
+            'get_model_manifest',
+            { modelId: artifactBundle?.modelId },
+          );
+          return {
+            threadId: args?.input?.threadId,
+            baseMessageId: args?.input?.baseMessageId,
+            messageId,
+            status: 'success',
+            designOutput,
+            artifactBundle,
+            modelManifest,
+            snapshotId: `snapshot-${messageId ?? args?.input?.baseMessageId}`,
+            parserMatched: true,
+            error: null,
+          };
         }
         if (cmd === 'apply_manual_parameters') {
           if ((window as any).__PARAM_DELAY_APPLY__ && !args?.input?.persist) {
@@ -1254,7 +1300,7 @@ endsolid mock
     await expect(page.locator('.macro-ast-node-param input.param-input').first()).toBeFocused();
   });
 
-  test('Given Ecky macro with legacy control views When Parameters opens Then the views persistence surface is absent', async ({
+  test('Given Ecky macro with control views When Parameters reopens Then the views persistence surface remains available', async ({
     page,
   }) => {
     await openSeededMacroMap(page);
@@ -1268,14 +1314,13 @@ endsolid mock
     await expect.soft(
       page.getByTestId('workbench-bottom-dock').getByRole('button', { name: 'Parameters', exact: true }),
     ).toBeVisible();
-    await expect.soft(page.getByRole('button', { name: 'new params', exact: true })).toBeVisible();
-    await expect.soft(page.getByRole('button', { name: 'VIEWS', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'VIEWS', exact: true })).toBeVisible();
 
     const persistedControlViews = await page.evaluate(() =>
       JSON.parse(sessionStorage.getItem('param-last-design') || 'null')
         ?.modelManifest?.controlViews ?? null,
     );
-    expect(persistedControlViews).toEqual([]);
+    expect(persistedControlViews).toHaveLength(4);
   });
 
   test('Given seeded macro When New Params edits a value Then Apply rerenders the draft', async ({
@@ -1283,8 +1328,8 @@ endsolid mock
   }) => {
     await openSeededMacroMap(page);
 
-    const beforeRenderCount = await page.evaluate(
-      () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+    const beforeApplyCount = await page.evaluate(
+      () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters').length,
     );
 
     // Zoomed out the map shows dense chips; clicking a module flies the
@@ -1295,20 +1340,20 @@ endsolid mock
     await firstParam.fill('42');
     await expect(page.getByRole('button', { name: 'APPLY' })).toBeEnabled();
 
-    const pendingRenderCount = await page.evaluate(
-      () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+    const pendingApplyCount = await page.evaluate(
+      () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters').length,
     );
-    expect(pendingRenderCount).toBe(beforeRenderCount);
+    expect(pendingApplyCount).toBe(beforeApplyCount);
 
     await page.getByRole('button', { name: 'APPLY' }).click();
 
     await expect
       .poll(async () =>
         page.evaluate(
-          () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+          () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters').length,
         ),
       )
-      .toBe(beforeRenderCount + 1);
+      .toBe(beforeApplyCount + 1);
   });
 
   test('Given several map params When search result is chosen Then owning region frames, pulses, and inline apply keeps identity', async ({
@@ -1353,10 +1398,10 @@ endsolid mock
 
     const input = page.locator('#macro-input_port_diameter_mm');
     await expect(input).toBeFocused();
-    const beforeRenderCount = await page.evaluate(
+    const beforeApplyCount = await page.evaluate(
       () =>
         (window as any).__PARAM_CALLS__.filter(
-          (entry: { cmd: string }) => entry.cmd === 'render_model',
+          (entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters',
         ).length,
     );
     await input.fill('17');
@@ -1366,16 +1411,16 @@ endsolid mock
         page.evaluate(
           () =>
             (window as any).__PARAM_CALLS__.filter(
-              (entry: { cmd: string }) => entry.cmd === 'render_model',
+              (entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters',
             ).length,
         ),
       )
-      .toBe(beforeRenderCount + 1);
+      .toBe(beforeApplyCount + 1);
     const appliedParameters = await page.evaluate(() => {
       const calls = (window as any).__PARAM_CALLS__.filter(
-        (entry: { cmd: string }) => entry.cmd === 'render_model',
+        (entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters',
       );
-      return calls.at(-1)?.args?.parameters;
+      return calls.at(-1)?.args?.input?.parameters;
     });
     expect(appliedParameters?.input_port_diameter_mm).toBe(17);
     await expect(target).toHaveAttribute('data-search-selected', 'true');
@@ -1543,8 +1588,8 @@ endsolid mock
     expect(footerPosition.bodyHeight).toBeGreaterThan(0);
     expect(footerPosition.scrollMode).toBe('auto');
 
-    const beforeRenderCount = await page.evaluate(
-      () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+    const beforeApplyCount = await page.evaluate(
+      () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters').length,
     );
 
     const width = page.locator('.param-panel input.param-input').first();
@@ -1557,21 +1602,21 @@ endsolid mock
     });
 
     await page.waitForTimeout(250);
-    const renderCountBeforeApply = await page.evaluate(
-      () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+    const applyCountBeforeClick = await page.evaluate(
+      () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters').length,
     );
-    expect(renderCountBeforeApply).toBe(beforeRenderCount);
+    expect(applyCountBeforeClick).toBe(beforeApplyCount);
 
     await page.getByRole('button', { name: 'APPLY', exact: true }).click();
     await expect.poll(() => page.evaluate(
-      () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
-    )).toBe(beforeRenderCount + 1);
+      () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters').length,
+    )).toBe(beforeApplyCount + 1);
 
-    const lastRenderCall = await page.evaluate(() => {
-      const calls = (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model');
+    const lastApplyCall = await page.evaluate(() => {
+      const calls = (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters');
       return calls[calls.length - 1];
     });
-    expect(lastRenderCall?.args?.parameters?.width).toBe(23);
+    expect(lastApplyCall?.args?.input?.parameters?.width).toBe(23);
   });
 
   test('Given non-live heavy params When typing number Then input handler stays fast and does not render', async ({ page }) => {
@@ -1648,8 +1693,8 @@ endsolid mock
     await page.getByRole('button', { name: 'PARAMETERS', exact: true }).click();
     await expect(page.locator('#p600')).toBeVisible();
 
-    const beforeRenderCount = await page.evaluate(
-      () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+    const beforeApplyCount = await page.evaluate(
+      () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters').length,
     );
     await page.locator('#p600').fill('987');
     await page.getByRole('button', { name: 'APPLY' }).click();
@@ -1657,15 +1702,15 @@ endsolid mock
     await expect
       .poll(async () =>
         page.evaluate(
-          () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+          () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters').length,
         ),
       )
-      .toBe(beforeRenderCount + 1);
-    const lastRenderCall = await page.evaluate(() => {
-      const calls = (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model');
+      .toBe(beforeApplyCount + 1);
+    const lastApplyCall = await page.evaluate(() => {
+      const calls = (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters');
       return calls[calls.length - 1];
     });
-    expect(lastRenderCall?.args?.parameters?.p600).toBe(987);
+    expect(lastApplyCall?.args?.input?.parameters?.p600).toBe(987);
   });
 
   test('Given edited params When Apply runs Then one Rust intent appends an immutable version', async ({ page }) => {
@@ -1796,29 +1841,29 @@ endsolid mock
     await expect(fontField).toContainText('Font');
     await expect(fontField.locator('.select-label')).toHaveText('Arial');
 
-    const renderCountBeforeChoice = await page.evaluate(
-      () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+    const applyCountBeforeChoice = await page.evaluate(
+      () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters').length,
     );
     await fontField.locator('button.select-trigger').click();
     await fontField.getByRole('button', { name: 'Impact', exact: true }).click();
     await expect(fontField.locator('.select-label')).toHaveText('Impact');
     await expect
       .poll(() => page.evaluate(
-        () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+        () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters').length,
       ))
-      .toBe(renderCountBeforeChoice);
+      .toBe(applyCountBeforeChoice);
 
     await page.getByRole('button', { name: 'APPLY' }).click();
     await expect
       .poll(() => page.evaluate(
-        () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+        () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters').length,
       ))
-      .toBe(renderCountBeforeChoice + 1);
-    const lastRenderCall = await page.evaluate(() => {
-      const calls = (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model');
+      .toBe(applyCountBeforeChoice + 1);
+    const lastApplyCall = await page.evaluate(() => {
+      const calls = (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters');
       return calls.at(-1);
     });
-    expect(lastRenderCall?.args?.parameters?.font).toBe('Impact');
+    expect(lastApplyCall?.args?.input?.parameters?.font).toBe('Impact');
   });
 
   test('Given applied params When Undo is clicked Then previous params rerender', async ({ page }) => {
@@ -1839,8 +1884,8 @@ endsolid mock
       .toBeGreaterThan(0);
 
     const width = page.locator('.param-panel input.param-input').first();
-    const beforeRenderCount = await page.evaluate(
-      () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+    const beforeApplyCount = await page.evaluate(
+      () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters').length,
     );
 
     await width.fill('42');
@@ -1848,29 +1893,29 @@ endsolid mock
     await expect
       .poll(async () =>
         page.evaluate(
-          () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+          () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters').length,
         ),
       )
-      .toBe(beforeRenderCount + 1);
-    const appliedRenderCall = await page.evaluate(() => {
-      const calls = (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model');
+      .toBe(beforeApplyCount + 1);
+    const appliedCall = await page.evaluate(() => {
+      const calls = (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters');
       return calls[calls.length - 1];
     });
-    expect(appliedRenderCall?.args?.parameters?.width).toBe(42);
+    expect(appliedCall?.args?.input?.parameters?.width).toBe(42);
 
     await page.getByRole('button', { name: 'UNDO' }).click();
     await expect(width).toHaveValue('10');
     await expect
       .poll(async () =>
         page.evaluate(
-          () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'render_model').length,
+          () => (window as any).__PARAM_CALLS__.filter((entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters').length,
         ),
       )
-      .toBe(beforeRenderCount + 2);
+      .toBe(beforeApplyCount + 2);
 
     const calls = await page.evaluate(() => (window as any).__PARAM_CALLS__);
-    const renderCall = calls.filter((entry: { cmd: string }) => entry.cmd === 'render_model').at(-1);
-    expect(renderCall?.args?.parameters?.width).toBe(10);
+    const undoCall = calls.filter((entry: { cmd: string }) => entry.cmd === 'apply_manual_parameters').at(-1);
+    expect(undoCall?.args?.input?.parameters?.width).toBe(10);
     await expect(page.getByRole('button', { name: 'UNDO' })).toBeDisabled();
   });
 
@@ -1908,9 +1953,9 @@ endsolid mock
           () =>
             (window as any).__PARAM_CALLS__.filter(
               (entry: { cmd: string; args?: any }) =>
-                entry.cmd === 'render_model' &&
-                `${entry.args?.macroCode ?? ''}`.includes('box 12 20 5') &&
-                `${entry.args?.macroCode ?? ''}`.includes('box 7 7 7'),
+                entry.cmd === 'apply_manual_code' &&
+                `${entry.args?.input?.source ?? ''}`.includes('box 12 20 5') &&
+                `${entry.args?.input?.source ?? ''}`.includes('box 7 7 7'),
             ).length,
         ),
       )
@@ -2006,8 +2051,8 @@ endsolid mock
           () =>
             (window as any).__PARAM_CALLS__.filter(
               (entry: { cmd: string; args?: any }) =>
-                entry.cmd === 'render_model' &&
-                `${entry.args?.macroCode ?? ''}`.includes('(part part_2 (box 10 10 10))'),
+                entry.cmd === 'apply_manual_code' &&
+                `${entry.args?.input?.source ?? ''}`.includes('(part part_2 (box 10 10 10))'),
             ).length,
         ),
       )

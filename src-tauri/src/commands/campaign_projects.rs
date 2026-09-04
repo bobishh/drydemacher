@@ -34,8 +34,8 @@ pub async fn create_campaign_run(
     input: CreateCampaignRunInput,
     state: State<'_, AppState>,
 ) -> AppResult<CampaignRun> {
-    let mut db = state.db.lock().await;
-    campaign_projects::create(&mut db, input)
+    let db = state.db.lock().await;
+    campaign_projects::create(&db, input)
 }
 #[tauri::command]
 #[specta::specta]

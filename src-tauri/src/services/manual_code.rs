@@ -291,6 +291,7 @@ fn requested_design(
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{canonicalize_manual_post_processing, DRAFT_LITHOPHANE_ID_PREFIX};
     use crate::contracts::PostProcessingSpec;

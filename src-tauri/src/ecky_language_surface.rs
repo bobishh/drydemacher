@@ -1562,8 +1562,14 @@ mod tests {
 
         assert!(reference.signature.contains(":font selector"));
         assert!(reference.example.contains(":font \"Arial\""));
-        assert!(reference.notes.iter().any(|note| note.contains("family name")));
-        assert!(reference.notes.iter().any(|note| note.contains("single `text` call")));
+        assert!(reference
+            .notes
+            .iter()
+            .any(|note| note.contains("family name")));
+        assert!(reference
+            .notes
+            .iter()
+            .any(|note| note.contains("single `text` call")));
     }
 
     #[test]

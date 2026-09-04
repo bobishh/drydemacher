@@ -46,7 +46,11 @@ server/test_env.py
 tmp/
 /artifacts/
 /outputs/
-public/docs/assets/
+public/docs/assets/*
+!public/docs/assets/corner-bracket.png
+!public/docs/assets/corner-bracket.png.manifest.json
+!public/docs/assets/dovetail-fit.png
+!public/docs/assets/dovetail-fit.png.manifest.json
 docs/books/ecky-ir/assets/
 # Generated book artifacts published by `npm run build:book` (source is
 # public/docs/ecky-ir.md); regenerable, not committed.

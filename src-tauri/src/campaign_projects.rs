@@ -384,8 +384,8 @@ mod tests {
             .unwrap();
         db.execute("DELETE FROM campaign_runs WHERE id = 'sentinel'", [])
             .unwrap();
-        let first = create(&mut db, create_input("First")).unwrap();
-        let second = create(&mut db, create_input("Second")).unwrap();
+        let first = create(&db, create_input("First")).unwrap();
+        let second = create(&db, create_input("Second")).unwrap();
         assert_ne!(first.id, second.id);
         assert!(uuid::Uuid::parse_str(&first.id).is_ok());
 
@@ -413,7 +413,7 @@ mod tests {
         assert_eq!(get(&db, &first.id).unwrap(), saved);
         assert_eq!(list(&db).unwrap().len(), 2);
 
-        delete(&mut db, &first.id).unwrap();
+        delete(&db, &first.id).unwrap();
         assert!(
             matches!(get(&db, &first.id), Err(error) if error.code == crate::contracts::AppErrorCode::NotFound)
         );

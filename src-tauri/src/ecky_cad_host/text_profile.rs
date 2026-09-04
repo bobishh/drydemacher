@@ -335,7 +335,10 @@ fn load_font_selector(selector: &str, text: &str) -> Option<ResolvedFont> {
         if face_count > 1 && !non_ascii_chars.is_empty() {
             for index in 0..face_count {
                 if let Ok(face) = Face::parse(&bytes, index) {
-                    if non_ascii_chars.iter().all(|&c| face.glyph_index(c).is_some()) {
+                    if non_ascii_chars
+                        .iter()
+                        .all(|&c| face.glyph_index(c).is_some())
+                    {
                         chosen_face = index;
                         break;
                     }
@@ -344,7 +347,10 @@ fn load_font_selector(selector: &str, text: &str) -> Option<ResolvedFont> {
         }
         if !non_ascii_chars.is_empty() {
             if let Ok(face) = Face::parse(&bytes, chosen_face) {
-                if non_ascii_chars.iter().any(|&c| face.glyph_index(c).is_none()) {
+                if non_ascii_chars
+                    .iter()
+                    .any(|&c| face.glyph_index(c).is_none())
+                {
                     return None;
                 }
             }

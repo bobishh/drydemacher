@@ -1271,7 +1271,11 @@ export function normalizeConfig(
           dingId: config.microwave.dingId ?? null,
           muted: Boolean(config.microwave.muted),
         }
-      : null,
+      : {
+          humId: null,
+          dingId: null,
+          muted: false,
+        },
     voice: {
       sttLanguageCode,
     },

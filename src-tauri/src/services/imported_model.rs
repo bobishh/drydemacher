@@ -25,6 +25,7 @@ use uuid::Uuid;
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
+#[allow(clippy::large_enum_variant)]
 pub enum ImportedModelSource {
     #[specta(rename_all = "camelCase")]
     Fcstd { source_path: String },
@@ -366,9 +367,9 @@ pub fn build_imported_output(
         interaction_mode: InteractionMode::Design,
         macro_code: String::new(),
         macro_dialect: MacroDialect::Legacy,
-        engine_kind: manifest.engine_kind.clone(),
-        source_language: manifest.source_language.clone(),
-        geometry_backend: manifest.geometry_backend.clone(),
+        engine_kind: manifest.engine_kind,
+        source_language: manifest.source_language,
+        geometry_backend: manifest.geometry_backend,
         ui_spec,
         initial_params,
         post_processing: None,

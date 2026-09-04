@@ -69,7 +69,7 @@ fn workspace_projection_loads_timeline_and_preferred_version_atomically() {
             .map(|message| message.id.as_str()),
         Some("version-1")
     );
-    assert_eq!(projection.requested_message_found, true);
+    assert!(projection.requested_message_found);
 
     let json = serde_json::to_value(&projection).expect("serialize projection");
     assert!(json.get("messagesPage").is_some());
@@ -102,7 +102,7 @@ fn workspace_projection_falls_back_to_latest_when_pointer_is_stale() {
             .map(|message| message.id.as_str()),
         Some("version-2")
     );
-    assert_eq!(projection.requested_message_found, false);
+    assert!(!projection.requested_message_found);
 
     drop(conn);
     let _ = std::fs::remove_file(path);

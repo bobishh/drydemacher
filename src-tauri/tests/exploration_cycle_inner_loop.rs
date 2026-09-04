@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 #[path = "../src/contracts/exploration_cycle.rs"]
 pub mod exploration_contracts;
 #[path = "../src/exploration_cycle.rs"]
