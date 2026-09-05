@@ -910,8 +910,10 @@ fn decode_f64_bytes(bytes: &[u8]) -> AppResult<Vec<f64>> {
         ));
     }
     let values = bytes
-        .chunks_exact(8)
-        .map(|chunk| f64::from_le_bytes(chunk.try_into().expect("8-byte chunk")))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|chunk| f64::from_le_bytes(*chunk))
         .collect::<Vec<_>>();
     if values.iter().any(|value| !value.is_finite()) {
         return Err(AppError::validation(

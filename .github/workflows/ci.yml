@@ -37,7 +37,7 @@ jobs:
             libsoup-3.0-dev
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.95.0
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 

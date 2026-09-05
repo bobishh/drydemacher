@@ -777,7 +777,9 @@ fn prepare_indexed_mesh(
         )
     };
     let prepared_triangles = prepared_indices
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|triangle| [triangle[0], triangle[1], triangle[2]])
         .collect::<Vec<_>>();
     let (prepared_triangles, _) = deduplicate_triangle_indices(prepared_triangles);
@@ -1019,7 +1021,9 @@ mod import_decode {
             )));
         }
         Ok(flat_vertices
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|chunk| [chunk[0], chunk[1], chunk[2]])
             .collect())
     }

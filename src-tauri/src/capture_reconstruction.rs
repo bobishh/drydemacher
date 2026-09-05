@@ -1,5 +1,6 @@
 use crate::contracts::{AppError, AppResult, CaptureFrameManifest, CaptureMeshPreview};
 use crate::ecky_ir::mesh_asset::{IndexedMeshAsset, MeshAsset, MeshAssetSource};
+#[cfg(target_os = "macos")]
 use sha2::{Digest, Sha256};
 use std::future::Future;
 use std::io::Write;
@@ -12,6 +13,7 @@ use std::sync::{
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::sync::Notify;
 
+#[cfg(target_os = "macos")]
 const APPLE_HELPER_SOURCE: &str = include_str!("../native/capture_object.swift");
 
 pub type ReconstructionFuture<'a> =
@@ -67,7 +69,7 @@ fn helper_binary(tool_cache_dir: &Path) -> AppResult<PathBuf> {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = tool_cache_dir;
-        return Err(AppError::provider("Apple Object Capture requires macOS."));
+        Err(AppError::provider("Apple Object Capture requires macOS."))
     }
     #[cfg(target_os = "macos")]
     {

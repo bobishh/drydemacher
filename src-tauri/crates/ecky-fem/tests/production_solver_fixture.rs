@@ -1,5 +1,3 @@
-#![allow(clippy::chunks_exact_to_as_chunks)]
-
 use std::{collections::BTreeSet, fmt::Write as _, path::Path};
 
 use ecky_fem::{
@@ -10,16 +8,20 @@ use ecky_fem::{
 fn f64_values(path: &Path) -> Vec<f64> {
     std::fs::read(path)
         .expect("read float64 array")
-        .chunks_exact(8)
-        .map(|bytes| f64::from_le_bytes(bytes.try_into().expect("f64 bytes")))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|bytes| f64::from_le_bytes(*bytes))
         .collect()
 }
 
 fn u32_values(path: &Path) -> Vec<u32> {
     std::fs::read(path)
         .expect("read uint32 array")
-        .chunks_exact(4)
-        .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("u32 bytes")))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| u32::from_le_bytes(*bytes))
         .collect()
 }
 
@@ -40,18 +42,22 @@ fn exports_production_scale_spd_and_multiple_rhs() {
     let arrays = result_dir.join("arrays");
     let coordinates = f64_values(&arrays.join("nodes.f64le"));
     let nodes = coordinates
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|xyz| FemPoint3::new(xyz[0], xyz[1], xyz[2]))
         .collect::<Vec<_>>();
     let cells = u32_values(&arrays.join("tet4-cells.u32le"))
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|cell| [cell[0], cell[1], cell[2], cell[3]])
         .collect::<Vec<_>>();
     assert_eq!(cells.len(), 50_287, "authoritative production mesh");
     let boundary = u32_values(&arrays.join("boundary-triangles.u32le"));
     let groups = u32_values(&arrays.join("boundary-face-groups.u32le"));
     let mut support_nodes = BTreeSet::new();
-    for (triangle, group) in boundary.chunks_exact(3).zip(groups) {
+    for (triangle, group) in boundary.as_chunks::<3>().0.iter().zip(groups) {
         if support_groups.contains(&group) {
             support_nodes.extend(triangle.iter().map(|node| *node as usize));
         }

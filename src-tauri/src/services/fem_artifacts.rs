@@ -291,15 +291,21 @@ pub fn decode_fem_topology_mesh(asset: &FemMeshAsset) -> AppResult<FemTopologyMe
         ));
     }
     let nodes = node_values
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|value| ecky_fem::FemPoint3::new(value[0], value[1], value[2]))
         .collect::<Vec<_>>();
     let cells = cell_values
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|value| [value[0], value[1], value[2], value[3]])
         .collect::<Vec<_>>();
     let boundary_triangles = triangle_values
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|value| [value[0], value[1], value[2]])
         .collect::<Vec<_>>();
     if boundary_face_group_indices.len() != boundary_triangles.len()
@@ -723,8 +729,10 @@ fn read_f64_asset(directory: &Path, array: &FemBinaryArrayAsset) -> AppResult<Ve
         ))
     })?;
     let values = bytes
-        .chunks_exact(8)
-        .map(|chunk| f64::from_le_bytes(chunk.try_into().expect("8-byte chunk")))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|chunk| f64::from_le_bytes(*chunk))
         .collect::<Vec<_>>();
     if values.iter().any(|value| !value.is_finite()) {
         return Err(AppError::validation(format!(
@@ -749,8 +757,10 @@ fn read_u32_asset(directory: &Path, array: &FemBinaryArrayAsset) -> AppResult<Ve
         ))
     })?;
     Ok(bytes
-        .chunks_exact(4)
-        .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("4-byte chunk")))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| u32::from_le_bytes(*chunk))
         .collect())
 }
 
