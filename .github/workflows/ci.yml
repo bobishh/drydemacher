@@ -52,8 +52,19 @@ jobs:
       - name: Check Formatting
         run: cd src-tauri && cargo fmt --all -- --check
 
-      - name: Run Tests
-        run: cd src-tauri && cargo test --workspace --all-targets --all-features --verbose
+      # The lib test target contains local CAD-runtime integration cases. They
+      # require a packaged OCCT runner and FreeCAD, neither of which exists on
+      # the generic Ubuntu image. Run each portable app integration target
+      # explicitly: `cargo test --tests` would also execute the lib target.
+      # Compilation and Clippy still cover every Rust target and feature below.
+      - name: Run Portable Rust Tests
+        run: |
+          cd src-tauri
+          cargo test --workspace --exclude ecky_cad --all-targets --all-features --verbose
+          for test_file in tests/*.rs; do
+            test_target="${test_file##*/}"
+            cargo test -p ecky_cad --test "${test_target%.rs}" --all-features --verbose
+          done
 
       - name: Run Clippy
         run: cd src-tauri && cargo clippy --workspace --all-targets --all-features -- -D warnings

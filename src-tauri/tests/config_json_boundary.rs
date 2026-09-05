@@ -34,7 +34,7 @@ fn config_json_runtime_access_is_limited_to_legacy_boundary() {
         .filter_map(|path| {
             let source = fs::read_to_string(&path).unwrap();
             production_source(&source)
-                .contains("config.json")
+                .contains("CONFIG_JSON_FILE")
                 .then_some(path)
         })
         .collect();
