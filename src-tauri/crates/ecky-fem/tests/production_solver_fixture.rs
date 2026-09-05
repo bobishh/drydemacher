@@ -1,3 +1,5 @@
+#![allow(clippy::chunks_exact_to_as_chunks)]
+
 use std::{collections::BTreeSet, fmt::Write as _, path::Path};
 
 use ecky_fem::{
