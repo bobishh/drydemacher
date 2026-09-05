@@ -49,7 +49,7 @@ pub fn solve_symmetric_upper(
     }
     #[cfg(not(target_os = "macos"))]
     {
-        return Err("Accelerate sparse Cholesky requires macOS".into());
+        Err("Accelerate sparse Cholesky requires macOS".into())
     }
     #[cfg(target_os = "macos")]
     {
