@@ -162,7 +162,7 @@ fn emit_back_round_trip_all_fixtures() {
             Ok(prog) => prog,
             Err(err) => {
                 eprintln!("\n=== EMIT-BACK PARSE FAILURE: {} ===", fixture_name);
-                eprintln!("Failed to reparse emitted source:\n{}", &emitted_once);
+                eprintln!("Failed to reparse emitted source:\n{}", emitted_once);
                 eprintln!("\nError: {}", err);
                 panic!(
                     "Failed to reparse emitted source for {}: {}",
